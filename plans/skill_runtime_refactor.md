@@ -399,12 +399,12 @@ Modify:
 - Create: `shared/skills/manifest.py`
 - Create: `tests/client_backend/test_skill_manifest.py`
 
-- [ ] Define Pydantic models for `SkillManifest`, `SkillRuntimeSpec`, `SkillDependencySpec`, `SkillSecretSpec`, `SkillCapabilitySpec`, and `SkillCapabilityExecutionSpec`.
-- [ ] Validate that each capability has a non-empty `name`, `description`, `input_schema`, and `execution`.
-- [ ] Validate runtime `type` against the first-slice supported runtime type set: `python_module`, `python_script`, and `binary`.
-- [ ] Reject capability names that cannot be converted into safe tool identifiers.
-- [ ] Add tests for valid manifests, missing required fields, invalid or reserved runtime types, duplicate capability names, malformed schemas, and provider-neutral manifests with no Google-specific fields.
-- [ ] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_manifest.py -q`
+- [x] Define Pydantic models for `SkillManifest`, `SkillRuntimeSpec`, `SkillDependencySpec`, `SkillSecretSpec`, `SkillCapabilitySpec`, and `SkillCapabilityExecutionSpec`.
+- [x] Validate that each capability has a non-empty `name`, `description`, `input_schema`, and `execution`.
+- [x] Validate runtime `type` against the first-slice supported runtime type set: `python_module`, `python_script`, and `binary`.
+- [x] Reject capability names that cannot be converted into safe tool identifiers.
+- [x] Add tests for valid manifests, missing required fields, invalid or reserved runtime types, duplicate capability names, malformed schemas, and provider-neutral manifests with no Google-specific fields.
+- [x] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_manifest.py -q` → 48 passed.
 
 ### Task 2: Load Manifests During Skill Scan
 
@@ -637,3 +637,26 @@ Modify:
 - Long-running local tools need cancellation and timeout handling through the existing runtime bridge.
 - Local profile secrets must be encrypted or protected with OS facilities before storing long-lived credentials.
 - The server should treat sidecar-published capabilities as untrusted metadata and continue validating session, catalog version, and tool instance ids.
+
+---
+
+## Implementation Progress
+
+Executed via subagent-driven development (controller = Opus, implementers/reviewers = sonnet). Controller reviews + commits (subagents never commit, per project delegation rules). Each task: implement → controller verifies pytest → commit → independent task review → fix loop → record.
+
+| Task | Status | Commit(s) | Notes |
+|------|--------|-----------|-------|
+| 1. Manifest models | ✅ done | `e3bf57d` (base `22360f9`) | 48 tests. Review found 2 Important (gitignore over-reach, unenforced non-empty input_schema); both fixed. |
+
+## Design Decisions Log
+
+### Cross-cutting
+- **`errors.py` location:** `shared/skills/errors.py` (per File Structure section), not the `client_backend/services/skill_runtime/errors.py` alternative in Task 7 — so both server-side (`app/ai`) and client_backend can import normalized codes.
+- **Google Calendar migration (Task 12) is optional.** The two provider-neutral fixtures (python + binary) are the required deliverable; gcal only if cheap.
+
+### Task 1 — Manifest models
+- **`.gitignore` bug fixed (in scope, enabling).** A bare `skills` pattern was ignoring the *importable* `shared/skills/` package (its `front_matter.py` is imported by both server and client but was untracked — a latent fresh-clone break) and would ignore future `tests/fixtures/skills/`. Fixed by anchoring the pattern to `/skills/` (top-level personal bundles only). Previously-untracked `shared/skills/front_matter.py` + `__init__.py` are now committed. First attempt used broad `!/shared/skills/**` negations — review caught that this also re-tracked `.env`/`*.db`/`*.log` inside the subtree; replaced with the anchored form.
+- **`json_output: bool` on `SkillCapabilityExecutionSpec`.** Part of the execution contract now (not speculative) because Task 7 parses JSON stdout only when the capability declares JSON output. Keeps the manifest schema stable across tasks.
+- **`input_schema` must be a non-empty dict; `argv` MAY be empty.** The brief's "non-empty input_schema/execution" is enforced for `input_schema` (validator) and for `execution` (its required `argv` field means `{}` fails). `argv: []` is intentionally allowed — a `python_module`/`binary` capability may invoke its entrypoint with no positional args.
+- **Reserved vs unknown runtime types** produce distinct error messages (`shell`/`node_package`/`mcp_server` → "reserved for a future slice"; anything else → "unknown"). Validation surfaces only as `pydantic.ValidationError`; no custom error-code system yet (that is Task 7 / `shared/skills/errors.py`).
+- **Minor review items deferred to final triage:** two near-identical non-empty-string description validators (2 call sites, not extracted).

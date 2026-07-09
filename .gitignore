@@ -80,7 +80,11 @@ scripts/
 .conda
 .pytest_cache
 .ruff_cache
-skills
+# Anchored to repo root: ignore only the top-level personal skill-bundle
+# directory. `shared/skills/` (importable shared code) and
+# `tests/fixtures/skills/` (CI fixtures) are not matched and stay tracked;
+# bytecode under them is still ignored by the __pycache__/ rule above.
+/skills/
 .codex_logs
 .conda
 
