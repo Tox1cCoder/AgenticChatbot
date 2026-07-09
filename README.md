@@ -412,7 +412,7 @@ The server accepts either a fully-formed URL (`REDIS_URL`) or a hostname + conve
 
 ## Database Migrations
 
-Migrations are Alembic-managed (28 revisions tracked). They are applied **automatically** at application startup via `app.database.migrations.upgrade_database` inside the lifespan hook, so manual migration is only required for dev or out-of-process tooling:
+Migrations are Alembic-managed (single head, currently `v1w2x3y4z5a6`). They are applied **automatically** at application startup via `app.database.migrations.upgrade_database` inside the lifespan hook, so manual migration is only required for dev or out-of-process tooling:
 
 ```bash
 alembic upgrade head
@@ -442,6 +442,14 @@ Key schemas:
 | `skill_settings` | Per-user skill toggles |
 
 LangGraph checkpoints are kept in the same database under `CHECKPOINT_SCHEMA` (default `public`) by `langgraph-checkpoint-postgres`.
+
+### Schema ownership and cleanup
+
+- **Alembic owns the application tables only.** Autogenerate is filtered (`app/alembic/autogenerate_filters.py`) so it never touches the LangGraph checkpoint tables or `alembic_version`.
+- **LangGraph owns the checkpoint tables** (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`). They are never created, dropped, or altered by application migrations; pruning their rows is operational cleanup, not a schema migration.
+- Migrations are the **only** schema-mutation path — `Base.metadata.create_all()` is not called at application startup (the old `Database.create_database()` helper was removed).
+- `conversation_device_bindings` was dropped (migration `v1w2x3y4z5a6`): conversation ownership is **user-based**, not device-bound.
+- **Checkpoint retention** (expiring abandoned HITL interrupts and reaping the checkpoint threads of expired interrupts and soft-deleted conversations) is handled by `CheckpointRetentionService`, invoked from the `cleanup_abandoned_interrupts` Celery beat task.
 
 ---
 

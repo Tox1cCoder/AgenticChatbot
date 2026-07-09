@@ -983,7 +983,7 @@ Expected: PASS.
 - Modify: `plans/AI_SDK_FE_CONTRACT.md` only if behavior changes
 - Modify: `README.md` for database/checkpoint ownership updates
 
-- [ ] **Step 1: Confirm no AI SDK stream change**
+- [x] **Step 1: Confirm no AI SDK stream change**
 
 Run:
 
@@ -993,13 +993,13 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 2: Update `plans/AI_SDK_FE_CONTRACT.md` only for contract changes**
+- [x] **Step 2: Update `plans/AI_SDK_FE_CONTRACT.md` only for contract changes**
 
 If implementation changes endpoint paths, event names, terminal stream order, metadata keys, resume behavior, or rich item delivery, update the matching sections in `plans/AI_SDK_FE_CONTRACT.md` in the same task as the code change.
 
 No update is required if all stream tests pass unchanged and the event catalog remains the same.
 
-- [ ] **Step 3: Update README database notes**
+- [x] **Step 3: Update README database notes**
 
 Document:
 
@@ -1098,6 +1098,10 @@ _Records deviations, judgment calls, and clarifications made during implementati
   - Step 2: `count_all()` now uses SQL `select(func.count(model.id))` instead of materializing all rows.
   - Step 3 (soft-delete audit) recorded above; no repo routes a no-`deleted_at` model through a soft-delete-assuming path anymore.
   - Verified: ruff clean; plan's repo suite 46/46; broad repository/service sweep 172 passed. The 1 failure (`test_live_server_integration.py::test_live_conversation_task_plan_and_alias_routes`) is a pre-existing **environmental** live-server test (`ConnectionRefusedError` to :8000, no server running) — not a Task 9 regression (pure Python strategy changes cannot raise a network error).
+- **Task 10** (controller-implemented):
+  - Step 1: AI SDK contract suite (`test_ai_sdk_v6_stream_contract`, `test_ai_sdk_assistant_ui_compat`, `test_ai_sdk_context_window`, `test_rich_response_streaming`) 39/39 pass → the public AI SDK / SSE wire format is unchanged by Tasks 6-8.
+  - Step 2: `plans/AI_SDK_FE_CONTRACT.md` intentionally NOT updated — no endpoint/event-name/terminal-order/metadata/resume/rich-item change (per the plan's conditional).
+  - Step 3: README `## Database Migrations` section updated with schema-ownership + cleanup notes (Alembic owns app tables; LangGraph owns checkpoint tables; migrations are the only schema-mutation path / no `create_all` at startup; `conversation_device_bindings` dropped for user-based ownership; retention via `CheckpointRetentionService` + Celery beat). Also replaced the stale "28 revisions tracked" count (actual revision files = 37) with a non-brittle "single head, currently v1w2x3y4z5a6".
 
 ### Progress
 
@@ -1109,5 +1113,6 @@ _Records deviations, judgment calls, and clarifications made during implementati
 - **Task 6 — DONE** (commit 1b4d19e). Legacy `summarize` node/method/stream-fallback removed after proving redundancy + resume-safety empirically (0/247 threads schedule it; no data pruned). `test_graph_streaming_summarization.py` updated, `test_graph_refactor_contract.py` guard added. Graph 15→14 nodes; 43 tests pass; ruff clean.
 - **Task 7 — DONE** (commit 7ca0381). Stream projection extracted to `graph_public_projection.py` (`GraphPublicStreamProjector`); graph.py 5184→4781 (-403). Byte-identical wire format (26 contract tests unchanged); new 8-test projection suite. Controller re-verified: 34/34 required + 242/242 broad sweep; ruff clean. Subagent-implemented [sonnet].
 - **Task 8 — DONE** (commit da7e8eb). Node domains extracted to `app/ai/workflow/{graph_builder,tool_loop,custom_agents,rag_loop,planning_loop}.py` via mixins; graph.py 4781→2871 (5202→2871 overall). 6 test files got monkeypatch-path-only updates (verified no weakening) + topology contract tests. Controller-verified: 128/128 Task-8 suite, 762/762 broad sweep, app imports OK, ruff clean. Deviation: 2871 > plan's <1800 target (remaining bulk = stream entrypoints + isolated-context runner, unscoped by plan). Subagent [opus] hit org spend limit post-verification; controller verified tree directly.
-- **Task 9 — DONE** (commit pending). Generic repo strategies (`query_strategy.py`, `command_strategy.py`) made `deleted_at`-agnostic via `hasattr` guard (`_exclude_soft_deleted`; delete soft-or-hard); `count_all` now SQL `COUNT`; fixed latent `hasattr(model,None)` bug. Controller-implemented. Verified: ruff clean, repo suite 46/46, broad sweep 172 pass (1 env-only live-server failure). No test-weakening.
+- **Task 9 — DONE** (commit 4b057f5). Generic repo strategies (`query_strategy.py`, `command_strategy.py`) made `deleted_at`-agnostic via `hasattr` guard (`_exclude_soft_deleted`; delete soft-or-hard); `count_all` now SQL `COUNT`; fixed latent `hasattr(model,None)` bug. Controller-implemented. Verified: ruff clean, repo suite 46/46, broad sweep 172 pass (1 env-only live-server failure). No test-weakening.
+- **Task 10 — DONE** (commit pending). AI SDK contract suite 39/39 (no wire change → `AI_SDK_FE_CONTRACT.md` untouched, per plan). README database section updated (Alembic/LangGraph ownership, migrations-only schema path, dropped `conversation_device_bindings`, retention service + Celery beat; stale revision count replaced). Controller-implemented.
 
