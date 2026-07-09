@@ -427,13 +427,13 @@ Modify:
 - Create: `client_backend/services/skill_runtime/secrets.py`
 - Test: `tests/client_backend/test_skill_runtime_manager.py`
 
-- [ ] Implement readiness states: `instruction_only`, `ready`, `not_ready`, and `invalid`.
-- [ ] Check Python imports for Python dependencies when possible.
-- [ ] Check executable availability for `binary` runtime using `shutil.which`.
-- [ ] Check required secrets through `SkillSecretStore`.
-- [ ] Return repair hints for missing dependency, missing executable, missing secret, unsupported runtime, and permission-required states. Do not auto-install dependencies during readiness checks.
-- [ ] Add tests for ready skill, missing secret, missing binary, invalid manifest, and Markdown-only skill.
-- [ ] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_runtime_manager.py -q`
+- [x] Implement readiness states: `instruction_only`, `ready`, `not_ready`, and `invalid`.
+- [x] Check Python imports for Python dependencies when possible.
+- [x] Check executable availability for `binary` runtime using `shutil.which`.
+- [x] Check required secrets through `SkillSecretStore`.
+- [x] Return repair hints for missing dependency, missing executable, missing secret, unsupported runtime, and permission-required states. Do not auto-install dependencies during readiness checks.
+- [x] Add tests for ready skill, missing secret, missing binary, invalid manifest, and Markdown-only skill.
+- [x] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_runtime_manager.py -q` → 16 passed.
 
 ### Task 4: Add Generic Skill Bundle Installation
 
@@ -647,7 +647,8 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 | Task | Status | Commit(s) | Notes |
 |------|--------|-----------|-------|
 | 1. Manifest models | ✅ done | `05b6a28` (base `22360f9`) | 48 tests. Review found 2 Important (gitignore over-reach, unenforced non-empty input_schema); both fixed. |
-| 2. Load manifests during scan | ✅ done | `e21dbab` (base `05b6a28`) | 11 registry tests. Review Approved; 1 Important (embedded-path leak in redactor) + 2 Minors fixed proactively before Task 4 relies on it. |
+| 2. Load manifests during scan | ✅ done | `166fa4b` (base `05b6a28`) | 11 registry tests. Review Approved; 1 Important (embedded-path leak in redactor) + 2 Minors fixed proactively before Task 4 relies on it. |
+| 3. Readiness checks | ✅ done | `0a99d07` (base `166fa4b`) | New skill_runtime/ package (manager + minimal secret store); 16 tests. Review found 1 Important (dep-name parser skipped whitespace-padded reqs, masking missing deps); fixed by switching to packaging.Requirement. |
 
 ## Design Decisions Log
 
@@ -667,3 +668,9 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 - **Invalid `skill.json` is never fatal.** A missing manifest → instruction-only (unchanged). A malformed/invalid one → skill still loads instruction-only with `manifest_error` set. The `.exists()` probe + read + parse all sit inside one try/except that only sets `manifest_error`, so even an `OSError` from a broken symlink can't drop an otherwise-valid skill.
 - **Sync privacy boundary hardened.** `to_sync_dict()` (server-synced) never emits `manifest_path` or any absolute path. `install_metadata` (reserved, populated by Task 4) is surfaced only through a redacting `_install_summary`: an allow-list of safe keys (`installed`, `source_hash`, `bundle_name`, `source`) AND `_looks_like_absolute_path` which detects POSIX/Windows-drive/UNC absolute paths — including a path *embedded* in a larger string (checks whitespace-split tokens), cross-OS. `to_dict()` (device-local) may include `manifest_path`.
 - **`install_metadata` declared but not populated here** — a stable, redacted hook so Task 4 inherits a safe-by-default surface.
+
+### Task 3 — Readiness checks
+- **New package `client_backend/services/skill_runtime/`.** `secrets.py` = env-only `SkillSecretStore` (`get`/`has`), explicitly deferring encrypted profile storage + redaction + API to Task 10 (which extends, not replaces, it). `manager.py` = `SkillRuntimeManager.evaluate_readiness(manifest, manifest_error)` → `SkillReadiness`.
+- **Readiness states:** `invalid` (manifest_error set), `instruction_only` (no manifest, no error), else aggregate `ready`/`not_ready` over five signals: unsupported runtime (defensive only — load_manifest already rejects), binary command present + on PATH (`shutil.which`), Python deps present, binary-missing-command, required secrets present. Repair hints are structured dicts; `REPAIR_HINT_TYPES` includes `permission_required` (shape reserved for Task 6, never emitted here).
+- **Dependency check is presence-only, not version-match** (avoids false negatives from workable-but-mismatched versions). Uses `packaging.requirements.Requirement(req).name` (already a pinned dep) — robustly handles extras, markers, and whitespace, and returns None (→ skip, don't false-fail) only for genuinely unparseable strings. (Initial hand-rolled regex skipped whitespace-padded requirements → could mask a missing dep; review caught it.)
+- **`node`/`system` deps are NOT availability-checked in this slice** (python only), per scope.
