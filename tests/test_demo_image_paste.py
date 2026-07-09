@@ -112,6 +112,55 @@ def test_clipboard_component_filters_to_focused_message_textarea():
     assert "clipboardData" in html
     assert "eventId" in html
     assert "images" in html
-    assert "__chatImagePasteSetComponentValue" in html
+    assert "__chatImagePasteActiveReceiver" in html
     assert "setFrameHeight(0)" in html
     assert "streamlit:setComponentValue" in html
+
+
+def test_clipboard_component_reregisters_active_receiver_each_mount():
+    html = (
+        Path(__file__).resolve().parents[1]
+        / "app"
+        / "ui"
+        / "clipboard_image_capture"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+
+    assert "__chatImagePasteActiveReceiver" in html
+    assert "__chatImagePasteActiveReceiver = setComponentValue" in html
+    assert "__chatImagePasteSetComponentValue" not in html
+
+
+def test_clipboard_component_supports_paste_drop_and_picker_input():
+    html = (
+        Path(__file__).resolve().parents[1]
+        / "app"
+        / "ui"
+        / "clipboard_image_capture"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+
+    assert 'type="file"' in html
+    assert 'accept="image/*"' in html
+    assert "multiple" in html
+    assert '"drop"' in html
+    assert '"dragover"' in html
+    assert "selectImageFiles" in html
+
+
+def test_demo_replaces_chat_image_file_uploader_with_paste_style_intake():
+    source = (Path(__file__).resolve().parents[1] / "demo.py").read_text(encoding="utf-8")
+
+    assert 'st.file_uploader(\n                "Attach images"' not in source
+    assert "show_attachment_uploader" in source
+    assert "capture_pasted_images(" in source
+    assert "_handle_pasted_image_payload(pasted_payload)" in source
+
+
+def test_clipboard_capture_wrapper_exposes_visible_mode():
+    source = (
+        Path(__file__).resolve().parents[1] / "app" / "ui" / "clipboard_image_capture.py"
+    ).read_text(encoding="utf-8")
+
+    assert "visible: bool = False" in source
+    assert "visible=visible" in source

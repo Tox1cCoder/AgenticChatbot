@@ -12,6 +12,10 @@ _capture_component = components.declare_component(
 )
 
 
-def capture_pasted_images(*, key: str) -> dict[str, Any] | list[dict[str, Any]]:
-    value = _capture_component(key=key, default={})
+def capture_pasted_images(
+    *,
+    key: str,
+    visible: bool = False,
+) -> dict[str, Any] | list[dict[str, Any]]:
+    value = _capture_component(key=key, default={}, visible=visible)
     return value if isinstance(value, (dict, list)) else {}
