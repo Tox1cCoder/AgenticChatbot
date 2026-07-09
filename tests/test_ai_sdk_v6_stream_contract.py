@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from app.api.ai_sdk import _extract_user_attachments
+from app.api.ai_sdk import _extract_user_attachments, _has_user_attachment_candidates
 from app.services.event_streaming.ai_sdk_v6 import AISDKV6StreamAdapter, AISDKV6StreamState
 from app.services.event_streaming.events import SubagentRef, make_event
 
@@ -370,3 +370,53 @@ def test_ai_sdk_extracts_file_part_data_url_attachment():
     assert _extract_user_attachments(payload) == [
         {"name": "screen.png", "mime": "image/png", "data": "data:image/png;base64,abc"}
     ]
+
+
+def test_ai_sdk_ignores_unusable_request_attachments():
+    payload = [
+        {
+            "role": "user",
+            "parts": [
+                {"type": "text", "text": "inspect"},
+                {
+                    "type": "file",
+                    "name": "screen.png",
+                    "mediaType": "image/png",
+                    "url": "blob:http://app.local/123",
+                },
+                {
+                    "type": "file",
+                    "name": "notes.pdf",
+                    "mediaType": "application/pdf",
+                    "data": "JVBERi0=",
+                },
+                {
+                    "type": "file",
+                    "name": "notes.txt",
+                    "url": "data:text/plain;base64,aGVsbG8=",
+                },
+            ],
+        }
+    ]
+
+    assert _extract_user_attachments(payload) == []
+    assert _has_user_attachment_candidates(payload) is True
+
+
+def test_ai_sdk_ignores_invalid_raw_base64_attachment():
+    payload = [
+        {
+            "role": "user",
+            "attachments": [
+                {
+                    "type": "image",
+                    "name": "broken.png",
+                    "mimeType": "image/png",
+                    "data": "not base64!",
+                }
+            ],
+        }
+    ]
+
+    assert _extract_user_attachments(payload) == []
+    assert _has_user_attachment_candidates(payload) is True

@@ -9,6 +9,7 @@
 | `POST /ai/resume-interrupt` | Resume after a HITL interrupt. Same SSE stream format. |
 | `GET /ai/conversations/{conversationId}/messages` | Message history as AI SDK `UIMessage` objects. |
 | `POST /ai/conversations`, `GET /ai/conversations`, `GET/PATCH/DELETE /ai/conversations/{id}` | Conversation CRUD (standard `ApiResponse` envelope). |
+| `POST /documents/uploads` | Upload document files for RAG/search. Multipart form route; not part of the chat JSON payload. |
 | `POST {connection_endpoint}` | Mint a widget WebSocket token (endpoint comes from the widget payload). |
 | `POST /widgets/{widgetId}/actions/{actionKey}` | Execute a widget action. |
 | `GET /tool-results/{blobId}` | Fetch an offloaded tool output. |
@@ -36,7 +37,7 @@ Content-Type: application/json
 | `messages` | array | AI SDK UI message history. The backend reads the latest `user` message. |
 | `messages[].role` | string | `user` or `assistant`. |
 | `messages[].content` | string or array | Plain text, or a parts array. |
-| `messages[].parts` | array | Optional. Text parts are `{ "type": "text", "text": "..." }`; image/file parts are accepted (see Request Attachments). |
+| `messages[].parts` | array | Optional. Text parts are `{ "type": "text", "text": "..." }`; image parts and AI SDK file parts carrying image media are accepted (see Request Attachments). |
 | `messages[].attachments` | array | Optional image attachments. `experimental_attachments` and `files` are accepted equivalents. |
 | `message` | object or string | Optional latest UI message for custom transports. A dict is appended to `messages` when its `id` differs from the last entry. |
 | `content` | string | Fallback user text when `messages` is empty. |
@@ -50,22 +51,75 @@ Error responses (non-stream JSON):
 
 | Status | Body | Cause |
 |---|---|---|
-| 400 | `{"success": false, "message": "No user message found"}` | No user text and no attachments in the request. |
+| 400 | `{"success": false, "code": "http_error", "message": "No user message found"}` | No user text and no supported image attachments in the request. |
+| 400 | `{"success": false, "code": "http_error", "message": "No supported image attachments found. Send image data URLs, raw base64, or http(s) image URLs; upload documents via /documents/uploads."}` | Attachment-like items were sent, but none were usable chat images. |
 | 405 | — | Wrong method. |
 
 ### Request Attachments
 
-The latest user message may carry images in `parts`, `content` (as an array),
-`attachments`, `experimental_attachments`, or `files`. Accepted item fields:
+The latest user message may carry chat image inputs in `parts`, `content` (as
+an array), `attachments`, `experimental_attachments`, or `files`. This is
+image-only: AI SDK `type: "file"` is accepted as a wrapper only when the item
+contains image media. Documents such as PDF/DOCX/TXT must be uploaded through
+`POST /documents/uploads`, then referenced by normal chat text.
+
+Accepted item fields:
 
 | Field | Rules |
 |---|---|
-| `type` | `image` or `file`. Other types are ignored. |
+| `type` | `image` or `file`. `file` must carry image media. Other types are ignored. |
 | `name` / `filename` | Optional display name. Default `attachment`. |
-| `mime` / `mimeType` / `mediaType` / `contentType` | MIME type. Default `image/jpeg`. |
-| `data` / `base64` | Data URL or raw base64. |
-| `url` | `data:`, `http(s):`, or `blob:` URL. |
+| `mime` / `mimeType` / `mediaType` / `contentType` | MIME type. Must resolve to `image/*`. Default/guess is `image/jpeg` when omitted. |
+| `data` / `base64` | Image data URL or raw base64. Raw base64 must be decodable. |
+| `url` | `data:` image URL or `http(s):` image URL. Browser `blob:` URLs are ignored because the backend cannot fetch page-local blobs. |
 | `path` / `image` / `source` | Fallback source fields. Local filesystem paths are ignored. |
+
+Unsupported attachment items are not forwarded to the model. If a request has
+no user text and all attachment-like items are unsupported, the route returns
+the 400 "No supported image attachments found" error above.
+
+Example image request:
+
+```json
+{
+  "messages": [
+    {
+      "role": "user",
+      "parts": [
+        { "type": "text", "text": "Inspect this screenshot" },
+        {
+          "type": "file",
+          "name": "screen.png",
+          "mediaType": "image/png",
+          "url": "data:image/png;base64,..."
+        }
+      ]
+    }
+  ],
+  "inlineRichResponseV1": true
+}
+```
+
+### Document Uploads
+
+Use the document route for non-image files that should be searchable by RAG:
+
+```http
+POST /documents/uploads
+Content-Type: multipart/form-data
+```
+
+Form fields:
+
+| Field | Rules |
+|---|---|
+| `files` | One or more files. Supported extensions: `.txt`, `.pdf`, `.docx`, `.pptx`, `.xlsx`, `.html`, `.md`. |
+| `conversation_id` | Conversation UUID. |
+
+The response uses the standard `ApiResponse` envelope and reports per-file
+accepted/rejected status. Uploading a document does not itself call the
+assistant; submit a normal chat message after upload when the user wants an
+answer based on the document.
 
 ## Stream Protocol
 

@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.ai.image_context import normalize_image_attachment
 from app.core.config import settings
 from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.conversation_service_interface import IConversationService
@@ -172,106 +173,104 @@ def _normalize_ai_sdk_chat_messages(payload: AISDKChatRequest) -> list[dict[str,
     return messages
 
 
-def _extract_data_from_candidate(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    return value.strip() or None
-
-
-def _extract_user_attachments(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """
-    Extract image attachments from the most recent user message in AI SDK payload.
-    Supports common UI payload variants:
-    - parts/content list entries with `type=image|file`
-    - message-level `attachments` / `experimental_attachments`
-    - data URLs and raw base64 payloads
-    """
+def _latest_user_attachment_candidates(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for msg in reversed(messages or []):
         if msg.get("role") != "user":
             continue
 
-        candidates: list[Any] = []
+        candidates: list[dict[str, Any]] = []
 
-        # Parts-based message formats
         parts = msg.get("parts")
         content = msg.get("content")
         if not isinstance(parts, list) and isinstance(content, list):
             parts = content
         if isinstance(parts, list):
-            candidates.extend(parts)
+            for item in parts:
+                if not isinstance(item, dict):
+                    continue
+                item_type = str(item.get("type") or "").lower()
+                if item_type in {"image", "file"}:
+                    candidates.append(item)
 
-        # Attachment-based message formats
         for key in ("attachments", "experimental_attachments", "files"):
             value = msg.get(key)
-            if isinstance(value, list):
-                candidates.extend(value)
-
-        attachments: list[dict[str, str]] = []
-        seen: set[tuple[str, str]] = set()
-
-        for item in candidates:
-            if not isinstance(item, dict):
+            if not isinstance(value, list):
                 continue
-
-            item_type = str(item.get("type") or "").lower()
-            if item_type and item_type not in {"image", "file"}:
-                continue
-
-            mime = (
-                item.get("mime")
-                or item.get("mimeType")
-                or item.get("mediaType")
-                or item.get("contentType")
-                or "image/jpeg"
-            )
-            mime = str(mime).strip() if mime else "image/jpeg"
-
-            name = item.get("name") or item.get("filename") or "attachment"
-            name = str(name)
-
-            raw_data: str | None = None
-            data_candidates: list[Any] = [
-                item.get("data"),
-                item.get("base64"),
-                item.get("url"),
-                item.get("path"),
-                item.get("image"),
-                item.get("source"),
-            ]
-            for candidate in data_candidates:
-                if isinstance(candidate, dict):
-                    candidate = (
-                        candidate.get("data") or candidate.get("base64") or candidate.get("url")
-                    )
-                extracted = _extract_data_from_candidate(candidate)
-                if extracted:
-                    raw_data = extracted
-                    break
-
-            if not raw_data:
-                continue
-
-            if not raw_data.startswith(("data:", "http://", "https://", "blob:")):
-                # Skip obvious local path values (e.g. C:\fakepath\image.png).
-                if ":\\" in raw_data or raw_data.startswith(("/", "./", "../")):
+            for item in value:
+                if not isinstance(item, dict):
                     continue
+                item_type = str(item.get("type") or "").lower()
+                if not item_type or item_type in {"image", "file"}:
+                    candidates.append(item)
 
-                # Best-effort sanity check that payload is decodable base64.
-                try:
-                    base64.b64decode(raw_data, validate=True)
-                except Exception:
-                    continue
-
-            key = (mime, raw_data)
-            if key in seen:
-                continue
-            seen.add(key)
-
-            attachments.append({"name": name, "mime": mime, "data": raw_data})
-
-        return attachments
+        return candidates
 
     return []
+
+
+def _has_user_attachment_candidates(messages: list[dict[str, Any]]) -> bool:
+    return bool(_latest_user_attachment_candidates(messages))
+
+
+def _attachment_source_value(item: dict[str, Any]) -> str | None:
+    for candidate in (
+        item.get("data"),
+        item.get("base64"),
+        item.get("url"),
+        item.get("path"),
+        item.get("image"),
+        item.get("source"),
+    ):
+        if isinstance(candidate, dict):
+            candidate = candidate.get("url") or candidate.get("data") or candidate.get("base64")
+        if isinstance(candidate, str):
+            cleaned = candidate.strip()
+            if cleaned:
+                return cleaned
+    return None
+
+
+def _is_valid_raw_base64_source(value: str) -> bool:
+    if value.startswith(("data:", "http://", "https://")):
+        return True
+    try:
+        base64.b64decode(value, validate=True)
+    except Exception:
+        return False
+    return True
+
+
+def _extract_user_attachments(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """
+    Extract usable image attachments from the most recent user message in AI SDK payload.
+    Supports common UI payload variants:
+    - parts/content list entries with `type=image|file`
+    - message-level `attachments` / `experimental_attachments`
+    - image data URLs, raw base64 payloads, and http(s) image URLs
+    """
+    attachments: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for item in _latest_user_attachment_candidates(messages):
+        source_value = _attachment_source_value(item)
+        if source_value is None or not _is_valid_raw_base64_source(source_value):
+            continue
+
+        normalized = normalize_image_attachment(item)
+        if normalized is None:
+            continue
+
+        raw_data = normalized["url"]
+        mime = normalized["mime"]
+        name = normalized["name"]
+        key = (mime, raw_data)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        attachments.append({"name": name, "mime": mime, "data": raw_data})
+
+    return attachments
 
 
 def _build_ui_message_stream_response(
@@ -533,8 +532,17 @@ async def chat_ui_message_stream(
     """
     request_messages = _normalize_ai_sdk_chat_messages(payload)
     user_text = _extract_user_text(request_messages)
+    has_attachment_candidates = _has_user_attachment_candidates(request_messages)
     user_attachments = _extract_user_attachments(request_messages)
     if not user_text and not user_attachments:
+        if has_attachment_candidates:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No supported image attachments found. Send image data URLs, raw "
+                    "base64, or http(s) image URLs; upload documents via /documents/uploads."
+                ),
+            )
         raise HTTPException(status_code=400, detail="No user message found")
 
     # Pre-generate the bot message UUID so the stream's messageId matches the
