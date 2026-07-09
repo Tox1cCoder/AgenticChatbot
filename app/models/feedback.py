@@ -44,4 +44,7 @@ class Feedback(Base):
     __table_args__ = (Index("idx_feedbacks_message_user", "message_id", "user_id"),)
 
     def __repr__(self) -> str:
-        return f"<Feedback(id={self.id}, message_id={self.message_id}, user_id={self.user_id}, rating={self.rating})>"
+        return (
+            f"<Feedback(id={self.id}, message_id={self.message_id}, "
+            f"user_id={self.user_id}, rating={self.rating})>"
+        )

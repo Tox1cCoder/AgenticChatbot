@@ -1,7 +1,8 @@
 """
 Model Provider database model.
 
-Stores encrypted API keys for different AI providers per user, enabling multi-provider model configuration.
+Stores encrypted API keys for different AI providers per user, enabling
+multi-provider model configuration.
 """
 
 import uuid

@@ -23,6 +23,5 @@ def include_name(
     type_: str,
     parent_names: dict[str, Any],
 ) -> bool:
-    if type_ == "table" and name in EXTERNAL_TABLE_NAMES:
-        return False
-    return True
+    # Include everything except the externally-owned tables.
+    return not (type_ == "table" and name in EXTERNAL_TABLE_NAMES)
