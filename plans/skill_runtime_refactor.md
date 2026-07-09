@@ -461,16 +461,16 @@ Modify:
 - Test: `tests/client_backend/test_skill_capability_catalog.py`
 - Test: `tests/test_unified_tool_search.py`
 
-- [ ] Build skill capability catalog entries from ready manifest capabilities.
-- [ ] Add those entries to the existing sidecar tool catalog in `_build_tool_catalog`.
-- [ ] Use qualified ids shaped as `skill::<skill-name>::<capability-name>`.
-- [ ] Allow `app/ai/client_runtime_tools.py` to parse entries with `origin == "skill"`.
-- [ ] Allow `app/ai/client_tool_catalog.py` to index entries with `origin == "skill"` so `tool_search`, deferred loading, and custom-agent allowlists can discover skill capability tools.
-- [ ] Add a client tool origin constant such as `TOOL_ORIGIN_CLIENT_SKILL = "client_skill"` and set skill tool metadata to that value while preserving the catalog entry's raw `origin == "skill"`.
-- [ ] Generate exposed names with the existing `client__...` prefix pattern.
-- [ ] Add tests proving MCP tools and skill capability tools can coexist without name collisions and can both be found through client-side `tool_search`.
-- [ ] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_capability_catalog.py -q`
-- [ ] Run: `.venv\Scripts\python.exe -m pytest tests/test_unified_tool_search.py -q`
+- [x] Build skill capability catalog entries from ready manifest capabilities.
+- [x] Add those entries to the existing sidecar tool catalog in `_build_tool_catalog`.
+- [x] Use qualified ids shaped as `skill::<skill-name>::<capability-name>`.
+- [x] Allow `app/ai/client_runtime_tools.py` to parse entries with `origin == "skill"`.
+- [x] Allow `app/ai/client_tool_catalog.py` to index entries with `origin == "skill"` so `tool_search`, deferred loading, and custom-agent allowlists can discover skill capability tools.
+- [x] Add a client tool origin constant such as `TOOL_ORIGIN_CLIENT_SKILL = "client_skill"` and set skill tool metadata to that value while preserving the catalog entry's raw `origin == "skill"` (as `metadata["catalog_origin"]`).
+- [x] Generate exposed names with the existing `client__...` prefix pattern.
+- [x] Add tests proving MCP tools and skill capability tools can coexist without name collisions and can both be found through client-side `tool_search`.
+- [x] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_capability_catalog.py -q` → 8 passed.
+- [x] Run: `.venv\Scripts\python.exe -m pytest tests/test_unified_tool_search.py -q` → 16 passed.
 
 ### Task 6: Add Permission Evaluator Before Execution
 
@@ -649,7 +649,8 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 | 1. Manifest models | ✅ done | `05b6a28` (base `22360f9`) | 48 tests. Review found 2 Important (gitignore over-reach, unenforced non-empty input_schema); both fixed. |
 | 2. Load manifests during scan | ✅ done | `166fa4b` (base `05b6a28`) | 11 registry tests. Review Approved; 1 Important (embedded-path leak in redactor) + 2 Minors fixed proactively before Task 4 relies on it. |
 | 3. Readiness checks | ✅ done | `7f5289b` (base `166fa4b`) | New skill_runtime/ package (manager + minimal secret store); 16 tests. Review found 1 Important (dep-name parser skipped whitespace-padded reqs, masking missing deps); fixed by switching to packaging.Requirement. |
-| 4. Bundle installation | ✅ done | `f0f8291` (base `23b4c00`) | install.py + shared/skills/errors.py + /skills install/uninstall/installed API; 13 tests (+1 platform-skip). Implementer hit a transient 529 mid-task (resumed). Review Needs-fixes→fixed: 3 Important (symlink rejection [plan-required], disabled-reinstall replace semantics, UNSAFE_BUNDLE_PATH test) + DRY helper. NOTE: user committed `beb1fdb`/`23b4c00` to this branch concurrently — no file overlap. |
+| 4. Bundle installation | ✅ done | `af416e1` (base `23b4c00`) | install.py + shared/skills/errors.py + /skills install/uninstall/installed API; 13 tests (+1 platform-skip). Implementer hit a transient 529 mid-task (resumed). Review Needs-fixes→fixed: 3 Important (symlink rejection [plan-required], disabled-reinstall replace semantics, UNSAFE_BUNDLE_PATH test) + DRY helper. NOTE: user committed `beb1fdb`/`23b4c00` to this branch concurrently — no file overlap. |
+| 5. Capability tools | ✅ done | `cc88101` (base `af416e1`) | Ready skills' capabilities sync as client tools (manager.capability_catalog_entries + runtime_bridge merge + client_runtime_tools/client_tool_catalog origin widening); 8 catalog tests + coexistence search test. Review Approved (3 Minors; applied logger.exception). runtime_bridge has 8 pre-existing baseline ruff errors (deferred to final lint cleanup). |
 
 ## Design Decisions Log
 
@@ -684,3 +685,10 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 - **`get_installed_skills_root(user_id)` in `core/paths.py`** is the single source of truth for the install location (installer writes, registry scans) — prevents drift.
 - **`pyproject.toml` ruff:** added `flake8-bugbear.extend-immutable-calls` for FastAPI DI markers (Depends/Query/…), clearing pre-existing B008 false positives repo-wide (no behavior change). The API's `Depends`-in-defaults is idiomatic FastAPI.
 - **Concurrent user commits:** while Task 4 was implemented, the user committed `beb1fdb` (tool-execution-policy design doc) and `23b4c00` (attachments/ai_sdk feature) to this same branch. No overlap with skill-runtime files. Per-task review bases now use each task commit's actual parent, not the previous task commit.
+
+### Task 5 — Sync skill capabilities as client tools
+- **`SkillRuntimeManager.capability_catalog_entries(skill, manifest, readiness)`** emits one client-tool catalog entry per capability, but ONLY when `readiness.status == "ready"` — the model is never offered a capability it can't execute. server_name = `skill_<name with - → _>`; qualified_id = `skill::<skill>::<capability>` (original name preserved).
+- **`runtime_bridge._build_tool_catalog`** appends ready-skill entries (via `_collect_skill_capability_tools`, a static method) into the `tools` list BEFORE the tool_instance_id stamping loop, so skill tools get the same session/catalog-version/tool_instance_id validation as MCP tools. The collection is wrapped in try/except (logged via `logger.exception`) so a skill-runtime hiccup can never break MCP tool sync.
+- **Origin model:** added `TOOL_ORIGIN_CLIENT_SKILL = "client_skill"`. Model-facing `tool_origin` = client_skill for skills; the RAW catalog origin (`"skill"`) is preserved as `metadata["catalog_origin"]` so approval/audit/search can distinguish skill tools from MCP tools. `client_runtime_tools` + `client_tool_catalog` widened their origin gate from `{"mcp"}` to `{"mcp","skill"}`.
+- **Execution NOT wired yet:** a `skill::...` tool call will fail at dispatch until Task 8 routes it — expected between-task state, committed in sequence.
+- **runtime_bridge pre-existing lint (8 errors: 6 E402 from imports split around `_make_tool_instance_id`, 2 E501)** left for a final lint-cleanup commit; the new SkillRuntimeManager import went in the clean top block (0 new errors).

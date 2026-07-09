@@ -706,3 +706,59 @@ async def test_run_shell_command_autoloads_only_start_process(monkeypatch):
     assert result["recommended_tool"]["is_loaded"] is True
     assert [ref.tool_name for ref in state.refs] == ["start_process"]
     assert {ref.tool_name for ref in state.refs}.isdisjoint({"start_search", "get_config"})
+
+
+# ---------------------------------------------------------------------------
+# Task 5: MCP client tools and skill capability client tools coexist and are
+# both indexed/searchable in ClientToolCatalog.
+# ---------------------------------------------------------------------------
+
+
+def test_client_tool_catalog_indexes_mcp_and_skill_tools_together():
+    """An MCP-origin entry and a skill-origin entry synced from the same
+    device must both be indexed under distinct exposed names, with the skill
+    entry carrying the client_skill tool_origin, and both discoverable via
+    search()."""
+    from app.ai.client_runtime_tools import TOOL_ORIGIN_CLIENT_SKILL
+    from app.ai.client_tool_catalog import ClientToolCatalog
+
+    catalog = ClientToolCatalog("device-123", "user-1")
+    catalog._rebuild_from_catalog(
+        {
+            "tools": [
+                {
+                    "name": "start_process",
+                    "qualified_id": "desktop_commander::start_process",
+                    "origin": "mcp",
+                    "server_name": "desktop_commander",
+                    "description": "Start a local process.",
+                    "input_schema": {"type": "object", "properties": {}},
+                },
+                {
+                    "name": "event_list",
+                    "qualified_id": "skill::example-calendar::event_list",
+                    "origin": "skill",
+                    "server_name": "skill_example_calendar",
+                    "description": "List calendar events.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"time_min": {"type": "string"}},
+                        "required": ["time_min"],
+                    },
+                },
+            ]
+        },
+        version=1,
+        session_id="s1",
+    )
+
+    mcp_tool = catalog.get_tool("client__desktop_commander__start_process")
+    skill_tool = catalog.get_tool("client__skill_example_calendar__event_list")
+
+    assert mcp_tool is not None
+    assert skill_tool is not None
+    assert mcp_tool is not skill_tool
+    assert skill_tool.origin == TOOL_ORIGIN_CLIENT_SKILL
+
+    results = catalog.search("calendar events")
+    assert "client__skill_example_calendar__event_list" in {tool.tool_name for tool in results}

@@ -35,6 +35,13 @@ REPAIR_HINT_TYPES = frozenset(
     }
 )
 
+# Prefix for the synthetic "server_name" a skill's capabilities are grouped
+# under in the sidecar tool catalog (e.g. "example-calendar" ->
+# "skill_example_calendar"). Mirrors the MCP catalog shape so downstream
+# consumers (runtime_bridge, client_runtime_tools, client_tool_catalog) treat
+# skill capabilities like any other client-tool "server".
+SKILL_SERVER_NAME_PREFIX = "skill_"
+
 def _parse_distribution_name(requirement: str) -> str | None:
     """Extract the distribution name from a PEP 508 requirement string.
 
@@ -200,6 +207,37 @@ class SkillRuntimeManager:
                     }
                 )
         return missing
+
+    def capability_catalog_entries(
+        self,
+        skill_name: str,
+        manifest: SkillManifest,
+        readiness: SkillReadiness,
+    ) -> list[dict]:
+        """Build sidecar tool-catalog entries for a skill's capabilities.
+
+        Only a ``"ready"`` skill exposes anything — an instruction_only,
+        not_ready, or invalid skill contributes no entries, since the model
+        must never be offered a capability it cannot actually execute. Pure
+        and side-effect-free: no IO, no execution, no permission enforcement
+        (those live in Tasks 6/7).
+        """
+        if readiness.status != "ready":
+            return []
+
+        server_name = SKILL_SERVER_NAME_PREFIX + skill_name.replace("-", "_")
+        return [
+            {
+                "name": capability.name,
+                "description": capability.description,
+                "origin": "skill",
+                "server_name": server_name,
+                "qualified_id": f"skill::{skill_name}::{capability.name}",
+                "input_schema": capability.input_schema,
+                "readiness": {"status": readiness.status},
+            }
+            for capability in manifest.capabilities
+        ]
 
     def _missing_secrets(self, manifest: SkillManifest, repair_hints: list[dict]) -> list[str]:
         """Check required secrets: manifest-level required secrets plus any

@@ -22,6 +22,7 @@ from app.services.client_device_service import ClientDeviceService, DeviceSessio
 from .client_runtime_tools import (
     CLIENT_TOOL_PREFIX,
     TOOL_ORIGIN_CLIENT_MCP,
+    TOOL_ORIGIN_CLIENT_SKILL,
 )
 from .text_normalization import sanitize_identifier, tokenize_text
 from .tool_search_scoring import (
@@ -49,7 +50,7 @@ class ClientToolDescriptor:
     arg_names: list[str]
     required_arg_names: list[str]
     qualified_tool_id: str  # e.g., "desktop_commander::start_process" or "pylance::get_docs"
-    origin: str  # TOOL_ORIGIN_CLIENT_MCP
+    origin: str  # TOOL_ORIGIN_CLIENT_MCP or TOOL_ORIGIN_CLIENT_SKILL
     device_id: str  # The device this tool belongs to
     session_id: str = ""
     catalog_version: int = 0
@@ -266,12 +267,12 @@ class ClientToolCatalog:
             server_name = str(raw_entry.get("server_name") or "").strip()
             description = str(raw_entry.get("description") or "").strip()
             input_schema = raw_entry.get("input_schema", {}) or {}
-            if origin != "mcp" or not server_name:
+            if origin not in ("mcp", "skill") or not server_name:
                 continue
 
             # Build the exposed name (with client__ prefix)
             exposed_name = f"{CLIENT_TOOL_PREFIX}{server_name}__{name}".lower()
-            tool_origin = TOOL_ORIGIN_CLIENT_MCP
+            tool_origin = TOOL_ORIGIN_CLIENT_SKILL if origin == "skill" else TOOL_ORIGIN_CLIENT_MCP
 
             # Sanitize exposed name
             exposed_name = sanitize_identifier(exposed_name)

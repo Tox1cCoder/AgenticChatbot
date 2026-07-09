@@ -21,7 +21,11 @@ logger = logging.getLogger(__name__)
 # Tool origin constants for clean separation between server and client tools
 TOOL_ORIGIN_SERVER_MCP = "server_mcp"  # MCP tools running on the server
 TOOL_ORIGIN_CLIENT_MCP = "client_mcp"  # MCP tools running on a client device
+TOOL_ORIGIN_CLIENT_SKILL = "client_skill"  # Skill capability tools running on a client device
 TOOL_ORIGIN_INTERNAL = "internal"  # Built-in server tools (tool_search, write_todos, etc.)
+
+# Catalog entry "origin" values a client-synced tool entry may carry.
+_CATALOG_ORIGINS = frozenset({"mcp", "skill"})
 
 # Prefix used for client tool exposed names to prevent collision with server tools
 CLIENT_TOOL_PREFIX = "client__"
@@ -68,7 +72,7 @@ class ClientRuntimeToolSpec:
     @property
     def tool_origin(self) -> str:
         """Return the normalized tool origin constant."""
-        return TOOL_ORIGIN_CLIENT_MCP
+        return TOOL_ORIGIN_CLIENT_SKILL if self.origin == "skill" else TOOL_ORIGIN_CLIENT_MCP
 
     def is_client_tool(self) -> bool:
         """Check if this is a client-side tool (always True for ClientRuntimeToolSpec)."""
@@ -99,8 +103,8 @@ def _build_exposed_name(raw_entry: dict[str, Any], seen: set[str]) -> str:
     origin = str(raw_entry.get("origin") or "").strip().lower()
     base_name = _sanitize_name_token(raw_entry.get("name"))
     server_name = _sanitize_name_token(raw_entry.get("server_name"))
-    if origin != "mcp" or not server_name:
-        raise ValueError("Client runtime tool entries must come from MCP servers.")
+    if origin not in _CATALOG_ORIGINS or not server_name:
+        raise ValueError("Client runtime tool entries must come from MCP servers or skills.")
 
     candidate = f"{CLIENT_TOOL_PREFIX}{server_name}__{base_name}"
 
@@ -135,7 +139,7 @@ def _parse_tool_specs(catalog: dict[str, Any]) -> list[ClientRuntimeToolSpec]:
         server_name = (
             str(raw_entry.get("server_name")).strip() if raw_entry.get("server_name") else None
         )
-        if not qualified_tool_id or not name or origin != "mcp" or not server_name:
+        if not qualified_tool_id or not name or origin not in _CATALOG_ORIGINS or not server_name:
             continue
 
         description = str(raw_entry.get("description") or "").strip() or (
@@ -314,7 +318,8 @@ def _build_tool(
             # Opaque capability identifier for dispatch/audit validation
             "tool_instance_id": tool_instance_id,
             # Tool origin classification for clean separation
-            "tool_origin": spec.tool_origin,  # TOOL_ORIGIN_CLIENT_MCP
+            "tool_origin": spec.tool_origin,  # TOOL_ORIGIN_CLIENT_MCP / TOOL_ORIGIN_CLIENT_SKILL
+            "catalog_origin": spec.origin,  # Raw catalog entry origin: "mcp" or "skill"
             # Original tool identification for dispatch
             "server_name": spec.server_name,  # MCP server name on client
             "qualified_tool_id": spec.qualified_tool_id,  # e.g., "desktop_commander::start_process"

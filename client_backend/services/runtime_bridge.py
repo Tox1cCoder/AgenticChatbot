@@ -28,6 +28,7 @@ from app.schemas.runtime_protocol import (
 )
 from client_backend import __version__
 from client_backend.core.config import client_settings
+from client_backend.services.skill_runtime.manager import SkillRuntimeManager
 
 
 def _make_tool_instance_id(
@@ -591,6 +592,8 @@ class RuntimeBridgeService:
         raw_tools = mcp_catalog.get("tools", []) if isinstance(mcp_catalog, dict) else []
         tools = [dict(entry) for entry in raw_tools if isinstance(entry, dict)]
 
+        tools.extend(self._collect_skill_capability_tools())
+
         # Embed tool_instance_id in each entry using the NEXT catalog_version
         # (server increments catalog_version on receive, so use version+1)
         device_id = self._device_id or ""
@@ -613,6 +616,36 @@ class RuntimeBridgeService:
             "mcp_server_count": mcp_catalog.get("server_count", 0),
             "active_servers": mcp_catalog.get("active_servers", []),
         }
+
+    @staticmethod
+    def _collect_skill_capability_tools() -> list[dict[str, Any]]:
+        """Build catalog entries for ready skills' capabilities.
+
+        Only skills whose readiness evaluates to "ready" contribute entries
+        (see SkillRuntimeManager.capability_catalog_entries). Any failure
+        while collecting skills (registry not initialized, a bad manifest,
+        etc.) is logged and swallowed here — a skill-runtime hiccup must
+        never break MCP tool catalog sync.
+        """
+        try:
+            skill_manager = SkillRuntimeManager()
+            skill_tools: list[dict[str, Any]] = []
+            for skill in get_skills_registry().get_enabled_skills():
+                if skill.manifest is None:
+                    continue
+                readiness = skill_manager.evaluate_readiness(skill.manifest, skill.manifest_error)
+                if readiness.status != "ready":
+                    continue
+                skill_tools.extend(
+                    skill_manager.capability_catalog_entries(skill.name, skill.manifest, readiness)
+                )
+            return skill_tools
+        except Exception:
+            # Swallow-and-continue so a skill-runtime hiccup never breaks MCP
+            # tool sync; log with a traceback so a real bug here is still
+            # debuggable rather than reduced to a one-line message.
+            logger.exception("Failed to collect skill capability tools for catalog sync")
+            return []
 
     async def _send_runtime_message(self, message: RuntimeMessage) -> None:
         await self._send_json(dump_runtime_message(message))
