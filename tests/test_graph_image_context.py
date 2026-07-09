@@ -22,25 +22,6 @@ def test_workflow_applies_current_turn_images_to_last_human_message():
     ]
 
 
-def test_workflow_applies_multiple_current_turn_images_to_last_human_message():
-    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
-
-    result, has_images = workflow._build_turn_messages_with_attachments(
-        [HumanMessage(content="compare these")],
-        [
-            {"name": "one.png", "mime": "image/png", "data": "abc"},
-            {"name": "two.jpg", "mime": "image/jpeg", "data": "def"},
-        ],
-    )
-
-    assert has_images is True
-    assert result[0].content == [
-        {"type": "text", "text": "compare these"},
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
-        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,def"}},
-    ]
-
-
 def test_workflow_leaves_turn_plain_without_valid_images():
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
 

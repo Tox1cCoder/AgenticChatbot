@@ -2,84 +2,7 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <style>
-      html,
-      body {
-        margin: 0;
-        padding: 0;
-        background: transparent;
-        font-family:
-          "Source Sans Pro",
-          -apple-system,
-          BlinkMacSystemFont,
-          "Segoe UI",
-          sans-serif;
-      }
-
-      body[data-visible="false"] .capture-shell {
-        display: none;
-      }
-
-      .capture-shell {
-        box-sizing: border-box;
-        width: 100%;
-        padding: 4px 0 8px;
-      }
-
-      .drop-target {
-        box-sizing: border-box;
-        width: 100%;
-        min-height: 64px;
-        border: 1px dashed rgba(49, 51, 63, 0.35);
-        border-radius: 8px;
-        background: rgba(250, 250, 251, 0.96);
-        color: rgb(49, 51, 63);
-        cursor: pointer;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        gap: 2px;
-        padding: 12px 14px;
-        outline: none;
-      }
-
-      .drop-target:hover,
-      .drop-target:focus,
-      .drop-target.dragging {
-        border-color: rgb(255, 75, 75);
-        background: rgba(255, 246, 246, 0.96);
-      }
-
-      .drop-title {
-        font-size: 14px;
-        font-weight: 600;
-        line-height: 1.25;
-      }
-
-      .drop-help {
-        color: rgba(49, 51, 63, 0.72);
-        font-size: 12px;
-        line-height: 1.25;
-      }
-
-      .file-input {
-        display: none;
-      }
-    </style>
     <script>
-      const MOUNT_ID = `mount-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      const VISIBLE_FRAME_HEIGHT = 84;
-      const IMAGE_FILE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
-      const IMAGE_EXTENSION_MIME = {
-        ".gif": "image/gif",
-        ".jpeg": "image/jpeg",
-        ".jpg": "image/jpeg",
-        ".png": "image/png",
-        ".webp": "image/webp",
-      };
-      let componentArgs = { visible: false };
-      let topDoc = null;
-
       function sendStreamlitMessage(type, data) {
         window.parent.postMessage(
           {
@@ -104,26 +27,6 @@
         setFrameHeight(0);
       }
 
-      function componentVisible() {
-        return Boolean(componentArgs && componentArgs.visible);
-      }
-
-      function resolveTopDocument() {
-        try {
-          topDoc = window.parent.document;
-        } catch (_) {
-          topDoc = null;
-        }
-        return topDoc;
-      }
-
-      function registerActiveReceiver() {
-        const doc = resolveTopDocument();
-        if (!doc) return;
-        doc.__chatImagePasteActiveReceiver = setComponentValue;
-        doc.__chatImagePasteActiveMountId = MOUNT_ID;
-      }
-
       function activeChatTextarea(doc) {
         const active = doc.activeElement;
         if (!active || active.tagName !== "TEXTAREA") return null;
@@ -135,52 +38,13 @@
         return null;
       }
 
-      function fileExtension(name) {
-        const value = String(name || "").toLowerCase();
-        const index = value.lastIndexOf(".");
-        return index >= 0 ? value.slice(index) : "";
-      }
-
-      function isImageFile(file) {
-        if (!file) return false;
-        if (file.type && file.type.startsWith("image/")) return true;
-        return IMAGE_FILE_EXTENSIONS.has(fileExtension(file.name));
-      }
-
-      function mimeForFile(file) {
-        if (file && file.type && file.type.startsWith("image/")) {
-          return file.type;
-        }
-        return IMAGE_EXTENSION_MIME[fileExtension(file && file.name)] || "image/png";
-      }
-
-      function filesFromClipboard(clipboard) {
-        const files = [];
-        if (!clipboard || !clipboard.items) return files;
-
-        for (const item of clipboard.items) {
-          if (
-            item.kind === "file" &&
-            ((item.type && item.type.startsWith("image/")) || !item.type)
-          ) {
-            const file = item.getAsFile();
-            if (isImageFile(file)) files.push(file);
-          }
-        }
-        return files;
-      }
-
-      function imageFilesFromList(fileList) {
-        return Array.from(fileList || []).filter((file) => isImageFile(file));
-      }
-
       async function fileToPayload(file, index) {
         return new Promise((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = () => {
             resolve({
               name: file.name || `clipboard-image-${Date.now()}-${index}.png`,
-              mime: mimeForFile(file),
+              mime: file.type || "image/png",
               data: String(reader.result || ""),
             });
           };
@@ -189,168 +53,53 @@
         });
       }
 
-      async function filesToPayload(files) {
-        const payload = [];
-        for (let index = 0; index < files.length; index += 1) {
-          try {
-            payload.push(await fileToPayload(files[index], index + 1));
-          } catch (_) {
-            // Skip unreadable clipboard/drop entries.
-          }
+      function install() {
+        let topDoc;
+        try {
+          topDoc = window.parent.document;
+        } catch (_) {
+          return;
         }
-        return payload;
-      }
+        if (!topDoc) return;
+        topDoc.__chatImagePasteSetComponentValue = setComponentValue;
+        if (topDoc.__chatImagePasteInstalled) return;
+        topDoc.__chatImagePasteInstalled = true;
 
-      async function emitImageFiles(files, receiver) {
-        const imageFiles = imageFilesFromList(files);
-        if (!imageFiles.length) return false;
-
-        const payload = await filesToPayload(imageFiles);
-        if (!payload.length) return false;
-
-        const eventId = `attach-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        receiver({
-          eventId: eventId,
-          images: payload,
-        });
-        return true;
-      }
-
-      async function sendImages(files) {
-        return emitImageFiles(files, setComponentValue);
-      }
-
-      function selectImageFiles() {
-        const input = document.getElementById("fileInput");
-        if (input) input.click();
-      }
-
-      function transferHasFiles(dataTransfer) {
-        return Array.from((dataTransfer && dataTransfer.types) || []).includes("Files");
-      }
-
-      function showDragging(target, event) {
-        if (!componentVisible() || !transferHasFiles(event.dataTransfer)) return false;
-        event.preventDefault();
-        event.dataTransfer.dropEffect = "copy";
-        target.classList.add("dragging");
-        return true;
-      }
-
-      function installParentPasteListener() {
-        const doc = resolveTopDocument();
-        if (!doc) return;
-        registerActiveReceiver();
-        if (doc.__chatImagePasteInstalled) return;
-        doc.__chatImagePasteInstalled = true;
-
-        doc.addEventListener(
+        topDoc.addEventListener(
           "paste",
           async function (event) {
-            if (!activeChatTextarea(doc)) return;
+            if (!activeChatTextarea(topDoc)) return;
+            const clipboard = event.clipboardData;
+            if (!clipboard || !clipboard.items) return;
 
-            const files = filesFromClipboard(event.clipboardData);
+            const files = [];
+            for (const item of clipboard.items) {
+              if (item.kind === "file" && item.type && item.type.startsWith("image/")) {
+                const file = item.getAsFile();
+                if (file) files.push(file);
+              }
+            }
+
             if (!files.length) return;
             event.preventDefault();
 
-            const receiver =
-              typeof doc.__chatImagePasteActiveReceiver === "function"
-                ? doc.__chatImagePasteActiveReceiver
-                : setComponentValue;
-            await emitImageFiles(files, receiver);
+            const payload = [];
+            for (let index = 0; index < files.length; index += 1) {
+              payload.push(await fileToPayload(files[index], index + 1));
+            }
+            const eventId = `paste-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            topDoc.__chatImagePasteSetComponentValue({
+              eventId: eventId,
+              images: payload,
+            });
           },
           true
         );
       }
 
-      function render(args) {
-        componentArgs = args || {};
-        document.body.dataset.visible = componentVisible() ? "true" : "false";
-        setFrameHeight(componentVisible() ? VISIBLE_FRAME_HEIGHT : 0);
-        registerActiveReceiver();
-      }
-
-      function installVisibleAttachmentTarget() {
-        const target = document.getElementById("dropTarget");
-        const input = document.getElementById("fileInput");
-        if (!target || !input) return;
-
-        input.addEventListener("change", async function (event) {
-          if (await sendImages(event.target.files)) {
-            input.value = "";
-          }
-        });
-
-        target.addEventListener("click", function () {
-          selectImageFiles();
-        });
-
-        target.addEventListener("keydown", function (event) {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            selectImageFiles();
-          }
-        });
-
-        target.addEventListener("dragover", function (event) {
-          showDragging(target, event);
-        });
-
-        target.addEventListener("dragleave", function () {
-          target.classList.remove("dragging");
-        });
-
-        target.addEventListener("drop", async function (event) {
-          if (!componentVisible() || !transferHasFiles(event.dataTransfer)) return;
-          event.preventDefault();
-          event.stopPropagation();
-          target.classList.remove("dragging");
-          await sendImages(event.dataTransfer ? event.dataTransfer.files : []);
-        });
-
-        target.addEventListener("paste", async function (event) {
-          const files = filesFromClipboard(event.clipboardData);
-          if (!files.length) return;
-          event.preventDefault();
-          await sendImages(files);
-        });
-
-        document.addEventListener("dragover", function (event) {
-          showDragging(target, event);
-        });
-
-        document.addEventListener("drop", async function (event) {
-          if (!componentVisible() || !transferHasFiles(event.dataTransfer)) return;
-          event.preventDefault();
-          target.classList.remove("dragging");
-          await sendImages(event.dataTransfer ? event.dataTransfer.files : []);
-        });
-      }
-
-      window.addEventListener("message", function (event) {
-        if (!event.data || event.data.type !== "streamlit:render") return;
-        render(event.data.args || {});
-      });
-
       componentReady();
-      installVisibleAttachmentTarget();
-      installParentPasteListener();
-      render({});
+      install();
     </script>
   </head>
-  <body data-visible="false">
-    <div class="capture-shell">
-      <div
-        id="dropTarget"
-        class="drop-target"
-        role="button"
-        tabindex="0"
-        aria-label="Attach images"
-      >
-        <div class="drop-title">Paste, drop, or choose images</div>
-        <div class="drop-help">PNG, JPG, GIF, or WebP. Multiple images are supported.</div>
-      </div>
-      <input id="fileInput" class="file-input" type="file" accept="image/*" multiple />
-    </div>
-  </body>
+  <body></body>
 </html>

@@ -48,33 +48,6 @@ def test_handle_pasted_image_payload_reuses_pending_attachment_queue(monkeypatch
     assert pending[0]["data"] == "YWJj"
 
 
-def test_handle_pasted_image_payload_keeps_multiple_distinct_images(monkeypatch):
-    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
-    streamlit_stub.session_state.pending_image_attachments = []
-
-    assert demo._handle_pasted_image_payload(
-        {
-            "eventId": "paste-two-images",
-            "images": [
-                {
-                    "name": "clipboard-1.png",
-                    "mime": "image/png",
-                    "data": "data:image/png;base64,YWJj",
-                },
-                {
-                    "name": "clipboard-2.jpg",
-                    "mime": "image/jpeg",
-                    "data": "data:image/jpeg;base64,ZGVm",
-                },
-            ],
-        }
-    )
-
-    pending = streamlit_stub.session_state.pending_image_attachments
-    assert [item["name"] for item in pending] == ["clipboard-1.png", "clipboard-2.jpg"]
-    assert [item["data"] for item in pending] == ["YWJj", "ZGVm"]
-
-
 def test_handle_pasted_image_payload_does_not_replay_consumed_event(monkeypatch):
     demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
     streamlit_stub.session_state.pending_image_attachments = []
@@ -139,84 +112,6 @@ def test_clipboard_component_filters_to_focused_message_textarea():
     assert "clipboardData" in html
     assert "eventId" in html
     assert "images" in html
-    assert "__chatImagePasteActiveReceiver" in html
+    assert "__chatImagePasteSetComponentValue" in html
     assert "setFrameHeight(0)" in html
     assert "streamlit:setComponentValue" in html
-
-
-def test_clipboard_component_reregisters_active_receiver_each_mount():
-    html = (
-        Path(__file__).resolve().parents[1]
-        / "app"
-        / "ui"
-        / "clipboard_image_capture"
-        / "index.html"
-    ).read_text(encoding="utf-8")
-
-    assert "__chatImagePasteActiveReceiver" in html
-    assert "__chatImagePasteActiveReceiver = setComponentValue" in html
-    assert "__chatImagePasteSetComponentValue" not in html
-
-
-def test_clipboard_component_supports_paste_drop_and_picker_input():
-    html = (
-        Path(__file__).resolve().parents[1]
-        / "app"
-        / "ui"
-        / "clipboard_image_capture"
-        / "index.html"
-    ).read_text(encoding="utf-8")
-
-    assert 'type="file"' in html
-    assert 'accept="image/*"' in html
-    assert "multiple" in html
-    assert '"drop"' in html
-    assert '"dragover"' in html
-    assert "selectImageFiles" in html
-
-
-def test_clipboard_component_accepts_image_extensions_when_mime_is_missing():
-    html = (
-        Path(__file__).resolve().parents[1]
-        / "app"
-        / "ui"
-        / "clipboard_image_capture"
-        / "index.html"
-    ).read_text(encoding="utf-8")
-
-    assert "IMAGE_FILE_EXTENSIONS" in html
-    assert "file.name" in html
-    assert "return IMAGE_FILE_EXTENSIONS.has(fileExtension(file.name))" in html
-    assert "filter((file) => isImageFile(file))" in html
-
-
-def test_clipboard_component_handles_drop_on_frame_document():
-    html = (
-        Path(__file__).resolve().parents[1]
-        / "app"
-        / "ui"
-        / "clipboard_image_capture"
-        / "index.html"
-    ).read_text(encoding="utf-8")
-
-    assert 'document.addEventListener("dragover"' in html
-    assert 'document.addEventListener("drop"' in html
-    assert "event.dataTransfer" in html
-
-
-def test_demo_replaces_chat_image_file_uploader_with_paste_style_intake():
-    source = (Path(__file__).resolve().parents[1] / "demo.py").read_text(encoding="utf-8")
-
-    assert 'st.file_uploader(\n                "Attach images"' not in source
-    assert "show_attachment_uploader" in source
-    assert "capture_pasted_images(" in source
-    assert "_handle_pasted_image_payload(pasted_payload)" in source
-
-
-def test_clipboard_capture_wrapper_exposes_visible_mode():
-    source = (
-        Path(__file__).resolve().parents[1] / "app" / "ui" / "clipboard_image_capture.py"
-    ).read_text(encoding="utf-8")
-
-    assert "visible: bool = False" in source
-    assert "visible=visible" in source

@@ -7928,13 +7928,19 @@ def render_chat_view():
         # Show pending attachments
         _render_pending_image_attachments()
 
-        if st.session_state.show_attachment_uploader:
-            attachment_payload = capture_pasted_images(
-                key=f"chat_image_attach_{conversation_id}",
-                visible=True,
+        # File uploader
+        file_uploader_key = f"chat_image_uploader_{conversation_id}" if conversation_id else None
+
+        if st.session_state.show_attachment_uploader and file_uploader_key:
+            uploaded_files = st.file_uploader(
+                "Attach images",
+                type=["png", "jpg", "jpeg", "gif", "webp"],
+                accept_multiple_files=True,
+                key=file_uploader_key,
+                help="Attach images",
             )
-            if _handle_pasted_image_payload(attachment_payload):
-                st.rerun()
+            if uploaded_files:
+                _handle_new_image_attachments(uploaded_files)
 
         # Message form
         # ── Handle interrupted stream on rerun (Phase 2 of two-phase stop) ──
@@ -7958,10 +7964,7 @@ def render_chat_view():
         # to the message form so the text box and Send/Attach controls stay
         # visible. A consumed paste triggers a single rerun, after which the
         # event id is remembered and the stale component value is ignored.
-        pasted_payload = capture_pasted_images(
-            key=f"chat_image_paste_{conversation_id}",
-            visible=False,
-        )
+        pasted_payload = capture_pasted_images(key=f"chat_image_paste_{conversation_id}")
         if _handle_pasted_image_payload(pasted_payload):
             st.rerun()
 
