@@ -69,6 +69,14 @@
     <script>
       const MOUNT_ID = `mount-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const VISIBLE_FRAME_HEIGHT = 84;
+      const IMAGE_FILE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
+      const IMAGE_EXTENSION_MIME = {
+        ".gif": "image/gif",
+        ".jpeg": "image/jpeg",
+        ".jpg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+      };
       let componentArgs = { visible: false };
       let topDoc = null;
 
@@ -127,23 +135,43 @@
         return null;
       }
 
+      function fileExtension(name) {
+        const value = String(name || "").toLowerCase();
+        const index = value.lastIndexOf(".");
+        return index >= 0 ? value.slice(index) : "";
+      }
+
+      function isImageFile(file) {
+        if (!file) return false;
+        if (file.type && file.type.startsWith("image/")) return true;
+        return IMAGE_FILE_EXTENSIONS.has(fileExtension(file.name));
+      }
+
+      function mimeForFile(file) {
+        if (file && file.type && file.type.startsWith("image/")) {
+          return file.type;
+        }
+        return IMAGE_EXTENSION_MIME[fileExtension(file && file.name)] || "image/png";
+      }
+
       function filesFromClipboard(clipboard) {
         const files = [];
         if (!clipboard || !clipboard.items) return files;
 
         for (const item of clipboard.items) {
-          if (item.kind === "file" && item.type && item.type.startsWith("image/")) {
+          if (
+            item.kind === "file" &&
+            ((item.type && item.type.startsWith("image/")) || !item.type)
+          ) {
             const file = item.getAsFile();
-            if (file) files.push(file);
+            if (isImageFile(file)) files.push(file);
           }
         }
         return files;
       }
 
       function imageFilesFromList(fileList) {
-        return Array.from(fileList || []).filter(
-          (file) => file && file.type && file.type.startsWith("image/")
-        );
+        return Array.from(fileList || []).filter((file) => isImageFile(file));
       }
 
       async function fileToPayload(file, index) {
@@ -152,7 +180,7 @@
           reader.onload = () => {
             resolve({
               name: file.name || `clipboard-image-${Date.now()}-${index}.png`,
-              mime: file.type || "image/png",
+              mime: mimeForFile(file),
               data: String(reader.result || ""),
             });
           };
@@ -195,6 +223,18 @@
       function selectImageFiles() {
         const input = document.getElementById("fileInput");
         if (input) input.click();
+      }
+
+      function transferHasFiles(dataTransfer) {
+        return Array.from((dataTransfer && dataTransfer.types) || []).includes("Files");
+      }
+
+      function showDragging(target, event) {
+        if (!componentVisible() || !transferHasFiles(event.dataTransfer)) return false;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        target.classList.add("dragging");
+        return true;
       }
 
       function installParentPasteListener() {
@@ -253,8 +293,7 @@
         });
 
         target.addEventListener("dragover", function (event) {
-          event.preventDefault();
-          target.classList.add("dragging");
+          showDragging(target, event);
         });
 
         target.addEventListener("dragleave", function () {
@@ -262,7 +301,9 @@
         });
 
         target.addEventListener("drop", async function (event) {
+          if (!componentVisible() || !transferHasFiles(event.dataTransfer)) return;
           event.preventDefault();
+          event.stopPropagation();
           target.classList.remove("dragging");
           await sendImages(event.dataTransfer ? event.dataTransfer.files : []);
         });
@@ -272,6 +313,17 @@
           if (!files.length) return;
           event.preventDefault();
           await sendImages(files);
+        });
+
+        document.addEventListener("dragover", function (event) {
+          showDragging(target, event);
+        });
+
+        document.addEventListener("drop", async function (event) {
+          if (!componentVisible() || !transferHasFiles(event.dataTransfer)) return;
+          event.preventDefault();
+          target.classList.remove("dragging");
+          await sendImages(event.dataTransfer ? event.dataTransfer.files : []);
         });
       }
 
