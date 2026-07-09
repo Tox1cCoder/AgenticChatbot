@@ -12,7 +12,7 @@ from pathlib import Path
 
 from client_backend.core.config import client_settings
 from client_backend.core.logging import get_logger
-from client_backend.core.paths import get_profile_subdir
+from client_backend.core.paths import get_installed_skills_root, get_profile_subdir
 from client_backend.services.upstream_auth import get_upstream_auth_service
 from shared.skills.front_matter import (
     extract_yaml_value,
@@ -341,6 +341,37 @@ class LocalSkillsRegistry:
                     "Failed to parse skill.json for %s: %s", candidate_manifest_path, exc
                 )
 
+            install_metadata: dict | None = None
+            candidate_install_path = skill_file.parent / "install.json"
+            # Same defensive shape as the skill.json block above: a bad or
+            # unreadable install.json must never drop an otherwise-valid
+            # skill, so parsing failures only leave install_metadata unset.
+            try:
+                if candidate_install_path.exists():
+                    install_raw = await asyncio.to_thread(
+                        candidate_install_path.read_text, encoding="utf-8"
+                    )
+                    parsed_install = json.loads(install_raw)
+                    if isinstance(parsed_install, dict):
+                        install_metadata = parsed_install
+            except Exception as exc:
+                logger.warning(
+                    "Failed to parse install.json for %s: %s", candidate_install_path, exc
+                )
+
+            # A plain-markdown bundle (no front matter) normally takes its
+            # name from the containing directory. For an installed bundle that
+            # directory is hash-suffixed (e.g. "plain-skill-ab12cd34ef56"),
+            # which would diverge from the name the installer recorded and
+            # returned, leaving the skill undiscoverable by that name. Prefer
+            # the installer's recorded bundle_name so an installed skill is
+            # always found and toggled under its recorded name. Front-matter
+            # names remain authoritative and are left untouched.
+            if used_plain_markdown_fallback and install_metadata:
+                recorded_name = install_metadata.get("bundle_name")
+                if isinstance(recorded_name, str) and recorded_name.strip():
+                    name = recorded_name
+
             return SkillMetadata(
                 name=name,
                 path=skill_file,
@@ -352,6 +383,7 @@ class LocalSkillsRegistry:
                 manifest_path=manifest_path,
                 manifest=manifest,
                 manifest_error=manifest_error,
+                install_metadata=install_metadata,
             )
 
         except Exception as e:
@@ -546,8 +578,20 @@ class LocalSkillsRegistry:
 
     def _resolve_skill_roots(self) -> list[str]:
         if self._explicit_skill_roots is not None:
-            return list(self._explicit_skill_roots)
-        return list(client_settings.skills_roots)
+            roots = list(self._explicit_skill_roots)
+        else:
+            roots = list(client_settings.skills_roots)
+
+        # Installed bundles (Task 4's SkillBundleInstaller) live under the
+        # active user's profile, not CLIENT_SKILLS_ROOTS, so they must be
+        # scanned unconditionally here. get_profile_subdir() creates the
+        # directory as a side effect, so it is only called once a user id is
+        # actually available.
+        current_user_id = self._resolve_current_user_id()
+        if current_user_id:
+            roots.append(str(get_installed_skills_root(current_user_id)))
+
+        return roots
 
     def _get_skill_state_path(self) -> Path | None:
         current_user_id = self._resolve_current_user_id()

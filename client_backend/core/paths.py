@@ -160,3 +160,14 @@ def get_profile_subdir(user_id: str, subdir: str) -> Path:
     path = Path(client_settings.profile_root) / server_hash / user_id / subdir
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def get_installed_skills_root(user_id: str) -> Path:
+    """Return the profile directory that holds profile-installed skill bundles.
+
+    Single source of truth for the installed-bundle location so the installer
+    (which writes here) and the registry scanner (which reads here) cannot
+    drift. Note: ``get_profile_subdir`` creates the parent ``skills`` dir as a
+    side effect, so only call this once a user id is actually available.
+    """
+    return get_profile_subdir(user_id, "skills") / "installed"

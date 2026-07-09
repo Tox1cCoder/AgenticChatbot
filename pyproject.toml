@@ -137,6 +137,23 @@ select = [
 # Bỏ qua một số rule cụ thể nếu thấy phiền
 ignore = []
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI dependency-injection markers are the idiomatic way to declare route
+# parameters and are safe as argument defaults; exempt them from B008 ("Do not
+# perform function call in argument defaults"), which would otherwise flag
+# every FastAPI route across the codebase.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Form",
+    "fastapi.File",
+    "fastapi.Security",
+]
+
 [tool.ruff.format]
 # Cấu hình formatter (giống Black)
 quote-style = "double"

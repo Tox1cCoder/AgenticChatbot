@@ -65,3 +65,20 @@ class SkillToggleResponse(BaseModel):
     skill_name: str
     enabled: bool
     synced_to_server: bool = False
+
+
+class SkillInstallRequest(BaseModel):
+    """Request to install a local skill bundle directory.
+
+    Provider-neutral by design: a bundle is just a directory containing
+    ``SKILL.md`` and an optional ``skill.json``, so this request never names
+    a specific integration (e.g. a calendar provider).
+    """
+
+    source_path: str
+
+
+class SkillUninstallRequest(BaseModel):
+    """Request to uninstall a previously installed local skill bundle."""
+
+    name: str

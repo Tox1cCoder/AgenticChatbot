@@ -443,14 +443,14 @@ Modify:
 - Modify: `client_backend/api/skills.py`
 - Test: `tests/client_backend/test_skill_installation.py`
 
-- [ ] Implement a `SkillBundleInstaller` that accepts a local directory path containing `SKILL.md`, validates the optional `skill.json`, computes a source hash, and installs the bundle under the current user's profile skill directory.
-- [ ] Add a registry-managed profile install root, for example `get_profile_subdir(user_id, "skills") / "installed"`, to `LocalSkillsRegistry._resolve_skill_roots()` so installed bundles are scanned without requiring users to edit `CLIENT_SKILLS_ROOTS`.
-- [ ] Reject unsafe bundles: missing `SKILL.md`, malformed front matter, malformed manifest, duplicate active skill name, path traversal inside archives, and install targets outside the profile skill root.
-- [ ] Store install metadata locally with bundle name, source hash, source path or archive name, installed timestamp, manifest status, and enabled state. Do not store secrets.
-- [ ] Add local API operations for install, uninstall, and install-status. Keep the API generic; request bodies must not mention Google Calendar or any other provider-specific integration.
-- [ ] Refresh the skill registry and runtime catalogs after install or uninstall if the runtime bridge is connected.
-- [ ] Add tests for installing a Markdown-only skill, installing a manifest-backed skill, rejecting duplicates, rejecting malformed manifests, uninstalling an installed skill, and proving the installed skill appears in the normal skill catalog.
-- [ ] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_installation.py -q`
+- [x] Implement a `SkillBundleInstaller` that accepts a local directory path containing `SKILL.md`, validates the optional `skill.json`, computes a source hash, and installs the bundle under the current user's profile skill directory.
+- [x] Add a registry-managed profile install root, for example `get_profile_subdir(user_id, "skills") / "installed"`, to `LocalSkillsRegistry._resolve_skill_roots()` so installed bundles are scanned without requiring users to edit `CLIENT_SKILLS_ROOTS`. (Extracted to `get_installed_skills_root(user_id)` in `core/paths.py` as the single source of truth.)
+- [x] Reject unsafe bundles: missing `SKILL.md`, malformed front matter, malformed manifest, duplicate active skill name, path traversal (target escaping profile root), and symlinks in the bundle. (Zip archives deferred — plan marks them optional.)
+- [x] Store install metadata locally with bundle name, source hash, source path, installed timestamp, manifest status, and enabled state. Do not store secrets.
+- [x] Add local API operations for install, uninstall, and install-status. Generic request bodies (`source_path` / `name`); no provider-specific mentions.
+- [x] Refresh the skill registry and runtime catalogs after install or uninstall if the runtime bridge is connected.
+- [x] Add tests for installing a Markdown-only skill, installing a manifest-backed skill, rejecting duplicates, rejecting malformed manifests, uninstalling an installed skill, and proving the installed skill appears in the normal skill catalog.
+- [x] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_installation.py -q` → 13 passed, 1 skipped (Windows symlink-privilege; logic covered cross-platform).
 
 ### Task 5: Sync Skill Capabilities As Client Tools
 
@@ -648,7 +648,8 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 |------|--------|-----------|-------|
 | 1. Manifest models | ✅ done | `05b6a28` (base `22360f9`) | 48 tests. Review found 2 Important (gitignore over-reach, unenforced non-empty input_schema); both fixed. |
 | 2. Load manifests during scan | ✅ done | `166fa4b` (base `05b6a28`) | 11 registry tests. Review Approved; 1 Important (embedded-path leak in redactor) + 2 Minors fixed proactively before Task 4 relies on it. |
-| 3. Readiness checks | ✅ done | `0a99d07` (base `166fa4b`) | New skill_runtime/ package (manager + minimal secret store); 16 tests. Review found 1 Important (dep-name parser skipped whitespace-padded reqs, masking missing deps); fixed by switching to packaging.Requirement. |
+| 3. Readiness checks | ✅ done | `7f5289b` (base `166fa4b`) | New skill_runtime/ package (manager + minimal secret store); 16 tests. Review found 1 Important (dep-name parser skipped whitespace-padded reqs, masking missing deps); fixed by switching to packaging.Requirement. |
+| 4. Bundle installation | ✅ done | `f0f8291` (base `23b4c00`) | install.py + shared/skills/errors.py + /skills install/uninstall/installed API; 13 tests (+1 platform-skip). Implementer hit a transient 529 mid-task (resumed). Review Needs-fixes→fixed: 3 Important (symlink rejection [plan-required], disabled-reinstall replace semantics, UNSAFE_BUNDLE_PATH test) + DRY helper. NOTE: user committed `beb1fdb`/`23b4c00` to this branch concurrently — no file overlap. |
 
 ## Design Decisions Log
 
@@ -674,3 +675,12 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 - **Readiness states:** `invalid` (manifest_error set), `instruction_only` (no manifest, no error), else aggregate `ready`/`not_ready` over five signals: unsupported runtime (defensive only — load_manifest already rejects), binary command present + on PATH (`shutil.which`), Python deps present, binary-missing-command, required secrets present. Repair hints are structured dicts; `REPAIR_HINT_TYPES` includes `permission_required` (shape reserved for Task 6, never emitted here).
 - **Dependency check is presence-only, not version-match** (avoids false negatives from workable-but-mismatched versions). Uses `packaging.requirements.Requirement(req).name` (already a pinned dep) — robustly handles extras, markers, and whitespace, and returns None (→ skip, don't false-fail) only for genuinely unparseable strings. (Initial hand-rolled regex skipped whitespace-padded requirements → could mask a missing dep; review caught it.)
 - **`node`/`system` deps are NOT availability-checked in this slice** (python only), per scope.
+
+### Task 4 — Generic bundle installation
+- **`shared/skills/errors.py` pulled forward** (File Structure lists it; Task 7 will reuse). Full normalized error-code set + `SkillRuntimeError(code, message, repair)` + `error_payload()`. Task 4 is the first task that needs normalized codes (install failures).
+- **Directory install only; zip archives deferred** (plan marks them optional). Reduces the extraction attack surface; directory install satisfies every Task-4 test.
+- **Security controls:** rejects missing SKILL.md, malformed front matter (present but no name), invalid manifest, duplicate ACTIVE skill name (disabled does not block), install/uninstall targets escaping the profile root (`is_under_root` before every copy/rmtree), and **symlinks in the bundle** (`os.walk(followlinks=False)` + reject; the plan's Risk Notes require this — copytree also uses `symlinks=True` as TOCTOU defense). Install metadata never stores secrets.
+- **Disabled-reinstall = replace:** reinstalling over a DISABLED same-named bundle removes the stale install dir first (guarded by `is_under_root`), so the reinstall is discoverable and scan-dedup never arbitrates between two same-named bundles. Known limitation: a disabled duplicate coming from a CONFIGURED root (not profile-installed) can still shadow a profile install via first-match-wins dedup — pre-existing behavior, noted for final triage.
+- **`get_installed_skills_root(user_id)` in `core/paths.py`** is the single source of truth for the install location (installer writes, registry scans) — prevents drift.
+- **`pyproject.toml` ruff:** added `flake8-bugbear.extend-immutable-calls` for FastAPI DI markers (Depends/Query/…), clearing pre-existing B008 false positives repo-wide (no behavior change). The API's `Depends`-in-defaults is idiomatic FastAPI.
+- **Concurrent user commits:** while Task 4 was implemented, the user committed `beb1fdb` (tool-execution-policy design doc) and `23b4c00` (attachments/ai_sdk feature) to this same branch. No overlap with skill-runtime files. Per-task review bases now use each task commit's actual parent, not the previous task commit.
