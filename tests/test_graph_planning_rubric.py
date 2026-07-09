@@ -37,7 +37,7 @@ async def test_planning_tools_node_stores_rubric_feedback_for_plan_mutation(monk
     async def fake_ensure_map(*_args, **_kwargs):
         return {}
 
-    monkeypatch.setattr("app.ai.graph.ensure_agent_tool_map", fake_ensure_map)
+    monkeypatch.setattr("app.ai.workflow.planning_loop.ensure_agent_tool_map", fake_ensure_map)
 
     async def fake_review(**_kwargs):
         return PlanningRubricAttempt(

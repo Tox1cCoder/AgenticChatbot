@@ -18,10 +18,66 @@ through the compiled graph and confirmed 0 of 247 had ``summarize`` in
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 from sqlalchemy import create_engine, text
 
+from app.ai.graph import create_workflow
 from app.core.config import settings
+
+BASE_AGENTS = frozenset(
+    {
+        "chat_agent",
+        "rag_agent",
+        "search_agent",
+        "image_generator_agent",
+        "planning_agent",
+        "canvas_agent",
+    }
+)
+STANDARD_TOOL_CALLING_AGENTS = frozenset(
+    {"chat_agent", "search_agent", "image_generator_agent", "canvas_agent", "custom_agent"}
+)
+
+
+@pytest.fixture(scope="module")
+def topology():
+    """Introspectable compiled topology built from the extracted builder.
+
+    Uses ``MagicMock`` collaborators so no live DB or Qdrant is touched — the
+    graph wiring is independent of those runtime dependencies.
+    """
+    wf = create_workflow(qdrant_client=MagicMock(), embedding_service=MagicMock())
+    return wf.graph.get_graph()
+
+
+def _targets(graph, source: str) -> set[str]:
+    return {edge.target for edge in graph.edges if edge.source == source}
+
+
+def test_start_routes_directly_to_route(topology):
+    assert _targets(topology, "__start__") == {"route"}
+
+
+def test_no_summarize_node(topology):
+    assert "summarize" not in topology.nodes
+
+
+def test_route_targets_all_base_agents_plus_custom(topology):
+    targets = _targets(topology, "route")
+    assert targets >= BASE_AGENTS
+    assert "custom_agent" in targets
+    assert "__end__" in targets
+
+
+def test_standard_tool_calling_agents_route_through_approval_tools_end(topology):
+    for agent in STANDARD_TOOL_CALLING_AGENTS:
+        assert _targets(topology, agent) == {"approval", "tools", "__end__"}
+
+
+def test_planning_tools_fans_out_to_every_agent_and_end(topology):
+    assert _targets(topology, "planning_tools") == BASE_AGENTS | {"custom_agent", "__end__"}
 
 
 def _engine():

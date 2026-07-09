@@ -586,7 +586,7 @@ async def test_execute_agent_tool_calls_persists_deferred_snapshot_to_state_cont
         )
         return ([], [], [])
 
-    monkeypatch.setattr("app.ai.graph.execute_tool_calls", _fake_execute_tool_calls)
+    monkeypatch.setattr("app.ai.workflow.tool_loop.execute_tool_calls", _fake_execute_tool_calls)
 
     await workflow._execute_agent_tool_calls(
         state=state,

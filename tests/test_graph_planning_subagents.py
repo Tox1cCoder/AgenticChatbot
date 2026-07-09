@@ -980,7 +980,7 @@ async def test_planning_tools_node_executes_dispatch_subagents(monkeypatch):
     async def fake_ensure_map(*args, **kwargs):
         return {}
 
-    monkeypatch.setattr("app.ai.graph.ensure_agent_tool_map", fake_ensure_map)
+    monkeypatch.setattr("app.ai.workflow.planning_loop.ensure_agent_tool_map", fake_ensure_map)
 
     captured: dict[str, Any] = {}
 
@@ -1063,7 +1063,7 @@ async def test_planning_tools_node_skips_dispatch_tool_build_when_no_dispatch_ca
     async def fake_ensure_map(*args, **kwargs):
         return {}
 
-    monkeypatch.setattr("app.ai.graph.ensure_agent_tool_map", fake_ensure_map)
+    monkeypatch.setattr("app.ai.workflow.planning_loop.ensure_agent_tool_map", fake_ensure_map)
 
     def unexpected_build(*args, **kwargs):
         raise AssertionError("dispatch tool should not be built without dispatch_subagents call")
@@ -1262,7 +1262,7 @@ async def test_planning_tools_node_applies_hand_off_to_target_agent(monkeypatch)
             )
         }
 
-    monkeypatch.setattr("app.ai.graph.ensure_agent_tool_map", fake_ensure_map)
+    monkeypatch.setattr("app.ai.workflow.planning_loop.ensure_agent_tool_map", fake_ensure_map)
 
     state: dict[str, Any] = {
         "selected_agent": "planning_agent",
@@ -1352,7 +1352,7 @@ async def test_planning_tools_node_handles_hand_off_alongside_dispatch(monkeypat
             )
         }
 
-    monkeypatch.setattr("app.ai.graph.ensure_agent_tool_map", fake_ensure_map)
+    monkeypatch.setattr("app.ai.workflow.planning_loop.ensure_agent_tool_map", fake_ensure_map)
 
     dispatched: list[str] = []
 
@@ -1444,7 +1444,7 @@ async def test_planning_consecutive_errors_only_warns_near_threshold(caplog, mon
 
         return {"flaky_tool": SimpleNamespace(name="flaky_tool", ainvoke=_raise)}
 
-    monkeypatch.setattr("app.ai.graph.ensure_agent_tool_map", fake_ensure_map)
+    monkeypatch.setattr("app.ai.workflow.planning_loop.ensure_agent_tool_map", fake_ensure_map)
     monkeypatch.setattr(settings, "planning_consecutive_errors_limit", 3)
 
     workflow.planning_agent = SimpleNamespace(
@@ -1512,7 +1512,7 @@ async def test_planning_consecutive_errors_small_limit_does_not_warn_on_first(ca
 
         return {"flaky_tool": SimpleNamespace(name="flaky_tool", ainvoke=_raise)}
 
-    monkeypatch.setattr("app.ai.graph.ensure_agent_tool_map", fake_ensure_map)
+    monkeypatch.setattr("app.ai.workflow.planning_loop.ensure_agent_tool_map", fake_ensure_map)
     monkeypatch.setattr(settings, "planning_consecutive_errors_limit", 2)
 
     workflow.planning_agent = SimpleNamespace(

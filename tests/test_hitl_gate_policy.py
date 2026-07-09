@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessage
 
 from app.ai import graph as graph_module
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+from app.ai.workflow import tool_loop as tool_loop_module
 
 
 class _FakeManager:
@@ -29,8 +30,13 @@ def _workflow_stub(tool_map, manager, monkeypatch):
     async def _fake_manager():
         return manager
 
+    # ``_run_agent_in_isolated_context`` still lives in ``app.ai.graph``; the
+    # tool/HITL helpers (``_needs_approval`` etc.) were relocated to
+    # ``app.ai.workflow.tool_loop`` (Task 8), so patch the names where each
+    # consumer now resolves them.
     monkeypatch.setattr(graph_module, "ensure_agent_tool_map", _fake_tool_map)
-    monkeypatch.setattr(graph_module, "get_global_mcp_manager", _fake_manager)
+    monkeypatch.setattr(tool_loop_module, "ensure_agent_tool_map", _fake_tool_map)
+    monkeypatch.setattr(tool_loop_module, "get_global_mcp_manager", _fake_manager)
     return wf
 
 

@@ -28,8 +28,12 @@ def test_workflow_has_no_summarize_node_or_method():
     summary node before the first user-visible token."""
     import inspect
 
+    from app.ai.workflow.graph_builder import build_workflow_graph
+
     assert not hasattr(MultiAgentWorkflow, "_summarization_node")
-    source = inspect.getsource(MultiAgentWorkflow._build_graph)
+    # Topology now lives in the extracted builder (Task 8); introspect it so the
+    # START -> route invariant is still guarded at its real definition site.
+    source = inspect.getsource(build_workflow_graph)
     assert '"summarize"' not in source
     assert 'add_edge(START, "route")' in source
 

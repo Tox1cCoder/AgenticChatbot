@@ -205,7 +205,7 @@ def test_rag_document_tool_results_are_recorded_as_response_artifacts(monkeypatc
         raise AssertionError(f"Unexpected action: {action}")
 
     monkeypatch.setattr(
-        "app.ai.graph.execute_search_documents_action",
+        "app.ai.workflow.rag_loop.execute_search_documents_action",
         fake_execute_search_documents_action,
     )
 
@@ -272,10 +272,10 @@ def test_rag_action_named_tool_call_is_canonicalized_to_search_documents(monkeyp
         raise AssertionError("RAG document actions must not use generic deferred tool execution")
 
     monkeypatch.setattr(
-        "app.ai.graph.execute_search_documents_action",
+        "app.ai.workflow.rag_loop.execute_search_documents_action",
         fake_execute_search_documents_action,
     )
-    monkeypatch.setattr("app.ai.graph.execute_tool_calls", fail_execute_tool_calls)
+    monkeypatch.setattr("app.ai.workflow.rag_loop.execute_tool_calls", fail_execute_tool_calls)
 
     state = {
         "conversation_id": "conv-1",
@@ -325,11 +325,11 @@ async def test_rag_tools_node_tracks_document_tool_error_streak(monkeypatch):
         return "Error: Unknown action: nope", "nope", {}
 
     monkeypatch.setattr(
-        "app.ai.graph.execute_search_documents_action",
+        "app.ai.workflow.rag_loop.execute_search_documents_action",
         fake_execute_search_documents_action,
     )
     monkeypatch.setattr(
-        "app.ai.graph.apply_tool_output_offload",
+        "app.ai.workflow.rag_loop.apply_tool_output_offload",
         lambda **kwargs: (kwargs["output_text"], None),
     )
 

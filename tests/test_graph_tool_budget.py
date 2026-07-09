@@ -217,7 +217,7 @@ async def test_tool_node_resolves_pending_calls_when_tool_map_empty(monkeypatch)
     async def _empty_tool_map(*args, **kwargs):
         return {}
 
-    monkeypatch.setattr("app.ai.graph.ensure_agent_tool_map", _empty_tool_map)
+    monkeypatch.setattr("app.ai.workflow.tool_loop.ensure_agent_tool_map", _empty_tool_map)
 
     state = {
         "selected_agent": "chat_agent",
