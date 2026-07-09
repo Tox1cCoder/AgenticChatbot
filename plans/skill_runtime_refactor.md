@@ -510,12 +510,12 @@ Modify:
 - Modify: `client_backend/services/runtime_bridge.py`
 - Test: `tests/client_backend/test_runtime_bridge.py` or create `tests/client_backend/test_skill_dispatch.py`
 
-- [ ] Keep `client_skill::activate` behavior unchanged for Markdown activation.
-- [ ] Route `qualified_tool_id` values that start with `skill::` to `SkillExecutionEngine`.
-- [ ] Keep existing session, catalog version, and tool instance validation.
-- [ ] Return runtime errors through the existing `ToolDispatchResult` error path.
-- [ ] Add tests for valid skill dispatch, stale session rejection, catalog mismatch rejection, and missing capability rejection.
-- [ ] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_dispatch.py -q`
+- [x] Keep `client_skill::activate` behavior unchanged for Markdown activation.
+- [x] Route `qualified_tool_id` values that start with `skill::` to `SkillExecutionEngine`.
+- [x] Keep existing session, catalog version, and tool instance validation.
+- [x] Return runtime errors through the existing `ToolDispatchResult` error path (SkillRuntimeError code + repair preserved).
+- [x] Add tests for valid skill dispatch, stale session rejection, catalog mismatch rejection, and missing capability rejection.
+- [x] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_dispatch.py -q` → 6 passed (+7 runtime_bridge regression).
 
 ### Task 9: Add HITL Approval Flow
 
@@ -652,6 +652,7 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 | 4. Bundle installation | ✅ done | `af416e1` (base `23b4c00`) | install.py + shared/skills/errors.py + /skills install/uninstall/installed API; 13 tests (+1 platform-skip). Implementer hit a transient 529 mid-task (resumed). Review Needs-fixes→fixed: 3 Important (symlink rejection [plan-required], disabled-reinstall replace semantics, UNSAFE_BUNDLE_PATH test) + DRY helper. NOTE: user committed `beb1fdb`/`23b4c00` to this branch concurrently — no file overlap. |
 | 5. Capability tools | ✅ done | `4e28e75` (base `af416e1`) | Ready skills' capabilities sync as client tools (manager.capability_catalog_entries + runtime_bridge merge + client_runtime_tools/client_tool_catalog origin widening); 8 catalog tests + coexistence search test. Review Approved (3 Minors; applied logger.exception). runtime_bridge has 8 pre-existing baseline ruff errors (deferred to final lint cleanup). |
 | 6. Permission evaluator | ✅ done | `812decb` (base `4e28e75`) | Pure pre-exec permission evaluation (permissions.py); 27 tests. Review found 2 CRITICAL over-grants (empty/root fs path-prefix opened whole FS; mutation gate bypassable via granted token/`*`) — both fixed + regression-tested; re-review confirmed Resolved. |
+| 8. Route skill dispatch | ✅ done | `e26b84c` (base `aea00bb`) | runtime_bridge routes `skill::` → SkillExecutionEngine; ok=false → error path (code+repair preserved); validation untouched (skill tools are normal catalog entries). 6 dispatch tests. Review Approved on production code; 1 Important test-only (vacuous missing-capability assertion) fixed by driving _handle_tool_request end-to-end. |
 | 7. Execution engine | ✅ done | `498b165` (base `975bbe2`) | SkillExecutionEngine (execution.py) — subprocess.run via to_thread (Selector-loop-safe), no shell, permission-before-secrets/spawn, scoped env, secret redaction, timeout+output caps; 16 tests. Review found 2 CRITICAL secret leaks (full os.environ inheritance; `_redact` substring collision) + 2 Important (manager/store divergence, unbounded timeout) — all fixed + regression-tested; re-review Approved (fixed NaN-clamp Minor too). User committed 4 image-attachment commits concurrently (no overlap). |
 
 ## Design Decisions Log
@@ -711,3 +712,9 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 - **Secret redaction** applied to stdout, stderr, and any error derived from them (RUNTIME_ERROR/NON_JSON_OUTPUT). INVALID_ARGUMENTS messages use only the schema path/keyword, never the offending value.
 - **First-slice policy default** = `SkillPermissionPolicy(granted={"*"}, allow_mutation=False)` (trust declared resource grants for user-installed skills; block mutations → PERMISSION_REQUIRED → Task 9 HITL; block shell). Revisit strictness later (final-triage item).
 - **audit_id stays None** — Task 11 wires the audit writer.
+
+### Task 8 — Route skill dispatch
+- `runtime_bridge._execute_tool_request` routes `qualified_tool_id.startswith("skill::")` to a new `_execute_skill_capability` (before the MCP fallback, after the `client_skill::activate` branch — the two never collide since `client_skill::activate` doesn't start with `skill::`).
+- **ok=false → error path (design choice):** the engine never raises, so `_execute_skill_capability` raises `SkillRuntimeError(code, message, repair)` on `ok=false`, matching how MCP dispatch surfaces errors (return-on-success / raise-on-error). `_build_runtime_error_context` was enhanced to preserve the normalized `code` (PERMISSION_REQUIRED/MISSING_SECRET/…) and put `repair` in the error detail, instead of the generic exception class name. On success it returns the `result` payload.
+- **Validation untouched:** skill tools are ordinary catalog entries (Task 5), so `_validate_tool_request` (session / catalog-version / tool_instance_id / unknown-tool) already covers them — a stale session, catalog mismatch, or unknown capability is rejected before the engine is ever constructed. No special-casing added.
+- HITL/mutation approval and audit are still deferred (Tasks 9/11); a blocked mutation surfaces as PERMISSION_REQUIRED for now.

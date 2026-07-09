@@ -28,7 +28,9 @@ from app.schemas.runtime_protocol import (
 )
 from client_backend import __version__
 from client_backend.core.config import client_settings
+from client_backend.services.skill_runtime.execution import SkillExecutionEngine
 from client_backend.services.skill_runtime.manager import SkillRuntimeManager
+from shared.skills.errors import SkillRuntimeError
 
 
 def _make_tool_instance_id(
@@ -248,6 +250,16 @@ class RuntimeBridgeService:
         *,
         detail: dict[str, Any] | None = None,
     ) -> RuntimeErrorContext:
+        if isinstance(exc, SkillRuntimeError):
+            merged_detail = dict(detail or {})
+            if exc.repair is not None:
+                merged_detail["repair"] = exc.repair
+            return RuntimeErrorContext(
+                message=exc.message,
+                code=exc.code,
+                detail=merged_detail or None,
+            )
+
         return RuntimeErrorContext(
             message=str(exc),
             code=exc.__class__.__name__,
@@ -564,11 +576,40 @@ class RuntimeBridgeService:
         if qualified_tool_id == "client_skill::activate":
             return await self._execute_client_skill_request(arguments=arguments)
 
+        if qualified_tool_id.startswith("skill::"):
+            return await self._execute_skill_capability(
+                qualified_tool_id, arguments, timeout_seconds
+            )
+
         return await get_mcp_manager().call_tool(
             qualified_tool_id=qualified_tool_id,
             arguments=arguments,
             timeout=timeout_seconds,
         )
+
+    async def _execute_skill_capability(
+        self,
+        qualified_tool_id: str,
+        arguments: dict[str, Any],
+        timeout_seconds: int,
+    ) -> Any:
+        context = {
+            "device_id": self._device_id,
+            "session_id": self._session_id,
+            "timeout_seconds": timeout_seconds,
+        }
+        engine = SkillExecutionEngine()
+        envelope = await engine.execute(qualified_tool_id, arguments, context)
+
+        if not envelope.get("ok"):
+            error = envelope.get("error") or {}
+            raise SkillRuntimeError(
+                error.get("code") or "RUNTIME_ERROR",
+                error.get("message") or "skill execution failed",
+                error.get("repair"),
+            )
+
+        return envelope.get("result")
 
     async def _execute_client_skill_request(
         self,
