@@ -412,13 +412,13 @@ Modify:
 - Modify: `client_backend/services/local_skills_registry.py`
 - Test: `tests/client_backend/test_skills_registry.py` or create `tests/client_backend/test_skill_runtime_manager.py`
 
-- [ ] Extend `SkillMetadata` with optional `manifest_path`, `manifest`, and `manifest_error` fields.
-- [ ] During `_load_skill`, look for `skill.json` in the same directory as `SKILL.md`.
-- [ ] Parse the manifest with `shared.skills.manifest`.
-- [ ] Preserve Markdown-only behavior when `skill.json` is missing.
-- [ ] Include install and execution status summaries in `to_dict()` and `to_sync_dict()` without exposing absolute local paths to the canonical server.
-- [ ] Add tests proving Markdown-only skills still load, manifest-backed skills include execution metadata, and installed skill metadata does not leak absolute profile paths.
-- [ ] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skills_registry.py -q`
+- [x] Extend `SkillMetadata` with optional `manifest_path`, `manifest`, and `manifest_error` fields.
+- [x] During `_load_skill`, look for `skill.json` in the same directory as `SKILL.md`.
+- [x] Parse the manifest with `shared.skills.manifest`.
+- [x] Preserve Markdown-only behavior when `skill.json` is missing.
+- [x] Include install and execution status summaries in `to_dict()` and `to_sync_dict()` without exposing absolute local paths to the canonical server.
+- [x] Add tests proving Markdown-only skills still load, manifest-backed skills include execution metadata, and installed skill metadata does not leak absolute profile paths.
+- [x] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skills_registry.py -q` → 11 passed.
 
 ### Task 3: Add Readiness Checks
 
@@ -646,7 +646,8 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 
 | Task | Status | Commit(s) | Notes |
 |------|--------|-----------|-------|
-| 1. Manifest models | ✅ done | `e3bf57d` (base `22360f9`) | 48 tests. Review found 2 Important (gitignore over-reach, unenforced non-empty input_schema); both fixed. |
+| 1. Manifest models | ✅ done | `05b6a28` (base `22360f9`) | 48 tests. Review found 2 Important (gitignore over-reach, unenforced non-empty input_schema); both fixed. |
+| 2. Load manifests during scan | ✅ done | `e21dbab` (base `05b6a28`) | 11 registry tests. Review Approved; 1 Important (embedded-path leak in redactor) + 2 Minors fixed proactively before Task 4 relies on it. |
 
 ## Design Decisions Log
 
@@ -660,3 +661,9 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 - **`input_schema` must be a non-empty dict; `argv` MAY be empty.** The brief's "non-empty input_schema/execution" is enforced for `input_schema` (validator) and for `execution` (its required `argv` field means `{}` fails). `argv: []` is intentionally allowed — a `python_module`/`binary` capability may invoke its entrypoint with no positional args.
 - **Reserved vs unknown runtime types** produce distinct error messages (`shell`/`node_package`/`mcp_server` → "reserved for a future slice"; anything else → "unknown"). Validation surfaces only as `pydantic.ValidationError`; no custom error-code system yet (that is Task 7 / `shared/skills/errors.py`).
 - **Minor review items deferred to final triage:** two near-identical non-empty-string description validators (2 call sites, not extracted).
+
+### Task 2 — Load manifests during scan
+- **Strict scope:** Task 2 only *attaches* the manifest and emits a coarse summary from its presence/validity. `execution.status` is exactly `instruction_only` / `invalid` / `manifest_present`. NO readiness (import/`which`/dep/secret) checks — those are Task 3; NO install logic — Task 4.
+- **Invalid `skill.json` is never fatal.** A missing manifest → instruction-only (unchanged). A malformed/invalid one → skill still loads instruction-only with `manifest_error` set. The `.exists()` probe + read + parse all sit inside one try/except that only sets `manifest_error`, so even an `OSError` from a broken symlink can't drop an otherwise-valid skill.
+- **Sync privacy boundary hardened.** `to_sync_dict()` (server-synced) never emits `manifest_path` or any absolute path. `install_metadata` (reserved, populated by Task 4) is surfaced only through a redacting `_install_summary`: an allow-list of safe keys (`installed`, `source_hash`, `bundle_name`, `source`) AND `_looks_like_absolute_path` which detects POSIX/Windows-drive/UNC absolute paths — including a path *embedded* in a larger string (checks whitespace-split tokens), cross-OS. `to_dict()` (device-local) may include `manifest_path`.
+- **`install_metadata` declared but not populated here** — a stable, redacted hook so Task 4 inherits a safe-by-default surface.

@@ -6,6 +6,7 @@ Manages scanning, loading, and caching of skills from local filesystem paths.
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,8 +19,42 @@ from shared.skills.front_matter import (
     parse_skill_front_matter,
     split_front_matter,
 )
+from shared.skills.manifest import SkillManifest, load_manifest
 
 logger = get_logger(__name__)
+
+# Fields we're willing to echo back from install_metadata. Task 4 (the
+# installer) owns the real shape of this dict; this is a thin, defensive
+# allow-list so a scanned SkillMetadata never round-trips something unsafe.
+_SAFE_INSTALL_SUMMARY_KEYS = ("installed", "source_hash", "bundle_name", "source")
+
+# Matches POSIX-style ("/..."), Windows drive-letter ("C:\..." / "C:/..."),
+# and UNC ("\\server\share") absolute paths, in addition to pathlib's own
+# is_absolute() check, so we catch absolute-looking strings even when running
+# on a different OS than the one that produced them.
+_ABSOLUTE_PATH_PREFIX = re.compile(r"^(?:/|\\\\|[A-Za-z]:[\\/])")
+
+
+def _looks_like_absolute_path(value: object) -> bool:
+    """Return True if ``value`` is a string that contains an absolute path.
+
+    Checks the whole string and each whitespace-delimited token, so a path
+    embedded in a larger string (e.g. ``"copied from C:\\Users\\x"``) is caught,
+    not only a value that is itself a bare path. This backstops the redaction
+    in :meth:`SkillMetadata._install_summary` regardless of how Task 4's
+    installer shapes ``install_metadata``.
+    """
+    if not isinstance(value, str):
+        return False
+    for candidate in (value, *value.split()):
+        if _ABSOLUTE_PATH_PREFIX.match(candidate):
+            return True
+        try:
+            if Path(candidate).is_absolute():
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
 
 
 @dataclass
@@ -33,10 +68,51 @@ class SkillMetadata:
     enabled: bool = True
     category: str | None = None
     tags: list[str] = None
+    manifest_path: Path | None = None
+    manifest: SkillManifest | None = None
+    manifest_error: str | None = None
+    # Reserved for the Task 4 installer to populate (source hash, bundle name,
+    # etc.). Always None for freshly scanned skills; declared here so
+    # to_dict()/to_sync_dict() have a stable, redacted place to surface it.
+    install_metadata: dict | None = None
 
     def __post_init__(self):
         if self.tags is None:
             self.tags = []
+
+    def _execution_summary(self) -> dict:
+        """JSON-safe summary of manifest presence/validity (never the raw manifest)."""
+        manifest = self.manifest
+        if manifest is not None:
+            status = "manifest_present"
+        elif self.manifest_error is not None:
+            status = "invalid"
+        else:
+            status = "instruction_only"
+
+        return {
+            "manifest_present": manifest is not None,
+            "status": status,
+            "capability_count": len(manifest.capabilities) if manifest is not None else 0,
+            "permissions": list(manifest.permissions) if manifest is not None else [],
+        }
+
+    def _install_summary(self) -> dict:
+        """JSON-safe, redacted summary of install_metadata (never an absolute path)."""
+        if not self.install_metadata:
+            return {"installed": False}
+
+        summary: dict = {}
+        for key in _SAFE_INSTALL_SUMMARY_KEYS:
+            if key not in self.install_metadata:
+                continue
+            value = self.install_metadata[key]
+            if _looks_like_absolute_path(value):
+                continue
+            summary[key] = value
+
+        summary.setdefault("installed", bool(self.install_metadata.get("installed", False)))
+        return summary
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
@@ -48,14 +124,18 @@ class SkillMetadata:
             "category": self.category,
             "tags": self.tags,
             "content_length": len(self.content) if self.content else 0,
+            "manifest_path": str(self.manifest_path) if self.manifest_path else None,
+            "execution": self._execution_summary(),
+            "install": self._install_summary(),
         }
 
     def to_sync_dict(self) -> dict:
         """
         Convert to a server-sync-safe dictionary.
 
-        Intentionally omits absolute local filesystem paths to avoid leaking
-        device-specific directory structure to the canonical backend.
+        Intentionally omits absolute local filesystem paths (including
+        ``manifest_path``) to avoid leaking device-specific directory
+        structure to the canonical backend.
         """
         return {
             "name": self.name,
@@ -64,6 +144,8 @@ class SkillMetadata:
             "category": self.category,
             "tags": self.tags,
             "content_length": len(self.content) if self.content else 0,
+            "execution": self._execution_summary(),
+            "install": self._install_summary(),
         }
 
     def to_catalog_entry(self) -> dict:
@@ -158,7 +240,9 @@ class LocalSkillsRegistry:
                             # Check if skill already exists (from another root)
                             if skill.name in discovered_skills:
                                 logger.warning(
-                                    f"Skill {skill.name} already exists, skipping duplicate from {skill_file}"
+                                    "Skill %s already exists, skipping duplicate from %s",
+                                    skill.name,
+                                    skill_file,
                                 )
                                 continue
 
@@ -188,6 +272,12 @@ class LocalSkillsRegistry:
 
         Falls back to directory-name / first-line heuristics only when no valid
         front matter is present, preserving compatibility with plain markdown skills.
+
+        If a ``skill.json`` file sits alongside SKILL.md, it is parsed and validated
+        as a :class:`SkillManifest`. A missing skill.json keeps the skill instruction-
+        only (unchanged behavior). A present-but-invalid skill.json (bad JSON or a
+        manifest that fails validation) never fails the load — the skill still comes
+        back as instruction-only, with ``manifest_error`` set to explain why.
 
         Args:
             skill_file: Path to the SKILL.md file.
@@ -231,6 +321,26 @@ class LocalSkillsRegistry:
             if used_plain_markdown_fallback and not description:
                 description = f"Skill: {name}"
 
+            manifest_path: Path | None = None
+            manifest: SkillManifest | None = None
+            manifest_error: str | None = None
+
+            candidate_manifest_path = skill_file.parent / "skill.json"
+            # The .exists() probe lives inside the try too: a broken symlink or
+            # permission error must never drop an otherwise-valid skill.
+            try:
+                if candidate_manifest_path.exists():
+                    manifest_raw = await asyncio.to_thread(
+                        candidate_manifest_path.read_text, encoding="utf-8"
+                    )
+                    manifest = load_manifest(json.loads(manifest_raw))
+                    manifest_path = candidate_manifest_path
+            except Exception as exc:
+                manifest_error = f"invalid skill.json: {exc}"
+                logger.warning(
+                    "Failed to parse skill.json for %s: %s", candidate_manifest_path, exc
+                )
+
             return SkillMetadata(
                 name=name,
                 path=skill_file,
@@ -239,6 +349,9 @@ class LocalSkillsRegistry:
                 enabled=True,  # Default enabled, overridden by persisted state
                 category=category,
                 tags=tags,
+                manifest_path=manifest_path,
+                manifest=manifest,
+                manifest_error=manifest_error,
             )
 
         except Exception as e:
