@@ -478,12 +478,12 @@ Modify:
 - Create: `client_backend/services/skill_runtime/permissions.py`
 - Test: `tests/client_backend/test_skill_permissions.py`
 
-- [ ] Implement permission evaluation for `network`, `filesystem`, `process`, and mutation families before any child process or runtime entrypoint is invoked.
-- [ ] Treat `mutation: true` capabilities as blocked unless the current permission policy explicitly grants the mutation or a later HITL approval grants it.
-- [ ] Block `shell` runtime entirely in the first slice because `shell` is a reserved future runtime type.
-- [ ] Return normalized `PERMISSION_REQUIRED` or `PERMISSION_DENIED` errors with redacted arguments and no secret values.
-- [ ] Add tests for allowed read capability, blocked write capability, blocked process spawn without permission, blocked mutation capability, and redacted permission error payloads.
-- [ ] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_permissions.py -q`
+- [x] Implement permission evaluation for `network`, `filesystem`, `process`, and mutation families before any child process or runtime entrypoint is invoked.
+- [x] Treat `mutation: true` capabilities as blocked unless the current permission policy explicitly grants the mutation or a later HITL approval grants it.
+- [x] Block `shell` runtime entirely in the first slice because `shell` is a reserved future runtime type.
+- [x] Return normalized `PERMISSION_REQUIRED` or `PERMISSION_DENIED` errors with redacted arguments and no secret values.
+- [x] Add tests for allowed read capability, blocked write capability, blocked process spawn without permission, blocked mutation capability, and redacted permission error payloads.
+- [x] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_permissions.py -q` → 27 passed.
 
 ### Task 7: Implement Execution Engine
 
@@ -650,7 +650,8 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 | 2. Load manifests during scan | ✅ done | `166fa4b` (base `05b6a28`) | 11 registry tests. Review Approved; 1 Important (embedded-path leak in redactor) + 2 Minors fixed proactively before Task 4 relies on it. |
 | 3. Readiness checks | ✅ done | `7f5289b` (base `166fa4b`) | New skill_runtime/ package (manager + minimal secret store); 16 tests. Review found 1 Important (dep-name parser skipped whitespace-padded reqs, masking missing deps); fixed by switching to packaging.Requirement. |
 | 4. Bundle installation | ✅ done | `af416e1` (base `23b4c00`) | install.py + shared/skills/errors.py + /skills install/uninstall/installed API; 13 tests (+1 platform-skip). Implementer hit a transient 529 mid-task (resumed). Review Needs-fixes→fixed: 3 Important (symlink rejection [plan-required], disabled-reinstall replace semantics, UNSAFE_BUNDLE_PATH test) + DRY helper. NOTE: user committed `beb1fdb`/`23b4c00` to this branch concurrently — no file overlap. |
-| 5. Capability tools | ✅ done | `cc88101` (base `af416e1`) | Ready skills' capabilities sync as client tools (manager.capability_catalog_entries + runtime_bridge merge + client_runtime_tools/client_tool_catalog origin widening); 8 catalog tests + coexistence search test. Review Approved (3 Minors; applied logger.exception). runtime_bridge has 8 pre-existing baseline ruff errors (deferred to final lint cleanup). |
+| 5. Capability tools | ✅ done | `4e28e75` (base `af416e1`) | Ready skills' capabilities sync as client tools (manager.capability_catalog_entries + runtime_bridge merge + client_runtime_tools/client_tool_catalog origin widening); 8 catalog tests + coexistence search test. Review Approved (3 Minors; applied logger.exception). runtime_bridge has 8 pre-existing baseline ruff errors (deferred to final lint cleanup). |
+| 6. Permission evaluator | ✅ done | `b06d312` (base `4e28e75`) | Pure pre-exec permission evaluation (permissions.py); 27 tests. Review found 2 CRITICAL over-grants (empty/root fs path-prefix opened whole FS; mutation gate bypassable via granted token/`*`) — both fixed + regression-tested; re-review confirmed Resolved. |
 
 ## Design Decisions Log
 
@@ -692,3 +693,11 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 - **Origin model:** added `TOOL_ORIGIN_CLIENT_SKILL = "client_skill"`. Model-facing `tool_origin` = client_skill for skills; the RAW catalog origin (`"skill"`) is preserved as `metadata["catalog_origin"]` so approval/audit/search can distinguish skill tools from MCP tools. `client_runtime_tools` + `client_tool_catalog` widened their origin gate from `{"mcp"}` to `{"mcp","skill"}`.
 - **Execution NOT wired yet:** a `skill::...` tool call will fail at dispatch until Task 8 routes it — expected between-task state, committed in sequence.
 - **runtime_bridge pre-existing lint (8 errors: 6 E402 from imports split around `_make_tool_instance_id`, 2 E501)** left for a final lint-cleanup commit; the new SkillRuntimeManager import went in the clean top block (0 new errors).
+
+### Task 6 — Permission evaluator
+- **Pure static evaluation** (`permissions.py`): no IO/execution/HITL/secrets. `SkillPermissionPolicy(granted, allow_mutation)` with `deny_all()`/`allow_all()`; `SkillPermissionEvaluator.evaluate(capability, runtime) -> PermissionDecision`.
+- **Code semantics:** `PERMISSION_DENIED` = hard/ungrantable (reserved `shell` runtime, checked first, unconditional even under allow_all). `PERMISSION_REQUIRED` = grant/approval could unblock (ungranted network/fs/process/domain token, or unapproved mutation with `requires_approval=True`).
+- **Token matching:** blanket `*`; family wildcards `network:*`/`filesystem:read:*`/`filesystem:write:*`; filesystem path-prefix with a `/` boundary. `process:spawn` and domain labels are exact-only.
+- **Two Critical over-grants caught in review + fixed:** (1) an empty or root-only fs path grant (`filesystem:read:` / `filesystem:read:/`) used to match the entire filesystem — now skipped (`if not prefix: continue`); use `filesystem:read:*` to grant everything. (2) mutation was satisfiable via the resource-grant set (a literal `"mutation"` token OR blanket `"*"`) — now gated SOLELY on `allow_mutation`. Both regression-tested; re-review confirmed Resolved.
+- **Redaction:** `redact_arguments` keeps keys, replaces every value with `"<redacted>"`; `PermissionDecision.to_error_payload` routes args through it so no argument value (possible secret) ever reaches an error/prompt/log.
+- Not yet wired into execution — Task 7 must call the evaluator before invoking any runtime and refuse on any non-allowed decision.
