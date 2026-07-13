@@ -136,7 +136,9 @@ class TestSuccessJsonOutput:
         assert envelope["capability"] == "list_items"
         assert envelope["result"] == {"items": [1, 2, 3]}
         assert isinstance(envelope["duration_ms"], int)
-        assert envelope["audit_id"] is None
+        # Task 11: every envelope now carries a real audit id (Task 7 left this
+        # as a hardcoded None placeholder pending the audit trail's existence).
+        assert envelope["audit_id"].startswith("skill-exec-")
 
 
 @pytest.mark.asyncio

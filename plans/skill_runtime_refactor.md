@@ -551,11 +551,11 @@ Modify:
 - Modify: `client_backend/services/skill_runtime/execution.py`
 - Test: `tests/client_backend/test_skill_audit.py`
 
-- [ ] Write one audit JSONL record per execution under the current profile.
-- [ ] Include user id, device id, session id, skill name, capability name, qualified id, redacted arguments, status, duration, and error code.
-- [ ] Keep raw stdout/stderr out of audit records by default.
-- [ ] Add tests proving secret values are not stored.
-- [ ] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_audit.py -q`
+- [x] Write one audit JSONL record per execution under the current profile.
+- [x] Include user id, device id, session id, skill name, capability name, qualified id, redacted arguments, status, duration, and error code.
+- [x] Keep raw stdout/stderr out of audit records by default.
+- [x] Add tests proving secret values are not stored (incl. special-character secrets).
+- [x] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_audit.py -q` → 8 passed.
 
 ### Task 12: Add Generic Example Fixtures
 
@@ -652,6 +652,7 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 | 4. Bundle installation | ✅ done | `af416e1` (base `23b4c00`) | install.py + shared/skills/errors.py + /skills install/uninstall/installed API; 13 tests (+1 platform-skip). Implementer hit a transient 529 mid-task (resumed). Review Needs-fixes→fixed: 3 Important (symlink rejection [plan-required], disabled-reinstall replace semantics, UNSAFE_BUNDLE_PATH test) + DRY helper. NOTE: user committed `beb1fdb`/`23b4c00` to this branch concurrently — no file overlap. |
 | 5. Capability tools | ✅ done | `4e28e75` (base `af416e1`) | Ready skills' capabilities sync as client tools (manager.capability_catalog_entries + runtime_bridge merge + client_runtime_tools/client_tool_catalog origin widening); 8 catalog tests + coexistence search test. Review Approved (3 Minors; applied logger.exception). runtime_bridge has 8 pre-existing baseline ruff errors (deferred to final lint cleanup). |
 | 6. Permission evaluator | ✅ done | `812decb` (base `4e28e75`) | Pure pre-exec permission evaluation (permissions.py); 27 tests. Review found 2 CRITICAL over-grants (empty/root fs path-prefix opened whole FS; mutation gate bypassable via granted token/`*`) — both fixed + regression-tested; re-review confirmed Resolved. |
+| 11. Audit trail | ✅ done | `0335a8b` (base `476831f`) | audit.py SkillAuditWriter → profile audit.jsonl per execution; wired into execute() for ALL outcomes incl. permission-denied. 8 tests. Review found 1 CRITICAL secret leak: _redact_arguments redacted the json.dumps()'d text, so a secret with a quote/backslash/non-ASCII char round-tripped back unredacted; fixed by walking the RAW structure (redact string leaves before serializing) + special-char test; re-review confirmed Resolved. |
 | 10. Secret store | ✅ done | `f5bbd99` (base `f4d71c3`) | SkillSecretStore extended with encrypted per-profile storage (profile-first, env-fallback) + set/delete/list + redact_secret_values; /skills secrets API. 13 tests. Review Approved; Important (weak sibling key file) fixed by delegating at-rest to core.security DPAPI/Fernet primitive (no key file); added corruption-tolerance tests. |
 | 9. HITL approval for mutations | ✅ done | `1857958` (base `1b8789c`) | A: propagate `mutation` (manifest→catalog→spec→tool metadata→CallIdentity) + identity_requires_approval auto-gates as last resort. B: redact_sensitive_args in approval prompt. C: ToolDispatchRequest.mutation_approved → sidecar runs approved mutation (still re-validates session/catalog/instance). 23 tests + 72 regression. Review Approved; 2 Important fixed (unified mutation def via shared is_mutation(); denied-mutation test). |
 | 8. Route skill dispatch | ✅ done | `e26b84c` (base `aea00bb`) | runtime_bridge routes `skill::` → SkillExecutionEngine; ok=false → error path (code+repair preserved); validation untouched (skill tools are normal catalog entries). 6 dispatch tests. Review Approved on production code; 1 Important test-only (vacuous missing-capability assertion) fixed by driving _handle_tool_request end-to-end. |
@@ -733,3 +734,9 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 - `redact_secret_values(text, values)` — shared longest-first redaction for logs/errors.
 - API: `POST /skills/secrets` (never echoes value; no-profile→400), `GET /skills/{name}/secrets` (names + required + configured booleans only, never values; ordered before `/{name}`).
 - **Perf note (final triage):** `get()`/`has()` re-read+decrypt the profile file per lookup; a readiness check / execution with N secrets does N decrypt cycles. Consider per-call caching if it bites.
+
+### Task 11 — Audit trail
+- `SkillAuditWriter.write()` appends one JSON line per execution to `<profile>/skills/audit.jsonl`: timestamp, audit_id, user/device/session, skill, capability, qualified_id, `arguments_redacted`, status, duration_ms, error_code. Never includes stdout/stderr or a secret value. Wired into `SkillExecutionEngine.execute` for EVERY outcome (success, SkillRuntimeError, broad Exception, and the permission-denied early return — a blocked mutation/shell is a security event worth recording). `audit_id` (`skill-exec-<utc>-<hex>`) is generated once and matches the returned envelope.
+- Best-effort: the whole write is swallowed on failure (disk/serialize/no-profile) so audit can never break execution; no active user → skip (no shared/global file).
+- **CRITICAL secret leak caught in review + fixed:** `_redact_arguments` originally redacted the `json.dumps()`'d text — but `json.dumps` escapes quotes/backslashes/non-ASCII, so a secret containing any of those never matched and `json.loads` round-tripped the raw secret back into the record. Fixed to walk the RAW argument structure and redact string leaves (incl. nested) BEFORE serializing; regression test uses a `p@ss"w\ord/café`-style secret.
+- **Minor (final triage):** the 4 near-identical `_audit.write` call sites in execute() could be one helper (drift risk); audit append is sync disk I/O on the loop (unlike the subprocess offload); a non-string arg leaf numerically equal to a string secret isn't redacted (unreachable today — secret_values are always string env secrets).

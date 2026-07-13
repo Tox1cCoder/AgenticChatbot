@@ -33,6 +33,7 @@ import jsonschema
 from client_backend.core.logging import get_logger
 from client_backend.core.paths import is_under_root
 from client_backend.services.local_skills_registry import LocalSkillsRegistry, get_skills_registry
+from client_backend.services.skill_runtime.audit import SkillAuditWriter, new_audit_id
 from client_backend.services.skill_runtime.manager import SkillRuntimeManager
 from client_backend.services.skill_runtime.permissions import (
     SkillPermissionEvaluator,
@@ -186,9 +187,11 @@ class SkillExecutionEngine:
         secret_store: SkillSecretStore | None = None,
         permission_policy: SkillPermissionPolicy | None = None,
         manager: SkillRuntimeManager | None = None,
+        audit_writer: SkillAuditWriter | None = None,
     ) -> None:
         self._registry = registry if registry is not None else get_skills_registry()
         self._secret_store = secret_store if secret_store is not None else SkillSecretStore()
+        self._audit = audit_writer if audit_writer is not None else SkillAuditWriter()
         # Default the readiness manager onto the SAME secret store the engine
         # uses, so readiness and execution can never disagree about which
         # secrets exist (they only diverge if a caller deliberately passes a
@@ -219,10 +222,12 @@ class SkillExecutionEngine:
         than propagating, so a skill-runtime bug can never crash the caller.
         """
         start = time.monotonic()
+        audit_id = new_audit_id()
         working_arguments: dict = dict(arguments) if arguments else {}
         call_context: dict = context or {}
         skill_name = ""
         capability_name = ""
+        secret_values: set[str] = set()
 
         try:
             skill_name, capability_name = self._parse_qualified_tool_id(qualified_tool_id)
@@ -267,11 +272,29 @@ class SkillExecutionEngine:
                     capability_name,
                     decision.code,
                 )
+                # A permission denial (blocked mutation, reserved shell, ungranted
+                # resource) is a security-relevant outcome and must be audited too,
+                # even though it returns rather than raising. secret_values is still
+                # empty here (this is before secret resolution).
+                self._audit.write(
+                    audit_id=audit_id,
+                    skill=skill_name,
+                    capability=capability_name,
+                    qualified_id=qualified_tool_id,
+                    arguments=working_arguments,
+                    secret_values=secret_values,
+                    status="error",
+                    duration_ms=self._elapsed_ms(start),
+                    error_code=decision.code,
+                    device_id=call_context.get("device_id"),
+                    session_id=call_context.get("session_id"),
+                )
                 return self._failure_envelope(
                     skill_name,
                     capability_name,
                     decision.to_error_payload(working_arguments),
                     start,
+                    audit_id,
                 )
 
             secret_values, env_secrets = self._resolve_secrets(manifest, capability)
@@ -309,27 +332,67 @@ class SkillExecutionEngine:
             else:
                 result = stdout_text
 
+            self._audit.write(
+                audit_id=audit_id,
+                skill=skill_name,
+                capability=capability_name,
+                qualified_id=qualified_tool_id,
+                arguments=working_arguments,
+                secret_values=secret_values,
+                status="ok",
+                duration_ms=self._elapsed_ms(start),
+                device_id=call_context.get("device_id"),
+                session_id=call_context.get("session_id"),
+            )
             return self._success_envelope(
-                skill_name, capability_name, result, stdout_text, stderr_text, start
+                skill_name, capability_name, result, stdout_text, stderr_text, start, audit_id
             )
 
         except SkillRuntimeError as exc:
             logger.warning(
                 "skill capability %s failed: %s: %s", qualified_tool_id, exc.code, exc.message
             )
+            self._audit.write(
+                audit_id=audit_id,
+                skill=skill_name,
+                capability=capability_name,
+                qualified_id=qualified_tool_id,
+                arguments=working_arguments,
+                secret_values=secret_values,
+                status="error",
+                duration_ms=self._elapsed_ms(start),
+                error_code=exc.code,
+                device_id=call_context.get("device_id"),
+                session_id=call_context.get("session_id"),
+            )
             return self._failure_envelope(
                 skill_name,
                 capability_name,
                 error_payload(exc.code, exc.message, exc.repair),
                 start,
+                audit_id,
             )
         except Exception as exc:  # pragma: no cover - defensive: never let this propagate
             logger.exception("unexpected error executing skill capability %s", qualified_tool_id)
+            self._audit.write(
+                audit_id=audit_id,
+                skill=skill_name,
+                capability=capability_name,
+                qualified_id=qualified_tool_id,
+                arguments=working_arguments,
+                secret_values=secret_values,
+                status="error",
+                duration_ms=self._elapsed_ms(start),
+                error_code=RUNTIME_ERROR,
+                device_id=call_context.get("device_id"),
+                session_id=call_context.get("session_id"),
+            )
             return self._failure_envelope(
                 skill_name,
                 capability_name,
                 error_payload(RUNTIME_ERROR, f"unexpected error: {exc}"),
                 start,
+                audit_id,
             )
 
     # -- envelope helpers ---------------------------------------------------
@@ -360,6 +423,7 @@ class SkillExecutionEngine:
         stdout_text: str,
         stderr_text: str,
         start: float,
+        audit_id: str | None = None,
     ) -> dict:
         return {
             "ok": True,
@@ -369,7 +433,7 @@ class SkillExecutionEngine:
             "stdout": stdout_text,
             "stderr": stderr_text,
             "duration_ms": self._elapsed_ms(start),
-            "audit_id": None,
+            "audit_id": audit_id,
         }
 
     def _failure_envelope(
@@ -378,6 +442,7 @@ class SkillExecutionEngine:
         capability_name: str,
         payload: dict,
         start: float,
+        audit_id: str | None = None,
     ) -> dict:
         return {
             "ok": False,
@@ -385,7 +450,7 @@ class SkillExecutionEngine:
             "capability": capability_name,
             "error": payload,
             "duration_ms": self._elapsed_ms(start),
-            "audit_id": None,
+            "audit_id": audit_id,
         }
 
     # -- parsing / lookup ----------------------------------------------------
