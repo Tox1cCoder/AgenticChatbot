@@ -570,13 +570,13 @@ Modify:
 - Test: `tests/client_backend/test_skill_example_fixtures.py`
 - Test: `skills/google_calendar/tests/test_full_e2e.py` only if Google Calendar remains part of the automated fixture set
 
-- [ ] Add at least two provider-neutral executable skill fixtures that prove the runtime is universal: one `python_module` or `python_script` fixture, and one `binary` fixture that uses an installed command available in CI.
-- [ ] Add manifests for those fixtures without mentioning Google Calendar or any provider-specific field.
-- [ ] Add dry-run fixture tests proving the skill capability path works without live credentials.
-- [ ] If Google Calendar remains in the repo, add its manifest as an example of the same generic contract and fix its package/import path so it is runnable from the repo. Do not add any Google-specific runtime manager, dispatcher, permission evaluator, secret store, or catalog code.
-- [ ] Add a regression test that scans all fixture manifests and fails if core runtime code contains example-specific skill name checks.
-- [ ] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_example_fixtures.py -q`
-- [ ] Optional if Google Calendar is kept in the automated fixture set: `.venv\Scripts\python.exe -m pytest skills/google_calendar/tests -q`
+- [x] Add at least two provider-neutral executable skill fixtures that prove the runtime is universal: one `python_module` or `python_script` fixture, and one `binary` fixture that uses an installed command available in CI. (echo-python python_script + binary-probe binary using `python`.)
+- [x] Add manifests for those fixtures without mentioning Google Calendar or any provider-specific field.
+- [x] Add dry-run fixture tests proving the skill capability path works without live credentials.
+- [~] If Google Calendar remains in the repo, add its manifest... — SKIPPED (optional per plan; kept scope tight; core runtime is provider-neutral without it).
+- [x] Add a regression test that scans all fixture manifests and fails if core runtime code contains example-specific skill name checks. (Scans skill_runtime/*.py + shared/skills; implementer proved it fails when a fixture name is hardcoded.)
+- [x] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_example_fixtures.py -q` → 5 passed.
+- [~] Optional Google Calendar suite — N/A (gcal migration skipped).
 
 ### Task 13: Update Documentation
 
@@ -652,6 +652,7 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 | 4. Bundle installation | ✅ done | `af416e1` (base `23b4c00`) | install.py + shared/skills/errors.py + /skills install/uninstall/installed API; 13 tests (+1 platform-skip). Implementer hit a transient 529 mid-task (resumed). Review Needs-fixes→fixed: 3 Important (symlink rejection [plan-required], disabled-reinstall replace semantics, UNSAFE_BUNDLE_PATH test) + DRY helper. NOTE: user committed `beb1fdb`/`23b4c00` to this branch concurrently — no file overlap. |
 | 5. Capability tools | ✅ done | `4e28e75` (base `af416e1`) | Ready skills' capabilities sync as client tools (manager.capability_catalog_entries + runtime_bridge merge + client_runtime_tools/client_tool_catalog origin widening); 8 catalog tests + coexistence search test. Review Approved (3 Minors; applied logger.exception). runtime_bridge has 8 pre-existing baseline ruff errors (deferred to final lint cleanup). |
 | 6. Permission evaluator | ✅ done | `812decb` (base `4e28e75`) | Pure pre-exec permission evaluation (permissions.py); 27 tests. Review found 2 CRITICAL over-grants (empty/root fs path-prefix opened whole FS; mutation gate bypassable via granted token/`*`) — both fixed + regression-tested; re-review confirmed Resolved. |
+| 12. Example fixtures | ✅ done | `fe2e69e` (base `3060750`) | Two provider-neutral executable fixtures (echo-python python_script, binary-probe binary) + test proving they load/execute without creds + genericness regression (core has no hardcoded skill names). 5 tests. Test-only/additive → controller-reviewed (no per-task reviewer dispatch); final review covers it. Google Calendar migration SKIPPED (optional). |
 | 11. Audit trail | ✅ done | `0335a8b` (base `476831f`) | audit.py SkillAuditWriter → profile audit.jsonl per execution; wired into execute() for ALL outcomes incl. permission-denied. 8 tests. Review found 1 CRITICAL secret leak: _redact_arguments redacted the json.dumps()'d text, so a secret with a quote/backslash/non-ASCII char round-tripped back unredacted; fixed by walking the RAW structure (redact string leaves before serializing) + special-char test; re-review confirmed Resolved. |
 | 10. Secret store | ✅ done | `f5bbd99` (base `f4d71c3`) | SkillSecretStore extended with encrypted per-profile storage (profile-first, env-fallback) + set/delete/list + redact_secret_values; /skills secrets API. 13 tests. Review Approved; Important (weak sibling key file) fixed by delegating at-rest to core.security DPAPI/Fernet primitive (no key file); added corruption-tolerance tests. |
 | 9. HITL approval for mutations | ✅ done | `1857958` (base `1b8789c`) | A: propagate `mutation` (manifest→catalog→spec→tool metadata→CallIdentity) + identity_requires_approval auto-gates as last resort. B: redact_sensitive_args in approval prompt. C: ToolDispatchRequest.mutation_approved → sidecar runs approved mutation (still re-validates session/catalog/instance). 23 tests + 72 regression. Review Approved; 2 Important fixed (unified mutation def via shared is_mutation(); denied-mutation test). |

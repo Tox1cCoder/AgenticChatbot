@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.0",
+  "name": "echo-python",
+  "description": "Echoes a message back as JSON to prove the python_script runtime executes end to end.",
+  "runtime": {
+    "type": "python_script",
+    "script": "runner.py"
+  },
+  "dependencies": {
+    "python": [],
+    "node": [],
+    "system": []
+  },
+  "secrets": [],
+  "permissions": [],
+  "capabilities": [
+    {
+      "name": "echo",
+      "description": "Echo a message back as a JSON object.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["message"]
+      },
+      "execution": {
+        "argv": ["--message", "{message}"],
+        "json_output": true
+      },
+      "permissions": [],
+      "secrets": [],
+      "mutation": false
+    }
+  ]
+}

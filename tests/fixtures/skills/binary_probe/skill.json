@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "name": "binary-probe",
+  "description": "Invokes an installed command directly to prove the binary runtime executes end to end.",
+  "runtime": {
+    "type": "binary",
+    "command": "python"
+  },
+  "dependencies": {
+    "python": [],
+    "node": [],
+    "system": []
+  },
+  "secrets": [],
+  "permissions": [],
+  "capabilities": [
+    {
+      "name": "probe",
+      "description": "Run a trivial command and return its stdout.",
+      "input_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "execution": {
+        "argv": ["-c", "print('binary probe ok')"],
+        "json_output": false
+      },
+      "permissions": [],
+      "secrets": [],
+      "mutation": false
+    }
+  ]
+}
