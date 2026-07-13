@@ -36,7 +36,10 @@ def test_deferred_server_tool_gated_by_server_after_autoload():
     assert identity.server_name == "postgres"
 
     calls = [{"name": "run_query", "args": {}, "id": "c1"}]
-    assert any_call_requires_approval(calls, policy=policy, tool_map=tool_map, mcp_manager=manager) is True
+    assert (
+        any_call_requires_approval(calls, policy=policy, tool_map=tool_map, mcp_manager=manager)
+        is True
+    )
 
 
 @pytest.mark.asyncio
@@ -62,3 +65,32 @@ async def test_prepare_interrupt_payload_carries_client_provenance():
     assert entry["server_name"] == "excel"
     assert entry["qualified_tool_id"] == "excel::delete_sheet"
     assert entry["tool_origin"] == "client_mcp"
+
+
+@pytest.mark.asyncio
+async def test_prepare_interrupt_payload_redacts_sensitive_args_in_prompt():
+    # The approval prompt (action_requests) must not surface a sensitive-keyed
+    # argument value, but must keep normal args visible for the approver — and
+    # must NOT mutate the original tool call that executes on approval.
+    from app.ai import graph as graph_module
+
+    wf = graph_module.MultiAgentWorkflow.__new__(graph_module.MultiAgentWorkflow)
+    tool_call = {
+        "name": "client__skill_demo__mutate",
+        "args": {"calendar_id": "primary", "api_token": "SUPER-SECRET"},
+        "id": "c1",
+    }
+    original_args = tool_call["args"]
+
+    payload = await wf._prepare_interrupt_payload(
+        {"context": {}, "device_id": "dev-1"},
+        tool_calls=[tool_call],
+        agent=None,
+        tool_map={},
+    )
+
+    prompt_args = payload["action_requests"][0]["args"]
+    assert prompt_args["calendar_id"] == "primary"
+    assert prompt_args["api_token"] == "<redacted>"
+    # The real tool call is untouched, so execution on approval uses real args.
+    assert original_args["api_token"] == "SUPER-SECRET"

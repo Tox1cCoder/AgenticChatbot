@@ -139,6 +139,8 @@ Secrets are declared in the manifest (`secrets` / a capability's `secrets`) and 
 
 `SkillSecretStore` resolves a secret from **encrypted per-profile storage first, then the process environment**. Profile storage is protected by the shared local-secret primitive (OS-user-bound DPAPI on Windows, managed Fernet elsewhere) — there is no separate key file to guard.
 
+> **First-slice limitation.** Secrets live in a single flat namespace and the env fallback resolves any variable by name, so a manifest that declares a secret named after an existing process env var will receive it, and two skills declaring the same secret name share a value. This is a least-privilege gap, not a sandbox boundary — skills already run unsandboxed as the local user (they could read the environment or token files directly). Per-skill secret namespacing is a planned hardening.
+
 Set and inspect secrets through the local API (values are never returned):
 
 - `POST /skills/secrets` — body `{ "name": "...", "value": "..." }`.

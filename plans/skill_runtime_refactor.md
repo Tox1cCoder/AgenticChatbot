@@ -661,6 +661,17 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 | 8. Route skill dispatch | ✅ done | `e26b84c` (base `aea00bb`) | runtime_bridge routes `skill::` → SkillExecutionEngine; ok=false → error path (code+repair preserved); validation untouched (skill tools are normal catalog entries). 6 dispatch tests. Review Approved on production code; 1 Important test-only (vacuous missing-capability assertion) fixed by driving _handle_tool_request end-to-end. |
 | 7. Execution engine | ✅ done | `498b165` (base `975bbe2`) | SkillExecutionEngine (execution.py) — subprocess.run via to_thread (Selector-loop-safe), no shell, permission-before-secrets/spawn, scoped env, secret redaction, timeout+output caps; 16 tests. Review found 2 CRITICAL secret leaks (full os.environ inheritance; `_redact` substring collision) + 2 Important (manager/store divergence, unbounded timeout) — all fixed + regression-tested; re-review Approved (fixed NaN-clamp Minor too). User committed 4 image-attachment commits concurrently (no overlap). |
 
+## Final Whole-Branch Review
+
+Ran on the most capable model over the ~2.7k-line production source diff (base `22360f9`), focused on cross-task coherence and the end-to-end trust model. **Verdict: Ready to merge** — 0 Critical; every trust boundary verified to fail closed (no raw shell, permission-before-side-effects, no secret leak to the model, mutation never executes without the server's gate + sidecar re-validation, genericness intact, failure isolation holds).
+
+Important findings (all coherence/least-privilege/doc, not boundary breaks) — resolved in `11e3760`:
+- **Redaction wiring:** Task 9's `redact_sensitive_args` sat on the API-response builder, not the actual approval-prompt path. Fixed by redacting in `tool_loop._prepare_interrupt_payload` (covers the interrupt value + the re-parsed API response); the executed tool call keeps real args. Test added on the real path.
+- **`mutation_approved` doc:** corrected the comment — it mirrors the capability's mutation flag (server-derived, not client-forgeable) meaning "the server permitted this mutation to reach execution", NOT independent proof a human approved. Sidecar still re-validates + only runs when set.
+- **Secret env-fallback scope:** ACCEPTED as a documented first-slice limitation (see docs/skill-runtime.md) — flat secret namespace + name-based env fallback is a least-privilege gap, not a boundary break (skills run unsandboxed as the user). Per-skill namespacing is planned.
+
+Minor / triage (accepted for the first slice; logged in `.superpowers/sdd/progress.md`): per-lookup secret decrypt (perf); non-injected shared secret store at a couple of construction sites; synchronous audit disk I/O on the loop; 4 near-identical `_audit.write` call sites (extract a helper); permissive `granted={"*"}, allow_mutation=False` default (blocks mutation+shell); absolute-path `binary` command; dead `REMOTE_API_ERROR`/`MISSING_DEPENDENCY` codes; readiness treats all capability secrets as required vs execution honoring `required=False` (fails safe); `ClientToolDescriptor` lacks `mutation` (unused for gating today).
+
 ## Design Decisions Log
 
 ### Cross-cutting

@@ -11,7 +11,11 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import interrupt
 
 from app.ai.hand_off_tool import MAX_DELEGATION_DEPTH
-from app.ai.hitl_config import any_call_requires_approval, policy_from_context
+from app.ai.hitl_config import (
+    any_call_requires_approval,
+    policy_from_context,
+    redact_sensitive_args,
+)
 from app.ai.mcp_registry import get_global_mcp_manager
 from app.ai.schemas import GraphState, GraphStateView
 from app.ai.token_instrumentation import truncate_tool_result
@@ -250,6 +254,14 @@ class ToolLoopMixin:
 
         for tool_call in normalized_calls:
             enriched_call = dict(tool_call)
+            # Redact sensitive-looking argument values from the human approval
+            # prompt (and thus the downstream API InterruptResponse, which
+            # re-parses this payload). redact_sensitive_args returns a fresh
+            # dict, so the tool call that ACTUALLY executes on approval keeps
+            # its real args untouched. Conservative key-name match, so normal
+            # arguments stay visible for the approver.
+            if isinstance(enriched_call.get("args"), dict):
+                enriched_call["args"] = redact_sensitive_args(enriched_call["args"])
             tool_call_id = enriched_call.get("id") or enriched_call.get("tool_call_id")
             if tool_call_id and "tool_call_id" not in enriched_call:
                 enriched_call["tool_call_id"] = tool_call_id

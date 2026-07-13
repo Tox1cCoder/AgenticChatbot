@@ -32,9 +32,15 @@ class ToolDispatchRequest(BaseModel):
     tool_instance_id: str | None = None
     expected_session_id: str | None = None
     expected_catalog_version: int | None = None
-    # Set by the server for a dispatched skill mutation that has cleared the
-    # HITL gate (approved, or pre-approved by policy). The sidecar allows the
-    # mutation only when this is True, and still re-validates session/catalog/
+    # Server-set marker that a dispatched capability is a mutation the server
+    # permitted to reach execution. It mirrors the capability's own mutation
+    # flag: the server's HITL gate interrupts BEFORE the tools node, so a
+    # mutation only reaches dispatch once it was approved by a human OR
+    # pre-approved by policy OR the HITL master switch is off. The sidecar
+    # therefore trusts this as "the server allowed this mutation" (the model
+    # cannot forge it — it travels the authenticated server->sidecar channel),
+    # NOT as independent proof a human clicked approve. The sidecar runs a
+    # mutation only when this is True and STILL re-validates session/catalog/
     # tool_instance regardless of this flag.
     mutation_approved: bool = False
 
