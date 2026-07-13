@@ -2190,6 +2190,7 @@ SESSION_STATE_DEFAULTS: dict[str, Callable[[], Any] | Any] = {
     "message_image_thumbnails": dict,
     "message_chunks": dict,
     "show_attachment_uploader": lambda: False,
+    "chat_image_uploader_nonce": lambda: 0,
     "API_BASE_URL": lambda: API_BASE_URL,
     "active_view": lambda: "chat",
     "mcp_tools_list": lambda: None,
@@ -3301,28 +3302,47 @@ def _handle_new_image_attachments(uploaded_files: list) -> None:
     if not uploaded_files:
         return
 
-    pending = st.session_state.get("pending_image_attachments", [])
-    existing_data = {item["data"] for item in pending}
-
     new_items: list[dict[str, str]] = []
     for file_obj in uploaded_files:
         attachment = _attachment_from_upload(file_obj)
         if not attachment:
             continue
 
-        if attachment["data"] in existing_data or any(
-            item["data"] == attachment["data"] for item in new_items
-        ):
-            continue
-
         new_items.append(attachment)
-        existing_data.add(attachment["data"])
 
     if not new_items:
         return
 
+    pending = st.session_state.get("pending_image_attachments", [])
     pending.extend(new_items)
     st.session_state.pending_image_attachments = pending
+
+
+def _chat_image_uploader_key(conversation_id: str) -> str:
+    try:
+        nonce = int(st.session_state.get("chat_image_uploader_nonce", 0) or 0)
+    except (TypeError, ValueError):
+        nonce = 0
+    return f"chat_image_uploader_{conversation_id}_{nonce}"
+
+
+def _advance_chat_image_uploader_nonce() -> None:
+    try:
+        nonce = int(st.session_state.get("chat_image_uploader_nonce", 0) or 0)
+    except (TypeError, ValueError):
+        nonce = 0
+    st.session_state.chat_image_uploader_nonce = nonce + 1
+
+
+def _consume_chat_image_uploader(uploader_key: str) -> None:
+    uploaded_files = st.session_state.get(uploader_key) or []
+    if not uploaded_files:
+        return
+    if not isinstance(uploaded_files, list):
+        uploaded_files = [uploaded_files]
+
+    _handle_new_image_attachments(uploaded_files)
+    _advance_chat_image_uploader_nonce()
 
 
 def _attachment_from_pasted_payload(item: dict[str, Any]) -> dict[str, str] | None:
@@ -7929,18 +7949,18 @@ def render_chat_view():
         _render_pending_image_attachments()
 
         # File uploader
-        file_uploader_key = f"chat_image_uploader_{conversation_id}" if conversation_id else None
+        file_uploader_key = _chat_image_uploader_key(conversation_id) if conversation_id else None
 
         if st.session_state.show_attachment_uploader and file_uploader_key:
-            uploaded_files = st.file_uploader(
+            st.file_uploader(
                 "Attach images",
                 type=["png", "jpg", "jpeg", "gif", "webp"],
                 accept_multiple_files=True,
                 key=file_uploader_key,
                 help="Attach images",
+                on_change=_consume_chat_image_uploader,
+                args=(file_uploader_key,),
             )
-            if uploaded_files:
-                _handle_new_image_attachments(uploaded_files)
 
         # Message form
         # ── Handle interrupted stream on rerun (Phase 2 of two-phase stop) ──

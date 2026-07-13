@@ -27,6 +27,38 @@ def test_handle_new_image_attachments_has_no_four_image_limit(monkeypatch):
     assert len(streamlit_stub.session_state.pending_image_attachments) == 6
 
 
+def test_handle_new_image_attachments_preserves_same_image_selected_twice(monkeypatch):
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    streamlit_stub.session_state.pending_image_attachments = []
+
+    uploads = [
+        Upload("first-copy.png", b"same-image"),
+        Upload("second-copy.png", b"same-image"),
+    ]
+
+    demo._handle_new_image_attachments(uploads)
+
+    pending = streamlit_stub.session_state.pending_image_attachments
+    assert [item["name"] for item in pending] == ["first-copy.png", "second-copy.png"]
+
+
+def test_consume_chat_image_uploader_adds_all_files_and_advances_dropzone(monkeypatch):
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    streamlit_stub.session_state.pending_image_attachments = []
+    streamlit_stub.session_state.chat_image_uploader_nonce = 4
+    uploader_key = "chat_image_uploader_conv-1_4"
+    streamlit_stub.session_state[uploader_key] = [
+        Upload("first.png", b"first-image"),
+        Upload("second.png", b"second-image"),
+    ]
+
+    demo._consume_chat_image_uploader(uploader_key)
+
+    pending = streamlit_stub.session_state.pending_image_attachments
+    assert [item["name"] for item in pending] == ["first.png", "second.png"]
+    assert streamlit_stub.session_state.chat_image_uploader_nonce == 5
+
+
 def test_handle_pasted_image_payload_reuses_pending_attachment_queue(monkeypatch):
     demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
     streamlit_stub.session_state.pending_image_attachments = []
@@ -84,6 +116,13 @@ def test_demo_mounts_clipboard_capture_near_chat_input():
 
     assert "capture_pasted_images(" in source
     assert "_handle_pasted_image_payload(" in source
+
+
+def test_demo_mounts_image_uploader_with_consume_callback():
+    source = (Path(__file__).resolve().parents[1] / "demo.py").read_text(encoding="utf-8")
+
+    assert "_chat_image_uploader_key(conversation_id)" in source
+    assert "on_change=_consume_chat_image_uploader" in source
 
 
 def test_paste_mount_does_not_block_message_form_rendering():
