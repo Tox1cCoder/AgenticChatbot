@@ -15,6 +15,7 @@ from client_backend.schemas.skills import (
 from client_backend.services.local_skills_registry import get_skills_registry
 from client_backend.services.runtime_bridge import get_runtime_bridge
 from client_backend.services.skill_runtime.install import SkillBundleInstaller
+from client_backend.services.skill_runtime.manager import SkillRuntimeManager
 from client_backend.services.skill_runtime.secrets import SkillSecretStore
 from shared.skills.errors import SKILL_INSTALL_CONFLICT, SKILL_INSTALL_INVALID, SkillRuntimeError
 
@@ -39,11 +40,14 @@ def get_secret_store() -> SkillSecretStore:
 
 
 def _skill_summary(skill) -> dict:
+    readiness = SkillRuntimeManager().evaluate_readiness(skill)
     return {
         "name": skill.name,
         "description": skill.description,
         "enabled": skill.enabled,
         "folderPath": str(skill.path.parent),
+        "commandCapable": readiness.status == "ready",
+        "runtimeStatus": readiness.status,
     }
 
 

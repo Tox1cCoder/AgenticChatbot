@@ -101,6 +101,15 @@ def test_skills_routes_return_server_style_payloads(monkeypatch):
     assert registry.toggle_calls == [("demo", False)]
 
 
+def test_skill_summary_marks_instruction_only_skill_as_not_command_capable():
+    summary = skills_api._skill_summary(
+        _Skill("instructions", command_capable=False)
+    )
+
+    assert summary["commandCapable"] is False
+    assert summary["runtimeStatus"] == "instruction_only"
+
+
 def test_reload_skills_refreshes_runtime_catalogs_when_bridge_active(monkeypatch):
     registry = _RegistryStub()
     bridge = _BridgeStub()

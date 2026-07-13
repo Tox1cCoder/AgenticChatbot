@@ -7178,6 +7178,24 @@ def render_skills_tab():
         )
         return
 
+    hitl_settings = get_hitl_settings()
+    skill_tool_rules: dict[str, bool] = {}
+    if hitl_settings is None:
+        st.warning(
+            "Human approval settings are unavailable. Skill approval controls are disabled."
+        )
+    else:
+        hitl_master = bool(hitl_settings.get("masterEnabled", True))
+        skill_tool_rules = {
+            item["scopeValue"]: item["requireApproval"]
+            for item in hitl_settings.get("tools", [])
+        }
+        if not hitl_master:
+            st.caption(
+                ":material/info: Human-in-the-loop is globally disabled (admin setting); "
+                "approval rules below are inactive until it is enabled."
+            )
+
     # Render each skill as a card
     for skill in skills:
         skill_name = skill.get("name", "Unknown")
@@ -7194,6 +7212,43 @@ def render_skills_tab():
         ):
             st.markdown(f"**Description:** {description}")
             st.caption(f"Folder: `{folder_path}`")
+
+            if hitl_settings is not None and skill.get("commandCapable", False):
+                skill_qualified_id = f"skill::{skill_name}::run_skill_command"
+                if skill_qualified_id in skill_tool_rules:
+                    current_mode = (
+                        "Require" if skill_tool_rules[skill_qualified_id] else "Skip"
+                    )
+                else:
+                    current_mode = "Inherit"
+
+                st.markdown("**Human approval**")
+                modes = ["Inherit", "Require", "Skip"]
+                chosen = st.radio(
+                    "Approval mode for this skill command",
+                    modes,
+                    index=modes.index(current_mode),
+                    key=f"hitl_skill_mode_{skill_name}",
+                    horizontal=True,
+                    help=(
+                        "Inherit = use the safe mutation default; Require = always prompt; "
+                        "Skip = preapprove this skill command"
+                    ),
+                )
+                if chosen != current_mode:
+                    with st.spinner("Updating skill approval..."):
+                        if chosen == "Inherit":
+                            result = clear_hitl_setting("tool", skill_qualified_id)
+                        else:
+                            result = set_hitl_setting("tool", skill_qualified_id, chosen == "Require")  # noqa: E501
+                        if result is not None:
+                            st.rerun()
+                        else:
+                            st.error(
+                                _last_api_error_message(
+                                    "Failed to update skill approval"
+                                )
+                            )
 
             col_view, col_spacer = st.columns([1, 1])
 
