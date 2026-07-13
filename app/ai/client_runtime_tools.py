@@ -36,17 +36,20 @@ def make_tool_instance_id(
     session_id: str,
     qualified_tool_id: str,
     catalog_version: int,
+    source_hash: str = "",
 ) -> str:
     """
     Build an opaque, stable identifier for a specific tool capability binding.
 
-    Built from a truncated SHA-256 of
-    "{device_id}:{session_id}:{qualified_tool_id}:{catalog_version}".
+    Built from a truncated SHA-256 of the device, session, qualified id,
+    catalog version, and optional skill source hash.
     Note: catalog_version is session-scoped and resets to 0 when a new
     session starts, so the same tool name from a reconnected sidecar gets
     a new tool_instance_id even if the catalog entry is identical.
     """
-    composite = f"{device_id}:{session_id}:{qualified_tool_id}:{catalog_version}"
+    composite = (
+        f"{device_id}:{session_id}:{qualified_tool_id}:{catalog_version}:{source_hash}"
+    )
     return hashlib.sha256(composite.encode()).hexdigest()[:16]
 
 
@@ -69,6 +72,7 @@ class ClientRuntimeToolSpec:
     exposed_name: str
     tool_instance_id: str = ""
     mutation: bool = False
+    source_hash: str = ""
 
     @property
     def tool_origin(self) -> str:
@@ -162,10 +166,22 @@ def _parse_tool_specs(catalog: dict[str, Any]) -> list[ClientRuntimeToolSpec]:
                 exposed_name=exposed_name,
                 tool_instance_id=str(raw_entry.get("tool_instance_id") or ""),
                 mutation=bool(raw_entry.get("mutation")),
+                source_hash=str(raw_entry.get("source_hash") or ""),
             )
         )
 
     return parsed
+
+
+def get_exposed_client_tool_name(
+    catalog: dict[str, Any],
+    qualified_tool_id: str,
+) -> str | None:
+    """Resolve the exact model-callable name for one current catalog entry."""
+    for spec in _parse_tool_specs(catalog):
+        if spec.qualified_tool_id == qualified_tool_id:
+            return spec.exposed_name
+    return None
 
 
 def _format_tool_result(result: Any) -> str:
@@ -301,6 +317,7 @@ def _build_tool(
         session_id=bound_session_id,
         qualified_tool_id=spec.qualified_tool_id,
         catalog_version=bound_catalog_version,
+        source_hash=spec.source_hash,
     )
 
     return StructuredTool.from_function(
@@ -328,6 +345,7 @@ def _build_tool(
             "qualified_tool_id": spec.qualified_tool_id,  # e.g., "desktop_commander::start_process"
             "source_tool_name": spec.name,  # Original tool name before prefixing
             "mutation": spec.mutation,  # Skill capability mutation flag (Task 9 HITL gate)
+            "source_hash": spec.source_hash,
         },
     )
 

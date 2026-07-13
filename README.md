@@ -727,20 +727,23 @@ When a skill is resolved to a tool (`skills_tool.py`), the agent's skill summari
 
 ### Executable skills (skill runtime)
 
-A skill directory may additionally include a machine-readable **`skill.json`** manifest. When present and valid, the skill's declared capabilities become typed client tools the model can call directly (`skill::<skill>::<capability>`) — executed on the sidecar through a generic, permissioned, auditable `SkillExecutionEngine` instead of the model constructing raw shell commands. Skills without a `skill.json` remain instruction-only and behave exactly as above.
+An executable skill uses the standard Agent Skills layout: `SKILL.md` plus optional bundle-owned `bin/`, `scripts/`, or `pyproject.toml` assets. Every ready executable skill publishes one fixed client tool, `skill::<skill>::run_skill_command`, which accepts an argv array and runs on the selected sidecar without a shell or global command lookup.
 
 Highlights:
 
-- **Two install paths** — scanned `CLIENT_SKILLS_ROOTS`, or `POST /skills/install` to install a validated directory bundle into a profile skill root (no env edits/restart).
-- **Runtime types** — `python_module`, `python_script`, `binary` (argv lists, never a shell).
-- **Readiness** — `ready` / `not_ready` / `invalid` / `instruction_only`, with repair hints; dependencies are never auto-installed.
-- **Secrets** — declared in the manifest, resolved only at execution time from encrypted per-profile storage or the environment, and redacted from prompts/logs/audit. Manage via `POST /skills/secrets` and `GET /skills/{name}/secrets`.
-- **Permissions & HITL** — resource/mutation permissions enforced before execution; `mutation: true` capabilities require human approval through the existing HITL path.
+- **Two install paths** — read-only `CLIENT_SKILLS_ROOTS` scanning, or hash-bound `POST /skills/install/preview` plus `POST /skills/install` into the device-local user profile.
+- **Scoped execution** — argv zero resolves only from that skill's bundle or prepared Python environment; no global `PATH` mutation and no arbitrary system-command fallback.
+- **Readiness** — `ready` / `not_ready` / `instruction_only`, with explicit setup and rebuild hints; unsafe bundles are rejected or omitted.
+- **Python setup** — approved projects are installed into staged, per-skill virtual environments and atomically promoted.
+- **Secrets** — encrypted, per-skill, per-machine bindings injected only at execution time and redacted from output/audit.
+- **Permissions & HITL** — every skill command is treated as mutating and passes the existing approval-policy path before secrets or process creation (human confirmation by default, with explicit per-tool preapproval supported).
 - **Audit** — one JSONL record per execution under the profile (no secrets or raw output).
 
-Extra sidecar endpoints: `POST /skills/install`, `POST /skills/uninstall`, `GET /skills/installed`, `POST /skills/secrets`, `GET /skills/{name}/secrets`.
+This is command confinement, not an OS sandbox: an approved skill still runs with the local sidecar user's host privileges, matching the trust model of coding-agent commands.
 
-**Full guide: [`docs/skill-runtime.md`](docs/skill-runtime.md)** — manifest schema, runtime types, security constraints, readiness/repair, secret setup, and troubleshooting.
+Extra sidecar endpoints: `POST /skills/install/preview`, `POST /skills/install`, `POST /skills/{name}/setup`, `POST /skills/uninstall`, `GET /skills/installed`, and per-skill secret GET/POST/DELETE routes.
+
+**Full guide: [`docs/skill-runtime.md`](docs/skill-runtime.md)** — bundle layout, setup, command confinement, device isolation, secret setup, and troubleshooting.
 
 ---
 

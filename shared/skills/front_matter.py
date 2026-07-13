@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+_SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def is_valid_skill_name(value: str) -> bool:
+    """Return whether a name satisfies the portable Agent Skills contract."""
+    return 1 <= len(value) <= 64 and _SKILL_NAME_PATTERN.fullmatch(value) is not None
 
 
 @dataclass(frozen=True)

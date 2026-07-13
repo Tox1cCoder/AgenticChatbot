@@ -12,14 +12,20 @@ from pathlib import Path
 
 from client_backend.core.config import client_settings
 from client_backend.core.logging import get_logger
-from client_backend.core.paths import get_installed_skills_root, get_profile_subdir
+from client_backend.core.paths import (
+    get_installed_skills_root,
+    get_profile_subdir,
+    is_under_root,
+)
 from client_backend.services.upstream_auth import get_upstream_auth_service
+from shared.skills.commands import is_link_like, is_supported_bundle_command
 from shared.skills.front_matter import (
     extract_yaml_value,
+    is_valid_skill_name,
     parse_skill_front_matter,
     split_front_matter,
 )
-from shared.skills.manifest import SkillManifest, load_manifest
+from shared.skills.hashing import compute_skill_bundle_hash
 
 logger = get_logger(__name__)
 
@@ -63,14 +69,14 @@ class SkillMetadata:
 
     name: str
     path: Path
+    bundle_root: Path
+    source_hash: str
+    executable_assets: dict
     description: str
     content: str
     enabled: bool = True
     category: str | None = None
     tags: list[str] = None
-    manifest_path: Path | None = None
-    manifest: SkillManifest | None = None
-    manifest_error: str | None = None
     # Reserved for the Task 4 installer to populate (source hash, bundle name,
     # etc.). Always None for freshly scanned skills; declared here so
     # to_dict()/to_sync_dict() have a stable, redacted place to surface it.
@@ -81,20 +87,26 @@ class SkillMetadata:
             self.tags = []
 
     def _execution_summary(self) -> dict:
-        """JSON-safe summary of manifest presence/validity (never the raw manifest)."""
-        manifest = self.manifest
-        if manifest is not None:
-            status = "manifest_present"
-        elif self.manifest_error is not None:
-            status = "invalid"
+        """Return a path-free summary of the bundle's executable inputs."""
+        has_commands = bool(self.executable_assets.get("bin")) or bool(
+            self.executable_assets.get("scripts")
+        )
+        has_python_project = bool(self.executable_assets.get("python_project"))
+        if has_commands:
+            status = "portable"
+        elif has_python_project:
+            status = "setup_required"
         else:
             status = "instruction_only"
 
         return {
-            "manifest_present": manifest is not None,
             "status": status,
-            "capability_count": len(manifest.capabilities) if manifest is not None else 0,
-            "permissions": list(manifest.permissions) if manifest is not None else [],
+            "source_hash": self.source_hash,
+            "command_assets": {
+                "bin": list(self.executable_assets.get("bin", [])),
+                "scripts": list(self.executable_assets.get("scripts", [])),
+                "python_project": has_python_project,
+            },
         }
 
     def _install_summary(self) -> dict:
@@ -124,7 +136,6 @@ class SkillMetadata:
             "category": self.category,
             "tags": self.tags,
             "content_length": len(self.content) if self.content else 0,
-            "manifest_path": str(self.manifest_path) if self.manifest_path else None,
             "execution": self._execution_summary(),
             "install": self._install_summary(),
         }
@@ -133,9 +144,8 @@ class SkillMetadata:
         """
         Convert to a server-sync-safe dictionary.
 
-        Intentionally omits absolute local filesystem paths (including
-        ``manifest_path``) to avoid leaking device-specific directory
-        structure to the canonical backend.
+        Intentionally omits absolute local filesystem paths to avoid leaking
+        device-specific directory structure to the canonical backend.
         """
         return {
             "name": self.name,
@@ -235,7 +245,7 @@ class LocalSkillsRegistry:
 
                 for skill_file in skill_files:
                     try:
-                        skill = await self._load_skill(skill_file)
+                        skill = await self._load_skill(skill_file, root_path)
                         if skill:
                             # Check if skill already exists (from another root)
                             if skill.name in discovered_skills:
@@ -261,7 +271,9 @@ class LocalSkillsRegistry:
         logger.info(f"Discovered {discovered} skills")
         return discovered
 
-    async def _load_skill(self, skill_file: Path) -> SkillMetadata | None:
+    async def _load_skill(
+        self, skill_file: Path, scan_root: Path | None = None
+    ) -> SkillMetadata | None:
         """
         Load a skill from a SKILL.md file.
 
@@ -273,19 +285,21 @@ class LocalSkillsRegistry:
         Falls back to directory-name / first-line heuristics only when no valid
         front matter is present, preserving compatibility with plain markdown skills.
 
-        If a ``skill.json`` file sits alongside SKILL.md, it is parsed and validated
-        as a :class:`SkillManifest`. A missing skill.json keeps the skill instruction-
-        only (unchanged behavior). A present-but-invalid skill.json (bad JSON or a
-        manifest that fails validation) never fails the load — the skill still comes
-        back as instruction-only, with ``manifest_error`` set to explain why.
-
         Args:
             skill_file: Path to the SKILL.md file.
+            scan_root: Configured root that discovered the skill.
 
         Returns:
             SkillMetadata if loaded successfully, None otherwise.
         """
         try:
+            resolved_scan_root = (scan_root or skill_file.parent).resolve()
+            resolved_skill_file = skill_file.resolve()
+            if is_link_like(skill_file) or not is_under_root(
+                resolved_skill_file, resolved_scan_root
+            ):
+                logger.warning("Skill document escapes configured root: %s", skill_file)
+                return None
             raw = await asyncio.to_thread(skill_file.read_text, encoding="utf-8")
 
             parsed = parse_skill_front_matter(raw)
@@ -321,31 +335,16 @@ class LocalSkillsRegistry:
             if used_plain_markdown_fallback and not description:
                 description = f"Skill: {name}"
 
-            manifest_path: Path | None = None
-            manifest: SkillManifest | None = None
-            manifest_error: str | None = None
-
-            candidate_manifest_path = skill_file.parent / "skill.json"
-            # The .exists() probe lives inside the try too: a broken symlink or
-            # permission error must never drop an otherwise-valid skill.
-            try:
-                if candidate_manifest_path.exists():
-                    manifest_raw = await asyncio.to_thread(
-                        candidate_manifest_path.read_text, encoding="utf-8"
-                    )
-                    manifest = load_manifest(json.loads(manifest_raw))
-                    manifest_path = candidate_manifest_path
-            except Exception as exc:
-                manifest_error = f"invalid skill.json: {exc}"
-                logger.warning(
-                    "Failed to parse skill.json for %s: %s", candidate_manifest_path, exc
-                )
+            bundle_root = self._resolve_bundle_root(
+                resolved_skill_file,
+                resolved_scan_root,
+            )
+            if not is_under_root(bundle_root, resolved_scan_root):
+                logger.warning("Skill bundle escapes configured root: %s", bundle_root)
+                return None
 
             install_metadata: dict | None = None
-            candidate_install_path = skill_file.parent / "install.json"
-            # Same defensive shape as the skill.json block above: a bad or
-            # unreadable install.json must never drop an otherwise-valid
-            # skill, so parsing failures only leave install_metadata unset.
+            candidate_install_path = bundle_root / "install.json"
             try:
                 if candidate_install_path.exists():
                     install_raw = await asyncio.to_thread(
@@ -372,23 +371,86 @@ class LocalSkillsRegistry:
                 if isinstance(recorded_name, str) and recorded_name.strip():
                     name = recorded_name
 
+            if not is_valid_skill_name(name):
+                logger.warning(
+                    "Skill name %r in %s is not portable; skipping",
+                    name,
+                    skill_file,
+                )
+                return None
+
+            # install.json is provenance, not an integrity oracle. Recompute the
+            # live bundle hash so edits rotate tool instances and stale runtimes.
+            source_hash = await asyncio.to_thread(self._compute_source_hash, bundle_root)
+            executable_assets = await asyncio.to_thread(
+                self._discover_executable_assets, bundle_root
+            )
+
             return SkillMetadata(
                 name=name,
                 path=skill_file,
+                bundle_root=bundle_root,
+                source_hash=source_hash,
+                executable_assets=executable_assets,
                 description=description,
                 content=content,
                 enabled=True,  # Default enabled, overridden by persisted state
                 category=category,
                 tags=tags,
-                manifest_path=manifest_path,
-                manifest=manifest,
-                manifest_error=manifest_error,
                 install_metadata=install_metadata,
             )
 
         except Exception as e:
             logger.error(f"Error loading skill from {skill_file}: {e}")
             return None
+
+    @staticmethod
+    def _resolve_bundle_root(skill_file: Path, scan_root: Path) -> Path:
+        """Resolve the directory that owns executable assets for ``skill_file``."""
+        current = skill_file.parent
+        while True:
+            if (current / "install.json").is_file():
+                return current.resolve()
+            if current == scan_root or scan_root not in current.parents:
+                break
+            current = current.parent
+
+        if skill_file.parent == scan_root:
+            return scan_root
+
+        plugin_markers = ("bin", "scripts", "pyproject.toml", ".claude-plugin")
+        if any((scan_root / marker).exists() for marker in plugin_markers):
+            return scan_root
+
+        try:
+            first_part = skill_file.relative_to(scan_root).parts[0]
+        except ValueError:
+            return skill_file.parent.resolve()
+        return (scan_root / first_part).resolve()
+
+    @staticmethod
+    def _discover_executable_assets(bundle_root: Path) -> dict:
+        bin_dir = bundle_root / "bin"
+        scripts_dir = bundle_root / "scripts"
+        bin_files = sorted(
+            path.name
+            for path in bin_dir.iterdir()
+            if is_supported_bundle_command(path)
+        ) if bin_dir.is_dir() else []
+        script_files = sorted(
+            path.relative_to(bundle_root).as_posix()
+            for path in scripts_dir.rglob("*.py")
+            if path.is_file() and not path.is_symlink()
+        ) if scripts_dir.is_dir() else []
+        return {
+            "bin": bin_files,
+            "scripts": script_files,
+            "python_project": (bundle_root / "pyproject.toml").is_file(),
+        }
+
+    @staticmethod
+    def _compute_source_hash(bundle_root: Path) -> str:
+        return compute_skill_bundle_hash(bundle_root, link_checker=is_link_like)
 
     @staticmethod
     def _split_front_matter(raw: str) -> tuple[str, str] | None:
@@ -432,7 +494,7 @@ class LocalSkillsRegistry:
             return False
 
         try:
-            new_skill = await self._load_skill(skill.path)
+            new_skill = await self._load_skill(skill.path, skill.bundle_root)
             if new_skill:
                 # Preserve enabled state
                 new_skill.enabled = skill.enabled

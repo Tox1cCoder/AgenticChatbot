@@ -1,228 +1,120 @@
-# Skill Runtime
+# Device-Local Skill Command Runtime
 
-The skill runtime lets a connected device (the client sidecar) expose **user-added skills** as typed, permissioned, auditable capabilities that the model can call — without the model constructing raw shell commands. Skills remain client-owned and are executed on the sidecar; the canonical server only orchestrates and dispatches to the active device session.
+The sidecar implements the open Agent Skills directory contract: every skill has a `SKILL.md`, and executable skills transport their own commands or scripts inside the same bundle. Skills, runtimes, secrets, and audit logs remain local to the device that published them.
 
-This document covers the executable skill runtime. For the plain Markdown/frontmatter loading that predates it, see the "Skills System" section of the main [README](../README.md).
-
----
-
-## Instruction-only vs. executable skills
-
-A skill is a directory containing at least a `SKILL.md`:
+## Bundle format
 
 ```text
-skills/<skill-name>/
-  SKILL.md          # human/model instructions (YAML front matter + markdown body)
-  skill.json        # OPTIONAL machine-readable execution manifest
-  runner.py         # runtime code (for python_script)
-  requirements.txt  # optional
-  README.md         # optional
+my-skill/
+  SKILL.md               # required metadata and instructions
+  bin/                   # optional bundled command launchers
+  scripts/               # optional Python scripts
+  pyproject.toml         # optional installable Python project
+  requirements.lock      # optional locked dependencies
+  references/            # optional documentation
+  assets/                # optional resources
 ```
 
-- **Instruction-only skill** — `SKILL.md` with no `skill.json`. Behaves exactly as before: `activate_skill` loads the markdown so the model can reason with it. Nothing is executed.
-- **Executable skill** — `SKILL.md` **plus** a valid `skill.json` manifest. Its declared capabilities become typed client tools the model can call directly (`skill::<skill>::<capability>`), executed by the sidecar's `SkillExecutionEngine`.
+The installer also accepts a distribution containing exactly one nested `SKILL.md`, such as `skills/my-skill/SKILL.md`, while executable assets remain at the copied bundle root. A source with zero or multiple skills is rejected.
 
-A missing or malformed `skill.json` never breaks loading — the skill degrades to instruction-only (with a `manifest_error` recorded).
+The front-matter `name` must be 1-64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen.
 
----
-
-## Two ways to add a skill
-
-Both paths are generic and provider-neutral — no skill name, provider, package, or command is hardcoded anywhere in the runtime.
-
-1. **Scanned roots.** The sidecar scans the directories in `CLIENT_SKILLS_ROOTS` for `SKILL.md` files, exactly as it always has. To develop against this repo's `skills/` folder, add its absolute path to the sidecar's `CLIENT_SKILLS_ROOTS`.
-2. **Profile-installed bundles.** Install a local directory bundle through the sidecar's `/skills/install` API. It is validated, copied into a sidecar-controlled profile skill root (`<profile>/skills/installed/<safe-name>-<hash>/`), recorded with install metadata, and picked up by the normal scan — no environment-variable edits or restart required.
-
-Dependencies are **never** installed as a side effect of scanning or installing. The runtime reports missing dependencies with repair hints; installing them is an explicit, separate, user-approved step.
-
----
-
-## The `skill.json` manifest
-
-```json
-{
-  "schema_version": "1.0",
-  "name": "example-calendar",
-  "display_name": "Example Calendar",
-  "description": "Inspect and manage calendar events.",
-  "runtime": {
-    "type": "python_module",
-    "module": "skills.example_calendar.cli",
-    "entrypoint": "cli"
-  },
-  "dependencies": { "python": ["click>=8", "requests>=2"], "node": [], "system": [] },
-  "secrets": [
-    { "name": "EXAMPLE_CALENDAR_ACCESS_TOKEN", "required": true, "description": "OAuth access token." }
-  ],
-  "permissions": ["network:api.example.com", "calendar:read", "calendar:write"],
-  "capabilities": [
-    {
-      "name": "event_list",
-      "description": "List events from a calendar.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "calendar_id": { "type": "string", "default": "primary" },
-          "time_min": { "type": "string" },
-          "time_max": { "type": "string" }
-        },
-        "required": ["time_min", "time_max"]
-      },
-      "execution": { "argv": ["--json", "event", "list", "--time-min", "{time_min}", "--time-max", "{time_max}"] },
-      "permissions": ["calendar:read"],
-      "secrets": ["EXAMPLE_CALENDAR_ACCESS_TOKEN"],
-      "mutation": false
-    }
-  ]
-}
-```
-
-Validation (`shared/skills/manifest.py`) enforces:
-
-- `schema_version` must be a supported version (`"1.0"`).
-- `name` matches `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`; each capability `name` matches `^[a-zA-Z][a-zA-Z0-9_]*$` (it becomes part of the `skill::<skill>::<capability>` id and a `client__…` tool name).
-- Each capability has a non-empty `description`, a non-empty `input_schema` object, and an `execution` block. Capability names are unique within a manifest.
-- `runtime.type` is one of the first-slice types below; reserved/unknown types are rejected at load time.
-
-`execution.argv` is a list of template strings. `{placeholder}` tokens are substituted with the matching argument value, **each into its own argv element** — never concatenated into a shell string. Set `execution.json_output: true` when the capability prints a JSON document to stdout; the engine parses it into `result`.
-
----
-
-## Runtime types
-
-First-slice, supported:
-
-| Type | How it runs |
-|---|---|
-| `python_module` | `python -m <module>` with the bundle dir on `PYTHONPATH`. |
-| `python_script` | `python <bundle-dir>/<script>` (script path is confined to the bundle dir). |
-| `binary` | an installed command resolved via `PATH` (`shutil.which(command)`). |
-
-Reserved for future slices and **rejected today**: `node_package`, `mcp_server`, `shell`.
-
-### Security constraints
-
-- **Never a shell.** Every runtime runs an argv **list** via `subprocess.run` (wrapped in a worker thread for the sidecar's event loop). No value is ever interpolated into a shell string.
-- **Permission check before anything happens.** The permission evaluator runs before secrets are resolved, arguments are rendered, or a process is spawned.
-- **Scoped environment.** The child process receives only an allow-list of infrastructure environment variables plus the capability's own declared secrets — never the sidecar's full environment (which would leak other skills' secrets).
-- **Path confinement.** A `python_script` path that escapes the bundle directory is refused; a bundle containing a symlink is rejected at install time.
-- **Timeouts & output caps.** Each call has a timeout (default 30s, capped) and an output-size limit.
-- **Secret redaction.** Resolved secret values are stripped from returned stdout/stderr, error messages, logs, and audit records.
-
----
+`CLIENT_SKILLS_ROOTS` scanning is read-only. It discovers assets and readiness but never executes setup code or installs dependencies.
 
 ## Readiness
 
-Before the model can call a capability, the sidecar computes the skill's readiness (`SkillRuntimeManager.evaluate_readiness`):
+- `instruction_only`: no bundled command, script, or Python project.
+- `ready`: `bin/` or `scripts/` contains a directly runnable asset, or a matching prepared environment exists.
+- `not_ready`: Python setup is required, failed, or stale.
 
-| Status | Meaning |
-|---|---|
-| `instruction_only` | no `skill.json` — nothing to execute |
-| `ready` | manifest valid, dependencies present, binary on PATH, required secrets configured |
-| `not_ready` | one or more requirements unmet (see repair hints) |
-| `invalid` | `skill.json` present but failed to parse/validate |
+Structurally unsafe bundles are rejected during installation or omitted during configured-root scanning; they are not published as runnable catalog entries.
 
-Only **ready** skills expose their capabilities as callable tools. Readiness checks are detection-only and provide structured **repair hints**:
+Prepared Python environments live below the active user's sidecar profile under `skills/runtimes/<skill>/<source-hash>/`. Setup uses a staged virtual environment and atomically promotes it only after installation and console-command discovery succeed. It never modifies the global interpreter.
 
-- `install_dependency` — a declared Python dependency is not importable (dependencies are never auto-installed).
-- `install_command` — a `binary` runtime's command is not on `PATH`.
-- `configure_secret` — a required secret is not set.
-- `unsupported_runtime` / `invalid_manifest` — manifest problems.
+Use the hash-bound workflow for Python projects:
 
-Python dependencies are **presence-checked** (via installed distribution metadata), not version-matched, to avoid false negatives.
+```http
+POST /skills/install/preview
+POST /skills/install
+POST /skills/{name}/setup
+```
 
----
+`approve_setup=true` and the exact `expected_source_hash` returned by preview are required before executing project-controlled build code. Setup freshly rehashes the bundle, so a missing or changed hash is rejected.
 
-## Secrets
+For an already configured or installed skill, `GET /skills/{name}` returns its current `sourceHash` for the setup request.
 
-Secrets are declared in the manifest (`secrets` / a capability's `secrets`) and resolved **only at execution time**, injected into the child process environment. They never appear in prompts, chat history, normal logs, or audit records.
+## Model tool
 
-`SkillSecretStore` resolves a secret from **encrypted per-profile storage first, then the process environment**. Profile storage is protected by the shared local-secret primitive (OS-user-bound DPAPI on Windows, managed Fernet elsewhere) — there is no separate key file to guard.
+Every ready executable skill publishes one tool:
 
-> **First-slice limitation.** Secrets live in a single flat namespace and the env fallback resolves any variable by name, so a manifest that declares a secret named after an existing process env var will receive it, and two skills declaring the same secret name share a value. This is a least-privilege gap, not a sandbox boundary — skills already run unsandboxed as the local user (they could read the environment or token files directly). Per-skill secret namespacing is a planned hardening.
+```text
+skill::<skill-name>::run_skill_command
+```
 
-Set and inspect secrets through the local API (values are never returned):
-
-- `POST /skills/secrets` — body `{ "name": "...", "value": "..." }`.
-- `GET /skills/{name}/secrets` — the skill's declared secret names, whether each is `required`, and a `configured` presence boolean (never the value).
-
----
-
-## Permissions and mutation approval
-
-Each capability declares `permissions` and a `mutation` flag. The sidecar enforces them before execution:
-
-- Resource permission families: `network:<host>`, `filesystem:read:<path>`, `filesystem:write:<path>` (path-prefix grants with a `/` boundary), `process:spawn`, exact domain labels (e.g. `calendar:read`), and `mutation`.
-- A denied permission returns a structured `PERMISSION_REQUIRED` (grantable) or `PERMISSION_DENIED` (hard, e.g. reserved `shell`) error with **redacted** arguments.
-- `mutation: true` capabilities require **human approval**. They route through the existing HITL interrupt path: the turn pauses, the user approves or rejects (with sensitive argument values redacted from the prompt), and only an approved mutation dispatches — still re-validated for session, catalog version, and tool-instance id before it runs.
-
----
-
-## Audit trail
-
-Every capability execution writes one JSON line to `<profile>/skills/audit.jsonl`:
+Input:
 
 ```json
 {
-  "timestamp": "2026-07-08T06:30:00+00:00",
-  "audit_id": "skill-exec-20260708T063000-a1b2c3",
-  "user_id": "...", "device_id": "...", "session_id": "...",
-  "skill": "example-calendar", "capability": "event_list",
-  "qualified_id": "skill::example-calendar::event_list",
-  "arguments_redacted": { "time_min": "...", "time_max": "..." },
-  "status": "ok", "duration_ms": 231, "error_code": null
+  "argv": ["bundled-command", "arg1", "arg2"],
+  "cwd": "workspace"
 }
 ```
 
-Records never contain raw stdout/stderr or any secret value. Auditing is best-effort — a write failure never breaks execution.
+`argv` must be a non-empty string array. `cwd` is either `workspace` or `skill`. No shell parses the arguments.
 
----
+The sidecar resolves argv element zero only from:
 
-## Managing skills (sidecar API)
+1. the selected bundle's `bin/` directory;
+2. the selected skill's prepared Python command directory; or
+3. a relative `.py` path below that bundle's `scripts/` directory.
 
-All endpoints live on the sidecar (the server has none of its own):
+It does not fall back to an arbitrary executable on the machine. Bundle discovery publishes Python launchers, current-platform native executables, and executable extensionless POSIX commands; batch, command, PowerShell, shell, and non-executable files are omitted. Python files run with the prepared environment's interpreter when one exists, otherwise the sidecar interpreter.
 
-| Endpoint | Purpose |
+The child receives a scoped `PATH`, `SKILL_ROOT`, `SKILL_RUNTIME_ROOT`, and only encrypted bindings belonging to the selected skill. The sidecar's complete environment is never inherited.
+
+## Activation
+
+`activate_skill` returns the skill instructions plus generated runtime guidance. The sidecar reports the internal command binding; the canonical activation layer resolves that binding against the current device catalog and appends the exact model-callable `client__...` tool name, including any collision suffix. It tells the model not to call the internal binding directly, use Desktop Commander, or search for another shell executor. A non-ready footer reports setup guidance and prohibits guessing `npx`, `pip`, or another installer.
+
+## Approval, isolation, and audit
+
+The fixed command tool is always marked mutating because free-form Markdown cannot safely classify arbitrary argv. It passes through the existing approval-policy gate before secret lookup or process creation; the default policy asks a human, while an explicit per-tool policy may preapprove it.
+
+Catalog and dispatch remain bound to user, device, runtime session, catalog version, tool instance, and skill source hash. The canonical server verifies ownership and binding before queueing to the selected device; the sidecar repeats catalog and session validation before execution.
+
+Two machines on the same account publish independent catalogs and use separate profile storage. Neither machine can reuse the other's runtime, secrets, approval, session, or tool instance.
+
+Every attempted command writes one profile-local JSONL audit record containing the skill, fixed capability name, redacted arguments, result status, duration, device, and session. Raw command output and secret values are excluded.
+
+Command confinement is not an operating-system sandbox. An approved skill command runs with the sidecar user's filesystem and network privileges, just as coding-agent commands do; install only bundles you trust. The runtime limits command selection, environment/secrets, device routing, time, output, and audit scope, but it does not virtualize the host.
+
+## Secret API
+
+```http
+POST   /skills/{name}/secrets
+GET    /skills/{name}/secrets
+DELETE /skills/{name}/secrets/{secret_name}
+```
+
+The POST body is `{"name":"ACCESS_TOKEN","value":"..."}`. GET returns configured names only. Values are encrypted at rest and namespaced by skill.
+
+## Errors
+
+| Code | Meaning |
 |---|---|
-| `GET /skills` | list local skills |
-| `GET /skills/{name}` | one skill's detail |
-| `PATCH /skills/{name}/toggle?enabled=` | enable/disable a skill |
-| `POST /skills/reload` | rescan configured + installed roots |
-| `POST /skills/install` | install a local directory bundle (`{ "source_path": "..." }`) |
-| `POST /skills/uninstall` | uninstall an installed bundle (`{ "name": "..." }`) |
-| `GET /skills/installed` | list profile-installed bundles |
-| `GET /skills/{name}/secrets` | declared secret names + `configured` booleans |
-| `POST /skills/secrets` | set a secret value |
+| `SKILL_INSTALL_INVALID` | The bundle source, structure, or preview hash is invalid. |
+| `UNSAFE_BUNDLE_PATH` | A symlink or path escapes a confined root. |
+| `SKILL_SETUP_REQUIRED` | Python setup needs explicit approval. |
+| `SKILL_SETUP_FAILED` | Environment creation or installation failed. |
+| `SKILL_RUNTIME_STALE` | Source, interpreter, platform, or runtime format changed. |
+| `SKILL_NOT_READY` | The command tool cannot currently execute. |
+| `PERMISSION_REQUIRED` | Human approval has not been supplied. |
+| `COMMAND_NOT_FOUND` | argv zero is not owned by the selected skill. |
+| `INVALID_ARGUMENTS` | argv or cwd failed the fixed schema. |
+| `EXECUTION_TIMEOUT` | The command exceeded its bounded timeout. |
+| `OUTPUT_TOO_LARGE` | Captured stdout or stderr exceeded the cap. |
+| `RUNTIME_ERROR` | The owned command returned non-zero or failed unexpectedly. |
 
-After an install, uninstall, or reload, the skill registry and the runtime tool catalog are refreshed, so newly-ready capabilities appear as tools without a restart.
+## Complete example
 
----
-
-## Standard error codes
-
-`SKILL_INSTALL_INVALID`, `SKILL_INSTALL_CONFLICT`, `UNSAFE_BUNDLE_PATH`, `SKILL_MANIFEST_INVALID`, `SKILL_NOT_READY`, `CAPABILITY_NOT_FOUND`, `UNSUPPORTED_RUNTIME`, `MISSING_DEPENDENCY`, `MISSING_SECRET`, `PERMISSION_REQUIRED`, `PERMISSION_DENIED`, `COMMAND_NOT_FOUND`, `INVALID_ARGUMENTS`, `EXECUTION_TIMEOUT`, `OUTPUT_TOO_LARGE`, `NON_JSON_OUTPUT`, `REMOTE_API_ERROR`, `RUNTIME_ERROR` (defined in `shared/skills/errors.py`).
-
----
-
-## Troubleshooting
-
-| Symptom | Likely cause & fix |
-|---|---|
-| `COMMAND_NOT_FOUND` | A `binary` runtime's command is not on `PATH`. Install it (readiness reports it as `not_ready` with an `install_command` hint). |
-| `MISSING_SECRET` | A required secret is not configured. Set it via `POST /skills/secrets`; check status via `GET /skills/{name}/secrets`. |
-| `SKILL_MANIFEST_INVALID` / status `invalid` | `skill.json` failed validation (unknown runtime type, missing/empty required field, bad capability name). Fix the manifest; the skill loads instruction-only meanwhile. |
-| `PERMISSION_DENIED` | The capability requires the reserved `shell` runtime or an explicitly denied permission — not grantable in this slice. |
-| `PERMISSION_REQUIRED` | A `mutation` needs approval, or a resource permission is not granted under the current policy. Approve the mutation, or grant the permission. |
-| `SKILL_NOT_READY` | Missing dependency/binary/secret at execution time. See the readiness repair hints via `GET /skills/{name}`. |
-| Capability doesn't appear as a tool | The skill isn't `ready`, or the catalog hasn't refreshed — call `POST /skills/reload`. |
-
----
-
-## Example fixtures
-
-Two provider-neutral executable fixtures under `tests/fixtures/skills/` demonstrate the contract end-to-end:
-
-- `echo_python/` — a `python_script` skill whose `echo` capability returns its `{message}` argument as JSON.
-- `binary_probe/` — a `binary` skill that runs the `python` command with a `-c` script.
-
-They install, validate, and execute with no live credentials — the same generic machinery a calendar, CAD, CRM, or file-utility skill would use.
+The tracked `tests/fixtures/skills/google_calendar/` bundle contains `SKILL.md` and `bin/cli-anything-google-calendar.py`. Its end-to-end test invokes `cli-anything-google-calendar --json ...` with an empty global `PATH`. Copying only the Markdown file or an inner Python package is insufficient; installation must receive the complete bundle.

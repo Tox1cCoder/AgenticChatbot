@@ -1,28 +1,14 @@
-"""Generic execution engine for skill capabilities.
-
-Ties together the manifest, readiness, permission, and secret modules to
-actually invoke one capability of one skill and return a normalized result
-or error envelope. This is the only place in the skill runtime that spawns a
-child process, so every safety property the plan requires (no shell, argv
-rendered as a list never a string, permission check before secret
-resolution/argv rendering/spawning, timeouts, output limits, secret
-redaction) is enforced here.
-
-Platform note: the sidecar forces a Selector event loop on Windows (so
-psycopg keeps working), and ``asyncio.create_subprocess_exec`` raises
-``NotImplementedError`` on a Selector loop on Windows. This module therefore
-never uses ``asyncio`` subprocess APIs -- it runs ``subprocess.run`` (which
-never invokes a shell when given an argv list) inside ``asyncio.to_thread``.
-"""
+"""Confined argv execution for one command-capable Agent Skill."""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import ctypes
 import json
 import math
 import os
-import re
-import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -30,60 +16,39 @@ from pathlib import Path
 
 import jsonschema
 
-from client_backend.core.logging import get_logger
-from client_backend.core.paths import is_under_root
+from client_backend.core.config import client_settings
+from client_backend.core.paths import PathSecurityError, is_under_root, validate_workspace_path
 from client_backend.services.local_skills_registry import LocalSkillsRegistry, get_skills_registry
 from client_backend.services.skill_runtime.audit import SkillAuditWriter, new_audit_id
-from client_backend.services.skill_runtime.manager import SkillRuntimeManager
-from client_backend.services.skill_runtime.permissions import (
-    SkillPermissionEvaluator,
-    SkillPermissionPolicy,
+from client_backend.services.skill_runtime.environment import SkillEnvironmentManager
+from client_backend.services.skill_runtime.manager import (
+    COMMAND_INPUT_SCHEMA,
+    RUN_SKILL_COMMAND,
+    SkillRuntimeManager,
 )
-from client_backend.services.skill_runtime.secrets import SkillSecretStore
+from client_backend.services.skill_runtime.secrets import SkillSecretStore, redact_secret_values
+from shared.skills.commands import is_supported_bundle_command
 from shared.skills.errors import (
     CAPABILITY_NOT_FOUND,
     COMMAND_NOT_FOUND,
     EXECUTION_TIMEOUT,
     INVALID_ARGUMENTS,
-    MISSING_SECRET,
-    NON_JSON_OUTPUT,
     OUTPUT_TOO_LARGE,
+    PERMISSION_REQUIRED,
     RUNTIME_ERROR,
     SKILL_NOT_READY,
-    UNSUPPORTED_RUNTIME,
+    SKILL_RUNTIME_STALE,
     SkillRuntimeError,
     error_payload,
 )
-from shared.skills.manifest import SkillCapabilitySpec, SkillManifest, SkillRuntimeSpec
 
-logger = get_logger(__name__)
-
-# A capability call may run for a while (network round trips, local file
-# scans); 30s is a generous first-slice default. Callers can override per
-# call via ``context={"timeout_seconds": ...}``.
 DEFAULT_TIMEOUT_SECONDS = 30
-
-# 1 MB. Generous enough for a normal JSON/text response, small enough that a
-# runaway or malicious capability cannot exhaust sidecar memory buffering
-# output that is fully captured before being returned.
+MAX_TIMEOUT_SECONDS = 300
 MAX_OUTPUT_BYTES = 1_000_000
 
-# Hard ceiling on a per-call timeout override so an untrusted caller (once
-# Task 8 wires `context`) cannot request an effectively unbounded run.
-MAX_TIMEOUT_SECONDS = 300
-
-# Allow-list of environment variable NAMES passed through to a skill child
-# process. The child gets ONLY these infrastructure vars plus the secrets this
-# capability explicitly declares (injected separately) -- never the sidecar's
-# full os.environ, which would hand every skill every OTHER skill's (and the
-# app's own) secrets. Names are matched case-insensitively (Windows env vars
-# are case-insensitive). Skill-specific configuration must arrive via declared
-# secrets or arguments, not arbitrary inherited env.
 _ENV_PASSTHROUGH_NAMES = frozenset(
     name.upper()
     for name in {
-        # POSIX / cross-platform runtime + locale + TLS trust store.
-        "PATH",
         "HOME",
         "LANG",
         "LC_ALL",
@@ -96,7 +61,6 @@ _ENV_PASSTHROUGH_NAMES = frozenset(
         "PYTHONDONTWRITEBYTECODE",
         "SSL_CERT_FILE",
         "SSL_CERT_DIR",
-        # Windows: required for the interpreter to even start / spawn.
         "SYSTEMROOT",
         "SYSTEMDRIVE",
         "WINDIR",
@@ -116,95 +80,134 @@ _ENV_PASSTHROUGH_NAMES = frozenset(
     }
 )
 
-# Matches `{identifier}` placeholders inside one argv template element.
-# Capability argument keys are schema property names (identifiers), so this
-# intentionally does not attempt to handle arbitrary/nested expressions.
-_ARGV_PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
-
-_REDACTION_PLACEHOLDER = "<redacted>"
+class _OutputLimitExceeded(Exception):
+    """Internal signal used to terminate a child while reading its output."""
 
 
-def _redact(text: str, secret_values: set[str]) -> str:
-    """Replace every occurrence of a resolved secret value with a placeholder.
-
-    Values are replaced LONGEST-FIRST. If one secret value is a substring of
-    another (e.g. ``"abc"`` and ``"abcdef"``), replacing the shorter one first
-    would fragment the longer one and leak its tail; replacing the longest
-    first makes redaction complete and independent of set iteration order
-    (which is otherwise randomized by PYTHONHASHSEED). Empty values are skipped
-    so an unset secret can never become a no-op ``str.replace("", ...)`` that
-    would corrupt the output.
-    """
-    redacted = text
-    for value in sorted(secret_values, key=len, reverse=True):
-        if not value:
-            continue
-        redacted = redacted.replace(value, _REDACTION_PLACEHOLDER)
-    return redacted
+class _JobBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("per_process_user_time_limit", ctypes.c_int64),
+        ("per_job_user_time_limit", ctypes.c_int64),
+        ("limit_flags", ctypes.c_ulong),
+        ("minimum_working_set_size", ctypes.c_size_t),
+        ("maximum_working_set_size", ctypes.c_size_t),
+        ("active_process_limit", ctypes.c_ulong),
+        ("affinity", ctypes.c_size_t),
+        ("priority_class", ctypes.c_ulong),
+        ("scheduling_class", ctypes.c_ulong),
+    ]
 
 
-def _build_scoped_env(extra_env: dict[str, str], env_secrets: dict[str, str]) -> dict[str, str]:
-    """Build a skill child's environment from an allow-list, never full os.environ.
+class _IoCounters(ctypes.Structure):
+    _fields_ = [
+        ("read_operation_count", ctypes.c_uint64),
+        ("write_operation_count", ctypes.c_uint64),
+        ("other_operation_count", ctypes.c_uint64),
+        ("read_transfer_count", ctypes.c_uint64),
+        ("write_transfer_count", ctypes.c_uint64),
+        ("other_transfer_count", ctypes.c_uint64),
+    ]
 
-    Passing the sidecar's whole ``os.environ`` would hand every skill every
-    OTHER skill's (and the app's own) secrets, defeating the per-capability
-    secret scoping this engine enforces. Instead the child gets only the
-    infrastructure vars in ``_ENV_PASSTHROUGH_NAMES``, plus runtime-specific
-    ``extra_env`` (e.g. PYTHONPATH) and this capability's own resolved
-    ``env_secrets``.
-    """
-    env = {
-        name: value
-        for name, value in os.environ.items()
-        if name.upper() in _ENV_PASSTHROUGH_NAMES
-    }
-    env.update(extra_env)
-    env.update(env_secrets)
-    return env
+
+class _JobExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("basic_limit_information", _JobBasicLimitInformation),
+        ("io_info", _IoCounters),
+        ("process_memory_limit", ctypes.c_size_t),
+        ("job_memory_limit", ctypes.c_size_t),
+        ("peak_process_memory_used", ctypes.c_size_t),
+        ("peak_job_memory_used", ctypes.c_size_t),
+    ]
+
+
+class _WindowsKillJob:
+    """A kill-on-close Windows Job Object containing one command tree."""
+
+    _KILL_ON_JOB_CLOSE = 0x2000
+    _EXTENDED_LIMIT_INFORMATION = 9
+    _PROCESS_TERMINATE = 0x0001
+    _PROCESS_SET_QUOTA = 0x0100
+
+    def __init__(self, kernel32, handle) -> None:
+        self._kernel32 = kernel32
+        self._handle = handle
+
+    @classmethod
+    def attach(cls, pid: int) -> _WindowsKillJob | None:
+        if os.name != "nt":
+            return None
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle_type = ctypes.c_void_p
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        kernel32.CreateJobObjectW.restype = handle_type
+        kernel32.SetInformationJobObject.argtypes = [
+            handle_type,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+        ]
+        kernel32.SetInformationJobObject.restype = ctypes.c_int
+        kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        kernel32.OpenProcess.restype = handle_type
+        kernel32.AssignProcessToJobObject.argtypes = [handle_type, handle_type]
+        kernel32.AssignProcessToJobObject.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = [handle_type]
+        kernel32.CloseHandle.restype = ctypes.c_int
+
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            raise ctypes.WinError(ctypes.get_last_error())
+        process_handle = None
+        try:
+            limits = _JobExtendedLimitInformation()
+            limits.basic_limit_information.limit_flags = cls._KILL_ON_JOB_CLOSE
+            if not kernel32.SetInformationJobObject(
+                job,
+                cls._EXTENDED_LIMIT_INFORMATION,
+                ctypes.byref(limits),
+                ctypes.sizeof(limits),
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            process_handle = kernel32.OpenProcess(
+                cls._PROCESS_TERMINATE | cls._PROCESS_SET_QUOTA,
+                False,
+                pid,
+            )
+            if not process_handle:
+                raise ctypes.WinError(ctypes.get_last_error())
+            if not kernel32.AssignProcessToJobObject(job, process_handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+            return cls(kernel32, job)
+        except OSError:
+            kernel32.CloseHandle(job)
+            raise
+        finally:
+            if process_handle:
+                kernel32.CloseHandle(process_handle)
+
+    def close(self) -> None:
+        if self._handle:
+            self._kernel32.CloseHandle(self._handle)
+            self._handle = None
 
 
 class SkillExecutionEngine:
-    """Executes one skill capability by qualified id and returns a normalized envelope.
-
-    Default permission policy (first slice):
-    ``SkillPermissionPolicy(granted=frozenset({"*"}), allow_mutation=False)``.
-    This trusts the resource permissions (network/filesystem/process/domain
-    tokens) a user-installed skill declares, but unconditionally blocks
-    ``mutation: true`` capabilities -- those always come back as
-    ``PERMISSION_REQUIRED`` here, which is the hand-off point to Task 9's
-    human-in-the-loop approval flow. The reserved ``shell`` runtime is
-    hard-denied by :class:`SkillPermissionEvaluator` regardless of policy.
-    This is deliberately more permissive on resource grants than
-    ``SkillPermissionPolicy.deny_all()`` and MUST NOT default to
-    ``allow_all()`` (which would also allow mutation outright). A stricter,
-    per-resource-scoped policy can be injected via ``permission_policy`` once
-    a device-level permission UI exists.
-    """
+    """Execute the reserved command capability without a shell or global lookup."""
 
     def __init__(
         self,
         registry: LocalSkillsRegistry | None = None,
+        environment_manager: SkillEnvironmentManager | None = None,
         secret_store: SkillSecretStore | None = None,
-        permission_policy: SkillPermissionPolicy | None = None,
         manager: SkillRuntimeManager | None = None,
         audit_writer: SkillAuditWriter | None = None,
     ) -> None:
         self._registry = registry if registry is not None else get_skills_registry()
-        self._secret_store = secret_store if secret_store is not None else SkillSecretStore()
-        self._audit = audit_writer if audit_writer is not None else SkillAuditWriter()
-        # Default the readiness manager onto the SAME secret store the engine
-        # uses, so readiness and execution can never disagree about which
-        # secrets exist (they only diverge if a caller deliberately passes a
-        # mismatched manager). This matters once a non-os.environ store (Task
-        # 10) is injected.
-        self._manager = (
-            manager if manager is not None else SkillRuntimeManager(secret_store=self._secret_store)
-        )
-        self._policy = (
-            permission_policy
-            if permission_policy is not None
-            else SkillPermissionPolicy(granted=frozenset({"*"}), allow_mutation=False)
-        )
+        self._environment = environment_manager or SkillEnvironmentManager()
+        self._secrets = secret_store or SkillSecretStore()
+        self._manager = manager or SkillRuntimeManager(self._environment)
+        self._audit = audit_writer or SkillAuditWriter()
 
     async def execute(
         self,
@@ -212,226 +215,495 @@ class SkillExecutionEngine:
         arguments: dict | None = None,
         context: dict | None = None,
     ) -> dict:
-        """Run one capability and return a normalized success/failure envelope.
-
-        Never raises for expected failures (parse errors, missing
-        capability, not-ready skill, invalid arguments, permission denial,
-        missing secret, command-not-found, timeout, output-too-large,
-        non-JSON output, non-zero exit). Any truly unexpected exception is
-        also caught and converted into a ``RUNTIME_ERROR`` envelope rather
-        than propagating, so a skill-runtime bug can never crash the caller.
-        """
         start = time.monotonic()
         audit_id = new_audit_id()
-        working_arguments: dict = dict(arguments) if arguments else {}
-        call_context: dict = context or {}
+        working_arguments = dict(arguments or {})
+        call_context = dict(context or {})
         skill_name = ""
-        capability_name = ""
         secret_values: set[str] = set()
 
         try:
-            skill_name, capability_name = self._parse_qualified_tool_id(qualified_tool_id)
-
+            skill_name, capability = self._parse_qualified_id(qualified_tool_id)
+            if capability != RUN_SKILL_COMMAND:
+                raise SkillRuntimeError(
+                    CAPABILITY_NOT_FOUND,
+                    f"skill '{skill_name}' exposes only '{RUN_SKILL_COMMAND}'",
+                )
             skill = self._registry.get_skill(skill_name)
             if skill is None or not skill.enabled:
                 raise SkillRuntimeError(
                     CAPABILITY_NOT_FOUND, f"skill '{skill_name}' is not available"
                 )
 
-            if skill.manifest is None:
-                raise SkillRuntimeError(
-                    SKILL_NOT_READY,
-                    f"skill '{skill_name}' has no executable manifest (instruction-only)",
-                )
-
-            manifest = skill.manifest
-            capability = self._find_capability(manifest, capability_name)
-            if capability is None:
-                raise SkillRuntimeError(
-                    CAPABILITY_NOT_FOUND,
-                    f"capability '{capability_name}' not found on skill '{skill_name}'",
-                )
-
-            readiness = self._manager.evaluate_readiness(manifest, skill.manifest_error)
+            readiness = self._manager.evaluate_readiness(skill)
             if readiness.status != "ready":
                 raise SkillRuntimeError(
                     SKILL_NOT_READY,
-                    f"skill '{skill_name}' is not ready (status={readiness.status})",
+                    f"skill '{skill_name}' is not ready",
                     repair=readiness.to_summary(),
                 )
 
-            self._validate_arguments(capability, working_arguments)
+            self._validate_arguments(working_arguments)
+            working_arguments.setdefault("cwd", "workspace")
 
-            decision = SkillPermissionEvaluator(self._policy).evaluate(
-                capability=capability, runtime=manifest.runtime
+            if call_context.get("mutation_approved") is not True:
+                raise SkillRuntimeError(
+                    PERMISSION_REQUIRED,
+                    f"running a command from skill '{skill_name}' requires approval",
+                    repair={
+                        "type": "approve_skill_command",
+                        "skill": skill_name,
+                        "source_hash": skill.source_hash,
+                    },
+                )
+
+            try:
+                live_source_hash = await asyncio.to_thread(
+                    LocalSkillsRegistry._compute_source_hash,
+                    skill.bundle_root,
+                )
+            except (OSError, ValueError) as exc:
+                raise SkillRuntimeError(
+                    SKILL_RUNTIME_STALE,
+                    f"skill '{skill_name}' changed or became unsafe after publication",
+                    repair={"type": "reload_skill", "skill": skill_name},
+                ) from exc
+            if live_source_hash != skill.source_hash:
+                raise SkillRuntimeError(
+                    SKILL_RUNTIME_STALE,
+                    f"skill '{skill_name}' changed after its command tool was published",
+                    repair={"type": "reload_skill", "skill": skill_name},
+                )
+
+            skill_secrets = self._skill_secrets(skill_name)
+            secret_values = {value for value in skill_secrets.values() if value}
+            argv = list(working_arguments["argv"])
+            command, runtime_root = self._resolve_owned_command(skill, argv[0])
+            cmd = [*command, *argv[1:]]
+            cwd = self._resolve_cwd(skill.bundle_root, working_arguments["cwd"], call_context)
+            env = self._build_environment(
+                bundle_root=skill.bundle_root,
+                runtime_root=runtime_root,
+                secrets=skill_secrets,
             )
-            if not decision.allowed:
-                logger.info(
-                    "skill capability %s::%s blocked by permission policy (%s)",
-                    skill_name,
-                    capability_name,
-                    decision.code,
-                )
-                # A permission denial (blocked mutation, reserved shell, ungranted
-                # resource) is a security-relevant outcome and must be audited too,
-                # even though it returns rather than raising. secret_values is still
-                # empty here (this is before secret resolution).
-                self._audit.write(
-                    audit_id=audit_id,
-                    skill=skill_name,
-                    capability=capability_name,
-                    qualified_id=qualified_tool_id,
-                    arguments=working_arguments,
-                    secret_values=secret_values,
-                    status="error",
-                    duration_ms=self._elapsed_ms(start),
-                    error_code=decision.code,
-                    device_id=call_context.get("device_id"),
-                    session_id=call_context.get("session_id"),
-                )
-                return self._failure_envelope(
-                    skill_name,
-                    capability_name,
-                    decision.to_error_payload(working_arguments),
-                    start,
-                    audit_id,
-                )
-
-            secret_values, env_secrets = self._resolve_secrets(manifest, capability)
-
-            rendered_argv = self._render_argv(capability.execution.argv, working_arguments)
-
-            skill_dir = skill.path.parent
-            cmd, extra_env = self._build_command(manifest.runtime, rendered_argv, skill_dir)
-
-            env = _build_scoped_env(extra_env, env_secrets)
-
             timeout = self._clamp_timeout(call_context.get("timeout_seconds"))
-
-            stdout_text, stderr_text, returncode = await self._run_and_collect(
-                cmd, skill_dir, env, timeout, secret_values
+            stdout, stderr, returncode = await self._run_and_collect(
+                cmd, cwd, env, timeout, secret_values
             )
-
             if returncode != 0:
-                stderr_tail = stderr_text[-4000:]
                 raise SkillRuntimeError(
                     RUNTIME_ERROR,
-                    f"capability exited with code {returncode}: {stderr_tail}",
+                    f"skill command exited with code {returncode}: {stderr[-4000:]}",
                 )
+            try:
+                result = json.loads(stdout)
+            except json.JSONDecodeError:
+                result = stdout
 
-            result: object
-            if capability.execution.json_output:
-                try:
-                    result = json.loads(stdout_text)
-                except json.JSONDecodeError as exc:
-                    raise SkillRuntimeError(
-                        NON_JSON_OUTPUT,
-                        "capability declared JSON output but stdout was not valid JSON: "
-                        f"{stdout_text[-2000:]}",
-                    ) from exc
-            else:
-                result = stdout_text
-
-            self._audit.write(
-                audit_id=audit_id,
-                skill=skill_name,
-                capability=capability_name,
-                qualified_id=qualified_tool_id,
-                arguments=working_arguments,
-                secret_values=secret_values,
-                status="ok",
-                duration_ms=self._elapsed_ms(start),
-                device_id=call_context.get("device_id"),
-                session_id=call_context.get("session_id"),
+            self._write_audit(
+                audit_id,
+                skill_name,
+                qualified_tool_id,
+                working_arguments,
+                secret_values,
+                "ok",
+                start,
+                call_context,
             )
             return self._success_envelope(
-                skill_name, capability_name, result, stdout_text, stderr_text, start, audit_id
+                skill_name, result, stdout, stderr, start, audit_id
             )
-
         except SkillRuntimeError as exc:
-            logger.warning(
-                "skill capability %s failed: %s: %s", qualified_tool_id, exc.code, exc.message
-            )
-            self._audit.write(
-                audit_id=audit_id,
-                skill=skill_name,
-                capability=capability_name,
-                qualified_id=qualified_tool_id,
-                arguments=working_arguments,
-                secret_values=secret_values,
-                status="error",
-                duration_ms=self._elapsed_ms(start),
+            self._write_audit(
+                audit_id,
+                skill_name,
+                qualified_tool_id,
+                working_arguments,
+                secret_values,
+                "error",
+                start,
+                call_context,
                 error_code=exc.code,
-                device_id=call_context.get("device_id"),
-                session_id=call_context.get("session_id"),
             )
             return self._failure_envelope(
                 skill_name,
-                capability_name,
                 error_payload(exc.code, exc.message, exc.repair),
                 start,
                 audit_id,
             )
-        except Exception as exc:  # pragma: no cover - defensive: never let this propagate
-            logger.exception("unexpected error executing skill capability %s", qualified_tool_id)
-            self._audit.write(
-                audit_id=audit_id,
-                skill=skill_name,
-                capability=capability_name,
-                qualified_id=qualified_tool_id,
-                arguments=working_arguments,
-                secret_values=secret_values,
-                status="error",
-                duration_ms=self._elapsed_ms(start),
+        except Exception as exc:  # pragma: no cover - defensive boundary
+            self._write_audit(
+                audit_id,
+                skill_name,
+                qualified_tool_id,
+                working_arguments,
+                secret_values,
+                "error",
+                start,
+                call_context,
                 error_code=RUNTIME_ERROR,
-                device_id=call_context.get("device_id"),
-                session_id=call_context.get("session_id"),
             )
             return self._failure_envelope(
                 skill_name,
-                capability_name,
-                error_payload(RUNTIME_ERROR, f"unexpected error: {exc}"),
+                error_payload(RUNTIME_ERROR, f"unexpected runtime error: {exc.__class__.__name__}"),
                 start,
                 audit_id,
             )
 
-    # -- envelope helpers ---------------------------------------------------
+    @staticmethod
+    def _parse_qualified_id(value: str) -> tuple[str, str]:
+        parts = value.split("::")
+        if len(parts) != 3 or parts[0] != "skill" or not parts[1] or not parts[2]:
+            raise SkillRuntimeError(
+                CAPABILITY_NOT_FOUND,
+                "malformed skill tool id; expected skill::<name>::run_skill_command",
+            )
+        return parts[1], parts[2]
+
+    @staticmethod
+    def _validate_arguments(arguments: dict) -> None:
+        try:
+            jsonschema.validate(arguments, COMMAND_INPUT_SCHEMA)
+        except jsonschema.ValidationError as exc:
+            path = ".".join(str(part) for part in exc.absolute_path) or "<root>"
+            raise SkillRuntimeError(
+                INVALID_ARGUMENTS,
+                f"argument validation failed at '{path}' (constraint: {exc.validator})",
+            ) from exc
+
+    def _resolve_owned_command(self, skill, requested: str) -> tuple[list[str], Path | None]:
+        if not requested or requested in {".", ".."}:
+            raise SkillRuntimeError(COMMAND_NOT_FOUND, "skill command is empty or invalid")
+        normalized = requested.replace("\\", "/")
+        if "/" in normalized:
+            if not normalized.startswith("scripts/") or not normalized.endswith(".py"):
+                raise SkillRuntimeError(
+                    COMMAND_NOT_FOUND,
+                    f"command is not owned by skill '{skill.name}': {requested}",
+                )
+            script = (skill.bundle_root / normalized).resolve()
+            scripts_root = (skill.bundle_root / "scripts").resolve()
+            if (
+                not is_under_root(script, scripts_root)
+                or not script.is_file()
+                or script.is_symlink()
+            ):
+                raise SkillRuntimeError(COMMAND_NOT_FOUND, f"script not found: {requested}")
+            python = self._environment.python_executable(skill) or Path(sys.executable)
+            return [str(python), str(script)], self._runtime_root(skill)
+
+        runtime_inspection = self._environment.inspect(skill)
+        runtime_dir = self._environment.command_directory(skill)
+        search_dirs = [skill.bundle_root / "bin"]
+        runtime_commands = {
+            str(command) for command in runtime_inspection.get("commands", [])
+        }
+        if runtime_dir is not None and requested in runtime_commands:
+            search_dirs.append(runtime_dir)
+        for directory in search_dirs:
+            for candidate_name in self._candidate_names(requested):
+                candidate = (directory / candidate_name).resolve()
+                if (
+                    not is_under_root(candidate, directory)
+                    or not is_supported_bundle_command(candidate)
+                ):
+                    continue
+                runtime_root = self._runtime_root(skill)
+                if candidate.suffix.lower() == ".py":
+                    python = self._environment.python_executable(skill) or Path(sys.executable)
+                    return [str(python), str(candidate)], runtime_root
+                return [str(candidate)], runtime_root
+        raise SkillRuntimeError(
+            COMMAND_NOT_FOUND,
+            f"command is not owned by skill '{skill.name}': {requested}",
+            repair={"type": "inspect_skill_commands", "skill": skill.name},
+        )
+
+    @staticmethod
+    def _candidate_names(requested: str) -> list[str]:
+        if Path(requested).suffix:
+            return [requested]
+        return [requested, f"{requested}.py", f"{requested}.exe"]
+
+    def _runtime_root(self, skill) -> Path | None:
+        command_dir = self._environment.command_directory(skill)
+        if command_dir is None:
+            return None
+        # <runtime>/venv/Scripts or <runtime>/venv/bin
+        return command_dir.parent.parent
+
+    @staticmethod
+    def _resolve_cwd(bundle_root: Path, choice: str, context: dict) -> Path:
+        if choice == "skill":
+            return bundle_root
+        configured_roots = [
+            str(root).strip() for root in client_settings.workspace_roots if str(root).strip()
+        ]
+        workspace = Path(
+            context.get("workspace_root")
+            or (configured_roots[0] if configured_roots else Path.cwd())
+        )
+        try:
+            return validate_workspace_path(workspace)
+        except PathSecurityError as exc:
+            raise SkillRuntimeError(INVALID_ARGUMENTS, str(exc)) from exc
+
+    @staticmethod
+    def _build_environment(
+        *,
+        bundle_root: Path,
+        runtime_root: Path | None,
+        secrets: dict[str, str],
+    ) -> dict[str, str]:
+        env = {
+            name: value
+            for name, value in os.environ.items()
+            if name.upper() in _ENV_PASSTHROUGH_NAMES
+        }
+        path_parts = [str(bundle_root / "bin")]
+        if runtime_root is not None:
+            runtime_bin = runtime_root / "venv" / ("Scripts" if os.name == "nt" else "bin")
+            path_parts.append(str(runtime_bin))
+        env["PATH"] = os.pathsep.join(path_parts)
+        env["SKILL_ROOT"] = str(bundle_root)
+        env["SKILL_RUNTIME_ROOT"] = str(runtime_root) if runtime_root is not None else ""
+        env.update(secrets)
+        return env
+
+    def _skill_secrets(self, skill_name: str) -> dict[str, str]:
+        getter = getattr(self._secrets, "get_for_skill", None)
+        if getter is None:
+            return {}
+        return {
+            str(name): str(value)
+            for name, value in getter(skill_name).items()
+            if value is not None
+        }
 
     @staticmethod
     def _clamp_timeout(requested: object) -> float:
-        """Clamp a caller-supplied timeout into (0, MAX_TIMEOUT_SECONDS].
-
-        Falls back to the default for a missing/non-numeric value, and never
-        lets an untrusted caller request an effectively unbounded run.
-        """
         if not isinstance(requested, (int, float)) or isinstance(requested, bool):
             return float(DEFAULT_TIMEOUT_SECONDS)
-        # Reject NaN/inf: min(nan, MAX) returns nan, which subprocess.run then
-        # rejects with a confusing ValueError instead of running bounded.
         if not math.isfinite(requested) or requested <= 0:
             return float(DEFAULT_TIMEOUT_SECONDS)
         return float(min(requested, MAX_TIMEOUT_SECONDS))
 
-    def _elapsed_ms(self, start: float) -> int:
+    @staticmethod
+    async def _run_and_collect(
+        cmd: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        timeout: float,
+        secret_values: set[str],
+    ) -> tuple[str, str, int]:
+        try:
+            process, windows_job = await SkillExecutionEngine._spawn_contained_process(
+                cmd, cwd, env
+            )
+        except FileNotFoundError as exc:
+            raise SkillRuntimeError(
+                COMMAND_NOT_FOUND,
+                "skill command executable disappeared",
+            ) from exc
+        except OSError as exc:
+            raise SkillRuntimeError(
+                RUNTIME_ERROR,
+                "unable to establish the command process boundary",
+            ) from exc
+
+        async def read_limited(stream: asyncio.StreamReader) -> bytes:
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = await stream.read(64 * 1024)
+                if not chunk:
+                    return b"".join(chunks)
+                total += len(chunk)
+                if total > MAX_OUTPUT_BYTES:
+                    raise _OutputLimitExceeded
+                chunks.append(chunk)
+
+        stdout_task = asyncio.create_task(read_limited(process.stdout))
+        stderr_task = asyncio.create_task(read_limited(process.stderr))
+        wait_task = asyncio.create_task(process.wait())
+        tasks = (stdout_task, stderr_task, wait_task)
+        try:
+            stdout_bytes, stderr_bytes, returncode = await asyncio.wait_for(
+                asyncio.gather(*tasks),
+                timeout=timeout,
+            )
+        except TimeoutError as exc:
+            await SkillExecutionEngine._terminate_process_tree(process, windows_job)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise SkillRuntimeError(
+                EXECUTION_TIMEOUT,
+                f"skill command exceeded {timeout}s timeout",
+            ) from exc
+        except _OutputLimitExceeded as exc:
+            await SkillExecutionEngine._terminate_process_tree(process, windows_job)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise SkillRuntimeError(
+                OUTPUT_TOO_LARGE,
+                f"skill command output exceeded {MAX_OUTPUT_BYTES} bytes",
+            ) from exc
+        except BaseException:
+            await SkillExecutionEngine._terminate_process_tree(process, windows_job)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        finally:
+            if windows_job is not None:
+                windows_job.close()
+
+        stdout = redact_secret_values(
+            stdout_bytes.decode("utf-8", errors="replace"), secret_values
+        ).replace("\r\n", "\n")
+        stderr = redact_secret_values(
+            stderr_bytes.decode("utf-8", errors="replace"), secret_values
+        ).replace("\r\n", "\n")
+        return stdout, stderr, returncode
+
+    @staticmethod
+    async def _spawn_contained_process(
+        cmd: list[str],
+        cwd: Path,
+        env: dict[str, str],
+    ) -> tuple[asyncio.subprocess.Process, _WindowsKillJob | None]:
+        windows = os.name == "nt"
+        spawn_cmd = cmd
+        stdin = asyncio.subprocess.DEVNULL
+        if windows:
+            launcher = Path(__file__).with_name("windows_job_launcher.py")
+            spawn_cmd = [sys.executable, "-I", str(launcher)]
+            stdin = asyncio.subprocess.PIPE
+
+        process = await asyncio.create_subprocess_exec(
+            *spawn_cmd,
+            cwd=str(cwd),
+            env=env,
+            stdin=stdin,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            creationflags=(
+                subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+                if windows
+                else 0
+            ),
+            start_new_session=not windows,
+        )
+        if not windows:
+            return process, None
+
+        windows_job: _WindowsKillJob | None = None
+        try:
+            windows_job = _WindowsKillJob.attach(process.pid)
+            if windows_job is None or process.stdin is None:
+                raise OSError("Windows process containment is unavailable")
+            request = json.dumps(
+                cmd,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8") + b"\n"
+            process.stdin.write(request)
+            await process.stdin.drain()
+            process.stdin.close()
+            return process, windows_job
+        except BaseException:
+            if windows_job is not None:
+                windows_job.close()
+            if process.stdin is not None:
+                process.stdin.close()
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+            with contextlib.suppress(TimeoutError, ProcessLookupError):
+                await asyncio.wait_for(process.wait(), timeout=5)
+            raise
+
+    @staticmethod
+    async def _terminate_process_tree(
+        process: asyncio.subprocess.Process,
+        windows_job: _WindowsKillJob | None,
+    ) -> None:
+        if os.name == "nt":
+            if windows_job is not None:
+                windows_job.close()
+            elif process.returncode is None:
+                system_root = Path(os.environ.get("SYSTEMROOT") or r"C:\Windows")
+                taskkill = system_root / "System32" / "taskkill.exe"
+                if taskkill.is_file():
+                    with contextlib.suppress(OSError):
+                        killer = await asyncio.create_subprocess_exec(
+                            str(taskkill),
+                            "/PID",
+                            str(process.pid),
+                            "/T",
+                            "/F",
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL,
+                            creationflags=subprocess.CREATE_NO_WINDOW,
+                        )
+                        await asyncio.wait_for(killer.wait(), timeout=5)
+        else:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
+        if process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+        with contextlib.suppress(TimeoutError, ProcessLookupError):
+            await asyncio.wait_for(process.wait(), timeout=5)
+
+    def _write_audit(
+        self,
+        audit_id: str,
+        skill_name: str,
+        qualified_id: str,
+        arguments: dict,
+        secret_values: set[str],
+        status: str,
+        start: float,
+        context: dict,
+        error_code: str | None = None,
+    ) -> None:
+        self._audit.write(
+            audit_id=audit_id,
+            skill=skill_name,
+            capability=RUN_SKILL_COMMAND,
+            qualified_id=qualified_id,
+            arguments=arguments,
+            secret_values=secret_values,
+            status=status,
+            duration_ms=self._elapsed_ms(start),
+            error_code=error_code,
+            device_id=context.get("device_id"),
+            session_id=context.get("session_id"),
+        )
+
+    @staticmethod
+    def _elapsed_ms(start: float) -> int:
         return int((time.monotonic() - start) * 1000)
 
     def _success_envelope(
         self,
         skill_name: str,
-        capability_name: str,
         result: object,
-        stdout_text: str,
-        stderr_text: str,
+        stdout: str,
+        stderr: str,
         start: float,
-        audit_id: str | None = None,
+        audit_id: str,
     ) -> dict:
         return {
             "ok": True,
             "skill": skill_name,
-            "capability": capability_name,
+            "capability": RUN_SKILL_COMMAND,
             "result": result,
-            "stdout": stdout_text,
-            "stderr": stderr_text,
+            "stdout": stdout,
+            "stderr": stderr,
             "duration_ms": self._elapsed_ms(start),
             "audit_id": audit_id,
         }
@@ -439,224 +711,15 @@ class SkillExecutionEngine:
     def _failure_envelope(
         self,
         skill_name: str,
-        capability_name: str,
         payload: dict,
         start: float,
-        audit_id: str | None = None,
+        audit_id: str,
     ) -> dict:
         return {
             "ok": False,
             "skill": skill_name,
-            "capability": capability_name,
+            "capability": RUN_SKILL_COMMAND,
             "error": payload,
             "duration_ms": self._elapsed_ms(start),
             "audit_id": audit_id,
         }
-
-    # -- parsing / lookup ----------------------------------------------------
-
-    @staticmethod
-    def _parse_qualified_tool_id(qualified_tool_id: str) -> tuple[str, str]:
-        parts = qualified_tool_id.split("::")
-        if len(parts) != 3 or parts[0] != "skill":
-            raise SkillRuntimeError(
-                CAPABILITY_NOT_FOUND,
-                f"malformed qualified tool id: {qualified_tool_id!r}; expected "
-                "'skill::<skill-name>::<capability-name>'",
-            )
-        _, skill_name, capability_name = parts
-        return skill_name, capability_name
-
-    @staticmethod
-    def _find_capability(
-        manifest: SkillManifest, capability_name: str
-    ) -> SkillCapabilitySpec | None:
-        for capability in manifest.capabilities:
-            if capability.name == capability_name:
-                return capability
-        return None
-
-    # -- argument validation ---------------------------------------------------
-
-    @staticmethod
-    def _validate_arguments(capability: SkillCapabilitySpec, arguments: dict) -> None:
-        """Validate ``arguments`` then fill in schema defaults, in place.
-
-        Validation runs against the raw arguments (so a missing required
-        field is still reported even if some *other* field has a default).
-        Defaults are only applied afterwards, so argv placeholders for
-        optional arguments still resolve.
-        """
-        schema = capability.input_schema
-        try:
-            jsonschema.validate(instance=arguments, schema=schema)
-        except jsonschema.ValidationError as exc:
-            path = ".".join(str(part) for part in exc.absolute_path) or "<root>"
-            # Deliberately built from the schema path/keyword only -- never
-            # the offending instance value, so a caller cannot make an error
-            # message echo back sensitive argument content.
-            raise SkillRuntimeError(
-                INVALID_ARGUMENTS,
-                f"argument validation failed at '{path}' (constraint: {exc.validator})",
-            ) from exc
-        except jsonschema.SchemaError as exc:
-            raise SkillRuntimeError(
-                RUNTIME_ERROR, f"capability input_schema is invalid: {exc}"
-            ) from exc
-
-        properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
-        for key, property_schema in properties.items():
-            if key in arguments:
-                continue
-            if isinstance(property_schema, dict) and "default" in property_schema:
-                arguments[key] = property_schema["default"]
-
-    # -- secrets ---------------------------------------------------------------
-
-    def _resolve_secrets(
-        self, manifest: SkillManifest, capability: SkillCapabilitySpec
-    ) -> tuple[set[str], dict[str, str]]:
-        """Resolve every secret the capability declares.
-
-        Returns ``(secret_values, env_secrets)``: ``secret_values`` is the
-        set of resolved values to redact from output/logs; ``env_secrets``
-        maps secret name -> value for injection into the child environment.
-        A secret is required unless it has a matching, explicitly
-        ``required=False`` entry in ``manifest.secrets`` -- a capability
-        secret with no manifest-level entry defaults to required.
-        """
-        required_by_name = {spec.name: spec.required for spec in manifest.secrets}
-        secret_values: set[str] = set()
-        env_secrets: dict[str, str] = {}
-
-        for name in capability.secrets:
-            value = self._secret_store.get(name)
-            required = required_by_name.get(name, True)
-            if not value:
-                if required:
-                    raise SkillRuntimeError(
-                        MISSING_SECRET,
-                        f"required secret '{name}' is not configured",
-                        repair={"type": "configure_secret", "secret": name},
-                    )
-                continue
-            env_secrets[name] = value
-            secret_values.add(value)
-
-        return secret_values, env_secrets
-
-    # -- argv rendering ----------------------------------------------------------
-
-    def _render_argv(self, argv_templates: list[str], arguments: dict) -> list[str]:
-        """Render each argv template independently into a discrete argv element.
-
-        Never concatenates elements together -- each templated string in
-        ``argv_templates`` becomes exactly one element of the returned list,
-        so a value containing spaces or shell metacharacters is passed to
-        the child process as a single argument, never re-split by a shell.
-        """
-        return [self._render_argv_element(template, arguments) for template in argv_templates]
-
-    @staticmethod
-    def _render_argv_element(template: str, arguments: dict) -> str:
-        def _substitute(match: re.Match[str]) -> str:
-            key = match.group(1)
-            if key not in arguments:
-                raise SkillRuntimeError(
-                    INVALID_ARGUMENTS,
-                    f"argv placeholder '{{{key}}}' has no matching argument",
-                )
-            return str(arguments[key])
-
-        return _ARGV_PLACEHOLDER_RE.sub(_substitute, template)
-
-    # -- command construction --------------------------------------------------
-
-    @staticmethod
-    def _build_command(
-        runtime: SkillRuntimeSpec, argv: list[str], skill_dir: Path
-    ) -> tuple[list[str], dict[str, str]]:
-        """Build the argv list (never a shell string) and any extra env vars."""
-        extra_env: dict[str, str] = {}
-
-        if runtime.type == "binary":
-            resolved = shutil.which(runtime.command) if runtime.command else None
-            if resolved is None:
-                raise SkillRuntimeError(
-                    COMMAND_NOT_FOUND, f"command not found on PATH: {runtime.command}"
-                )
-            return [resolved, *argv], extra_env
-
-        if runtime.type == "python_script":
-            if not runtime.script:
-                raise SkillRuntimeError(
-                    RUNTIME_ERROR, "python_script runtime requires a 'script' path"
-                )
-            script_path = (skill_dir / runtime.script).resolve()
-            if not is_under_root(script_path, skill_dir):
-                raise SkillRuntimeError(
-                    RUNTIME_ERROR,
-                    f"script path escapes skill directory: {runtime.script}",
-                )
-            if not script_path.is_file():
-                raise SkillRuntimeError(COMMAND_NOT_FOUND, f"script not found: {script_path}")
-            return [sys.executable, str(script_path), *argv], extra_env
-
-        if runtime.type == "python_module":
-            if not runtime.module:
-                raise SkillRuntimeError(
-                    RUNTIME_ERROR, "python_module runtime requires a 'module'"
-                )
-            existing_pythonpath = os.environ.get("PYTHONPATH", "")
-            extra_env["PYTHONPATH"] = (
-                f"{skill_dir}{os.pathsep}{existing_pythonpath}"
-                if existing_pythonpath
-                else str(skill_dir)
-            )
-            return [sys.executable, "-m", runtime.module, *argv], extra_env
-
-        raise SkillRuntimeError(UNSUPPORTED_RUNTIME, f"unsupported runtime type: {runtime.type}")
-
-    # -- subprocess execution -------------------------------------------------
-
-    async def _run_and_collect(
-        self,
-        cmd: list[str],
-        skill_dir: Path,
-        env: dict[str, str],
-        timeout: float,
-        secret_values: set[str],
-    ) -> tuple[str, str, int]:
-        """Run ``cmd`` in a worker thread and return redacted (stdout, stderr, returncode).
-
-        Uses ``subprocess.run`` (never ``shell=True``, always an argv list)
-        wrapped in ``asyncio.to_thread`` -- ``asyncio.create_subprocess_exec``
-        raises ``NotImplementedError`` on the sidecar's Selector event loop
-        on Windows.
-        """
-
-        def _run() -> subprocess.CompletedProcess[bytes]:
-            # Argv list, never shell=True -- no shell string interpolation.
-            return subprocess.run(
-                cmd, cwd=str(skill_dir), env=env, capture_output=True, timeout=timeout
-            )
-
-        try:
-            proc = await asyncio.to_thread(_run)
-        except subprocess.TimeoutExpired as exc:
-            raise SkillRuntimeError(
-                EXECUTION_TIMEOUT, f"capability execution exceeded {timeout}s timeout"
-            ) from exc
-        except FileNotFoundError as exc:
-            raise SkillRuntimeError(COMMAND_NOT_FOUND, f"command not found: {exc}") from exc
-
-        stdout_bytes = proc.stdout or b""
-        stderr_bytes = proc.stderr or b""
-        if len(stdout_bytes) > MAX_OUTPUT_BYTES or len(stderr_bytes) > MAX_OUTPUT_BYTES:
-            raise SkillRuntimeError(
-                OUTPUT_TOO_LARGE, f"capability output exceeded {MAX_OUTPUT_BYTES} bytes"
-            )
-
-        stdout_text = _redact(stdout_bytes.decode("utf-8", errors="replace"), secret_values)
-        stderr_text = _redact(stderr_bytes.decode("utf-8", errors="replace"), secret_values)
-        return stdout_text, stderr_text, proc.returncode

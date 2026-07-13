@@ -171,3 +171,8 @@ def get_installed_skills_root(user_id: str) -> Path:
     side effect, so only call this once a user id is actually available.
     """
     return get_profile_subdir(user_id, "skills") / "installed"
+
+
+def get_skill_runtimes_root(user_id: str) -> Path:
+    """Return the profile directory that holds prepared skill runtimes."""
+    return get_profile_subdir(user_id, "skills") / "runtimes"

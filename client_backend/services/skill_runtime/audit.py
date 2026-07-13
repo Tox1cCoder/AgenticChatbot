@@ -1,4 +1,4 @@
-"""Per-execution JSONL audit trail for skill capability executions.
+"""Per-execution JSONL audit trail for device-local skill commands.
 
 Every call through :class:`~client_backend.services.skill_runtime.execution.
 SkillExecutionEngine` writes exactly one JSON line here describing WHO ran
@@ -40,7 +40,7 @@ def new_audit_id() -> str:
 
 
 class SkillAuditWriter:
-    """Appends one JSON line per skill capability execution to a profile-scoped log."""
+    """Append one JSON line per skill command attempt to a profile-scoped log."""
 
     def write(
         self,

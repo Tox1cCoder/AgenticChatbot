@@ -7,6 +7,7 @@ from app.schemas.runtime_protocol import RuntimeErrorMessage
 from client_backend.schemas.runtime import CatalogSyncResult, RuntimeStatus, ToolDispatchRequest
 from client_backend.services import runtime_bridge as runtime_bridge_module
 from client_backend.services.runtime_bridge import RuntimeBridgeService
+from client_backend.services.skill_runtime.manager import SkillReadiness
 
 
 class _ServerClientStub:
@@ -84,7 +85,17 @@ async def test_runtime_bridge_executes_activate_skill_locally(monkeypatch):
         "get_skills_registry",
         lambda: SimpleNamespace(
             get_skill=lambda name: (
-                SimpleNamespace(name="demo", enabled=True, content="Follow the demo instructions.")
+                SimpleNamespace(
+                    name="demo",
+                    enabled=True,
+                    content="Follow the demo instructions.",
+                    source_hash="a" * 64,
+                    executable_assets={
+                        "bin": ["demo-cli.py"],
+                        "scripts": [],
+                        "python_project": False,
+                    },
+                )
                 if name == "demo"
                 else None
             )
@@ -103,6 +114,70 @@ async def test_runtime_bridge_executes_activate_skill_locally(monkeypatch):
 
     assert "Skill: demo" in result
     assert "Follow the demo instructions." in result
+    assert "skill::demo::run_skill_command" in result
+    assert "Desktop Commander" in result
+
+
+def test_collect_skill_tools_publishes_only_ready_fixed_command(monkeypatch):
+    ready = SimpleNamespace(
+        name="ready-skill",
+        enabled=True,
+        description="ready",
+        source_hash="a" * 64,
+        executable_assets={"bin": ["ready-cli.py"], "scripts": [], "python_project": False},
+    )
+    instruction_only = SimpleNamespace(
+        name="notes",
+        enabled=True,
+        description="notes",
+        source_hash="b" * 64,
+        executable_assets={"bin": [], "scripts": [], "python_project": False},
+    )
+    monkeypatch.setattr(
+        runtime_bridge_module,
+        "get_skills_registry",
+        lambda: SimpleNamespace(get_enabled_skills=lambda: [ready, instruction_only]),
+    )
+
+    entries = RuntimeBridgeService._collect_skill_capability_tools()
+
+    assert [entry["qualified_id"] for entry in entries] == [
+        "skill::ready-skill::run_skill_command"
+    ]
+    assert entries[0]["mutation"] is True
+
+
+@pytest.mark.asyncio
+async def test_activation_reports_setup_required_without_package_manager_guessing(monkeypatch):
+    bridge = RuntimeBridgeService(server_client=_ServerClientStub())
+    skill = SimpleNamespace(
+        name="python-skill",
+        enabled=True,
+        content="Use python-skill-cli.",
+        source_hash="c" * 64,
+        executable_assets={"bin": [], "scripts": [], "python_project": True},
+    )
+
+    class _Manager:
+        def evaluate_readiness(self, selected):
+            assert selected is skill
+            return SkillReadiness(
+                status="not_ready",
+                setup_status="setup_required",
+                repair_hints=[{"type": "setup_skill", "skill": skill.name}],
+            )
+
+    monkeypatch.setattr(runtime_bridge_module, "SkillRuntimeManager", _Manager)
+    monkeypatch.setattr(
+        runtime_bridge_module,
+        "get_skills_registry",
+        lambda: SimpleNamespace(get_skill=lambda name: skill if name == skill.name else None),
+    )
+
+    result = await bridge._execute_client_skill_request(arguments={"skill_name": skill.name})
+
+    assert "setup_required" in result
+    assert "Do not guess npx, pip" in result
 
 
 @pytest.mark.asyncio
@@ -187,6 +262,11 @@ async def test_build_tool_catalog_returns_mcp_tools_only(monkeypatch):
                 "active_servers": ["demo"],
             }
         ),
+    )
+    monkeypatch.setattr(
+        runtime_bridge_module,
+        "get_skills_registry",
+        lambda: SimpleNamespace(get_enabled_skills=lambda: []),
     )
 
     catalog = await bridge._build_tool_catalog()

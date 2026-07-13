@@ -1,13 +1,11 @@
 ---
 name: echo-python
-description: Echoes a message back as JSON to prove the python_script skill runtime executes end to end.
+description: Echoes a message as JSON through a bundled command without a global installation.
 ---
 
 # Echo Python
 
-A minimal, provider-neutral fixture skill used to exercise the generic skill
-runtime's `python_script` execution path.
+A minimal, provider-neutral fixture for the standard bundled-command path.
 
-Call the `echo` capability with a `message` string argument. The skill runs a
-small stdlib-only Python script that prints the message back as a JSON object.
-It requires no secrets, no network access, and no third-party dependencies.
+Run `echo-python "message"`. The command is transported under `bin/`, uses
+only the standard library, and prints a JSON object.

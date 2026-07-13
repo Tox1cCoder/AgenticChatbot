@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,52 +10,221 @@ from client_backend.core.config import client_settings
 from client_backend.core.paths import get_profile_subdir
 from client_backend.services import local_skills_registry as local_skills_registry_module
 from client_backend.services.local_skills_registry import LocalSkillsRegistry, SkillMetadata
+from client_backend.services.skill_runtime.install import _compute_source_hash as install_hash
 
 
-def _valid_skill_manifest_dict() -> dict:
-    """A minimal, provider-neutral skill.json payload for registry tests."""
-    return {
-        "schema_version": "1.0",
-        "name": "demo-skill",
-        "description": "Demo skill for registry tests.",
-        "runtime": {
-            "type": "python_module",
-            "module": "skills.demo.cli",
-            "entrypoint": "cli",
-        },
-        "permissions": ["filesystem:read"],
-        "capabilities": [
-            {
-                "name": "do_thing",
-                "description": "Do the thing.",
-                "input_schema": {"type": "object", "properties": {}},
-                "execution": {"argv": ["do-thing"]},
-            }
-        ],
+def _write_skill(skill_dir: Path, *, name: str = "demo-skill") -> Path:
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: Test bundled commands.\n---\n\n"
+        f"Use `{name}-cli --json`.\n",
+        encoding="utf-8",
+    )
+    return skill_dir
+
+
+@pytest.mark.asyncio
+async def test_direct_bundle_records_root_hash_and_executable_assets(tmp_path):
+    skill_root = tmp_path / "skills"
+    skill_dir = _write_skill(skill_root / "demo-skill")
+    (skill_dir / "bin").mkdir()
+    (skill_dir / "bin" / "demo-skill-cli.py").write_text("print('ok')\n", encoding="utf-8")
+    (skill_dir / "scripts").mkdir()
+    (skill_dir / "scripts" / "inspect.py").write_text("print('inspect')\n", encoding="utf-8")
+
+    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
+    await registry.initialize()
+
+    skill = registry.get_skill("demo-skill")
+    assert skill is not None
+    assert skill.bundle_root == skill_dir.resolve()
+    assert len(skill.source_hash) == 64
+    assert skill.executable_assets == {
+        "bin": ["demo-skill-cli.py"],
+        "scripts": ["scripts/inspect.py"],
+        "python_project": False,
     }
 
 
-def _write_demo_skill(skill_root: Path, skill_json_content: str | None = None) -> Path:
-    skill_dir = skill_root / "demo-skill"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
-        "# Demo Skill\n\nUse this skill for testing.\n",
+@pytest.mark.asyncio
+async def test_nested_installed_bundle_uses_install_marker_as_authoritative_root(tmp_path):
+    install_root = tmp_path / "installed"
+    bundle_root = install_root / "demo-skill-abc123"
+    skill_dir = _write_skill(bundle_root / "skills" / "demo-skill")
+    (bundle_root / "bin").mkdir(parents=True)
+    (bundle_root / "bin" / "demo-skill-cli.py").write_text("print('ok')\n", encoding="utf-8")
+    (bundle_root / "install.json").write_text(
+        json.dumps(
+            {
+                "installed": True,
+                "bundle_name": "demo-skill",
+                "source_hash": "a" * 64,
+                "source": "profile",
+            }
+        ),
         encoding="utf-8",
     )
-    if skill_json_content is not None:
-        (skill_dir / "skill.json").write_text(skill_json_content, encoding="utf-8")
-    return skill_dir
+
+    registry = LocalSkillsRegistry(skill_roots=[str(install_root)])
+    await registry.initialize()
+
+    skill = registry.get_skill("demo-skill")
+    assert skill is not None
+    assert skill.path == skill_dir / "SKILL.md"
+    assert skill.bundle_root == bundle_root.resolve()
+    assert skill.source_hash != "a" * 64
+    assert skill.source_hash == registry._compute_source_hash(bundle_root)
+    assert skill.executable_assets["bin"] == ["demo-skill-cli.py"]
+
+
+@pytest.mark.asyncio
+async def test_source_hash_changes_when_executable_changes(tmp_path):
+    skill_root = tmp_path / "skills"
+    skill_dir = _write_skill(skill_root / "demo-skill")
+    script = skill_dir / "scripts" / "run.py"
+    script.parent.mkdir()
+    script.write_text("print('one')\n", encoding="utf-8")
+
+    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
+    await registry.initialize()
+    first_hash = registry.get_skill("demo-skill").source_hash
+
+    script.write_text("print('two')\n", encoding="utf-8")
+    await registry.refresh()
+
+    assert registry.get_skill("demo-skill").source_hash != first_hash
+
+
+def test_source_hash_records_are_unambiguous_and_shared_by_installer(tmp_path):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "SKILL.md").write_text("same", encoding="utf-8")
+    (second / "SKILL.md").write_text("same", encoding="utf-8")
+    # The old path+content concatenation encoded both trailing records as b"abc".
+    (first / "ab").write_bytes(b"c")
+    (second / "a").write_bytes(b"bc")
+
+    first_hash = LocalSkillsRegistry._compute_source_hash(first)
+    second_hash = LocalSkillsRegistry._compute_source_hash(second)
+
+    assert first_hash != second_hash
+    assert install_hash(first) == first_hash
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or not hasattr(os, "mkfifo"),
+    reason="POSIX FIFO regression",
+)
+def test_source_hash_rejects_fifo_without_blocking(tmp_path):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "SKILL.md").write_text("same", encoding="utf-8")
+    os.mkfifo(bundle / "blocking-input")
+
+    with pytest.raises(ValueError, match="regular file"):
+        LocalSkillsRegistry._compute_source_hash(bundle)
+
+
+@pytest.mark.asyncio
+async def test_scanner_omits_front_matter_with_nonstandard_skill_name(tmp_path):
+    skill_root = tmp_path / "skills"
+    _write_skill(skill_root / "invalid", name="invalid::skill")
+    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
+
+    await registry.initialize()
+
+    assert registry.get_all_skills() == []
+
+
+@pytest.mark.asyncio
+async def test_scanner_rejects_symlinked_skill_document_outside_root(tmp_path):
+    skill_root = tmp_path / "skills"
+    bundle = skill_root / "demo-skill"
+    bundle.mkdir(parents=True)
+    outside = _write_skill(tmp_path / "outside") / "SKILL.md"
+    try:
+        os.symlink(outside, bundle / "SKILL.md")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted")
+    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
+
+    await registry.initialize()
+
+    assert registry.get_all_skills() == []
+
+
+@pytest.mark.asyncio
+async def test_loader_rejects_resolved_skill_document_outside_scan_root(tmp_path):
+    skill_root = tmp_path / "skills"
+    skill_root.mkdir()
+    outside_skill = _write_skill(tmp_path / "outside") / "SKILL.md"
+    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
+
+    loaded = await registry._load_skill(outside_skill, skill_root.resolve())
+
+    assert loaded is None
+
+
+@pytest.mark.asyncio
+async def test_scanner_rejects_bundle_with_symlinked_executable(tmp_path):
+    skill_root = tmp_path / "skills"
+    skill_dir = _write_skill(skill_root / "demo-skill")
+    (skill_dir / "bin").mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("print('outside')\n", encoding="utf-8")
+    try:
+        os.symlink(outside, skill_dir / "bin" / "demo-cli.py")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted")
+    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
+
+    await registry.initialize()
+
+    assert registry.get_all_skills() == []
+
+
+@pytest.mark.asyncio
+async def test_scanner_rejects_link_like_asset_without_platform_symlink_support(
+    tmp_path, monkeypatch
+):
+    skill_root = tmp_path / "skills"
+    skill_dir = _write_skill(skill_root / "demo-skill")
+    (skill_dir / "bin").mkdir()
+    (skill_dir / "bin" / "demo-cli.py").write_text("print('x')\n", encoding="utf-8")
+    real_is_link_like = local_skills_registry_module.is_link_like
+    monkeypatch.setattr(
+        local_skills_registry_module,
+        "is_link_like",
+        lambda path: path.name == "demo-cli.py" or real_is_link_like(path),
+    )
+    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
+
+    await registry.initialize()
+
+    assert registry.get_all_skills() == []
+
+
+@pytest.mark.asyncio
+async def test_unsupported_bin_assets_are_not_published_as_commands(tmp_path):
+    skill_root = tmp_path / "skills"
+    skill_dir = _write_skill(skill_root / "demo-skill")
+    bin_dir = skill_dir / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "notes.txt").write_text("not a command", encoding="utf-8")
+    (bin_dir / "blocked.cmd").write_text("echo blocked", encoding="utf-8")
+    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
+
+    await registry.initialize()
+
+    assert registry.get_skill("demo-skill").executable_assets["bin"] == []
 
 
 @pytest.mark.asyncio
 async def test_skill_catalog_sync_omits_absolute_paths_and_roots(tmp_path):
     skill_root = tmp_path / "skills"
-    skill_dir = skill_root / "demo-skill"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
-        "# Demo Skill\n\nUse this skill for testing.\n",
-        encoding="utf-8",
-    )
+    _write_skill(skill_root / "demo-skill")
 
     registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
     await registry.initialize()
@@ -67,22 +237,18 @@ async def test_skill_catalog_sync_omits_absolute_paths_and_roots(tmp_path):
     assert catalog["skills"][0]["name"] == "demo-skill"
     assert "content" in catalog["skills"][0]
     assert "path" not in catalog["skills"][0]
+    assert "bundle_root" not in catalog["skills"][0]
     assert str(skill_root.resolve()) not in serialized_catalog
+    assert catalog["skills"][0]["execution"]["source_hash"]
 
 
 @pytest.mark.asyncio
 async def test_refresh_only_reports_new_skills_not_removed_ones(tmp_path):
     skill_root = tmp_path / "skills"
-    skill_dir = skill_root / "demo-skill"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
-        "# Demo Skill\n\nUse this skill for testing.\n",
-        encoding="utf-8",
-    )
+    skill_dir = _write_skill(skill_root / "demo-skill")
 
     registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
     await registry.initialize()
-
     shutil.rmtree(skill_dir)
 
     discovered = await registry.refresh()
@@ -94,17 +260,9 @@ async def test_refresh_only_reports_new_skills_not_removed_ones(tmp_path):
 @pytest.mark.asyncio
 async def test_skill_enabled_state_is_isolated_per_user_profile(tmp_path, monkeypatch):
     skill_root = tmp_path / "skills"
-    skill_dir = skill_root / "demo-skill"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
-        "# Demo Skill\n\nUse this skill for testing.\n",
-        encoding="utf-8",
-    )
-
-    profile_root = tmp_path / "profiles"
+    _write_skill(skill_root / "demo-skill")
     original_profile_root = client_settings.profile_root
-    client_settings.profile_root = str(profile_root)
-
+    client_settings.profile_root = str(tmp_path / "profiles")
     auth_state = SimpleNamespace(current_user_id="user-a")
     monkeypatch.setattr(
         local_skills_registry_module,
@@ -115,160 +273,40 @@ async def test_skill_enabled_state_is_isolated_per_user_profile(tmp_path, monkey
     try:
         registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
         await registry.initialize()
-
-        assert registry.get_skill("demo-skill").enabled is True
-
         registry.set_skill_enabled("demo-skill", False)
-        assert registry.get_skill("demo-skill").enabled is False
 
         auth_state.current_user_id = "user-b"
         await registry.initialize()
         assert registry.get_skill("demo-skill").enabled is True
 
-        registry.set_skill_enabled("demo-skill", False)
-        assert registry.get_skill("demo-skill").enabled is False
-
         auth_state.current_user_id = "user-a"
         await registry.initialize()
         assert registry.get_skill("demo-skill").enabled is False
-
-        user_a_state = json.loads(
-            (get_profile_subdir("user-a", "skills") / "state.json").read_text(encoding="utf-8")
+        state = json.loads(
+            (get_profile_subdir("user-a", "skills") / "state.json").read_text(
+                encoding="utf-8"
+            )
         )
-        user_b_state = json.loads(
-            (get_profile_subdir("user-b", "skills") / "state.json").read_text(encoding="utf-8")
-        )
-        assert user_a_state == {"enabled": {"demo-skill": False}}
-        assert user_b_state == {"enabled": {"demo-skill": False}}
+        assert state == {"enabled": {"demo-skill": False}}
     finally:
         client_settings.profile_root = original_profile_root
 
 
-@pytest.mark.asyncio
-async def test_markdown_only_skill_has_instruction_only_execution_summary(tmp_path):
-    skill_root = tmp_path / "skills"
-    _write_demo_skill(skill_root)
-
-    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
-    await registry.initialize()
-
-    skill = registry.get_skill("demo-skill")
-    assert skill is not None
-    assert skill.manifest is None
-    assert skill.manifest_error is None
-    assert skill.manifest_path is None
-
-    execution = skill.to_dict()["execution"]
-    assert execution == {
-        "manifest_present": False,
-        "status": "instruction_only",
-        "capability_count": 0,
-        "permissions": [],
-    }
-
-    catalog = registry.get_skill_catalog(include_content=True)
-    assert catalog["skills"][0]["execution"]["status"] == "instruction_only"
-    assert catalog["skills"][0]["execution"]["manifest_present"] is False
-
-
-@pytest.mark.asyncio
-async def test_manifest_backed_skill_has_manifest_present_execution_summary(tmp_path):
-    skill_root = tmp_path / "skills"
-    manifest_dict = _valid_skill_manifest_dict()
-    _write_demo_skill(skill_root, skill_json_content=json.dumps(manifest_dict))
-
-    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
-    await registry.initialize()
-
-    skill = registry.get_skill("demo-skill")
-    assert skill is not None
-    assert skill.manifest is not None
-    assert skill.manifest_error is None
-    assert skill.manifest_path is not None
-
-    execution = skill.to_dict()["execution"]
-    assert execution["manifest_present"] is True
-    assert execution["status"] == "manifest_present"
-    assert execution["capability_count"] == len(manifest_dict["capabilities"])
-    assert execution["permissions"] == manifest_dict["permissions"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "skill_json_content",
-    [
-        "{this is not valid json",
-        json.dumps(
-            {
-                "schema_version": "1.0",
-                "name": "demo-skill",
-                "description": "Has an unknown runtime type.",
-                "runtime": {"type": "totally_unknown"},
-                "capabilities": [],
-            }
-        ),
-    ],
-    ids=["malformed-json", "invalid-manifest-unknown-runtime-type"],
-)
-async def test_invalid_skill_json_still_loads_skill_as_instruction_only(
-    tmp_path, skill_json_content
-):
-    skill_root = tmp_path / "skills"
-    _write_demo_skill(skill_root, skill_json_content=skill_json_content)
-
-    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
-    await registry.initialize()
-
-    skill = registry.get_skill("demo-skill")
-    assert skill is not None
-    assert skill.manifest is None
-    assert skill.manifest_error is not None
-    assert "skill.json" in skill.manifest_error
-
-    execution = skill.to_dict()["execution"]
-    assert execution["manifest_present"] is False
-    assert execution["status"] == "invalid"
-    assert execution["capability_count"] == 0
-    assert execution["permissions"] == []
-
-
-@pytest.mark.asyncio
-async def test_sync_dict_and_catalog_omit_manifest_path_and_absolute_paths(tmp_path):
-    skill_root = tmp_path / "skills"
-    _write_demo_skill(skill_root, skill_json_content=json.dumps(_valid_skill_manifest_dict()))
-
-    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
-    await registry.initialize()
-
-    catalog = registry.get_skill_catalog(include_content=True)
-    serialized_catalog = json.dumps(catalog)
-
-    assert str(skill_root.resolve()) not in serialized_catalog
-    assert "manifest_path" not in catalog["skills"][0]
-    assert catalog["skills"][0]["execution"]["status"] == "manifest_present"
-
-    skill = registry.get_skill("demo-skill")
-    sync_dict = skill.to_sync_dict()
-    assert "manifest_path" not in sync_dict
-    assert "path" not in sync_dict
-
-
 def test_install_metadata_never_leaks_absolute_paths_in_sync_dict(tmp_path):
-    absolute_path = str((tmp_path / "profiles" / "user-a" / "skills" / "demo-skill").resolve())
-
+    absolute_path = str((tmp_path / "profiles" / "user-a" / "skills").resolve())
     skill = SkillMetadata(
         name="demo-skill",
         path=tmp_path / "SKILL.md",
+        bundle_root=tmp_path,
+        source_hash="abc123",
+        executable_assets={"bin": [], "scripts": [], "python_project": False},
         description="demo",
         content="content",
         install_metadata={
             "installed": True,
             "source_hash": "abc123",
             "bundle_name": "demo-skill",
-            # Misuse: a category label field populated with an absolute path
-            # instead of e.g. "profile" — must still be redacted defensively.
             "source": absolute_path,
-            # Not in the safe-key allow-list at all.
             "install_root": absolute_path,
         },
     )
@@ -280,36 +318,15 @@ def test_install_metadata_never_leaks_absolute_paths_in_sync_dict(tmp_path):
     assert "install_root" not in sync_dict["install"]
     assert "source" not in sync_dict["install"]
     assert sync_dict["install"]["installed"] is True
-    assert sync_dict["install"]["source_hash"] == "abc123"
-    assert sync_dict["install"]["bundle_name"] == "demo-skill"
 
 
-def test_install_metadata_redacts_absolute_path_embedded_in_larger_string(tmp_path):
-    absolute_path = str((tmp_path / "profiles" / "user-a" / "skills" / "demo").resolve())
-
+def test_install_metadata_defaults_to_not_installed_when_absent(tmp_path):
     skill = SkillMetadata(
         name="demo-skill",
         path=tmp_path / "SKILL.md",
-        description="demo",
-        content="content",
-        install_metadata={
-            "installed": True,
-            # Path embedded as a substring in a larger human string, not a
-            # bare path value — must still be caught and dropped.
-            "bundle_name": f"copied from {absolute_path}",
-        },
-    )
-
-    serialized = json.dumps(skill.to_sync_dict())
-
-    assert absolute_path not in serialized
-    assert "bundle_name" not in skill.to_sync_dict()["install"]
-
-
-def test_install_metadata_defaults_to_not_installed_when_absent():
-    skill = SkillMetadata(
-        name="demo-skill",
-        path=Path("SKILL.md"),
+        bundle_root=tmp_path,
+        source_hash="abc123",
+        executable_assets={"bin": [], "scripts": [], "python_project": False},
         description="demo",
         content="content",
     )

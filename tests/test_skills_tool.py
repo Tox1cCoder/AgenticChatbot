@@ -15,12 +15,20 @@ from app.services.client_runtime_store import (
 )
 
 
-def _client_session(skills, *, user_id="user-1", session_id="session-1", device_id=None):
+def _client_session(
+    skills,
+    *,
+    user_id="user-1",
+    session_id="session-1",
+    device_id=None,
+    tool_catalog=None,
+):
     return SimpleNamespace(
         user_id=user_id,
         session_id=session_id,
         device_id=device_id,
         skill_catalog={"skills": skills},
+        tool_catalog=tool_catalog or {"tools": []},
     )
 
 
@@ -90,6 +98,49 @@ async def test_activate_skill_unknown_name_returns_graceful_error(monkeypatch):
     assert "not found" in result.lower()
     assert "client-skill" in result  # only this session's skills are offered
     assert dispatched == []
+
+
+@pytest.mark.asyncio
+async def test_activation_appends_exact_model_callable_skill_tool_name(monkeypatch):
+    device_id = str(uuid4())
+    session = _client_session(
+        [{"name": "client-skill", "description": "d", "enabled": True}],
+        device_id=device_id,
+        tool_catalog={
+            "tools": [
+                {
+                    "name": "run_skill_command",
+                    "origin": "mcp",
+                    "server_name": "skill_client_skill",
+                    "qualified_id": "mcp::collision",
+                },
+                {
+                    "name": "run_skill_command",
+                    "origin": "skill",
+                    "server_name": "skill_client_skill",
+                    "qualified_id": "skill::client-skill::run_skill_command",
+                    "mutation": True,
+                },
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        skill_resolver.ClientDeviceService,
+        "lookup_active_session",
+        lambda _device_uuid: session,
+    )
+
+    async def _dispatch(**kwargs):
+        return {"success": True, "result": "skill body"}
+
+    monkeypatch.setattr(skills_tool.ClientDeviceService, "dispatch_tool_call", _dispatch)
+    tool = skills_tool.create_activate_skill_tool(user_id="user-1", device_id=device_id)
+
+    result = await tool.ainvoke({"skill_name": "client-skill"})
+
+    assert "skill body" in result
+    assert "client__skill_client_skill__run_skill_command_2" in result
+    assert "exact model-callable tool" in result.lower()
 
 
 @pytest.mark.asyncio

@@ -1,676 +1,486 @@
-"""Tests for client_backend.services.skill_runtime.execution.SkillExecutionEngine.
-
-Every scenario builds a real skill bundle on disk (SKILL.md + skill.json)
-under ``tmp_path``, scans it with a real ``LocalSkillsRegistry``, and runs
-the engine against a real short-lived Python subprocess (the
-``python_script`` runtime, invoked via ``sys.executable`` so it is
-deterministic and cross-platform). Only the secret store is faked (via an
-injected environ mapping); nothing here mocks subprocess or jsonschema.
-"""
-
+import asyncio
 import json
+import os
+import sys
+import time
 from pathlib import Path
 
 import pytest
 
-from client_backend.services.local_skills_registry import LocalSkillsRegistry
+from client_backend.core.config import client_settings
+from client_backend.services.local_skills_registry import LocalSkillsRegistry, SkillMetadata
 from client_backend.services.skill_runtime import execution as execution_module
 from client_backend.services.skill_runtime.execution import SkillExecutionEngine
-from client_backend.services.skill_runtime.manager import SkillReadiness, SkillRuntimeManager
-from client_backend.services.skill_runtime.secrets import SkillSecretStore
 from shared.skills.errors import (
     COMMAND_NOT_FOUND,
     EXECUTION_TIMEOUT,
     INVALID_ARGUMENTS,
-    MISSING_SECRET,
-    NON_JSON_OUTPUT,
     OUTPUT_TOO_LARGE,
     PERMISSION_REQUIRED,
-    RUNTIME_ERROR,
+    SKILL_RUNTIME_STALE,
 )
 
 
-class _AlwaysReadyManager:
-    """Readiness stub that always reports ``ready``.
+class _Registry:
+    def __init__(self, skill):
+        self.skill = skill
 
-    ``SkillRuntimeManager.evaluate_readiness`` also independently checks
-    binary-command presence and required secrets (see
-    ``test_skill_runtime_manager.py``), which would otherwise short-circuit
-    a couple of these scenarios with ``SKILL_NOT_READY`` before the
-    execution engine's OWN command-not-found / missing-secret checks ever
-    run. Injecting this stub via the engine's ``manager=`` parameter isolates
-    the engine-level check under test from the (separately-tested) readiness
-    evaluator.
-    """
-
-    def evaluate_readiness(self, manifest, manifest_error=None) -> SkillReadiness:
-        return SkillReadiness(status="ready")
+    def get_skill(self, name):
+        return self.skill if name == self.skill.name else None
 
 
-def _write_skill_md(skill_dir: Path, name: str) -> None:
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    content = (
-        f"---\nname: {name}\ndescription: Test skill {name}.\n---\n\n# {name}\n\nBody.\n"
+class _Environment:
+    def __init__(self, command_dir: Path | None = None, python: Path | None = None):
+        self._command_dir = command_dir
+        self._python = python
+
+    def inspect(self, _skill):
+        if self._command_dir is None:
+            return {"status": "setup_required", "commands": []}
+        return {"status": "ready", "commands": ["runtime-cli"], "runtime_id": "runtime"}
+
+    def command_directory(self, _skill):
+        return self._command_dir
+
+    def python_executable(self, _skill):
+        return self._python
+
+
+class _Secrets:
+    def __init__(self, values=None):
+        self.values = values or {}
+        self.calls = []
+
+    def get_for_skill(self, name):
+        self.calls.append(name)
+        return dict(self.values)
+
+
+class _Audit:
+    def __init__(self):
+        self.records = []
+
+    def write(self, **record):
+        self.records.append(record)
+
+
+class _FakeJob:
+    def close(self):
+        pass
+
+
+def _skill(tmp_path: Path, script: str, *, command_name: str = "demo-cli"):
+    root = tmp_path / "demo-skill"
+    root.mkdir()
+    (root / "SKILL.md").write_text("# Demo\n", encoding="utf-8")
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    executable = bin_dir / f"{command_name}.py"
+    executable.write_text(script, encoding="utf-8")
+    return SkillMetadata(
+        name="demo-skill",
+        path=root / "SKILL.md",
+        bundle_root=root,
+        source_hash=LocalSkillsRegistry._compute_source_hash(root),
+        executable_assets={
+            "bin": [executable.name],
+            "scripts": [],
+            "python_project": False,
+        },
+        description="demo",
+        content="demo",
     )
-    (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
 
 
-def _write_manifest(skill_dir: Path, manifest: dict) -> None:
-    (skill_dir / "skill.json").write_text(json.dumps(manifest), encoding="utf-8")
+def _engine(skill, *, environment=None, secrets=None, audit=None):
+    environment = environment or _Environment()
+    return SkillExecutionEngine(
+        registry=_Registry(skill),
+        environment_manager=environment,
+        secret_store=secrets or _Secrets(),
+        audit_writer=audit or _Audit(),
+    )
 
 
-def _write_runner(skill_dir: Path, script_name: str, source: str) -> None:
-    (skill_dir / script_name).write_text(source, encoding="utf-8")
-
-
-def _manifest_dict(
-    *,
-    name: str = "example-skill",
-    runtime: dict | None = None,
-    capability: dict | None = None,
-    secrets: list[dict] | None = None,
-) -> dict:
-    """A minimal, provider-neutral manifest dict for execution-engine tests."""
+def _context(**extra):
     return {
-        "schema_version": "1.0",
-        "name": name,
-        "description": "A skill used to exercise the execution engine.",
-        "runtime": runtime or {"type": "python_script", "script": "runner.py"},
-        "dependencies": {"python": [], "node": [], "system": []},
-        "secrets": secrets or [],
-        "permissions": [],
-        "capabilities": [
-            capability
-            or {
-                "name": "do_thing",
-                "description": "Does a thing.",
-                "input_schema": {"type": "object", "properties": {}},
-                "execution": {"argv": [], "json_output": False},
-                "permissions": [],
-                "secrets": [],
-                "mutation": False,
-            }
-        ],
+        "mutation_approved": True,
+        "device_id": "device-a",
+        "session_id": "session-a",
+        **extra,
     }
 
 
-async def _build_registry(root: Path) -> LocalSkillsRegistry:
-    registry = LocalSkillsRegistry(skill_roots=[str(root)])
-    await registry.scan_skills()
-    return registry
+@pytest.mark.asyncio
+async def test_bundled_command_runs_when_absent_from_global_path(tmp_path, monkeypatch):
+    skill = _skill(
+        tmp_path,
+        "import json, sys\nprint(json.dumps({'argv': sys.argv[1:]}))\n",
+    )
+    monkeypatch.setenv("PATH", "")
+    engine = _engine(skill)
+
+    envelope = await engine.execute(
+        "skill::demo-skill::run_skill_command",
+        {"argv": ["demo-cli", "hello world", "$(not-a-shell)"]},
+        _context(),
+    )
+
+    assert envelope["ok"] is True
+    assert envelope["result"] == {"argv": ["hello world", "$(not-a-shell)"]}
 
 
 @pytest.mark.asyncio
-class TestSuccessJsonOutput:
-    async def test_json_output_capability_returns_parsed_result(self, tmp_path):
-        skill_dir = tmp_path / "example-skill"
-        _write_skill_md(skill_dir, "example-skill")
-        _write_runner(
-            skill_dir,
-            "runner.py",
-            "import json\nprint(json.dumps({'items': [1, 2, 3]}))\n",
-        )
-        _write_manifest(
-            skill_dir,
-            _manifest_dict(
-                capability={
-                    "name": "list_items",
-                    "description": "List items.",
-                    "input_schema": {"type": "object", "properties": {}},
-                    "execution": {"argv": [], "json_output": True},
-                    "permissions": [],
-                    "secrets": [],
-                    "mutation": False,
-                }
-            ),
-        )
-        registry = await _build_registry(tmp_path)
-        engine = SkillExecutionEngine(
-            registry=registry, secret_store=SkillSecretStore(environ={})
-        )
+async def test_relative_python_script_under_scripts_is_supported(tmp_path):
+    skill = _skill(tmp_path, "print('bin')\n")
+    scripts = skill.bundle_root / "scripts"
+    scripts.mkdir()
+    (scripts / "inspect.py").write_text("print('script-ok')\n", encoding="utf-8")
+    skill.executable_assets["scripts"] = ["scripts/inspect.py"]
+    skill.source_hash = LocalSkillsRegistry._compute_source_hash(skill.bundle_root)
 
-        envelope = await engine.execute("skill::example-skill::list_items", {})
+    envelope = await _engine(skill).execute(
+        "skill::demo-skill::run_skill_command",
+        {"argv": ["scripts/inspect.py"], "cwd": "skill"},
+        _context(),
+    )
 
-        assert envelope["ok"] is True
-        assert envelope["skill"] == "example-skill"
-        assert envelope["capability"] == "list_items"
-        assert envelope["result"] == {"items": [1, 2, 3]}
-        assert isinstance(envelope["duration_ms"], int)
-        # Task 11: every envelope now carries a real audit id (Task 7 left this
-        # as a hardcoded None placeholder pending the audit trail's existence).
-        assert envelope["audit_id"].startswith("skill-exec-")
+    assert envelope["ok"] is True
+    assert envelope["result"] == "script-ok\n"
 
 
 @pytest.mark.asyncio
-class TestSuccessTextOutput:
-    async def test_text_output_capability_returns_raw_stdout(self, tmp_path):
-        skill_dir = tmp_path / "example-skill"
-        _write_skill_md(skill_dir, "example-skill")
-        _write_runner(skill_dir, "runner.py", "print('hello from skill')\n")
-        _write_manifest(
-            skill_dir,
-            _manifest_dict(
-                capability={
-                    "name": "say_hello",
-                    "description": "Say hello.",
-                    "input_schema": {"type": "object", "properties": {}},
-                    "execution": {"argv": [], "json_output": False},
-                    "permissions": [],
-                    "secrets": [],
-                    "mutation": False,
-                }
-            ),
-        )
-        registry = await _build_registry(tmp_path)
-        engine = SkillExecutionEngine(
-            registry=registry, secret_store=SkillSecretStore(environ={})
-        )
+async def test_workspace_cwd_defaults_to_first_configured_workspace_root(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    skill = _skill(
+        tmp_path,
+        "import json, os\nprint(json.dumps({'cwd': os.getcwd()}))\n",
+    )
+    monkeypatch.setattr(client_settings, "workspace_roots", [str(workspace)])
 
-        envelope = await engine.execute("skill::example-skill::say_hello", {})
+    envelope = await _engine(skill).execute(
+        "skill::demo-skill::run_skill_command",
+        {"argv": ["demo-cli"], "cwd": "workspace"},
+        _context(),
+    )
 
-        assert envelope["ok"] is True
-        assert envelope["result"].strip() == "hello from skill"
+    assert envelope["ok"] is True
+    assert Path(envelope["result"]["cwd"]).resolve() == workspace.resolve()
 
 
 @pytest.mark.asyncio
-class TestInvalidArguments:
-    async def test_missing_required_argument_is_rejected_before_spawn(self, tmp_path):
-        skill_dir = tmp_path / "example-skill"
-        _write_skill_md(skill_dir, "example-skill")
-        _write_runner(skill_dir, "runner.py", "raise SystemExit('should never run')\n")
-        _write_manifest(
-            skill_dir,
-            _manifest_dict(
-                capability={
-                    "name": "event_list",
-                    "description": "List events.",
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {"time_min": {"type": "string"}},
-                        "required": ["time_min"],
-                    },
-                    "execution": {"argv": ["{time_min}"], "json_output": False},
-                    "permissions": [],
-                    "secrets": [],
-                    "mutation": False,
-                }
-            ),
-        )
-        registry = await _build_registry(tmp_path)
-        engine = SkillExecutionEngine(
-            registry=registry, secret_store=SkillSecretStore(environ={})
-        )
+async def test_approval_is_required_before_secret_resolution(tmp_path):
+    skill = _skill(tmp_path, "print('no')\n")
+    secrets = _Secrets({"TOKEN": "secret"})
 
-        envelope = await engine.execute("skill::example-skill::event_list", {})
+    envelope = await _engine(skill, secrets=secrets).execute(
+        "skill::demo-skill::run_skill_command",
+        {"argv": ["demo-cli"]},
+        {"mutation_approved": False},
+    )
 
-        assert envelope["ok"] is False
-        assert envelope["error"]["code"] == INVALID_ARGUMENTS
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == PERMISSION_REQUIRED
+    assert secrets.calls == []
 
 
 @pytest.mark.asyncio
-class TestCommandNotFound:
-    async def test_missing_binary_command_is_reported(self, tmp_path):
-        skill_dir = tmp_path / "example-skill"
-        _write_skill_md(skill_dir, "example-skill")
-        _write_manifest(
-            skill_dir,
-            _manifest_dict(
-                runtime={"type": "binary", "command": "totally-missing-cmd-xyz"},
-                capability={
-                    "name": "run_thing",
-                    "description": "Run a thing.",
-                    "input_schema": {"type": "object", "properties": {}},
-                    "execution": {"argv": [], "json_output": False},
-                    "permissions": [],
-                    "secrets": [],
-                    "mutation": False,
-                },
-            ),
-        )
-        registry = await _build_registry(tmp_path)
-        # Bypass readiness's own (separately-tested) binary-missing check so
-        # this test isolates the engine's own COMMAND_NOT_FOUND path.
-        engine = SkillExecutionEngine(
-            registry=registry,
-            secret_store=SkillSecretStore(environ={}),
-            manager=_AlwaysReadyManager(),
-        )
+async def test_live_bundle_tamper_is_rejected_before_secret_resolution(tmp_path):
+    skill = _skill(tmp_path, "print('original')\n")
+    skill.source_hash = LocalSkillsRegistry._compute_source_hash(skill.bundle_root)
+    secrets = _Secrets({"TOKEN": "must-not-reach-tampered-code"})
+    (skill.bundle_root / "bin" / "demo-cli.py").write_text(
+        "import os\nprint(os.environ.get('TOKEN'))\n",
+        encoding="utf-8",
+    )
 
-        envelope = await engine.execute("skill::example-skill::run_thing", {})
+    envelope = await _engine(skill, secrets=secrets).execute(
+        "skill::demo-skill::run_skill_command",
+        {"argv": ["demo-cli"]},
+        _context(),
+    )
 
-        assert envelope["ok"] is False
-        assert envelope["error"]["code"] == COMMAND_NOT_FOUND
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == SKILL_RUNTIME_STALE
+    assert secrets.calls == []
 
 
 @pytest.mark.asyncio
-class TestTimeout:
-    async def test_slow_capability_is_killed_and_reported_as_timeout(self, tmp_path):
-        skill_dir = tmp_path / "example-skill"
-        _write_skill_md(skill_dir, "example-skill")
-        _write_runner(skill_dir, "runner.py", "import time\ntime.sleep(5)\nprint('done')\n")
-        _write_manifest(
-            skill_dir,
-            _manifest_dict(
-                capability={
-                    "name": "slow_thing",
-                    "description": "Take a while.",
-                    "input_schema": {"type": "object", "properties": {}},
-                    "execution": {"argv": [], "json_output": False},
-                    "permissions": [],
-                    "secrets": [],
-                    "mutation": False,
-                }
-            ),
-        )
-        registry = await _build_registry(tmp_path)
-        engine = SkillExecutionEngine(
-            registry=registry, secret_store=SkillSecretStore(environ={})
-        )
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"argv": "demo-cli --help"},
+        {"argv": []},
+        {"argv": ["demo-cli"], "cwd": "outside"},
+        {"argv": ["demo-cli"], "extra": True},
+    ],
+)
+async def test_fixed_command_schema_rejects_invalid_arguments(tmp_path, arguments):
+    skill = _skill(tmp_path, "print('no')\n")
 
-        envelope = await engine.execute(
-            "skill::example-skill::slow_thing", {}, {"timeout_seconds": 1}
-        )
+    envelope = await _engine(skill).execute(
+        "skill::demo-skill::run_skill_command",
+        arguments,
+        _context(),
+    )
 
-        assert envelope["ok"] is False
-        assert envelope["error"]["code"] == EXECUTION_TIMEOUT
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == INVALID_ARGUMENTS
 
 
 @pytest.mark.asyncio
-class TestOutputTooLarge:
-    async def test_oversized_stdout_is_rejected(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(execution_module, "MAX_OUTPUT_BYTES", 16)
-        skill_dir = tmp_path / "example-skill"
-        _write_skill_md(skill_dir, "example-skill")
-        _write_runner(skill_dir, "runner.py", "print('x' * 1000)\n")
-        _write_manifest(
-            skill_dir,
-            _manifest_dict(
-                capability={
-                    "name": "big_output",
-                    "description": "Print a lot.",
-                    "input_schema": {"type": "object", "properties": {}},
-                    "execution": {"argv": [], "json_output": False},
-                    "permissions": [],
-                    "secrets": [],
-                    "mutation": False,
-                }
-            ),
-        )
-        registry = await _build_registry(tmp_path)
-        engine = SkillExecutionEngine(
-            registry=registry, secret_store=SkillSecretStore(environ={})
-        )
+async def test_system_command_and_path_traversal_are_not_owned_commands(tmp_path):
+    skill = _skill(tmp_path, "print('no')\n")
+    engine = _engine(skill)
 
-        envelope = await engine.execute("skill::example-skill::big_output", {})
+    system = await engine.execute(
+        "skill::demo-skill::run_skill_command",
+        {"argv": [Path(sys.executable).name]},
+        _context(),
+    )
+    traversal = await engine.execute(
+        "skill::demo-skill::run_skill_command",
+        {"argv": ["../outside.py"]},
+        _context(),
+    )
 
-        assert envelope["ok"] is False
-        assert envelope["error"]["code"] == OUTPUT_TOO_LARGE
+    assert system["error"]["code"] == COMMAND_NOT_FOUND
+    assert traversal["error"]["code"] == COMMAND_NOT_FOUND
 
 
 @pytest.mark.asyncio
-class TestNonJsonOutput:
-    async def test_declared_json_output_that_is_not_json_is_rejected(self, tmp_path):
-        skill_dir = tmp_path / "example-skill"
-        _write_skill_md(skill_dir, "example-skill")
-        _write_runner(skill_dir, "runner.py", "print('not json')\n")
-        _write_manifest(
-            skill_dir,
-            _manifest_dict(
-                capability={
-                    "name": "bad_json",
-                    "description": "Claims JSON, isn't.",
-                    "input_schema": {"type": "object", "properties": {}},
-                    "execution": {"argv": [], "json_output": True},
-                    "permissions": [],
-                    "secrets": [],
-                    "mutation": False,
-                }
-            ),
-        )
-        registry = await _build_registry(tmp_path)
-        engine = SkillExecutionEngine(
-            registry=registry, secret_store=SkillSecretStore(environ={})
-        )
+async def test_child_receives_scoped_roots_path_and_only_own_secrets(tmp_path, monkeypatch):
+    skill = _skill(
+        tmp_path,
+        """
+import json, os
+print(json.dumps({
+    'root': os.environ.get('SKILL_ROOT'),
+    'runtime': os.environ.get('SKILL_RUNTIME_ROOT'),
+    'path0': os.environ.get('PATH', '').split(os.pathsep)[0],
+    'path': os.environ.get('PATH', ''),
+    'token': os.environ.get('DEMO_TOKEN'),
+    'foreign': os.environ.get('FOREIGN_TOKEN'),
+}))
+""".strip(),
+    )
+    secrets = _Secrets({"DEMO_TOKEN": "very-secret"})
+    monkeypatch.setenv("FOREIGN_TOKEN", "must-not-leak")
+    global_path = str(tmp_path / "global-bin")
+    monkeypatch.setenv("PATH", global_path)
 
-        envelope = await engine.execute("skill::example-skill::bad_json", {})
+    envelope = await _engine(skill, secrets=secrets).execute(
+        "skill::demo-skill::run_skill_command",
+        {"argv": ["demo-cli"]},
+        _context(),
+    )
 
-        assert envelope["ok"] is False
-        assert envelope["error"]["code"] == NON_JSON_OUTPUT
-
-
-@pytest.mark.asyncio
-class TestPermissionBlockedMutation:
-    async def test_mutation_capability_is_blocked_by_default_policy(self, tmp_path):
-        skill_dir = tmp_path / "example-skill"
-        _write_skill_md(skill_dir, "example-skill")
-        _write_runner(skill_dir, "runner.py", "raise SystemExit('should never run')\n")
-        _write_manifest(
-            skill_dir,
-            _manifest_dict(
-                capability={
-                    "name": "delete_thing",
-                    "description": "Delete a thing.",
-                    "input_schema": {"type": "object", "properties": {"target": {}}},
-                    "execution": {"argv": [], "json_output": False},
-                    "permissions": [],
-                    "secrets": [],
-                    "mutation": True,
-                }
-            ),
-        )
-        registry = await _build_registry(tmp_path)
-        # Default engine policy: allow_mutation=False.
-        engine = SkillExecutionEngine(
-            registry=registry, secret_store=SkillSecretStore(environ={})
-        )
-        sensitive_value = "super-secret-should-not-appear"
-
-        envelope = await engine.execute(
-            "skill::example-skill::delete_thing", {"target": sensitive_value}
-        )
-
-        assert envelope["ok"] is False
-        assert envelope["error"]["code"] == PERMISSION_REQUIRED
-        serialized = json.dumps(envelope)
-        assert sensitive_value not in serialized
+    assert envelope["ok"] is True
+    assert envelope["result"]["root"] == str(skill.bundle_root)
+    assert envelope["result"]["runtime"] == ""
+    assert envelope["result"]["path0"] == str(skill.bundle_root / "bin")
+    assert global_path not in envelope["result"]["path"]
+    assert envelope["result"]["token"] == "<redacted>"
+    assert envelope["result"]["foreign"] is None
 
 
 @pytest.mark.asyncio
-class TestMissingSecret:
-    async def test_missing_required_secret_is_reported(self, tmp_path):
-        skill_dir = tmp_path / "example-skill"
-        _write_skill_md(skill_dir, "example-skill")
-        _write_runner(skill_dir, "runner.py", "raise SystemExit('should never run')\n")
-        _write_manifest(
-            skill_dir,
-            _manifest_dict(
-                capability={
-                    "name": "call_api",
-                    "description": "Call an API.",
-                    "input_schema": {"type": "object", "properties": {}},
-                    "execution": {"argv": [], "json_output": False},
-                    "permissions": [],
-                    "secrets": ["API_TOKEN"],
-                    "mutation": False,
-                }
-            ),
-        )
-        registry = await _build_registry(tmp_path)
-        # Bypass readiness's own (separately-tested) missing-secret check so
-        # this test isolates the engine's own MISSING_SECRET resolution path.
-        engine = SkillExecutionEngine(
-            registry=registry,
-            secret_store=SkillSecretStore(environ={}),
-            manager=_AlwaysReadyManager(),
-        )
+async def test_runtime_command_directory_is_resolved_without_global_path(tmp_path):
+    skill = _skill(tmp_path, "print('bin')\n")
+    skill.executable_assets = {"bin": [], "scripts": [], "python_project": True}
+    runtime_bin = tmp_path / "runtime" / "Scripts"
+    runtime_bin.mkdir(parents=True)
+    (runtime_bin / "runtime-cli.py").write_text("print('runtime-ok')\n", encoding="utf-8")
+    environment = _Environment(runtime_bin, Path(sys.executable))
 
-        envelope = await engine.execute("skill::example-skill::call_api", {})
+    envelope = await _engine(skill, environment=environment).execute(
+        "skill::demo-skill::run_skill_command",
+        {"argv": ["runtime-cli"]},
+        _context(),
+    )
 
-        assert envelope["ok"] is False
-        assert envelope["error"]["code"] == MISSING_SECRET
-        assert envelope["error"]["repair"] == {"type": "configure_secret", "secret": "API_TOKEN"}
+    assert envelope["ok"] is True
+    assert envelope["result"] == "runtime-ok\n"
 
 
 @pytest.mark.asyncio
-class TestSecretRedaction:
-    async def test_secret_reaches_child_but_never_appears_in_the_envelope(self, tmp_path):
-        skill_dir = tmp_path / "example-skill"
-        _write_skill_md(skill_dir, "example-skill")
-        _write_runner(
-            skill_dir,
-            "runner.py",
-            "import os\n"
-            "token = os.environ.get('API_TOKEN', '')\n"
-            "print(token)\n"
-            "print('received-length:' + str(len(token)))\n",
-        )
-        _write_manifest(
-            skill_dir,
-            _manifest_dict(
-                capability={
-                    "name": "echo_secret",
-                    "description": "Echo the injected secret.",
-                    "input_schema": {"type": "object", "properties": {}},
-                    "execution": {"argv": [], "json_output": False},
-                    "permissions": [],
-                    "secrets": ["API_TOKEN"],
-                    "mutation": False,
-                }
-            ),
-        )
-        registry = await _build_registry(tmp_path)
-        secret_value = "super-secret-value-123"
-        secret_store = SkillSecretStore(environ={"API_TOKEN": secret_value})
-        # Give the readiness manager the SAME secret store, so readiness
-        # legitimately sees the secret as present (this is not a stub --
-        # the secret really is configured end to end).
-        manager = SkillRuntimeManager(secret_store=secret_store)
-        engine = SkillExecutionEngine(
-            registry=registry, secret_store=secret_store, manager=manager
-        )
+async def test_prepared_runtime_rejects_undeclared_environment_commands(tmp_path):
+    skill = _skill(tmp_path, "print('bin')\n")
+    skill.executable_assets = {"bin": [], "scripts": [], "python_project": True}
+    runtime_bin = tmp_path / "runtime" / "Scripts"
+    runtime_bin.mkdir(parents=True)
+    (runtime_bin / "runtime-cli.py").write_text("print('owned')\n", encoding="utf-8")
+    (runtime_bin / "pip.py").write_text("print('not owned')\n", encoding="utf-8")
+    environment = _Environment(runtime_bin, Path(sys.executable))
 
-        envelope = await engine.execute("skill::example-skill::echo_secret", {})
+    envelope = await _engine(skill, environment=environment).execute(
+        "skill::demo-skill::run_skill_command",
+        {"argv": ["pip"]},
+        _context(),
+    )
 
-        assert envelope["ok"] is True
-        serialized = json.dumps(envelope)
-        assert secret_value not in serialized
-        assert f"received-length:{len(secret_value)}" in envelope["stdout"]
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == COMMAND_NOT_FOUND
 
 
 @pytest.mark.asyncio
-class TestArgvPlaceholderRendering:
-    async def test_placeholder_value_is_a_discrete_argv_element(self, tmp_path):
-        skill_dir = tmp_path / "example-skill"
-        _write_skill_md(skill_dir, "example-skill")
-        _write_runner(
-            skill_dir,
-            "runner.py",
-            "import json\nimport sys\nprint(json.dumps(sys.argv[1:]))\n",
-        )
-        _write_manifest(
-            skill_dir,
-            _manifest_dict(
-                capability={
-                    "name": "echo_argv",
-                    "description": "Echo argv.",
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {"name": {"type": "string"}},
-                        "required": ["name"],
-                    },
-                    "execution": {"argv": ["--name", "{name}"], "json_output": True},
-                    "permissions": [],
-                    "secrets": [],
-                    "mutation": False,
-                }
-            ),
-        )
-        registry = await _build_registry(tmp_path)
-        engine = SkillExecutionEngine(
-            registry=registry, secret_store=SkillSecretStore(environ={})
-        )
+async def test_timeout_is_normalized(tmp_path):
+    skill = _skill(tmp_path, "import time\ntime.sleep(2)\n")
 
-        envelope = await engine.execute(
-            "skill::example-skill::echo_argv", {"name": "hello world"}
-        )
+    envelope = await _engine(skill).execute(
+        "skill::demo-skill::run_skill_command",
+        {"argv": ["demo-cli"]},
+        _context(timeout_seconds=0.05),
+    )
 
-        assert envelope["ok"] is True
-        # Exactly two argv elements -- proves "hello world" arrived as ONE
-        # element, never split by a shell into ["--name", "hello", "world"].
-        assert envelope["result"] == ["--name", "hello world"]
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == EXECUTION_TIMEOUT
 
 
 @pytest.mark.asyncio
-class TestPathEscape:
-    async def test_script_path_escaping_skill_dir_is_refused(self, tmp_path):
-        skill_dir = tmp_path / "example-skill"
-        _write_skill_md(skill_dir, "example-skill")
-        marker_path = tmp_path / "evil_ran.marker"
-        (tmp_path / "evil.py").write_text(
-            f"open(r'{marker_path}', 'w').write('pwned')\n", encoding="utf-8"
-        )
-        _write_manifest(
-            skill_dir,
-            _manifest_dict(
-                runtime={"type": "python_script", "script": "../evil.py"},
-                capability={
-                    "name": "run_evil",
-                    "description": "Attempt to escape the skill dir.",
-                    "input_schema": {"type": "object", "properties": {}},
-                    "execution": {"argv": [], "json_output": False},
-                    "permissions": [],
-                    "secrets": [],
-                    "mutation": False,
-                },
-            ),
-        )
-        registry = await _build_registry(tmp_path)
-        engine = SkillExecutionEngine(
-            registry=registry, secret_store=SkillSecretStore(environ={})
-        )
+async def test_timeout_includes_process_wait_after_child_closes_output(tmp_path):
+    skill = _skill(
+        tmp_path,
+        "import os, time\nos.close(1)\nos.close(2)\ntime.sleep(2)\n",
+    )
+    started = time.monotonic()
 
-        envelope = await engine.execute("skill::example-skill::run_evil", {})
+    envelope = await _engine(skill).execute(
+        "skill::demo-skill::run_skill_command",
+        {"argv": ["demo-cli"]},
+        _context(timeout_seconds=0.05),
+    )
 
-        assert envelope["ok"] is False
-        assert envelope["error"]["code"] == RUNTIME_ERROR
-        assert not marker_path.exists()
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == EXECUTION_TIMEOUT
+    assert time.monotonic() - started < 1.0
 
 
 @pytest.mark.asyncio
-class TestScopedEnvironment:
-    async def test_child_env_excludes_unrelated_process_env_but_keeps_path(
-        self, tmp_path, monkeypatch
-    ):
-        # A capability that declares NO secrets and dumps its whole os.environ
-        # must NOT see an unrelated env var (e.g. another skill's env-backed
-        # secret) from the sidecar process -- only allow-listed infra vars.
-        monkeypatch.setenv("OTHER_SKILL_SECRET_XYZ", "leak-me-if-you-can")
-        skill_dir = tmp_path / "example-skill"
-        _write_skill_md(skill_dir, "example-skill")
-        _write_runner(
-            skill_dir,
-            "runner.py",
-            "import json, os\nprint(json.dumps(dict(os.environ)))\n",
-        )
-        _write_manifest(
-            skill_dir,
-            _manifest_dict(
-                capability={
-                    "name": "dump_env",
-                    "description": "Dump the environment.",
-                    "input_schema": {"type": "object", "properties": {}},
-                    "execution": {"argv": [], "json_output": True},
-                    "permissions": [],
-                    "secrets": [],
-                    "mutation": False,
-                }
-            ),
-        )
-        registry = await _build_registry(tmp_path)
-        engine = SkillExecutionEngine(registry=registry, secret_store=SkillSecretStore(environ={}))
+async def test_timeout_terminates_descendant_processes(tmp_path):
+    marker = tmp_path / "descendant-survived.txt"
+    child_code = (
+        "import time; from pathlib import Path; "
+        f"time.sleep(0.4); Path({str(marker)!r}).write_text('survived')"
+    )
+    parent_code = (
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+        "time.sleep(2)\n"
+    )
+    skill = _skill(tmp_path, parent_code)
 
-        envelope = await engine.execute("skill::example-skill::dump_env", {})
+    envelope = await _engine(skill).execute(
+        "skill::demo-skill::run_skill_command",
+        {"argv": ["demo-cli"]},
+        _context(timeout_seconds=0.05),
+    )
+    await asyncio.sleep(0.6)
 
-        assert envelope["ok"] is True
-        child_env = envelope["result"]
-        assert "OTHER_SKILL_SECRET_XYZ" not in child_env
-        assert "leak-me-if-you-can" not in json.dumps(envelope)
-        assert "PATH" in child_env  # infra var still passes through
+    assert envelope["error"]["code"] == EXECUTION_TIMEOUT
+    assert not marker.exists()
 
 
 @pytest.mark.asyncio
-class TestSecretRedactionSubstringCollision:
-    async def test_shorter_secret_substring_of_longer_is_fully_redacted(self, tmp_path):
-        # One secret value is a prefix of another; redaction must strip both
-        # completely regardless of iteration order (longest-first).
-        short_value = "ZZSECRETZZ"
-        long_value = "ZZSECRETZZ_EXTRA_TAIL"
-        secret_store = SkillSecretStore(
-            environ={"SHORT_TOKEN": short_value, "LONG_TOKEN": long_value}
-        )
-        skill_dir = tmp_path / "example-skill"
-        _write_skill_md(skill_dir, "example-skill")
-        _write_runner(
-            skill_dir,
-            "runner.py",
-            "import os\nprint(os.environ['SHORT_TOKEN'])\nprint(os.environ['LONG_TOKEN'])\n",
-        )
-        _write_manifest(
-            skill_dir,
-            _manifest_dict(
-                secrets=[
-                    {"name": "SHORT_TOKEN", "required": True},
-                    {"name": "LONG_TOKEN", "required": True},
-                ],
-                capability={
-                    "name": "echo_secrets",
-                    "description": "Echo both secrets.",
-                    "input_schema": {"type": "object", "properties": {}},
-                    "execution": {"argv": [], "json_output": False},
-                    "permissions": [],
-                    "secrets": ["SHORT_TOKEN", "LONG_TOKEN"],
-                    "mutation": False,
-                },
-            ),
-        )
-        registry = await _build_registry(tmp_path)
-        engine = SkillExecutionEngine(registry=registry, secret_store=secret_store)
+async def test_timeout_terminates_descendant_after_parent_already_exited(tmp_path):
+    marker = tmp_path / "orphan-survived.txt"
+    child_code = (
+        "import time; from pathlib import Path; "
+        f"time.sleep(0.4); Path({str(marker)!r}).write_text('survived')"
+    )
+    parent_code = (
+        "import subprocess, sys\n"
+        f"subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+    )
+    skill = _skill(tmp_path, parent_code)
 
-        envelope = await engine.execute("skill::example-skill::echo_secrets", {})
+    envelope = await _engine(skill).execute(
+        "skill::demo-skill::run_skill_command",
+        {"argv": ["demo-cli"]},
+        _context(timeout_seconds=0.05),
+    )
+    await asyncio.sleep(0.6)
 
-        serialized = json.dumps(envelope)
-        assert short_value not in serialized
-        assert long_value not in serialized
-        # The tail that would leak if the shorter value were replaced first.
-        assert "_EXTRA_TAIL" not in serialized
+    assert envelope["error"]["code"] == EXECUTION_TIMEOUT
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process-containment protocol")
+@pytest.mark.asyncio
+async def test_windows_skill_command_is_released_only_after_job_attachment(
+    tmp_path, monkeypatch
+):
+    events = []
+
+    class FakeStdin:
+        def write(self, payload):
+            events.append(("write", json.loads(payload.decode("utf-8"))))
+
+        async def drain(self):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeProcess:
+        pid = 123
+        stdin = FakeStdin()
+
+    async def fake_spawn(*args, **kwargs):
+        events.append(("spawn", list(args), kwargs))
+        return FakeProcess()
+
+    def fake_attach(pid):
+        events.append(("attach", pid))
+        return _FakeJob()
+
+    monkeypatch.setattr(execution_module.asyncio, "create_subprocess_exec", fake_spawn)
+    monkeypatch.setattr(execution_module._WindowsKillJob, "attach", fake_attach)
+
+    process, job = await SkillExecutionEngine._spawn_contained_process(
+        [r"C:\skill\fast.exe", "arg"],
+        tmp_path,
+        {"PATH": ""},
+    )
+
+    assert process.pid == 123
+    assert isinstance(job, _FakeJob)
+    assert [event[0] for event in events] == ["spawn", "attach", "write"]
+    assert r"C:\skill\fast.exe" not in events[0][1]
+    assert events[2][1] == [r"C:\skill\fast.exe", "arg"]
 
 
 @pytest.mark.asyncio
-class TestManagerSharesSecretStore:
-    async def test_injected_secret_store_is_used_by_readiness(self, tmp_path):
-        # Constructing the engine with only a custom secret_store (no manager)
-        # must make readiness use that SAME store -- otherwise a required
-        # secret present only in the injected store would make readiness
-        # report not_ready and the capability would fail with SKILL_NOT_READY.
-        secret_store = SkillSecretStore(environ={"REQUIRED_TOKEN": "present"})
-        skill_dir = tmp_path / "example-skill"
-        _write_skill_md(skill_dir, "example-skill")
-        _write_runner(skill_dir, "runner.py", "print('ok')\n")
-        _write_manifest(
-            skill_dir,
-            _manifest_dict(
-                secrets=[{"name": "REQUIRED_TOKEN", "required": True}],
-                capability={
-                    "name": "needs_secret",
-                    "description": "Needs a secret.",
-                    "input_schema": {"type": "object", "properties": {}},
-                    "execution": {"argv": [], "json_output": False},
-                    "permissions": [],
-                    "secrets": ["REQUIRED_TOKEN"],
-                    "mutation": False,
-                },
-            ),
-        )
-        registry = await _build_registry(tmp_path)
-        engine = SkillExecutionEngine(registry=registry, secret_store=secret_store)
+async def test_output_limit_is_enforced(tmp_path, monkeypatch):
+    skill = _skill(tmp_path, "print('x' * 100)\n")
+    monkeypatch.setattr(execution_module, "MAX_OUTPUT_BYTES", 20)
 
-        envelope = await engine.execute("skill::example-skill::needs_secret", {})
+    envelope = await _engine(skill).execute(
+        "skill::demo-skill::run_skill_command",
+        {"argv": ["demo-cli"]},
+        _context(),
+    )
 
-        assert envelope["ok"] is True
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == OUTPUT_TOO_LARGE
 
 
-class TestClampTimeout:
-    def test_clamp_timeout_bounds_and_fallbacks(self):
-        default = float(execution_module.DEFAULT_TIMEOUT_SECONDS)
-        maximum = float(execution_module.MAX_TIMEOUT_SECONDS)
-        clamp = SkillExecutionEngine._clamp_timeout
+@pytest.mark.asyncio
+async def test_audit_record_is_bound_to_device_session_and_fixed_capability(tmp_path):
+    skill = _skill(tmp_path, "print('ok')\n")
+    audit = _Audit()
 
-        assert clamp(None) == default
-        assert clamp(0) == default
-        assert clamp(-5) == default
-        assert clamp("30") == default  # non-numeric
-        assert clamp(True) == default  # bool is not a real timeout
-        assert clamp(10) == 10.0
-        assert clamp(10_000) == maximum
-        assert clamp(float("nan")) == default  # NaN must not slip through min()
-        assert clamp(float("inf")) == default
+    envelope = await _engine(skill, audit=audit).execute(
+        "skill::demo-skill::run_skill_command",
+        {"argv": ["demo-cli"]},
+        _context(),
+    )
+
+    assert envelope["ok"] is True
+    assert audit.records[0]["skill"] == "demo-skill"
+    assert audit.records[0]["capability"] == "run_skill_command"
+    assert audit.records[0]["device_id"] == "device-a"
+    assert audit.records[0]["session_id"] == "session-a"

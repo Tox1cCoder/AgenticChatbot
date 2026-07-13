@@ -1,9 +1,4 @@
-"""Skill runtime: readiness evaluation ahead of skill execution.
-
-Later tasks in this refactor extend this package with installation (Task 4),
-a capability-to-client-tool catalog (Task 5), permission enforcement
-(Task 6), and execution (Task 7).
-"""
+"""Device-local command runtime for standard ``SKILL.md`` bundles."""
 
 from client_backend.services.skill_runtime.manager import (
     REPAIR_HINT_TYPES,

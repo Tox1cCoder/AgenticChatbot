@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from app.core.config import settings
 from app.services.client_device_service import ClientDeviceService
 
+from .client_runtime_tools import get_exposed_client_tool_name
 from .skill_resolver import (
     get_available_skill_summaries as get_resolved_skill_summaries,
 )
@@ -170,9 +171,24 @@ def create_activate_skill_tool(
 
         result = response.get("result")
         if isinstance(result, str):
-            return result
-        if isinstance(result, dict) and isinstance(result.get("content"), str):
-            return str(result["content"])
-        return json.dumps(result, indent=2, ensure_ascii=False, default=str)
+            content = result
+        elif isinstance(result, dict) and isinstance(result.get("content"), str):
+            content = str(result["content"])
+        else:
+            content = json.dumps(result, indent=2, ensure_ascii=False, default=str)
+
+        qualified_id = f"skill::{resolved_skill.name}::run_skill_command"
+        exposed_name = get_exposed_client_tool_name(
+            session.tool_catalog or {},
+            qualified_id,
+        )
+        if exposed_name:
+            content += (
+                "\n\n── Exact command tool binding ──\n"
+                f"The exact model-callable tool is `{exposed_name}`. "
+                "Call this tool with an argv array; do not call the internal "
+                f"qualified id `{qualified_id}` directly."
+            )
+        return content
 
     return activate_skill

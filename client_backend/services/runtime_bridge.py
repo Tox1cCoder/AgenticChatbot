@@ -28,26 +28,6 @@ from app.schemas.runtime_protocol import (
 )
 from client_backend import __version__
 from client_backend.core.config import client_settings
-from client_backend.services.skill_runtime.execution import SkillExecutionEngine
-from client_backend.services.skill_runtime.manager import SkillRuntimeManager
-from client_backend.services.skill_runtime.permissions import SkillPermissionPolicy
-from shared.skills.errors import SkillRuntimeError
-
-
-def _make_tool_instance_id(
-    device_id: str,
-    session_id: str,
-    qualified_tool_id: str,
-    catalog_version: int,
-) -> str:
-    """
-    Compute the opaque tool capability identifier that the server will echo
-    back in ToolDispatchRequest for sidecar-side validation.
-    """
-    composite = f"{device_id}:{session_id}:{qualified_tool_id}:{catalog_version}"
-    return hashlib.sha256(composite.encode()).hexdigest()[:16]
-
-
 from client_backend.core.logging import get_logger
 from client_backend.core.security import generate_device_identifier
 from client_backend.schemas.runtime import (
@@ -65,6 +45,27 @@ from client_backend.services.local_skills_registry import (
     initialize_skills_registry,
 )
 from client_backend.services.server_api import ServerAPIClient, get_server_client
+from client_backend.services.skill_runtime.execution import SkillExecutionEngine
+from client_backend.services.skill_runtime.manager import SkillRuntimeManager
+from shared.skills.errors import SkillRuntimeError
+
+
+def _make_tool_instance_id(
+    device_id: str,
+    session_id: str,
+    qualified_tool_id: str,
+    catalog_version: int,
+    source_hash: str = "",
+) -> str:
+    """
+    Compute the opaque tool capability identifier that the server will echo
+    back in ToolDispatchRequest for sidecar-side validation.
+    """
+    composite = (
+        f"{device_id}:{session_id}:{qualified_tool_id}:{catalog_version}:{source_hash}"
+    )
+    return hashlib.sha256(composite.encode()).hexdigest()[:16]
+
 
 logger = get_logger(__name__)
 
@@ -488,7 +489,8 @@ class RuntimeBridgeService:
             and request.expected_catalog_version != self._tool_catalog_version
         ):
             return (
-                f"Catalog version mismatch: server expects version={request.expected_catalog_version} "
+                "Catalog version mismatch: server expects "
+                f"version={request.expected_catalog_version} "
                 f"but current version is {self._tool_catalog_version}. "
                 "The tool catalog has changed; re-sync and retry."
             )
@@ -502,11 +504,23 @@ class RuntimeBridgeService:
                 )
             return None
 
+        if qualified_id.startswith("skill::") and (
+            not request.expected_session_id
+            or request.expected_catalog_version is None
+            or not request.tool_instance_id
+        ):
+            return (
+                "Skill command binding is incomplete: session, catalog version, "
+                "and tool instance are all required. Search the active device "
+                "catalog again and retry."
+            )
+
         catalog_entry = self._current_tool_catalog.get(qualified_id)
 
         if catalog_entry is None:
             return (
-                f"Unknown tool: qualified_tool_id={qualified_id!r} is not in the current tool catalog. "
+                f"Unknown tool: qualified_tool_id={qualified_id!r} is not in the "
+                "current tool catalog. "
                 "The tool may have been removed; re-sync and retry."
             )
 
@@ -599,20 +613,11 @@ class RuntimeBridgeService:
             "device_id": self._device_id,
             "session_id": self._session_id,
             "timeout_seconds": timeout_seconds,
+            "mutation_approved": mutation_approved,
         }
-        # The server only sets mutation_approved once the HITL gate has
-        # approved (or pre-granted) this specific mutation call; the engine's
-        # own default policy unconditionally blocks mutation, so this is the
-        # sidecar-side hand-off point for an approved skill mutation.
-        engine = (
-            SkillExecutionEngine(
-                permission_policy=SkillPermissionPolicy(
-                    granted=frozenset({"*"}), allow_mutation=True
-                )
-            )
-            if mutation_approved
-            else SkillExecutionEngine()
-        )
+        # The engine independently requires this exact approval bit before it
+        # resolves secrets or starts the skill-owned process.
+        engine = SkillExecutionEngine()
         envelope = await engine.execute(qualified_tool_id, arguments, context)
 
         if not envelope.get("ok"):
@@ -640,7 +645,35 @@ class RuntimeBridgeService:
         if not skill.enabled:
             raise ValueError(f"Skill '{skill_name}' is disabled on this device.")
 
-        return f"── Skill: {skill.name} ──\n\n{skill.content}\n\n── End Skill: {skill.name} ──"
+        readiness = SkillRuntimeManager().evaluate_readiness(skill)
+        if readiness.status == "ready":
+            runtime_footer = (
+                f"Runtime status: ready\n"
+                f"Command binding: `skill::{skill.name}::run_skill_command`.\n"
+                "The activation service appends the exact model-callable tool name; "
+                "use that exposed name with an argv array, not this internal binding id.\n"
+                "Do not use Desktop Commander or search for another shell executor "
+                "for this skill's commands."
+            )
+        elif readiness.status == "not_ready":
+            runtime_footer = (
+                f"Runtime status: {readiness.setup_status}\n"
+                f"Repair hints: {json.dumps(readiness.repair_hints)}\n"
+                "Do not guess npx, pip, or another package-manager command. "
+                "Ask the user to approve this skill's local setup."
+            )
+        else:
+            runtime_footer = (
+                "Runtime status: instruction_only\n"
+                "This skill has no bundled command. Follow its instructions without "
+                "inventing an executable."
+            )
+
+        return (
+            f"── Skill: {skill.name} ──\n\n{skill.content}\n\n"
+            f"── Device-local skill runtime ──\n{runtime_footer}\n\n"
+            f"── End Skill: {skill.name} ──"
+        )
 
     async def _build_tool_catalog(self) -> dict[str, Any]:
         mcp_catalog = get_mcp_manager().get_tool_catalog()
@@ -662,6 +695,7 @@ class RuntimeBridgeService:
                     session_id,
                     qid,
                     next_catalog_version,
+                    str(entry.get("source_hash") or ""),
                 )
 
         return {
@@ -674,25 +708,19 @@ class RuntimeBridgeService:
 
     @staticmethod
     def _collect_skill_capability_tools() -> list[dict[str, Any]]:
-        """Build catalog entries for ready skills' capabilities.
+        """Build the single fixed command entry for every ready skill.
 
-        Only skills whose readiness evaluates to "ready" contribute entries
-        (see SkillRuntimeManager.capability_catalog_entries). Any failure
-        while collecting skills (registry not initialized, a bad manifest,
-        etc.) is logged and swallowed here — a skill-runtime hiccup must
-        never break MCP tool catalog sync.
+        A skill-runtime hiccup must never break MCP tool catalog sync.
         """
         try:
             skill_manager = SkillRuntimeManager()
             skill_tools: list[dict[str, Any]] = []
             for skill in get_skills_registry().get_enabled_skills():
-                if skill.manifest is None:
-                    continue
-                readiness = skill_manager.evaluate_readiness(skill.manifest, skill.manifest_error)
+                readiness = skill_manager.evaluate_readiness(skill)
                 if readiness.status != "ready":
                     continue
                 skill_tools.extend(
-                    skill_manager.capability_catalog_entries(skill.name, skill.manifest, readiness)
+                    skill_manager.capability_catalog_entries(skill, readiness)
                 )
             return skill_tools
         except Exception:

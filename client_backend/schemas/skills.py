@@ -70,12 +70,26 @@ class SkillToggleResponse(BaseModel):
 class SkillInstallRequest(BaseModel):
     """Request to install a local skill bundle directory.
 
-    Provider-neutral by design: a bundle is just a directory containing
-    ``SKILL.md`` and an optional ``skill.json``, so this request never names
-    a specific integration (e.g. a calendar provider).
+    A bundle is a directory containing exactly one discoverable ``SKILL.md``
+    and any executable assets that skill owns.
     """
 
     source_path: str
+    expected_source_hash: str | None = None
+    approve_setup: bool = False
+
+
+class SkillInstallPreviewRequest(BaseModel):
+    """Request a hash-bound, path-safe installation preview."""
+
+    source_path: str
+
+
+class SkillSetupRequest(BaseModel):
+    """Approve preparation of a Python runtime for one discovered skill."""
+
+    expected_source_hash: str
+    approve_setup: bool = False
 
 
 class SkillUninstallRequest(BaseModel):
@@ -85,11 +99,7 @@ class SkillUninstallRequest(BaseModel):
 
 
 class SkillSecretSetRequest(BaseModel):
-    """Request to set a named secret value for a skill.
-
-    Provider-neutral: the secret name comes from the skill's own manifest
-    (``skill.json``'s ``secrets`` list), never a hardcoded integration name.
-    """
+    """Set one environment binding for the skill named in the route."""
 
     name: str
     value: str

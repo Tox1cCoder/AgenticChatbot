@@ -8,8 +8,10 @@ from client_backend.api.common import make_api_response
 from client_backend.core.auth import require_local_session
 from client_backend.core.security import LocalSessionPayload
 from client_backend.schemas.skills import (
+    SkillInstallPreviewRequest,
     SkillInstallRequest,
     SkillSecretSetRequest,
+    SkillSetupRequest,
     SkillUninstallRequest,
 )
 from client_backend.services.local_skills_registry import get_skills_registry
@@ -22,9 +24,8 @@ from shared.skills.errors import SKILL_INSTALL_CONFLICT, SKILL_INSTALL_INVALID, 
 router = APIRouter(prefix="/skills", tags=["skills"])
 
 # Status codes for install/uninstall failures that aren't the generic 400.
-# Every other SkillRuntimeError code (e.g. UNSAFE_BUNDLE_PATH,
-# SKILL_MANIFEST_INVALID) is a client-supplied-bad-input case, so 400 is the
-# correct default rather than enumerating each one here.
+# Every other installation error is a client-supplied-bad-input case, so 400
+# is the correct default rather than enumerating each one here.
 _INSTALL_ERROR_STATUS_OVERRIDES = {SKILL_INSTALL_CONFLICT: 409}
 _UNINSTALL_ERROR_STATUS_OVERRIDES = {SKILL_INSTALL_INVALID: 404}
 
@@ -46,6 +47,7 @@ def _skill_summary(skill) -> dict:
         "description": skill.description,
         "enabled": skill.enabled,
         "folderPath": str(skill.path.parent),
+        "sourceHash": getattr(skill, "source_hash", None),
         "commandCapable": readiness.status == "ready",
         "runtimeStatus": readiness.status,
     }
@@ -91,7 +93,11 @@ async def install_skill(
     """Install a local skill bundle directory into the profile skill root."""
     installer = get_skill_installer()
     try:
-        result = await installer.install(payload.source_path)
+        result = await installer.install(
+            payload.source_path,
+            expected_source_hash=payload.expected_source_hash,
+            approve_setup=payload.approve_setup,
+        )
     except SkillRuntimeError as exc:
         status_code = _INSTALL_ERROR_STATUS_OVERRIDES.get(exc.code, 400)
         raise HTTPException(
@@ -105,6 +111,51 @@ async def install_skill(
     return make_api_response(
         success=True,
         message=f"Skill bundle '{result['name']}' installed",
+        data=result,
+    )
+
+
+@router.post("/install/preview")
+async def preview_skill_install(
+    payload: SkillInstallPreviewRequest,
+    _session: LocalSessionPayload = Depends(require_local_session),
+):
+    """Inspect a one-skill bundle without copying or executing it."""
+    try:
+        result = await get_skill_installer().preview(payload.source_path)
+    except SkillRuntimeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+    return make_api_response(
+        success=True,
+        message=f"Skill bundle '{result['name']}' previewed",
+        data=result,
+    )
+
+
+@router.post("/{name}/setup")
+async def setup_skill(
+    name: str,
+    payload: SkillSetupRequest,
+    _session: LocalSessionPayload = Depends(require_local_session),
+):
+    """Prepare or rebuild one skill's device-local Python runtime."""
+    try:
+        result = await get_skill_installer().setup(
+            name,
+            expected_source_hash=payload.expected_source_hash,
+            approve_setup=payload.approve_setup,
+        )
+    except SkillRuntimeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+    return make_api_response(
+        success=True,
+        message=f"Skill '{name}' runtime prepared",
         data=result,
     )
 
@@ -149,22 +200,33 @@ async def list_installed_skills(
     )
 
 
-@router.post("/secrets")
+async def _require_known_skill(name: str):
+    registry = get_skills_registry()
+    await registry.initialize()
+    skill = registry.get_skill(name)
+    if skill is None:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    return skill
+
+
+@router.post("/{name}/secrets")
 async def set_skill_secret(
+    name: str,
     payload: SkillSecretSetRequest,
     _session: LocalSessionPayload = Depends(require_local_session),
 ):
-    """Set a secret value for use by skill capabilities. Never echoes the value."""
+    """Bind a secret to exactly one local skill. Never echo the value."""
+    await _require_known_skill(name)
     store = get_secret_store()
     try:
-        store.set(payload.name, payload.value)
-    except RuntimeError as exc:
+        store.set_for_skill(name, payload.name, payload.value)
+    except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return make_api_response(
         success=True,
         message=f"Secret '{payload.name}' saved",
-        data={"name": payload.name, "configured": True},
+        data={"skill": name, "name": payload.name, "configured": True},
     )
 
 
@@ -173,40 +235,36 @@ async def get_skill_secrets(
     name: str,
     _session: LocalSessionPayload = Depends(require_local_session),
 ):
-    """List a skill's declared secrets and whether each is configured.
-
-    Never returns secret values, only presence booleans. A skill with no
-    manifest (instruction-only) has no declared secrets, so this returns an
-    empty list rather than a 404; only an unknown skill name is a 404.
-    """
-    registry = get_skills_registry()
-    await registry.initialize()
-    skill = registry.get_skill(name)
-    if skill is None:
-        raise HTTPException(status_code=404, detail="Skill not found")
-
-    manifest = getattr(skill, "manifest", None)
-    if manifest is None:
-        return make_api_response(
-            success=True,
-            message=f"Skill '{name}' has no declared secrets",
-            data={"secrets": []},
-        )
-
+    """List configured binding names for one skill, never their values."""
+    await _require_known_skill(name)
     store = get_secret_store()
     secrets = [
-        {
-            "name": spec.name,
-            "required": spec.required,
-            "description": spec.description,
-            "configured": store.has(spec.name),
-        }
-        for spec in manifest.secrets
+        {"name": secret_name, "configured": True}
+        for secret_name in store.list_for_skill(name)
     ]
     return make_api_response(
         success=True,
         message=f"Secrets for skill '{name}' retrieved",
         data={"secrets": secrets},
+    )
+
+
+@router.delete("/{name}/secrets/{secret_name}")
+async def delete_skill_secret(
+    name: str,
+    secret_name: str,
+    _session: LocalSessionPayload = Depends(require_local_session),
+):
+    """Delete one binding from one local skill."""
+    await _require_known_skill(name)
+    try:
+        removed = get_secret_store().delete_for_skill(name, secret_name)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return make_api_response(
+        success=True,
+        message=f"Secret '{secret_name}' removed from skill '{name}'",
+        data={"skill": name, "name": secret_name, "removed": removed},
     )
 
 
