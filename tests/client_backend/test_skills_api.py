@@ -7,12 +7,17 @@ from client_backend.api import skills as skills_api
 
 
 class _Skill:
-    def __init__(self, name: str, *, enabled: bool = True):
+    def __init__(self, name: str, *, enabled: bool = True, command_capable: bool = True):
         self.name = name
         self.description = f"Description for {name}"
         self.enabled = enabled
         self.path = Path(f"/tmp/{name}/SKILL.md")
         self.content = f"Content for {name}"
+        self.executable_assets = {
+            "bin": [f"{name}.py"] if command_capable else [],
+            "scripts": [],
+            "python_project": False,
+        }
 
 
 class _RegistryStub:
@@ -81,6 +86,9 @@ def test_skills_routes_return_server_style_payloads(monkeypatch):
     assert list_response.status_code == 200
     assert list_response.json()["data"]["totalCount"] == 1
     assert list_response.json()["data"]["enabledCount"] == 1
+    skill_summary = list_response.json()["data"]["skills"][0]
+    assert skill_summary["commandCapable"] is True
+    assert skill_summary["runtimeStatus"] == "ready"
     assert detail_response.status_code == 200
     assert detail_response.json()["data"]["content"] == "Content for demo"
     assert toggle_response.status_code == 200

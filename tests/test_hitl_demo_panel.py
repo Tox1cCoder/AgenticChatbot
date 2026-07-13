@@ -23,6 +23,20 @@ def test_demo_renders_per_server_and_per_tool_controls():
     assert "qualified_tool_options" in src    # duplicate tool names select by server::tool
 
 
+def test_demo_renders_per_skill_command_hitl_controls():
+    src = _demo_source()
+    assert 'f"skill::{skill_name}::run_skill_command"' in src
+    assert 'skill.get("commandCapable", False)' in src
+    assert 'key=f"hitl_skill_mode_{skill_name}"' in src
+    assert 'modes = ["Inherit", "Require", "Skip"]' in src
+    assert 'clear_hitl_setting("tool", skill_qualified_id)' in src
+    assert (
+        'set_hitl_setting("tool", skill_qualified_id, chosen == "Require")'
+        in src
+    )
+    assert "approval rules below are inactive until it is enabled" in src
+
+
 def test_demo_uses_shared_hitl_decision_builder():
     src = _demo_source()
     assert "from app.ui.hitl_decisions import" in src
