@@ -57,7 +57,8 @@ class CallIdentity:
     name: str
     server_name: str | None
     qualified_tool_id: str | None
-    origin: str  # "client_mcp" | "server_mcp" | "internal"
+    origin: str  # "client_mcp" | "server_mcp" | "internal" | "client_skill"
+    mutation: bool = False
 
 
 def build_global_policy() -> dict:
@@ -95,6 +96,7 @@ def resolve_call_identity(
     server_name = meta.get("server_name")
     qualified = meta.get("qualified_tool_id")
     origin = meta.get("tool_origin")
+    mutation = bool(meta.get("mutation"))
 
     if name.startswith(CLIENT_TOOL_PREFIX):
         remainder = name[len(CLIENT_TOOL_PREFIX) :]
@@ -121,7 +123,11 @@ def resolve_call_identity(
         origin = origin or ("server_mcp" if server_name else "internal")
 
     return CallIdentity(
-        name=name, server_name=server_name, qualified_tool_id=qualified, origin=origin
+        name=name,
+        server_name=server_name,
+        qualified_tool_id=qualified,
+        origin=origin,
+        mutation=mutation,
     )
 
 
@@ -143,7 +149,10 @@ def identity_requires_approval(identity: CallIdentity, policy: dict) -> bool:
     if identity.name and identity.name in set(policy.get("global_tools") or []):
         return True
 
-    return False
+    # A mutation is auto-gated unless an explicit policy entry already
+    # decided it above (a per-tool/server/global override still wins and
+    # returns earlier). This is the last resort, not a precedence tier.
+    return bool(identity.mutation)
 
 
 def any_call_requires_approval(
@@ -159,6 +168,47 @@ def any_call_requires_approval(
         if identity_requires_approval(identity, policy):
             return True
     return False
+
+
+# Lowercased substrings that mark an argument key as sensitive. Kept
+# conservative and generic (not tool-specific) so this never fires on the
+# ordinary argument names existing MCP approval prompts already use.
+_SENSITIVE_ARG_KEY_MARKERS = (
+    "secret",
+    "token",
+    "password",
+    "passwd",
+    "api_key",
+    "apikey",
+    "credential",
+    "authorization",
+    "access_key",
+)
+
+_REDACTED_ARG_PLACEHOLDER = "<redacted>"
+
+
+def redact_sensitive_args(args: dict) -> dict:
+    """Shallow-copy ``args``, replacing values whose key looks sensitive.
+
+    Skill capability arguments are non-secret by design -- secrets live in
+    the sidecar secret store and are injected at execution time, never
+    passed as tool arguments -- so this is a defensive backstop, not the
+    primary control. Applies generically to any tool's args (not just
+    skills) so a sensitively-named argument never reaches an approval
+    prompt or a log line built from this dict. Non-dict input returns an
+    empty dict, since there is nothing safe to redact key-by-key.
+    """
+    if not isinstance(args, dict):
+        return {}
+    return {
+        key: (
+            _REDACTED_ARG_PLACEHOLDER
+            if any(marker in key.lower() for marker in _SENSITIVE_ARG_KEY_MARKERS)
+            else value
+        )
+        for key, value in args.items()
+    }
 
 
 def _parse_review_configs(data: list[dict[str, Any]] | None) -> dict[str, list[str]]:
@@ -188,7 +238,9 @@ def _build_tool_interrupt_request(
         or f"{default_prefix}:{idx}"
     )
     tool_name = task.get("action") or task.get("tool") or task.get("name") or "unknown"
-    tool_args = task.get("args") or task.get("tool_input") or task.get("arguments") or {}
+    tool_args = redact_sensitive_args(
+        task.get("args") or task.get("tool_input") or task.get("arguments") or {}
+    )
     allowed = allowed_map.get(tool_name)
 
     return ToolInterruptRequest(

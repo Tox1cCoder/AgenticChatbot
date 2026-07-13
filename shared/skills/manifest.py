@@ -94,6 +94,17 @@ class SkillCapabilitySpec(BaseModel):
     secrets: list[str] = Field(default_factory=list)
     mutation: bool = False
 
+    def is_mutation(self) -> bool:
+        """Whether this capability mutates state.
+
+        A capability may declare mutation via the ``mutation`` flag OR by
+        listing the literal ``"mutation"`` permission token. This is the single
+        source of truth for that definition so the readiness/permission
+        evaluator, the HITL catalog signal, and any future consumer never drift
+        apart on what counts as a mutation.
+        """
+        return self.mutation or "mutation" in self.permissions
+
     @field_validator("name")
     @classmethod
     def _validate_name(cls, value: str) -> str:

@@ -68,6 +68,7 @@ class ClientRuntimeToolSpec:
     input_schema: dict[str, Any]
     exposed_name: str
     tool_instance_id: str = ""
+    mutation: bool = False
 
     @property
     def tool_origin(self) -> str:
@@ -160,6 +161,7 @@ def _parse_tool_specs(catalog: dict[str, Any]) -> list[ClientRuntimeToolSpec]:
                 input_schema=_normalize_input_schema(raw_entry.get("input_schema")),
                 exposed_name=exposed_name,
                 tool_instance_id=str(raw_entry.get("tool_instance_id") or ""),
+                mutation=bool(raw_entry.get("mutation")),
             )
         )
 
@@ -270,6 +272,7 @@ def _build_tool(
                 bound_session_id=bound_session_id,
                 bound_catalog_version=bound_catalog_version,
                 tool_instance_id=tool_instance_id,
+                mutation_approved=spec.mutation,
             )
         except RuntimeError as exc:
             # The client disconnected or re-synced between the guard above and
@@ -324,6 +327,7 @@ def _build_tool(
             "server_name": spec.server_name,  # MCP server name on client
             "qualified_tool_id": spec.qualified_tool_id,  # e.g., "desktop_commander::start_process"
             "source_tool_name": spec.name,  # Original tool name before prefixing
+            "mutation": spec.mutation,  # Skill capability mutation flag (Task 9 HITL gate)
         },
     )
 

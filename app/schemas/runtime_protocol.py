@@ -32,6 +32,11 @@ class ToolDispatchRequest(BaseModel):
     tool_instance_id: str | None = None
     expected_session_id: str | None = None
     expected_catalog_version: int | None = None
+    # Set by the server for a dispatched skill mutation that has cleared the
+    # HITL gate (approved, or pre-approved by policy). The sidecar allows the
+    # mutation only when this is True, and still re-validates session/catalog/
+    # tool_instance regardless of this flag.
+    mutation_approved: bool = False
 
 
 class ToolDispatchResult(BaseModel):

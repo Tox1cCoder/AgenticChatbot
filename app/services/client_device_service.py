@@ -64,6 +64,7 @@ class ClientDeviceService:
         bound_session_id: str | None = None,
         bound_catalog_version: int | None = None,
         tool_instance_id: str | None = None,
+        mutation_approved: bool = False,
     ) -> dict[str, Any]:
         """Dispatch a tool call to the correct sidecar session."""
         session = cls.lookup_active_session(UUID(str(device_id)))
@@ -118,6 +119,7 @@ class ClientDeviceService:
                 if bound_catalog_version is not None
                 else session.tool_catalog_version
             ),
+            mutation_approved=mutation_approved,
         )
         return await get_client_runtime_store().dispatch_request(session, request, timeout_seconds)
 

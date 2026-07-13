@@ -193,7 +193,7 @@ class SkillPermissionEvaluator:
             if token != _MUTATION_TOKEN and not self._policy.grants(token)
         ]
 
-        mutation_declared = capability.mutation or _MUTATION_TOKEN in capability.permissions
+        mutation_declared = capability.is_mutation()
         # Mutation is a structural property, gated SOLELY by allow_mutation --
         # never satisfiable through the resource-grant token set. Otherwise a
         # blanket "*" resource grant (or a literal "mutation" token) would

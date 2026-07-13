@@ -30,6 +30,7 @@ from client_backend import __version__
 from client_backend.core.config import client_settings
 from client_backend.services.skill_runtime.execution import SkillExecutionEngine
 from client_backend.services.skill_runtime.manager import SkillRuntimeManager
+from client_backend.services.skill_runtime.permissions import SkillPermissionPolicy
 from shared.skills.errors import SkillRuntimeError
 
 
@@ -578,7 +579,7 @@ class RuntimeBridgeService:
 
         if qualified_tool_id.startswith("skill::"):
             return await self._execute_skill_capability(
-                qualified_tool_id, arguments, timeout_seconds
+                qualified_tool_id, arguments, timeout_seconds, request.mutation_approved
             )
 
         return await get_mcp_manager().call_tool(
@@ -592,13 +593,26 @@ class RuntimeBridgeService:
         qualified_tool_id: str,
         arguments: dict[str, Any],
         timeout_seconds: int,
+        mutation_approved: bool = False,
     ) -> Any:
         context = {
             "device_id": self._device_id,
             "session_id": self._session_id,
             "timeout_seconds": timeout_seconds,
         }
-        engine = SkillExecutionEngine()
+        # The server only sets mutation_approved once the HITL gate has
+        # approved (or pre-granted) this specific mutation call; the engine's
+        # own default policy unconditionally blocks mutation, so this is the
+        # sidecar-side hand-off point for an approved skill mutation.
+        engine = (
+            SkillExecutionEngine(
+                permission_policy=SkillPermissionPolicy(
+                    granted=frozenset({"*"}), allow_mutation=True
+                )
+            )
+            if mutation_approved
+            else SkillExecutionEngine()
+        )
         envelope = await engine.execute(qualified_tool_id, arguments, context)
 
         if not envelope.get("ok"):

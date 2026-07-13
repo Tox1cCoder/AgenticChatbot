@@ -235,6 +235,7 @@ class SkillRuntimeManager:
                 "qualified_id": f"skill::{skill_name}::{capability.name}",
                 "input_schema": capability.input_schema,
                 "readiness": {"status": readiness.status},
+                "mutation": capability.is_mutation(),
             }
             for capability in manifest.capabilities
         ]
