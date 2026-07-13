@@ -27,7 +27,7 @@ def test_demo_renders_per_skill_command_hitl_controls():
     src = _demo_source()
     assert 'f"skill::{skill_name}::run_skill_command"' in src
     assert 'skill.get("commandCapable", False)' in src
-    assert 'key=f"hitl_skill_mode_{skill_name}"' in src
+    assert 'widget_key = f"hitl_skill_mode_{skill_hitl_scope}_{skill_name}"' in src
     assert 'modes = ["Inherit", "Require", "Skip"]' in src
     assert 'clear_hitl_setting("tool", skill_qualified_id)' in src
     assert (
@@ -35,6 +35,15 @@ def test_demo_renders_per_skill_command_hitl_controls():
         in src
     )
     assert "approval rules below are inactive until it is enabled" in src
+
+
+def test_demo_skill_hitl_state_is_callback_driven_and_cleared_on_logout():
+    src = _demo_source()
+    assert "def _persist_skill_hitl_mode(" in src
+    assert "on_change=_persist_skill_hitl_mode" in src
+    assert "st.session_state[widget_key] = current_mode" in src
+    assert "def _clear_skill_hitl_session_state(" in src
+    assert "_clear_skill_hitl_session_state()" in src
 
 
 def test_demo_uses_shared_hitl_decision_builder():

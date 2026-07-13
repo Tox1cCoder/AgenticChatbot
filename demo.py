@@ -3532,6 +3532,33 @@ def clear_hitl_setting(scope_type: str, scope_value: str) -> dict[str, Any] | No
     return response.get("data") if response else None
 
 
+def _persist_skill_hitl_mode(
+    widget_key: str,
+    skill_qualified_id: str,
+    current_mode: str,
+) -> None:
+    """Persist one deliberate radio change and restore server state on failure."""
+    chosen = str(st.session_state.get(widget_key) or current_mode)
+    if chosen == current_mode:
+        return
+    if chosen == "Inherit":
+        result = clear_hitl_setting("tool", skill_qualified_id)
+    else:
+        result = set_hitl_setting("tool", skill_qualified_id, chosen == "Require")
+    if result is None:
+        st.session_state[widget_key] = current_mode
+        st.session_state[f"{widget_key}_error"] = _last_api_error_message(
+            "Failed to update skill approval"
+        )
+
+
+def _clear_skill_hitl_session_state() -> None:
+    """Remove user-scoped skill approval widgets during logout."""
+    for key in list(st.session_state):
+        if str(key).startswith("hitl_skill_mode_"):
+            del st.session_state[key]
+
+
 def render_json_output(data: Any, label: str = "JSON Output", expanded: bool | None = None) -> None:
     """Render JSON data with syntax highlighting in an expandable section.
 
@@ -4048,6 +4075,7 @@ def render_sidebar():
                 st.markdown(f"**{user['username']}**")
                 if st.button("Sign Out", width="stretch"):
                     make_api_request("POST", "/auth/logout")
+                    _clear_skill_hitl_session_state()
                     st.session_state.current_user_id = None
                     st.session_state.current_user_profile = None
                     st.session_state.current_conversation_id = None
@@ -7197,6 +7225,7 @@ def render_skills_tab():
             )
 
     # Render each skill as a card
+    skill_hitl_scope = str(st.session_state.get("current_user_id") or "anonymous")
     for skill in skills:
         skill_name = skill.get("name", "Unknown")
         description = skill.get("description", "No description")
@@ -7224,31 +7253,24 @@ def render_skills_tab():
 
                 st.markdown("**Human approval**")
                 modes = ["Inherit", "Require", "Skip"]
-                chosen = st.radio(
+                widget_key = f"hitl_skill_mode_{skill_hitl_scope}_{skill_name}"
+                st.session_state[widget_key] = current_mode
+                st.radio(
                     "Approval mode for this skill command",
                     modes,
                     index=modes.index(current_mode),
-                    key=f"hitl_skill_mode_{skill_name}",
+                    key=widget_key,
                     horizontal=True,
                     help=(
                         "Inherit = use the safe mutation default; Require = always prompt; "
                         "Skip = preapprove this skill command"
                     ),
+                    on_change=_persist_skill_hitl_mode,
+                    args=(widget_key, skill_qualified_id, current_mode),
                 )
-                if chosen != current_mode:
-                    with st.spinner("Updating skill approval..."):
-                        if chosen == "Inherit":
-                            result = clear_hitl_setting("tool", skill_qualified_id)
-                        else:
-                            result = set_hitl_setting("tool", skill_qualified_id, chosen == "Require")  # noqa: E501
-                        if result is not None:
-                            st.rerun()
-                        else:
-                            st.error(
-                                _last_api_error_message(
-                                    "Failed to update skill approval"
-                                )
-                            )
+                error_message = st.session_state.pop(f"{widget_key}_error", None)
+                if error_message:
+                    st.error(error_message)
 
             col_view, col_spacer = st.columns([1, 1])
 
