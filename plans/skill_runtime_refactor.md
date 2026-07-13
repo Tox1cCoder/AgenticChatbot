@@ -584,14 +584,14 @@ Modify:
 - Modify: `README.md`
 - Create: `docs/skill-runtime.md`
 
-- [ ] Document the difference between instruction-only skills and executable skill bundles.
-- [ ] Document the two generic installation paths: configured scan roots and profile-installed bundles.
-- [ ] Document `skill.json` schema with examples.
-- [ ] Document runtime types and security constraints.
-- [ ] Document dependency readiness and repair hints, including the rule that dependencies are not silently installed during scan.
-- [ ] Document secret setup and readiness states.
-- [ ] Document how sidecar users reload skills and inspect readiness.
-- [ ] Add a short troubleshooting section for command not found, missing secret, invalid manifest, and permission denied.
+- [x] Document the difference between instruction-only skills and executable skill bundles.
+- [x] Document the two generic installation paths: configured scan roots and profile-installed bundles.
+- [x] Document `skill.json` schema with examples.
+- [x] Document runtime types and security constraints.
+- [x] Document dependency readiness and repair hints, including the rule that dependencies are not silently installed during scan.
+- [x] Document secret setup and readiness states.
+- [x] Document how sidecar users reload skills and inspect readiness.
+- [x] Add a short troubleshooting section for command not found, missing secret, invalid manifest, and permission denied.
 
 ### Task 14: Full Regression
 
@@ -652,6 +652,7 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 | 4. Bundle installation | ✅ done | `af416e1` (base `23b4c00`) | install.py + shared/skills/errors.py + /skills install/uninstall/installed API; 13 tests (+1 platform-skip). Implementer hit a transient 529 mid-task (resumed). Review Needs-fixes→fixed: 3 Important (symlink rejection [plan-required], disabled-reinstall replace semantics, UNSAFE_BUNDLE_PATH test) + DRY helper. NOTE: user committed `beb1fdb`/`23b4c00` to this branch concurrently — no file overlap. |
 | 5. Capability tools | ✅ done | `4e28e75` (base `af416e1`) | Ready skills' capabilities sync as client tools (manager.capability_catalog_entries + runtime_bridge merge + client_runtime_tools/client_tool_catalog origin widening); 8 catalog tests + coexistence search test. Review Approved (3 Minors; applied logger.exception). runtime_bridge has 8 pre-existing baseline ruff errors (deferred to final lint cleanup). |
 | 6. Permission evaluator | ✅ done | `812decb` (base `4e28e75`) | Pure pre-exec permission evaluation (permissions.py); 27 tests. Review found 2 CRITICAL over-grants (empty/root fs path-prefix opened whole FS; mutation gate bypassable via granted token/`*`) — both fixed + regression-tested; re-review confirmed Resolved. |
+| 13. Documentation | ✅ done | `f51a6ac` (base `def0a30`) | New docs/skill-runtime.md (full guide) + README Skills System 'Executable skills' subsection. Docs-only → controller-written/reviewed. |
 | 12. Example fixtures | ✅ done | `fe2e69e` (base `3060750`) | Two provider-neutral executable fixtures (echo-python python_script, binary-probe binary) + test proving they load/execute without creds + genericness regression (core has no hardcoded skill names). 5 tests. Test-only/additive → controller-reviewed (no per-task reviewer dispatch); final review covers it. Google Calendar migration SKIPPED (optional). |
 | 11. Audit trail | ✅ done | `0335a8b` (base `476831f`) | audit.py SkillAuditWriter → profile audit.jsonl per execution; wired into execute() for ALL outcomes incl. permission-denied. 8 tests. Review found 1 CRITICAL secret leak: _redact_arguments redacted the json.dumps()'d text, so a secret with a quote/backslash/non-ASCII char round-tripped back unredacted; fixed by walking the RAW structure (redact string leaves before serializing) + special-char test; re-review confirmed Resolved. |
 | 10. Secret store | ✅ done | `f5bbd99` (base `f4d71c3`) | SkillSecretStore extended with encrypted per-profile storage (profile-first, env-fallback) + set/delete/list + redact_secret_values; /skills secrets API. 13 tests. Review Approved; Important (weak sibling key file) fixed by delegating at-rest to core.security DPAPI/Fernet primitive (no key file); added corruption-tolerance tests. |

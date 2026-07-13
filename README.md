@@ -725,6 +725,23 @@ API (sidecar only — the server has no skills endpoints of its own):
 
 When a skill is resolved to a tool (`skills_tool.py`), the agent's skill summaries are injected into its system prompt so it knows *what* is available without paying the schema cost for every skill.
 
+### Executable skills (skill runtime)
+
+A skill directory may additionally include a machine-readable **`skill.json`** manifest. When present and valid, the skill's declared capabilities become typed client tools the model can call directly (`skill::<skill>::<capability>`) — executed on the sidecar through a generic, permissioned, auditable `SkillExecutionEngine` instead of the model constructing raw shell commands. Skills without a `skill.json` remain instruction-only and behave exactly as above.
+
+Highlights:
+
+- **Two install paths** — scanned `CLIENT_SKILLS_ROOTS`, or `POST /skills/install` to install a validated directory bundle into a profile skill root (no env edits/restart).
+- **Runtime types** — `python_module`, `python_script`, `binary` (argv lists, never a shell).
+- **Readiness** — `ready` / `not_ready` / `invalid` / `instruction_only`, with repair hints; dependencies are never auto-installed.
+- **Secrets** — declared in the manifest, resolved only at execution time from encrypted per-profile storage or the environment, and redacted from prompts/logs/audit. Manage via `POST /skills/secrets` and `GET /skills/{name}/secrets`.
+- **Permissions & HITL** — resource/mutation permissions enforced before execution; `mutation: true` capabilities require human approval through the existing HITL path.
+- **Audit** — one JSONL record per execution under the profile (no secrets or raw output).
+
+Extra sidecar endpoints: `POST /skills/install`, `POST /skills/uninstall`, `GET /skills/installed`, `POST /skills/secrets`, `GET /skills/{name}/secrets`.
+
+**Full guide: [`docs/skill-runtime.md`](docs/skill-runtime.md)** — manifest schema, runtime types, security constraints, readiness/repair, secret setup, and troubleshooting.
+
 ---
 
 ## Planning Mode & Task Plans
