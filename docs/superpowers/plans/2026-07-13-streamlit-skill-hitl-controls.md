@@ -16,7 +16,7 @@
 - Modify: `tests/test_hitl_demo_panel.py`
 - Modify: `tests/client_backend/test_skills_api.py`
 
-- [ ] **Step 1: Write the failing static regression test**
+- [x] **Step 1: Write the failing static regression test**
 
 Add a focused test that requires the Skills tab to construct the exact command ID, render the three approval modes, use a skill-specific widget key, and call the existing tool-scoped helpers:
 
@@ -58,7 +58,7 @@ assert skill_summary["commandCapable"] is True
 assert skill_summary["runtimeStatus"] == "ready"
 ```
 
-- [ ] **Step 2: Run the test and verify the expected failure**
+- [x] **Step 2: Run the test and verify the expected failure**
 
 Run:
 
@@ -68,7 +68,7 @@ Run:
 
 Expected: FAIL because `render_skills_tab()` does not yet construct the skill qualified ID or render `hitl_skill_mode_...`.
 
-- [ ] **Step 3: Commit the red test**
+- [x] **Step 3: Commit the red test**
 
 ```powershell
 git add -- tests/test_hitl_demo_panel.py tests/client_backend/test_skills_api.py
@@ -83,7 +83,7 @@ git commit -m "test(hitl): specify Streamlit skill approval controls"
 - Test: `tests/test_hitl_demo_panel.py`
 - Test: `tests/client_backend/test_skills_api.py`
 
-- [ ] **Step 1: Expose command readiness in local skill summaries**
+- [x] **Step 1: Expose command readiness in local skill summaries**
 
 Use the same runtime manager as catalog publication:
 
@@ -103,7 +103,7 @@ def _skill_summary(skill) -> dict:
     }
 ```
 
-- [ ] **Step 2: Load the policy once in the Skills tab**
+- [x] **Step 2: Load the policy once in the Skills tab**
 
 After the skill list is validated, load the HITL settings and build the exact tool-rule index:
 
@@ -127,7 +127,7 @@ else:
         )
 ```
 
-- [ ] **Step 3: Add the MCP-style control to each command-capable skill card**
+- [x] **Step 3: Add the MCP-style control to each command-capable skill card**
 
 Inside each skill expander, render a control only when settings loaded:
 
@@ -166,7 +166,7 @@ if hitl_settings is not None and skill.get("commandCapable", False):
                 st.error(_last_api_error_message("Failed to update skill approval"))
 ```
 
-- [ ] **Step 4: Run the focused API and Streamlit tests**
+- [x] **Step 4: Run the focused API and Streamlit tests**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q tests/test_hitl_demo_panel.py tests/test_streamlit_width_deprecation.py tests/client_backend/test_skills_api.py
@@ -174,7 +174,7 @@ if hitl_settings is not None and skill.get("commandCapable", False):
 
 Expected: PASS.
 
-- [ ] **Step 5: Run the skill/HITL policy regression tests**
+- [x] **Step 5: Run the skill/HITL policy regression tests**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q tests/client_backend/test_skill_hitl.py tests/test_hitl_policy.py tests/test_hitl_gate_policy.py tests/test_hitl_client_and_deferred.py tests/client_backend/test_hitl_proxy.py
@@ -182,7 +182,7 @@ Expected: PASS.
 
 Expected: PASS; exact Skip rules continue to override default mutation gating.
 
-- [ ] **Step 6: Run static quality checks**
+- [x] **Step 6: Run static quality checks**
 
 ```powershell
 .venv\Scripts\python.exe -m ruff check client_backend/api/skills.py demo.py tests/test_hitl_demo_panel.py tests/client_backend/test_skills_api.py
@@ -191,7 +191,7 @@ git diff --check
 
 Expected: no lint or whitespace errors.
 
-- [ ] **Step 7: Commit the implementation**
+- [x] **Step 7: Commit the implementation**
 
 ```powershell
 git add -- client_backend/api/skills.py demo.py tests/test_hitl_demo_panel.py tests/client_backend/test_skills_api.py
@@ -204,7 +204,7 @@ git commit -m "feat(hitl): configure skill approvals in Streamlit"
 - Verify: `demo.py`
 - Verify: `tests/test_hitl_demo_panel.py`
 
-- [ ] **Step 1: Run the complete focused HITL and skill matrix**
+- [x] **Step 1: Run the complete focused HITL and skill matrix**
 
 ```powershell
 $skillFiles = @(Get-ChildItem tests/client_backend -File | Where-Object {
@@ -216,7 +216,7 @@ $hitlFiles = @(Get-ChildItem tests -File -Filter 'test_hitl*.py' | ForEach-Objec
 
 Expected: PASS, with only platform-dependent tests skipped.
 
-- [ ] **Step 2: Inspect the final diff and repository state**
+- [x] **Step 2: Inspect the final diff and repository state**
 
 ```powershell
 git diff --check
