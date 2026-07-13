@@ -8,7 +8,8 @@ existing per-tool MCP approval control and reuse the existing HITL policy API.
 
 ## Scope
 
-This change adds one approval control to each command-capable skill card in
+This change adds command-readiness fields to the existing local `/skills`
+response and one approval control to each command-capable skill card in
 `demo.py`. It does not add a new policy type, database table, endpoint, or
 standalone HITL page.
 
@@ -46,15 +47,17 @@ enabled again.
 
 ## Data Flow
 
-1. `render_skills_tab()` calls `get_skills_list()` and `get_hitl_settings()`.
-2. Tool-scoped settings are indexed by `scopeValue`.
-3. For each skill, Streamlit constructs
+1. The local `/skills` response evaluates the same readiness model used by
+   catalog publication and returns `commandCapable` and `runtimeStatus`.
+2. `render_skills_tab()` calls `get_skills_list()` and `get_hitl_settings()`.
+3. Tool-scoped settings are indexed by `scopeValue`.
+4. For each command-capable skill, Streamlit constructs
    `skill::<name>::run_skill_command` and maps its rule to Inherit, Require, or
    Skip.
-4. A changed selection calls `clear_hitl_setting("tool", qualified_id)` for
+5. A changed selection calls `clear_hitl_setting("tool", qualified_id)` for
    Inherit, or `set_hitl_setting("tool", qualified_id, bool)` for Require and
    Skip.
-5. The existing per-turn HITL policy resolves the exact qualified ID before
+6. The existing per-turn HITL policy resolves the exact qualified ID before
    falling back to mutation gating.
 
 Settings remain per-user because that is the behavior of the existing MCP
@@ -80,6 +83,9 @@ Extend the Streamlit static guard to prove that the Skills tab:
 - renders the same Inherit, Require, and Skip modes;
 - calls the existing set and clear HITL helpers with tool scope; and
 - displays the global-disabled notice.
+
+Extend the local Skills API test to prove that ready skills are marked command
+capable and instruction-only skills are not.
 
 Run the focused Streamlit HITL tests, the skill HITL policy tests, formatting
 checks, and the broader skill/HITL regression matrix.
