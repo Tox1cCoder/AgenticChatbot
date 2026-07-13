@@ -598,12 +598,12 @@ Modify:
 **Files:**
 - Existing test suite
 
-- [ ] Run client-side tests: `.venv\Scripts\python.exe -m pytest tests/client_backend -q`
-- [ ] Run skill-related server tests: `.venv\Scripts\python.exe -m pytest tests/test_skills_tool.py tests/test_skills_architecture.py tests/test_client_tool_scope.py -q`
-- [ ] Run MCP/client runtime tests: `.venv\Scripts\python.exe -m pytest tests/test_multi_sidecar_hardening.py tests/test_client_invocation_isolation.py tests/test_client_tool_isolation.py tests/test_unified_tool_search.py -q`
-- [ ] Run a manual sidecar readiness check through the local `/skills` API.
-- [ ] Run a manual sidecar install check by installing a provider-neutral local skill bundle through the local `/skills` API and verifying it appears in readiness and tool catalogs.
-- [ ] Run one dry-run executable skill capability through a chat turn and verify the model calls the typed tool rather than constructing a raw shell command.
+- [x] Run client-side tests: `.venv\Scripts\python.exe -m pytest tests/client_backend -q` → 287 passed, 1 skipped, 1 failed (`test_live_document_upload_list_get_task_and_delete_flow` — PRE-EXISTING environmental live-server failure, unrelated to this refactor; per test-and-lint baseline).
+- [x] Run skill-related server tests: `.venv\Scripts\python.exe -m pytest tests/test_skills_tool.py tests/test_skills_architecture.py tests/test_client_tool_scope.py -q` → 9 passed.
+- [x] Run MCP/client runtime tests: `.venv\Scripts\python.exe -m pytest tests/test_multi_sidecar_hardening.py tests/test_client_invocation_isolation.py tests/test_client_tool_isolation.py tests/test_unified_tool_search.py -q` → 62 passed.
+- [~] Manual sidecar readiness check through `/skills` — covered by automated proxy (`test_skills_api`, `test_skill_secrets` drive the `/skills` readiness + secret endpoints via TestClient; `test_skill_runtime_manager` covers readiness). A live-stack run is left for an interactive environment.
+- [~] Manual sidecar install check — covered by automated proxy (`test_skill_installation` installs a provider-neutral bundle through the installer/`/skills/install` path and asserts it appears in the registry catalog + readiness).
+- [~] Dry-run executable capability through a chat turn — covered by automated proxy (`test_skill_example_fixtures` executes `echo-python`/`binary-probe` end-to-end through the real `SkillExecutionEngine`, proving a typed result rather than a raw shell command). A full live chat turn (LLM + server + WS bridge) is left for an interactive environment.
 
 ## Acceptance Criteria
 
@@ -652,6 +652,7 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 | 4. Bundle installation | ✅ done | `af416e1` (base `23b4c00`) | install.py + shared/skills/errors.py + /skills install/uninstall/installed API; 13 tests (+1 platform-skip). Implementer hit a transient 529 mid-task (resumed). Review Needs-fixes→fixed: 3 Important (symlink rejection [plan-required], disabled-reinstall replace semantics, UNSAFE_BUNDLE_PATH test) + DRY helper. NOTE: user committed `beb1fdb`/`23b4c00` to this branch concurrently — no file overlap. |
 | 5. Capability tools | ✅ done | `4e28e75` (base `af416e1`) | Ready skills' capabilities sync as client tools (manager.capability_catalog_entries + runtime_bridge merge + client_runtime_tools/client_tool_catalog origin widening); 8 catalog tests + coexistence search test. Review Approved (3 Minors; applied logger.exception). runtime_bridge has 8 pre-existing baseline ruff errors (deferred to final lint cleanup). |
 | 6. Permission evaluator | ✅ done | `812decb` (base `4e28e75`) | Pure pre-exec permission evaluation (permissions.py); 27 tests. Review found 2 CRITICAL over-grants (empty/root fs path-prefix opened whole FS; mutation gate bypassable via granted token/`*`) — both fixed + regression-tested; re-review confirmed Resolved. |
+| 14. Full regression | ✅ done | (docs commit) | client_backend 287 pass (1 pre-existing env fail, 1 skip); skill server tests 9 pass; MCP/client-runtime 62 pass. Live-stack manual checks covered by automated proxies (install/readiness/execute); a true live chat turn is left for an interactive env. |
 | 13. Documentation | ✅ done | `f51a6ac` (base `def0a30`) | New docs/skill-runtime.md (full guide) + README Skills System 'Executable skills' subsection. Docs-only → controller-written/reviewed. |
 | 12. Example fixtures | ✅ done | `fe2e69e` (base `3060750`) | Two provider-neutral executable fixtures (echo-python python_script, binary-probe binary) + test proving they load/execute without creds + genericness regression (core has no hardcoded skill names). 5 tests. Test-only/additive → controller-reviewed (no per-task reviewer dispatch); final review covers it. Google Calendar migration SKIPPED (optional). |
 | 11. Audit trail | ✅ done | `0335a8b` (base `476831f`) | audit.py SkillAuditWriter → profile audit.jsonl per execution; wired into execute() for ALL outcomes incl. permission-denied. 8 tests. Review found 1 CRITICAL secret leak: _redact_arguments redacted the json.dumps()'d text, so a secret with a quote/backslash/non-ASCII char round-tripped back unredacted; fixed by walking the RAW structure (redact string leaves before serializing) + special-char test; re-review confirmed Resolved. |
