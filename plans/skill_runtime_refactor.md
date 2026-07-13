@@ -537,12 +537,12 @@ Modify:
 - Modify: `client_backend/api/skills.py`
 - Test: `tests/client_backend/test_skill_secrets.py`
 
-- [ ] Implement environment-backed secret lookup.
-- [ ] Implement encrypted local profile-backed secret storage using the existing local profile root.
-- [ ] Add redaction helpers for logs and returned errors.
-- [ ] Add local API endpoints for listing required secret names and setting a secret value.
-- [ ] Add tests for env lookup, stored lookup, missing required secret, and redaction.
-- [ ] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_secrets.py -q`
+- [x] Implement environment-backed secret lookup.
+- [x] Implement encrypted local profile-backed secret storage using the existing local profile root.
+- [x] Add redaction helpers for logs and returned errors.
+- [x] Add local API endpoints for listing required secret names and setting a secret value.
+- [x] Add tests for env lookup, stored lookup, missing required secret, and redaction.
+- [x] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_secrets.py -q` → 13 passed.
 
 ### Task 11: Add Audit Trail
 
@@ -652,6 +652,7 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 | 4. Bundle installation | ✅ done | `af416e1` (base `23b4c00`) | install.py + shared/skills/errors.py + /skills install/uninstall/installed API; 13 tests (+1 platform-skip). Implementer hit a transient 529 mid-task (resumed). Review Needs-fixes→fixed: 3 Important (symlink rejection [plan-required], disabled-reinstall replace semantics, UNSAFE_BUNDLE_PATH test) + DRY helper. NOTE: user committed `beb1fdb`/`23b4c00` to this branch concurrently — no file overlap. |
 | 5. Capability tools | ✅ done | `4e28e75` (base `af416e1`) | Ready skills' capabilities sync as client tools (manager.capability_catalog_entries + runtime_bridge merge + client_runtime_tools/client_tool_catalog origin widening); 8 catalog tests + coexistence search test. Review Approved (3 Minors; applied logger.exception). runtime_bridge has 8 pre-existing baseline ruff errors (deferred to final lint cleanup). |
 | 6. Permission evaluator | ✅ done | `812decb` (base `4e28e75`) | Pure pre-exec permission evaluation (permissions.py); 27 tests. Review found 2 CRITICAL over-grants (empty/root fs path-prefix opened whole FS; mutation gate bypassable via granted token/`*`) — both fixed + regression-tested; re-review confirmed Resolved. |
+| 10. Secret store | ✅ done | `f5bbd99` (base `f4d71c3`) | SkillSecretStore extended with encrypted per-profile storage (profile-first, env-fallback) + set/delete/list + redact_secret_values; /skills secrets API. 13 tests. Review Approved; Important (weak sibling key file) fixed by delegating at-rest to core.security DPAPI/Fernet primitive (no key file); added corruption-tolerance tests. |
 | 9. HITL approval for mutations | ✅ done | `1857958` (base `1b8789c`) | A: propagate `mutation` (manifest→catalog→spec→tool metadata→CallIdentity) + identity_requires_approval auto-gates as last resort. B: redact_sensitive_args in approval prompt. C: ToolDispatchRequest.mutation_approved → sidecar runs approved mutation (still re-validates session/catalog/instance). 23 tests + 72 regression. Review Approved; 2 Important fixed (unified mutation def via shared is_mutation(); denied-mutation test). |
 | 8. Route skill dispatch | ✅ done | `e26b84c` (base `aea00bb`) | runtime_bridge routes `skill::` → SkillExecutionEngine; ok=false → error path (code+repair preserved); validation untouched (skill tools are normal catalog entries). 6 dispatch tests. Review Approved on production code; 1 Important test-only (vacuous missing-capability assertion) fixed by driving _handle_tool_request end-to-end. |
 | 7. Execution engine | ✅ done | `498b165` (base `975bbe2`) | SkillExecutionEngine (execution.py) — subprocess.run via to_thread (Selector-loop-safe), no shell, permission-before-secrets/spawn, scoped env, secret redaction, timeout+output caps; 16 tests. Review found 2 CRITICAL secret leaks (full os.environ inheritance; `_redact` substring collision) + 2 Important (manager/store divergence, unbounded timeout) — all fixed + regression-tested; re-review Approved (fixed NaN-clamp Minor too). User committed 4 image-attachment commits concurrently (no overlap). |
@@ -725,3 +726,10 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 - **Mutation definition unified:** `SkillCapabilitySpec.is_mutation()` (`self.mutation or "mutation" in self.permissions`) is the single source of truth, used by both the permission evaluator (Task 6) and the catalog signal — so a capability declaring mutation via the permissions token still gates (fails closed → approvable, not permanently unexecutable).
 - **Redaction (B):** `redact_sensitive_args` masks values under secret/token/password/api_key/credential/authorization-style keys in the approval prompt (`_build_tool_interrupt_request`), applied generically. Skill args are non-secret by design (secrets injected at exec), so this is a conservative defensive backstop that leaves MCP prompts unaffected. Shallow-only (documented tradeoff; skill args are flat).
 - **Dispatch signal (C):** `ToolDispatchRequest.mutation_approved` (server-derived, not client-forgeable). `_dispatch_client_tool` sets it = `spec.mutation` (reaching dispatch means the gate approved/pre-granted). The sidecar `_execute_skill_capability` runs the mutation with an `allow_mutation=True` policy ONLY when the flag is set, and STILL re-validates session/catalog/tool_instance first — an approved-but-stale mutation is rejected. The sidecar remains the final enforcement authority (default policy blocks mutation without the flag).
+
+### Task 10 — Encrypted secret store + API
+- `SkillSecretStore` now checks encrypted per-profile storage first, then env — so a user can set a secret via the local API without an env var + restart, while env-only construction (readiness manager, execution engine, their tests) is unchanged (no active user id → env-only reads, raising writes).
+- **At-rest protection delegated to `core.security.encrypt_local_secret`/`decrypt_local_secret`** (the review caught that a self-managed sibling key file adds ~no protection vs a same-user attacker). That primitive is OS-user-bound DPAPI on Windows (no key file to guard), managed-Fernet fallback elsewhere — the same one `upstream_auth` uses. One JSON envelope per profile (`<profile>/skills/secrets.json`). Reads tolerate missing/malformed/undecryptable/non-dict state → empty, never crash.
+- `redact_secret_values(text, values)` — shared longest-first redaction for logs/errors.
+- API: `POST /skills/secrets` (never echoes value; no-profile→400), `GET /skills/{name}/secrets` (names + required + configured booleans only, never values; ordered before `/{name}`).
+- **Perf note (final triage):** `get()`/`has()` re-read+decrypt the profile file per lookup; a readiness check / execution with N secrets does N decrypt cycles. Consider per-call caching if it bites.

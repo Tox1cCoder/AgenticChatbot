@@ -7,10 +7,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from client_backend.api.common import make_api_response
 from client_backend.core.auth import require_local_session
 from client_backend.core.security import LocalSessionPayload
-from client_backend.schemas.skills import SkillInstallRequest, SkillUninstallRequest
+from client_backend.schemas.skills import (
+    SkillInstallRequest,
+    SkillSecretSetRequest,
+    SkillUninstallRequest,
+)
 from client_backend.services.local_skills_registry import get_skills_registry
 from client_backend.services.runtime_bridge import get_runtime_bridge
 from client_backend.services.skill_runtime.install import SkillBundleInstaller
+from client_backend.services.skill_runtime.secrets import SkillSecretStore
 from shared.skills.errors import SKILL_INSTALL_CONFLICT, SKILL_INSTALL_INVALID, SkillRuntimeError
 
 router = APIRouter(prefix="/skills", tags=["skills"])
@@ -26,6 +31,11 @@ _UNINSTALL_ERROR_STATUS_OVERRIDES = {SKILL_INSTALL_INVALID: 404}
 def get_skill_installer() -> SkillBundleInstaller:
     """Factory for the bundle installer, overridable in tests."""
     return SkillBundleInstaller()
+
+
+def get_secret_store() -> SkillSecretStore:
+    """Factory for the skill secret store, overridable in tests."""
+    return SkillSecretStore()
 
 
 def _skill_summary(skill) -> dict:
@@ -132,6 +142,67 @@ async def list_installed_skills(
         success=True,
         message="Installed skill bundles retrieved",
         data={"installed": installed, "total_count": len(installed)},
+    )
+
+
+@router.post("/secrets")
+async def set_skill_secret(
+    payload: SkillSecretSetRequest,
+    _session: LocalSessionPayload = Depends(require_local_session),
+):
+    """Set a secret value for use by skill capabilities. Never echoes the value."""
+    store = get_secret_store()
+    try:
+        store.set(payload.name, payload.value)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return make_api_response(
+        success=True,
+        message=f"Secret '{payload.name}' saved",
+        data={"name": payload.name, "configured": True},
+    )
+
+
+@router.get("/{name}/secrets")
+async def get_skill_secrets(
+    name: str,
+    _session: LocalSessionPayload = Depends(require_local_session),
+):
+    """List a skill's declared secrets and whether each is configured.
+
+    Never returns secret values, only presence booleans. A skill with no
+    manifest (instruction-only) has no declared secrets, so this returns an
+    empty list rather than a 404; only an unknown skill name is a 404.
+    """
+    registry = get_skills_registry()
+    await registry.initialize()
+    skill = registry.get_skill(name)
+    if skill is None:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    manifest = getattr(skill, "manifest", None)
+    if manifest is None:
+        return make_api_response(
+            success=True,
+            message=f"Skill '{name}' has no declared secrets",
+            data={"secrets": []},
+        )
+
+    store = get_secret_store()
+    secrets = [
+        {
+            "name": spec.name,
+            "required": spec.required,
+            "description": spec.description,
+            "configured": store.has(spec.name),
+        }
+        for spec in manifest.secrets
+    ]
+    return make_api_response(
+        success=True,
+        message=f"Secrets for skill '{name}' retrieved",
+        data={"secrets": secrets},
     )
 
 

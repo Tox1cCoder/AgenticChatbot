@@ -82,3 +82,14 @@ class SkillUninstallRequest(BaseModel):
     """Request to uninstall a previously installed local skill bundle."""
 
     name: str
+
+
+class SkillSecretSetRequest(BaseModel):
+    """Request to set a named secret value for a skill.
+
+    Provider-neutral: the secret name comes from the skill's own manifest
+    (``skill.json``'s ``secrets`` list), never a hardcoded integration name.
+    """
+
+    name: str
+    value: str
