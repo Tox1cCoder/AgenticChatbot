@@ -2845,6 +2845,15 @@ def _last_api_error_message(default: str = "Request failed") -> str:
     return default
 
 
+def _transition_to_login() -> None:
+    """Discard user-scoped UI state before returning to the login screen."""
+    _clear_skill_hitl_session_state()
+    st.session_state.auth_token = None
+    st.session_state.current_user_id = None
+    st.session_state.current_user_profile = None
+    st.session_state.show_login = True
+
+
 def make_api_request(
     method: str,
     endpoint: str,
@@ -2896,6 +2905,10 @@ def make_api_request(
                 payload = {}
         error_message = _extract_api_error_message(status_code, payload)
         st.session_state["_last_api_error_message"] = error_message
+        if status_code == 401:
+            _transition_to_login()
+            st.toast("Please log in", icon=":material/lock:")
+            return {}
         st.toast(error_message, icon=":material/cancel:")
         return {}
     except requests.exceptions.ConnectionError:
@@ -2914,11 +2927,7 @@ def make_api_request(
         st.session_state["_last_api_error_message"] = error_message
 
         if error_code == "unauthenticated":
-            _clear_skill_hitl_session_state()
-            st.session_state.auth_token = None
-            st.session_state.current_user_id = None
-            st.session_state.current_user_profile = None
-            st.session_state.show_login = True
+            _transition_to_login()
             st.toast("Please log in", icon=":material/lock:")
         else:
             st.toast(f"{error_message}", icon=":material/cancel:")
