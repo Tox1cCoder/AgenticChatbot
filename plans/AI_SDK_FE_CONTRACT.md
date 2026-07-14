@@ -7,7 +7,7 @@
 | `POST /api/chat/{conversationId}` | Chat stream (AI SDK UI Message Stream, SSE). |
 | `POST /ai/chat/{conversationId}` | Alias of the above. Use `/api/chat` for new integrations. |
 | `POST /ai/resume-interrupt` | Resume after a HITL interrupt. Same SSE stream format. |
-| `GET /hitl/interrupts/{interruptId}` | Read the authenticated owner's durable HITL lifecycle state for reconciliation. |
+| `GET /hitl/interrupts/{interruptId}` | Read the authenticated owner's durable HITL lifecycle state for reconciliation; other owners cannot discover it. |
 | `GET /ai/conversations/{conversationId}/messages` | Message history as AI SDK `UIMessage` objects. |
 | `POST /ai/conversations`, `GET /ai/conversations`, `GET/PATCH/DELETE /ai/conversations/{id}` | Conversation CRUD (standard `ApiResponse` envelope). |
 | `POST /documents/uploads` | Upload document files for RAG/search. Multipart form route; not part of the chat JSON payload. |
@@ -294,9 +294,10 @@ Error:
 `data-user-message` (with `content` included).
 
 `statusCode` and `errorCode` are optional and appear only for known domain
-failures. Unknown exceptions retain `type` and `errorText` only. Treat the
-error event as terminal regardless of whether those optional fields are
-present.
+failures. They are the AI SDK camel-case projection of the internal
+`status_code` and `error_code` values. Unknown exceptions retain `type` and
+`errorText` only. Treat the error event as terminal regardless of whether
+those optional fields are present.
 
 ## Subagent Progress
 
@@ -498,11 +499,11 @@ Coverage rules:
 - Incomplete coverage → `422 INTERRUPT_INCOMPLETE_DECISIONS`.
 - Set an interrupt-ID-scoped submission lock before this POST and disable every
   control that can submit another resume request.
-- A duplicate discovered after streaming starts is a terminal `200` SSE stream
-  whose `error` event has `errorCode` `INTERRUPT_ALREADY_RESOLVED` or
-  `INTERRUPT_CONFLICT`; it is not a second successful resume. JSON validation
-  failures that happen before streaming can still be ordinary non-stream HTTP
-  errors.
+- Resume is first-write-wins: a duplicate discovered after streaming starts is
+  a terminal `200` SSE stream whose `error` event has `errorCode`
+  `INTERRUPT_ALREADY_RESOLVED` or `INTERRUPT_CONFLICT`; it is not a second
+  successful resume. JSON validation failures that happen before streaming can
+  still be ordinary non-stream HTTP errors.
 
 Decision behavior:
 
@@ -519,12 +520,11 @@ The resume response is the same SSE stream format as chat.
 
 ```http
 GET /hitl/interrupts/{interruptId}
-Cache-Control: no-cache
 ```
 
 Use `fetch(..., { cache: "no-store" })` (or an equivalent uncached client
 request) for this endpoint. It is authenticated and owner-filtered; a missing
-or foreign ID returns:
+or foreign ID returns HTTP `404` with `INTERRUPT_NOT_FOUND`:
 
 ```json
 {
@@ -554,21 +554,25 @@ Successful responses contain only lifecycle data:
 The response never contains decisions, tool arguments, device/session data,
 user IDs, or secret material.
 
-When the terminal stream error's `errorCode` is
+When the terminal stream error's `errorCode` is exactly
 `INTERRUPT_ALREADY_RESOLVED` or `INTERRUPT_CONFLICT`, do exactly one uncached
-state GET and never POST `/ai/resume-interrupt` again for that interrupt:
+state GET. Do not automatically replay the resume POST; use the durable state
+to choose the next UI state:
 
 | State | Required frontend behavior |
 |---|---|
-| `pending` | Remove the submission lock and restore the approval form. |
-| `resolving` | Clear local decisions and render a non-submittable “already processing” state with one manual **Check status** action. |
+| `pending` | Remove the submission lock and exact-ID suppression marker, then restore the approval form. |
+| `resolving` | Clear local decisions, retain the exact-ID suppression marker, and render a non-submittable “already processing” state with one manual **Check status** action. Do not poll. |
 | `resolved` | Clear the paused approval UI, retain suppression for the stale paused message, refetch conversation history, and return to normal chat. |
-| `failed` / `expired` / unavailable | Clear the paused approval UI, explain that a new message is required, and return to normal chat. |
+| `failed` | Clear the paused approval UI, retain suppression for the stale paused message, explain that a new message is required, and return to normal chat. |
+| `expired` | Clear the paused approval UI, retain suppression for the stale paused message, explain that a new message is required, and return to normal chat. |
+| unavailable (including `404`) | Clear the paused approval UI, retain suppression for the stale paused message, explain that a new message is required, and return to normal chat. This is not an additional lifecycle status. |
 
 Do not treat `INTERRUPT_EXPIRED`, `INTERRUPT_FAILED`, or device/session/catalog/
 tool mismatch errors as successful completion. Surface their message and do not
-retry the resume POST. A claimed resume that later fails reaches durable
-`failed`; it is terminal and requires a new user message.
+automatically retry the resume POST. A claimed resume that later fails reaches
+durable `failed`; `failed` and `expired` are terminal, require a new user
+message, and neither client may POST resume for that interrupt again.
 
 ## Message History
 

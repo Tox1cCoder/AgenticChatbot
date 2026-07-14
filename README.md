@@ -735,13 +735,17 @@ Highlights:
 - **Scoped execution** — argv zero resolves only from that skill's bundle or prepared Python environment; no global `PATH` mutation and no arbitrary system-command fallback.
 - **Readiness** — `ready` / `not_ready` / `instruction_only`, with explicit setup and rebuild hints; unsafe bundles are rejected or omitted.
 - **Python setup** — approved projects are installed into staged, per-skill virtual environments and atomically promoted.
-- **Secrets** — encrypted, per-skill, per-machine bindings injected only at execution time and redacted from output/audit.
+- **Secrets** — the operator manually enters a name documented by the skill and a password-style value. Values are encrypted, per-skill, per-user, and per-machine; they are injected only at execution time and redacted from output/audit. They never synchronize to the server or another device, and never appear in chat history.
 - **Permissions & HITL** — every skill command is treated as mutating and passes the existing approval-policy path before secrets or process creation (human confirmation by default, with explicit per-tool preapproval supported).
 - **Audit** — one JSONL record per execution under the profile (no secrets or raw output).
 
 This is command confinement, not an OS sandbox: an approved skill still runs with the local sidecar user's host privileges, matching the trust model of coding-agent commands.
 
 Extra sidecar endpoints: `POST /skills/install/preview`, `POST /skills/install`, `POST /skills/{name}/setup`, `POST /skills/uninstall`, `GET /skills/installed`, and per-skill secret GET/POST/DELETE routes.
+
+The credential UI returns configured names only, never values. Bindings live in
+the local sidecar profile for the current user and device; switching users or
+devices does not share them.
 
 **Full guide: [`docs/skill-runtime.md`](docs/skill-runtime.md)** — bundle layout, setup, command confinement, device isolation, secret setup, and troubleshooting.
 
@@ -805,6 +809,31 @@ HITL is global (`ENABLE_HUMAN_IN_THE_LOOP=true`) with a per-tool opt-in list (`H
 4. The graph resumes, applies the decision to pending tool calls, and continues streaming.
 
 Timeout handling is Redis-backed; after `HITL_APPROVAL_TIMEOUT_MINUTES` the interrupt is auto-rejected or cleaned up.
+
+### Durable resume recovery
+
+Resume is first-write-wins: when two clients submit decisions for the same
+interrupt, exactly one claim can continue. Every client locks all
+interrupt-scoped submit controls before opening its resume stream. A duplicate
+reported during streaming is terminal, but it is a `200` SSE response with the
+typed duplicate code (`INTERRUPT_ALREADY_RESOLVED` or `INTERRUPT_CONFLICT`),
+not a second successful resume; pre-stream validation errors remain ordinary
+JSON HTTP errors. The internal Streamlit stream uses optional `status_code` /
+`error_code` metadata; the AI SDK stream projects the same values as optional
+`statusCode` / `errorCode`.
+
+On either duplicate code, make exactly one owner-filtered lifecycle read with
+`GET /hitl/interrupts/{interrupt_id}` using `cache: "no-store"`; never
+automatically replay the POST. The endpoint exposes only `pending`,
+`resolving`, `resolved`, `failed`, or `expired` and returns `404
+INTERRUPT_NOT_FOUND` for missing or foreign IDs. `pending` restores the form;
+`resolving` shows a non-submittable processing panel with one manual **Check
+status** action (no polling); `resolved` refreshes history and returns to chat.
+For `failed`, `expired`, or an unavailable lifecycle row, clear the paused UI,
+retain an exact-interrupt suppression marker so a stale paused message cannot
+rehydrate, and require a new chat message. A continuation that fails after its
+claim becomes terminal durable `failed` (`INTERRUPT_FAILED`). Failed and
+expired interrupts cannot be resumed by either client.
 
 **Human-in-the-loop approval (per-user).** Beyond the global `HITL_TOOLS_REQUIRE_APPROVAL` floor, approval is governed by a per-user policy stored server-side (`tool_approval_settings`). A rule is either **server-scoped** (gates every tool from an MCP server) or **tool-scoped** (a `"<server>::<tool>"` rule that overrides its server). Precedence: tool rule > server rule > the legacy global floor `hitl_tools_require_approval`; the global `enable_human_in_the_loop` switch is the master kill-switch. The gate resolves each pending call's provenance (client tools from their `client__<server>__<tool>` name, server tools via the MCP manager) so it works for client-sidecar and deferred (search-loaded) tools alike. Manage it from the demo's MCP panel (per-server "Approval" toggle; per-tool Inherit/Require/Skip), which calls `GET/POST/DELETE /hitl/settings` through the sidecar proxy.
 
