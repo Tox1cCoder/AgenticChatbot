@@ -1,4 +1,4 @@
-"""The sidecar proxies /hitl/settings to the canonical server without device stamping."""
+"""The sidecar proxies HITL resources without device stamping."""
 
 from __future__ import annotations
 
@@ -44,7 +44,21 @@ def test_post_and_delete_hitl_settings_proxy(client):
     test_client, captured = client
     assert test_client.post("/hitl/settings", json={"items": []}).status_code == 200
     assert captured["path"] == "/hitl/settings"
-    assert test_client.request(
-        "DELETE", "/hitl/settings", params={"scope_type": "server", "scope_value": "excel"}
-    ).status_code == 200
+    assert (
+        test_client.request(
+            "DELETE", "/hitl/settings", params={"scope_type": "server", "scope_value": "excel"}
+        ).status_code
+        == 200
+    )
     assert captured["method"] == "DELETE"
+
+
+def test_get_hitl_interrupt_proxies_without_device_context(client):
+    test_client, captured = client
+
+    response = test_client.get("/hitl/interrupts/int-1")
+
+    assert response.status_code == 200
+    assert captured["path"] == "/hitl/interrupts/int-1"
+    assert captured["method"] == "GET"
+    assert captured["params_override"] is None

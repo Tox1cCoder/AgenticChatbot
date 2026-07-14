@@ -49,6 +49,18 @@ async def proxy_hitl_settings(
     return await proxy_server_request(request, upstream_path="/hitl/settings")
 
 
+@router.get("/hitl/interrupts/{interrupt_id}")
+async def proxy_hitl_interrupt(
+    interrupt_id: str,
+    request: Request,
+    _session: LocalSessionPayload = Depends(require_local_session),
+) -> Response:
+    return await proxy_server_request(
+        request,
+        upstream_path=f"/hitl/interrupts/{interrupt_id}",
+    )
+
+
 @router.api_route("/providers/{provider_type}", methods=["GET", "DELETE"])
 async def proxy_provider(
     provider_type: str,
