@@ -194,6 +194,54 @@ def test_http_unauthorized_api_transition_clears_local_skill_credential_state(mo
     assert name_key not in session_state
 
 
+def test_cached_get_unauthorized_transition_clears_local_skill_credential_state(monkeypatch):
+    import demo
+
+    class SessionState(dict):
+        def __getattr__(self, name):
+            try:
+                return self[name]
+            except KeyError as exc:
+                raise AttributeError(name) from exc
+
+        def __setattr__(self, name, value):
+            self[name] = value
+
+    value_key = "skill_secret_value_user-a_calendar"
+    name_key = "skill_secret_name_user-a_calendar"
+    session_state = SessionState(
+        auth_token="expired-token",
+        current_user_id="user-a",
+        current_user_profile={"id": "user-a"},
+        show_login=False,
+        api_cache_version=0,
+        **{
+            value_key: object(),
+            name_key: "ACCESS_TOKEN",
+        },
+    )
+    monkeypatch.setattr(
+        demo,
+        "st",
+        SimpleNamespace(session_state=session_state, toast=lambda *_args, **_kwargs: None),
+    )
+    monkeypatch.setattr(
+        demo,
+        "_cached_get_request",
+        lambda **_kwargs: {
+            "status_code": 401,
+            "payload": {"detail": "Session expired"},
+        },
+    )
+
+    assert demo.get_skill_secrets("calendar") is None
+    assert session_state.auth_token is None
+    assert session_state.current_user_id is None
+    assert session_state.show_login is True
+    assert value_key not in session_state
+    assert name_key not in session_state
+
+
 def test_successful_skill_secret_save_clears_credential_widget_value(monkeypatch):
     import demo
 

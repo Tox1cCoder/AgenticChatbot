@@ -2878,6 +2878,10 @@ def make_api_request(
             if status_code >= 400:
                 error_message = _extract_api_error_message(status_code, response_data)
                 st.session_state["_last_api_error_message"] = error_message
+                if status_code == 401:
+                    _transition_to_login()
+                    st.toast("Please log in", icon=":material/lock:")
+                    return {}
                 st.toast(error_message, icon=":material/cancel:")
                 return {}
         else:
