@@ -1851,9 +1851,7 @@ class MessageService(IMessageService):
             self._clear_redis_interrupt(conversation_id, interrupt_id)
 
             if not bot_message_persisted:
-                get_generation_registry().clear_paused_for_conversation(
-                    user_id, conversation_id
-                )
+                get_generation_registry().clear_paused_for_conversation(user_id, conversation_id)
                 self._mark_claimed_interrupt_failed(interrupt_id, "stream_incomplete")
                 fallback_message = self._create_bot_response_message(
                     conversation_id=conversation_id,

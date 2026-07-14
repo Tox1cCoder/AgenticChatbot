@@ -240,8 +240,7 @@ async def get_skill_secrets(
     await _require_known_skill(name)
     store = get_secret_store()
     secrets = [
-        {"name": secret_name, "configured": True}
-        for secret_name in store.list_for_skill(name)
+        {"name": secret_name, "configured": True} for secret_name in store.list_for_skill(name)
     ]
     return make_api_response(
         success=True,

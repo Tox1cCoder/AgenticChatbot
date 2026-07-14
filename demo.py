@@ -1,3 +1,5 @@
+# ruff: noqa: E501
+
 import base64
 import contextlib
 import html
@@ -41,6 +43,7 @@ from app.ui.rag_artifacts import (
     RAGDocumentListing,
     extract_rag_artifact_views,
 )
+from app.ui.stream_markdown import normalize_stream_markdown_text
 from app.ui.subagent_activity import (
     build_live_subagent_activity_view,
     build_subagent_activity_view,
@@ -1371,9 +1374,7 @@ def render_custom_agents_manager() -> None:
             edit_excluded_tool_keys = _custom_agent_grouped_tool_keys(
                 server_groups, edit_server_names
             )
-            edit_tool_options = [
-                key for key in tool_labels if key not in edit_excluded_tool_keys
-            ]
+            edit_tool_options = [key for key in tool_labels if key not in edit_excluded_tool_keys]
             _ca_retain_session_options(f"ca_edit_tools_{agent['id']}", edit_tool_options)
             edit_tool_default = [
                 key
@@ -2335,11 +2336,6 @@ def _sanitize_rendered_html(html_fragment: str) -> str:
     return "".join(parser.result)
 
 
-from app.ui.stream_markdown import (
-    normalize_stream_markdown_text as normalize_stream_markdown_text,
-)
-
-
 @st.cache_data(show_spinner=False, max_entries=500)
 def sanitize_message_content(content: str) -> str:
     """Render limited markdown to HTML while preventing unsafe tags."""
@@ -2989,9 +2985,7 @@ def make_streaming_request(endpoint: str, data: dict | None = None):
                     continue
 
     except requests.exceptions.HTTPError as http_error:
-        status_code = (
-            http_error.response.status_code if http_error.response is not None else None
-        )
+        status_code = http_error.response.status_code if http_error.response is not None else None
         payload: Any = {}
         if http_error.response is not None:
             with contextlib.suppress(ValueError):
@@ -3551,9 +3545,7 @@ def get_hitl_settings() -> dict[str, Any] | None:
 
 def get_hitl_interrupt_state(interrupt_id: str) -> dict[str, Any] | None:
     """Fetch the canonical lifecycle state without reusing a stale GET cache."""
-    response = make_api_request(
-        "GET", f"/hitl/interrupts/{interrupt_id}", use_cache=False
-    )
+    response = make_api_request("GET", f"/hitl/interrupts/{interrupt_id}", use_cache=False)
     return response.get("data") if response else None
 
 
@@ -7080,8 +7072,7 @@ def render_tools_tab():
             hitl_settings = get_hitl_settings() or {}
             hitl_master = bool(hitl_settings.get("masterEnabled", True))
             hitl_servers = {
-                s["scopeValue"]: s["requireApproval"]
-                for s in hitl_settings.get("servers", [])
+                s["scopeValue"]: s["requireApproval"] for s in hitl_settings.get("servers", [])
             }
             if not hitl_master:
                 st.caption(
@@ -7135,7 +7126,10 @@ def render_tools_tab():
                         help="Require human approval for all tools from this server",
                     ):
                         with st.spinner("Updating approval rule..."):
-                            if set_hitl_setting("server", server_name, not server_gated) is not None:
+                            if (
+                                set_hitl_setting("server", server_name, not server_gated)
+                                is not None
+                            ):
                                 st.rerun()
 
                 st.markdown("---")
@@ -7213,9 +7207,7 @@ def render_tools_tab():
     st.markdown("**Human approval**")
     qualified_id = selected_tool_key
     hitl_settings = get_hitl_settings() or {}
-    tool_rules = {
-        t["scopeValue"]: t["requireApproval"] for t in hitl_settings.get("tools", [])
-    }
+    tool_rules = {t["scopeValue"]: t["requireApproval"] for t in hitl_settings.get("tools", [])}
 
     if qualified_id in tool_rules:
         current_mode = "Require" if tool_rules[qualified_id] else "Skip"
@@ -7382,14 +7374,11 @@ def render_skills_tab():
     hitl_settings = get_hitl_settings()
     skill_tool_rules: dict[str, bool] = {}
     if hitl_settings is None:
-        st.warning(
-            "Human approval settings are unavailable. Skill approval controls are disabled."
-        )
+        st.warning("Human approval settings are unavailable. Skill approval controls are disabled.")
     else:
         hitl_master = bool(hitl_settings.get("masterEnabled", True))
         skill_tool_rules = {
-            item["scopeValue"]: item["requireApproval"]
-            for item in hitl_settings.get("tools", [])
+            item["scopeValue"]: item["requireApproval"] for item in hitl_settings.get("tools", [])
         }
         if not hitl_master:
             st.caption(
@@ -7467,9 +7456,7 @@ def render_skills_tab():
             if runtime_status == "ready" and hitl_settings is not None and command_capable:
                 skill_qualified_id = f"skill::{skill_name}::run_skill_command"
                 if skill_qualified_id in skill_tool_rules:
-                    current_mode = (
-                        "Require" if skill_tool_rules[skill_qualified_id] else "Skip"
-                    )
+                    current_mode = "Require" if skill_tool_rules[skill_qualified_id] else "Skip"
                 else:
                     current_mode = "Inherit"
 
@@ -7654,9 +7641,7 @@ def render_interrupt_approval_ui():
                 st.error(decision_label, icon=":material/cancel:")
 
             # Option to change decision
-            if st.button(
-                "Change decision", key=f"change_{idx}", disabled=resume_inflight
-            ):
+            if st.button("Change decision", key=f"change_{idx}", disabled=resume_inflight):
                 st.session_state[decisions_key].pop(task_id, None)
                 st.session_state.pop(f"editing_tool_{idx}", None)
                 st.rerun()
@@ -7730,13 +7715,11 @@ def render_interrupt_approval_ui():
                         ):
                             try:
                                 edited_args = json.loads(edited_args_text)
-                                st.session_state[decisions_key][task_id] = (
-                                    build_interrupt_decision(
-                                        "edit",
-                                        action_request,
-                                        action=tool_name,
-                                        args=edited_args,
-                                    )
+                                st.session_state[decisions_key][task_id] = build_interrupt_decision(
+                                    "edit",
+                                    action_request,
+                                    action=tool_name,
+                                    args=edited_args,
                                 )
                                 st.session_state.pop(f"editing_tool_{idx}", None)
                                 st.rerun()
@@ -7928,9 +7911,7 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
         _clear_inflight_state()
 
         if resume_error_event:
-            resume_error = str(
-                resume_error_event.get("error") or "Failed to resume execution"
-            )
+            resume_error = str(resume_error_event.get("error") or "Failed to resume execution")
             error_code = extract_error_code(resume_error_event)
 
             if is_recoverable_resume_conflict(resume_error_event):
@@ -7938,11 +7919,15 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
                 st.rerun()
                 return
 
-            if error_code in {
-                "INTERRUPT_FAILED",
-                "INTERRUPT_EXPIRED",
-                "INTERRUPT_NOT_FOUND",
-            } or resume_error_event.get("status_code") == 410:
+            if (
+                error_code
+                in {
+                    "INTERRUPT_FAILED",
+                    "INTERRUPT_EXPIRED",
+                    "INTERRUPT_NOT_FOUND",
+                }
+                or resume_error_event.get("status_code") == 410
+            ):
                 _clear_interrupt_ui_state(interrupt_id)
                 st.session_state[_hitl_reconciliation_key()] = interrupt_id
                 st.session_state["hitl_reconciliation_notice"] = resume_error
@@ -7965,9 +7950,9 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
             # The just-resolved interrupt's tools are now done; advance the
             # cumulative counter so the follow-up interrupt numbers its tools
             # after these (Tool 1 → Tool 2 → ...) instead of restarting at 1.
-            st.session_state.hitl_step_base = int(
-                st.session_state.get("hitl_step_base", 0)
-            ) + len(action_requests or [])
+            st.session_state.hitl_step_base = int(st.session_state.get("hitl_step_base", 0)) + len(
+                action_requests or []
+            )
             st.session_state.pending_interrupt = next_interrupt
             st.session_state.interrupt_conversation_id = conversation_id
             next_interrupt_message = extract_interrupt_message(next_interrupt)
@@ -8200,13 +8185,10 @@ def render_chat_view():
                                     **_interrupt_data,
                                     "thread_id": _thread_id,
                                 }
-                            recovered_interrupt_id = (
-                                _interrupt_data.get("interrupt_id")
-                                or _interrupt_data.get("interruptId")
-                            )
-                            reconciliation_marker = st.session_state.get(
-                                _hitl_reconciliation_key()
-                            )
+                            recovered_interrupt_id = _interrupt_data.get(
+                                "interrupt_id"
+                            ) or _interrupt_data.get("interruptId")
+                            reconciliation_marker = st.session_state.get(_hitl_reconciliation_key())
                             if not should_suppress_pending_interrupt(
                                 recovered_interrupt_id, reconciliation_marker
                             ):
@@ -8372,9 +8354,7 @@ def render_chat_view():
                 )
 
             with col2:
-                _form_send = st.form_submit_button(
-                    "\nSend", width="stretch", type="primary"
-                )
+                _form_send = st.form_submit_button("\nSend", width="stretch", type="primary")
 
             with col3:
                 _form_attach = st.form_submit_button("Attach", width="stretch")

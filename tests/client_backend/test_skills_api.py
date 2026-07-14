@@ -111,9 +111,7 @@ def test_skills_routes_return_server_style_payloads(monkeypatch):
 
 
 def test_skill_summary_marks_instruction_only_skill_as_not_command_capable():
-    summary = skills_api._skill_summary(
-        _Skill("instructions", command_capable=False)
-    )
+    summary = skills_api._skill_summary(_Skill("instructions", command_capable=False))
 
     assert summary["commandCapable"] is False
     assert summary["runtimeStatus"] == "instruction_only"
