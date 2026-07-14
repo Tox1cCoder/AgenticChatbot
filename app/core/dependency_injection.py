@@ -21,10 +21,10 @@ from app.interfaces.task_plan_service_interface import ITaskPlanService
 from app.repositories.conversation import ConversationRepository
 from app.repositories.document import DocumentRepository
 from app.repositories.feedback import FeedbackRepository
+from app.repositories.hitl_interrupt import HITLInterruptRepository
 from app.repositories.message import MessageRepository
 from app.repositories.task_plan import TaskPlanRepository
 from app.repositories.user import UserRepository
-from app.repositories.hitl_interrupt import HITLInterruptRepository
 from app.services.ai_service import AIService
 from app.services.custom_agent_service import CustomAgentService
 from app.services.document_processing_service import DocumentProcessingService

@@ -208,6 +208,14 @@ def _claimed_resume_service(*, source, lifecycle_events):
     return service, conversation_id, user_id, interrupt_id
 
 
+class _PausedRegistryRecorder:
+    def __init__(self):
+        self.calls = []
+
+    def clear_paused_for_conversation(self, user_id, conversation_id):
+        self.calls.append((user_id, conversation_id))
+
+
 @pytest.mark.asyncio
 async def test_claimed_resume_stream_error_marks_interrupt_failed_before_terminal_event():
     lifecycle_events = []
@@ -241,7 +249,9 @@ async def test_claimed_resume_stream_error_marks_interrupt_failed_before_termina
 
 
 @pytest.mark.asyncio
-async def test_closing_claimed_resume_stream_marks_interrupt_failed_for_client_disconnect():
+async def test_closing_claimed_resume_stream_marks_interrupt_failed_for_client_disconnect(
+    monkeypatch,
+):
     lifecycle_events = []
 
     async def source(**_kwargs):
@@ -251,6 +261,11 @@ async def test_closing_claimed_resume_stream_marks_interrupt_failed_for_client_d
     service, conversation_id, user_id, interrupt_id = _claimed_resume_service(
         source=source,
         lifecycle_events=lifecycle_events,
+    )
+    registry = _PausedRegistryRecorder()
+    monkeypatch.setattr(
+        "app.services.message_service.get_generation_registry",
+        lambda: registry,
     )
     stream = service.resume_message_creation_stream(
         thread_id=str(conversation_id),
@@ -264,10 +279,11 @@ async def test_closing_claimed_resume_stream_marks_interrupt_failed_for_client_d
     await stream.aclose()
 
     assert ("failed", interrupt_id, "client_disconnect") in lifecycle_events
+    assert registry.calls == [(user_id, conversation_id)]
 
 
 @pytest.mark.asyncio
-async def test_claimed_resume_setup_exception_marks_failed_and_yields_typed_error():
+async def test_claimed_resume_setup_exception_marks_failed_and_yields_typed_error(monkeypatch):
     lifecycle_events = []
 
     async def source(**_kwargs):
@@ -282,6 +298,11 @@ async def test_claimed_resume_setup_exception_marks_failed_and_yields_typed_erro
         raise RuntimeError("setup failed")
 
     service._get_conversation_context = fail_context
+    registry = _PausedRegistryRecorder()
+    monkeypatch.setattr(
+        "app.services.message_service.get_generation_registry",
+        lambda: registry,
+    )
 
     events = [
         event
@@ -298,6 +319,41 @@ async def test_claimed_resume_setup_exception_marks_failed_and_yields_typed_erro
     assert events[-1].type == "error"
     assert events[-1].data["error_code"] == "INTERRUPT_FAILED"
     assert events[-1].data["status_code"] == 500
+    assert registry.calls == [(user_id, conversation_id)]
+
+
+@pytest.mark.asyncio
+async def test_claimed_incomplete_resume_stream_clears_paused_registry(monkeypatch):
+    lifecycle_events = []
+
+    async def source(**_kwargs):
+        if False:
+            yield make_event("message_delta", sequence=1, data={"text": "unused"})
+
+    service, conversation_id, user_id, interrupt_id = _claimed_resume_service(
+        source=source,
+        lifecycle_events=lifecycle_events,
+    )
+    registry = _PausedRegistryRecorder()
+    monkeypatch.setattr(
+        "app.services.message_service.get_generation_registry",
+        lambda: registry,
+    )
+
+    events = [
+        event
+        async for event in service.resume_message_creation_stream(
+            thread_id=str(conversation_id),
+            conversation_id=conversation_id,
+            user_id=user_id,
+            decisions=[],
+            interrupt_id=interrupt_id,
+        )
+    ]
+
+    assert events[-1].type == "error"
+    assert ("failed", interrupt_id, "stream_incomplete") in lifecycle_events
+    assert registry.calls == [(user_id, conversation_id)]
 
 
 @pytest.mark.asyncio
@@ -376,8 +432,13 @@ async def test_claimed_nested_interrupt_durable_creation_failure_marks_failed_no
     conversation_id = uuid4()
     user_id = uuid4()
     interrupt_id = "claimed-interrupt"
+    bot_message_id = uuid4()
+    paused_message_id = uuid4()
+    error_message_id = uuid4()
     transitions = []
     state = {"value": "resolving"}
+    created_messages = []
+    deleted_message_ids = []
 
     class StatefulRepository:
         def create(self, **_kwargs):
@@ -419,10 +480,19 @@ async def test_claimed_nested_interrupt_durable_creation_failure_marks_failed_no
     service._resolve_custom_agents_state = lambda *_args: {}
     service._clear_redis_interrupt = lambda *_args: None
     service._sync_response_plan_state = lambda **_kwargs: False
-    service._create_bot_response_message = lambda **_kwargs: SimpleNamespace(
-        id=uuid4(),
-        model_dump=lambda **_kwargs: {},
+    service.repository = SimpleNamespace(
+        delete=lambda message_id: deleted_message_ids.append(message_id) or True,
     )
+
+    def create_bot_response_message(**kwargs):
+        created_messages.append((kwargs["message_id"], kwargs["metadata"]))
+        message_id = paused_message_id if len(created_messages) == 1 else error_message_id
+        return SimpleNamespace(
+            id=message_id,
+            model_dump=lambda **_kwargs: {"id": str(message_id)},
+        )
+
+    service._create_bot_response_message = create_bot_response_message
     service.redis_client = None
     service.task_plan_service = None
     service.ai_service = SimpleNamespace(
@@ -438,11 +508,18 @@ async def test_claimed_nested_interrupt_durable_creation_failure_marks_failed_no
             user_id=user_id,
             decisions=[],
             interrupt_id=interrupt_id,
+            bot_message_id=bot_message_id,
         )
     ]
 
     assert state["value"] == "failed"
     assert transitions == [("failed", "stream_exception")]
     assert events[-1].type == "error"
+    assert [message_id for message_id, _metadata in created_messages] == [bot_message_id, None]
+    assert created_messages[0][1]["paused"] is True
+    assert created_messages[1][1] == {"error": "follow-up interrupt persistence failed"}
+    assert events[-1].message_id == str(error_message_id)
+    assert events[-1].data["message"]["id"] == str(error_message_id)
+    assert deleted_message_ids == [paused_message_id]
     assert events[-1].data["error_code"] == "INTERRUPT_FAILED"
     assert events[-1].data["status_code"] == 500

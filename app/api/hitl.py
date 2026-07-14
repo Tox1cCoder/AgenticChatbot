@@ -4,6 +4,7 @@ from fastapi import APIRouter, Query
 
 from app.core.dependency_injection import AppAutoInjector
 from app.core.exceptions import CustomHTTPException
+from app.models.hitl_interrupt import HITLInterruptStatus
 from app.repositories.hitl_interrupt import HITLInterruptRepository
 from app.schemas.hitl import (
     HitlInterruptStateResponse,
@@ -13,7 +14,6 @@ from app.schemas.hitl import (
 )
 from app.schemas.responses import ApiResponse
 from app.services.hitl_settings_service import HitlSettingsService
-from app.models.hitl_interrupt import HITLInterruptStatus
 
 # No router-level auth dependency: the auto-injected ``user_id: UUID`` resolves to
 # ``Depends(get_current_user_id)`` (DI magic), which both authenticates the request

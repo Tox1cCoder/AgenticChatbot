@@ -752,6 +752,7 @@ class MessageService(IMessageService):
                         exc_info=True,
                     )
                     if require_durable_interrupt:
+                        self.repository.delete(bot_message.id)
                         raise
 
         return bot_message
@@ -1729,7 +1730,7 @@ class MessageService(IMessageService):
                             "error",
                             sequence=_next_sequence(),
                             conversation_id=str(conversation_id),
-                            message_id=str(bot_message_id) if bot_message_id else None,
+                            message_id=str(error_message.id),
                             data={
                                 "error": str(exc),
                                 "message": error_message.model_dump(mode="json"),
@@ -1850,6 +1851,9 @@ class MessageService(IMessageService):
             self._clear_redis_interrupt(conversation_id, interrupt_id)
 
             if not bot_message_persisted:
+                get_generation_registry().clear_paused_for_conversation(
+                    user_id, conversation_id
+                )
                 self._mark_claimed_interrupt_failed(interrupt_id, "stream_incomplete")
                 fallback_message = self._create_bot_response_message(
                     conversation_id=conversation_id,
@@ -1871,6 +1875,7 @@ class MessageService(IMessageService):
                 )
 
         except (asyncio.CancelledError, GeneratorExit):
+            get_generation_registry().clear_paused_for_conversation(user_id, conversation_id)
             self._mark_claimed_interrupt_failed(interrupt_id, "client_disconnect")
             if bot_message_persisted:
                 return
@@ -1893,6 +1898,7 @@ class MessageService(IMessageService):
 
         except Exception as exc:
             self._clear_redis_interrupt(conversation_id, interrupt_id)
+            get_generation_registry().clear_paused_for_conversation(user_id, conversation_id)
             self._mark_claimed_interrupt_failed(interrupt_id, "stream_exception")
             if bot_message_persisted:
                 return
