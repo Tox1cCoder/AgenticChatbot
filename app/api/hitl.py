@@ -3,9 +3,17 @@ from uuid import UUID
 from fastapi import APIRouter, Query
 
 from app.core.dependency_injection import AppAutoInjector
-from app.schemas.hitl import HitlScopeRule, HitlSettingsResponse, HitlSettingsUpdate
+from app.core.exceptions import CustomHTTPException
+from app.repositories.hitl_interrupt import HITLInterruptRepository
+from app.schemas.hitl import (
+    HitlInterruptStateResponse,
+    HitlScopeRule,
+    HitlSettingsResponse,
+    HitlSettingsUpdate,
+)
 from app.schemas.responses import ApiResponse
 from app.services.hitl_settings_service import HitlSettingsService
+from app.models.hitl_interrupt import HITLInterruptStatus
 
 # No router-level auth dependency: the auto-injected ``user_id: UUID`` resolves to
 # ``Depends(get_current_user_id)`` (DI magic), which both authenticates the request
@@ -55,3 +63,33 @@ async def clear_hitl_setting(
 ) -> ApiResponse[HitlSettingsResponse]:
     data = hitl_settings_service.clear(user_id, scope_type, scope_value)
     return ApiResponse(success=True, message="HITL setting cleared", data=_to_response(data))
+
+
+@router.get("/interrupts/{interrupt_id}")
+@AppAutoInjector.auto_inject()
+async def get_hitl_interrupt_state(
+    interrupt_id: str,
+    hitl_interrupt_repository: HITLInterruptRepository,
+    user_id: UUID,
+) -> ApiResponse[HitlInterruptStateResponse]:
+    interrupt = hitl_interrupt_repository.get_by_id_for_user(interrupt_id, user_id)
+    if interrupt is None:
+        raise CustomHTTPException(404, "HITL interrupt not found.", "INTERRUPT_NOT_FOUND")
+
+    if interrupt.status == HITLInterruptStatus.PENDING:
+        hitl_interrupt_repository.expire_pending_if_due_for_user(interrupt_id, user_id)
+        interrupt = hitl_interrupt_repository.get_by_id_for_user(interrupt_id, user_id)
+        if interrupt is None:
+            raise CustomHTTPException(404, "HITL interrupt not found.", "INTERRUPT_NOT_FOUND")
+
+    return ApiResponse(
+        success=True,
+        message="HITL interrupt state retrieved",
+        data=HitlInterruptStateResponse(
+            interrupt_id=interrupt.id,
+            conversation_id=interrupt.conversation_id,
+            status=interrupt.status.value,
+            expires_at=interrupt.expires_at,
+            updated_at=interrupt.updated_at,
+        ),
+    )

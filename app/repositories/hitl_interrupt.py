@@ -118,6 +118,26 @@ class HITLInterruptRepository:
             )
             db.commit()
 
+    def mark_failed(self, interrupt_id: str, *, resolution_source: str) -> bool:
+        """Mark a claimed interrupt as failed if it is still resolving."""
+        now = datetime.now(timezone.utc)
+        with self.session_factory() as db:
+            result = db.execute(
+                update(HITLInterrupt)
+                .where(
+                    HITLInterrupt.id == interrupt_id,
+                    HITLInterrupt.status == HITLInterruptStatus.RESOLVING,
+                )
+                .values(
+                    status=HITLInterruptStatus.FAILED,
+                    resolution_source=resolution_source,
+                    resolved_at=now,
+                    updated_at=now,
+                )
+            )
+            db.commit()
+            return result.rowcount == 1
+
     def mark_expired(
         self,
         interrupt_id: str,
@@ -139,6 +159,27 @@ class HITLInterruptRepository:
                 )
             )
             db.commit()
+
+    def expire_pending_if_due_for_user(self, interrupt_id: str, user_id: UUID) -> bool:
+        """Expire an owned pending interrupt only when its stored expiry is due."""
+        now = datetime.now(timezone.utc)
+        with self.session_factory() as db:
+            result = db.execute(
+                update(HITLInterrupt)
+                .where(
+                    HITLInterrupt.id == interrupt_id,
+                    HITLInterrupt.user_id == user_id,
+                    HITLInterrupt.status == HITLInterruptStatus.PENDING,
+                    HITLInterrupt.expires_at <= now,
+                )
+                .values(
+                    status=HITLInterruptStatus.EXPIRED,
+                    resolution_source="timeout",
+                    updated_at=now,
+                )
+            )
+            db.commit()
+            return result.rowcount == 1
 
     def expire_stale_client_tool_interrupts(
         self,
@@ -202,6 +243,15 @@ class HITLInterruptRepository:
         """Look up an interrupt record by its ID."""
         with self.session_factory() as db:
             return db.get(HITLInterrupt, interrupt_id)
+
+    def get_by_id_for_user(self, interrupt_id: str, user_id: UUID) -> HITLInterrupt | None:
+        """Look up an interrupt only when it belongs to the requesting user."""
+        with self.session_factory() as db:
+            stmt = select(HITLInterrupt).where(
+                HITLInterrupt.id == interrupt_id,
+                HITLInterrupt.user_id == user_id,
+            )
+            return db.execute(stmt).scalar_one_or_none()
 
     def get_pending_by_conversation(self, conversation_id: UUID) -> list[HITLInterrupt]:
         """Return all PENDING interrupt records for a conversation."""

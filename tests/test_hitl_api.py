@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -13,8 +14,11 @@ from app.api.hitl import router
 from app.core.auth import get_current_user_id
 from app.core.config import settings
 from app.database.database import Database
+from app.models.conversation import Conversation
+from app.models.hitl_interrupt import HITLInterrupt, HITLInterruptStatus
 from app.models.tool_approval_setting import ToolApprovalSetting
 from app.models.user import User
+from app.repositories.hitl_interrupt import HITLInterruptRepository
 
 
 def _build_app(user_id):
@@ -22,6 +26,38 @@ def _build_app(user_id):
     app.include_router(router)
     app.dependency_overrides[get_current_user_id] = lambda: user_id
     return app
+
+
+def _create_interrupt(
+    session_factory,
+    user_id,
+    *,
+    status: HITLInterruptStatus,
+) -> str:
+    conversation_id = uuid4()
+    interrupt_id = f"interrupt-{uuid4()}"
+    with session_factory() as session:
+        session.add(
+            Conversation(
+                id=conversation_id,
+                owner_id=user_id,
+                title="HITL lifecycle test",
+            )
+        )
+        session.add(
+            HITLInterrupt(
+                id=interrupt_id,
+                conversation_id=conversation_id,
+                user_id=user_id,
+                thread_id=str(conversation_id),
+                status=status,
+                expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+                action_requests_json=[],
+                interrupt_metadata_json={},
+            )
+        )
+        session.commit()
+    return interrupt_id
 
 
 @pytest.fixture
@@ -38,6 +74,8 @@ def api():
         yield client, user_id, sf
     finally:
         with sf() as s:
+            s.execute(delete(HITLInterrupt).where(HITLInterrupt.user_id == user_id))
+            s.execute(delete(Conversation).where(Conversation.owner_id == user_id))
             s.execute(delete(ToolApprovalSetting).where(ToolApprovalSetting.user_id == user_id))
             s.execute(delete(User).where(User.id == user_id))
             s.commit()
@@ -78,3 +116,45 @@ def test_rejects_invalid_scope_type(api):
         {"scopeType": "garbage", "scopeValue": "ignored", "requireApproval": True},
     ]})
     assert resp.status_code == 422
+
+
+def test_get_interrupt_state_returns_only_public_failed_lifecycle_fields(api):
+    client, user_id, session_factory = api
+    interrupt_id = _create_interrupt(
+        session_factory,
+        user_id,
+        status=HITLInterruptStatus.FAILED,
+    )
+
+    response = client.get(f"/hitl/interrupts/{interrupt_id}")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "failed"
+    assert set(response.json()["data"]) == {
+        "interruptId",
+        "conversationId",
+        "status",
+        "expiresAt",
+        "updatedAt",
+    }
+
+
+def test_mark_failed_changes_only_a_resolving_interrupt(api):
+    _client, user_id, session_factory = api
+    resolving_id = _create_interrupt(
+        session_factory,
+        user_id,
+        status=HITLInterruptStatus.RESOLVING,
+    )
+    pending_id = _create_interrupt(
+        session_factory,
+        user_id,
+        status=HITLInterruptStatus.PENDING,
+    )
+    repository = HITLInterruptRepository(session_factory)
+
+    assert repository.mark_failed(resolving_id, resolution_source="stream_error") is True
+    assert repository.mark_failed(pending_id, resolution_source="stream_error") is False
+
+    assert repository.get_by_id(resolving_id).status == HITLInterruptStatus.FAILED
+    assert repository.get_by_id(pending_id).status == HITLInterruptStatus.PENDING

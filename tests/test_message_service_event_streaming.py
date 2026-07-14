@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -176,3 +177,90 @@ async def test_resume_stream_accepts_v3_events_and_persists_once():
     assert events[-1].type == "complete"
     assert events[-1].data["message"]["content"] == "resumed"
     assert len(persisted) == 1
+
+
+def _claimed_resume_service(*, source, lifecycle_events):
+    conversation_id = uuid4()
+    user_id = uuid4()
+    interrupt_id = "claimed-interrupt"
+
+    service = MessageService.__new__(MessageService)
+    service.hitl_interrupt_repository = SimpleNamespace(
+        mark_failed=lambda identifier, *, resolution_source: lifecycle_events.append(
+            ("failed", identifier, resolution_source)
+        )
+    )
+    service._validate_and_claim_interrupt_resume = lambda **_kwargs: SimpleNamespace()
+    service._get_conversation_context = lambda *_args: (user_id, None)
+    service._revalidate_resume_custom_agent = lambda *_args: None
+    service._audit_interrupt_resume_decisions = lambda **_kwargs: None
+    service._resolve_custom_agents_state = lambda *_args: {}
+    service._clear_redis_interrupt = lambda *_args: None
+    service._sync_response_plan_state = lambda **_kwargs: False
+    service._create_bot_response_message = lambda **_kwargs: SimpleNamespace(
+        model_dump=lambda **_kwargs: {},
+    )
+    service.ai_service = SimpleNamespace(
+        invalidate_history_cache=lambda *_args: None,
+        resume_interrupted_execution_stream=source,
+    )
+
+    return service, conversation_id, user_id, interrupt_id
+
+
+@pytest.mark.asyncio
+async def test_claimed_resume_stream_error_marks_interrupt_failed_before_terminal_event():
+    lifecycle_events = []
+
+    async def source(**_kwargs):
+        yield make_event("error", sequence=1, data={"error": "upstream failure"})
+
+    service, conversation_id, user_id, interrupt_id = _claimed_resume_service(
+        source=source,
+        lifecycle_events=lifecycle_events,
+    )
+
+    events = []
+    async for event in service.resume_message_creation_stream(
+        thread_id=str(conversation_id),
+        conversation_id=conversation_id,
+        user_id=user_id,
+        decisions=[],
+        interrupt_id=interrupt_id,
+    ):
+        lifecycle_events.append(("event", event.type))
+        events.append(event)
+
+    assert events[-1].type == "error"
+    assert events[-1].data["error_code"] == "INTERRUPT_FAILED"
+    assert events[-1].data["status_code"] == 500
+    assert lifecycle_events == [
+        ("failed", interrupt_id, "stream_error"),
+        ("event", "error"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_closing_claimed_resume_stream_marks_interrupt_failed_for_client_disconnect():
+    lifecycle_events = []
+
+    async def source(**_kwargs):
+        yield make_event("message_delta", sequence=1, data={"text": ""})
+        await asyncio.Event().wait()
+
+    service, conversation_id, user_id, interrupt_id = _claimed_resume_service(
+        source=source,
+        lifecycle_events=lifecycle_events,
+    )
+    stream = service.resume_message_creation_stream(
+        thread_id=str(conversation_id),
+        conversation_id=conversation_id,
+        user_id=user_id,
+        decisions=[],
+        interrupt_id=interrupt_id,
+    )
+
+    assert (await anext(stream)).type == "message_delta"
+    await stream.aclose()
+
+    assert ("failed", interrupt_id, "client_disconnect") in lifecycle_events

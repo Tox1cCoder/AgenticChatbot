@@ -15,6 +15,7 @@ class HITLInterruptStatus(str, enum.Enum):
 
     PENDING = "pending"  # Awaiting human decision
     RESOLVING = "resolving"  # Decision received; graph being resumed (transient)
+    FAILED = "failed"  # Claimed continuation terminated unsuccessfully
     RESOLVED = "resolved"  # Workflow resumed successfully
     EXPIRED = "expired"  # Timeout elapsed before decision
 

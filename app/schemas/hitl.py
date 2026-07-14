@@ -1,6 +1,8 @@
 """Schemas for the per-user HITL approval settings API."""
 
+from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,3 +28,11 @@ class HitlSettingsResponse(_CamelModel):
     global_tools: list[str]
     servers: list[HitlScopeRule]
     tools: list[HitlScopeRule]
+
+
+class HitlInterruptStateResponse(_CamelModel):
+    interrupt_id: str
+    conversation_id: UUID
+    status: Literal["pending", "resolving", "resolved", "failed", "expired"]
+    expires_at: datetime
+    updated_at: datetime

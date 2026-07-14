@@ -314,6 +314,15 @@ class MessageService(IMessageService):
                 resolution_source=resolution_source,
             )
 
+    def _mark_claimed_interrupt_failed(self, interrupt_id: str | None, source: str) -> None:
+        """Best-effort terminal transition for a previously claimed resume."""
+        if self.hitl_interrupt_repository and interrupt_id:
+            with contextlib.suppress(Exception):
+                self.hitl_interrupt_repository.mark_failed(
+                    interrupt_id,
+                    resolution_source=source,
+                )
+
     @staticmethod
     def _decision_action(decision: Any) -> str | None:
         if isinstance(decision, dict):
@@ -1270,6 +1279,15 @@ class MessageService(IMessageService):
                     ),
                     error_code="INTERRUPT_EXPIRED",
                 )
+            if record.status == HITLInterruptStatus.FAILED:
+                raise CustomHTTPException(
+                    status_code=http_status.HTTP_409_CONFLICT,
+                    detail=(
+                        "This approval cannot be resumed after a failed continuation. "
+                        "Please send a new message."
+                    ),
+                    error_code="INTERRUPT_FAILED",
+                )
             if record.status in (
                 HITLInterruptStatus.RESOLVED,
                 HITLInterruptStatus.RESOLVING,
@@ -1666,12 +1684,6 @@ class MessageService(IMessageService):
                     yield event
 
                 elif event_type == "interrupt":
-                    self._clear_redis_interrupt(conversation_id, interrupt_id)
-
-                    if self.hitl_interrupt_repository and interrupt_id:
-                        with contextlib.suppress(Exception):
-                            self.hitl_interrupt_repository.mark_resolved(interrupt_id)
-
                     interrupt_response = event.data.get("interrupt")
                     normalized_interrupt = self._normalize_nested_interrupt_payload(
                         interrupt_response
@@ -1681,24 +1693,55 @@ class MessageService(IMessageService):
                         if isinstance(interrupt_response, dict)
                         else None
                     )
+                    try:
+                        persisted = self._persist_interrupt_bot_message(
+                            conversation_id=conversation_id,
+                            interrupt_payload=normalized_interrupt,
+                            sanitized_persona=sanitized_persona,
+                            pending_tool_calls=event.data.get("pending_tool_calls"),
+                            thread_id=event.data.get("thread_id") or thread_id,
+                            next_nodes=event.data.get("next"),
+                            user_id=user_id,
+                            message_id=bot_message_id,
+                            tool_artifacts=resume_tool_artifacts or None,
+                            selected_agent=resume_selected_agent,
+                            custom_agents=resume_custom_agents,
+                        )
+                    except Exception as exc:
+                        self._clear_redis_interrupt(conversation_id, interrupt_id)
+                        get_generation_registry().clear_paused_for_conversation(
+                            user_id, conversation_id
+                        )
+                        self._mark_claimed_interrupt_failed(interrupt_id, "stream_exception")
+                        error_message = self._create_bot_response_message(
+                            conversation_id=conversation_id,
+                            content=f"Error generating response: {str(exc)}",
+                            metadata={"error": str(exc)},
+                            message_id=bot_message_id,
+                        )
+                        bot_message_persisted = True
+                        yield make_event(
+                            "error",
+                            sequence=_next_sequence(),
+                            conversation_id=str(conversation_id),
+                            message_id=str(bot_message_id) if bot_message_id else None,
+                            data={
+                                "error": str(exc),
+                                "message": error_message.model_dump(mode="json"),
+                                "error_code": "INTERRUPT_FAILED",
+                                "status_code": 500,
+                            },
+                        )
+                        return
+
+                    self._clear_redis_interrupt(conversation_id, interrupt_id)
+                    if self.hitl_interrupt_repository and interrupt_id:
+                        with contextlib.suppress(Exception):
+                            self.hitl_interrupt_repository.mark_resolved(interrupt_id)
                     self._handle_redis_interrupt_storage(
                         conversation_id,
                         next_interrupt_id,
                         interrupt_response,
-                    )
-
-                    persisted = self._persist_interrupt_bot_message(
-                        conversation_id=conversation_id,
-                        interrupt_payload=normalized_interrupt,
-                        sanitized_persona=sanitized_persona,
-                        pending_tool_calls=event.data.get("pending_tool_calls"),
-                        thread_id=event.data.get("thread_id") or thread_id,
-                        next_nodes=event.data.get("next"),
-                        user_id=user_id,
-                        message_id=bot_message_id,
-                        tool_artifacts=resume_tool_artifacts or None,
-                        selected_agent=resume_selected_agent,
-                        custom_agents=resume_custom_agents,
                     )
                     self._set_plan_lifecycle(
                         conversation_id,
@@ -1769,6 +1812,7 @@ class MessageService(IMessageService):
                     get_generation_registry().clear_paused_for_conversation(
                         user_id, conversation_id
                     )
+                    self._mark_claimed_interrupt_failed(interrupt_id, "stream_error")
 
                     error_msg = event.data.get("error", UNKNOWN_ERROR)
                     error_message = self._create_bot_response_message(
@@ -1787,6 +1831,8 @@ class MessageService(IMessageService):
                         data={
                             "error": error_msg,
                             "message": error_message.model_dump(mode="json"),
+                            "error_code": "INTERRUPT_FAILED",
+                            "status_code": 500,
                         },
                     )
                     return
@@ -1800,6 +1846,7 @@ class MessageService(IMessageService):
             self._clear_redis_interrupt(conversation_id, interrupt_id)
 
             if not bot_message_persisted:
+                self._mark_claimed_interrupt_failed(interrupt_id, "stream_incomplete")
                 fallback_message = self._create_bot_response_message(
                     conversation_id=conversation_id,
                     content=ERROR_RESPONSE_AFTER_RESUME,
@@ -1814,10 +1861,13 @@ class MessageService(IMessageService):
                     data={
                         "error": ERROR_RESPONSE_AFTER_RESUME,
                         "message": fallback_message.model_dump(mode="json"),
+                        "error_code": "INTERRUPT_FAILED",
+                        "status_code": 500,
                     },
                 )
 
         except (asyncio.CancelledError, GeneratorExit):
+            self._mark_claimed_interrupt_failed(interrupt_id, "client_disconnect")
             if bot_message_persisted:
                 return
 
@@ -1839,6 +1889,7 @@ class MessageService(IMessageService):
 
         except Exception as exc:
             self._clear_redis_interrupt(conversation_id, interrupt_id)
+            self._mark_claimed_interrupt_failed(interrupt_id, "stream_exception")
             if bot_message_persisted:
                 return
 
@@ -1857,6 +1908,8 @@ class MessageService(IMessageService):
                 data={
                     "error": str(exc),
                     "message": error_message.model_dump(mode="json"),
+                    "error_code": "INTERRUPT_FAILED",
+                    "status_code": 500,
                 },
             )
 

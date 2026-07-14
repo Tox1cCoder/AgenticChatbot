@@ -284,6 +284,43 @@ def test_interrupt_resume_rejects_device_mismatch():
     assert exc_info.value.error_code == "INTERRUPT_DEVICE_MISMATCH"
 
 
+def test_interrupt_resume_rejects_failed_continuation_before_resolved_branch():
+    conversation_id = uuid4()
+    user_id = uuid4()
+    interrupt_record = SimpleNamespace(
+        conversation_id=conversation_id,
+        thread_id="thread-1",
+        device_id=None,
+        status=HITLInterruptStatus.FAILED,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+    service = MessageService(
+        message_repository=SimpleNamespace(),
+        conversation_validation_utils=SimpleNamespace(
+            validate_conversation_access=lambda *_args, **_kwargs: None
+        ),
+        message_validation_utils=SimpleNamespace(),
+        ai_service=SimpleNamespace(),
+        hitl_interrupt_repository=SimpleNamespace(
+            get_by_id=lambda _interrupt_id: interrupt_record,
+            try_transition_to_resolving=lambda **_kwargs: True,
+        ),
+    )
+
+    with pytest.raises(CustomHTTPException) as exc_info:
+        service._validate_and_claim_interrupt_resume(
+            thread_id="thread-1",
+            conversation_id=conversation_id,
+            user_id=user_id,
+            interrupt_id="interrupt-1",
+            device_id=None,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.error_code == "INTERRUPT_FAILED"
+
+
 @pytest.mark.asyncio
 async def test_refresh_tool_map_after_search_uses_active_session_scope(monkeypatch):
     from app.ai.tool_execution import _refresh_tool_map_after_search
