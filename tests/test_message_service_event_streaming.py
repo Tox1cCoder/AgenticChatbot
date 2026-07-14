@@ -264,3 +264,185 @@ async def test_closing_claimed_resume_stream_marks_interrupt_failed_for_client_d
     await stream.aclose()
 
     assert ("failed", interrupt_id, "client_disconnect") in lifecycle_events
+
+
+@pytest.mark.asyncio
+async def test_claimed_resume_setup_exception_marks_failed_and_yields_typed_error():
+    lifecycle_events = []
+
+    async def source(**_kwargs):
+        yield make_event("complete", sequence=1, data={})
+
+    service, conversation_id, user_id, interrupt_id = _claimed_resume_service(
+        source=source,
+        lifecycle_events=lifecycle_events,
+    )
+
+    def fail_context(*_args):
+        raise RuntimeError("setup failed")
+
+    service._get_conversation_context = fail_context
+
+    events = [
+        event
+        async for event in service.resume_message_creation_stream(
+            thread_id=str(conversation_id),
+            conversation_id=conversation_id,
+            user_id=user_id,
+            decisions=[],
+            interrupt_id=interrupt_id,
+        )
+    ]
+
+    assert lifecycle_events == [("failed", interrupt_id, "stream_exception")]
+    assert events[-1].type == "error"
+    assert events[-1].data["error_code"] == "INTERRUPT_FAILED"
+    assert events[-1].data["status_code"] == 500
+
+
+@pytest.mark.asyncio
+async def test_claimed_resume_completion_persistence_failure_marks_failed_before_resolved():
+    conversation_id = uuid4()
+    user_id = uuid4()
+    interrupt_id = "claimed-interrupt"
+    transitions = []
+    state = {"value": "resolving"}
+
+    class StatefulRepository:
+        def mark_resolved(self, _interrupt_id):
+            assert state["value"] == "resolving"
+            state["value"] = "resolved"
+            transitions.append("resolved")
+
+        def mark_failed(self, _interrupt_id, *, resolution_source):
+            if state["value"] != "resolving":
+                return False
+            state["value"] = "failed"
+            transitions.append(("failed", resolution_source))
+            return True
+
+    async def source(**_kwargs):
+        yield make_event(
+            "complete",
+            sequence=1,
+            data={
+                "response": WorkflowResponse(
+                    message=WorkflowResponseMessage(content="completed"),
+                    metadata={},
+                )
+            },
+        )
+
+    service = MessageService.__new__(MessageService)
+    service.hitl_interrupt_repository = StatefulRepository()
+    service._validate_and_claim_interrupt_resume = lambda **_kwargs: SimpleNamespace()
+    service._get_conversation_context = lambda *_args: (user_id, None)
+    service._revalidate_resume_custom_agent = lambda *_args: None
+    service._audit_interrupt_resume_decisions = lambda **_kwargs: None
+    service._resolve_custom_agents_state = lambda *_args: {}
+    service._clear_redis_interrupt = lambda *_args: None
+    service._sync_response_plan_state = lambda **_kwargs: False
+    service._create_bot_response_message = lambda **_kwargs: SimpleNamespace(
+        model_dump=lambda **_kwargs: {},
+    )
+    service.ai_service = SimpleNamespace(
+        invalidate_history_cache=lambda *_args: None,
+        resume_interrupted_execution_stream=source,
+    )
+    service._persist_completed_workflow_response = AsyncMock(
+        side_effect=RuntimeError("completion persistence failed")
+    )
+    service._compact_checkpoint_after_persist = AsyncMock()
+
+    events = [
+        event
+        async for event in service.resume_message_creation_stream(
+            thread_id=str(conversation_id),
+            conversation_id=conversation_id,
+            user_id=user_id,
+            decisions=[],
+            interrupt_id=interrupt_id,
+        )
+    ]
+
+    assert state["value"] == "failed"
+    assert transitions == [("failed", "stream_exception")]
+    assert events[-1].data["error_code"] == "INTERRUPT_FAILED"
+    assert events[-1].data["status_code"] == 500
+
+
+@pytest.mark.asyncio
+async def test_claimed_nested_interrupt_durable_creation_failure_marks_failed_not_resolved():
+    conversation_id = uuid4()
+    user_id = uuid4()
+    interrupt_id = "claimed-interrupt"
+    transitions = []
+    state = {"value": "resolving"}
+
+    class StatefulRepository:
+        def create(self, **_kwargs):
+            raise RuntimeError("follow-up interrupt persistence failed")
+
+        def mark_resolved(self, _interrupt_id):
+            assert state["value"] == "resolving"
+            state["value"] = "resolved"
+            transitions.append("resolved")
+
+        def mark_failed(self, _interrupt_id, *, resolution_source):
+            if state["value"] != "resolving":
+                return False
+            state["value"] = "failed"
+            transitions.append(("failed", resolution_source))
+            return True
+
+    async def source(**_kwargs):
+        yield make_event(
+            "interrupt",
+            sequence=1,
+            data={
+                "interrupt": {
+                    "interrupt_id": "follow-up-interrupt",
+                    "action_requests": [],
+                    "thread_id": str(conversation_id),
+                    "conversation_id": str(conversation_id),
+                    "metadata": {},
+                }
+            },
+        )
+
+    service = MessageService.__new__(MessageService)
+    service.hitl_interrupt_repository = StatefulRepository()
+    service._validate_and_claim_interrupt_resume = lambda **_kwargs: SimpleNamespace()
+    service._get_conversation_context = lambda *_args: (user_id, None)
+    service._revalidate_resume_custom_agent = lambda *_args: None
+    service._audit_interrupt_resume_decisions = lambda **_kwargs: None
+    service._resolve_custom_agents_state = lambda *_args: {}
+    service._clear_redis_interrupt = lambda *_args: None
+    service._sync_response_plan_state = lambda **_kwargs: False
+    service._create_bot_response_message = lambda **_kwargs: SimpleNamespace(
+        id=uuid4(),
+        model_dump=lambda **_kwargs: {},
+    )
+    service.redis_client = None
+    service.task_plan_service = None
+    service.ai_service = SimpleNamespace(
+        invalidate_history_cache=lambda *_args: None,
+        resume_interrupted_execution_stream=source,
+    )
+
+    events = [
+        event
+        async for event in service.resume_message_creation_stream(
+            thread_id=str(conversation_id),
+            conversation_id=conversation_id,
+            user_id=user_id,
+            decisions=[],
+            interrupt_id=interrupt_id,
+        )
+    ]
+
+    assert state["value"] == "failed"
+    assert transitions == [("failed", "stream_exception")]
+    assert events[-1].type == "error"
+    assert events[-1].data["error_code"] == "INTERRUPT_FAILED"
+    assert events[-1].data["status_code"] == 500

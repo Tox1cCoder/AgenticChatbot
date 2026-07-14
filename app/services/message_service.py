@@ -658,13 +658,15 @@ class MessageService(IMessageService):
         tool_artifacts: list[dict[str, Any]] | None = None,
         selected_agent: str | None = None,
         custom_agents: dict[str, Any] | None = None,
+        require_durable_interrupt: bool = False,
     ) -> MessageRead:
         """
         Persist an assistant message that represents a paused workflow awaiting HITL approval.
 
         Also creates a durable HITLInterrupt lifecycle record so pending approvals
         are recoverable via normal message history APIs (DB-backed) and survive
-        process restarts.
+        process restarts. Callers handling a claimed nested resume can require
+        durable-record failures to propagate.
         """
         if isinstance(interrupt_payload, InterruptResponse):
             interrupt_dict = interrupt_payload.model_dump(mode="json")
@@ -749,6 +751,8 @@ class MessageService(IMessageService):
                         exc,
                         exc_info=True,
                     )
+                    if require_durable_interrupt:
+                        raise
 
         return bot_message
 
@@ -1599,26 +1603,11 @@ class MessageService(IMessageService):
             decisions=decisions,
         )
 
-        user_id, persona = self._get_conversation_context(conversation_id, user_id)
-        sanitized_persona = sanitize_persona(persona)
-
-        # Reload/validate the custom-agent map before resuming.
-        self._revalidate_resume_custom_agent(user_id, conversation_id)
-
-        self._audit_interrupt_resume_decisions(
-            conversation_id=conversation_id,
-            user_id=user_id,
-            decisions=decisions,
-            interrupt_id=interrupt_id,
-            fetched_interrupt_record=fetched_interrupt_record,
-        )
-
         partial_text = ""
         bot_message_persisted = False
         resume_tool_artifacts: list[dict[str, Any]] = []
         resume_tool_args_by_id: dict[str, Any] = {}
         resume_selected_agent: str | None = None
-        resume_custom_agents = self._resolve_custom_agents_state(user_id, conversation_id)
 
         sequence = 0
 
@@ -1628,6 +1617,21 @@ class MessageService(IMessageService):
             return sequence
 
         try:
+            user_id, persona = self._get_conversation_context(conversation_id, user_id)
+            sanitized_persona = sanitize_persona(persona)
+
+            # Reload/validate the custom-agent map before resuming.
+            self._revalidate_resume_custom_agent(user_id, conversation_id)
+
+            self._audit_interrupt_resume_decisions(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                decisions=decisions,
+                interrupt_id=interrupt_id,
+                fetched_interrupt_record=fetched_interrupt_record,
+            )
+            resume_custom_agents = self._resolve_custom_agents_state(user_id, conversation_id)
+
             async for raw_event in self.ai_service.resume_interrupted_execution_stream(
                 thread_id=thread_id,
                 decisions=decisions,
@@ -1706,6 +1710,7 @@ class MessageService(IMessageService):
                             tool_artifacts=resume_tool_artifacts or None,
                             selected_agent=resume_selected_agent,
                             custom_agents=resume_custom_agents,
+                            require_durable_interrupt=True,
                         )
                     except Exception as exc:
                         self._clear_redis_interrupt(conversation_id, interrupt_id)
@@ -1717,7 +1722,7 @@ class MessageService(IMessageService):
                             conversation_id=conversation_id,
                             content=f"Error generating response: {str(exc)}",
                             metadata={"error": str(exc)},
-                            message_id=bot_message_id,
+                            message_id=None,
                         )
                         bot_message_persisted = True
                         yield make_event(
@@ -1776,11 +1781,6 @@ class MessageService(IMessageService):
                         resume_tool_artifacts,
                     )
 
-                    self._clear_redis_interrupt(conversation_id, interrupt_id)
-                    if self.hitl_interrupt_repository and interrupt_id:
-                        with contextlib.suppress(Exception):
-                            self.hitl_interrupt_repository.mark_resolved(interrupt_id)
-
                     bot_message = await self._persist_completed_workflow_response(
                         conversation_id=conversation_id,
                         user_id=user_id,
@@ -1791,6 +1791,10 @@ class MessageService(IMessageService):
                         fallback_content=ERROR_RESPONSE_AFTER_RESUME,
                     )
                     bot_message_persisted = True
+                    self._clear_redis_interrupt(conversation_id, interrupt_id)
+                    if self.hitl_interrupt_repository and interrupt_id:
+                        with contextlib.suppress(Exception):
+                            self.hitl_interrupt_repository.mark_resolved(interrupt_id)
                     await self._compact_checkpoint_after_persist(thread_id=thread_id)
 
                     # Resume resolved the paused run — release its lock token.
