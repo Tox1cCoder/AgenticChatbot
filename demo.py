@@ -29,6 +29,12 @@ from app.ui.hitl_decisions import (
     interrupt_request_target_ids,
     interrupt_stream_context,
 )
+from app.ui.hitl_recovery import (
+    extract_error_code,
+    is_recoverable_resume_conflict,
+    reconciliation_action,
+    should_suppress_pending_interrupt,
+)
 from app.ui.rag_artifacts import (
     RAGArtifactView,
     RAGChunkView,
@@ -2629,6 +2635,7 @@ def _handle_stop_rerun(conversation_id: str) -> None:
 
 
 def reset_conversation_state() -> None:
+    _clear_interrupt_ui_state()
     st.session_state.messages = []
     st.session_state.conversation_messages_meta = None
     st.session_state.conversation_messages_page = 0
@@ -2640,6 +2647,8 @@ def reset_conversation_state() -> None:
     st.session_state.pending_image_attachments = []
     st.session_state.show_attachment_uploader = False
     st.session_state.message_image_thumbnails = {}
+    st.session_state.pop(_hitl_reconciliation_key(), None)
+    st.session_state.pop("hitl_reconciliation_notice", None)
     # Clear in-flight streaming state
     _clear_inflight_state()
 
@@ -2836,14 +2845,20 @@ def _last_api_error_message(default: str = "Request failed") -> str:
     return default
 
 
-def make_api_request(method: str, endpoint: str, data: dict | None = None) -> dict:
+def make_api_request(
+    method: str,
+    endpoint: str,
+    data: dict | None = None,
+    *,
+    use_cache: bool = True,
+) -> dict:
     method = method.strip().upper()
     auth_token = st.session_state.get("auth_token")
     response_data: dict[str, Any]
     st.session_state["_last_api_error_message"] = None
 
     try:
-        if method == "GET" and data is None:
+        if method == "GET" and data is None and use_cache:
             cached = _cached_get_request(
                 endpoint=endpoint,
                 auth_token=str(auth_token or ""),
@@ -2960,8 +2975,21 @@ def make_streaming_request(endpoint: str, data: dict | None = None):
                     continue
 
     except requests.exceptions.HTTPError as http_error:
-        st.toast(f"HTTP error {http_error.response.status_code}", icon=":material/cancel:")
-        yield {"type": "error", "error": f"HTTP {http_error.response.status_code}"}
+        status_code = (
+            http_error.response.status_code if http_error.response is not None else None
+        )
+        payload: Any = {}
+        if http_error.response is not None:
+            with contextlib.suppress(ValueError):
+                payload = http_error.response.json()
+        error_message = _extract_api_error_message(status_code, payload)
+        st.toast(error_message, icon=":material/cancel:")
+        yield {
+            "type": "error",
+            "error": error_message,
+            "status_code": status_code,
+            "error_code": extract_error_code(payload) if isinstance(payload, dict) else None,
+        }
     except requests.exceptions.ConnectionError:
         if not stream_completed:
             st.toast("Cannot connect to API", icon=":material/cancel:")
@@ -3505,6 +3533,76 @@ def get_hitl_settings() -> dict[str, Any] | None:
     """Fetch this user's HITL approval settings (via the sidecar proxy)."""
     response = make_api_request("GET", "/hitl/settings")
     return response.get("data") if response else None
+
+
+def get_hitl_interrupt_state(interrupt_id: str) -> dict[str, Any] | None:
+    """Fetch the canonical lifecycle state without reusing a stale GET cache."""
+    response = make_api_request(
+        "GET", f"/hitl/interrupts/{interrupt_id}", use_cache=False
+    )
+    return response.get("data") if response else None
+
+
+def _hitl_resume_lock_key(interrupt_id: str | None) -> str:
+    return f"hitl_resume_inflight_{interrupt_id or 'unknown'}"
+
+
+def _hitl_reconciliation_key() -> str:
+    return "hitl_reconciling_interrupt_id"
+
+
+def _clear_interrupt_decision_state() -> None:
+    for key in list(st.session_state):
+        key_text = str(key)
+        if key_text == "pending_decisions" or key_text.startswith(
+            ("pending_decisions_", "editing_tool_")
+        ):
+            del st.session_state[key]
+
+
+def _clear_interrupt_ui_state(interrupt_id: str | None = None) -> None:
+    """Clear paused approval UI while deliberately retaining reconciliation state."""
+    _clear_interrupt_decision_state()
+    if interrupt_id:
+        st.session_state.pop(_hitl_resume_lock_key(interrupt_id), None)
+    else:
+        for key in list(st.session_state):
+            if str(key).startswith("hitl_resume_inflight_"):
+                del st.session_state[key]
+    st.session_state.pop("pending_interrupt", None)
+    st.session_state.pop("interrupt_conversation_id", None)
+    st.session_state.conversation_messages_page = 0
+
+
+def _reconcile_interrupt(interrupt_id: str) -> str:
+    """Reconcile one duplicate resume against durable lifecycle state without replaying it."""
+    lifecycle_state = get_hitl_interrupt_state(interrupt_id)
+    status = lifecycle_state.get("status") if lifecycle_state else None
+    action = reconciliation_action(status)
+    marker_key = _hitl_reconciliation_key()
+
+    if action == "restore_form":
+        st.session_state.pop(_hitl_resume_lock_key(interrupt_id), None)
+        if st.session_state.get(marker_key) == interrupt_id:
+            st.session_state.pop(marker_key, None)
+    elif action == "show_processing":
+        _clear_interrupt_decision_state()
+        st.session_state[marker_key] = interrupt_id
+    elif action == "refresh_history":
+        _clear_interrupt_ui_state(interrupt_id)
+        st.session_state[marker_key] = interrupt_id
+        st.session_state["hitl_reconciliation_notice"] = (
+            "Approval completed elsewhere; conversation refreshed."
+        )
+    else:
+        # Failed, expired, and unavailable lifecycle reads require a new turn.
+        _clear_interrupt_ui_state(interrupt_id)
+        st.session_state[marker_key] = interrupt_id
+        st.session_state["hitl_reconciliation_notice"] = (
+            "This approval can no longer be resumed. Send a new message."
+        )
+
+    return action
 
 
 def set_hitl_setting(
@@ -7342,9 +7440,27 @@ def render_interrupt_approval_ui():
     interrupt_id = interrupt_info.get("interrupt_id")
     action_requests = interrupt_info.get("action_requests", [])
 
+    reconciliation_marker = st.session_state.get(_hitl_reconciliation_key())
+    if should_suppress_pending_interrupt(interrupt_id, reconciliation_marker):
+        st.info(
+            st.session_state.get("hitl_reconciliation_notice")
+            or "Approval status is being reconciled."
+        )
+        check_column, return_column = st.columns(2)
+        with check_column:
+            if st.button("Check status", key=f"hitl_check_status_{interrupt_id}"):
+                _reconcile_interrupt(interrupt_id)
+                st.rerun()
+        with return_column:
+            if st.button("Return to chat", key=f"hitl_return_to_chat_{interrupt_id}"):
+                _clear_interrupt_ui_state(interrupt_id)
+                st.rerun()
+        return
+
     # Key all pending decisions under the interrupt_id to avoid cross-contamination
     # on reload or when multiple interrupts occur in a single session.
     decisions_key = f"pending_decisions_{interrupt_id}" if interrupt_id else "pending_decisions"
+    resume_inflight = bool(st.session_state.get(_hitl_resume_lock_key(interrupt_id)))
 
     if interrupt_message:
         st.warning(f"**{interrupt_message}**", icon=":material/pause_circle:")
@@ -7414,7 +7530,9 @@ def render_interrupt_approval_ui():
                 st.error(decision_label, icon=":material/cancel:")
 
             # Option to change decision
-            if st.button("Change decision", key=f"change_{idx}"):
+            if st.button(
+                "Change decision", key=f"change_{idx}", disabled=resume_inflight
+            ):
                 st.session_state[decisions_key].pop(task_id, None)
                 st.session_state.pop(f"editing_tool_{idx}", None)
                 st.rerun()
@@ -7432,6 +7550,7 @@ def render_interrupt_approval_ui():
                     key=f"approve_{idx}",
                     width="stretch",
                     type="primary",
+                    disabled=resume_inflight,
                 ):
                     st.session_state[decisions_key][task_id] = build_interrupt_decision(
                         "approve",
@@ -7443,14 +7562,20 @@ def render_interrupt_approval_ui():
 
             with col2:
                 if "edit" in allowed_decisions and st.button(
-                    "Edit Args", key=f"edit_{idx}", width="stretch"
+                    "Edit Args",
+                    key=f"edit_{idx}",
+                    width="stretch",
+                    disabled=resume_inflight,
                 ):
                     st.session_state[f"editing_tool_{idx}"] = True
                     st.rerun()
 
             with col3:
                 if "reject" in allowed_decisions and st.button(
-                    "Reject", key=f"reject_{idx}", width="stretch"
+                    "Reject",
+                    key=f"reject_{idx}",
+                    width="stretch",
+                    disabled=resume_inflight,
                 ):
                     st.session_state[decisions_key][task_id] = build_interrupt_decision(
                         "reject",
@@ -7468,6 +7593,7 @@ def render_interrupt_approval_ui():
                         "Arguments (JSON format)",
                         value=json.dumps(tool_args, indent=2, ensure_ascii=False),
                         height=200,
+                        disabled=resume_inflight,
                     )
 
                     col_save, col_cancel = st.columns(2)
@@ -7476,6 +7602,7 @@ def render_interrupt_approval_ui():
                             "Save & Approve",
                             width="stretch",
                             type="primary",
+                            disabled=resume_inflight,
                         ):
                             try:
                                 edited_args = json.loads(edited_args_text)
@@ -7493,7 +7620,9 @@ def render_interrupt_approval_ui():
                                 st.error("Invalid JSON format")
 
                     with col_cancel:
-                        if st.form_submit_button("Cancel", width="stretch"):
+                        if st.form_submit_button(
+                            "Cancel", width="stretch", disabled=resume_inflight
+                        ):
                             st.session_state.pop(f"editing_tool_{idx}", None)
                             st.rerun()
 
@@ -7527,12 +7656,12 @@ def render_interrupt_approval_ui():
             "Submit Decisions",
             width="stretch",
             type="primary",
-            disabled=not all_decided,
+            disabled=not all_decided or resume_inflight,
         ):
             submit_resume = True
 
     with col_approve_all:
-        if st.button("Approve All", width="stretch"):
+        if st.button("Approve All", width="stretch", disabled=resume_inflight):
             # Auto-approve all remaining tools
             for req in action_requests:
                 task_id, _tool_call_id = interrupt_request_target_ids(req)
@@ -7545,7 +7674,7 @@ def render_interrupt_approval_ui():
             submit_resume = True
 
     with col_cancel:
-        if st.button("Cancel All", width="stretch"):
+        if st.button("Cancel All", width="stretch", disabled=resume_inflight):
             # Reject all tools
             for req in action_requests:
                 task_id, _tool_call_id = interrupt_request_target_ids(req)
@@ -7558,6 +7687,7 @@ def render_interrupt_approval_ui():
             submit_resume = True
 
     if submit_resume:
+        st.session_state[_hitl_resume_lock_key(interrupt_id)] = True
         with resume_stream_container:
             _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisions_key)
 
@@ -7581,7 +7711,7 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
 
     with st.status("Resuming execution...", expanded=True) as status:
         next_interrupt = None
-        resume_error = None
+        resume_error_event: dict[str, Any] | None = None
         trace_placeholder = st.empty()
         response_placeholder = st.empty()
         stream_renderer = _StreamingRichResponseRenderer(
@@ -7661,6 +7791,7 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
                 break
 
             if event_type == "error":
+                resume_error_event = event
                 resume_error = event.get("error") or "Failed to resume execution"
                 status.update(label=f"Error: {resume_error}", state="error")
                 break
@@ -7672,14 +7803,39 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
 
         _clear_inflight_state()
 
-        # Clear decisions for this interrupt
+        if resume_error_event:
+            resume_error = str(
+                resume_error_event.get("error") or "Failed to resume execution"
+            )
+            error_code = extract_error_code(resume_error_event)
+
+            if is_recoverable_resume_conflict(resume_error_event):
+                _reconcile_interrupt(interrupt_id)
+                st.rerun()
+                return
+
+            if error_code in {
+                "INTERRUPT_FAILED",
+                "INTERRUPT_EXPIRED",
+                "INTERRUPT_NOT_FOUND",
+            } or resume_error_event.get("status_code") == 410:
+                _clear_interrupt_ui_state(interrupt_id)
+                st.session_state[_hitl_reconciliation_key()] = interrupt_id
+                st.session_state["hitl_reconciliation_notice"] = resume_error
+                st.error(resume_error)
+                st.rerun()
+                return
+
+            st.session_state.pop(_hitl_resume_lock_key(interrupt_id), None)
+            st.error(resume_error)
+            return
+
+        # Clear decisions for this completed interrupt only after a non-error event.
         st.session_state.pop(decisions_key, None)
         for idx in range(len(action_requests)):
             st.session_state.pop(f"editing_tool_{idx}", None)
 
-        if resume_error:
-            st.error(resume_error)
-            return
+        st.session_state.pop(_hitl_resume_lock_key(interrupt_id), None)
 
         if next_interrupt:
             # The just-resolved interrupt's tools are now done; advance the
@@ -7695,9 +7851,7 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
                 st.toast(next_interrupt_message, icon=":material/warning:")
             st.rerun()
 
-        st.session_state.pop("pending_interrupt", None)
-        st.session_state.pop("interrupt_conversation_id", None)
-        st.session_state.conversation_messages_page = 0
+        _clear_interrupt_ui_state(interrupt_id)
         st.rerun()
 
 
@@ -7922,9 +8076,24 @@ def render_chat_view():
                                     **_interrupt_data,
                                     "thread_id": _thread_id,
                                 }
-                            st.session_state.pending_interrupt = _interrupt_data
-                            st.session_state.interrupt_conversation_id = conversation_id
+                            recovered_interrupt_id = (
+                                _interrupt_data.get("interrupt_id")
+                                or _interrupt_data.get("interruptId")
+                            )
+                            reconciliation_marker = st.session_state.get(
+                                _hitl_reconciliation_key()
+                            )
+                            if not should_suppress_pending_interrupt(
+                                recovered_interrupt_id, reconciliation_marker
+                            ):
+                                st.session_state.pending_interrupt = _interrupt_data
+                                st.session_state.interrupt_conversation_id = conversation_id
                     break  # only check the most recent assistant message
+
+    if not st.session_state.get("pending_interrupt"):
+        reconciliation_notice = st.session_state.pop("hitl_reconciliation_notice", None)
+        if reconciliation_notice:
+            st.info(reconciliation_notice)
 
     # Show conversation title
     current_conv = next(
