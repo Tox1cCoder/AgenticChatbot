@@ -23,6 +23,22 @@ def test_custom_http_error_envelope_retains_domain_code():
     }
 
 
+def test_custom_http_error_without_domain_code_omits_code():
+    app = FastAPI()
+    register_exception_handlers(app)
+
+    @app.get("/no-domain-code")
+    async def no_domain_code():
+        raise CustomHTTPException(409, "No domain code")
+
+    response = TestClient(app).get("/no-domain-code")
+
+    assert response.json() == {
+        "success": False,
+        "message": "No domain code",
+    }
+
+
 def test_code_less_response_model_omits_code():
     app = FastAPI()
 

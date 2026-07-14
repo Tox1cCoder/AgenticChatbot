@@ -21,7 +21,7 @@ def register_exception_handlers(app: FastAPI):
     async def custom_http_exception_handler(request: Request, exc: CustomHTTPException):
         api_response = ApiResponse(
             success=False,
-            code=exc.error_code or "custom_error",
+            code=exc.error_code,
             message=exc.detail,
         )
         return JSONResponse(
