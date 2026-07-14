@@ -86,6 +86,10 @@ def legacy_event_from_v3(event: V3StreamEvent) -> dict[str, Any] | None:
             "type": "error",
             "error": event.data.get("error") or (message if isinstance(message, str) else None),
         }
+        for key in ("status_code", "error_code"):
+            value = event.data.get(key)
+            if value is not None:
+                payload[key] = value
         if isinstance(message, dict):
             # Streamlit renders the persisted error bot message directly.
             payload["message"] = message

@@ -17,7 +17,7 @@ from client_backend.core.config import client_settings
 from client_backend.core.logging import get_logger
 from client_backend.core.security import LocalSessionPayload
 from client_backend.services.runtime_bridge import get_runtime_bridge
-from client_backend.services.server_api import get_server_client
+from client_backend.services.server_api import ServerAPIError, get_server_client
 from client_backend.services.upstream_auth import get_upstream_auth_service
 
 router = APIRouter(tags=["messages"])
@@ -28,6 +28,23 @@ logger = get_logger(__name__)
 # does not emit heartbeats during tool execution, so the sidecar injects its
 # own to prevent the frontend from assuming the stream is dead.
 _SSE_KEEPALIVE_INTERVAL_SECONDS = 2.0
+
+
+def _upstream_stream_error_event(exc: Exception, *, ai_sdk: bool) -> dict[str, Any]:
+    """Project structured upstream failures without exposing arbitrary detail."""
+    text_key = "errorText" if ai_sdk else "error"
+    status_key = "statusCode" if ai_sdk else "status_code"
+    code_key = "errorCode" if ai_sdk else "error_code"
+    event: dict[str, Any] = {"type": "error", text_key: str(exc)}
+    if isinstance(exc, ServerAPIError):
+        if exc.status_code is not None:
+            event[status_key] = exc.status_code
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        event[text_key] = str(detail.get("message") or str(exc))
+        code = detail.get("code")
+        if code:
+            event[code_key] = str(code)
+    return event
 
 
 def _build_sse_response(
@@ -50,10 +67,7 @@ def _build_sse_response(
                 async for event in event_source:
                     await queue.put(event)
             except Exception as exc:
-                if ai_sdk:
-                    await queue.put({"type": "error", "errorText": str(exc)})
-                else:
-                    await queue.put({"type": "error", "error": str(exc)})
+                await queue.put(_upstream_stream_error_event(exc, ai_sdk=ai_sdk))
             finally:
                 await queue.put(None)
 

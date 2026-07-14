@@ -8,6 +8,7 @@ import pytest
 from client_backend.api import common as common_api
 from client_backend.api import messages as messages_api
 from client_backend.core.security import LocalSessionPayload
+from client_backend.services.server_api import ServerAPIError
 
 
 class _AuthServiceStub:
@@ -214,3 +215,66 @@ async def test_messages_stream_route_forwards_context_window_metadata(monkeypatc
     forwarded_event = json.loads(data_lines[0])
     assert forwarded_event == complete_event
     assert forwarded_event["message"]["metadata"]["context_window"] == context_window_payload
+
+
+@pytest.mark.asyncio
+async def test_internal_sidecar_stream_error_retains_upstream_identity():
+    async def source():
+        raise ServerAPIError(
+            "Server error: 409",
+            status_code=409,
+            detail={
+                "code": "INTERRUPT_CONFLICT",
+                "message": "Interrupt was claimed by a concurrent request.",
+            },
+        )
+        yield  # pragma: no cover
+
+    response = messages_api._build_sse_response(source())
+    body = await _collect_streaming_body(response)
+    payloads = [
+        json.loads(line[6:])
+        for line in body.splitlines()
+        if line.startswith("data: ") and line[6:] != "[DONE]"
+    ]
+
+    assert payloads == [
+        {
+            "type": "error",
+            "error": "Interrupt was claimed by a concurrent request.",
+            "status_code": 409,
+            "error_code": "INTERRUPT_CONFLICT",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ai_sdk_sidecar_stream_error_retains_upstream_identity():
+    async def source():
+        raise ServerAPIError(
+            "Server error: 409",
+            status_code=409,
+            detail={
+                "code": "INTERRUPT_CONFLICT",
+                "message": "Interrupt was claimed by a concurrent request.",
+            },
+        )
+        yield  # pragma: no cover
+
+    response = messages_api._build_sse_response(source(), ai_sdk=True)
+    body = await _collect_streaming_body(response)
+    payloads = [
+        json.loads(line[6:])
+        for line in body.splitlines()
+        if line.startswith("data: ") and line[6:] != "[DONE]"
+    ]
+
+    assert payloads == [
+        {
+            "type": "error",
+            "errorText": "Interrupt was claimed by a concurrent request.",
+            "statusCode": 409,
+            "errorCode": "INTERRUPT_CONFLICT",
+        }
+    ]
+    assert body.endswith("data: [DONE]\n\n")

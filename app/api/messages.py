@@ -9,6 +9,7 @@ from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 
 from app.core.dependency_injection import AppAutoInjector
+from app.core.exceptions import CustomHTTPException
 from app.interfaces.message_service_interface import IMessageService
 from app.schemas.message import (
     InterruptResumeRequest,
@@ -41,6 +42,17 @@ def _to_internal_sse_event(event: dict | V3StreamEvent) -> dict | None:
     return event
 
 
+def _stream_error_event(exc: Exception) -> dict:
+    """Project known stream exceptions to the internal SSE error shape."""
+    error_event: dict = {"type": "error", "error": str(exc)}
+    if isinstance(exc, CustomHTTPException):
+        error_event["error"] = str(exc.detail)
+        error_event["status_code"] = exc.status_code
+        if exc.error_code is not None:
+            error_event["error_code"] = exc.error_code
+    return error_event
+
+
 def _internal_event_stream_response(
     producer_factory: Callable[[], AsyncGenerator[dict, None]],
     request: Request,
@@ -55,7 +67,7 @@ def _internal_event_stream_response(
             except asyncio.CancelledError:
                 return
             except Exception as exc:
-                await queue.put({"type": "error", "error": str(exc)})
+                await queue.put(_stream_error_event(exc))
             finally:
                 await queue.put(None)
 
@@ -88,8 +100,7 @@ def _internal_event_stream_response(
         except asyncio.CancelledError:
             return
         except Exception as exc:
-            error_event = {"type": "error", "error": str(exc)}
-            yield f"data: {json.dumps(error_event)}\n\n"
+            yield f"data: {json.dumps(_stream_error_event(exc))}\n\n"
         finally:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):

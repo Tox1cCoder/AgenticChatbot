@@ -13,6 +13,7 @@ import json
 from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
+from app.core.exceptions import CustomHTTPException
 from app.core.rich_response import select_transient_upsert_items
 
 from .ai_sdk_projection import (
@@ -32,6 +33,30 @@ _AI_SDK_HEARTBEAT_INTERVAL_SECONDS = 15.0
 
 def _sse(data: dict[str, Any]) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False, separators=(',', ':'))}\n\n"
+
+
+def _ai_sdk_error_from_exception(exc: Exception) -> dict[str, Any]:
+    """Project a known server exception to the AI SDK error event shape."""
+    event: dict[str, Any] = {"type": "error", "errorText": str(exc)}
+    if isinstance(exc, CustomHTTPException):
+        event["errorText"] = str(exc.detail)
+        event["statusCode"] = exc.status_code
+        if exc.error_code is not None:
+            event["errorCode"] = exc.error_code
+    return event
+
+
+def _ai_sdk_error_from_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Project known V3 error metadata to the AI SDK error event shape."""
+    message = data.get("error") or data.get("message") or ""
+    event: dict[str, Any] = {"type": "error", "errorText": message}
+    status_code = data.get("status_code")
+    if status_code is not None:
+        event["statusCode"] = status_code
+    error_code = data.get("error_code")
+    if error_code is not None:
+        event["errorCode"] = error_code
+    return event
 
 
 class AISDKV6StreamState:
@@ -95,7 +120,7 @@ class AISDKV6StreamAdapter:
         except asyncio.CancelledError:
             return
         except Exception as exc:  # pragma: no cover - defensive
-            yield _sse({"type": "error", "errorText": str(exc)})
+            yield _sse(_ai_sdk_error_from_exception(exc))
             async for chunk in self._terminate():
                 yield chunk
 
@@ -373,7 +398,7 @@ class AISDKV6StreamAdapter:
 
     async def _error(self, data: dict[str, Any]) -> AsyncGenerator[str, None]:
         state = self._state
-        yield _sse({"type": "error", "errorText": data.get("error") or data.get("message") or ""})
+        yield _sse(_ai_sdk_error_from_data(data))
         if state.text_started:
             yield _sse({"type": "text-end", "id": state.text_id})
         if state.reasoning_started:

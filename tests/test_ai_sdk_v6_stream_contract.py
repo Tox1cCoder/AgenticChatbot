@@ -5,6 +5,7 @@ import json
 import pytest
 
 from app.api.ai_sdk import _extract_user_attachments, _has_user_attachment_candidates
+from app.core.exceptions import CustomHTTPException
 from app.services.event_streaming.ai_sdk_v6 import AISDKV6StreamAdapter, AISDKV6StreamState
 from app.services.event_streaming.events import SubagentRef, make_event
 
@@ -122,6 +123,51 @@ async def test_interrupt_terminates_ui_stream():
     assert not any(
         payload != "[DONE]" and payload.get("delta") == "unreachable" for payload in payloads
     )
+
+
+@pytest.mark.asyncio
+async def test_v3_error_retains_canonical_status_and_code_in_ai_sdk_stream():
+    async def source():
+        yield make_event(
+            "error",
+            sequence=1,
+            data={
+                "error": "This interrupt has already been resolved.",
+                "status_code": 409,
+                "error_code": "INTERRUPT_ALREADY_RESOLVED",
+            },
+        )
+
+    payloads = await _collect_payloads(source)
+
+    assert next(
+        payload for payload in payloads if payload != "[DONE]" and payload["type"] == "error"
+    ) == {
+        "type": "error",
+        "errorText": "This interrupt has already been resolved.",
+        "statusCode": 409,
+        "errorCode": "INTERRUPT_ALREADY_RESOLVED",
+    }
+    assert payloads[-1] == "[DONE]"
+
+
+@pytest.mark.asyncio
+async def test_ai_sdk_stream_exception_retains_custom_http_metadata():
+    async def source():
+        raise CustomHTTPException(409, "Already resolved", "INTERRUPT_ALREADY_RESOLVED")
+        yield  # pragma: no cover
+
+    payloads = await _collect_payloads(source)
+
+    assert next(
+        payload for payload in payloads if payload != "[DONE]" and payload["type"] == "error"
+    ) == {
+        "type": "error",
+        "errorText": "Already resolved",
+        "statusCode": 409,
+        "errorCode": "INTERRUPT_ALREADY_RESOLVED",
+    }
+    assert payloads[-1] == "[DONE]"
 
 
 @pytest.mark.asyncio
