@@ -2914,6 +2914,7 @@ def make_api_request(
         st.session_state["_last_api_error_message"] = error_message
 
         if error_code == "unauthenticated":
+            _clear_skill_hitl_session_state()
             st.session_state.auth_token = None
             st.session_state.current_user_id = None
             st.session_state.current_user_profile = None

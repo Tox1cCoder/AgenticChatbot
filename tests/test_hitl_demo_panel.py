@@ -88,6 +88,81 @@ def test_demo_skill_hitl_state_is_callback_driven_and_cleared_on_logout():
     assert "_clear_skill_hitl_session_state()" in src
 
 
+def test_unauthenticated_api_transition_clears_local_skill_credential_state(monkeypatch):
+    import demo
+
+    class SessionState(dict):
+        def __getattr__(self, name):
+            try:
+                return self[name]
+            except KeyError as exc:
+                raise AttributeError(name) from exc
+
+        def __setattr__(self, name, value):
+            self[name] = value
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "success": False,
+                "code": "unauthenticated",
+                "message": "Session expired",
+            }
+
+    value_key = "skill_secret_value_user-a_calendar"
+    name_key = "skill_secret_name_user-a_calendar"
+    session_state = SessionState(
+        auth_token="expired-token",
+        current_user_id="user-a",
+        current_user_profile={"id": "user-a"},
+        show_login=False,
+        **{
+            value_key: object(),
+            name_key: "ACCESS_TOKEN",
+        },
+    )
+    monkeypatch.setattr(
+        demo,
+        "st",
+        SimpleNamespace(session_state=session_state, toast=lambda *_args, **_kwargs: None),
+    )
+    monkeypatch.setattr(
+        demo,
+        "get_http_session",
+        lambda: SimpleNamespace(request=lambda *_args, **_kwargs: Response()),
+    )
+
+    assert demo.make_api_request("POST", "/skills/calendar/secrets", {"name": "ACCESS_TOKEN"}) == {}
+    assert session_state.auth_token is None
+    assert session_state.current_user_id is None
+    assert session_state.show_login is True
+    assert value_key not in session_state
+    assert name_key not in session_state
+
+
+def test_ordinary_failed_skill_secret_save_preserves_credential_widget_value(monkeypatch):
+    import demo
+
+    value_key = "skill_secret_value_user-a_calendar"
+    name_key = "skill_secret_name_user-a_calendar"
+    value = object()
+    session_state = {
+        value_key: value,
+        name_key: "ACCESS_TOKEN",
+    }
+    monkeypatch.setattr(demo, "st", SimpleNamespace(session_state=session_state))
+    monkeypatch.setattr(demo, "set_skill_secret", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(demo, "_last_api_error_message", lambda default: default)
+
+    demo._save_skill_secret("calendar", name_key, value_key)
+
+    assert session_state[value_key] is value
+    assert session_state[f"{value_key}_status"][0] == "error"
+
+
 def test_demo_uses_shared_hitl_decision_builder():
     src = _demo_source()
     assert "from app.ui.hitl_decisions import" in src
