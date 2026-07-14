@@ -3651,9 +3651,9 @@ def _persist_skill_hitl_mode(
 
 
 def _clear_skill_hitl_session_state() -> None:
-    """Remove user-scoped skill approval widgets during logout."""
+    """Remove user-scoped skill approval and credential widgets during logout."""
     for key in list(st.session_state):
-        if str(key).startswith("hitl_skill_mode_"):
+        if str(key).startswith("hitl_skill_mode_") or str(key).startswith("skill_secret_"):
             del st.session_state[key]
 
 
@@ -3998,6 +3998,67 @@ def get_skill_detail(name: str) -> dict[str, Any] | None:
     """Fetch full detail for one local sidecar skill."""
     response = make_api_request("GET", f"/skills/{name}")
     return response.get("data") if response else None
+
+
+def get_skill_secrets(name: str) -> dict[str, Any] | None:
+    """Fetch configured credential names for one local skill, never values."""
+    response = make_api_request("GET", f"/skills/{name}/secrets")
+    return response.get("data") if response else None
+
+
+def set_skill_secret(
+    name: str,
+    secret_name: str,
+    value: str,
+) -> dict[str, Any] | None:
+    """Save one local credential binding without exposing its value."""
+    response = make_api_request(
+        "POST",
+        f"/skills/{name}/secrets",
+        {"name": secret_name, "value": value},
+    )
+    return response.get("data") if response else None
+
+
+def delete_skill_secret(name: str, secret_name: str) -> dict[str, Any] | None:
+    """Remove one local credential binding for a skill."""
+    response = make_api_request("DELETE", f"/skills/{name}/secrets/{secret_name}")
+    return response.get("data") if response else None
+
+
+def _save_skill_secret(
+    skill_name: str,
+    secret_name_key: str,
+    value_key: str,
+) -> None:
+    """Persist the credential from widget state, then clear its password field."""
+    secret_name = str(st.session_state.get(secret_name_key) or "").strip()
+    value = str(st.session_state.get(value_key) or "")
+    status_key = f"{value_key}_status"
+
+    if not secret_name or not value:
+        st.session_state[status_key] = ("error", "Enter both a credential name and value.")
+        return
+    if set_skill_secret(skill_name, secret_name, value) is None:
+        st.session_state[status_key] = (
+            "error",
+            _last_api_error_message("Failed to save local credential"),
+        )
+        return
+
+    st.session_state[value_key] = ""
+    st.session_state[status_key] = ("success", f"{secret_name} configured")
+
+
+def _delete_skill_secret(skill_name: str, secret_name: str, status_key: str) -> None:
+    """Delete one named credential binding and retain only a safe status message."""
+    if delete_skill_secret(skill_name, secret_name) is None:
+        st.session_state[status_key] = (
+            "error",
+            _last_api_error_message("Failed to remove local credential"),
+        )
+        return
+    st.session_state[status_key] = ("success", f"{secret_name} removed")
 
 
 def reload_skills() -> dict[str, Any] | None:
@@ -7340,7 +7401,56 @@ def render_skills_tab():
             st.markdown(f"**Description:** {description}")
             st.caption(f"Folder: `{folder_path}`")
 
-            if hitl_settings is not None and skill.get("commandCapable", False):
+            runtime_status = str(skill.get("runtimeStatus") or "not_ready")
+            setup_status = str(skill.get("setupStatus") or "setup_required")
+            command_capable = skill.get("commandCapable", False)
+            if runtime_status == "ready":
+                st.caption("Command runtime: Ready")
+            elif runtime_status == "instruction_only":
+                st.caption(
+                    "Command runtime: This skill provides instructions only; "
+                    "it has no command runtime."
+                )
+            else:
+                st.warning(f"Command runtime is not ready ({setup_status})")
+
+            skill_secret_scope = f"{skill_hitl_scope}_{skill_name}"
+            secret_name_key = f"skill_secret_name_{skill_secret_scope}"
+            value_key = f"skill_secret_value_{skill_secret_scope}"
+            secret_status_key = f"{value_key}_status"
+            with st.expander("Local credentials", expanded=False):
+                st.caption(
+                    "Use the environment-variable name documented by this skill. "
+                    "Values stay encrypted on this device."
+                )
+                st.text_input("Credential name", key=secret_name_key)
+                st.text_input("Secret value", type="password", key=value_key)
+                st.button(
+                    "Save credential",
+                    key=f"skill_secret_save_{skill_secret_scope}",
+                    on_click=_save_skill_secret,
+                    args=(skill_name, secret_name_key, value_key),
+                )
+
+                secret_status = st.session_state.pop(secret_status_key, None)
+                if secret_status:
+                    level, message = secret_status
+                    getattr(st, level)(message)
+
+                configured = get_skill_secrets(skill_name) or {"secrets": []}
+                for item in configured.get("secrets", []):
+                    secret_name = str(item.get("name") or "")
+                    if not secret_name:
+                        continue
+                    st.caption(f"{secret_name} configured")
+                    st.button(
+                        "Remove",
+                        key=f"skill_secret_delete_{skill_secret_scope}_{secret_name}",
+                        on_click=_delete_skill_secret,
+                        args=(skill_name, secret_name, secret_status_key),
+                    )
+
+            if runtime_status == "ready" and hitl_settings is not None and command_capable:
                 skill_qualified_id = f"skill::{skill_name}::run_skill_command"
                 if skill_qualified_id in skill_tool_rules:
                     current_mode = (

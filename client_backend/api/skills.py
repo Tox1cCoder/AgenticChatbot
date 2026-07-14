@@ -50,6 +50,7 @@ def _skill_summary(skill) -> dict:
         "sourceHash": getattr(skill, "source_hash", None),
         "commandCapable": readiness.status == "ready",
         "runtimeStatus": readiness.status,
+        "setupStatus": readiness.setup_status,
     }
 
 

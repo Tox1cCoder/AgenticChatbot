@@ -65,6 +65,15 @@ class _BridgeStub:
         self.refresh_calls += 1
 
 
+class _ReadinessManager:
+    def __init__(self, status: str, setup_status: str):
+        self.status = status
+        self.setup_status = setup_status
+
+    def evaluate_readiness(self, _skill):
+        return self
+
+
 def _build_app() -> FastAPI:
     app = FastAPI()
     app.include_router(skills_api.router)
@@ -108,6 +117,24 @@ def test_skill_summary_marks_instruction_only_skill_as_not_command_capable():
 
     assert summary["commandCapable"] is False
     assert summary["runtimeStatus"] == "instruction_only"
+
+
+def test_skill_summary_exposes_safe_setup_status(monkeypatch):
+    monkeypatch.setattr(
+        skills_api,
+        "SkillRuntimeManager",
+        lambda: _ReadinessManager("not_ready", "setup_required"),
+    )
+
+    summary = skills_api._skill_summary(_Skill("python-skill", command_capable=False))
+
+    assert summary["commandCapable"] is False
+    assert summary["runtimeStatus"] == "not_ready"
+    assert summary["setupStatus"] == "setup_required"
+    assert "runtimeRoot" not in summary
+    assert "commandPath" not in summary
+    assert "setupLogs" not in summary
+    assert "secretBindings" not in summary
 
 
 def test_reload_skills_refreshes_runtime_catalogs_when_bridge_active(monkeypatch):

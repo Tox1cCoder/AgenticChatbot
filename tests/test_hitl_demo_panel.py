@@ -39,6 +39,46 @@ def test_demo_renders_per_skill_command_hitl_controls():
     assert "approval rules below are inactive until it is enabled" in src
 
 
+def test_demo_has_names_only_local_skill_credential_seams_and_runtime_guidance():
+    src = _demo_source()
+    tree = ast.parse(src)
+
+    def helper_call(name: str) -> str:
+        helper = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == name
+        )
+        call = next(
+            node
+            for node in ast.walk(helper)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "make_api_request"
+        )
+        return ast.unparse(call)
+
+    assert "def get_skill_secrets(" in src
+    assert "def set_skill_secret(" in src
+    assert "def delete_skill_secret(" in src
+    assert helper_call("get_skill_secrets") == "make_api_request('GET', f'/skills/{name}/secrets')"
+    assert helper_call("set_skill_secret").startswith(
+        "make_api_request('POST', f'/skills/{name}/secrets',"
+    )
+    assert helper_call("delete_skill_secret") == (
+        "make_api_request('DELETE', f'/skills/{name}/secrets/{secret_name}')"
+    )
+    assert 'st.expander("Local credentials"' in src
+    assert 'st.text_input("Secret value", type="password", key=value_key)' in src
+    assert 'st.session_state[value_key] = ""' in src
+    assert 'f"skill_secret_value_{skill_secret_scope}"' in src
+    assert 'f"skill_secret_name_{skill_secret_scope}"' in src
+    assert 'f"{secret_name} configured"' in src
+    assert 'str(key).startswith("skill_secret_")' in src
+    assert "Command runtime: Ready" in src
+    assert "Command runtime is not ready" in src
+
+
 def test_demo_skill_hitl_state_is_callback_driven_and_cleared_on_logout():
     src = _demo_source()
     assert "def _persist_skill_hitl_mode(" in src
