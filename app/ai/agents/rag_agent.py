@@ -32,7 +32,6 @@ from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
 from ..model_factory import ModelFactory
 from ..prompts import (
     AGENTIC_RAG_SYSTEM_PROMPT,
-    DELEGATION_SUFFIX,
     TOOL_EXPLORATION_SUFFIX,
 )
 from ..rag_tools import create_search_documents_tool
@@ -190,10 +189,18 @@ class RAGAgent(BaseAgent):
         self,
         message: AgentMessage,
         conversation_id: str | None = None,
+        *,
+        internal_tools: list[BaseTool] | None = None,
+        handoff_target_descriptions: dict[str, str] | None = None,
     ) -> AgentResponse:
         """Agentic RAG is the only execution path."""
         await self._init_tools()
-        return await self._process_message_agentic(message, conversation_id)
+        return await self._process_message_agentic(
+            message,
+            conversation_id,
+            internal_tools=internal_tools,
+            handoff_target_descriptions=handoff_target_descriptions,
+        )
 
     async def _search(
         self,
@@ -876,6 +883,9 @@ class RAGAgent(BaseAgent):
         self,
         message: AgentMessage,
         conversation_id: str | None = None,
+        *,
+        internal_tools: list[BaseTool] | None = None,
+        handoff_target_descriptions: dict[str, str] | None = None,
     ) -> AgentResponse:
         """
         Process message using agentic document exploration.
@@ -905,10 +915,13 @@ class RAGAgent(BaseAgent):
 
         system_prompt = AGENTIC_RAG_SYSTEM_PROMPT
         system_prompt = f"{system_prompt}{TOOL_EXPLORATION_SUFFIX}"
-        # DELEGATION_SUFFIX brings RAG to parity with other agents — the
-        # `hand_off` tool is exposed via MCP and the model needs to know it
-        # exists to respect routing rules.
-        system_prompt = f"{system_prompt}{DELEGATION_SUFFIX}"
+        handoff_bound = any(
+            getattr(tool, "name", None) == "hand_off" for tool in internal_tools or []
+        )
+        if handoff_bound:
+            system_prompt = (
+                f"{system_prompt}{self._build_delegation_suffix(handoff_target_descriptions)}"
+            )
 
         # Append active skills
         skills_suffix = self._build_skills_suffix(
@@ -946,9 +959,10 @@ class RAGAgent(BaseAgent):
         # Get tools for binding - supports deferred loading when enabled
         tools_to_bind = self._get_tools_for_binding(
             conversation_id=conversation_id,
-            internal_tools=[create_search_documents_tool()],
+            internal_tools=[create_search_documents_tool(), *(internal_tools or [])],
             user_id=request_user_id,
             device_id=request_device_id,
+            include_hand_off=handoff_bound,
         )
 
         # Build messages list with conversation history

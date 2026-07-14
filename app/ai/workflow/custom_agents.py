@@ -23,13 +23,17 @@ class CustomAgentsMixin:
             return self._build_custom_agent(state, selected_agent)
         return None
 
-    def _custom_handoff_targets(self, state: GraphState, runtime_agent_id: str | None) -> list[str]:
-        """Valid hand_off targets for a custom agent: base agents + other custom."""
-        targets = list(self.agents)
+    def _handoff_targets(self, state: GraphState, active_agent_id: str | None) -> list[str]:
+        """Live hand_off targets: every reachable agent except the active one."""
+        targets = list(getattr(self, "agents", {}))
         targets.extend(
-            cid for cid in GraphStateView(state).custom_agents() if cid != runtime_agent_id
+            cid for cid in GraphStateView(state).custom_agents() if cid != active_agent_id
         )
-        return targets
+        return [target for target in targets if target != active_agent_id]
+
+    def _custom_handoff_targets(self, state: GraphState, runtime_agent_id: str | None) -> list[str]:
+        """Backward-compatible name for the shared live-roster helper."""
+        return self._handoff_targets(state, runtime_agent_id)
 
     def _custom_handoff_target_descriptions(
         self, state: GraphState, runtime_agent_id: str | None
@@ -37,7 +41,7 @@ class CustomAgentsMixin:
         descriptions: dict[str, str] = {}
         # Base agents: capability blurbs so a limited-toolset agent can recognise
         # which specialist to delegate to when work falls outside its own tools.
-        for agent_id in self.agents:
+        for agent_id in getattr(self, "agents", {}):
             if agent_id == runtime_agent_id:
                 continue
             blurb = base_agent_capability(agent_id)
@@ -52,36 +56,37 @@ class CustomAgentsMixin:
             descriptions[cid] = f"{name}: {detail}" if detail else name
         return descriptions
 
+    def _handoff_tool_for_agent(self, state: GraphState, active_agent_id: str | None) -> Any | None:
+        """Build the one live handoff tool valid for this invocation."""
+        targets = self._handoff_targets(state, active_agent_id)
+        if not targets:
+            return None
+        return create_hand_off_tool(
+            targets,
+            self._custom_handoff_target_descriptions(state, active_agent_id),
+        )
+
     def _multi_agent_kwargs(self, state: GraphState, active_agent_id: str | None) -> dict[str, Any]:
         """Per-invocation kwargs that make an agent aware of — and able to reach
         — the rest of the multi-agent system.
 
         Base agents receive a graph-injected dynamic ``hand_off`` tool plus
-        capability-aware target descriptions so they can delegate to attached
-        custom agents (their static tool only knows base agents). Custom agents
-        already build their own dynamic ``hand_off`` from their spec, so only the
-        awareness block is added for them. Returns an empty dict when no custom
-        agents are attached, so plain conversations keep existing behavior.
+        capability-aware target descriptions. Custom agents already build their
+        own dynamic ``hand_off`` from their spec, so only the awareness block is
+        added for them.
         """
         kwargs: dict[str, Any] = {}
-        if not GraphStateView(state).custom_agents():
-            return kwargs
-
         activity = self._build_multi_agent_activity_block(state, active_agent_id)
         if activity:
             kwargs["multi_agent_activity"] = activity
 
         # Only base agents need the targets injected; custom agents carry their
         # own dynamic hand_off + delegation prompt from their runtime spec.
-        if active_agent_id in self.agents:
-            targets = [
-                target
-                for target in self._custom_handoff_targets(state, active_agent_id)
-                if target != active_agent_id
-            ]
-            if targets:
+        if active_agent_id in getattr(self, "agents", {}):
+            handoff_tool = self._handoff_tool_for_agent(state, active_agent_id)
+            if handoff_tool:
                 descriptions = self._custom_handoff_target_descriptions(state, active_agent_id)
-                kwargs["internal_tools"] = [create_hand_off_tool(targets, descriptions)]
+                kwargs["internal_tools"] = [handoff_tool]
                 kwargs["handoff_target_descriptions"] = descriptions
         return kwargs
 
@@ -121,9 +126,6 @@ class CustomAgentsMixin:
                 name = entry.get("name") or entry.get("id") or "unknown"
                 via_label = via_labels.get(entry.get("via"), entry.get("via") or "")
                 suffix = f" — {via_label}" if via_label else ""
-                reason = entry.get("reason")
-                if reason:
-                    suffix += f" (reason: {reason})"
                 lines.append(f"- {name}{suffix}")
 
         return "\n".join(lines)
@@ -142,7 +144,6 @@ class CustomAgentsMixin:
         agent_id: str | None,
         *,
         via: str,
-        reason: str | None = None,
     ) -> None:
         """Append an agent to this turn's invocation trail (context.agents_invoked)."""
         if not agent_id:
@@ -162,8 +163,6 @@ class CustomAgentsMixin:
             "kind": identity["kind"] if identity else "base",
             "via": via,
         }
-        if reason:
-            entry["reason"] = reason
         trail.append(entry)
         context["agents_invoked"] = trail
         state["context"] = context

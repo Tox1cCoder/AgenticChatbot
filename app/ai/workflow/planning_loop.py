@@ -110,7 +110,11 @@ class PlanningLoopMixin:
         persona = state.get("persona")
 
         # Get only current turn messages for the model
-        current_turn_messages = self._get_current_turn_messages(messages)
+        current_turn_messages = self._messages_for_selected_agent(
+            state,
+            state.get("selected_agent") or "planning_agent",
+            messages,
+        )
         current_turn_messages, has_images = self._apply_current_turn_attachments(
             state,
             current_turn_messages,
@@ -118,6 +122,8 @@ class PlanningLoopMixin:
 
         # Build the Planning-mode subagent dispatch tool (only when allowed).
         internal_tools = self._build_planning_internal_tools(state)
+        multi_agent_kwargs = self._multi_agent_kwargs(state, "planning_agent")
+        internal_tools.extend(multi_agent_kwargs.get("internal_tools") or [])
 
         # Call the planning agent with history
         custom_workers = [
@@ -145,6 +151,8 @@ class PlanningLoopMixin:
             internal_tools=internal_tools or None,
             custom_workers=custom_workers or None,
             planning_rubric_feedback=context.get("planning_rubric_feedback"),
+            handoff_target_descriptions=multi_agent_kwargs.get("handoff_target_descriptions"),
+            multi_agent_activity=multi_agent_kwargs.get("multi_agent_activity"),
             **self._final_response_kwargs(state),
         )
 
@@ -250,12 +258,15 @@ class PlanningLoopMixin:
         write_todos_calls = [tc for tc in normalized_calls if tc.get("name") == "write_todos"]
 
         tool_map: dict[str, Any] = {}
+        handoff_tool = self._handoff_tool_for_agent(state, "planning_agent")
+        scoped_internal_tools = [handoff_tool] if handoff_tool else None
         if external_tool_calls:
             tool_map = await ensure_agent_tool_map(
                 self.planning_agent,
                 conversation_id=conversation_id,
                 user_id=user_id,
                 device_id=state.get("device_id"),
+                internal_tools=scoped_internal_tools,
             )
 
         # Make Planning-supervisor-only tools (e.g. dispatch_subagents)
@@ -341,6 +352,7 @@ class PlanningLoopMixin:
                 tool_calls=approved_external_calls,
                 tool_map=tool_map,
                 capture_images=True,
+                internal_tools=scoped_internal_tools,
             )
             tool_outputs.extend(external_outputs)
             tool_artifacts.extend(external_artifacts)

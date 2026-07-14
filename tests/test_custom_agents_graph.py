@@ -198,13 +198,14 @@ import pytest  # noqa: E402
 
 from app.ai.agents.router import Router  # noqa: E402
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole  # noqa: E402
+from app.core.config import settings  # noqa: E402
 
 
 def _handoff_output(target, tool_call_id="h1"):
     return [
         {
             "name": "hand_off",
-            "content": json.dumps({"hand_off": target, "reason": "delegating"}),
+            "content": json.dumps({"hand_off": target}),
             "tool_call_id": tool_call_id,
         }
     ]
@@ -388,7 +389,7 @@ def test_custom_agent_system_prompt_describes_dynamic_handoff_targets():
     agent = wf._build_custom_agent(state, rid1)
 
     assert agent is not None
-    prompt = agent._build_system_prompt(None, False)
+    prompt = agent._build_system_prompt(None, False, include_hand_off=True)
     assert rid2 in prompt
     assert "Legal Reviewer" in prompt
     assert "Reviews contract and policy questions." in prompt
@@ -420,17 +421,85 @@ def test_no_custom_agents_regression_across_paths():
     assert AIWorkflowExecutionRequest(message="x").custom_agents == {}
 
 
-def test_handoff_to_unattached_custom_agent_is_refused_with_tool_error():
+def test_handoff_to_unattached_custom_agent_rewrites_its_single_tool_result():
     wf = _workflow()
     rid = f"custom_agent:{uuid4()}"
     bogus = f"custom_agent:{uuid4()}"
     state = _multi_custom_state("chat_agent", [rid])
-    new_state = wf._apply_hand_off_if_present(state, _handoff_output(bogus))
-    # Selection unchanged; a structured tool error was appended.
+    outputs = _handoff_output(bogus)
+
+    new_state = wf._apply_hand_off_if_present(state, outputs)
+
+    # Selection remains unchanged and the interpreter has not appended a
+    # duplicate message. The normal tool-output writer creates the sole pair.
     assert new_state["selected_agent"] == "chat_agent"
-    last = new_state["messages"][-1]
+    assert len(new_state["messages"]) == 1
+    wf._apply_tool_outputs_to_state(new_state, tool_outputs=outputs)
+    handoff_messages = [message for message in new_state["messages"] if message.name == "hand_off"]
+    assert len(handoff_messages) == 1
+    last = handoff_messages[0]
     assert isinstance(last, ToolMessage)
-    assert "not a valid target" in last.content
+    assert "not a reachable target" in last.content
+
+
+@pytest.mark.parametrize(
+    ("outputs", "expected_error"),
+    [
+        (
+            [
+                *_handoff_output("search_agent", tool_call_id="h1"),
+                *_handoff_output("planning_agent", tool_call_id="h2"),
+            ],
+            "exactly one hand_off call",
+        ),
+        (
+            [
+                {
+                    "name": "hand_off",
+                    "content": '{"hand_off": "search_agent", "reason": "legacy"}',
+                    "tool_call_id": "h1",
+                }
+            ],
+            "exactly one target agent",
+        ),
+    ],
+)
+def test_handoff_rewrites_noncanonical_or_multiple_outputs(outputs, expected_error):
+    wf = _workflow()
+    state = _multi_custom_state("chat_agent", [])
+
+    wf._apply_hand_off_if_present(state, outputs)
+
+    assert state["selected_agent"] == "chat_agent"
+    assert all(expected_error in output["content"] for output in outputs)
+
+
+def test_handoff_rejects_self_and_revisited_targets():
+    wf = _workflow()
+    state = _multi_custom_state("chat_agent", [])
+    self_output = _handoff_output("chat_agent")
+
+    wf._apply_hand_off_if_present(state, self_output)
+
+    assert "not a reachable target" in self_output[0]["content"]
+    state["context"]["agents_invoked"] = [{"id": "search_agent"}]
+    repeated_output = _handoff_output("search_agent")
+    wf._apply_hand_off_if_present(state, repeated_output)
+
+    assert "already handled this turn" in repeated_output[0]["content"]
+
+
+def test_handoff_rejects_when_configured_depth_is_exhausted(monkeypatch):
+    wf = _workflow()
+    state = _multi_custom_state("chat_agent", [])
+    state["delegation_count"] = 1
+    outputs = _handoff_output("search_agent")
+    monkeypatch.setattr(settings, "max_handoff_delegation_depth", 1)
+
+    wf._apply_hand_off_if_present(state, outputs)
+
+    assert state["selected_agent"] == "chat_agent"
+    assert "maximum delegation depth of 1" in outputs[0]["content"]
 
 
 # --------------------------------------------------------------------------- #
@@ -477,6 +546,7 @@ def test_finalize_response_adds_handoff_metadata():
 
     assert response.metadata["handoff"]["from_agent_id"] == "chat_agent"
     assert response.metadata["handoff"]["to_agent_id"] == rid
+    assert "reason" not in response.metadata["handoff"]
 
 
 def test_recover_terminal_response_adds_canonical_agent_metadata():
@@ -520,16 +590,18 @@ def test_base_agent_multi_agent_kwargs_inject_custom_handoff_tool():
     assert "chat_agent" not in handoff.description.split("Valid targets:", 1)[-1]
 
 
-def test_multi_agent_kwargs_no_injection_without_custom_agents():
-    """No attached custom agents → base agents keep their existing static
-    hand_off behavior (no dynamic tool / descriptions injected)."""
+def test_base_agent_multi_agent_kwargs_are_dynamic_without_custom_agents():
+    """Base agents always receive a live roster, not a static handoff tool."""
     wf = _workflow()
     state = {"selected_agent": "chat_agent", "custom_agents": {}, "context": {}}
 
     kwargs = wf._multi_agent_kwargs(state, "chat_agent")
 
-    assert "internal_tools" not in kwargs
-    assert "handoff_target_descriptions" not in kwargs
+    handoff = next(
+        tool for tool in kwargs["internal_tools"] if getattr(tool, "name", None) == "hand_off"
+    )
+    assert "chat_agent" not in handoff.description.split("Valid targets:", 1)[-1]
+    assert "search_agent" in kwargs["handoff_target_descriptions"]
 
 
 def test_custom_node_multi_agent_kwargs_skip_tool_injection():
@@ -590,7 +662,7 @@ def test_activity_block_reflects_handoff_trail():
     state = _multi_custom_state(rid, [rid])
     state["custom_agents"][rid]["name"] = "Legal Reviewer"
     wf._record_agent_invocation(state, "chat_agent", via="router")
-    wf._record_agent_invocation(state, rid, via="handoff", reason="needs legal review")
+    wf._record_agent_invocation(state, rid, via="handoff")
 
     block = wf._build_multi_agent_activity_block(state, rid)
 

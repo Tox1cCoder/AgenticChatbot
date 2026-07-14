@@ -132,7 +132,6 @@ def normalize_handoff_metadata(context: dict[str, Any] | None) -> dict[str, Any]
     return {
         "from_agent_id": handoff.get("source_agent"),
         "to_agent_id": handoff.get("target_agent"),
-        "reason": handoff.get("reason") or "",
         "tool_call_id": handoff.get("tool_call_id"),
     }
 

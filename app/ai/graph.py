@@ -729,8 +729,15 @@ class MultiAgentWorkflow(
 
         normalized_calls = [normalize_tool_call(tc) for tc in last_message.tool_calls]
         selected_agent_name = state.get("selected_agent")
-        agent = self.agents.get(selected_agent_name) if selected_agent_name else None
-        if await self._needs_approval(state, normalized_calls, agent=agent):
+        agent = self._resolve_runtime_agent(state, selected_agent_name)
+        handoff_tool = self._handoff_tool_for_agent(state, selected_agent_name)
+        scoped_internal_tools = [handoff_tool] if handoff_tool else None
+        if await self._needs_approval(
+            state,
+            normalized_calls,
+            agent=agent,
+            internal_tools=scoped_internal_tools,
+        ):
             return "approval"
 
         return "tools"

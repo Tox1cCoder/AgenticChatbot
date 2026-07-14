@@ -703,6 +703,10 @@ class Settings(BaseSettings):
         default=0.7,
         description="Minimum quality score (0.0-1.0) to accept response without refinement",
     )
+    max_handoff_delegation_depth: int = Field(
+        default=5,
+        description="Maximum inter-agent handoffs permitted in one user turn",
+    )
     react_agent_recursion_limit: int = Field(
         default=105,
         description=(
@@ -1135,6 +1139,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "react_agent_max_iterations",
+        "max_handoff_delegation_depth",
         "react_agent_recursion_limit",
         "planning_rubric_max_iterations",
         "agentic_max_iterations",

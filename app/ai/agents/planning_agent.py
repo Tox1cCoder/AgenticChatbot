@@ -143,6 +143,36 @@ class PlanningAgent(BaseAgent):
         **kwargs: Any,
     ) -> str:
         base_prompt = super()._build_system_prompt(persona, has_tool_context, **kwargs)
+        handoff_enabled = bool(kwargs.get("include_hand_off"))
+        handoff_planning_guidance = (
+            dedent(
+                """
+                - `hand_off` — transfer the *entire* conversation to a more
+                  suitable top-level agent (e.g. the user asks a follow-up
+                  that's outside planning, like "actually just answer this
+                  question normally"). After hand_off the next agent owns the
+                  reply; the planning loop ends for this turn.
+                """
+            ).strip()
+            if handoff_enabled
+            else ""
+        )
+        handoff_execution_guidance = (
+            dedent(
+                """
+                ## `hand_off` rules
+                - Before working the plan, use `hand_off` if the user has
+                  clearly switched topic away from it (normal chat, document
+                  search, and similar requests). The receiving agent takes
+                  over the user-facing reply; the planning loop will not run
+                  again this turn.
+                - Do not use it to do parallel research — that is
+                  `dispatch_subagents`.
+                """
+            ).strip()
+            if handoff_enabled
+            else ""
+        )
 
         phase = planning_phase or "planning"
         if phase == "planning":
@@ -159,42 +189,34 @@ class PlanningAgent(BaseAgent):
                 When the user explicitly asks to start/execute/implement:
                 - Begin execution by calling start_todo for the next task
 
-                ## Delegation tools (planning phase)
-                Two delegation primitives exist; do NOT confuse them.
+                ## Delegation tool (planning phase)
                 - `dispatch_subagents` — fan out *independent* worker tasks in
                   parallel and wait for results. When the user explicitly
                   asks to delegate, fan out, parallelize, run subagents, or
                   test the subagent feature, CALL `dispatch_subagents`
                   directly with concrete worker tasks. Do not narrate it.
-                - `hand_off` — transfer the *entire* conversation to a more
-                  suitable top-level agent (e.g. the user asks a follow-up
-                  that's outside planning, like "actually just answer this
-                  question normally"). After hand_off the next agent owns the
-                  reply; the planning loop ends for this turn.
+                {handoff_planning_guidance}
                 Otherwise, plan creation/editing uses `write_todos` only.
                 """
-            ).strip()
+            ).strip().replace("{handoff_planning_guidance}", handoff_planning_guidance)
         else:
             phase_prompt = dedent(
                 """
                 # CURRENT PHASE: EXECUTING
 
                 ## Decision order on every turn
-                1. If the user has clearly switched topic away from this plan
-                   (asks an off-plan question, wants normal chat, wants
-                   document search, etc.) — CALL `hand_off` to the right
-                   top-level agent with a one-line reason. Do not keep working
-                   the plan against the user's intent.
-                2. If the user explicitly asked to delegate, dispatch, fan
+                1. If the user explicitly asked to delegate, dispatch, fan
                    out, parallelize, or run subagents — CALL
                    `dispatch_subagents` now with concrete worker tasks. Do not
                    narrate it.
-                3. If the next pending todo can be split into 2+ INDEPENDENT
+                2. If the next pending todo can be split into 2+ INDEPENDENT
                    sub-tasks (research X while building Y; check A while
                    drafting B), prefer `dispatch_subagents` over doing them
                    yourself serially.
-                4. Otherwise, work the next pending todo directly: start_todo
+                3. Otherwise, work the next pending todo directly: start_todo
                    → do the work → complete_todo → continue.
+
+                {handoff_execution_guidance}
 
                 ## `dispatch_subagents` rules
                 - Targets: chat_agent, rag_agent, search_agent,
@@ -261,13 +283,6 @@ class PlanningAgent(BaseAgent):
                 - `"model": "gemini-3-flash"` (missing `-preview`)
                 - `"model": "gpt-5"` or `"model": "gemini"` (not a real id)
 
-                ## `hand_off` rules
-                - Use ONLY when the conversation should leave planning
-                  entirely. Do not use to do parallel research — that is
-                  `dispatch_subagents`.
-                - The receiving agent takes over the user-facing reply; the
-                  planning loop will not run again this turn.
-
                 ## Anti-narration rule
                 Never describe a delegation in prose without emitting the
                 tool call. Either dispatch, hand off, or do the work yourself
@@ -277,7 +292,7 @@ class PlanningAgent(BaseAgent):
                 Stop only when all tasks are completed (then summarize), you
                 need user clarification, or an unresolvable error occurs.
                 """
-            ).strip()
+            ).strip().replace("{handoff_execution_guidance}", handoff_execution_guidance)
 
         prompt = f"{base_prompt}\n\n{phase_prompt}"
 

@@ -24,10 +24,10 @@ retries the same `hand_off` with different `reason` text until
 - Agent selection remains LLM-directed. There will be no keyword rule that
   routes document conversations or current-events questions to a particular
   agent.
-- `hand_off` accepts exactly one argument: `target_agent`. `reason` is removed
-  from the schema, tool output, state metadata, event payloads, prompts, and
-  tests. It is unnecessary to route a graph transition and should not consume
-  tool-call arguments.
+- `hand_off` accepts exactly one argument: `target_agent`. Model-supplied
+  `reason` is removed from the schema, tool output, persisted handoff metadata,
+  prompts, and tests. The fixed stream classification `reason="handoff"`
+  remains; it is not model-supplied rationale.
 - The graph owns the transition. Agents select from a live, dynamically built
   roster; graph code validates and executes the selected target.
 - Standard, planning, and RAG tool loops use the same handoff interpreter.
@@ -62,8 +62,8 @@ to access an unattached, disallowed, or self target.
 ```text
 active agent invokes hand_off(target_agent)
   -> current tool runner executes the pure tool
-  -> shared handoff interpreter validates the live target
-  -> interpreter appends/retains the matching ToolMessage and updates state
+  -> shared handoff interpreter validates the live target and rewrites its output if rejected
+  -> normal tool persistence writes the matching ToolMessage and interpreter updates state
   -> selected_agent becomes target_agent
   -> the tool-loop conditional edge enters the target's graph node
   -> target agent answers the original user request
@@ -75,47 +75,61 @@ LangGraph. The receiving agent's prompt excludes that control-plane pair, so
 it sees the original user request rather than routing narration or raw handoff
 JSON. This is deliberate context engineering, not a loss of audit state.
 
-The handoff state records only:
+The handoff control-plane state records:
 
+- `active: true` (so delegated-prompt filtering can identify an active transfer)
 - `source_agent`
 - `target_agent`
 - `tool_call_id`
 
-The existing stream can use this state to emit one `agent_selected` event with
-`reason="handoff"`; no free-text model rationale is emitted or persisted.
+The existing stream uses a selected-agent change to emit one `agent_selected`
+event with `reason="handoff"`; no free-text model rationale is emitted or
+persisted.
 
 ## Shared interpreter and graph integration
 
 Refactor `_apply_hand_off_if_present` into a graph-level helper that:
 
-1. Detects a `hand_off` output deterministically.
-2. Parses the canonical output and validates that exactly one permitted target
-   was requested.
-3. Rejects malformed output, unknown/unattached targets, self-handoffs, and
-   already-visited targets with a normal `ToolMessage` error for the active
-   agent.
+1. Detects `hand_off` outputs deterministically. Exactly one handoff call is
+   permitted in one model message; multiple calls are rejected as ambiguous.
+2. Parses only the canonical `{"hand_off": "target"}` shape and validates the
+   target against the active agent's live roster.
+3. Rewrites the matching output record to a normal tool-error response for a
+   malformed, unknown/unattached, self, repeated, depth-exhausted, or ambiguous
+   handoff. The runner then writes exactly one `ToolMessage` for each tool-call
+   id; the interpreter never appends a duplicate message itself.
 4. Updates `selected_agent`, delegation state, and the per-turn agent trail on
    acceptance.
 
-The standard `tools` node and `planning_tools` node call the helper as they do
-today. `rag_tools` calls it immediately after its non-document tools execute.
-Its continuation method detects a successful transfer before applying RAG
-error or iteration-budget logic and returns the graph node for the selected
-target.
+The standard `tools`, `planning_tools`, and `rag_tools` nodes call the helper
+before any `ToolMessage` is written. A valid handoff may accompany other tool
+calls in the same model message; those calls retain their ordinary execution
+and pairing semantics, while the graph transfers after the whole tool batch.
+`rag_tools` detects a successful RAG-originated transfer before applying RAG
+error or iteration-budget logic and returns the selected target's graph node.
 
 The graph builder's routing map after `rag_tools` includes every base node plus
 the static `custom_agent` multiplexing node, as the standard tool routing map
 already does. This lets a dynamic runtime target be mapped through
 `_route_target_for` without hard-coded agent names.
 
-`RAGAgent` receives the same dynamic handoff tool and roster description as
-other base agents. Its special agentic tool binding must no longer use the
+Every base-agent invocation, including RAG and Planning, receives the same
+dynamic handoff tool and roster description. Planning merges it with its
+supervisor tools. RAG accepts it through its agentic binding API. The tool
+execution map receives the same invocation-scoped tool so its binding and
+execution views agree. Standard-loop HITL approval and provenance helpers use
+that same scoped execution map, rather than rebuilding an unscoped one.
+Custom-agent runtime construction uses the same roster helper. There is no
 static default handoff tool.
+
+All delegated targets use the same control-plane message filtering. Planning
+uses `_messages_for_selected_agent`; RAG continues to derive the original user
+request and excludes `hand_off` ToolMessages from RAG evidence.
 
 ## Safety policy
 
-`MAX_DELEGATION_DEPTH` is replaced by a positive, validated configuration
-setting. It is a separate delegation guard, not a substitute for tool or
+`MAX_HANDOFF_DELEGATION_DEPTH` is a positive, validated configuration setting
+(default `5`). It is a separate delegation guard, not a substitute for tool or
 recursion limits. The handoff interpreter also prevents an agent from handing
 off to itself or selecting any agent already present in the current turn's
 agent-invocation trail. Those checks stop reciprocal RAG/search transfers
@@ -151,14 +165,17 @@ Add focused tests that prove:
 2. The RAG graph edge accepts all registered base targets and attached custom
    targets through the shared routing map.
 3. Standard, planning, and RAG paths use the same validation behavior.
-4. Bound target rosters are live, exclude the active agent, and authorize only
-   targets actually bound for the current agent.
+4. Bound and execution target rosters are live, exclude the active agent, and
+   authorize only targets actually bound for the current agent, including RAG
+   and Planning.
 5. A malformed, self, unknown, unattached, repeated, or depth-exhausted
    handoff produces a paired tool error and does not mutate agent ownership.
 6. Source handoff messages remain valid in canonical state but are excluded
-   from the delegated agent's prompt.
+   from every delegated target's prompt, including Planning.
 7. Existing stream behavior still emits the delegated agent selection and
    returns that agent's final reply.
+8. HITL approval and interrupt provenance use the same scoped handoff map as
+   normal tool execution.
 
 Run the focused handoff, RAG finalization, graph-contract, and router suites,
 then the relevant complete AI workflow test suite. Existing baseline evidence

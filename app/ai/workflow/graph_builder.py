@@ -82,13 +82,13 @@ def build_workflow_graph(workflow: Any, *, checkpointer: Any | None) -> Any:
         },
     )
 
+    rag_tools_routing = {agent_name: agent_name for agent_name in workflow.agents}
+    rag_tools_routing["custom_agent"] = "custom_agent"
+    rag_tools_routing["end"] = END
     graph.add_conditional_edges(
         "rag_tools",
         workflow._should_continue_rag,
-        {
-            "rag_agent": "rag_agent",
-            "end": END,
-        },
+        rag_tools_routing,
     )
 
     # Planning agent ReAct loop: planning_agent → planning_tools → planning_agent OR end

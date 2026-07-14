@@ -895,9 +895,9 @@ def test_invoke_agentic_rag_model_merges_context_window_usage_from_total_tokens(
     assert context_window["display_state"] == "ok"
 
 
-def test_rag_system_prompt_includes_delegation_suffix():
-    """RAG agentic flow must include DELEGATION_SUFFIX (parity with other agents)."""
-    from app.ai.prompts import DELEGATION_SUFFIX
+def test_rag_system_prompt_includes_dynamic_delegation_roster():
+    """RAG advertises only its graph-injected live handoff roster."""
+    from app.ai.hand_off_tool import create_hand_off_tool
     from app.ai.schemas import AgentMessage, MessageRole
     from app.core.runtime_modeling import ResolvedRuntimeModelConfig
 
@@ -946,13 +946,19 @@ def test_rag_system_prompt_includes_delegation_suffix():
         metadata={"original_query": "What is in the document?"},
     )
 
-    asyncio.run(agent._process_message_agentic(msg, "conv-1"))
+    asyncio.run(
+        agent._process_message_agentic(
+            msg,
+            "conv-1",
+            internal_tools=[create_hand_off_tool(["search_agent"])],
+            handoff_target_descriptions={"search_agent": "Current web research."},
+        )
+    )
 
     system_msg = captured_messages["messages"][0]
     rendered = system_msg.content if hasattr(system_msg, "content") else str(system_msg)
-    assert DELEGATION_SUFFIX.strip() in rendered, (
-        "RAG system prompt must include DELEGATION_SUFFIX for parity with other agents"
-    )
+    assert "hand_off" in rendered
+    assert "search_agent: Current web research." in rendered
 
 
 def test_rag_system_prompt_has_compact_complex_query_policy_without_hardcoded_phrases():

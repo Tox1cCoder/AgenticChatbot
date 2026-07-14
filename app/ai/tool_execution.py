@@ -586,6 +586,7 @@ async def ensure_agent_tool_map(
     user_id: str | None = None,
     device_id: str | None = None,
     tool_scope: str | None = None,
+    internal_tools: list[Any] | None = None,
 ) -> dict[str, Any]:
     """
     Build a tool map for executing tool calls.
@@ -631,6 +632,7 @@ async def ensure_agent_tool_map(
                 user_id=user_id,
                 device_id=device_id,
                 tool_scope=tool_scope,
+                internal_tools=internal_tools,
             )
         except TypeError:
             # Backward-compat fallback for non-keyword signatures.

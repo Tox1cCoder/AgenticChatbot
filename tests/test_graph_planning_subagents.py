@@ -1258,7 +1258,7 @@ async def test_planning_tools_node_applies_hand_off_to_target_agent(monkeypatch)
         return {
             "hand_off": SimpleNamespace(
                 name="hand_off",
-                ainvoke=AsyncMock(return_value='{"hand_off": "chat_agent", "reason": "off-plan"}'),
+                ainvoke=AsyncMock(return_value='{"hand_off": "chat_agent"}'),
             )
         }
 
@@ -1274,7 +1274,7 @@ async def test_planning_tools_node_applies_hand_off_to_target_agent(monkeypatch)
                     {
                         "id": "tc-1",
                         "name": "hand_off",
-                        "args": {"target_agent": "chat_agent", "reason": "off-plan"},
+                        "args": {"target_agent": "chat_agent"},
                     }
                 ],
             ),
@@ -1348,7 +1348,7 @@ async def test_planning_tools_node_handles_hand_off_alongside_dispatch(monkeypat
         return {
             "hand_off": SimpleNamespace(
                 name="hand_off",
-                ainvoke=AsyncMock(return_value='{"hand_off": "chat_agent", "reason": "off-plan"}'),
+                ainvoke=AsyncMock(return_value='{"hand_off": "chat_agent"}'),
             )
         }
 
@@ -1386,10 +1386,7 @@ async def test_planning_tools_node_handles_hand_off_alongside_dispatch(monkeypat
                     {
                         "id": "tc-handoff",
                         "name": "hand_off",
-                        "args": {
-                            "target_agent": "chat_agent",
-                            "reason": "off-plan",
-                        },
+                        "args": {"target_agent": "chat_agent"},
                     },
                 ],
             ),
@@ -1851,7 +1848,7 @@ def test_delegated_agent_messages_strip_handoff_control_messages():
             ],
         ),
         ToolMessage(
-            content='{"hand_off": "search_agent", "reason": "needs current info"}',
+            content='{"hand_off": "search_agent"}',
             tool_call_id="handoff-1",
             name="hand_off",
         ),
@@ -1874,6 +1871,63 @@ def test_delegated_agent_messages_strip_handoff_control_messages():
     assert delegated == [messages[0]]
 
 
+@pytest.mark.asyncio
+async def test_planning_node_scopes_handoff_control_messages_before_model_call(monkeypatch):
+    """Planning must apply the same handoff boundary as the other graph nodes."""
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    workflow.agents = {"planning_agent": object(), "chat_agent": object()}
+    workflow._get_conversation_history = AsyncMock(return_value=[])
+    workflow.planning_agent = SimpleNamespace(
+        invoke_model_with_history=AsyncMock(return_value=_ok())
+    )
+    monkeypatch.setattr(workflow, "_build_planning_internal_tools", lambda state: [])
+    monkeypatch.setattr(
+        workflow, "_finalize_forced_final_response", lambda state, response: response
+    )
+    monkeypatch.setattr(workflow, "_merge_tool_artifacts", lambda *args, **kwargs: None)
+    monkeypatch.setattr(workflow, "_finalize_agent_response", lambda state, response: state)
+    monkeypatch.setattr(workflow, "_final_response_kwargs", lambda state: {})
+
+    messages = [
+        HumanMessage(content="help me organize this work"),
+        AIMessage(
+            content="I will hand this to Planning.",
+            tool_calls=[
+                {
+                    "id": "handoff-1",
+                    "name": "hand_off",
+                    "args": {"target_agent": "planning_agent"},
+                }
+            ],
+        ),
+        ToolMessage(
+            content='{"hand_off": "planning_agent"}',
+            tool_call_id="handoff-1",
+            name="hand_off",
+        ),
+    ]
+    state: dict[str, Any] = {
+        "messages": messages,
+        "selected_agent": "planning_agent",
+        "conversation_id": "conv-1",
+        "user_id": "user-1",
+        "todos": [],
+        "context": {
+            "handoff": {
+                "active": True,
+                "source_agent": "chat_agent",
+                "target_agent": "planning_agent",
+                "tool_call_id": "handoff-1",
+            }
+        },
+    }
+
+    await workflow._planning_node(state)
+
+    call_kwargs = workflow.planning_agent.invoke_model_with_history.call_args.kwargs
+    assert call_kwargs["messages"] == [messages[0]]
+
+
 def test_apply_hand_off_records_control_metadata():
     """Successful hand_off must stamp ``state['context']['handoff']`` so the
     streamer and delegated-agent scoping can react to it deterministically.
@@ -1890,7 +1944,7 @@ def test_apply_hand_off_records_control_metadata():
         {
             "tool_call_id": "handoff-9",
             "name": "hand_off",
-            "content": '{"hand_off": "search_agent", "reason": "needs current info"}',
+            "content": '{"hand_off": "search_agent"}',
         }
     ]
 
@@ -1902,7 +1956,6 @@ def test_apply_hand_off_records_control_metadata():
         "active": True,
         "source_agent": "planning_agent",
         "target_agent": "search_agent",
-        "reason": "needs current info",
         "tool_call_id": "handoff-9",
     }
 

@@ -550,7 +550,9 @@ The agent workflow is a **LangGraph state machine** defined in [`app/ai/graph.py
 
 ### Hand-off & delegation
 
-`hand_off_tool` supports inter-agent delegation with `MAX_DELEGATION_DEPTH` safety to prevent loops.
+`hand_off` supports graph-validated, LLM-directed delegation. Its per-turn loop guard is
+configured with `MAX_HANDOFF_DELEGATION_DEPTH` (default `5`); tool, recursion, and
+wall-clock limits remain independent safeguards.
 
 ### Deferred tool search
 

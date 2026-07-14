@@ -10,7 +10,6 @@ from typing import Any
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import interrupt
 
-from app.ai.hand_off_tool import MAX_DELEGATION_DEPTH
 from app.ai.hitl_config import (
     any_call_requires_approval,
     policy_from_context,
@@ -81,11 +80,14 @@ class ToolLoopMixin:
             )
             return state
 
+        handoff_tool = self._handoff_tool_for_agent(state, selected_agent_name)
+        scoped_internal_tools = [handoff_tool] if handoff_tool else None
         tool_map = await ensure_agent_tool_map(
             agent,
             conversation_id=state.get("conversation_id"),
             user_id=state.get("user_id"),
             device_id=state.get("device_id"),
+            internal_tools=scoped_internal_tools,
         )
 
         tool_outputs, tool_artifacts, all_images = await self._execute_agent_tool_calls(
@@ -94,7 +96,13 @@ class ToolLoopMixin:
             tool_calls=tool_calls_pending,
             tool_map=tool_map,
             capture_images=True,
+            internal_tools=scoped_internal_tools,
         )
+
+        # Inter-agent delegation is interpreted before ToolMessages are
+        # persisted so a rejected handoff rewrites its one matching output
+        # instead of appending a duplicate ToolMessage.
+        state = self._apply_hand_off_if_present(state, tool_outputs)
         self._apply_tool_outputs_to_state(
             state,
             tool_outputs=tool_outputs,
@@ -103,101 +111,89 @@ class ToolLoopMixin:
             truncate_outputs=True,
         )
 
-        # ── Inter-agent delegation (hand_off tool) ──────────────────────
-        state = self._apply_hand_off_if_present(state, tool_outputs)
-
         return state
 
     def _apply_hand_off_if_present(self, state: GraphState, tool_outputs: list) -> GraphState:
-        """Detect a hand_off tool result and re-route to the target agent.
-
-        If ``delegation_count`` exceeds ``MAX_DELEGATION_DEPTH`` the delegation
-        is rejected and an explanatory ToolMessage is appended instead.
-        """
-        hand_off_output = None
-        for output in tool_outputs:
-            if output.get("name") == "hand_off":
-                hand_off_output = output
-                break
-        if hand_off_output is None:
+        """Interpret one canonical handoff output before ToolMessages are persisted."""
+        handoff_outputs = [
+            output
+            for output in tool_outputs
+            if isinstance(output, dict) and output.get("name") == "hand_off"
+        ]
+        if not handoff_outputs:
             return state
 
+        def reject(output: dict[str, Any], message: str) -> None:
+            output["content"] = f"Hand-off refused: {message}"
+
+        if len(handoff_outputs) != 1:
+            for output in handoff_outputs:
+                reject(output, "exactly one hand_off call is allowed per model message.")
+            return state
+
+        handoff_output = handoff_outputs[0]
         try:
-            payload = json.loads(hand_off_output["content"])
-            target_agent = payload.get("hand_off")
-            reason = payload.get("reason", "")
-        except (json.JSONDecodeError, KeyError):
-            logger.warning("Malformed hand_off tool output; ignoring delegation")
+            payload = json.loads(handoff_output.get("content", ""))
+        except (TypeError, json.JSONDecodeError):
+            reject(handoff_output, "the tool output must be canonical handoff JSON.")
             return state
 
-        # Validate target agent exists: a base agent or an attached custom agent.
-        if target_agent not in self.agents and not self._is_attached_custom_agent(
-            state, target_agent
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"hand_off"}
+            or not isinstance(payload.get("hand_off"), str)
+            or not payload["hand_off"].strip()
         ):
-            logger.warning("hand_off requested unknown/unattached agent '%s'", target_agent)
-            tool_call_id = hand_off_output.get("tool_call_id")
-            if tool_call_id:
-                state.setdefault("messages", []).append(
-                    ToolMessage(
-                        content=(
-                            f"Hand-off refused: '{target_agent}' is not a valid target. "
-                            "It is not a base agent and not a custom agent attached to this "
-                            "conversation. Answer the request yourself or hand off to a listed "
-                            "target."
-                        ),
-                        tool_call_id=tool_call_id,
-                        name="hand_off",
-                    )
-                )
+            reject(handoff_output, "the tool output must contain exactly one target agent.")
             return state
 
-        # Circuit-breaker: cap delegation depth
-        delegation_count = state.get("delegation_count") or 0
-        if delegation_count >= MAX_DELEGATION_DEPTH:
-            logger.warning(
-                "Delegation depth %d reached limit of %d; refusing hand_off to '%s'",
-                delegation_count,
-                MAX_DELEGATION_DEPTH,
-                target_agent,
-            )
-            state.setdefault("messages", []).append(
-                ToolMessage(
-                    content=(
-                        f"Delegation refused: maximum depth of {MAX_DELEGATION_DEPTH} reached. "
-                        "Please answer the user's request directly."
-                    ),
-                    tool_call_id=hand_off_output["tool_call_id"],
-                    name="hand_off",
-                )
+        source_agent = state.get("selected_agent")
+        if not isinstance(source_agent, str) or not source_agent:
+            reject(handoff_output, "the active agent is unavailable.")
+            return state
+
+        target_agent = payload["hand_off"]
+        allowed_targets = set(self._handoff_targets(state, source_agent))
+        if target_agent not in allowed_targets:
+            reject(
+                handoff_output,
+                f"'{target_agent}' is not a reachable target for {source_agent}.",
             )
             return state
 
-        previous_agent = state.get("selected_agent")
-        logger.info(
-            "Delegating from '%s' → '%s' (reason: %s)",
-            previous_agent,
-            target_agent,
-            reason,
-        )
-        state["selected_agent"] = target_agent
-        state["delegation_count"] = delegation_count + 1
-
-        # Control-plane handoff metadata — used by ``_messages_for_selected_agent``
-        # to strip handoff control AIMessage/ToolMessage pairs out of the
-        # delegated agent's prompt, and by the streamer to emit an
-        # ``agent_selected`` event when the active agent changes.
-        context = state.get("context") or {}
+        context = state.get("context")
         if not isinstance(context, dict):
             context = {}
+        trail = context.get("agents_invoked")
+        visited_agents = {
+            entry.get("id")
+            for entry in trail
+            if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+        } if isinstance(trail, list) else set()
+        if target_agent in visited_agents:
+            reject(handoff_output, f"'{target_agent}' has already handled this turn.")
+            return state
+
+        delegation_count = int(state.get("delegation_count") or 0)
+        max_delegation_depth = settings.max_handoff_delegation_depth
+        if delegation_count >= max_delegation_depth:
+            reject(
+                handoff_output,
+                f"maximum delegation depth of {max_delegation_depth} reached; answer directly.",
+            )
+            return state
+
+        logger.info("Delegating from '%s' to '%s'", source_agent, target_agent)
+        state["selected_agent"] = target_agent
+        state["delegation_count"] = delegation_count + 1
         context["handoff"] = {
             "active": True,
-            "source_agent": previous_agent,
+            "source_agent": source_agent,
             "target_agent": target_agent,
-            "reason": reason,
-            "tool_call_id": hand_off_output.get("tool_call_id"),
+            "tool_call_id": handoff_output.get("tool_call_id"),
         }
         state["context"] = context
-        self._record_agent_invocation(state, target_agent, via="handoff", reason=reason)
+        self._record_agent_invocation(state, target_agent, via="handoff")
         return state
 
     async def _needs_approval(
@@ -207,6 +203,7 @@ class ToolLoopMixin:
         *,
         agent: Any | None = None,
         tool_map: dict[str, Any] | None = None,
+        internal_tools: list[Any] | None = None,
     ) -> bool:
         """Resolve per-call provenance and apply the per-turn HITL policy."""
         policy = policy_from_context(state.get("context"))
@@ -221,6 +218,7 @@ class ToolLoopMixin:
                 conversation_id=view.conversation_id(),
                 user_id=view.user_id(),
                 device_id=view.device_id(),
+                internal_tools=internal_tools,
             )
         if tool_map is not None:
             mcp_manager = await get_global_mcp_manager()
@@ -236,6 +234,7 @@ class ToolLoopMixin:
         tool_calls: list[Any],
         agent: Any | None,
         tool_map: dict[str, Any] | None = None,
+        internal_tools: list[Any] | None = None,
     ) -> dict[str, Any]:
         """Attach device/runtime provenance to pending tool approvals."""
         state_view = GraphStateView(state)
@@ -246,6 +245,7 @@ class ToolLoopMixin:
                 conversation_id=state_view.conversation_id(),
                 user_id=state_view.user_id(),
                 device_id=state_view.device_id(),
+                internal_tools=internal_tools,
             )
 
         device_id = state_view.device_id()
@@ -323,11 +323,14 @@ class ToolLoopMixin:
             return state
 
         selected_agent_name = state.get("selected_agent")
-        agent = self.agents.get(selected_agent_name) if selected_agent_name else None
+        agent = self._resolve_runtime_agent(state, selected_agent_name)
+        handoff_tool = self._handoff_tool_for_agent(state, selected_agent_name)
+        scoped_internal_tools = [handoff_tool] if handoff_tool else None
         interrupt_payload = await self._prepare_interrupt_payload(
             state,
             tool_calls=last_message.tool_calls,
             agent=agent,
+            internal_tools=scoped_internal_tools,
         )
         interrupt_payload["action_requests"]
 
@@ -381,6 +384,7 @@ class ToolLoopMixin:
         tool_calls: list[Any],
         tool_map: dict[str, Any] | None = None,
         capture_images: bool = True,
+        internal_tools: list[Any] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
         if not tool_calls:
             return [], [], []
@@ -404,6 +408,7 @@ class ToolLoopMixin:
                 conversation_id=conversation_id,
                 user_id=user_id,
                 device_id=device_id,
+                internal_tools=internal_tools,
             )
 
         with tool_execution_context(

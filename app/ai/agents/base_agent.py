@@ -31,11 +31,10 @@ from ..deferred_tool_binding import (
     build_deferred_tool_list,
     should_use_deferred_loading,
 )
-from ..hand_off_tool import hand_off as _hand_off_tool
 from ..image_context import build_multimodal_content, has_image_parts
 from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
 from ..model_context import build_context_window_usage, resolve_model_context_window
-from ..prompts import DELEGATION_SUFFIX, TOOL_CONTEXT_SUFFIX, TOOL_EXPLORATION_SUFFIX
+from ..prompts import TOOL_CONTEXT_SUFFIX, TOOL_EXPLORATION_SUFFIX
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..skills_tool import create_activate_skill_tool, get_available_skill_summaries
 from ..time_context import build_runtime_time_context_block
@@ -237,9 +236,6 @@ class BaseAgent(ABC):
             self.gemini_client = None
             self.langchain_model = None
 
-    def _should_include_hand_off_tool(self) -> bool:
-        return True
-
     async def _init_tools(self) -> None:
         """
         Initialize or refresh tools from MCP manager.
@@ -270,13 +266,6 @@ class BaseAgent(ABC):
 
             # Apply per-agent tool allowlist filtering
             self.tools = self._filter_tools_by_allowlist(unique_tools)
-
-            # Add inter-agent delegation tool for agents that participate in
-            # graph-level handoff. Planning has its own supervisor primitive.
-            existing_names = {t.name for t in self.tools}
-            if self._should_include_hand_off_tool() and _hand_off_tool.name not in existing_names:
-                self.tools.append(_hand_off_tool)
-                existing_names.add(_hand_off_tool.name)
 
             # Update our tracked generation
             self._tools_generation_seen = current_generation
@@ -427,17 +416,11 @@ class BaseAgent(ABC):
         for tool in skills_tools:
             _add_internal(tool)
 
-        # Caller-provided internal tools are registered first so a graph-injected
-        # dynamic ``hand_off`` (scoped to attached custom agents) takes precedence
-        # over the static base-only ``hand_off`` below (dedup keeps the first).
+        # Caller-provided internal tools include the graph-scoped ``hand_off``
+        # tool. The graph owns its roster, so BaseAgent never supplies a static
+        # fallback that could become stale or permit self-delegation.
         for tool in internal_tools or []:
             _add_internal(tool)
-
-        hand_off_enabled = (
-            self._should_include_hand_off_tool() if include_hand_off is None else include_hand_off
-        )
-        if hand_off_enabled:
-            _add_internal(_hand_off_tool)
 
         if getattr(settings, "enable_user_memory_tools", False) and user_id:
             try:
@@ -511,8 +494,8 @@ class BaseAgent(ABC):
             else:
                 tools = list(self.tools)
 
-        if not hand_off_enabled:
-            tools = [tool for tool in tools if getattr(tool, "name", None) != _hand_off_tool.name]
+        if include_hand_off is False:
+            tools = [tool for tool in tools if getattr(tool, "name", None) != "hand_off"]
 
         seen_names = {tool.name for tool in tools}
         for tool in remote_tools:
@@ -552,11 +535,9 @@ class BaseAgent(ABC):
             model: Optional model override
             conversation_id: Conversation ID for deferred tool lookup
             internal_tools: Non-MCP internal tools to include
-            include_hand_off: Override the agent's default hand_off inclusion. ``None``
-                falls back to ``_should_include_hand_off_tool()``. Subagent
-                workers pass ``False`` to keep ``hand_off`` off the worker
-                toolset because graph-level delegation does not apply in an
-                isolated execution context.
+            include_hand_off: When ``False``, remove any graph-injected
+                ``hand_off`` from the binding. Graph nodes pass a live handoff
+                tool through ``internal_tools`` when delegation is available.
 
         Returns:
             Model with tools bound
@@ -926,7 +907,10 @@ class BaseAgent(ABC):
                 system_prompt_kwargs["tool_budget_notice"] = tool_budget_notice
             if rich_response_inventory:
                 system_prompt_kwargs["rich_response_inventory"] = rich_response_inventory
-            system_prompt_kwargs["include_hand_off"] = include_hand_off
+            system_prompt_kwargs["include_hand_off"] = bool(
+                include_hand_off is not False
+                and any(getattr(tool, "name", None) == "hand_off" for tool in bound_tools)
+            )
 
             system_prompt = self._build_system_prompt(
                 persona,
@@ -1198,11 +1182,11 @@ class BaseAgent(ABC):
         With ``target_descriptions`` (graph-injected: base specialists +
         attached custom agents), render a dynamic, capability-aware target list
         so the agent can delegate to the right specialist — including custom
-        agents it would otherwise never see. Without it, fall back to the
-        canonical static suffix.
+        agents it would otherwise never see. Without live targets, there is no
+        handoff instruction because no handoff tool is bound.
         """
         if not target_descriptions:
-            return DELEGATION_SUFFIX
+            return ""
 
         lines = [
             f"- {target}" + (f": {description}" if description else "")
@@ -1241,12 +1225,7 @@ class BaseAgent(ABC):
         system_prompt = f"{system_prompt}{TOOL_EXPLORATION_SUFFIX}"
 
         # Append delegation instructions only when the tool is actually bound.
-        include_hand_off = _.get("include_hand_off")
-        hand_off_prompt_enabled = (
-            self._should_include_hand_off_tool()
-            if include_hand_off is None
-            else bool(include_hand_off)
-        )
+        hand_off_prompt_enabled = bool(_.get("include_hand_off"))
         if hand_off_prompt_enabled:
             handoff_target_descriptions = _.get("handoff_target_descriptions")
             system_prompt = (

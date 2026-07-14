@@ -91,7 +91,13 @@ class RagLoopMixin:
             attachments=self._get_state_attachments(state),
         )
 
-        response = await self.rag_agent.process_message(agent_msg, conversation_id)
+        multi_agent_kwargs = self._multi_agent_kwargs(state, "rag_agent")
+        response = await self.rag_agent.process_message(
+            agent_msg,
+            conversation_id,
+            internal_tools=multi_agent_kwargs.get("internal_tools"),
+            handoff_target_descriptions=multi_agent_kwargs.get("handoff_target_descriptions"),
+        )
         response = self._finalize_forced_final_response(state, response)
         self._merge_tool_artifacts(state, response)
         state["response"] = response
@@ -145,15 +151,23 @@ class RagLoopMixin:
         rejected_feedback: dict[str, str] = {}
         selected_agent_name = state.get("selected_agent")
         agent = self.agents.get(selected_agent_name) if selected_agent_name else None
+        handoff_tool = self._handoff_tool_for_agent(state, selected_agent_name)
+        scoped_internal_tools = [handoff_tool] if handoff_tool else None
 
         if non_search_tool_calls:
             tool_calls_to_execute = list(non_search_tool_calls)
 
-            if await self._needs_approval(state, non_search_tool_calls, agent=agent):
+            if await self._needs_approval(
+                state,
+                non_search_tool_calls,
+                agent=agent,
+                internal_tools=scoped_internal_tools,
+            ):
                 interrupt_payload = await self._prepare_interrupt_payload(
                     state,
                     tool_calls=non_search_tool_calls,
                     agent=agent,
+                    internal_tools=scoped_internal_tools,
                 )
                 human_decisions = interrupt(interrupt_payload)
 
@@ -184,6 +198,7 @@ class RagLoopMixin:
                         conversation_id=conversation_id,
                         user_id=user_id,
                         device_id=state.get("device_id"),
+                        internal_tools=scoped_internal_tools,
                     )
                     if agent
                     else {}
@@ -291,6 +306,10 @@ class RagLoopMixin:
                 }
             )
 
+        # Interpret delegation before persisting ToolMessages so rejection
+        # feedback replaces the matching result rather than adding a duplicate.
+        state = self._apply_hand_off_if_present(state, tool_outputs)
+
         # Add tool messages to state
         for output in tool_outputs:
             state.setdefault("messages", []).append(
@@ -358,6 +377,15 @@ class RagLoopMixin:
         tools, end the graph to avoid an infinite loop.
         """
         context = state.get("context", {})
+        handoff = context.get("handoff") if isinstance(context, dict) else None
+        if (
+            isinstance(handoff, dict)
+            and handoff.get("active")
+            and handoff.get("source_agent") == "rag_agent"
+            and handoff.get("target_agent") == state.get("selected_agent")
+            and state.get("selected_agent") != "rag_agent"
+        ):
+            return self._route_target_for(state, state["selected_agent"])
         agentic_iteration = context.get("agentic_rag_iteration", 0)
 
         streak = context.get("tool_error_streak")

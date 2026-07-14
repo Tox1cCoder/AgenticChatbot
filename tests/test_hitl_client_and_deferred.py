@@ -1,6 +1,7 @@
 """HITL fires correctly for client (sidecar) tools and deferred (search-loaded) tools."""
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -94,3 +95,45 @@ async def test_prepare_interrupt_payload_redacts_sensitive_args_in_prompt():
     assert prompt_args["api_token"] == "<redacted>"
     # The real tool call is untouched, so execution on approval uses real args.
     assert original_args["api_token"] == "SUPER-SECRET"
+
+
+@pytest.mark.asyncio
+async def test_approval_helpers_rebuild_the_live_scoped_handoff_map(monkeypatch):
+    """HITL must inspect the same graph-scoped handoff tool that will execute."""
+    from app.ai import graph as graph_module
+    from app.ai.hand_off_tool import create_hand_off_tool
+
+    wf = graph_module.MultiAgentWorkflow.__new__(graph_module.MultiAgentWorkflow)
+    handoff_tool = create_hand_off_tool(["search_agent"])
+    observed_internal_tools: list[list[object] | None] = []
+
+    async def fake_ensure_agent_tool_map(agent, **kwargs):
+        observed_internal_tools.append(kwargs.get("internal_tools"))
+        return {"hand_off": handoff_tool}
+
+    monkeypatch.setattr(
+        "app.ai.workflow.tool_loop.ensure_agent_tool_map", fake_ensure_agent_tool_map
+    )
+    monkeypatch.setattr(
+        "app.ai.workflow.tool_loop.get_global_mcp_manager", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        "app.ai.workflow.tool_loop.any_call_requires_approval", lambda *args, **kwargs: False
+    )
+    state = {"context": {}, "device_id": "device-1"}
+    calls = [{"name": "hand_off", "args": {"target_agent": "search_agent"}, "id": "h1"}]
+
+    assert await wf._needs_approval(
+        state,
+        calls,
+        agent=object(),
+        internal_tools=[handoff_tool],
+    ) is False
+    await wf._prepare_interrupt_payload(
+        state,
+        tool_calls=calls,
+        agent=object(),
+        internal_tools=[handoff_tool],
+    )
+
+    assert observed_internal_tools == [[handoff_tool], [handoff_tool]]

@@ -4,6 +4,9 @@ delegation prompt, and to surface a multi-agent awareness block."""
 
 from __future__ import annotations
 
+import pytest
+from pydantic import ValidationError
+
 from app.ai.agents.base_agent import BaseAgent
 from app.ai.hand_off_tool import create_hand_off_tool
 from app.ai.schemas import AgentType
@@ -30,11 +33,17 @@ def _agent() -> _DummyBase:
     return _DummyBase(agent_config_key="chat")
 
 
-def test_build_delegation_suffix_static_without_descriptions():
+def test_hand_off_tool_accepts_only_target_agent():
+    schema = create_hand_off_tool(["search_agent"]).args_schema
+
+    assert schema.model_validate({"target_agent": "search_agent"}).target_agent == "search_agent"
+    with pytest.raises(ValidationError):
+        schema.model_validate({"target_agent": "search_agent", "reason": "legacy"})
+
+
+def test_build_delegation_suffix_is_empty_without_live_targets():
     suffix = _agent()._build_delegation_suffix()
-    assert "hand_off" in suffix
-    # Falls back to the canonical static suffix when no dynamic targets given.
-    assert "Available targets" in suffix
+    assert suffix == ""
 
 
 def test_build_delegation_suffix_dynamic_lists_custom_targets():
@@ -64,15 +73,21 @@ def test_build_system_prompt_uses_dynamic_delegation_targets():
     prompt = _agent()._build_system_prompt(
         persona=None,
         has_tool_context=False,
+        include_hand_off=True,
         handoff_target_descriptions=descriptions,
     )
     assert "custom_agent:abc" in prompt
     assert "Legal Reviewer" in prompt
 
 
-def test_injected_handoff_tool_wins_over_static():
-    """A hand_off passed via internal_tools (the graph's dynamic one) must
-    replace the static base-only hand_off, not be deduped away by it."""
+def test_build_system_prompt_omits_delegation_without_a_bound_handoff_tool():
+    prompt = _agent()._build_system_prompt(persona=None, has_tool_context=False)
+
+    assert "INTER-AGENT DELEGATION" not in prompt
+
+
+def test_injected_handoff_tool_is_the_only_bound_handoff():
+    """The graph-injected handoff is the only handoff BaseAgent can bind."""
     dynamic = create_hand_off_tool(
         ["search_agent", "custom_agent:abc"],
         {"custom_agent:abc": "Legal Reviewer: contracts."},

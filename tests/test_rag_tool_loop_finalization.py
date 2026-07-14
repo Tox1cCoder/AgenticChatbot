@@ -14,6 +14,7 @@ Behaviour under test:
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
@@ -26,6 +27,60 @@ from app.core.config import settings
 
 def _make_workflow():
     return MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+
+
+@pytest.mark.asyncio
+async def test_rag_handoff_routes_to_search_agent_in_same_turn(monkeypatch):
+    """RAG must transfer immediately instead of consuming its local loop budget."""
+    import app.ai.workflow.rag_loop as rag_loop
+
+    workflow = _make_workflow()
+    workflow.rag_agent = object()
+    workflow.agents = {
+        "rag_agent": SimpleNamespace(agent_config_key="rag"),
+        "search_agent": object(),
+    }
+
+    async def no_approval(*args, **kwargs):
+        return False
+
+    async def tool_map(*args, **kwargs):
+        return {"hand_off": SimpleNamespace(name="hand_off")}
+
+    async def execute_tools(**kwargs):
+        return (
+            [
+                {
+                    "tool_call_id": "handoff-1",
+                    "name": "hand_off",
+                    "content": '{"hand_off":"search_agent"}',
+                }
+            ],
+            [],
+            [],
+        )
+
+    workflow._needs_approval = no_approval
+    workflow._update_tool_error_streak = lambda *args, **kwargs: None
+    monkeypatch.setattr(rag_loop, "ensure_agent_tool_map", tool_map)
+    monkeypatch.setattr(rag_loop, "execute_tool_calls", execute_tools)
+
+    state = {
+        "selected_agent": "rag_agent",
+        "messages": [
+            AIMessage(
+                content="",
+                tool_calls=[{"id": "handoff-1", "name": "hand_off", "args": {}}],
+            )
+        ],
+        "context": {},
+        "custom_agents": {},
+    }
+
+    await workflow._rag_tools_node(state)
+
+    assert state["selected_agent"] == "search_agent"
+    assert workflow._should_continue_rag(state) == "search_agent"
 
 
 def test_rag_budget_routes_to_final_no_tool_pass(monkeypatch):

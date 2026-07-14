@@ -116,8 +116,8 @@ class CustomAgent(BaseAgent):
             "capability you do not have, or when you are not making progress with your "
             "own tools. Do not keep retrying the same tool calls to force work that is "
             "outside your toolset; delegate it to the best-suited target instead. "
-            "Choose the target whose capabilities match the work, and explain what is "
-            "needed in `reason`. Do not delegate if no listed target is more capable "
+            "Choose the target whose capabilities match the work. Do not delegate if "
+            "no listed target is more capable "
             "than you for the request.\n"
             "Available targets:\n" + "\n".join(lines)
         )

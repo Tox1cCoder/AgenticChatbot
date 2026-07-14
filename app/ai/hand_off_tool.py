@@ -15,20 +15,7 @@ error for unknown/unattached targets.
 import json
 
 from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, Field
-
-# Canonical list of base agents that can be delegation targets.
-DELEGATABLE_AGENTS = (
-    "chat_agent",
-    "rag_agent",
-    "search_agent",
-    "image_generator_agent",
-    "planning_agent",
-    "canvas_agent",
-)
-
-# Maximum number of inter-agent delegations per user turn.
-MAX_DELEGATION_DEPTH = 5
+from pydantic import BaseModel, ConfigDict, Field
 
 _HAND_OFF_DOC = (
     "Hand the conversation off to a different specialist agent.\n\n"
@@ -36,19 +23,19 @@ _HAND_OFF_DOC = (
     "is better suited to another listed target. Do NOT delegate if no listed "
     "target is better suited.\n\n"
     "Args:\n"
-    "    target_agent: The agent id to delegate to.{targets}\n"
-    "    reason: A brief explanation of why delegation is appropriate.\n\n"
+    "    target_agent: The agent id to delegate to.{targets}\n\n"
     "Returns: a JSON object consumed by the orchestrator to re-route execution."
 )
 
 
 class HandOffInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     target_agent: str = Field(..., description="The agent id to delegate to.")
-    reason: str = Field(..., description="Why delegation is appropriate.")
 
 
-def _hand_off_impl(target_agent: str, reason: str) -> str:
-    return json.dumps({"hand_off": target_agent, "reason": reason})
+def _hand_off_impl(target_agent: str) -> str:
+    return json.dumps({"hand_off": target_agent})
 
 
 def create_hand_off_tool(
@@ -60,7 +47,7 @@ def create_hand_off_tool(
     The schema accepts a free-form ``target_agent`` string so dynamic custom
     runtime ids work; the graph re-validates the target at execution time.
     """
-    targets = list(allowed_targets) if allowed_targets is not None else list(DELEGATABLE_AGENTS)
+    targets = list(allowed_targets or [])
     descriptions = target_descriptions or {}
     if targets:
         lines = []
@@ -77,8 +64,3 @@ def create_hand_off_tool(
         description=_HAND_OFF_DOC.format(targets=targets_block),
         args_schema=HandOffInput,
     )
-
-
-# Backward-compatible default instance (base-agent targets) used where no
-# dynamic custom targets are available.
-hand_off = create_hand_off_tool()

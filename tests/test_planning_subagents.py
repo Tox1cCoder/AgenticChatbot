@@ -854,6 +854,8 @@ def test_planning_prompt_executing_phase_mentions_dispatch_subagents():
         todos=[],
         current_task_index=0,
         planning_phase="executing",
+        include_hand_off=True,
+        handoff_target_descriptions={"search_agent": "Current events and web research."},
     )
     assert "dispatch_subagents" in prompt
     assert "INDEPENDENT" in prompt or "independent" in prompt
@@ -874,16 +876,45 @@ def test_planning_prompt_advertises_hand_off_with_clear_disambiguation():
         todos=[],
         current_task_index=0,
         planning_phase="executing",
+        include_hand_off=True,
+        handoff_target_descriptions={"search_agent": "Current events and web research."},
     )
     assert "dispatch_subagents" in prompt
     assert "hand_off" in prompt
 
 
-def test_planning_agent_binding_includes_hand_off(monkeypatch):
-    """The Planning Agent is now wired into graph-level delegation, so the
-    ``hand_off`` tool must appear in its bound toolset alongside the always-on
-    ``write_todos`` internal tool.
-    """
+def test_planning_agent_binding_includes_graph_injected_hand_off(monkeypatch):
+    """Planning binds the graph-scoped hand_off alongside write_todos."""
+    from app.ai.agents.planning_agent import PlanningAgent
+    from app.ai.hand_off_tool import create_hand_off_tool
+
+    monkeypatch.setattr(
+        "app.ai.agents.base_agent.should_use_deferred_loading",
+        lambda _agent_key: True,
+    )
+    monkeypatch.setattr(
+        "app.ai.agents.base_agent.get_available_skill_summaries",
+        lambda **kwargs: [],
+    )
+
+    agent = PlanningAgent.__new__(PlanningAgent)
+    agent.agent_config_key = "planning"
+    agent.mcp_manager = None
+    agent.tools = []
+
+    dynamic_handoff = create_hand_off_tool(["search_agent"])
+    tools = agent._get_tools_for_binding(
+        conversation_id="conversation-1",
+        internal_tools=[dynamic_handoff],
+    )
+    tool_names = [tool.name for tool in tools]
+
+    assert "write_todos" in tool_names
+    assert "hand_off" in tool_names
+
+
+def test_planning_agent_binding_has_no_static_hand_off_fallback(monkeypatch):
+    """Only graph injection can bind hand_off for Planning."""
     from app.ai.agents.planning_agent import PlanningAgent
 
     monkeypatch.setattr(
@@ -901,36 +932,6 @@ def test_planning_agent_binding_includes_hand_off(monkeypatch):
     agent.tools = []
 
     tools = agent._get_tools_for_binding(conversation_id="conversation-1")
-    tool_names = [tool.name for tool in tools]
-
-    assert "write_todos" in tool_names
-    assert "hand_off" in tool_names
-
-
-def test_planning_agent_binding_can_opt_out_of_hand_off(monkeypatch):
-    """Subagent workers pass ``include_hand_off=False`` so graph-level
-    delegation does not leak into isolated worker tool maps.
-    """
-    from app.ai.agents.planning_agent import PlanningAgent
-
-    monkeypatch.setattr(
-        "app.ai.agents.base_agent.should_use_deferred_loading",
-        lambda _agent_key: True,
-    )
-    monkeypatch.setattr(
-        "app.ai.agents.base_agent.get_available_skill_summaries",
-        lambda **kwargs: [],
-    )
-
-    agent = PlanningAgent.__new__(PlanningAgent)
-    agent.agent_config_key = "planning"
-    agent.mcp_manager = None
-    agent.tools = []
-
-    tools = agent._get_tools_for_binding(
-        conversation_id="conversation-1",
-        include_hand_off=False,
-    )
     tool_names = [tool.name for tool in tools]
 
     assert "write_todos" in tool_names
