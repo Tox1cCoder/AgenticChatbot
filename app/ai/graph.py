@@ -97,6 +97,15 @@ if TYPE_CHECKING:
 
 _apply_decisions = apply_hitl_decisions
 
+# Generic agents pause in the dedicated ``approval`` node. Planning and RAG
+# perform their approval gates inside their tool-loop nodes, so LangGraph
+# reports those nodes as the pending continuation target.
+_APPROVAL_INTERRUPT_NODES = frozenset({"approval", "planning_tools", "rag_tools"})
+
+
+def _has_approval_interrupt(next_nodes: Any) -> bool:
+    return bool(set(next_nodes or ()) & _APPROVAL_INTERRUPT_NODES)
+
 
 def _build_inline_rich_inventory_for_state(context: dict[str, Any] | None) -> str:
     """Compute the bounded rich-item inventory block for the current turn.
@@ -2322,11 +2331,7 @@ class MultiAgentWorkflow(
 
         # Check for further interrupts
         final_snapshot = await self.graph.aget_state(config)
-        if (
-            final_snapshot.next
-            and len(final_snapshot.next) > 0
-            and "approval" in final_snapshot.next
-        ):
+        if _has_approval_interrupt(final_snapshot.next):
             interrupt_response = self._build_interrupt_agent_response(
                 final_snapshot,
                 thread_id,
@@ -2359,7 +2364,7 @@ class MultiAgentWorkflow(
 
         if not state_snapshot.next or len(state_snapshot.next) == 0:
             raise ValueError("Workflow is not in interrupted state")
-        if "approval" not in state_snapshot.next:
+        if not _has_approval_interrupt(state_snapshot.next):
             raise ValueError(f"Unexpected interrupt state: next nodes are {state_snapshot.next}")
 
         resume_data = build_interrupt_resume_payload(decisions)

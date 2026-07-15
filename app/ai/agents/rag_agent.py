@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -968,16 +968,9 @@ class RAGAgent(BaseAgent):
         # Build messages list with conversation history
         messages = [SystemMessage(content=system_prompt)]
 
-        # Add conversation history (convert AgentMessage to LangChain format)
-        for hist_msg in conversation_history:
-            if hasattr(hist_msg, "role") and hasattr(hist_msg, "content"):
-                role_value = (
-                    hist_msg.role.value if hasattr(hist_msg.role, "value") else hist_msg.role
-                )
-                if role_value == "user":
-                    messages.append(HumanMessage(content=hist_msg.content))
-                elif role_value == "assistant":
-                    messages.append(AIMessage(content=hist_msg.content))
+        # Reuse the base history converter so prior user image attachments stay
+        # available when a later follow-up is routed to RAG.
+        messages.extend(self._convert_history_to_langchain_messages(conversation_history))
 
         # Build context for current query
         context_parts = [f"User Question: {original_query}"]

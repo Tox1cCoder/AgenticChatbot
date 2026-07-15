@@ -30,7 +30,7 @@ from .tool_error_policy import (
 from .tool_result_rendering import normalize_tool_result_for_rendering
 from .tool_scope import is_client_only_scope
 from .tool_search_tool import create_tool_search_tool
-from .utils import normalize_tool_call
+from .utils import make_json_safe, normalize_tool_call
 
 if TYPE_CHECKING:
     pass
@@ -148,6 +148,123 @@ def build_image_candidates_from_tool_result(
     return candidates
 
 
+def _extract_image_content_blocks(result: Any) -> list[dict[str, Any]]:
+    """Return standard MCP image content blocks from a raw tool result."""
+    safe_result = make_json_safe(result)
+    if isinstance(safe_result, str):
+        try:
+            safe_result = json.loads(safe_result)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    if isinstance(safe_result, dict):
+        content = safe_result.get("content")
+        if isinstance(content, dict):
+            blocks = [content]
+        elif isinstance(content, list):
+            blocks = content
+        elif str(safe_result.get("type") or "").lower() == "image":
+            blocks = [safe_result]
+        else:
+            blocks = []
+    elif isinstance(safe_result, list):
+        blocks = safe_result
+    else:
+        blocks = []
+
+    return [
+        block
+        for block in blocks
+        if isinstance(block, dict) and str(block.get("type") or "").lower() == "image"
+    ]
+
+
+def _image_payload_from_content_block(block: dict[str, Any]) -> dict[str, Any] | None:
+    raw_url = block.get("url") or block.get("src") or block.get("image_url")
+    if isinstance(raw_url, dict):
+        raw_url = raw_url.get("url")
+    url = str(raw_url).strip() if raw_url not in (None, "") else ""
+
+    raw_data = block.get("data") or block.get("base64") or block.get("b64_data")
+    data = str(raw_data).strip() if raw_data not in (None, "") else ""
+    mime_type = str(block.get("mimeType") or block.get("mime_type") or "").strip()
+    if data.startswith("data:"):
+        header, separator, encoded = data.partition(",")
+        if separator:
+            inferred_mime = header[5:].split(";", 1)[0].strip()
+            mime_type = inferred_mime or mime_type
+            data = encoded
+
+    if not url and not data:
+        return None
+    if not mime_type:
+        mime_type = _guess_mime_from_url(url) if url else "image/png"
+
+    payload: dict[str, Any] = {"mime_type": mime_type}
+    if url:
+        payload["url"] = url
+    else:
+        payload["data"] = data
+    return payload
+
+
+def build_image_candidates_from_tool_content(
+    result: Any,
+    *,
+    tool_call_id: str | None,
+    tool_name: str,
+) -> list[dict[str, Any]]:
+    """Promote MCP image content blocks into typed rich-image candidates.
+
+    The normalized model text intentionally reduces image blocks to a short
+    textual marker, so harvesting must happen from the original result before
+    artifact render metadata redacts large inline data.
+    """
+    candidates: list[dict[str, Any]] = []
+    candidate_id_base = tool_call_id or tool_name or "tool"
+    for index, block in enumerate(_extract_image_content_blocks(result)):
+        payload = _image_payload_from_content_block(block)
+        if payload is None:
+            continue
+        description = block.get("description") or block.get("alt")
+        candidates.append(
+            {
+                "id": f"image:tool-content:{candidate_id_base}:{index}",
+                "type": RichItemType.image.value,
+                "source": "tool_image",
+                "display_policy": RichDisplayPolicy.inline_only.value,
+                "alt_text": str(description or GENERIC_IMAGE_ALT_TEXT),
+                "title": block.get("title"),
+                "payload": payload,
+                "provenance": {
+                    "tool_call_id": tool_call_id,
+                    "tool": tool_name,
+                    "content_block_index": index,
+                },
+            }
+        )
+    return candidates
+
+
+def extract_images_from_tool_content(result: Any) -> list[dict[str, str]]:
+    """Build the legacy metadata image shape from MCP image blocks."""
+    images: list[dict[str, str]] = []
+    for block in _extract_image_content_blocks(result):
+        payload = _image_payload_from_content_block(block)
+        if payload is None:
+            continue
+        image: dict[str, str] = {
+            "mime": str(payload["mime_type"]),
+            "description": str(block.get("description") or block.get("alt") or ""),
+        }
+        if payload.get("url"):
+            image["url"] = str(payload["url"])
+        elif payload.get("data"):
+            image["data"] = str(payload["data"])
+        images.append(image)
+    return images
+
+
 def build_tool_render_candidate(
     render: dict[str, Any] | None,
     *,
@@ -216,6 +333,7 @@ def build_live_widget_candidate_from_tool_result(
 def _attach_rich_candidates_to_artifact(
     artifact: dict[str, Any],
     *,
+    raw_result: Any,
     result_text: str,
     render: dict[str, Any] | None,
     tool_call_id: str | None,
@@ -229,6 +347,13 @@ def _attach_rich_candidates_to_artifact(
     candidates.extend(
         build_image_candidates_from_tool_result(
             result_text, tool_call_id=tool_call_id, tool_name=tool_name
+        )
+    )
+    candidates.extend(
+        build_image_candidates_from_tool_content(
+            raw_result,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
         )
     )
     live_widget = build_live_widget_candidate_from_tool_result(
@@ -417,7 +542,7 @@ def build_tool_artifact(
     output_text: str | None,
     error: str | None,
     status: str | None = None,
-    max_output_chars: int = 1000,
+    max_output_chars: int = 0,
     render: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     artifact: dict[str, Any] = {
@@ -433,7 +558,9 @@ def build_tool_artifact(
         if tool_name in _WIDGET_ARTIFACT_TOOLS:
             output_text = _compact_widget_artifact_output(output_text)
         artifact["output"] = (
-            output_text[:max_output_chars] if len(output_text) > max_output_chars else output_text
+            output_text[:max_output_chars]
+            if max_output_chars > 0 and len(output_text) > max_output_chars
+            else output_text
         )
 
     if render is not None:
@@ -507,7 +634,7 @@ def build_rejected_tool_artifacts(
     *,
     tool_calls: list[Any],
     rejected_feedback: dict[str, str],
-    max_output_chars: int = 1000,
+    max_output_chars: int = 0,
 ) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
 
@@ -969,6 +1096,37 @@ async def invoke_tool(tool: Any, tool_args: Any) -> Any:
     raise TypeError("Tool has no invoke/ainvoke and is not callable")
 
 
+def _structured_tool_error(result: Any) -> str | None:
+    """Recognize MCP and repository-standard error result envelopes."""
+    safe_result = make_json_safe(result)
+    if not isinstance(safe_result, dict):
+        return None
+
+    is_error = safe_result.get("isError") is True or safe_result.get("is_error") is True
+    error_value = safe_result.get("error")
+    if not is_error and error_value in (None, "", False):
+        return None
+
+    if error_value not in (None, "", False):
+        if isinstance(error_value, str):
+            return error_value.strip() or "Tool execution failed"
+        try:
+            return json.dumps(error_value, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return str(error_value)
+
+    content = safe_result.get("content")
+    blocks = content if isinstance(content, list) else [content]
+    text_parts = [
+        str(block.get("text")).strip()
+        for block in blocks
+        if isinstance(block, dict)
+        and str(block.get("type") or "").lower() == "text"
+        and str(block.get("text") or "").strip()
+    ]
+    return "\n".join(text_parts) or str(safe_result.get("message") or "Tool execution failed")
+
+
 def _tool_execution_timeout_seconds() -> float:
     value = getattr(settings, "tool_execution_timeout", 30) or 30
     try:
@@ -1084,7 +1242,7 @@ async def execute_tool_calls(
     tool_calls: list[Any],
     tool_map: dict[str, Any],
     capture_images: bool = True,
-    artifact_max_output_chars: int = 1000,
+    artifact_max_output_chars: int = 0,
     device_id: str | None = None,
     agent: Any | None = None,
     conversation_id: str | None = None,
@@ -1107,7 +1265,8 @@ async def execute_tool_calls(
         tool_calls: List of tool call objects to execute
         tool_map: Dict mapping tool names to tool objects (modified in-place if refresh needed)
         capture_images: Whether to extract images from tool results
-        artifact_max_output_chars: Max chars for artifact output truncation
+        artifact_max_output_chars: Optional artifact preview cap (0 preserves the
+            full result until the configured blob offload stage).
         device_id: Current device_id for client tool validation
         agent: Optional agent instance for tool map refresh
         conversation_id: Optional conversation ID for tool map refresh
@@ -1296,8 +1455,10 @@ async def execute_tool_calls(
             normalized_result = normalize_tool_result_for_rendering(
                 result,
                 tool_name=tool_name,
+                error=_structured_tool_error(result),
             )
             result_text = normalized_result.model_content
+            structured_error = _structured_tool_error(result)
 
             outputs.append(
                 {
@@ -1312,12 +1473,13 @@ async def execute_tool_calls(
                 tool_name=tool_name,
                 tool_args=tool_args,
                 output_text=result_text,
-                error=None,
+                error=structured_error,
                 max_output_chars=artifact_max_output_chars,
                 render=normalized_result.render,
             )
             _attach_rich_candidates_to_artifact(
                 artifact,
+                raw_result=result,
                 result_text=result_text,
                 render=normalized_result.render,
                 tool_call_id=tool_id,
@@ -1326,6 +1488,7 @@ async def execute_tool_calls(
             artifacts.append(artifact)
             if capture_images:
                 images.extend(extract_images_from_tool_result(result_text))
+                images.extend(extract_images_from_tool_content(result))
 
             # Update LRU timestamp for deferred tools on successful execution
             _mark_tool_used_if_deferred(tool_name)
@@ -1365,8 +1528,10 @@ async def execute_tool_calls(
                     normalized_result = normalize_tool_result_for_rendering(
                         result,
                         tool_name=tool_name,
+                        error=_structured_tool_error(result),
                     )
                     result_text = normalized_result.model_content
+                    structured_error = _structured_tool_error(result)
 
                     outputs.append(
                         {
@@ -1381,12 +1546,13 @@ async def execute_tool_calls(
                         tool_name=tool_name,
                         tool_args=tool_args,
                         output_text=result_text,
-                        error=None,
+                        error=structured_error,
                         max_output_chars=artifact_max_output_chars,
                         render=normalized_result.render,
                     )
                     _attach_rich_candidates_to_artifact(
                         artifact,
+                        raw_result=result,
                         result_text=result_text,
                         render=normalized_result.render,
                         tool_call_id=tool_id,
@@ -1395,6 +1561,7 @@ async def execute_tool_calls(
                     artifacts.append(artifact)
                     if capture_images:
                         images.extend(extract_images_from_tool_result(result_text))
+                        images.extend(extract_images_from_tool_content(result))
                     _mark_tool_used_if_deferred(tool_name)
                     reconnected = True
             except Exception as retry_exc:

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from app.ai.schemas import InterruptDecision as AIInterruptDecision
 from app.ai.utils import apply_hitl_decisions
@@ -25,6 +26,90 @@ def test_interrupt_resume_request_preserves_tool_call_id():
     )
 
     assert request.decisions[0].tool_call_id == "tool-1"
+
+
+def test_interrupt_resume_request_requires_interrupt_id():
+    with pytest.raises(ValidationError):
+        InterruptResumeRequest.model_validate(
+            {
+                "threadId": "thread-1",
+                "conversationId": str(uuid4()),
+                "decisions": [{"type": "approve", "toolCallId": "tool-1"}],
+            }
+        )
+
+
+def test_service_rejects_resume_without_interrupt_id_before_graph_resume():
+    service = MessageService(
+        message_repository=SimpleNamespace(),
+        conversation_validation_utils=SimpleNamespace(
+            validate_conversation_access=lambda _user_id, _conversation_id: None,
+        ),
+        message_validation_utils=SimpleNamespace(),
+        ai_service=SimpleNamespace(),
+    )
+
+    with pytest.raises(CustomHTTPException) as exc_info:
+        service._validate_and_claim_interrupt_resume(
+            thread_id="thread-1",
+            conversation_id=uuid4(),
+            user_id=uuid4(),
+            interrupt_id=None,
+            device_id=None,
+            decisions=[],
+        )
+
+    assert exc_info.value.error_code == "INTERRUPT_ID_REQUIRED"
+
+
+def test_per_user_hitl_policy_load_failure_fails_closed():
+    service = MessageService(
+        message_repository=SimpleNamespace(),
+        conversation_validation_utils=SimpleNamespace(),
+        message_validation_utils=SimpleNamespace(),
+        ai_service=SimpleNamespace(),
+    )
+    service.tool_approval_setting_repository = SimpleNamespace(
+        build_policy=lambda _user_id: (_ for _ in ()).throw(RuntimeError("database unavailable"))
+    )
+
+    with pytest.raises(RuntimeError, match="Unable to load"):
+        service._resolve_hitl_policy(uuid4())
+
+
+def test_interrupt_validation_rejects_disallowed_and_duplicate_decisions():
+    record = SimpleNamespace(
+        action_requests_json=[
+            {
+                "tool_call_id": "tool-1",
+                "action": "client__write",
+                "allowed_decisions": ["reject"],
+            }
+        ]
+    )
+
+    with pytest.raises(CustomHTTPException) as disallowed:
+        MessageService._validate_complete_interrupt_decisions(
+            record=record,
+            decisions=[
+                InterruptDecision(
+                    type=InterruptDecisionType.APPROVE,
+                    tool_call_id="tool-1",
+                )
+            ],
+        )
+    assert disallowed.value.error_code == "INTERRUPT_DECISION_NOT_ALLOWED"
+
+    record.action_requests_json[0]["allowed_decisions"] = ["approve", "reject"]
+    with pytest.raises(CustomHTTPException) as duplicate:
+        MessageService._validate_complete_interrupt_decisions(
+            record=record,
+            decisions=[
+                InterruptDecision(type=InterruptDecisionType.APPROVE, tool_call_id="tool-1"),
+                InterruptDecision(type=InterruptDecisionType.REJECT, tool_call_id="tool-1"),
+            ],
+        )
+    assert duplicate.value.error_code == "INTERRUPT_DUPLICATE_DECISION"
 
 
 def test_service_to_ai_decision_conversion_preserves_tool_call_id():

@@ -39,6 +39,33 @@ _apply_decisions = apply_hitl_decisions
 class ToolLoopMixin:
     """Relocated tool_loop methods for :class:`MultiAgentWorkflow`."""
 
+    @staticmethod
+    def _lift_rich_candidates(
+        context: dict[str, Any],
+        tool_artifacts: list[dict[str, Any]],
+    ) -> None:
+        """Move transient artifact candidates into turn context and sanitize artifacts."""
+        existing_candidates: list[dict[str, Any]] = list(
+            context.get("rich_item_candidates", [])
+        )
+        seen_ids = {c.get("id") for c in existing_candidates if isinstance(c, dict)}
+        for artifact in tool_artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            candidates = artifact.pop("_rich_item_candidates", None)
+            if not isinstance(candidates, list):
+                continue
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                candidate_id = candidate.get("id")
+                if not candidate_id or candidate_id in seen_ids:
+                    continue
+                existing_candidates.append(candidate)
+                seen_ids.add(candidate_id)
+        if existing_candidates:
+            context["rich_item_candidates"] = existing_candidates
+
     async def _tool_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
         pending_tool_message = find_pending_tool_call_message(messages)
@@ -346,9 +373,30 @@ class ToolLoopMixin:
         state["context"] = context
 
         if not human_decisions:
-            _, rejected_feedback = _apply_decisions(last_message.tool_calls, [])
+            approved_tool_calls, rejected_feedback = _apply_decisions(
+                last_message.tool_calls, []
+            )
         else:
-            _, rejected_feedback = _apply_decisions(last_message.tool_calls, human_decisions)
+            approved_tool_calls, rejected_feedback = _apply_decisions(
+                last_message.tool_calls, human_decisions
+            )
+
+        # ``apply_hitl_decisions`` returns edited calls with the approver's
+        # replacement args.  Persist those edits on the AIMessage consumed by
+        # the downstream tools node; otherwise it finds and executes the
+        # original, pre-approval args.  Rejected calls remain on the message so
+        # their ToolMessages still form a valid assistant/tool sequence.
+        approved_by_id = {
+            normalize_tool_call(tool_call).get("id"): tool_call
+            for tool_call in approved_tool_calls
+        }
+        rewritten_tool_calls = [
+            approved_by_id.get(normalize_tool_call(tool_call).get("id"), tool_call)
+            for tool_call in last_message.tool_calls
+        ]
+        last_message = last_message.model_copy(
+            update={"tool_calls": rewritten_tool_calls}
+        )
 
         rejection_messages = [
             ToolMessage(
@@ -587,29 +635,10 @@ class ToolLoopMixin:
             existing_images.extend(all_images)
             context["tool_images"] = existing_images
 
-        # Lift artifact-attached rich-item candidates into turn-scoped context.
-        # Each artifact may carry `_rich_item_candidates`; merge unique by id.
+        # Candidate records are turn-internal handoff data. Lift and remove
+        # them before tool artifacts can reach persisted response metadata.
         if tool_artifacts:
-            existing_candidates: list[dict[str, Any]] = list(
-                context.get("rich_item_candidates", [])
-            )
-            seen_ids = {c.get("id") for c in existing_candidates if isinstance(c, dict)}
-            for artifact in tool_artifacts:
-                if not isinstance(artifact, dict):
-                    continue
-                candidates = artifact.get("_rich_item_candidates")
-                if not isinstance(candidates, list):
-                    continue
-                for candidate in candidates:
-                    if not isinstance(candidate, dict):
-                        continue
-                    cid = candidate.get("id")
-                    if not cid or cid in seen_ids:
-                        continue
-                    existing_candidates.append(candidate)
-                    seen_ids.add(cid)
-            if existing_candidates:
-                context["rich_item_candidates"] = existing_candidates
+            self._lift_rich_candidates(context, tool_artifacts)
         state["context"] = context
 
         self._update_tool_error_streak(state, tool_artifacts)

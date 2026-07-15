@@ -173,8 +173,8 @@ class InterruptResumeRequest(BaseModel):
     """Request to resume execution after handling interrupts."""
 
     thread_id: str = Field(..., description="Thread ID from the interrupt response")
-    interrupt_id: str | None = Field(
-        default=None, description="Interrupt ID returned from the HITL middleware"
+    interrupt_id: str = Field(
+        ..., min_length=1, description="Interrupt ID returned from the HITL middleware"
     )
     conversation_id: UUID = Field(..., description="Conversation ID")
     device_id: UUID | None = Field(

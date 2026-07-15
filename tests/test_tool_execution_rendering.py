@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.ai.graph import MultiAgentWorkflow
-from app.ai.tool_execution import execute_tool_calls
+from app.ai.tool_execution import build_tool_artifact, execute_tool_calls
 
 
 class _FakeTool:
@@ -73,11 +73,18 @@ class _MissingNameTool:
         return "never-called"
 
 
+class _StructuredErrorTool:
+    name = "structured_error_tool"
+
+    async def ainvoke(self, args):
+        return {"error": "image search is not configured"}
+
+
 @pytest.mark.asyncio
 async def test_execute_tool_calls_preserves_mcp_image_content_blocks():
     """Tool execution must forward MCP content blocks to the normalizer intact.
     Without this, mixed text+image results degrade to render.type == 'json'."""
-    outputs, artifacts, _ = await execute_tool_calls(
+    outputs, artifacts, images = await execute_tool_calls(
         tool_calls=[{"id": "tc-mixed", "name": "mixed_content_tool", "args": {}}],
         tool_map={"mixed_content_tool": _MixedContentTool()},
     )
@@ -88,6 +95,19 @@ async def test_execute_tool_calls_preserves_mcp_image_content_blocks():
     assert render["content"][1]["type"] == "image"
     assert outputs[0]["content"] == "Here is the chart."
     assert artifacts[0]["render"]["type"] == "image"
+    assert images == [
+        {
+            "mime": "image/png",
+            "description": "",
+            "data": "iVBORw0KGgo=",
+        }
+    ]
+    candidates = artifacts[0]["_rich_item_candidates"]
+    image_candidate = next(item for item in candidates if item["type"] == "image")
+    assert image_candidate["payload"] == {
+        "mime_type": "image/png",
+        "data": "iVBORw0KGgo=",
+    }
 
 
 @pytest.mark.asyncio
@@ -126,6 +146,33 @@ async def test_execute_tool_calls_preserves_error_render_artifact():
     assert artifacts[0]["render"]["type"] == "error"
     assert artifacts[0]["error_type"] == "validation"
     assert images == []
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_calls_marks_structured_error_results_as_errors():
+    outputs, artifacts, images = await execute_tool_calls(
+        tool_calls=[{"id": "structured-error", "name": "structured_error_tool", "args": {}}],
+        tool_map={"structured_error_tool": _StructuredErrorTool()},
+    )
+
+    assert outputs[0]["render"]["type"] == "error"
+    assert artifacts[0]["status"] == "error"
+    assert artifacts[0]["error"] == "image search is not configured"
+    assert images == []
+
+
+def test_tool_artifact_preserves_full_output_by_default():
+    output = "x" * 1001
+
+    artifact = build_tool_artifact(
+        tool_call_id="call-1",
+        tool_name="long_tool",
+        tool_args={},
+        output_text=output,
+        error=None,
+    )
+
+    assert artifact["output"] == output
 
 
 def test_lookup_tool_render_payload_from_state_context():

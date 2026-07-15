@@ -434,6 +434,89 @@ def test_inline_tool_render_uses_existing_demo_renderer(monkeypatch):
     assert json_fallbacks == []
 
 
+def test_image_tool_render_displays_text_and_base64_image(monkeypatch):
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    markdown_calls: list[tuple[str, dict[str, Any]]] = []
+    streamlit_stub.markdown = lambda text, **kwargs: markdown_calls.append((text, kwargs))
+    streamlit_stub.expander = lambda *_args, **_kwargs: nullcontext()
+    monkeypatch.setattr(demo, "render_tool_result_payload", lambda *_args, **_kwargs: None)
+
+    rendered = demo.render_tool_render_payload(
+        {
+            "type": "image",
+            "content": [
+                {"type": "text", "text": "Generated chart"},
+                {"type": "image", "mimeType": "image/png", "data": "YWJj"},
+            ],
+        }
+    )
+
+    assert rendered is True
+    assert any(text == "Generated chart" for text, _kwargs in markdown_calls)
+    assert any("data:image/png;base64,YWJj" in text for text, _kwargs in markdown_calls)
+
+
+def test_chart_tool_render_preserves_labels_as_x_axis(monkeypatch):
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    chart_calls: list[tuple[Any, dict[str, Any]]] = []
+    streamlit_stub.line_chart = lambda data, **kwargs: chart_calls.append((data, kwargs))
+    streamlit_stub.expander = lambda *_args, **_kwargs: nullcontext()
+    streamlit_stub.dataframe = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(demo, "render_tool_result_payload", lambda *_args, **_kwargs: None)
+
+    assert demo.render_tool_render_payload(
+        {
+            "type": "chart",
+            "structured_content": {
+                "chart_type": "line",
+                "labels": ["Mon", "Tue"],
+                "datasets": [{"label": "Visits", "data": [10, 12]}],
+            },
+        }
+    )
+
+    assert chart_calls == [
+        (
+            {"label": ["Mon", "Tue"], "Visits": [10, 12]},
+            {"x": "label", "y": ["Visits"]},
+        )
+    ]
+
+
+def test_chart_tool_render_preserves_duplicate_labels_and_series_names(monkeypatch):
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    chart_calls: list[tuple[Any, dict[str, Any]]] = []
+    streamlit_stub.line_chart = lambda data, **kwargs: chart_calls.append((data, kwargs))
+    streamlit_stub.expander = lambda *_args, **_kwargs: nullcontext()
+    streamlit_stub.dataframe = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(demo, "render_tool_result_payload", lambda *_args, **_kwargs: None)
+
+    demo.render_tool_render_payload(
+        {
+            "type": "chart",
+            "structured_content": {
+                "chart_type": "line",
+                "labels": ["Jan", "Jan"],
+                "datasets": [
+                    {"label": "Revenue", "data": [1, 2]},
+                    {"label": "Revenue", "data": [3, 4]},
+                ],
+            },
+        }
+    )
+
+    assert chart_calls == [
+        (
+            {
+                "label": ["Jan", "Jan"],
+                "Revenue": [1, 2],
+                "Revenue (2)": [3, 4],
+            },
+            {"x": "label", "y": ["Revenue", "Revenue (2)"]},
+        )
+    ]
+
+
 def test_both_demo_stream_loops_use_segmented_rich_renderer():
     source = (Path(__file__).resolve().parents[1] / "demo.py").read_text(encoding="utf-8")
 

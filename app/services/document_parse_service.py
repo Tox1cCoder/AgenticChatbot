@@ -19,6 +19,7 @@ import logging
 import mimetypes
 import os
 import re
+import shutil
 import subprocess
 import time
 import unicodedata
@@ -26,7 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -82,8 +83,9 @@ class DocumentParseService:
         Writes chunks_with_metadata + images_data to:
             {parse_artifacts_storage_path}/{document_id}/normalized_chunks.json
 
-        Image copying is deferred to T012 index stage — only original temp paths
-        are recorded in artifact_metadata.
+        MinerU images are copied into the same durable artifact directory before
+        their temporary extraction directory is removed. The index stage may run
+        later or retry independently, so it must never depend on MinerU temp paths.
 
         Raises:
             RuntimeError: If no artifact_repo was injected at construction time.
@@ -94,13 +96,24 @@ class DocumentParseService:
                 "artifact_repo injected at construction time."
             )
 
-        artifact_dir = Path(self.settings.parse_artifacts_storage_path) / document_id
+        document_uuid = UUID(document_id)
+        canonical_document_id = str(document_uuid)
+        artifact_root = Path(self.settings.parse_artifacts_storage_path)
+        if not artifact_root.is_absolute():
+            artifact_root = Path.cwd() / artifact_root
+        artifact_dir = artifact_root.resolve() / canonical_document_id
         artifact_dir.mkdir(parents=True, exist_ok=True)
         artifact_path = artifact_dir / "normalized_chunks.json"
 
+        durable_images = self._copy_images_into_artifact(
+            document_id=canonical_document_id,
+            artifact_dir=artifact_dir,
+            images_data=result.images_data,
+        )
+
         payload = {
             "chunks_with_metadata": result.chunks_with_metadata,
-            "images_data": result.images_data,
+            "images_data": durable_images,
             "backend_used": result.backend_used,
             "parse_elapsed_s": result.parse_elapsed_s,
         }
@@ -110,18 +123,17 @@ class DocumentParseService:
         checksum = hashlib.sha256(json_bytes).hexdigest()
         size = len(json_bytes)
 
-        # Image copying deferred to T012 index stage
-        image_paths = [entry.get("path") for entry in result.images_data if entry.get("path")]
+        image_paths = [entry.get("path") for entry in durable_images if entry.get("path")]
         artifact_metadata = {
             "backend_used": result.backend_used,
             "parse_elapsed_s": result.parse_elapsed_s,
             "chunk_count": len(result.chunks_with_metadata),
-            "image_count": len(result.images_data),
+            "image_count": len(durable_images),
             "image_paths": image_paths,
         }
 
         created = self._artifact_repo.replace_for_document(
-            document_id=UUID(document_id),
+            document_id=document_uuid,
             artifacts=[
                 {
                     "artifact_type": "normalized_chunks",
@@ -134,6 +146,68 @@ class DocumentParseService:
             ],
         )
         return created[0]
+
+    def _copy_images_into_artifact(
+        self,
+        *,
+        document_id: str,
+        artifact_dir: Path,
+        images_data: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Return image entries whose paths survive parse-stage temp cleanup.
+
+        MinerU is the only parser that emits image paths. Its output is scoped to
+        ``temp_storage_path/mineru_output_<document_id>``; resolving and checking
+        containment before copying prevents an unexpected parser payload or a
+        symlink from copying arbitrary files into durable storage.
+        """
+        if not images_data:
+            return []
+
+        temp_root = Path(self.settings.temp_storage_path)
+        if not temp_root.is_absolute():
+            temp_root = Path.cwd() / temp_root
+        mineru_root = (temp_root.resolve() / f"mineru_output_{document_id}").resolve()
+        durable_dir = (artifact_dir / "images").resolve()
+        durable_dir.mkdir(parents=True, exist_ok=True)
+
+        durable_images: list[dict[str, Any]] = []
+        copied_by_source: dict[Path, Path] = {}
+
+        for index, entry in enumerate(images_data):
+            durable_entry = dict(entry)
+            raw_path = entry.get("path")
+            if not raw_path:
+                durable_images.append(durable_entry)
+                continue
+
+            source_path = Path(str(raw_path)).resolve(strict=True)
+            try:
+                source_path.relative_to(mineru_root)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Extracted image path is outside the document MinerU directory: {raw_path}"
+                ) from exc
+            if not source_path.is_file():
+                raise FileNotFoundError(f"Extracted image file not found: {source_path}")
+
+            destination = copied_by_source.get(source_path)
+            if destination is None:
+                destination = durable_dir / f"{index:04d}_{source_path.name}"
+                if source_path != destination:
+                    temporary_destination = durable_dir / f".{destination.name}.{uuid4().hex}.tmp"
+                    try:
+                        shutil.copy2(source_path, temporary_destination)
+                        os.replace(temporary_destination, destination)
+                    finally:
+                        if temporary_destination.exists():
+                            temporary_destination.unlink()
+                copied_by_source[source_path] = destination
+
+            durable_entry["path"] = str(destination)
+            durable_images.append(durable_entry)
+
+        return durable_images
 
     def load_parse_result(self, artifact: DocumentParseArtifact) -> ParseResult:
         """Load a persisted ParseResult from disk. Raises FileNotFoundError if gone."""
@@ -248,8 +322,9 @@ class DocumentParseService:
             method = str(getattr(self.settings, "mineru_method", "auto") or "auto").strip().lower()
             valid_methods = {"auto", "txt", "ocr"}
             if method not in valid_methods:
+                allowed_methods = ", ".join(sorted(valid_methods))
                 raise ValueError(
-                    f"Invalid MinerU method '{method}'. Allowed values: {', '.join(sorted(valid_methods))}"
+                    f"Invalid MinerU method '{method}'. Allowed values: {allowed_methods}"
                 )
 
             lang = str(getattr(self.settings, "mineru_lang", "") or "").strip()

@@ -10,8 +10,9 @@ from langchain_core.messages import HumanMessage as LCHumanMessage
 from ...core.config import settings
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..agent_config import AGENT_CONFIG, create_gemini_client, create_langchain_model
+from ..image_context import build_multimodal_content
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..utils import coerce_response_text
+from ..utils import coerce_response_text, extract_inline_images_from_content
 from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
@@ -109,7 +110,13 @@ class ImageGeneratorAgent(BaseAgent):
             enhanced_prompt = message_content
 
             # Generate the image directly
-            images, narrative = await self._generate_images(enhanced_prompt, message_content)
+            images, narrative = await self._generate_images(
+                enhanced_prompt,
+                message_content,
+                source_images=extract_inline_images_from_content(
+                    build_multimodal_content(message_content, message.attachments)
+                ),
+            )
 
             # Generate a natural user-facing response instead of showing the enhanced prompt
             user_facing = narrative or await self._generate_user_facing_response(message_content)
@@ -135,9 +142,10 @@ class ImageGeneratorAgent(BaseAgent):
             device_id=request_device_id,
         )
 
+        current_content = build_multimodal_content(message_content, message.attachments)
         messages = [
             {"role": "system", "content": self._get_system_prompt()},
-            {"role": "user", "content": message_content},
+            {"role": "user", "content": current_content or message_content},
         ]
 
         try:
@@ -165,7 +173,11 @@ class ImageGeneratorAgent(BaseAgent):
             enhanced_prompt = coerce_response_text(response.content)
 
             # Now generate the image
-            images, narrative = await self._generate_images(enhanced_prompt, message_content)
+            images, narrative = await self._generate_images(
+                enhanced_prompt,
+                message_content,
+                source_images=extract_inline_images_from_content(current_content),
+            )
 
             # Generate a natural user-facing response instead of showing the enhanced prompt
             user_facing = narrative or await self._generate_user_facing_response(message_content)
@@ -192,8 +204,10 @@ class ImageGeneratorAgent(BaseAgent):
 
     def _get_system_prompt(self) -> str:
         return """You are an expert image generation prompt engineer.
-Your goal is to create a detailed, descriptive prompt for an image generator based on the user's request.
-You have access to external tools to fetch real-time context (like weather, time, news) if relevant to the image.
+Your goal is to create a detailed, descriptive prompt for an image generator based on
+the user's request.
+You have access to external tools to fetch real-time context (like weather, time, news)
+if relevant to the image.
 If the user asks for "a picture of the current weather in NY", use the weather tool first.
 Once you have sufficient information, output the FINAL detailed prompt for the image generator.
 Do not output anything else, just the prompt."""
@@ -240,14 +254,15 @@ Do not output anything else, just the prompt."""
 
         # Derive the original user request from the current turn messages.
         original_prompt = ""
+        source_images: list[dict[str, str]] = []
         for msg in reversed(messages):
-            if (
-                hasattr(msg, "content")
-                and isinstance(msg.content, str)
-                and msg.content.strip()
-                and isinstance(msg, LCHumanMessage)
-            ):
-                original_prompt = msg.content.strip()
+            if not isinstance(msg, LCHumanMessage) or not hasattr(msg, "content"):
+                continue
+            candidate_prompt = coerce_response_text(msg.content).strip()
+            candidate_images = extract_inline_images_from_content(msg.content)
+            if candidate_prompt or candidate_images:
+                original_prompt = candidate_prompt
+                source_images = candidate_images
                 break
 
         # The runtime model may itself be an image-capable model that returns the
@@ -273,7 +288,11 @@ Do not output anything else, just the prompt."""
         original_prompt = original_prompt or enhanced_prompt
 
         try:
-            images, narrative = await self._generate_images(enhanced_prompt, original_prompt)
+            images, narrative = await self._generate_images(
+                enhanced_prompt,
+                original_prompt,
+                source_images=source_images,
+            )
         except Exception as e:
             logger.error("Image generation failed: %s", e, exc_info=True)
             return response
@@ -336,17 +355,31 @@ Do not output anything else, just the prompt."""
             return "Your image has been generated!"
 
     async def _generate_images(
-        self, prepared_prompt: str, original_prompt: str
+        self,
+        prepared_prompt: str,
+        original_prompt: str,
+        *,
+        source_images: list[dict[str, str]] | None = None,
     ) -> tuple[list[dict], str]:
         if not self.gemini_client:
             return [], ""
 
-        contents = [
-            types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=prepared_prompt)],
-            )
-        ]
+        parts = [types.Part.from_text(text=prepared_prompt)]
+        for source_image in source_images or []:
+            encoded = source_image.get("data")
+            if not encoded:
+                continue
+            try:
+                parts.append(
+                    types.Part.from_bytes(
+                        data=base64.b64decode(encoded, validate=True),
+                        mime_type=source_image.get("mime") or "image/png",
+                    )
+                )
+            except (TypeError, ValueError):
+                logger.warning("Skipping invalid source image supplied for image editing")
+
+        contents = [types.Content(role="user", parts=parts)]
 
         config_kwargs = {"response_modalities": ["IMAGE", "TEXT"]}
         image_config_cls = getattr(types, "ImageGenerationConfig", None)

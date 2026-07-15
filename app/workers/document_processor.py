@@ -84,20 +84,43 @@ def _emit_failed(document_id: str, filename: str, task_id: str, exc: Exception):
 
 
 def _cleanup_parse_artifacts(temp_file_path: str, document_id: str):
-    """Delete staged temp file and MinerU temp output dir."""
+    """Delete staged files only when they resolve inside configured temp storage."""
+    settings_ = get_settings()
+    temp_root = Path(settings_.temp_storage_path)
+    if not temp_root.is_absolute():
+        temp_root = Path.cwd() / temp_root
+    temp_root = temp_root.resolve()
+
+    def _contained(candidate: Path) -> Path | None:
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(temp_root)
+            return resolved
+        except (OSError, ValueError):
+            return None
+
     try:
-        if os.path.isfile(temp_file_path):
-            os.unlink(temp_file_path)
+        staged_file = _contained(Path(temp_file_path))
+        if staged_file is None:
+            logger.warning("Refusing to clean staged file outside temp storage: %s", temp_file_path)
+        elif staged_file.is_file():
+            staged_file.unlink()
     except Exception:
         logger.warning("Cleanup error for %s", temp_file_path, exc_info=True)
 
     try:
-        settings_ = get_settings()
-        mineru_output_path = Path(settings_.temp_storage_path) / f"mineru_output_{document_id}"
-        if mineru_output_path.exists():
+        mineru_candidate = temp_root / f"mineru_output_{document_id}"
+        mineru_output_path = _contained(mineru_candidate)
+        if mineru_output_path is None:
+            logger.warning(
+                "Refusing to clean MinerU output outside temp storage: %s", mineru_candidate
+            )
+        elif mineru_output_path.is_dir():
             shutil.rmtree(mineru_output_path)
     except Exception:
-        logger.warning("Cleanup error for MinerU output dir %s", mineru_output_path, exc_info=True)
+        logger.warning(
+            "Cleanup error for MinerU output dir for document %s", document_id, exc_info=True
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +390,8 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
 
         # Structured log line
         logger.info(
-            "document=%s indexed: parse_s=%.3f caption_s=%.3f embed_s=%.3f upsert_s=%.3f total_s=%.3f",
+            "document=%s indexed: parse_s=%.3f caption_s=%.3f embed_s=%.3f "
+            "upsert_s=%.3f total_s=%.3f",
             document_id,
             timings["parse_s"],
             timings["caption_s"],

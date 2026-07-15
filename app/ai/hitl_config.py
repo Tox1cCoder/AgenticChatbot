@@ -189,7 +189,7 @@ _REDACTED_ARG_PLACEHOLDER = "<redacted>"
 
 
 def redact_sensitive_args(args: dict) -> dict:
-    """Shallow-copy ``args``, replacing values whose key looks sensitive.
+    """Recursively copy ``args``, replacing values whose key looks sensitive.
 
     Skill capability arguments are non-secret by design -- secrets live in
     the sidecar secret store and are injected at execution time, never
@@ -201,14 +201,23 @@ def redact_sensitive_args(args: dict) -> dict:
     """
     if not isinstance(args, dict):
         return {}
-    return {
-        key: (
-            _REDACTED_ARG_PLACEHOLDER
-            if any(marker in key.lower() for marker in _SENSITIVE_ARG_KEY_MARKERS)
-            else value
-        )
-        for key, value in args.items()
-    }
+    def redact(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: (
+                    _REDACTED_ARG_PLACEHOLDER
+                    if any(
+                        marker in str(key).lower() for marker in _SENSITIVE_ARG_KEY_MARKERS
+                    )
+                    else redact(nested)
+                )
+                for key, nested in value.items()
+            }
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        return value
+
+    return redact(args)
 
 
 def _parse_review_configs(data: list[dict[str, Any]] | None) -> dict[str, list[str]]:

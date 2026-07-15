@@ -273,3 +273,38 @@ def test_apply_tool_outputs_tracks_same_error_streak(monkeypatch):
     assert streak["limit"] == 2
     assert streak["signature"]["tool"] == "read_file"
     assert streak["signature"]["args"] == '{"path":"missing.txt"}'
+
+
+def test_apply_tool_outputs_lifts_but_does_not_persist_internal_rich_candidates():
+    graph = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    state = {"messages": [], "context": {}}
+    candidate = {
+        "id": "image:tool-content:call-1:0",
+        "type": "image",
+        "display_policy": "inline_only",
+        "payload": {"data": "YWJj", "mime_type": "image/png"},
+    }
+    artifact = {
+        "tool_call_id": "call-1",
+        "tool": "image_tool",
+        "args": {},
+        "status": "success",
+        "output": "[image/png image]",
+        "_rich_item_candidates": [candidate],
+    }
+
+    graph._apply_tool_outputs_to_state(
+        state,
+        tool_outputs=[
+            {
+                "tool_call_id": "call-1",
+                "name": "image_tool",
+                "content": "[image/png image]",
+            }
+        ],
+        tool_artifacts=[artifact],
+    )
+
+    assert state["context"]["rich_item_candidates"] == [candidate]
+    assert "_rich_item_candidates" not in artifact
+    assert "_rich_item_candidates" not in state["context"]["tool_artifacts"][0]

@@ -4,6 +4,7 @@ from app.ui.hitl_decisions import (
     approval_tool_label,
     attach_stream_context,
     build_interrupt_decision,
+    interrupt_allowed_decisions,
     interrupt_request_target_ids,
     interrupt_stream_context,
 )
@@ -55,6 +56,18 @@ def test_attach_stream_context_ignores_blank_and_non_dict():
 
 def test_interrupt_stream_context_defaults_to_empty():
     assert interrupt_stream_context({}) == ("", "")
+
+
+def test_interrupt_allowed_decisions_normalizes_legacy_and_camel_case_payloads():
+    assert interrupt_allowed_decisions({}) == frozenset({"approve", "edit", "reject"})
+    assert interrupt_allowed_decisions({"allowedDecisions": ["APPROVE", "reject"]}) == (
+        frozenset({"approve", "reject"})
+    )
+    assert interrupt_allowed_decisions({"allowed_decisions": "edit"}) == frozenset({"edit"})
+
+
+def test_interrupt_allowed_decisions_fails_closed_for_malformed_explicit_value():
+    assert interrupt_allowed_decisions({"allowed_decisions": {"approve": True}}) == frozenset()
 
 
 def test_approval_tool_label_numbers_cumulatively_across_turns():

@@ -115,3 +115,30 @@ def test_extract_rag_artifact_views_surfaces_document_listings():
     assert len(views[0].documents) == 1
     assert views[0].documents[0].filename == "report.pdf"
     assert views[0].documents[0].chunk_count == 12
+
+
+def test_rag_chunk_counts_use_available_evidence_without_inventing_table_count():
+    metadata = {
+        "tool_artifacts": [
+            {
+                "tool_call_id": "chunk-call",
+                "tool": "search_documents",
+                "args": {"action": "search_chunks"},
+                "rag_evidence": {
+                    "chunks": [
+                        {
+                            "rank": "not-a-number",
+                            "image_captions": ["A chart with no persisted image id"],
+                            "has_tables": True,
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+
+    chunk = extract_rag_artifact_views(metadata)[0].chunks[0]
+    assert chunk.rank == 1
+    assert chunk.image_count == 1
+    assert chunk.has_tables is True
+    assert chunk.table_count is None

@@ -365,12 +365,13 @@ def _merge_live_subagent_event(
                 entry[key] = value
 
     rebuilt = [by_id[row_id] for row_id in order]
-    any_running = any(r.get("status") == "running" for r in rebuilt)
-    dispatch_status = "running" if any_running else "completed"
+    # Derive the aggregate from the worker outcomes. Merely having no running
+    # workers does not mean the dispatch completed successfully: every worker
+    # may instead have failed, timed out, or paused for approval.
     return _build_activity_view(
         results=rebuilt,
         rationales=_as_list((previous or {}).get("rationales")),
-        dispatch_statuses=[dispatch_status],
+        dispatch_statuses=[],
     )
 
 

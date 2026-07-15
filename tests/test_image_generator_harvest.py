@@ -110,3 +110,42 @@ async def test_invoke_history_keeps_text_when_model_returns_caption():
     assert result.message.content == "A serene fox in autumn light."
     assert result.metadata["images"][0]["data"] == "IMGDATA"
     agent._generate_user_facing_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_invoke_history_passes_current_multimodal_image_to_edit_generation():
+    agent = _bare_agent()
+    base_response = SimpleNamespace(
+        message=SimpleNamespace(content="Edit the source into a watercolor", tool_calls=None),
+        metadata={},
+        error=None,
+    )
+
+    with patch(
+        "app.ai.agents.base_agent.BaseAgent.invoke_model_with_history",
+        new=AsyncMock(return_value=base_response),
+    ):
+        agent._generate_images = AsyncMock(return_value=([{"data": "EDITED"}], "Done"))
+        result = await agent.invoke_model_with_history(
+            [
+                HumanMessage(
+                    content=[
+                        {"type": "text", "text": "make this a watercolor"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,YWJj"},
+                        },
+                    ]
+                )
+            ],
+            conversation_history=[],
+            persona=None,
+        )
+
+    agent._generate_images.assert_awaited_once_with(
+        "Edit the source into a watercolor",
+        "make this a watercolor",
+        source_images=[{"data": "YWJj", "mime": "image/png"}],
+    )
+    assert result.metadata["images"] == [{"data": "EDITED"}]
+    assert result.message.content == "Done"

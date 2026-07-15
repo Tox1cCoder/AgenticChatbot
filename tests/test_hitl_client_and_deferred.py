@@ -97,6 +97,26 @@ async def test_prepare_interrupt_payload_redacts_sensitive_args_in_prompt():
     assert original_args["api_token"] == "SUPER-SECRET"
 
 
+def test_sensitive_argument_redaction_recurses_through_nested_objects_and_lists():
+    from app.ai.hitl_config import redact_sensitive_args
+
+    redacted = redact_sensitive_args(
+        {
+            "config": {
+                "api_token": "SECRET",
+                "items": [{"password": "HIDDEN"}, {"name": "safe"}],
+            }
+        }
+    )
+
+    assert redacted == {
+        "config": {
+            "api_token": "<redacted>",
+            "items": [{"password": "<redacted>"}, {"name": "safe"}],
+        }
+    }
+
+
 @pytest.mark.asyncio
 async def test_approval_helpers_rebuild_the_live_scoped_handoff_map(monkeypatch):
     """HITL must inspect the same graph-scoped handoff tool that will execute."""

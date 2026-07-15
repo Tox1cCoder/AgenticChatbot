@@ -28,6 +28,7 @@ from app.ui.hitl_decisions import (
     approval_tool_label,
     attach_stream_context,
     build_interrupt_decision,
+    interrupt_allowed_decisions,
     interrupt_request_target_ids,
     interrupt_stream_context,
 )
@@ -2626,6 +2627,11 @@ def _handle_stop_rerun(conversation_id: str) -> None:
         st.session_state.conversation_messages_page = 0
         st.session_state.has_more_messages = True
 
+    # The user message (and its attachments) was already persisted before a
+    # stoppable stream id was emitted. Do not leave those images queued for the
+    # next message after cancelling or reconciling the stream.
+    st.session_state.pending_image_attachments = []
+    st.session_state.show_attachment_uploader = False
     _clear_inflight_state()
     st.rerun()
 
@@ -3370,6 +3376,21 @@ def _advance_chat_image_uploader_nonce() -> None:
     st.session_state.chat_image_uploader_nonce = nonce + 1
 
 
+def _pending_message_draft_key(conversation_id: str) -> str:
+    return f"pending_message_draft_{conversation_id}"
+
+
+def _preserve_message_draft_for_attachment_toggle(
+    conversation_id: str, message: str
+) -> None:
+    st.session_state[_pending_message_draft_key(conversation_id)] = message
+
+
+def _consume_preserved_message_draft(conversation_id: str) -> str:
+    draft = st.session_state.pop(_pending_message_draft_key(conversation_id), "")
+    return draft if isinstance(draft, str) else ""
+
+
 def _consume_chat_image_uploader(uploader_key: str) -> None:
     uploaded_files = st.session_state.get(uploader_key) or []
     if not uploaded_files:
@@ -3464,10 +3485,11 @@ def _render_pending_image_attachments() -> None:
     if not pending:
         return
 
-    st.caption(f"{len(pending)} attachment(s) ready")
+    count = len(pending)
+    st.caption(f"{count} attachment{'s' if count != 1 else ''} ready")
     for row_start in range(0, len(pending), _PENDING_IMAGE_PREVIEW_COLUMNS):
         row = pending[row_start : row_start + _PENDING_IMAGE_PREVIEW_COLUMNS]
-        cols = st.columns(_PENDING_IMAGE_PREVIEW_COLUMNS)
+        cols = st.columns(len(row))
         for idx, att in enumerate(row):
             if not isinstance(att, dict):
                 continue
@@ -3531,10 +3553,40 @@ def get_mcp_tools(server_name: str | None = None) -> dict[str, Any] | None:
     return response.get("data") if response else None
 
 
-def execute_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
+def execute_mcp_tool(
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    server_name: str | None = None,
+    qualified_tool_id: str | None = None,
+) -> dict[str, Any] | None:
     """Execute an MCP tool with provided arguments"""
-    response = make_api_request("POST", f"/mcp/tools/{tool_name}/execute", {"arguments": arguments})
+    payload: dict[str, Any] = {"arguments": arguments}
+    if server_name:
+        payload["serverName"] = server_name
+    if qualified_tool_id:
+        payload["qualifiedToolId"] = qualified_tool_id
+    response = make_api_request("POST", f"/mcp/tools/{tool_name}/execute", payload)
     return response.get("data") if response else None
+
+
+def _mcp_tool_execution_results() -> dict[str, dict[str, Any]]:
+    """Return tester results keyed by server-qualified tool identity."""
+    results = st.session_state.get("mcp_tool_execution_results")
+    if not isinstance(results, dict):
+        results = {}
+        st.session_state["mcp_tool_execution_results"] = results
+    return results
+
+
+def _remember_mcp_tool_execution_result(
+    qualified_tool_id: str, result: dict[str, Any]
+) -> None:
+    _mcp_tool_execution_results()[qualified_tool_id] = result
+
+
+def _clear_mcp_tool_execution_result(qualified_tool_id: str) -> None:
+    _mcp_tool_execution_results().pop(qualified_tool_id, None)
 
 
 def get_hitl_settings() -> dict[str, Any] | None:
@@ -3698,6 +3750,29 @@ def render_tool_result_payload(payload: Any, use_expander: bool = False) -> None
         st.write("No data returned.")
         return
 
+    image_content: Any = None
+    if isinstance(payload, dict):
+        candidate = payload.get("content")
+        if isinstance(candidate, (dict, list)):
+            image_content = candidate
+    elif isinstance(payload, list):
+        image_content = payload
+
+    image_blocks = (
+        [image_content]
+        if isinstance(image_content, dict)
+        else image_content
+        if isinstance(image_content, list)
+        else []
+    )
+    if any(
+        isinstance(block, dict)
+        and str(block.get("type") or "").strip().lower() == "image"
+        for block in image_blocks
+    ):
+        _render_image_tool_result({"content": image_blocks})
+        return
+
     if isinstance(payload, (dict, list)):
         if use_expander:
             render_json_output(payload, label="Result Data", expanded=True)
@@ -3780,15 +3855,23 @@ def _render_chart_tool_result(render: dict[str, Any]) -> bool:
     if not isinstance(labels, list) or not isinstance(datasets, list):
         return False
 
+    normalized_datasets: list[tuple[str, list[Any]]] = []
+    used_names: dict[str, int] = {}
+    for dataset_index, dataset in enumerate(datasets, start=1):
+        if not isinstance(dataset, dict):
+            continue
+        base_name = str(dataset.get("label") or f"Series {dataset_index}")
+        occurrence = used_names.get(base_name, 0) + 1
+        used_names[base_name] = occurrence
+        name = base_name if occurrence == 1 else f"{base_name} ({occurrence})"
+        data = dataset.get("data")
+        normalized_datasets.append((name, data if isinstance(data, list) else []))
+
     chart_rows: list[dict[str, Any]] = []
     for label_index, label in enumerate(labels):
         row: dict[str, Any] = {"label": label}
-        for dataset in datasets:
-            if not isinstance(dataset, dict):
-                continue
-            name = str(dataset.get("label") or f"Series {len(row)}")
-            data = dataset.get("data")
-            if isinstance(data, list) and label_index < len(data):
+        for name, data in normalized_datasets:
+            if label_index < len(data):
                 row[name] = data[label_index]
         chart_rows.append(row)
 
@@ -3797,15 +3880,19 @@ def _render_chart_tool_result(render: dict[str, Any]) -> bool:
         return True
 
     chart_type = str(structured.get("chart_type") or structured.get("chartType") or "line").lower()
-    chart_data = {
-        row["label"]: {k: v for k, v in row.items() if k != "label"} for row in chart_rows
+    series_names = list(
+        dict.fromkeys(key for row in chart_rows for key in row if key != "label")
+    )
+    chart_data: dict[str, list[Any]] = {
+        "label": [row.get("label") for row in chart_rows],
+        **{name: [row.get(name) for row in chart_rows] for name in series_names},
     }
     if chart_type == "bar":
-        st.bar_chart(chart_data)
+        st.bar_chart(chart_data, x="label", y=series_names)
     elif chart_type == "area":
-        st.area_chart(chart_data)
+        st.area_chart(chart_data, x="label", y=series_names)
     else:
-        st.line_chart(chart_data)
+        st.line_chart(chart_data, x="label", y=series_names)
 
     with st.expander("Chart data", expanded=False):
         st.dataframe(chart_rows, width="stretch", hide_index=True)
@@ -3831,6 +3918,55 @@ def _render_resource_tool_result(render: dict[str, Any]) -> bool:
         if mime_type:
             st.caption(mime_type)
     return True
+
+
+def _render_image_tool_result(render: dict[str, Any]) -> bool:
+    """Render MCP image content blocks instead of falling back to raw JSON."""
+    from app.ui.rich_response import build_inline_image_html
+
+    raw_content = render.get("content")
+    if isinstance(raw_content, dict):
+        content = [raw_content]
+    elif isinstance(raw_content, list):
+        content = raw_content
+    else:
+        content = []
+
+    rendered = False
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or "").strip().lower()
+        if block_type == "text":
+            text = block.get("text")
+            if isinstance(text, str) and text.strip():
+                st.markdown(text.strip())
+                rendered = True
+            continue
+        if block_type != "image":
+            continue
+
+        raw_url = block.get("url") or block.get("src")
+        if isinstance(raw_url, dict):
+            raw_url = raw_url.get("url")
+        url = raw_url.strip() if isinstance(raw_url, str) else ""
+        raw_data = block.get("data") or block.get("base64")
+        data = raw_data.strip() if isinstance(raw_data, str) else ""
+        mime = str(block.get("mimeType") or block.get("mime_type") or "image/png")
+        src = url or (data if data.startswith("data:") else f"data:{mime};base64,{data}" if data else "")
+        if not src:
+            continue
+
+        caption = block.get("title") or block.get("alt") or block.get("description")
+        st.markdown(
+            build_inline_image_html(src, caption=str(caption) if caption else None),
+            unsafe_allow_html=True,
+        )
+        rendered = True
+
+    # Image resources use the same normalized resource list as ordinary links.
+    # Keep them available when a provider returns URLs rather than content blocks.
+    return _render_resource_tool_result(render) or rendered
 
 
 def _render_mcp_app_tool_result(render: dict[str, Any]) -> bool:
@@ -3944,8 +4080,10 @@ def render_tool_render_payload(render: Any, fallback_output: Any = None) -> bool
         rendered = _render_table_tool_result(render)
     elif render_type == "chart":
         rendered = _render_chart_tool_result(render)
-    elif render_type in {"resource", "image"}:
+    elif render_type == "resource":
         rendered = _render_resource_tool_result(render)
+    elif render_type == "image":
+        rendered = _render_image_tool_result(render)
     elif render_type == "text":
         text = render.get("text") or fallback_output
         if text not in (None, ""):
@@ -4338,12 +4476,12 @@ def _render_thumbnail_gallery(
             )
             if natural:
                 container_style = (
-                    f"max-width:{thumb_width}px; flex:0 1 {thumb_width}px; "
+                    f"width:fit-content; max-width:{thumb_width}px; flex:0 1 auto; "
                     "border-radius:10px; overflow:hidden; background:#f8fafc; "
                     "border:1px solid #e2e8f0;"
                 )
                 img_style = (
-                    f"width:100%; height:auto; max-width:{thumb_width}px; "
+                    f"width:auto; height:auto; max-width:min({thumb_width}px, 100%); "
                     "display:block; cursor:zoom-in; border-radius:10px 10px 0 0;"
                 )
             else:
@@ -5098,6 +5236,8 @@ def _render_trace_preview_block(label: str, payload: Any, full_label: str) -> No
 
 def _trace_status_meta(state: str | None) -> tuple[str, str, str]:
     normalized = str(state or "unknown").strip().lower()
+    if normalized == "queued":
+        return "Queued", "hourglass_top", "running"
     if normalized == "running":
         return "Running", "hourglass_top", "running"
     if normalized == "error":
@@ -5603,8 +5743,10 @@ def _render_rag_chunk_card(view: RAGArtifactView, chunk: RAGChunkView) -> None:
         meta_parts.append(f"chunk: `{chunk.chunk_id}`")
     if chunk.image_count:
         meta_parts.append(f"images: `{chunk.image_count}`")
-    if chunk.has_tables or chunk.table_count:
+    if chunk.table_count is not None:
         meta_parts.append(f"tables: `{chunk.table_count}`")
+    elif chunk.has_tables:
+        meta_parts.append("tables: `present`")
     if meta_parts:
         st.caption(" | ".join(meta_parts))
 
@@ -5633,8 +5775,16 @@ def render_rag_retrieval_artifacts(message_metadata: dict[str, Any]) -> None:
 
     label = "Retrieved Evidence"
     total_chunks = sum(len(view.chunks) for view in views)
-    summary_count = total_chunks if total_chunks else len(views)
-    summary_label = "chunk" if total_chunks else "result"
+    total_documents = sum(len(view.documents) for view in views)
+    if total_chunks:
+        summary_count = total_chunks
+        summary_label = "chunk"
+    elif total_documents:
+        summary_count = total_documents
+        summary_label = "document"
+    else:
+        summary_count = len(views)
+        summary_label = "result"
     summary_suffix = "" if summary_count == 1 else "s"
 
     with st.expander(f"{label} ({summary_count} {summary_label}{summary_suffix})", expanded=False):
@@ -5755,7 +5905,10 @@ def _resolve_stream_tool_trace_id(tool_event: dict[str, Any]) -> str:
 
     if phase == "end":
         for item in trace_items:
-            if item.get("kind") == "tool" and str(item.get("state")).lower() == "running":
+            if item.get("kind") == "tool" and str(item.get("state")).lower() in {
+                "queued",
+                "running",
+            }:
                 fallback_id = item.get("tool_call_id")
                 if fallback_id:
                     return str(fallback_id)
@@ -5819,6 +5972,13 @@ def _upsert_stream_tool_trace(tool_event: dict[str, Any]) -> None:
 
     if tool_event.get("result") is not None:
         item["result"] = tool_event.get("result")
+
+    # End events carry the presentation details separately from the model-facing
+    # result. Keep them on the live trace item so the same renderer used for
+    # persisted artifacts can show charts, tables, images, errors, and hints.
+    for field in ("render", "error", "hint"):
+        if tool_event.get(field) is not None:
+            item[field] = tool_event.get(field)
 
     if phase == "start" and item.get("started_at") is None:
         item["started_at"] = now_ts
@@ -6261,43 +6421,39 @@ def render_message_bubble(
                     label = f"{label} ({reason.strip()[:140]})"
                 st.caption(label)
 
-        st.caption(timestamp)
-
-    # Show attachments if user message
-    if is_user:
-        attachments = st.session_state.get("message_image_thumbnails", {}).get(
-            str(msg.get("id", ""))
-        )
-        if attachments:
-            render_attachment_gallery(attachments, align="right")
-
-    if not is_user:
-        # Show agent-sent images, canvas artifact, live widgets, citations,
-        # and feedback for assistant messages. Reuse the metadata dict
-        # already extracted above instead of re-parsing it five times.
-        if not view.is_v1 and view.use_legacy_image_gallery:
-            render_agent_images(message_metadata)
-        if view.is_v1:
-            # Append only the unreferenced inline_or_append items.
-            _render_append_items(
-                view.append_items,
-                message_metadata=message_metadata,
-                message_key=str(msg.get("id", "")),
-                auto_mount=auto_mount_live_widgets,
+        # Keep attachments and generated artifacts in the same chat row as the
+        # message they belong to, then show the timestamp after all content.
+        if is_user:
+            attachments = st.session_state.get("message_image_thumbnails", {}).get(
+                str(msg.get("id", ""))
             )
+            if attachments:
+                render_attachment_gallery(attachments, align="right")
         else:
-            render_canvas_artifact(message_metadata)
-            render_live_widgets(
+            if not view.is_v1 and view.use_legacy_image_gallery:
+                render_agent_images(message_metadata)
+            if view.is_v1:
+                _render_append_items(
+                    view.append_items,
+                    message_metadata=message_metadata,
+                    message_key=str(msg.get("id", "")),
+                    auto_mount=auto_mount_live_widgets,
+                )
+            else:
+                render_canvas_artifact(message_metadata)
+                render_live_widgets(
+                    message_metadata,
+                    message_key=str(msg.get("id", "")),
+                    auto_mount=auto_mount_live_widgets,
+                )
+            render_citations(
                 message_metadata,
-                message_key=str(msg.get("id", "")),
-                auto_mount=auto_mount_live_widgets,
+                str(msg.get("id", "")),
+                include_images=not view.is_v1,
             )
-        render_citations(
-            message_metadata,
-            str(msg.get("id", "")),
-            include_images=not view.is_v1,
-        )
-        render_message_feedback_inline(msg)
+            render_message_feedback_inline(msg)
+
+        st.caption(timestamp)
 
 
 def _build_rich_response_view_for_msg(content_text: str, message_metadata: dict):
@@ -6526,14 +6682,9 @@ def _render_inline_rich_item(
         # Tool renders reuse the existing result renderer; unsupported payloads
         # still remain inspectable as JSON.
         render = payload.get("render") or {}
-        title = item.get("title") or render.get("title")
-        if title:
-            st.caption(title)
         try:
-            rendered = render_tool_render_payload(render)
+            render_tool_render_payload(render)
         except Exception:
-            rendered = False
-        if not rendered:
             st.json(render)
     elif item_type == "canvas_artifact":
         single = dict(message_metadata)
@@ -6664,21 +6815,35 @@ def render_tool_parameter_form(
         param_type = param_info.get("type", "string")
         param_desc = param_info.get("description", "")
         is_required = param_name in required
+        has_default = "default" in param_info
+        schema_default = param_info.get("default")
 
         label = f"{param_name}{'*' if is_required else ''}"
         help_text = param_desc if param_desc else None
         base_key = f"{key_prefix}_{param_name}" if key_prefix else param_name
 
         if param_type == "boolean":
-            default_val = bool(param_info.get("default", False))
-            parameters[param_name] = st.checkbox(
-                label,
-                value=default_val,
-                help=help_text,
-                key=f"{base_key}_bool",
-            )
+            if is_required or has_default:
+                default_val = bool(schema_default) if has_default else False
+                parameters[param_name] = st.checkbox(
+                    label,
+                    value=default_val,
+                    help=help_text,
+                    key=f"{base_key}_bool",
+                )
+            else:
+                value = st.selectbox(
+                    label,
+                    options=[True, False],
+                    index=None,
+                    placeholder="Not provided",
+                    help=help_text,
+                    key=f"{base_key}_bool",
+                )
+                if value is not None:
+                    parameters[param_name] = value
         elif param_type == "integer":
-            default_val = int(param_info.get("default", 0) or 0)
+            default_val = int(schema_default or 0) if is_required or has_default else None
             value = st.number_input(
                 label,
                 value=default_val,
@@ -6687,10 +6852,11 @@ def render_tool_parameter_form(
                 help=help_text,
                 key=f"{base_key}_int",
             )
-            parameters[param_name] = int(value)
+            if value is not None:
+                parameters[param_name] = int(value)
         elif param_type == "number":
-            default_val = float(param_info.get("default", 0.0) or 0.0)
-            parameters[param_name] = st.number_input(
+            default_val = float(schema_default or 0.0) if is_required or has_default else None
+            value = st.number_input(
                 label,
                 value=default_val,
                 step=0.1,
@@ -6698,25 +6864,44 @@ def render_tool_parameter_form(
                 help=help_text,
                 key=f"{base_key}_number",
             )
+            if value is not None:
+                parameters[param_name] = value
         elif param_type == "string":
             if "enum" in param_info:
                 enum_values = param_info["enum"]
-                parameters[param_name] = st.selectbox(
+                enum_index = None
+                if has_default and schema_default in enum_values:
+                    enum_index = enum_values.index(schema_default)
+                elif is_required and enum_values:
+                    enum_index = 0
+                value = st.selectbox(
                     label,
                     options=enum_values,
+                    index=enum_index,
+                    placeholder="Not provided" if enum_index is None else None,
                     help=help_text,
                     key=f"{base_key}_enum",
                 )
+                if value is not None:
+                    parameters[param_name] = value
             else:
-                default_val = _stringify_default(param_info.get("default", ""))
-                parameters[param_name] = st.text_input(
+                default_val = _stringify_default(schema_default) if has_default else ""
+                value = st.text_input(
                     label,
                     value=default_val,
                     help=help_text,
                     key=f"{base_key}_text",
                 )
+                if is_required or has_default or value != "":
+                    parameters[param_name] = value
         elif param_type in {"object", "array"}:
-            default_val = param_info.get("default", {} if param_type == "object" else [])
+            default_val = (
+                schema_default
+                if has_default
+                else ({} if param_type == "object" else [])
+                if is_required
+                else None
+            )
             default_text = _stringify_default(default_val)
             placeholder = (
                 "Enter JSON object value" if param_type == "object" else "Enter JSON array value"
@@ -6739,7 +6924,8 @@ def render_tool_parameter_form(
                     st.warning(f"Invalid JSON provided for {param_name}.")
                     parameters[param_name] = raw_value
             else:
-                parameters[param_name] = default_val
+                if is_required or has_default:
+                    parameters[param_name] = default_val
         else:
             raw_value = st.text_area(
                 label,
@@ -6758,7 +6944,8 @@ def render_tool_parameter_form(
                     st.warning(f"Invalid JSON provided for {param_name}.")
                     parameters[param_name] = raw_value
             else:
-                parameters[param_name] = None
+                if is_required or has_default:
+                    parameters[param_name] = schema_default if has_default else None
 
     return parameters, parsing_errors
 
@@ -7168,7 +7355,10 @@ def render_tools_tab():
     # Display tools as selectbox, keyed by qualified id so duplicate tool names
     # across servers each select their own rule (server::tool).
     qualified_tool_options = {
-        f"{tool.get('serverName', '')}::{tool.get('name')}": tool
+        str(
+            tool.get("qualifiedId")
+            or f"{tool.get('serverName', '')}::{tool.get('name')}"
+        ): tool
         for tool in filtered_tools
         if tool.get("name")
     }
@@ -7236,12 +7426,12 @@ def render_tools_tab():
     st.markdown("---")
     args_schema = selected_tool.get("argsSchema", {})
 
-    with st.form(key=f"tool_execute_form_{selected_tool_name}"):
+    with st.form(key=f"tool_execute_form_{qualified_id}"):
         st.markdown("### Execute Tool")
 
         # Render parameter inputs
         parameters, parameter_errors = render_tool_parameter_form(
-            args_schema, key_prefix=selected_tool_name
+            args_schema, key_prefix=qualified_id
         )
 
         # Submit button
@@ -7253,19 +7443,21 @@ def render_tools_tab():
                     st.error(error_msg)
             else:
                 with st.spinner(f"Executing {selected_tool_name}..."):
-                    result = execute_mcp_tool(selected_tool_name, parameters)
+                    result = execute_mcp_tool(
+                        selected_tool_name,
+                        parameters,
+                        server_name=selected_tool.get("serverName"),
+                        qualified_tool_id=qualified_id,
+                    )
 
                     if result:
-                        st.session_state.tool_execution_result = result
+                        _remember_mcp_tool_execution_result(qualified_id, result)
                     else:
                         st.error("Tool execution failed. Check API logs.")
 
     # Display execution result
-    if (
-        hasattr(st.session_state, "tool_execution_result")
-        and st.session_state.tool_execution_result
-    ):
-        result = st.session_state.tool_execution_result
+    result = _mcp_tool_execution_results().get(qualified_id)
+    if result:
 
         st.markdown("---")
         st.markdown("### Execution Result")
@@ -7296,8 +7488,8 @@ def render_tools_tab():
                 render_tool_result_payload(payload)
 
         # Clear button
-        if st.button("Clear Result"):
-            st.session_state.tool_execution_result = None
+        if st.button("Clear Result", key=f"clear_tool_result_{qualified_id}"):
+            _clear_mcp_tool_execution_result(qualified_id)
             st.rerun()
 
 
@@ -7612,13 +7804,7 @@ def render_interrupt_approval_ui():
         task_id, tool_call_id = interrupt_request_target_ids(action_request)
 
         # Determine which decision types are allowed for this tool
-        allowed_raw = action_request.get("allowed_decisions") or action_request.get(
-            "allowedDecisions"
-        )
-        if allowed_raw:
-            allowed_decisions = {str(d).strip().lower() for d in allowed_raw if isinstance(d, str)}
-        else:
-            allowed_decisions = {"approve", "edit", "reject"}
+        allowed_decisions = interrupt_allowed_decisions(action_request)
 
         # Check if this tool already has a decision
         current_decision = st.session_state[decisions_key].get(task_id)
@@ -7758,6 +7944,18 @@ def render_interrupt_approval_ui():
     # Submit button — disabled until all tools have a decision
     col_submit, col_approve_all, col_cancel = st.columns(3)
 
+    undecided_requests = []
+    for req in action_requests:
+        task_id, _tool_call_id = interrupt_request_target_ids(req)
+        if task_id not in st.session_state[decisions_key]:
+            undecided_requests.append(req)
+    can_approve_all = bool(undecided_requests) and all(
+        "approve" in interrupt_allowed_decisions(req) for req in undecided_requests
+    )
+    can_reject_all = bool(undecided_requests) and all(
+        "reject" in interrupt_allowed_decisions(req) for req in undecided_requests
+    )
+
     with col_submit:
         if st.button(
             "Submit Decisions",
@@ -7768,7 +7966,12 @@ def render_interrupt_approval_ui():
             submit_resume = True
 
     with col_approve_all:
-        if st.button("Approve All", width="stretch", disabled=resume_inflight):
+        if st.button(
+            "Approve All",
+            width="stretch",
+            disabled=resume_inflight or not can_approve_all,
+            help=None if can_approve_all else "One or more tools do not allow approval.",
+        ):
             # Auto-approve all remaining tools
             for req in action_requests:
                 task_id, _tool_call_id = interrupt_request_target_ids(req)
@@ -7781,7 +7984,12 @@ def render_interrupt_approval_ui():
             submit_resume = True
 
     with col_cancel:
-        if st.button("Cancel All", width="stretch", disabled=resume_inflight):
+        if st.button(
+            "Cancel All",
+            width="stretch",
+            disabled=resume_inflight or not can_reject_all,
+            help=None if can_reject_all else "One or more tools do not allow rejection.",
+        ):
             # Reject all tools
             for req in action_requests:
                 task_id, _tool_call_id = interrupt_request_target_ids(req)
@@ -7818,6 +8026,7 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
 
     with st.status("Resuming execution...", expanded=True) as status:
         next_interrupt = None
+        resume_succeeded = False
         resume_error_event: dict[str, Any] | None = None
         trace_placeholder = st.empty()
         response_placeholder = st.empty()
@@ -7885,6 +8094,7 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
 
             if event_type == "interrupt":
                 next_interrupt = event.get("interrupt")
+                resume_succeeded = True
                 # Carry the reasoning/partial answer streamed during this resume
                 # turn onto the follow-up interrupt so it shows in the next prompt.
                 attach_stream_context(
@@ -7906,6 +8116,7 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
             if event_type == "complete":
                 stream_renderer.finalize(event.get("message"))
                 status.update(label="Resume completed", state="complete")
+                resume_succeeded = True
                 break
 
         _clear_inflight_state()
@@ -7938,6 +8149,12 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
             st.session_state.pop(_hitl_resume_lock_key(interrupt_id), None)
             st.error(resume_error)
             return
+
+        # The attachments belong to the original user turn that produced this
+        # interrupt. Once resume succeeds, do not leave them queued for the next
+        # message (including when execution pauses again on a follow-up tool).
+        if resume_succeeded:
+            st.session_state.pending_image_attachments = []
 
         # Clear decisions for this completed interrupt only after a non-error event.
         st.session_state.pop(decisions_key, None)
@@ -7998,6 +8215,7 @@ def _render_plan_progress_widget(
     progress_pct = status.get("progressPercentage", 0)
     next_task = status.get("nextTask")
     completed = status.get("completedTasks", 0)
+    skipped = status.get("skippedTasks", 0)
     total = status.get("totalTasks", 0)
 
     with st.container():
@@ -8016,7 +8234,13 @@ def _render_plan_progress_widget(
                     f"**Current:** {truncated}"
                 )
             else:
-                st.success(f":material/check_circle: **All {total} tasks completed!**")
+                if completed == total:
+                    st.success(f":material/check_circle: **All {total} tasks completed!**")
+                else:
+                    st.success(
+                        f":material/check_circle: **All {total} tasks resolved** | "
+                        f"{completed} completed, {skipped} skipped"
+                    )
         with col_action:
             if st.button(
                 ":material/checklist: View All",
@@ -8323,6 +8547,7 @@ def render_chat_view():
 
         # Check for pending suggestion from suggestion buttons
         pending_suggestion = st.session_state.pop("pending_suggestion", "")
+        preserved_draft = _consume_preserved_message_draft(conversation_id)
 
         # ── Message form ──
         # Capture form values first; heavy processing (streaming) happens AFTER
@@ -8346,7 +8571,7 @@ def render_chat_view():
             with col1:
                 _form_message = st.text_area(
                     "Message",
-                    value=pending_suggestion,
+                    value=pending_suggestion or preserved_draft,
                     placeholder="Type your message...",
                     height=100,
                     label_visibility="collapsed",
@@ -8361,6 +8586,9 @@ def render_chat_view():
 
         # ── Process form actions OUTSIDE the form context ──
         if _form_attach:
+            # Submitting a form with clear_on_submit=True resets its textarea.
+            # Carry the current draft across the uploader-toggle rerun.
+            _preserve_message_draft_for_attachment_toggle(conversation_id, _form_message)
             st.session_state.show_attachment_uploader = not st.session_state.get(
                 "show_attachment_uploader", False
             )

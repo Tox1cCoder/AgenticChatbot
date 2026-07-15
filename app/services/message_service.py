@@ -173,12 +173,16 @@ class MessageService(IMessageService):
             return False
 
         tool_origin = str(provenance.get("tool_origin") or "").strip().lower()
+        if tool_origin:
+            return tool_origin.startswith("client_")
+
+        # Qualified IDs identify both server and client MCP tools.  Only the
+        # runtime binding fields are a safe legacy fallback when origin is
+        # absent.
         return (
-            tool_origin.startswith("client_")
-            or provenance.get("session_id") not in (None, "")
+            provenance.get("session_id") not in (None, "")
             or provenance.get("catalog_version") is not None
             or provenance.get("tool_instance_id") not in (None, "")
-            or provenance.get("qualified_tool_id") not in (None, "")
         )
 
     @classmethod
@@ -352,6 +356,75 @@ class MessageService(IMessageService):
             if action not in (None, ""):
                 action_key = str(action)
                 action_counts[action_key] = action_counts.get(action_key, 0) + 1
+
+        request_indexes_by_key: dict[str, int] = {}
+        for index, request in enumerate(pending_requests):
+            if not isinstance(request, dict):
+                continue
+            for id_key in ("tool_call_id", "task_id"):
+                value = request.get(id_key)
+                if value not in (None, ""):
+                    request_indexes_by_key[str(value)] = index
+            action = request.get("action")
+            if action not in (None, "") and action_counts.get(str(action)) == 1:
+                request_indexes_by_key[str(action)] = index
+
+        seen_request_indexes: set[int] = set()
+        for decision in decisions or []:
+            candidate_keys: list[str] = []
+            decision_id = resolve_interrupt_decision_id(decision)
+            if decision_id:
+                candidate_keys.append(str(decision_id))
+            action = cls._decision_action(decision)
+            if action:
+                candidate_keys.append(action)
+
+            matched_index = next(
+                (
+                    request_indexes_by_key[key]
+                    for key in candidate_keys
+                    if key in request_indexes_by_key
+                ),
+                None,
+            )
+            if matched_index is None:
+                raise CustomHTTPException(
+                    status_code=422,
+                    detail="Resume decision targets an unknown pending tool call.",
+                    error_code="INTERRUPT_UNKNOWN_DECISION",
+                )
+            if matched_index in seen_request_indexes:
+                raise CustomHTTPException(
+                    status_code=422,
+                    detail="Only one resume decision is allowed per pending tool call.",
+                    error_code="INTERRUPT_DUPLICATE_DECISION",
+                )
+            seen_request_indexes.add(matched_index)
+
+            request = pending_requests[matched_index]
+            allowed_raw = request.get("allowed_decisions") or request.get("allowedDecisions")
+            if isinstance(allowed_raw, str):
+                allowed = {allowed_raw.strip().lower()}
+            elif isinstance(allowed_raw, list):
+                allowed = {
+                    str(value).strip().lower()
+                    for value in allowed_raw
+                    if isinstance(value, str) and value.strip()
+                }
+            else:
+                allowed = {"approve", "edit", "reject"}
+
+            decision_type = getattr(decision, "type", None)
+            decision_type = getattr(decision_type, "value", decision_type)
+            normalized_type = str(decision_type or "").strip().lower()
+            if normalized_type not in allowed:
+                raise CustomHTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Decision '{normalized_type}' is not allowed for this pending tool call."
+                    ),
+                    error_code="INTERRUPT_DECISION_NOT_ALLOWED",
+                )
 
         decision_keys: set[str] = set()
         for decision in decisions or []:
@@ -1237,6 +1310,13 @@ class MessageService(IMessageService):
         decisions: list[InterruptDecision] | None = None,
     ) -> Any:
         self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
+
+        if not interrupt_id:
+            raise CustomHTTPException(
+                status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="interruptId is required to resume a durable approval request.",
+                error_code="INTERRUPT_ID_REQUIRED",
+            )
 
         fetched_interrupt_record = None
         if self.hitl_interrupt_repository and interrupt_id:
@@ -2315,9 +2395,9 @@ class MessageService(IMessageService):
     def _resolve_hitl_policy(self, user_id) -> dict | None:
         """Resolve the per-user HITL approval policy for this turn.
 
-        Best-effort: returns ``None`` when no repository is wired or no user is
-        resolved, so the graph falls back to the global policy and legacy turns
-        are unaffected.
+        Returns ``None`` when no repository is wired or no user is resolved, so
+        legacy turns use global policy. Once a per-user repository is wired,
+        loading errors fail the turn instead of silently dropping Require rules.
         """
         repo = getattr(self, "tool_approval_setting_repository", None)
         if repo is None or not user_id:
@@ -2332,9 +2412,9 @@ class MessageService(IMessageService):
                 "tools": grouped["tools"],
                 "global_tools": list(get_tools_requiring_approval()),
             }
-        except Exception as exc:  # pragma: no cover - defensive
-            logging.warning("Failed to resolve HITL policy: %s", exc)
-            return None
+        except Exception as exc:
+            logging.exception("Failed to resolve HITL policy")
+            raise RuntimeError("Unable to load the user's HITL approval policy") from exc
 
     @staticmethod
     def _agent_selected_event(

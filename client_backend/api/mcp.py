@@ -90,6 +90,48 @@ def _manager_tool_lookup() -> dict[str, list[dict[str, Any]]]:
     return lookup
 
 
+def _resolve_manager_tool(
+    tool_name: str,
+    *,
+    server_name: str | None = None,
+    qualified_tool_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Resolve a tool while preserving the legacy bare-name API.
+
+    Older callers only sent ``tool_name`` and therefore keep the historical
+    first-match behavior.  Tester callers can additionally identify the
+    selected server (or send the qualified id directly), which prevents a
+    same-name tool on another server from being invoked accidentally.
+    """
+    matches = _manager_tool_lookup().get(tool_name) or []
+    normalized_qualified_id = str(qualified_tool_id or "").strip()
+    normalized_server_name = str(server_name or "").strip()
+
+    if normalized_qualified_id:
+        return next(
+            (
+                tool
+                for tool in matches
+                if tool.get("qualifiedId") == normalized_qualified_id
+                and (
+                    not normalized_server_name
+                    or tool.get("serverName") == normalized_server_name
+                )
+            ),
+            None,
+        )
+    if normalized_server_name:
+        return next(
+            (
+                tool
+                for tool in matches
+                if tool.get("serverName") == normalized_server_name
+            ),
+            None,
+        )
+    return matches[0] if matches else None
+
+
 def _server_info_from_config(name: str, config: dict[str, Any]) -> dict[str, Any]:
     manager = get_mcp_manager()
     process = manager.servers.get(name)
@@ -338,6 +380,7 @@ async def list_mcp_tools(
                 "description": tool.description,
                 "argsSchema": tool.input_schema,
                 "serverName": tool.server_name,
+                "qualifiedId": tool.qualified_id,
             }
         )
 
@@ -386,11 +429,16 @@ async def execute_mcp_tool(
     """Execute a local MCP tool for compatibility/testing."""
     manager = get_mcp_manager()
     await manager.initialize()
-    matches = _manager_tool_lookup().get(tool_name) or []
-    if not matches:
+    server_name = payload.get("serverName") or payload.get("server_name")
+    qualified_tool_id = payload.get("qualifiedToolId") or payload.get("qualified_tool_id")
+    tool = _resolve_manager_tool(
+        tool_name,
+        server_name=server_name,
+        qualified_tool_id=qualified_tool_id,
+    )
+    if tool is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MCP tool not found")
 
-    tool = matches[0]
     started_at = time.perf_counter()
     try:
         result = await manager.call_tool(
@@ -405,6 +453,7 @@ async def execute_mcp_tool(
             "executionTime": execution_time,
             "toolName": tool_name,
             "serverName": tool["serverName"],
+            "qualifiedId": tool["qualifiedId"],
         }
         return make_api_response(
             success=True,
@@ -420,6 +469,7 @@ async def execute_mcp_tool(
             "executionTime": execution_time,
             "toolName": tool_name,
             "serverName": tool["serverName"],
+            "qualifiedId": tool["qualifiedId"],
         }
         return make_api_response(
             success=False,

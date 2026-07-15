@@ -327,6 +327,7 @@ class RagLoopMixin:
         state["iteration_count"] = current_iteration + 1
 
         if tool_artifacts:
+            self._lift_rich_candidates(context, tool_artifacts)
             existing_artifacts = context.get("tool_artifacts", [])
             existing_artifacts.extend(tool_artifacts)
             context["tool_artifacts"] = existing_artifacts

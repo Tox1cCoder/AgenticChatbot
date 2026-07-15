@@ -3,6 +3,8 @@
 from collections.abc import Mapping
 from typing import Any
 
+_DEFAULT_ALLOWED_DECISIONS = frozenset({"approve", "edit", "reject"})
+
 
 def _first_present(data: Mapping[str, Any], *keys: str) -> str | None:
     for key in keys:
@@ -24,6 +26,30 @@ def interrupt_request_target_ids(
 def interrupt_request_action(action_request: Mapping[str, Any]) -> str | None:
     """Return the display/action tool name from an interrupt request."""
     return _first_present(action_request, "action", "tool", "name")
+
+
+def interrupt_allowed_decisions(action_request: Mapping[str, Any]) -> frozenset[str]:
+    """Return the normalized decision types the request explicitly permits.
+
+    Older interrupt payloads did not include this field, so they retain the
+    original approve/edit/reject behavior. A string is treated as one decision
+    instead of an iterable of characters, which also makes recovery tolerant of
+    hand-authored and legacy payloads.
+    """
+    raw = action_request.get("allowed_decisions")
+    if raw in (None, ""):
+        raw = action_request.get("allowedDecisions")
+    if raw in (None, "", [], (), set(), frozenset()):
+        return _DEFAULT_ALLOWED_DECISIONS
+
+    values = [raw] if isinstance(raw, str) else raw
+    if not isinstance(values, (list, tuple, set, frozenset)):
+        return frozenset()
+    return frozenset(
+        str(value).strip().lower()
+        for value in values
+        if isinstance(value, str) and str(value).strip()
+    )
 
 
 def build_interrupt_decision(

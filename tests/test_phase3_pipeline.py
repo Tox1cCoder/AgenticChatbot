@@ -9,17 +9,23 @@ All external I/O (DB, Qdrant, filesystem beyond tmp_path) is mocked.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+from PIL import Image
 
 from app.core.events import DocumentEvent
 from app.schemas.document import DocumentStatus
 from app.services.document_parse_service import DocumentParseService, ParseResult
+from app.services.document_processing_service import DocumentProcessingService
 from app.workers.celery_app import celery_app
+from app.workers.document_processor import _cleanup_parse_artifacts
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -171,6 +177,107 @@ def test_artifact_roundtrip_preserves_all_fields(tmp_path):
     assert len(loaded.images_data) == 2
     assert loaded.parse_elapsed_s == pytest.approx(1.23, abs=1e-6)
     assert loaded.backend_used == "pipeline"
+
+
+def test_mineru_images_survive_parse_cleanup_and_feed_index_preparation(tmp_path, monkeypatch):
+    """The parse artifact must not retain image paths under MinerU temp storage."""
+    document_id = str(uuid4())
+    artifact_id = uuid4()
+    temp_root = tmp_path / "temp"
+    mineru_images = temp_root / f"mineru_output_{document_id}" / "report" / "images"
+    mineru_images.mkdir(parents=True)
+    extracted_image = mineru_images / "chart.png"
+    Image.new("RGB", (4, 4), color="blue").save(extracted_image)
+    staged_upload = temp_root / "staged-report.pdf"
+    staged_upload.write_bytes(b"pdf")
+
+    settings = MagicMock()
+    settings.temp_storage_path = str(temp_root)
+    settings.parse_artifacts_storage_path = str(tmp_path / "parse-artifacts")
+    settings.document_images_storage_path = str(tmp_path / "document-images")
+    settings.image_caption_max_concurrency = 1
+    settings.rag_chunk_target_tokens = 400
+    settings.rag_chunk_overlap_tokens = 40
+    settings.rag_chunk_max_tokens = 800
+
+    def _replace_artifact(*, document_id: UUID, artifacts: list):
+        row = artifacts[0]
+        return [
+            SimpleNamespace(
+                id=artifact_id,
+                document_id=document_id,
+                storage_path=row["storage_path"],
+                checksum_sha256=row["checksum_sha256"],
+                size_bytes=row["size_bytes"],
+            )
+        ]
+
+    artifact_repo = MagicMock()
+    artifact_repo.replace_for_document.side_effect = _replace_artifact
+    parse_service = DocumentParseService(settings=settings, artifact_repo=artifact_repo)
+    artifact = parse_service.persist_parse_result(
+        document_id,
+        ParseResult(
+            chunks_with_metadata=[
+                {
+                    "text": "Chart summary",
+                    "page_start": 0,
+                    "page_end": 0,
+                    "has_images": True,
+                    "image_count": 1,
+                }
+            ],
+            images_data=[
+                {
+                    "path": str(extracted_image),
+                    "page_number": 0,
+                    "mime_type": "image/png",
+                }
+            ],
+            parse_elapsed_s=0.25,
+            backend_used="mineru/pipeline",
+        ),
+    )
+
+    loaded_before_cleanup = parse_service.load_parse_result(artifact)
+    durable_image = Path(loaded_before_cleanup.images_data[0]["path"])
+    assert durable_image.is_file()
+    assert durable_image.is_relative_to(
+        Path(settings.parse_artifacts_storage_path) / document_id / "images"
+    )
+
+    monkeypatch.setattr("app.workers.document_processor.get_settings", lambda: settings)
+    _cleanup_parse_artifacts(str(staged_upload), document_id)
+
+    assert not staged_upload.exists()
+    assert not extracted_image.exists()
+    assert durable_image.is_file()
+
+    loaded_after_cleanup = parse_service.load_parse_result(artifact)
+    processing_service = object.__new__(DocumentProcessingService)
+    processing_service.settings = settings
+    processing_service.gemini_client = None
+    prepared = asyncio.run(
+        processing_service._prepare_images_for_indexing(
+            loaded_after_cleanup.images_data,
+            document_id,
+        )
+    )
+
+    assert len(prepared) == 1
+    assert Path(prepared[0]["stored_path"]).is_file()
+
+
+def test_parse_cleanup_refuses_staged_file_outside_temp_storage(tmp_path, monkeypatch):
+    settings = MagicMock()
+    settings.temp_storage_path = str(tmp_path / "temp")
+    outside_file = tmp_path / "outside-upload.pdf"
+    outside_file.write_bytes(b"keep")
+
+    monkeypatch.setattr("app.workers.document_processor.get_settings", lambda: settings)
+    _cleanup_parse_artifacts(str(outside_file), str(uuid4()))
+
+    assert outside_file.is_file()
 
 
 # ---------------------------------------------------------------------------
@@ -461,12 +568,10 @@ def test_parse_task_emits_failed_event_on_terminal_error(tmp_path, monkeypatch):
 
     nonexistent = str(tmp_path / "nope.txt")
 
-    try:
+    with contextlib.suppress(Exception):
         celery_app.tasks["app.workers.document_processor.parse_document_task"].apply(
             args=[document_id, nonexistent, "nope.txt"]
         )
-    except Exception:
-        pass  # expected — task propagates terminal error
 
     # _emit_failed calls get_event_bus().emit(DocumentEvent.PROCESSING_FAILED, ...)
     # It runs in a _run_async() block so the AsyncMock is awaited.
@@ -548,14 +653,17 @@ def test_small_documents_complete_independently_of_large(tmp_path, monkeypatch):
         temp_file.write_text("content", encoding="utf-8")
 
         with (
-            patch("app.workers.document_processor.SessionLocal", lambda: mock_cm),
+            patch(
+                "app.workers.document_processor.SessionLocal",
+                lambda mock_cm=mock_cm: mock_cm,
+            ),
             patch(
                 "app.workers.document_processor.DocumentRepository",
-                lambda _: mock_doc_repo,
+                lambda _, mock_doc_repo=mock_doc_repo: mock_doc_repo,
             ),
             patch(
                 "app.workers.document_processor.get_container",
-                lambda: mock_container,
+                lambda mock_container=mock_container: mock_container,
             ),
             patch("app.services.document_parse_service.DocumentParseService") as MockParseService,
         ):

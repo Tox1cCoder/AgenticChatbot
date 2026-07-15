@@ -101,6 +101,8 @@ def _set_inflight_stream(state: _SessionState) -> None:
     state.stream_conversation_id = _STREAM_CONVERSATION_ID
     state.stream_user_message_id = _USER_MESSAGE_ID
     state.stream_partial_text = ""
+    state.pending_image_attachments = [{"name": "already-sent.png", "data": "YWJj"}]
+    state.show_attachment_uploader = True
 
 
 def test_stoppable_id_is_the_streaming_conversation_even_on_pending_new_view(monkeypatch):
@@ -170,6 +172,8 @@ def test_stop_rerun_sends_the_streaming_conversation_payload(monkeypatch):
     # must not leak into the visible message list.
     assert stub.session_state.messages == []
     assert stub.session_state.stream_inflight is False
+    assert stub.session_state.pending_image_attachments == []
+    assert stub.session_state.show_attachment_uploader is False
 
 
 def test_stop_rerun_appends_partial_message_when_view_matches(monkeypatch):

@@ -25,7 +25,7 @@ class RAGChunkView:
     image_count: int
     image_captions: tuple[str, ...]
     has_tables: bool
-    table_count: int
+    table_count: int | None
 
 
 @dataclass(frozen=True)
@@ -168,21 +168,27 @@ def _build_chunk_views(raw_chunks: Any) -> list[RAGChunkView]:
             if _string_value(caption).strip()
         )
 
+        table_count_raw = chunk.get("table_count")
         try:
-            table_count = int(chunk.get("table_count") or 0)
+            table_count = int(table_count_raw) if table_count_raw is not None else None
         except (TypeError, ValueError):
-            table_count = 0
+            table_count = None
+
+        try:
+            rank = int(chunk.get("rank") or index)
+        except (TypeError, ValueError):
+            rank = index
 
         chunk_views.append(
             RAGChunkView(
-                rank=int(chunk.get("rank") or index),
+                rank=rank,
                 source=_string_value(chunk.get("source") or "unknown"),
                 score=score,
                 document_id=_string_value(chunk.get("document_id")).strip() or None,
                 chunk_id=_string_value(chunk.get("chunk_id")).strip() or None,
                 page_label=_format_page_label(chunk),
                 content=_string_value(chunk.get("content")),
-                image_count=len(image_ids),
+                image_count=max(len(image_ids), len(image_captions)),
                 image_captions=image_captions,
                 has_tables=bool(chunk.get("has_tables")),
                 table_count=table_count,
@@ -203,9 +209,13 @@ def _build_document_views(raw_documents: Any) -> list[RAGDocumentListing]:
             chunk_count = int(chunk_count_raw) if chunk_count_raw is not None else None
         except (TypeError, ValueError):
             chunk_count = None
+        try:
+            rank = int(doc.get("rank") or index)
+        except (TypeError, ValueError):
+            rank = index
         listings.append(
             RAGDocumentListing(
-                rank=int(doc.get("rank") or index),
+                rank=rank,
                 filename=_string_value(doc.get("filename")).strip() or None,
                 document_id=_string_value(doc.get("document_id")).strip() or None,
                 chunk_count=chunk_count,
