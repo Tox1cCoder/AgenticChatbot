@@ -415,7 +415,6 @@ class PlanningAgent(BaseAgent):
         conversation_history = message.metadata.get("history", [])
         request_user_id = message.metadata.get("user_id")
         model_request = message.metadata.get("model_request")
-        history_summary = message.metadata.get("history_summary")
 
         # Convert existing tasks into todo-like dicts for prompt context.
         todos: list[dict[str, Any]] = []
@@ -446,7 +445,6 @@ class PlanningAgent(BaseAgent):
             todos=todos or None,
             current_task_index=current_task_index,
             planning_phase="planning",
-            history_summary=history_summary,
         )
 
         # Force a tool call so we can reliably extract a machine-readable plan.

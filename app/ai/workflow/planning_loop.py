@@ -143,7 +143,6 @@ class PlanningLoopMixin:
             user_id=user_id,
             device_id=state.get("device_id"),
             model_request=state.get("model_request"),
-            history_summary=state.get("history_summary"),
             todos=todos,
             current_task_index=current_task_index,
             planning_phase=planning_phase,

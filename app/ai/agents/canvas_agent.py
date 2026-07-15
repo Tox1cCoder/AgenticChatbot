@@ -246,7 +246,6 @@ class CanvasAgent(BaseAgent):
         user_id: str | None = None,
         device_id: str | None = None,
         model_request: dict[str, Any] | None = None,
-        history_summary: str | None = None,
         **system_prompt_kwargs: Any,
     ) -> AgentResponse:
         # Let the base class handle LLM invocation (tool calls, provider switching, …).
@@ -258,7 +257,6 @@ class CanvasAgent(BaseAgent):
             user_id=user_id,
             device_id=device_id,
             model_request=model_request,
-            history_summary=history_summary,
             **system_prompt_kwargs,
         )
 

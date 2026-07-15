@@ -44,7 +44,6 @@ class SearchAgent(BaseAgent):
         request_user_id = message.metadata.get("user_id")
         request_device_id = message.metadata.get("device_id")
         model_request = message.metadata.get("model_request")
-        history_summary = message.metadata.get("history_summary")
 
         # Check if this invocation includes tool results (post-tool-execution)
         # This happens when the graph routes back after tool execution
@@ -66,7 +65,6 @@ class SearchAgent(BaseAgent):
             user_id=request_user_id,
             device_id=request_device_id,
             model_request=model_request,
-            history_summary=history_summary,
         )
         response.metadata["conversation_id"] = conversation_id
         response.metadata["agent_type"] = "tool_calling"

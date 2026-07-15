@@ -292,7 +292,7 @@ class Container(containers.DeclarativeContainer):
     history_provider = providers.Singleton(
         ConversationHistoryProvider,
         message_repository=message_repository,
-        summary_repository=conversation_memory_summary_repository,
+        summary_repository=conversation_compaction_repository,
         settings=providers.Object(settings),
     )
 

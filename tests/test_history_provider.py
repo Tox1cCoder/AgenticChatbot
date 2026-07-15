@@ -38,6 +38,7 @@ def _make_message(
         sender=sender,
         content=content,
         created_at=created_at,
+        sequence=max(1, int(created_at.timestamp())),
     )
     if deleted:
         msg.deleted_at = created_at + timedelta(seconds=1)
@@ -280,7 +281,6 @@ def test_history_provider_returns_summary_plus_recent_without_overlap():
 
     conversation_id = uuid4()
     user_id = uuid4()
-    cursor_message_id = uuid4()
     after_user_id = uuid4()
     after_assistant_id = uuid4()
     current_message_id = uuid4()
@@ -302,16 +302,24 @@ def test_history_provider_returns_summary_plus_recent_without_overlap():
     after_assistant.id = after_assistant_id
 
     summary = SimpleNamespace(
-        summary_text="- Earlier billing discussion",
-        last_summarized_message_id=cursor_message_id,
+        summary_payload={
+            "facts": ["Earlier billing discussion"],
+            "decisions": [],
+            "constraints": [],
+            "preferences": [],
+            "open_questions": [],
+            "tool_outcomes": [],
+        },
+        last_summarized_sequence=4,
         summary_version=2,
+        is_valid=True,
     )
 
     message_repo = MagicMock()
     message_repo.get_prompt_history.return_value = [after_user, after_assistant]
 
     summary_repo = MagicMock()
-    summary_repo.get_by_conversation_id.return_value = summary
+    summary_repo.get_owned_valid_memory.return_value = summary
 
     provider = ConversationHistoryProvider(
         message_repository=message_repo,
@@ -328,16 +336,16 @@ def test_history_provider_returns_summary_plus_recent_without_overlap():
         )
     )
 
-    assert context.summary == "- Earlier billing discussion"
-    assert context.summary_message_id == str(cursor_message_id)
-    assert [m.metadata["message_id"] for m in context.messages] == [
+    assert context.memory is not None
+    assert context.memory.role.value == "memory"
+    assert [m.metadata["message_id"] for m in context.messages[1:]] == [
         str(after_user_id),
         str(after_assistant_id),
     ]
     message_repo.get_prompt_history.assert_called_once()
     kwargs = message_repo.get_prompt_history.call_args.kwargs
     assert kwargs["before_message_id"] == current_message_id
-    assert kwargs["after_message_id"] == cursor_message_id
+    assert kwargs["after_sequence"] == 4
 
 
 def test_history_provider_trims_by_agent_budget():
@@ -362,7 +370,7 @@ def test_history_provider_trims_by_agent_budget():
     message_repo.get_prompt_history.return_value = rows
 
     summary_repo = MagicMock()
-    summary_repo.get_by_conversation_id.return_value = None
+    summary_repo.get_owned_valid_memory.return_value = None
 
     settings = _fake_settings()
     provider = ConversationHistoryProvider(
@@ -382,7 +390,7 @@ def test_history_provider_trims_by_agent_budget():
 
     assert len(context.messages) <= settings.rag_history_max_messages
     assert context.budget.agent_key == "rag"
-    assert context.summary is None
+    assert context.memory is None
 
 
 def test_history_provider_invalidate_clears_cached_entries():
@@ -404,7 +412,7 @@ def test_history_provider_invalidate_clears_cached_entries():
     message_repo.get_prompt_history.return_value = [msg]
 
     summary_repo = MagicMock()
-    summary_repo.get_by_conversation_id.return_value = None
+    summary_repo.get_owned_valid_memory.return_value = None
 
     provider = ConversationHistoryProvider(
         message_repository=message_repo,

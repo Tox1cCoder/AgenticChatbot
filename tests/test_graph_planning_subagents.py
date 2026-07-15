@@ -642,7 +642,7 @@ async def test_run_agent_in_isolated_context_inherits_scoped_identifiers_without
     assert captured_kwargs["user_id"] == "user-99"
     assert captured_kwargs["device_id"] == "device-7"
     assert captured_kwargs["model_request"] == {"chat": {"model": "x"}}
-    assert captured_kwargs["history_summary"] is None
+    assert "history_summary" not in captured_kwargs
 
 
 @pytest.mark.asyncio
@@ -802,7 +802,7 @@ async def test_run_agent_in_isolated_context_drives_rag_search_loop(monkeypatch)
     assert len(captured_metadata) == 2
     assert captured_metadata[0]["tool_context"] == []
     assert captured_metadata[1]["tool_context"] == ["SEARCH RESULT"]
-    assert captured_metadata[1]["history_summary"] is None
+    assert "history_summary" not in captured_metadata[1]
     assert response.tool_artifacts is not None
     assert response.tool_artifacts[0]["tool"] == "search_documents"
 

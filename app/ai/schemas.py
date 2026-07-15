@@ -21,6 +21,7 @@ class MessageRole(str, Enum):
     USER = "user"
     ASSISTANT = "assistant"
     SYSTEM = "system"
+    MEMORY = "memory"
 
 
 class InterruptDecisionType(str, Enum):
@@ -234,10 +235,6 @@ class GraphState(TypedDict):
     plan_lifecycle: NotRequired[PlanLifecycle | None]
     # Inter-agent delegation depth counter (reset each user turn)
     delegation_count: NotRequired[int | None]
-    # Rolling conversation summary memory (checkpoint-backed)
-    history_summary: NotRequired[str | None]
-    history_summary_updated_at: NotRequired[str | None]
-    summary_cursor_message_id: NotRequired[str | None]
     # Stable DB message identifiers for the current turn. ``user_message_id``
     # is the persisted prompt; ``assistant_message_id`` is reserved before
     # generation so the final ``AIMessage`` can carry the same ID that the

@@ -72,7 +72,6 @@ class RagLoopMixin:
             "model_request": state.get("model_request"),
             "user_id": user_id,
             "device_id": device_id,
-            "history_summary": state.get("history_summary"),
         }
         # When ``_should_continue_rag`` decides the budget is exhausted, it
         # sets these flags on the context so this RAG turn becomes a no-tools

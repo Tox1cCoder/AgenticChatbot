@@ -98,7 +98,6 @@ class ChatAgent(BaseAgent):
         request_user_id = message.metadata.get("user_id")
         request_device_id = message.metadata.get("device_id")
         model_request = message.metadata.get("model_request")
-        history_summary = message.metadata.get("history_summary")
 
         prompt = build_chat_prompt(
             message_content,
@@ -114,7 +113,6 @@ class ChatAgent(BaseAgent):
             user_id=request_user_id,
             device_id=request_device_id,
             model_request=model_request,
-            history_summary=history_summary,
         )
 
         response.metadata["conversation_id"] = conversation_id

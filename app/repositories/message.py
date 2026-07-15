@@ -152,13 +152,14 @@ class MessageCRUDStrategy(
         *,
         before_message_id: UUID | None = None,
         after_message_id: UUID | None = None,
+        after_sequence: int | None = None,
         limit: int | None = 50,
     ) -> list[Message]:
         """Return prompt-eligible messages for a conversation in ascending order.
 
         Always filters out soft-deleted rows. When a cursor is supplied, the
-        ``(created_at, id)`` tuple of that anchor message is used to bound the
-        result strictly before/after the cursor. The newest ``limit`` rows in
+        immutable sequence of that anchor message is used to bound the result
+        strictly before/after the cursor. The newest ``limit`` rows in
         the window are selected (DESC + limit) and then returned ASC so prompt
         history reads naturally from oldest to newest.
 
@@ -167,8 +168,12 @@ class MessageCRUDStrategy(
         predicates differ across dialects and the candidate set is small.
         """
 
-        before_anchor = self._lookup_anchor(db, before_message_id) if before_message_id else None
-        after_anchor = self._lookup_anchor(db, after_message_id) if after_message_id else None
+        before_anchor = (
+            self._lookup_sequence(db, before_message_id) if before_message_id else None
+        )
+        after_anchor = (
+            self._lookup_sequence(db, after_message_id) if after_message_id else None
+        )
 
         clauses = [
             Message.conversation_id == conversation_id,
@@ -176,31 +181,16 @@ class MessageCRUDStrategy(
         ]
 
         if before_anchor is not None:
-            anchor_created_at, anchor_id = before_anchor
-            clauses.append(
-                or_(
-                    Message.created_at < anchor_created_at,
-                    and_(
-                        Message.created_at == anchor_created_at,
-                        Message.id < anchor_id,
-                    ),
-                )
-            )
+            clauses.append(Message.sequence < before_anchor)
 
         if after_anchor is not None:
-            anchor_created_at, anchor_id = after_anchor
-            clauses.append(
-                or_(
-                    Message.created_at > anchor_created_at,
-                    and_(
-                        Message.created_at == anchor_created_at,
-                        Message.id > anchor_id,
-                    ),
-                )
-            )
+            clauses.append(Message.sequence > after_anchor)
+
+        if after_sequence is not None:
+            clauses.append(Message.sequence > after_sequence)
 
         statement = (
-            select(Message).where(*clauses).order_by(Message.created_at.desc(), Message.id.desc())
+            select(Message).where(*clauses).order_by(Message.sequence.desc())
         )
         if limit is not None and limit > 0:
             statement = statement.limit(limit)
@@ -208,6 +198,12 @@ class MessageCRUDStrategy(
         rows = list(db.execute(statement).scalars().all())
         rows.reverse()
         return [row for row in rows if not self._is_hidden_artifact(row)]
+
+    @staticmethod
+    def _lookup_sequence(db: Session, message_id: UUID) -> int | None:
+        statement = select(Message).where(Message.id == message_id)
+        anchor = db.execute(statement).scalar_one_or_none()
+        return int(anchor.sequence) if anchor is not None else None
 
     @staticmethod
     def _lookup_anchor(db: Session, message_id: UUID) -> tuple | None:
@@ -421,13 +417,14 @@ class MessageRepository:
         *,
         before_message_id: UUID | None = None,
         after_message_id: UUID | None = None,
+        after_sequence: int | None = None,
         limit: int | None = 50,
     ) -> list[Message]:
         """Return prompt-eligible messages for a conversation.
 
         Excludes soft-deleted rows and empty paused/interrupt assistant
-        placeholders. Uses ``(created_at, id)`` cursor positioning so the
-        anchor message itself is never included. The newest ``limit`` rows in
+        placeholders. Uses immutable sequence cursor positioning so the anchor
+        message itself is never included. The newest ``limit`` rows in
         the window are selected; pass ``None`` or ``0`` to disable the cap.
         """
         with self.session_factory() as session:
@@ -436,6 +433,7 @@ class MessageRepository:
                 conversation_id,
                 before_message_id=before_message_id,
                 after_message_id=after_message_id,
+                after_sequence=after_sequence,
                 limit=limit,
             )
 

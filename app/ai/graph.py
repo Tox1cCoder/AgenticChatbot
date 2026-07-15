@@ -267,9 +267,8 @@ class MultiAgentWorkflow(
         When the workflow is wired with a ``ConversationHistoryProvider``
         (production path), the provider is the single source of truth: it
         returns DB-backed messages already excluding the current user turn
-        by ``user_message_id`` and the durable summary cursor. The summary
-        text is mirrored into ``state['history_summary']`` so existing
-        agent nodes that read that field keep working.
+        by ``user_message_id`` and the durable memory sequence cursor. Owned
+        valid memory is already the first lower-priority history message.
 
         When the provider is absent (legacy/test path) we fall back to the
         ``MemoryManager`` + tail-position exclusion.
@@ -293,10 +292,6 @@ class MultiAgentWorkflow(
                 current_message_id=current_message_id,
             )
             if context is not None:
-                if state is not None and context.summary:
-                    state["history_summary"] = context.summary
-                    if context.summary_message_id:
-                        state["summary_cursor_message_id"] = context.summary_message_id
                 return list(context.messages)
 
         # Legacy fallback (no provider wired).
@@ -1404,7 +1399,6 @@ class MultiAgentWorkflow(
             user_id=user_id,
             device_id=device_id,
             model_request=state.get("model_request"),
-            history_summary=state.get("history_summary"),
             **self._final_response_kwargs(state),
             **self._multi_agent_kwargs(state, "chat_agent"),
         )
@@ -1454,7 +1448,6 @@ class MultiAgentWorkflow(
             user_id=user_id,
             device_id=device_id,
             model_request=state.get("model_request"),
-            history_summary=state.get("history_summary"),
             **self._final_response_kwargs(state),
             **self._multi_agent_kwargs(state, selected_agent),
         )
@@ -1494,7 +1487,6 @@ class MultiAgentWorkflow(
             user_id=user_id,
             device_id=state.get("device_id"),
             model_request=state.get("model_request"),
-            history_summary=state.get("history_summary"),
             **self._final_response_kwargs(state),
             **self._multi_agent_kwargs(state, "search_agent"),
         )
@@ -1535,7 +1527,6 @@ class MultiAgentWorkflow(
             user_id=user_id,
             device_id=state.get("device_id"),
             model_request=state.get("model_request"),
-            history_summary=state.get("history_summary"),
             **self._final_response_kwargs(state),
             **self._multi_agent_kwargs(state, "image_generator_agent"),
         )
@@ -1576,7 +1567,6 @@ class MultiAgentWorkflow(
             user_id=user_id,
             device_id=state.get("device_id"),
             model_request=state.get("model_request"),
-            history_summary=state.get("history_summary"),
             **self._final_response_kwargs(state),
             **self._multi_agent_kwargs(state, "canvas_agent"),
         )
@@ -1637,7 +1627,6 @@ class MultiAgentWorkflow(
             agent_key=agent_key,
             override=model_override,
         )
-        worker_history_summary: str | None = None
         # ``purpose`` + ``subagent_task_id`` let the v3 stream translator
         # attribute this worker's model deltas to its subagent row instead of
         # leaking them into the main answer/thinking stream.
@@ -1700,7 +1689,6 @@ class MultiAgentWorkflow(
                         "model_request": model_request,
                         "user_id": user_id,
                         "device_id": device_id,
-                        "history_summary": worker_history_summary,
                         "run_config": run_config,
                     },
                     attachments=self._get_state_attachments(parent_state),
@@ -1880,7 +1868,6 @@ class MultiAgentWorkflow(
                 user_id=user_id,
                 device_id=device_id,
                 model_request=model_request,
-                history_summary=worker_history_summary,
                 run_config=run_config,
                 # Workers run isolated; graph-level hand_off cannot apply here, so
                 # bind it off to keep the worker from wasting tokens on no-op

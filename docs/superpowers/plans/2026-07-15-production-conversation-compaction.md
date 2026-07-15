@@ -271,23 +271,23 @@ Run Ruff and `git diff --check`; record and commit with `feat(compaction): add d
 - Create: `tests/test_conversation_memory_hydration.py`
 - Modify: `tests/test_history_provider.py`
 
-- [ ] **Step 1: Write failing hydration tests**
+- [x] **Step 1: Write failing hydration tests**
 
 Assert only owned valid summaries hydrate; canonical JSON is wrapped as untrusted reference data; memory is a dedicated lower-priority message before recent history; no memory bytes appear in any `SystemMessage`; current user turn remains last; cursor prevents overlap; invalid summaries are ignored.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run hydration/history tests. Expected: current system-prompt injection assertion fails.
 
-- [ ] **Step 3: Replace `history_summary` with typed `conversation_memory`**
+- [x] **Step 3: Replace `history_summary` with typed `conversation_memory`**
 
 Return the memory message separately from transcript messages. Update all agent paths to assemble `System + Memory + Recent History + Current Turn`; remove summary checkpoint state and fallback propagation.
 
-- [ ] **Step 4: Verify GREEN across agents**
+- [x] **Step 4: Verify GREEN across agents**
 
 Run hydration, history, graph, chat, RAG, planning, search, canvas, and image-agent tests. Expected: no agent injects memory into system instructions.
 
-- [ ] **Step 5: Run task gate, update logs, and commit**
+- [x] **Step 5: Run task gate, update logs, and commit**
 
 Run Ruff and legacy-symbol scan for graph summary keys; record and commit with `feat(compaction): hydrate untrusted structured memory`.
 
@@ -483,6 +483,9 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Task 5 | Complete | GREEN: focused structured-memory/compactor suite produced `32 passed`. Final gate with the real token counter produced `48 passed`; Ruff lint and format checks passed for all four files; `git diff --check` passed. Tests cover exact threshold boundaries, independently disabled thresholds, full-window evaluation, assistant-ended prefix retention, strict six-key validation, content safety, prior-memory preservation, delimited prompt injection, and provider-exact credentials. |
 | 2026-07-15 | Task 6, steps 1–2 | In progress | Added worker orchestration, timeout/retry/dead/CAS, duplicate delivery, reconciliation, backfill, routes/Beat, and launcher tests. RED: collection failed with the expected missing `app.workers.conversation_compaction` module. |
 | 2026-07-15 | Task 6 | Complete | GREEN: worker/route/launcher suite produced `22 passed`, then `26 passed` with repository contracts. Disposable PostgreSQL produced `10 passed`, including idempotent historical backfill. Final affected gate produced `75 passed`; Ruff lint/format passed across eight task files; `alembic check` reported no operations; `git diff --check` passed. |
+| 2026-07-15 | Task 7, steps 1–2 | In progress | Added ownership, validity, canonical untrusted-memory, sequence non-overlap, message priority, and current-turn ordering tests; migrated history expectations to structured memory. RED: five expected failures showed the legacy unscoped summary lookup/context fields and missing dedicated memory role. |
+| 2026-07-15 | Task 7, steps 3–4 | In progress | Hydration/history suite produced `10 passed`; subagent/history coverage produced `56 passed`; base/chat/search/RAG/canvas/custom-agent/graph regressions produced `105 passed`. Owned valid memory is canonicalized into a dedicated lower-priority message, sequence-scoped recent history follows it, and no active agent caller passes memory into system-prompt construction. |
+| 2026-07-15 | Task 7 | Complete | Final agent/history/container gate produced `162 passed`; structured-memory/compactor/repository regression produced `36 passed`. Active graph/schema/agent/workflow scan found no `history_summary` or `summary_cursor_message_id`; Ruff lint passed for all task files (with only the two documented pre-existing message-file E501 lines ignored); new/central files are formatted; `git diff --check` passed. |
 
 ## Decision Log
 
@@ -510,3 +513,5 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Use positive jitter up to 25% on capped exponential retry delays. | This disperses provider/broker recovery traffic while keeping every delay within the configured five-second base and fifteen-minute maximum. |
 | 2026-07-15 | Schedule reconciliation every configured 60 seconds and bounded historical backfill hourly. | Reconciliation is latency-sensitive crash/broker recovery; backfill is rate-limited maintenance work and remains idempotent through target-aware database requests. |
 | 2026-07-15 | Run a dedicated third worker process for the `summary` queue using existing general worker concurrency. | Queue isolation prevents model compaction from delaying parse/index jobs without adding an unplanned configuration field; `solo` mode is clamped to one process slot. |
+| 2026-07-15 | Represent durable memory with an explicit `memory` agent role that converts to a LangChain `HumanMessage`. | It remains below trusted system instructions, stays distinguishable in application history, precedes recent transcript, and requires no provider-specific developer-role support. |
+| 2026-07-15 | Keep memory outside the legacy per-agent history trim pending full-request budgeting. | Dropping validated memory as the oldest item would silently reintroduce context loss; Task 8 counts and reduces the complete assembled request deterministically. |

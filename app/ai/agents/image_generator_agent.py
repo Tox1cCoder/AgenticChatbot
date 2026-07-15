@@ -221,7 +221,6 @@ Do not output anything else, just the prompt."""
         user_id: str | None = None,
         device_id: str | None = None,
         model_request: dict[str, Any] | None = None,
-        history_summary: str | None = None,
         **system_prompt_kwargs: Any,
     ) -> AgentResponse:
         """Override to add image generation after LLM prompt-engineering step.
@@ -240,7 +239,6 @@ Do not output anything else, just the prompt."""
             user_id=user_id,
             device_id=device_id,
             model_request=model_request,
-            history_summary=history_summary,
             **system_prompt_kwargs,
         )
 

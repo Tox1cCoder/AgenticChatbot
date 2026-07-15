@@ -3,15 +3,13 @@
 The provider is the single place that builds prompt memory. Every agent
 node receives both:
 
-* ``messages`` — recent unsummarized DB rows (already excluding the
-  current user message, soft-deleted rows, and empty paused/interrupt
-  placeholders); and
-* ``summary`` — the durable rolling summary text covering everything up
-  to ``last_summarized_message_id``.
+* a dedicated lower-priority memory message containing validated canonical
+  JSON, when owned valid memory exists; and
+* recent unsummarized DB rows after its sequence cursor.
 
 This replaces the previous ``MemoryManager`` indirection plus a
 checkpoint-backed summary cursor with a single deterministic source of
-truth keyed on database message IDs.
+truth keyed on database message sequences.
 """
 
 from __future__ import annotations
@@ -25,6 +23,7 @@ from uuid import UUID
 
 from cachetools import TTLCache
 
+from app.ai.conversation_memory import ConversationMemory
 from app.ai.schemas import AgentMessage, MessageRole
 from app.ai.token_instrumentation import HistoryBudgetConfig, trim_history_to_budget
 from app.models.enums import MessageRole as DBMessageRole
@@ -48,8 +47,8 @@ class ConversationHistoryContext:
 
     conversation_id: str
     user_id: str
-    summary: str | None
-    summary_message_id: str | None
+    memory: AgentMessage | None
+    memory_sequence: int | None
     messages: list[AgentMessage]
     budget: HistoryBudget
     summary_version: int = 0
@@ -66,8 +65,10 @@ def db_message_to_agent_message(message: Message) -> AgentMessage | None:
     if message.deleted_at is not None:
         return None
 
+    raw_sequence = getattr(message, "sequence", None)
     metadata = {
         "message_id": str(message.id),
+        "sequence": int(raw_sequence) if raw_sequence is not None else None,
         "created_at": message.created_at.isoformat() if message.created_at else None,
     }
 
@@ -100,7 +101,7 @@ class _CacheKey:
     user_id: str
     current_message_id: str | None
     agent_key: str
-    summary_message_id: str | None
+    memory_sequence: int | None
     summary_version: int
 
     def as_tuple(self) -> tuple:
@@ -109,7 +110,7 @@ class _CacheKey:
             self.user_id,
             self.current_message_id,
             self.agent_key,
-            self.summary_message_id,
+            self.memory_sequence,
             self.summary_version,
         )
 
@@ -145,10 +146,11 @@ class ConversationHistoryProvider:
         current_uuid = self._coerce_uuid(current_message_id) if current_message_id else None
         budget = self._budget_for(agent_key)
 
-        summary = self._safe_get_summary(conversation_uuid)
-        summary_message_id = (
-            str(summary.last_summarized_message_id)
-            if summary is not None and summary.last_summarized_message_id is not None
+        summary = self._safe_get_summary(conversation_uuid, user_uuid)
+        memory = self._memory_message(summary)
+        memory_sequence = (
+            int(summary.last_summarized_sequence)
+            if summary is not None and summary.last_summarized_sequence is not None
             else None
         )
         summary_version = int(getattr(summary, "summary_version", 0) or 0) if summary else 0
@@ -158,7 +160,7 @@ class ConversationHistoryProvider:
             user_id=str(user_uuid),
             current_message_id=str(current_uuid) if current_uuid else None,
             agent_key=agent_key,
-            summary_message_id=summary_message_id,
+            memory_sequence=memory_sequence,
             summary_version=summary_version,
         ).as_tuple()
 
@@ -167,12 +169,6 @@ class ConversationHistoryProvider:
             cached = self._cache.get(cache_key)
             if cached is not None:
                 return cached
-
-            after_uuid = (
-                summary.last_summarized_message_id
-                if summary is not None and summary.last_summarized_message_id is not None
-                else None
-            )
 
             # ``max_messages == 0`` is documented as "no cap"; pass ``None`` so
             # the repository skips ``.limit()`` entirely. The token-based
@@ -185,7 +181,7 @@ class ConversationHistoryProvider:
                 rows = self.message_repository.get_prompt_history(
                     conversation_uuid,
                     before_message_id=current_uuid,
-                    after_message_id=after_uuid,
+                    after_sequence=memory_sequence,
                     limit=history_limit,
                 )
             except Exception as exc:
@@ -206,9 +202,9 @@ class ConversationHistoryProvider:
             context = ConversationHistoryContext(
                 conversation_id=str(conversation_uuid),
                 user_id=str(user_uuid),
-                summary=summary.summary_text if summary is not None else None,
-                summary_message_id=summary_message_id,
-                messages=trimmed,
+                memory=memory,
+                memory_sequence=memory_sequence,
+                messages=([memory] if memory is not None else []) + trimmed,
                 budget=budget,
                 summary_version=summary_version,
             )
@@ -229,11 +225,17 @@ class ConversationHistoryProvider:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _safe_get_summary(self, conversation_uuid: UUID):
+    def _safe_get_summary(self, conversation_uuid: UUID, user_uuid: UUID):
         if self.summary_repository is None:
             return None
         try:
-            return self.summary_repository.get_by_conversation_id(conversation_uuid)
+            summary = self.summary_repository.get_owned_valid_memory(conversation_uuid, user_uuid)
+            if summary is None or not bool(getattr(summary, "is_valid", False)):
+                return None
+            if getattr(summary, "last_summarized_sequence", None) is None:
+                return None
+            ConversationMemory.model_validate(summary.summary_payload)
+            return summary
         except Exception as exc:
             logger.warning(
                 "History provider could not load summary for %s: %s",
@@ -241,6 +243,21 @@ class ConversationHistoryProvider:
                 exc,
             )
             return None
+
+    @staticmethod
+    def _memory_message(summary: Any | None) -> AgentMessage | None:
+        if summary is None:
+            return None
+        memory = ConversationMemory.model_validate(summary.summary_payload)
+        return AgentMessage(
+            role=MessageRole.MEMORY,
+            content=memory.to_untrusted_reference(),
+            metadata={
+                "memory_sequence": int(summary.last_summarized_sequence),
+                "summary_version": int(summary.summary_version),
+                "untrusted_reference": True,
+            },
+        )
 
     def _budget_for(self, agent_key: str) -> HistoryBudget:
         config = HistoryBudgetConfig.for_agent(agent_key, self.settings)
