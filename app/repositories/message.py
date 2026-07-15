@@ -3,9 +3,11 @@ from uuid import UUID
 from sqlalchemy import and_, asc, desc, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
+from app.factories.message_factory import MessageFactory
 from app.models.enums import MessageRole
 from app.models.message import Message
 from app.repositories.command_strategy import DefaultCommandStrategy
+from app.repositories.conversation_compaction import ConversationCompactionRepository
 from app.repositories.query_strategy import DefaultQueryStrategy
 from app.repositories.utils.pagination import Paginator
 from app.schemas.message import MessageCreate, MessageUpdate
@@ -314,10 +316,17 @@ class MessageCRUDStrategy(
 class MessageRepository:
     """Repository for Message model using session factory pattern"""
 
-    def __init__(self, session_factory: callable):
+    def __init__(
+        self,
+        session_factory: callable,
+        compaction_repository: ConversationCompactionRepository | None = None,
+    ):
         """Initialize repository with session factory for dependency injection."""
         self.session_factory = session_factory
         self._crud_strategy = MessageCRUDStrategy(Message)
+        self._compaction_repository = compaction_repository or ConversationCompactionRepository(
+            session_factory
+        )
 
     def get_by_conversation_id(
         self,
@@ -372,10 +381,15 @@ class MessageRepository:
             return self._crud_strategy.count_by_user_id(session, user_id)
 
     def create(self, input_schema: MessageCreate) -> Message:
-        """Create a new message with eager loading of feedback"""
-        with self.session_factory() as session:
-            created_message = self._crud_strategy.create(session, input_schema)
-            return created_message
+        """Atomically allocate a sequence and persist durable assistant work."""
+        if isinstance(input_schema, dict):
+            message_data = input_schema
+        else:
+            message_data = MessageFactory.create_from_schema_with_role(
+                input_schema,
+                input_schema.role,
+            )
+        return self._compaction_repository.persist_message(message_data)
 
     def get_by_id(self, id: UUID) -> Message | None:
         """Get message by ID"""
@@ -388,17 +402,18 @@ class MessageRepository:
             return self._crud_strategy.get_all(session, page, limit)
 
     def update(self, id: UUID, input_schema: MessageUpdate) -> Message | None:
-        """Update message by ID"""
-        with self.session_factory() as session:
-            db_obj = self._crud_strategy.get_by_id(session, id)
-            if db_obj is None:
-                return None
-            return self._crud_strategy.update(session, db_obj, input_schema)
+        """Update a message and invalidate covered memory in one transaction."""
+        content = input_schema.content
+        if content is None or not self._compaction_repository.invalidate_for_mutation(
+            id,
+            new_content=content,
+        ):
+            return None
+        return self.get_by_id(id)
 
     def delete(self, id: UUID) -> bool:
-        """Delete message by ID"""
-        with self.session_factory() as session:
-            return self._crud_strategy.delete(session, id)
+        """Soft-delete a message and invalidate covered memory atomically."""
+        return self._compaction_repository.invalidate_for_mutation(id, delete=True)
 
     def get_prompt_history(
         self,

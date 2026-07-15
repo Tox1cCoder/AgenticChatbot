@@ -183,23 +183,23 @@ Run Ruff, `alembic check`, and `git diff --check`; record results. Commit with `
 - Create: `tests/test_conversation_compaction_repository.py`
 - Create: `tests/integration/test_conversation_compaction_postgres.py`
 
-- [ ] **Step 1: Write failing repository tests**
+- [x] **Step 1: Write failing repository tests**
 
 Test atomic sequence allocation/message insert/assistant job upsert; `GREATEST` target coalescing; pending target advancement during a live lease; `SKIP LOCKED` claim; lease token checks; completion to idle/pending; retry/dead transitions; expired-lease reconciliation; ownership-scoped valid-memory read; CAS on summary version/cursor/lease; and edit/delete invalidation plus rebuild request.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run fast repository tests and the PostgreSQL integration file when `TEST_DATABASE_URL` is available. Expected: missing repository/API failures.
 
-- [ ] **Step 3: Implement transaction-owning repository**
+- [x] **Step 3: Implement transaction-owning repository**
 
 Expose methods `persist_message`, `invalidate_for_mutation`, `claim_job`, `load_compaction_input`, `persist_memory_cas`, `complete_claim`, `fail_claim`, `reconcile_due_jobs`, and `request_backfill`. No method may keep a transaction open across provider calls.
 
-- [ ] **Step 4: Verify GREEN including concurrency**
+- [x] **Step 4: Verify GREEN including concurrency**
 
 Run both repository suites. Expected: duplicate/concurrent operations cannot regress sequence, target, or memory; cross-conversation cursors fail at the database.
 
-- [ ] **Step 5: Run task gate, update logs, and commit**
+- [x] **Step 5: Run task gate, update logs, and commit**
 
 Run Ruff, affected repository tests, Alembic check, and `git diff --check`; record and commit with `feat(compaction): add atomic persistence and job repository`.
 
@@ -476,6 +476,9 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Task 1 | Complete | RED: `pytest tests/test_conversation_summary_config.py -q` produced 26 expected failures for missing fields/invariants. GREEN: targeted plus config/summarizer regressions produced `36 passed`. Ruff formatting reports both changed Python files formatted; the new test has zero lint errors and the diff adds zero overlong lines. Whole-file `config.py` still reports the same 42 pre-existing E501 errors as `HEAD`; `git diff --check` passed. |
 | 2026-07-15 | Task 2 | Complete | RED: token-counter tests failed at collection with the expected missing-module error. GREEN: 16 focused tests passed. Final gate: token, context-window, image-history, and model-context suites produced `76 passed`; Ruff lint passed; both files were formatted after one formatter-only iteration; `git diff --check` passed. |
 | 2026-07-15 | Task 3 | Complete | RED: schema and migration tests failed for the missing job model/revision. GREEN: model/migration contracts passed. Disposable PostgreSQL verification from supported previous head validated deterministic `1,2,3` sequence backfill, next sequence `4`, named constraints/indexes, legacy payload invalidation/version `7→8`, `alembic current/check`, downgrade restoration, and re-upgrade. Final schema/container gate: `17 passed`; Ruff lint/format and `git diff --check` passed. A from-zero run was blocked in immutable history by the pre-existing duplicate `decision_type` enum migration; no old revision was altered. |
+| 2026-07-15 | Task 4, steps 1–2 | In progress | Added fast SQL-contract tests plus PostgreSQL state-machine/invalidation coverage. RED: `.conda\\python.exe -m pytest tests/test_conversation_compaction_repository.py -q` failed during collection with the expected `ModuleNotFoundError` for `app.repositories.conversation_compaction`. |
+| 2026-07-15 | Task 4, steps 3–4 | In progress | Fast SQL contracts passed (`4 passed`). A disposable PostgreSQL suite passed (`9 passed`) after proving and fixing nullable eager-join locking and stale mutation-lease races. Coverage includes concurrent `1..12` allocation, target `12`, real `SKIP LOCKED`, live/expired/wrong-token leases, retry/dead/reconcile, ownership, version/cursor/lease CAS, edit/delete rebuild, and cross-conversation composite-FK rejection. Affected history/container regressions passed (`12 passed`). |
+| 2026-07-15 | Task 4 | Complete | Final gate: new/affected repository, schema, history, and container suites produced `19 passed`; disposable PostgreSQL produced `9 passed`; Ruff lint passed for all task changes (with pre-existing message-file E501 ignored only for that legacy file); all three new files are Ruff-formatted; `alembic check` reported no new operations; `git diff --check` passed. |
 
 ## Decision Log
 
@@ -493,3 +496,7 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Convert legacy free-form summaries into invalid empty structured rows with an incremented version. | Free-form text cannot be safely or deterministically promoted into the validated schema; invalidation guarantees it is never reused while preserving conversation/version continuity. |
 | 2026-07-15 | Verify migration from `w7x8y9z0a1b2`, not by rewriting old migration history. | The repository's from-zero history has a pre-existing duplicate enum defect; production rollout starts from the applied previous head, and the design explicitly forbids rewriting applied revisions. |
 | 2026-07-15 | Do not downgrade the live development database after automatic startup migration advanced it. | Active API processes applied the new head when the revision appeared; destructive rollback would disrupt those sessions, so all downgrade testing remained disposable. |
+| 2026-07-15 | Let notification-driven claims bypass reconciliation debounce while generic scans respect `available_at`. | Reconciliation advances `available_at` before publishing to suppress duplicate dispatch; the addressed task must still be able to claim immediately, while opportunistic scanners must honor retry/debounce timing. |
+| 2026-07-15 | Revoke an active compaction lease when a covered transcript message is edited or deleted. | Target coalescing normally preserves a live lease, but a mutation makes that worker's captured transcript stale; clearing the lease and forcing `pending` makes its subsequent CAS fail and guarantees a full rebuild. |
+| 2026-07-15 | Require an unexpired lease for input loading, memory CAS, completion, and failure transitions. | A token alone does not remain authoritative after its deadline; reconciliation owns recovery once a lease expires. |
+| 2026-07-15 | Build disposable repository tests from only their required PostgreSQL tables. | Metadata-wide `create_all` hits a pre-existing malformed `task_plans.task_metadata` JSONB default; isolating the authoritative compaction tables plus mapper-required `feedbacks` tests this subsystem without altering unrelated code. |

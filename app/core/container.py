@@ -28,6 +28,7 @@ from app.interfaces.planning_runtime_interface import IPlanningRuntimeService
 from app.interfaces.task_plan_service_interface import ITaskPlanService
 from app.repositories.agent_model_config import AgentModelConfigRepository
 from app.repositories.conversation import ConversationRepository
+from app.repositories.conversation_compaction import ConversationCompactionRepository
 from app.repositories.conversation_memory_summary import (
     ConversationMemorySummaryRepository,
 )
@@ -204,9 +205,15 @@ class Container(containers.DeclarativeContainer):
         session_factory=db.provided.session,
     )
 
+    conversation_compaction_repository = providers.Factory(
+        ConversationCompactionRepository,
+        session_factory=db.provided.session,
+    )
+
     message_repository = providers.Factory(
         MessageRepository,
         session_factory=db.provided.session,
+        compaction_repository=conversation_compaction_repository,
     )
 
     feedback_repository = providers.Factory(
