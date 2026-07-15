@@ -359,23 +359,23 @@ Run Ruff and legacy-runner symbol scan; record and commit with `feat(compaction)
 - Modify: `app/main.py`
 - Create: `tests/test_conversation_compaction_health.py`
 
-- [ ] **Step 1: Write failing observability tests**
+- [x] **Step 1: Write failing observability tests**
 
 Assert required counters/gauges/histograms, provider/model/content-class calibration labels, cost metadata, queue/dead/lease/lag health checks, no transcript/summary/conversation IDs in metrics or response, and aggregate health separation from Celery health.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run health tests. Expected: missing endpoint/collector.
 
-- [ ] **Step 3: Implement content-free metrics and health service**
+- [x] **Step 3: Implement content-free metrics and health service**
 
 Use bounded label cardinality and sanitized error classifications. Health response exposes aggregate counts/ages/lag and status only.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run health and main-app tests. Expected: endpoint reports healthy/degraded/unhealthy deterministically without tenant content.
 
-- [ ] **Step 5: Run task gate, update logs, and commit**
+- [x] **Step 5: Run task gate, update logs, and commit**
 
 Run Ruff and `git diff --check`; record and commit with `feat(compaction): add summary observability`.
 
@@ -492,6 +492,9 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Task 9, steps 1–2 | In progress | Added terminal-category publication ordering, user exclusion, broker-failure durability, hidden-placeholder filtering, and legacy-runner deletion tests. RED produced `9 failed, 3 passed`: `MessageRepository` has no after-commit publisher dependency and `MessageService` still contains the in-process summary runner. |
 | 2026-07-15 | Task 9, steps 3–4 | In progress | `MessageRepository.create` now returns from the atomic message/sequence/job transaction before publishing a content-free Celery hint; broker failures are sanitized and suppressed because the committed job remains reconcilable. Removed all MessageService pending/active state, runner methods, refresh method, scheduling calls, and obsolete constructor wiring. Focused GREEN produced `30 passed`; expanded ordinary/stream/partial/stop/error/resume/HITL/history coverage produced `77 passed`. The PostgreSQL suite was discovered but skipped without `TEST_DATABASE_URL`; its unchanged atomic persistence implementation previously passed the disposable Task 4 gate. |
 | 2026-07-15 | Task 9 | Complete | Final repository/worker/message-stream/stop/error/resume/HITL/history/container gate produced `94 passed`. Ruff lint passed for all task files with only the two documented pre-existing `message.py` E501 lines ignored; new/central files passed format checks; `git diff --check` passed. The application scan found none of the six legacy in-process runner symbols. |
+| 2026-07-15 | Task 10, steps 1–2 | In progress | Added tests for required compaction metrics, bounded provider/model/content-class/error labels, cost/calibration metadata, deterministic trim/overflow measurements, aggregate queue/dead/lease/lag status, content exclusion, and endpoint separation from Celery health. RED failed collection with the expected missing `app.api.health` module. |
+| 2026-07-15 | Task 10, steps 3–4 | In progress | Added a private Prometheus registry, bounded label normalization, worker/request-path metric emission, repository aggregate health queries, and separate `/health/conversation-compaction` plus `/metrics/conversation-compaction` endpoints. Initial health GREEN produced `3 passed`; the expanded worker/budget/RAG/container gate first found and fixed a handler-name shadowing bug, then found and fixed a lazy-import circular dependency. Repeated gate produced `66 passed`. |
+| 2026-07-15 | Task 10 | Complete | Full compaction schema/migration/repository/compactor/worker/message/budget/token/health/container gate produced `92 passed, 10 skipped` (PostgreSQL tests require `TEST_DATABASE_URL`); the post-format affected repeat produced `60 passed`. Ruff lint and new/central-file format checks passed; `git diff --check` passed. Metrics and health output contain only bounded labels and aggregate counts/ages/lag. |
 
 ## Decision Log
 
@@ -525,3 +528,5 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Exclude context-overflow errors from generic provider retries and provider fallback. | Replaying the same oversized payload with backoff cannot help; one aggressive structural reduction is permitted, then a sanitized `provider_context_overflow` is surfaced without leaking provider details or looping across fallbacks. |
 | 2026-07-15 | Publish compaction hints in `MessageRepository.create` after the transaction-owning compaction repository returns. | Every assistant persistence path already converges on this repository boundary; this gives ordinary, streaming, partial, stopped, resumed, and error terminals identical ordering while user messages remain notification-free. |
 | 2026-07-15 | Treat broker publication as a recoverable hint, never part of message durability. | The assistant row and coalesced PostgreSQL job commit together first; publication failure cannot roll them back, and periodic reconciliation recovers the pending job. |
+| 2026-07-15 | Normalize provider/model/content/error metric labels into fixed coarse families. | Provider payloads, custom model identifiers, transcript fragments, UUIDs, and arbitrary error strings must never become labels; fixed families bound cardinality and keep telemetry content-free. |
+| 2026-07-15 | Classify dead jobs or expired leases as unhealthy and stale/retrying/lagged work as degraded. | Permanent loss and abandoned ownership require immediate operator action, while recoverable backlog should remain distinguishable from both healthy operation and terminal failure. |

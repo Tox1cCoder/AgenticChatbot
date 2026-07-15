@@ -23,6 +23,7 @@ from app.api import (
     device_runtime_router,
     documents_router,
     feedback_router,
+    health_router,
     hitl_router,
     mcp_router,
     messages_router,
@@ -262,6 +263,7 @@ def create_app() -> FastAPI:
     app.include_router(custom_agents_conversation_router, prefix="/ai")
     app.include_router(messages_router)
     app.include_router(feedback_router)
+    app.include_router(health_router)
     app.include_router(documents_router)
     app.include_router(mcp_router)
     app.include_router(hitl_router)

@@ -635,6 +635,62 @@ class ConversationCompactionRepository:
                 session.expunge(memory)
             return memory
 
+    def get_compaction_health_snapshot(self) -> dict[str, Any]:
+        """Return aggregate queue, lease, and sequence-lag health without IDs."""
+        now = self._utcnow()
+        with self.session_factory() as session:
+            count_rows = session.execute(
+                select(ConversationSummaryJob.status, func.count())
+                .group_by(ConversationSummaryJob.status)
+            ).all()
+            job_counts = {str(status): int(count) for status, count in count_rows}
+            oldest_updated = session.execute(
+                select(func.min(ConversationSummaryJob.updated_at)).where(
+                    ConversationSummaryJob.status.in_(
+                        [
+                            SummaryJobStatus.PENDING.value,
+                            SummaryJobStatus.RETRY.value,
+                        ]
+                    )
+                )
+            ).scalar_one()
+            expired_lease_count = int(
+                session.execute(
+                    select(func.count()).select_from(ConversationSummaryJob).where(
+                        ConversationSummaryJob.status
+                        == SummaryJobStatus.PROCESSING.value,
+                        ConversationSummaryJob.lease_expires_at <= now,
+                    )
+                ).scalar_one()
+                or 0
+            )
+            lag = func.greatest(
+                ConversationSummaryJob.requested_through_sequence
+                - func.coalesce(ConversationMemorySummary.last_summarized_sequence, 0),
+                0,
+            )
+            max_lag, total_lag = session.execute(
+                select(func.coalesce(func.max(lag), 0), func.coalesce(func.sum(lag), 0))
+                .select_from(ConversationSummaryJob)
+                .outerjoin(
+                    ConversationMemorySummary,
+                    ConversationMemorySummary.conversation_id
+                    == ConversationSummaryJob.conversation_id,
+                )
+            ).one()
+        oldest_age = 0.0
+        if oldest_updated is not None:
+            if oldest_updated.tzinfo is None:
+                oldest_updated = oldest_updated.replace(tzinfo=timezone.utc)
+            oldest_age = max(0.0, (now - oldest_updated).total_seconds())
+        return {
+            "job_counts": job_counts,
+            "oldest_actionable_age_seconds": oldest_age,
+            "expired_lease_count": expired_lease_count,
+            "max_sequence_lag": int(max_lag or 0),
+            "total_sequence_lag": int(total_lag or 0),
+        }
+
     def invalidate_for_mutation(
         self,
         message_id: UUID,

@@ -24,6 +24,7 @@ from ...database.session import SessionLocal
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ...models.document import Document
 from ...models.document_chunk import DocumentChunk
+from ...observability.conversation_compaction import conversation_compaction_metrics
 from ...repositories.document_chunk import DocumentChunkRepository
 from ...repositories.document_image import DocumentImageRepository
 from ..context_overflow import is_context_overflow_error, prepare_aggressive_context_retry
@@ -834,10 +835,14 @@ class RAGAgent(BaseAgent):
                         )
                     except Exception as retry_exc:
                         if is_context_overflow_error(retry_exc):
+                            conversation_compaction_metrics.record_provider_overflow_retry(
+                                "failure"
+                            )
                             raise ContextBudgetExceededError(
                                 "provider_context_overflow"
                             ) from retry_exc
                         raise
+                    conversation_compaction_metrics.record_provider_overflow_retry("success")
                     context_overflow_retried = True
                 runtime_config = current_runtime
                 break

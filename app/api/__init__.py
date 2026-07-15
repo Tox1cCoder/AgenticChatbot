@@ -15,6 +15,7 @@ from app.api.custom_agents import router as custom_agents_router  # noqa: E402
 from app.api.device_runtime import router as device_runtime_router  # noqa: E402
 from app.api.documents import router as documents_router  # noqa: E402
 from app.api.feedback import router as feedback_router  # noqa: E402
+from app.api.health import router as health_router  # noqa: E402
 from app.api.hitl import router as hitl_router  # noqa: E402
 from app.api.mcp import router as mcp_router  # noqa: E402
 from app.api.messages import router as messages_router  # noqa: E402
@@ -37,6 +38,7 @@ __all__ = [
     "custom_agents_conversation_router",
     "messages_router",
     "feedback_router",
+    "health_router",
     "hitl_router",
     "mcp_router",
     "model_config_router",

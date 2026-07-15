@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
 from uuid import UUID
@@ -17,6 +18,7 @@ from app.ai.conversation_memory import ConversationMemory
 from app.ai.model_factory import ModelFactory
 from app.ai.token_counter import TokenCounter
 from app.core.config import settings
+from app.observability.conversation_compaction import conversation_compaction_metrics
 from app.repositories.conversation_compaction import ConversationCompactionRepository
 from app.workers.celery_app import celery_app
 
@@ -68,13 +70,16 @@ class ConversationCompactionWorker:
         self.compactor = compactor
         self.settings = settings
         self.jitter = jitter
+        self.metrics = conversation_compaction_metrics
 
     async def execute(self, conversation_id: UUID) -> WorkerOutcome:
+        started = time.perf_counter()
         claim = self.repository.claim_job(
             conversation_id,
             lease_seconds=self.settings.conversation_summary_lease_seconds,
         )
         if claim is None:
+            self.metrics.record_job_outcome("skipped", error_code="not_claimed")
             return WorkerOutcome("noop", "not_claimed")
 
         compaction_input = self.repository.load_compaction_input(claim)
@@ -85,6 +90,7 @@ class ConversationCompactionWorker:
                 permanent=True,
                 max_attempts=self.settings.conversation_summary_max_attempts,
             )
+            self.metrics.record_job_outcome("dead", error_code="ownership_invalid")
             return WorkerOutcome("dead", "ownership_invalid")
 
         previous_memory = self._previous_memory(compaction_input.summary_payload)
@@ -98,12 +104,34 @@ class ConversationCompactionWorker:
                 timeout=self.settings.conversation_summary_timeout_seconds,
             )
         except TimeoutError:
+            self.metrics.record_compaction(
+                mode="background",
+                outcome="timeout",
+                provider=self.compactor.provider,
+                model=self.compactor.model,
+                content_class="text",
+                input_tokens=0,
+                output_tokens=0,
+                duration_seconds=time.perf_counter() - started,
+            )
             return self._retry(claim, "provider_timeout")
+
+        self.metrics.record_compaction(
+            mode="background",
+            outcome="success" if result.success else "failure",
+            provider=self.compactor.provider,
+            model=self.compactor.model,
+            content_class="text",
+            input_tokens=result.trigger.token_count,
+            output_tokens=result.summary_token_count,
+            duration_seconds=time.perf_counter() - started,
+        )
 
         if not result.success:
             error_code = result.error_code or "generation_failed"
             if error_code in _SKIPPED_ERRORS:
                 status = self.repository.complete_claim(claim)
+                self.metrics.record_job_outcome("skipped", error_code=error_code)
                 return WorkerOutcome("skipped", status or error_code)
             if error_code in _PERMANENT_ERRORS:
                 self.repository.fail_claim(
@@ -112,6 +140,7 @@ class ConversationCompactionWorker:
                     permanent=True,
                     max_attempts=self.settings.conversation_summary_max_attempts,
                 )
+                self.metrics.record_job_outcome("dead", error_code=error_code)
                 return WorkerOutcome("dead", error_code)
             return self._retry(claim, error_code)
 
@@ -131,12 +160,20 @@ class ConversationCompactionWorker:
             prompt_version=self.compactor.prompt_version,
         )
         if not persisted:
-            self._retry(claim, "cas_conflict")
+            self._retry(claim, "cas_conflict", record_outcome=False)
+            self.metrics.record_job_outcome("conflict", error_code="cas_conflict")
             return WorkerOutcome("conflict", "cas_conflict")
         status = self.repository.complete_claim(claim)
+        self.metrics.record_job_outcome("success", error_code=None)
         return WorkerOutcome("completed", status or "lease_lost")
 
-    def _retry(self, claim, error_code: str) -> WorkerOutcome:
+    def _retry(
+        self,
+        claim,
+        error_code: str,
+        *,
+        record_outcome: bool = True,
+    ) -> WorkerOutcome:
         delay = compute_retry_delay(
             claim.attempt_count,
             base_seconds=self.settings.conversation_summary_retry_base_seconds,
@@ -152,7 +189,11 @@ class ConversationCompactionWorker:
             max_attempts=self.settings.conversation_summary_max_attempts,
         )
         if claim.attempt_count + 1 >= self.settings.conversation_summary_max_attempts:
+            if record_outcome:
+                self.metrics.record_job_outcome("dead", error_code=error_code)
             return WorkerOutcome("dead", error_code)
+        if record_outcome:
+            self.metrics.record_job_outcome("retry", error_code=error_code)
         return WorkerOutcome("retry", error_code)
 
     @staticmethod

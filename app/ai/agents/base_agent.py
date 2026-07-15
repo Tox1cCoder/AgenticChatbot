@@ -21,6 +21,7 @@ from ...core.runtime_modeling import (
     RuntimeFallbackConfig,
 )
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
+from ...observability.conversation_compaction import conversation_compaction_metrics
 from ..agent_config import AGENT_CONFIG, create_gemini_client, create_langchain_model
 from ..client_runtime_tools import (
     get_active_client_runtime_session,
@@ -843,6 +844,29 @@ class BaseAgent(ABC):
         )
         if result.error_code:
             raise ContextBudgetExceededError(result.error_code)
+        if result.removed_groups:
+            conversation_compaction_metrics.record_deterministic_trim(
+                removed_groups=result.removed_groups
+            )
+        if result.emergency_compacted:
+            conversation_compaction_metrics.record_compaction(
+                mode="emergency",
+                outcome="success",
+                provider=runtime_config.provider,
+                model=runtime_config.model,
+                content_class=(
+                    "mixed"
+                    if tools and attachments
+                    else "tools"
+                    if tools
+                    else "multimodal"
+                    if attachments
+                    else "text"
+                ),
+                input_tokens=result.input_tokens,
+                output_tokens=0,
+                duration_seconds=0,
+            )
         return result
 
     @staticmethod
@@ -1082,10 +1106,14 @@ class BaseAgent(ABC):
                         )
                     except Exception as retry_exc:
                         if is_context_overflow_error(retry_exc):
+                            conversation_compaction_metrics.record_provider_overflow_retry(
+                                "failure"
+                            )
                             raise ContextBudgetExceededError(
                                 "provider_context_overflow"
                             ) from retry_exc
                         raise
+                    conversation_compaction_metrics.record_provider_overflow_retry("success")
                     context_overflow_retried = True
             except ContextBudgetExceededError:
                 raise
@@ -1227,6 +1255,20 @@ class BaseAgent(ABC):
                     actual_usage.get("reasoning_tokens"),
                     token_breakdown.total_tokens,
                 )
+                if budget_result is not None and actual_usage["input_tokens"] is not None:
+                    conversation_compaction_metrics.record_token_calibration(
+                        provider=runtime_config.provider,
+                        model=runtime_config.model,
+                        content_class=(
+                            "mixed"
+                            if bound_tools and has_tool_context
+                            else "tools"
+                            if bound_tools
+                            else "text"
+                        ),
+                        estimated_tokens=budget_result.input_tokens,
+                        actual_tokens=actual_usage["input_tokens"],
+                    )
 
             tool_calls = None
             if hasattr(response, "tool_calls") and response.tool_calls:
