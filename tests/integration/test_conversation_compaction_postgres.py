@@ -157,6 +157,7 @@ def test_claim_token_retry_dead_and_expired_lease_reconciliation(
     )
     retry_claim = repository.claim_job(conversation_id, lease_seconds=1)
     assert retry_claim is not None
+    assert retry_claim.attempt_count == 1
     with session_factory.begin() as session:
         job = session.get(ConversationSummaryJob, conversation_id)
         job.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
@@ -381,3 +382,23 @@ def test_database_rejects_cross_conversation_memory_cursor(
             )
             session.execute(delete(Message).where(Message.conversation_id == other_conversation_id))
             session.execute(delete(Conversation).where(Conversation.id == other_conversation_id))
+
+
+def test_historical_backfill_listing_and_request_are_idempotent(
+    seeded_repository, session_factory
+) -> None:
+    repository, _, conversation_id = seeded_repository
+    message = repository.persist_message(
+        _message(conversation_id, MessageRole.assistant, "historical")
+    )
+    with session_factory.begin() as session:
+        session.execute(
+            delete(ConversationSummaryJob).where(
+                ConversationSummaryJob.conversation_id == conversation_id
+            )
+        )
+
+    assert (conversation_id, message.sequence) in repository.list_backfill_candidates(limit=100)
+    assert repository.request_backfill(conversation_id, message.sequence)
+    assert not repository.request_backfill(conversation_id, message.sequence)
+    assert (conversation_id, message.sequence) not in repository.list_backfill_candidates(limit=100)

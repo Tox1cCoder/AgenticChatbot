@@ -1,0 +1,308 @@
+"""Celery orchestration for durable conversation compaction jobs."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import random
+from datetime import datetime, timedelta, timezone
+from typing import Any, NamedTuple
+from uuid import UUID
+
+from app.ai.conversation_compactor import (
+    CompactionCredentialResolver,
+    ConversationCompactor,
+)
+from app.ai.conversation_memory import ConversationMemory
+from app.ai.model_factory import ModelFactory
+from app.ai.token_counter import TokenCounter
+from app.core.config import settings
+from app.repositories.conversation_compaction import ConversationCompactionRepository
+from app.workers.celery_app import celery_app
+
+logger = logging.getLogger(__name__)
+
+_PERMANENT_ERRORS = {
+    "credential_unavailable",
+    "invalid_json",
+    "invalid_memory",
+    "empty_memory",
+    "memory_over_budget",
+    "ownership_invalid",
+    "invariant_invalid",
+}
+_SKIPPED_ERRORS = {"not_triggered", "no_complete_turn"}
+
+
+class WorkerOutcome(NamedTuple):
+    status: str
+    code: str
+
+
+def compute_retry_delay(
+    attempt_count: int,
+    *,
+    base_seconds: int,
+    max_seconds: int,
+    jitter=random.uniform,
+) -> float:
+    """Return capped exponential delay with bounded positive jitter."""
+    exponent = max(0, int(attempt_count))
+    raw = min(float(max_seconds), float(base_seconds) * (2**exponent))
+    jittered = raw + float(jitter(0, raw * 0.25))
+    return min(float(max_seconds), jittered)
+
+
+class ConversationCompactionWorker:
+    """Execute one lease-scoped compaction without holding database locks."""
+
+    def __init__(
+        self,
+        *,
+        repository: ConversationCompactionRepository,
+        compactor: ConversationCompactor,
+        settings: Any,
+        jitter=random.uniform,
+    ) -> None:
+        self.repository = repository
+        self.compactor = compactor
+        self.settings = settings
+        self.jitter = jitter
+
+    async def execute(self, conversation_id: UUID) -> WorkerOutcome:
+        claim = self.repository.claim_job(
+            conversation_id,
+            lease_seconds=self.settings.conversation_summary_lease_seconds,
+        )
+        if claim is None:
+            return WorkerOutcome("noop", "not_claimed")
+
+        compaction_input = self.repository.load_compaction_input(claim)
+        if compaction_input is None:
+            self.repository.fail_claim(
+                claim,
+                error_code="ownership_invalid",
+                permanent=True,
+                max_attempts=self.settings.conversation_summary_max_attempts,
+            )
+            return WorkerOutcome("dead", "ownership_invalid")
+
+        previous_memory = self._previous_memory(compaction_input.summary_payload)
+        try:
+            result = await asyncio.wait_for(
+                self.compactor.compact(
+                    compaction_input.messages,
+                    previous_memory=previous_memory,
+                    user_id=compaction_input.owner_id,
+                ),
+                timeout=self.settings.conversation_summary_timeout_seconds,
+            )
+        except TimeoutError:
+            return self._retry(claim, "provider_timeout")
+
+        if not result.success:
+            error_code = result.error_code or "generation_failed"
+            if error_code in _SKIPPED_ERRORS:
+                status = self.repository.complete_claim(claim)
+                return WorkerOutcome("skipped", status or error_code)
+            if error_code in _PERMANENT_ERRORS:
+                self.repository.fail_claim(
+                    claim,
+                    error_code=error_code,
+                    permanent=True,
+                    max_attempts=self.settings.conversation_summary_max_attempts,
+                )
+                return WorkerOutcome("dead", error_code)
+            return self._retry(claim, error_code)
+
+        persisted = self.repository.persist_memory_cas(
+            claim,
+            base_summary_version=compaction_input.summary_version,
+            base_cursor=compaction_input.last_summarized_sequence,
+            summary_payload=result.memory.model_dump(),
+            summary_schema_version=1,
+            last_summarized_sequence=result.last_summarized_sequence,
+            source_message_count=len(result.selection.compactable_prefix),
+            source_token_count=result.trigger.token_count,
+            summary_token_count=result.summary_token_count,
+            provider=self.compactor.provider,
+            model=self.compactor.model,
+            tokenizer=result.trigger.token_strategy,
+            prompt_version=self.compactor.prompt_version,
+        )
+        if not persisted:
+            self._retry(claim, "cas_conflict")
+            return WorkerOutcome("conflict", "cas_conflict")
+        status = self.repository.complete_claim(claim)
+        return WorkerOutcome("completed", status or "lease_lost")
+
+    def _retry(self, claim, error_code: str) -> WorkerOutcome:
+        delay = compute_retry_delay(
+            claim.attempt_count,
+            base_seconds=self.settings.conversation_summary_retry_base_seconds,
+            max_seconds=self.settings.conversation_summary_retry_max_seconds,
+            jitter=self.jitter,
+        )
+        retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        self.repository.fail_claim(
+            claim,
+            error_code=error_code,
+            permanent=False,
+            retry_at=retry_at,
+            max_attempts=self.settings.conversation_summary_max_attempts,
+        )
+        if claim.attempt_count + 1 >= self.settings.conversation_summary_max_attempts:
+            return WorkerOutcome("dead", error_code)
+        return WorkerOutcome("retry", error_code)
+
+    @staticmethod
+    def _previous_memory(payload: dict[str, Any] | None) -> ConversationMemory | None:
+        if not payload:
+            return None
+        try:
+            return ConversationMemory.model_validate(payload)
+        except Exception:
+            return None
+
+
+def dispatch_due_jobs(
+    repository: ConversationCompactionRepository,
+    publisher,
+    *,
+    debounce_seconds: int,
+    limit: int,
+) -> int:
+    """Reserve due rows before publishing content-free task notifications."""
+    conversation_ids = repository.reconcile_due_jobs(
+        limit=limit,
+        dispatch_debounce_seconds=debounce_seconds,
+    )
+    published = 0
+    for conversation_id in conversation_ids:
+        try:
+            publisher(conversation_id)
+        except Exception:
+            logger.warning("Summary task publication failed code=broker_publish_failed")
+        else:
+            published += 1
+    return published
+
+
+def request_historical_backfill(
+    repository: ConversationCompactionRepository,
+    publisher,
+    *,
+    batch_size: int,
+) -> int:
+    """Request and publish one bounded idempotent historical batch."""
+    published = 0
+    for conversation_id, target in repository.list_backfill_candidates(limit=batch_size):
+        if not repository.request_backfill(conversation_id, target):
+            continue
+        try:
+            publisher(str(conversation_id))
+        except Exception:
+            logger.warning("Summary backfill publication failed code=broker_publish_failed")
+        else:
+            published += 1
+    return published
+
+
+async def _langchain_generate(
+    *,
+    prompt: str,
+    provider: str,
+    model: str,
+    api_key: str | None,
+    **_kwargs,
+) -> str:
+    if not api_key:
+        raise ValueError("credential_unavailable")
+    client = ModelFactory.create_model(
+        provider=provider,
+        model=model,
+        api_key=api_key,
+        temperature=0,
+        timeout=settings.conversation_summary_timeout_seconds,
+    )
+    response = await client.ainvoke(prompt)
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(item.get("text", "")) if isinstance(item, dict) else str(item) for item in content
+        )
+    return str(content)
+
+
+def _build_worker() -> ConversationCompactionWorker:
+    from app.core.container import get_container
+
+    container = get_container()
+    repository = container.conversation_compaction_repository()
+    provider_service = container.provider_service()
+    resolver = CompactionCredentialResolver(
+        provider=settings.conversation_summary_provider,
+        server_credentials={"gemini": settings.gemini_api_key},
+        user_credential_resolver=provider_service.resolve_provider_credentials,
+        allow_user_credentials=True,
+    )
+    compactor = ConversationCompactor(
+        token_counter=TokenCounter(),
+        generator=_langchain_generate,
+        provider=settings.conversation_summary_provider,
+        model=settings.conversation_summary_model,
+        trigger_messages=settings.conversation_summary_trigger_messages,
+        trigger_tokens=settings.conversation_summary_trigger_tokens,
+        keep_recent_turns=settings.conversation_summary_keep_recent_turns,
+        max_summary_tokens=settings.conversation_summary_max_tokens,
+        credential_resolver=resolver,
+    )
+    return ConversationCompactionWorker(
+        repository=repository,
+        compactor=compactor,
+        settings=settings,
+    )
+
+
+@celery_app.task(
+    name="app.workers.conversation_compaction.compact_conversation_task",
+    ignore_result=True,
+)
+def compact_conversation_task(conversation_id: str) -> dict[str, str]:
+    """Process one content-free conversation notification."""
+    try:
+        parsed_id = UUID(str(conversation_id))
+    except (TypeError, ValueError):
+        return WorkerOutcome("dead", "invalid_conversation_id")._asdict()
+    outcome = asyncio.run(_build_worker().execute(parsed_id))
+    return outcome._asdict()
+
+
+@celery_app.task(
+    name="app.workers.conversation_compaction.reconcile_conversation_summaries_task",
+    ignore_result=True,
+)
+def reconcile_conversation_summaries_task(limit: int = 100) -> int:
+    worker = _build_worker()
+    return dispatch_due_jobs(
+        worker.repository,
+        lambda conversation_id: compact_conversation_task.delay(str(conversation_id)),
+        debounce_seconds=settings.conversation_summary_reconcile_seconds,
+        limit=limit,
+    )
+
+
+@celery_app.task(
+    name="app.workers.conversation_compaction.backfill_conversation_summaries_task",
+    ignore_result=True,
+    rate_limit="10/m",
+)
+def backfill_conversation_summaries_task(batch_size: int = 100) -> int:
+    worker = _build_worker()
+    return request_historical_backfill(
+        worker.repository,
+        compact_conversation_task.delay,
+        batch_size=batch_size,
+    )

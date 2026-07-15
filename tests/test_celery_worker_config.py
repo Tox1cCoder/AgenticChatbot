@@ -11,7 +11,7 @@ from .conftest import FakePopen
 def _captured_cmds(
     monkeypatch, *, system: str, env: dict[str, str] | None = None
 ) -> list[list[str]]:
-    """Return [parse_cmd, index_cmd] spawned by start_worker()."""
+    """Return [parse_cmd, index_cmd, summary_cmd] spawned by start_worker()."""
     spawned: list[list[str]] = []
 
     monkeypatch.setattr("app.workers.start_worker.os.chdir", lambda _path: None)
@@ -49,7 +49,7 @@ def _captured_cmds(
 
 def test_windows_auto_pool_resolves_to_threads(monkeypatch):
     cmds = _captured_cmds(monkeypatch, system="Windows", env={"CELERY_WORKER_POOL": "auto"})
-    assert len(cmds) == 2, "Expected two worker processes (parse + index)"
+    assert len(cmds) == 3, "Expected parse, index, and summary worker processes"
     for cmd in cmds:
         joined = " ".join(cmd)
         assert "--pool=threads" in joined
@@ -58,7 +58,7 @@ def test_windows_auto_pool_resolves_to_threads(monkeypatch):
 
 def test_linux_auto_pool_resolves_to_prefork(monkeypatch):
     cmds = _captured_cmds(monkeypatch, system="Linux", env={"CELERY_WORKER_POOL": "auto"})
-    assert len(cmds) == 2
+    assert len(cmds) == 3
     for cmd in cmds:
         joined = " ".join(cmd)
         assert "--pool=prefork" in joined
@@ -74,7 +74,7 @@ def test_concurrency_is_configurable(monkeypatch):
             "CELERY_INDEX_CONCURRENCY": "2",
         },
     )
-    assert len(cmds) == 2
+    assert len(cmds) == 3
     # parse worker
     parse_joined = " ".join(cmds[0])
     assert "--concurrency=4" in parse_joined
@@ -85,14 +85,17 @@ def test_concurrency_is_configurable(monkeypatch):
     assert "--concurrency=2" in index_joined
     assert "--pool=threads" in index_joined
     assert "--queues=index" in index_joined
+    summary_joined = " ".join(cmds[2])
+    assert "--queues=summary" in summary_joined
 
 
 def test_explicit_solo_remains_available(monkeypatch):
     cmds = _captured_cmds(monkeypatch, system="Windows", env={"CELERY_WORKER_POOL": "solo"})
-    assert len(cmds) == 2
+    assert len(cmds) == 3
     for cmd in cmds:
         joined = " ".join(cmd)
         assert "--pool=solo" in joined
+        assert "--concurrency=1" in joined
 
 
 def test_time_limits_passed_through(monkeypatch):
@@ -107,7 +110,7 @@ def test_time_limits_passed_through(monkeypatch):
             "CELERY_INDEX_TIME_LIMIT": "120",
         },
     )
-    assert len(cmds) == 2
+    assert len(cmds) == 3
     for cmd in cmds:
         joined = " ".join(cmd)
         assert "--max-tasks-per-child=5" in joined
@@ -123,11 +126,12 @@ def test_time_limits_passed_through(monkeypatch):
 def test_hostname_disambiguation(monkeypatch):
     """Each worker must have a distinct hostname for Celery monitoring."""
     cmds = _captured_cmds(monkeypatch, system="Linux", env={"CELERY_WORKER_POOL": "prefork"})
-    assert len(cmds) == 2
+    assert len(cmds) == 3
     parse_joined = " ".join(cmds[0])
     index_joined = " ".join(cmds[1])
     assert "--hostname=worker-parse@%h" in parse_joined
     assert "--hostname=worker-index@%h" in index_joined
+    assert "--hostname=worker-summary@%h" in " ".join(cmds[2])
 
 
 def test_document_processing_service_uses_factory_provider():
@@ -166,3 +170,18 @@ def test_celery_redis_broker_resilience_is_explicit():
 
     result_options = dict(celery_app.conf.result_backend_transport_options or {})
     assert result_options["visibility_timeout"] == 3600
+
+
+def test_summary_tasks_have_dedicated_routes_and_beat_schedules():
+    from app.workers.celery_app import celery_app
+
+    routes = dict(celery_app.conf.task_routes)
+    assert routes["app.workers.conversation_compaction.compact_conversation_task"] == {
+        "queue": "summary"
+    }
+    assert routes["app.workers.conversation_compaction.reconcile_conversation_summaries_task"] == {
+        "queue": "summary"
+    }
+    schedule = dict(celery_app.conf.beat_schedule)
+    assert schedule["reconcile-conversation-summaries"]["schedule"] == 60
+    assert schedule["backfill-conversation-summaries"]["options"]["queue"] == "summary"

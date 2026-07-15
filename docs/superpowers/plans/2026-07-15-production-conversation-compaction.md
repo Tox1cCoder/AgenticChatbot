@@ -241,23 +241,23 @@ Run Ruff and `git diff --check`; record and commit with `feat(compaction): add s
 - Modify: `tests/test_celery_worker_config.py`
 - Modify: `tests/test_start_worker.py`
 
-- [ ] **Step 1: Write failing task tests**
+- [x] **Step 1: Write failing task tests**
 
 Test task payload contains only `conversation_id`; lease commits before provider call; transient/permanent classification; exponential backoff with bounded jitter; five-attempt default; sanitized error codes; CAS conflict accounting; newer-target preservation; expired lease recovery; reconciler debounce-before-publish; duplicate notifications; and rate-limited idempotent backfill.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run new task and existing worker-config tests. Expected: missing summary routes/tasks.
 
-- [ ] **Step 3: Implement tasks and queue wiring**
+- [x] **Step 3: Implement tasks and queue wiring**
 
 Add `summary` queue routes and Beat schedules for reconciliation/backfill. Worker transactions wrap only claim/load/persist state, never the provider call. Broker publication is best effort and logs sanitized classifications.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run task and worker tests. Expected: all pass using eager/mocked Celery transport and real repository state machines.
 
-- [ ] **Step 5: Run task gate, update logs, and commit**
+- [x] **Step 5: Run task gate, update logs, and commit**
 
 Run Ruff and `git diff --check`; record and commit with `feat(compaction): add durable summary workers`.
 
@@ -481,6 +481,8 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Task 4 | Complete | Final gate: new/affected repository, schema, history, and container suites produced `19 passed`; disposable PostgreSQL produced `9 passed`; Ruff lint passed for all task changes (with pre-existing message-file E501 ignored only for that legacy file); all three new files are Ruff-formatted; `alembic check` reported no new operations; `git diff --check` passed. |
 | 2026-07-15 | Task 5, steps 1–2 | In progress | Added structured-memory, safety, trigger, selection, preservation, prompt-boundary, and credential-isolation tests. RED: both files failed collection with the expected missing `conversation_memory` and `conversation_compactor` modules. |
 | 2026-07-15 | Task 5 | Complete | GREEN: focused structured-memory/compactor suite produced `32 passed`. Final gate with the real token counter produced `48 passed`; Ruff lint and format checks passed for all four files; `git diff --check` passed. Tests cover exact threshold boundaries, independently disabled thresholds, full-window evaluation, assistant-ended prefix retention, strict six-key validation, content safety, prior-memory preservation, delimited prompt injection, and provider-exact credentials. |
+| 2026-07-15 | Task 6, steps 1–2 | In progress | Added worker orchestration, timeout/retry/dead/CAS, duplicate delivery, reconciliation, backfill, routes/Beat, and launcher tests. RED: collection failed with the expected missing `app.workers.conversation_compaction` module. |
+| 2026-07-15 | Task 6 | Complete | GREEN: worker/route/launcher suite produced `22 passed`, then `26 passed` with repository contracts. Disposable PostgreSQL produced `10 passed`, including idempotent historical backfill. Final affected gate produced `75 passed`; Ruff lint/format passed across eight task files; `alembic check` reported no operations; `git diff --check` passed. |
 
 ## Decision Log
 
@@ -505,3 +507,6 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Bound each structured-memory section to 50 items and each item to 500 characters. | The design requires bounded strings/items without prescribing limits; these caps allow useful durable facts while preventing a single field from bypassing the configured token cap or carrying full artifacts. |
 | 2026-07-15 | Permit quoted prompt-injection text as inert facts but reject executable, credential-shaped, and raw-base64 content. | User intent can legitimately mention malicious instructions; safety comes from strict JSON strings, untrusted prompt boundaries, validation, and application-enforced permissions rather than deleting semantically relevant quoted text. |
 | 2026-07-15 | Model compaction failure as a typed result that carries the prior memory but no candidate memory. | The pure compactor cannot accidentally overwrite durable state on invalid/empty/over-budget output, while workers receive a sanitized code for retry classification. |
+| 2026-07-15 | Use positive jitter up to 25% on capped exponential retry delays. | This disperses provider/broker recovery traffic while keeping every delay within the configured five-second base and fifteen-minute maximum. |
+| 2026-07-15 | Schedule reconciliation every configured 60 seconds and bounded historical backfill hourly. | Reconciliation is latency-sensitive crash/broker recovery; backfill is rate-limited maintenance work and remains idempotent through target-aware database requests. |
+| 2026-07-15 | Run a dedicated third worker process for the `summary` queue using existing general worker concurrency. | Queue isolation prevents model compaction from delaying parse/index jobs without adding an unplanned configuration field; `solo` mode is clamped to one process slot. |

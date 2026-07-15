@@ -105,14 +105,15 @@ def _spawn_worker(
 
 
 def start_worker():
-    """Start parse and index Celery workers using config-driven flags.
+    """Start parse, index, and summary Celery workers using config-driven flags.
 
-    Spawns two parallel worker processes:
+    Spawns three parallel worker processes:
     - parse worker  : consumes the ``parse`` queue, concurrency from celery_parse_concurrency
     - index worker  : consumes the ``index`` queue, concurrency from celery_index_concurrency
+    - summary worker: consumes the ``summary`` queue with durable PostgreSQL leases
 
     Dev-mode tip: for a minimal single-process setup start Celery manually with
-    ``celery -A app.workers.celery_app worker -Q parse,index`` to handle both queues.
+    ``celery -A app.workers.celery_app worker -Q parse,index,summary`` to handle all queues.
     """
     project_root = Path(__file__).parent.parent.parent
     os.chdir(project_root)
@@ -129,11 +130,13 @@ def start_worker():
 
     parse_concurrency = settings.celery_parse_concurrency
     index_concurrency = settings.celery_index_concurrency
+    summary_concurrency = max(1, settings.celery_worker_concurrency)
     if pool == "solo":
         # The solo pool only ever runs one task at a time. Clamp both
         # concurrency values so the printed banner does not mislead.
         parse_concurrency = 1
         index_concurrency = 1
+        summary_concurrency = 1
 
     p_parse = _spawn_worker(
         queues="parse",
@@ -153,26 +156,36 @@ def start_worker():
         label="index",
         settings=settings,
     )
+    p_summary = _spawn_worker(
+        queues="summary",
+        concurrency=summary_concurrency,
+        pool=pool,
+        time_limit=settings.conversation_summary_timeout_seconds + 30,
+        soft_time_limit=settings.conversation_summary_timeout_seconds + 15,
+        label="summary",
+        settings=settings,
+    )
 
-    print(f"Both workers started (PIDs: parse={p_parse.pid}, index={p_index.pid})")
+    workers = [p_parse, p_index, p_summary]
+    print(
+        f"Workers started (PIDs: parse={p_parse.pid}, index={p_index.pid}, summary={p_summary.pid})"
+    )
 
     try:
-        p_parse.wait()
-        p_index.wait()
+        for process in workers:
+            process.wait()
     except KeyboardInterrupt:
         print("\nShutting down workers...")
-        if p_parse.poll() is None:
-            p_parse.terminate()
-        if p_index.poll() is None:
-            p_index.terminate()
-        p_parse.wait()
-        p_index.wait()
+        for process in workers:
+            if process.poll() is None:
+                process.terminate()
+        for process in workers:
+            process.wait()
     except Exception as e:
         print(f"Error waiting for workers: {e}")
-        if p_parse.poll() is None:
-            p_parse.terminate()
-        if p_index.poll() is None:
-            p_index.terminate()
+        for process in workers:
+            if process.poll() is None:
+                process.terminate()
         raise
 
 

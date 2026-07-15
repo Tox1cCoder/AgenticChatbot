@@ -33,7 +33,7 @@ def test_start_worker_does_not_seed_default_celery_env_vars(monkeypatch):
     assert "CELERY_BROKER_URL" not in os.environ
     assert "CELERY_RESULT_BACKEND" not in os.environ
 
-    assert len(spawned) == 2, "Expected two worker processes (parse + index)"
+    assert len(spawned) == 3, "Expected parse, index, and summary worker processes"
 
     for cmd in spawned:
         joined = " ".join(cmd)

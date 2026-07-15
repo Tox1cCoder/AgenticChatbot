@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, case, exists, func, select, update
+from sqlalchemy import and_, case, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, lazyload
 
@@ -26,6 +26,7 @@ class SummaryJobClaim(NamedTuple):
     conversation_id: UUID
     requested_through_sequence: int
     lease_token: UUID
+    attempt_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class CompactionInput:
     """Detached authoritative input loaded after a worker commits its lease."""
 
     claim: SummaryJobClaim
+    owner_id: UUID
     summary_payload: dict[str, Any] | None
     summary_version: int
     last_summarized_sequence: int | None
@@ -226,6 +228,18 @@ class ConversationCompactionRepository:
                 ).scalar_one()
             if target is None:
                 return False
+            existing = session.get(ConversationSummaryJob, conversation_id)
+            if (
+                existing is not None
+                and existing.requested_through_sequence >= target
+                and existing.status
+                in {
+                    SummaryJobStatus.PENDING.value,
+                    SummaryJobStatus.PROCESSING.value,
+                    SummaryJobStatus.RETRY.value,
+                }
+            ):
+                return False
             session.execute(
                 self._job_upsert_statement(
                     conversation_id=conversation_id,
@@ -235,6 +249,59 @@ class ConversationCompactionRepository:
             )
             session.commit()
             return True
+
+    def list_backfill_candidates(self, *, limit: int = 100) -> list[tuple[UUID, int]]:
+        """Return historical conversations whose durable target is absent or stale."""
+        assistant_targets = (
+            select(
+                Message.conversation_id.label("conversation_id"),
+                func.max(Message.sequence).label("target"),
+            )
+            .where(
+                Message.sender == MessageRole.assistant.value,
+                Message.deleted_at.is_(None),
+            )
+            .group_by(Message.conversation_id)
+            .subquery()
+        )
+        with self.session_factory() as session:
+            rows = session.execute(
+                select(assistant_targets.c.conversation_id, assistant_targets.c.target)
+                .join(
+                    Conversation,
+                    Conversation.id == assistant_targets.c.conversation_id,
+                )
+                .outerjoin(
+                    ConversationSummaryJob,
+                    ConversationSummaryJob.conversation_id == assistant_targets.c.conversation_id,
+                )
+                .outerjoin(
+                    ConversationMemorySummary,
+                    ConversationMemorySummary.conversation_id
+                    == assistant_targets.c.conversation_id,
+                )
+                .where(
+                    Conversation.deleted_at.is_(None),
+                    or_(
+                        ConversationSummaryJob.conversation_id.is_(None),
+                        ConversationSummaryJob.requested_through_sequence
+                        < assistant_targets.c.target,
+                        and_(
+                            ConversationMemorySummary.conversation_id.is_not(None),
+                            ConversationMemorySummary.is_valid.is_(False),
+                            ConversationSummaryJob.status.in_(
+                                [
+                                    SummaryJobStatus.IDLE.value,
+                                    SummaryJobStatus.DEAD.value,
+                                ]
+                            ),
+                        ),
+                    ),
+                )
+                .order_by(Conversation.created_at, Conversation.id)
+                .limit(limit)
+            ).all()
+            return [(row.conversation_id, int(row.target)) for row in rows]
 
     def claim_job(
         self,
@@ -261,7 +328,12 @@ class ConversationCompactionRepository:
             job.updated_at = claimed_at
             target = int(job.requested_through_sequence)
             session.commit()
-            return SummaryJobClaim(job.conversation_id, target, token)
+            return SummaryJobClaim(
+                job.conversation_id,
+                target,
+                token,
+                int(job.attempt_count),
+            )
 
     def load_compaction_input(
         self,
@@ -318,6 +390,7 @@ class ConversationCompactionRepository:
                 session.expunge(row)
             return CompactionInput(
                 claim=claim,
+                owner_id=conversation.owner_id,
                 summary_payload=(
                     dict(memory.summary_payload) if memory is not None and memory.is_valid else None
                 ),
