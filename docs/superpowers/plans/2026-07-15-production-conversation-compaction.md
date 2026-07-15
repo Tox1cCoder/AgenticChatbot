@@ -51,7 +51,7 @@
 - Modify: `.env.example`
 - Create: `tests/test_conversation_summary_config.py`
 
-- [ ] **Step 1: Write failing configuration tests**
+- [x] **Step 1: Write failing configuration tests**
 
 Cover defaults, zero disabling one threshold, rejection when both thresholds are zero while enabled, numeric bounds, `soft < hard`, keep-turn/message-threshold compatibility, retry/lease positivity, production provider/model requirements, and production rejection of `preview`.
 
@@ -73,22 +73,22 @@ def test_production_rejects_preview_model():
         )
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_conversation_summary_config.py -q`
 Expected: collection/assertion failures because `conversation_summary_*` fields do not exist.
 
-- [ ] **Step 3: Implement the namespace and validator**
+- [x] **Step 3: Implement the namespace and validator**
 
-Add every field listed in design section 10 with documented defaults. Use one `@model_validator(mode="after")` that raises explicit messages for each invariant. Remove `MEMORY_SUMMARY_*` and `SUMMARIZATION_*` settings and replace `.env.example` entries with exact `CONVERSATION_SUMMARY_*` names.
+Add every field listed in design section 10 with documented defaults. Use one `@model_validator(mode="after")` that raises explicit messages for each invariant. Add exact `CONVERSATION_SUMMARY_*` `.env.example` entries; retain legacy fields only until their callers are migrated, then remove fields and old example entries together in Task 11.
 
-- [ ] **Step 4: Verify GREEN and regressions**
+- [x] **Step 4: Verify GREEN and regressions**
 
 Run:
 `pytest tests/test_conversation_summary_config.py tests/test_config_redis.py tests/test_conversation_summarizer.py -q`
 Expected: new tests pass; legacy summarizer tests may fail only where they prove removed settings and must be replaced during Task 11, not weakened here.
 
-- [ ] **Step 5: Run task gate, update logs, and commit**
+- [x] **Step 5: Run task gate, update logs, and commit**
 
 Run Ruff on changed files plus `git diff --check`. Record exact results below. Commit only configuration/test/example files with `feat(compaction): add validated summary configuration`.
 
@@ -473,6 +473,7 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | Time (Asia/Bangkok) | Task | Status | Verification evidence |
 |---|---|---|---|
 | 2026-07-15 | Plan | Complete | Placeholder scan returned no matches; requirement coverage scan found sequence/jobs, structured memory, token counting/Thai, invalidation, leases/CAS/reconciliation, emergency retry, health/metrics, cleanup, docs, and migration gates; plan-file verification found no whitespace errors. |
+| 2026-07-15 | Task 1 | Complete | RED: `pytest tests/test_conversation_summary_config.py -q` produced 26 expected failures for missing fields/invariants. GREEN: targeted plus config/summarizer regressions produced `36 passed`. Ruff formatting reports both changed Python files formatted; the new test has zero lint errors and the diff adds zero overlong lines. Whole-file `config.py` still reports the same 42 pre-existing E501 errors as `HEAD`; `git diff --check` passed. |
 
 ## Decision Log
 
@@ -482,3 +483,5 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Treat each numbered task as the user's “step” and verification gate. | Each task delivers one testable subsystem while its internal red/green actions remain small TDD increments. |
 | 2026-07-15 | Keep PostgreSQL authoritative and use Redis/Celery only for dispatch. | Required by the approved design and necessary for restart/broker-failure recovery. |
 | 2026-07-15 | Resolve credentials only for the configured compaction provider. | Prevents the legacy class of silently sending one provider's key to another provider and makes server-managed fallback explicit. |
+| 2026-07-15 | Add new settings before deleting legacy settings. | Migrating callers and deleting old fields in Task 11 keeps every intermediate gate runnable while still shipping without compatibility aliases. |
+| 2026-07-15 | Default reconciliation to 60 seconds, safety margin to 1,024 tokens, and reserved output to 4,096 tokens. | The design names these controls but does not assign numbers; these conservative values match the existing operational scale and are now locked by tests/docs. |

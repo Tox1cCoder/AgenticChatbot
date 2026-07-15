@@ -400,6 +400,80 @@ class Settings(BaseSettings):
         default=256,
         description="Maximum number of conversations cached by ConversationHistoryProvider before LRU eviction",
     )
+
+    # Production conversation compaction. These settings are intentionally
+    # provider-specific and are the only namespace used by the replacement
+    # pipeline. Legacy settings remain temporarily until their callers are
+    # migrated in the scoped cleanup task.
+    conversation_summary_enabled: bool = Field(
+        default=True,
+        description="Enable durable background conversation compaction",
+    )
+    conversation_summary_provider: str = Field(
+        default="gemini",
+        description="Provider used only for conversation compaction",
+    )
+    conversation_summary_model: str = Field(
+        default="gemini-2.5-flash",
+        description="Stable model used only for conversation compaction",
+    )
+    conversation_summary_trigger_messages: int = Field(
+        default=60,
+        description="Eligible unsummarized messages required for background compaction",
+    )
+    conversation_summary_trigger_tokens: int = Field(
+        default=18_000,
+        description="Eligible unsummarized tokens required for background compaction",
+    )
+    conversation_summary_soft_context_ratio: float = Field(
+        default=0.70,
+        description="Input-budget ratio that requests durable background compaction",
+    )
+    conversation_summary_hard_context_ratio: float = Field(
+        default=0.85,
+        description="Input-budget ratio that triggers bounded request-path compaction",
+    )
+    conversation_summary_keep_recent_turns: int = Field(
+        default=4,
+        description="Newest complete turns retained verbatim during compaction",
+    )
+    conversation_summary_max_tokens: int = Field(
+        default=1_500,
+        description="Hard token cap for validated structured conversation memory",
+    )
+    conversation_summary_timeout_seconds: int = Field(
+        default=30,
+        description="Timeout for background and emergency compaction provider calls",
+    )
+    conversation_summary_max_attempts: int = Field(
+        default=5,
+        description="Maximum transient-failure attempts before a summary job becomes dead",
+    )
+    conversation_summary_lease_seconds: int = Field(
+        default=120,
+        description="Duration of a summary worker claim lease",
+    )
+    conversation_summary_retry_base_seconds: int = Field(
+        default=5,
+        description="Base delay for exponential summary-job retry backoff",
+    )
+    conversation_summary_retry_max_seconds: int = Field(
+        default=900,
+        description="Maximum delay for summary-job retry backoff",
+    )
+    conversation_summary_reconcile_seconds: int = Field(
+        default=60,
+        description="Celery Beat interval and dispatch debounce for summary reconciliation",
+    )
+    conversation_summary_safety_margin_tokens: int = Field(
+        default=1_024,
+        description="Tokens held back from the provider input context as a safety margin",
+    )
+    conversation_summary_default_reserved_output_tokens: int = Field(
+        default=4_096,
+        description="Default output-token reservation used by request preflight",
+    )
+
     memory_summary_min_unsummarized_messages: int = Field(
         default=60,
         description="Refresh the durable summary once this many unsummarized messages exist (0 disables the message threshold)",
@@ -910,6 +984,15 @@ class Settings(BaseSettings):
         default=-1,
         description="Thinking budget for Gemini 2.5 models (-1 for dynamic, 0 to disable, or specific token count like 1024).",
     )
+    chat_agent_thinking_level: str = Field(
+        default="low",
+        description=(
+            "Gemini 3 thinking_level for chat_agent specifically. chat_agent only "
+            "routes/hands off or answers simple conversation, so it runs below the "
+            "global thinking_level to cut latency; search/rag agents keep the global "
+            "level for synthesis quality. A per-request reasoning_effort still overrides this."
+        ),
+    )
 
     # Agentic RAG Configuration
     agentic_max_iterations: int = Field(
@@ -1157,6 +1240,12 @@ class Settings(BaseSettings):
         "celery_broker_visibility_timeout",
         "brave_image_search_default_count",
         "brave_image_search_max_count",
+        "conversation_summary_timeout_seconds",
+        "conversation_summary_max_attempts",
+        "conversation_summary_lease_seconds",
+        "conversation_summary_retry_base_seconds",
+        "conversation_summary_retry_max_seconds",
+        "conversation_summary_reconcile_seconds",
         mode="before",
     )
     @classmethod
@@ -1260,6 +1349,12 @@ class Settings(BaseSettings):
         "mcp_tool_search_max_pinned_tools",
         "mcp_tool_search_max_loaded_tools_per_conversation",
         "planning_max_iterations",
+        "conversation_summary_trigger_messages",
+        "conversation_summary_trigger_tokens",
+        "conversation_summary_keep_recent_turns",
+        "conversation_summary_max_tokens",
+        "conversation_summary_safety_margin_tokens",
+        "conversation_summary_default_reserved_output_tokens",
         mode="before",
     )
     @classmethod
@@ -1305,6 +1400,46 @@ class Settings(BaseSettings):
                 raise ValueError("secret_key must be set to a strong value outside development")
         if self.environment != "development" and self.api_debug:
             raise ValueError("api_debug must be disabled outside development")
+        if (
+            self.conversation_summary_enabled
+            and self.conversation_summary_trigger_messages == 0
+            and self.conversation_summary_trigger_tokens == 0
+        ):
+            raise ValueError(
+                "conversation summaries require at least one background threshold when enabled"
+            )
+        if not (
+            0.0
+            < self.conversation_summary_soft_context_ratio
+            < self.conversation_summary_hard_context_ratio
+            < 1.0
+        ):
+            raise ValueError(
+                "conversation summary soft context ratio must be greater than zero, "
+                "below the hard context ratio, and the hard ratio must be below one"
+            )
+        if (
+            self.conversation_summary_trigger_messages > 0
+            and self.conversation_summary_keep_recent_turns
+            >= self.conversation_summary_trigger_messages
+        ):
+            raise ValueError(
+                "conversation summary keep recent turns must be below the enabled message threshold"
+            )
+        if (
+            self.conversation_summary_retry_max_seconds
+            < self.conversation_summary_retry_base_seconds
+        ):
+            raise ValueError(
+                "conversation summary retry max must be greater than or equal to retry base"
+            )
+        if self.environment.strip().lower() == "production":
+            if not self.conversation_summary_provider.strip():
+                raise ValueError("conversation summary provider must be explicit in production")
+            if not self.conversation_summary_model.strip():
+                raise ValueError("conversation summary model must be explicit in production")
+            if "preview" in self.conversation_summary_model.strip().lower():
+                raise ValueError("conversation summary model must be stable in production")
         if self.summarization_keep_messages >= self.summarization_trigger_messages:
             raise ValueError(
                 f"summarization_keep_messages ({self.summarization_keep_messages}) "
