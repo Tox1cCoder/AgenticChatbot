@@ -1,3 +1,6 @@
+import logging
+from collections.abc import Callable
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import and_, asc, desc, func, or_, select
@@ -12,6 +15,8 @@ from app.repositories.query_strategy import DefaultQueryStrategy
 from app.repositories.utils.pagination import Paginator
 from app.schemas.message import MessageCreate, MessageUpdate
 from app.utils.validation.pagination_validation import validate_pagination_params
+
+logger = logging.getLogger(__name__)
 
 
 class MessageCRUDStrategy(
@@ -316,6 +321,7 @@ class MessageRepository:
         self,
         session_factory: callable,
         compaction_repository: ConversationCompactionRepository | None = None,
+        compaction_publisher: Callable[[UUID], Any] | None = None,
     ):
         """Initialize repository with session factory for dependency injection."""
         self.session_factory = session_factory
@@ -323,6 +329,7 @@ class MessageRepository:
         self._compaction_repository = compaction_repository or ConversationCompactionRepository(
             session_factory
         )
+        self._compaction_publisher = compaction_publisher
 
     def get_by_conversation_id(
         self,
@@ -385,7 +392,21 @@ class MessageRepository:
                 input_schema,
                 input_schema.role,
             )
-        return self._compaction_repository.persist_message(message_data)
+        message = self._compaction_repository.persist_message(message_data)
+        if (
+            message.sender == MessageRole.assistant.value
+            and self._compaction_publisher is not None
+        ):
+            try:
+                self._compaction_publisher(message.conversation_id)
+            except Exception:
+                # The message and coalesced database job are already committed.
+                # Reconciliation recovers a lost notification.
+                logger.warning(
+                    "Conversation compaction notification failed "
+                    "code=broker_publish_failed"
+                )
+        return message
 
     def get_by_id(self, id: UUID) -> Message | None:
         """Get message by ID"""

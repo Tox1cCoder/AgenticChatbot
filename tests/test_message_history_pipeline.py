@@ -242,9 +242,6 @@ async def test_message_service_compacts_checkpoint_after_persist(monkeypatch):
     service.task_plan_service = None
     service._sync_response_plan_state = lambda **_kwargs: False
     service._generate_and_add_suggestions = AsyncMock()
-    service._schedule_summary_refresh = lambda **kwargs: events.append(
-        ("summary", str(kwargs["through_message_id"]))
-    )
 
     def fake_create_bot_response_message(**kwargs):
         events.append(("persist", str(kwargs.get("message_id"))))
@@ -279,7 +276,6 @@ async def test_message_service_compacts_checkpoint_after_persist(monkeypatch):
 
     assert events == [
         ("persist", str(assistant_message_id)),
-        ("summary", str(assistant_message_id)),
         ("compact", str(conversation_id)),
     ]
 
@@ -305,7 +301,6 @@ async def test_capable_widget_response_does_not_invent_missing_marker(monkeypatc
     service.task_plan_service = None
     service._sync_response_plan_state = lambda **_kwargs: False
     service._generate_and_add_suggestions = AsyncMock()
-    service._schedule_summary_refresh = lambda **_kwargs: None
 
     def fake_create_bot_response_message(**kwargs):
         captured.update(kwargs)

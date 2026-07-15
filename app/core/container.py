@@ -78,6 +78,7 @@ from app.utils.validation.message_validation import MessageValidationUtils
 from app.utils.validation.task_plan_validation import TaskPlanValidationUtils
 from app.utils.validation.user_validation import UserValidationUtils
 from app.workers.celery_app import celery_app
+from app.workers.conversation_compaction import publish_conversation_compaction
 
 
 class Container(containers.DeclarativeContainer):
@@ -214,6 +215,7 @@ class Container(containers.DeclarativeContainer):
         MessageRepository,
         session_factory=db.provided.session,
         compaction_repository=conversation_compaction_repository,
+        compaction_publisher=providers.Object(publish_conversation_compaction),
     )
 
     feedback_repository = providers.Factory(
@@ -431,8 +433,6 @@ class Container(containers.DeclarativeContainer):
         tool_approval_repository=tool_approval_repository,
         hitl_interrupt_repository=hitl_interrupt_repository,
         task_plan_service=task_plan_service,
-        summary_repository=conversation_memory_summary_repository,
-        conversation_summarizer=conversation_summarizer,
         custom_agent_service=custom_agent_service,
         tool_approval_setting_repository=tool_approval_setting_repository,
     )

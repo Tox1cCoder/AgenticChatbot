@@ -330,23 +330,23 @@ Run Ruff and `git diff --check`; record and commit with `feat(compaction): enfor
 - Modify: `tests/test_message_history_pipeline.py`
 - Modify: `tests/test_message_service_event_streaming.py`
 
-- [ ] **Step 1: Write failing terminal-path tests**
+- [x] **Step 1: Write failing terminal-path tests**
 
 Test ordinary, streamed, partial, stopped, resumed, error-terminal assistant persistence all atomically advance the job; hidden placeholders do not become summary content; broker publish happens only after commit; publish failure keeps message/job committed; user message does not request summary.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run new path tests. Expected: current in-process runner and separate commits violate assertions.
 
-- [ ] **Step 3: Route every persistence path through the transaction-owning repository**
+- [x] **Step 3: Route every persistence path through the transaction-owning repository**
 
 Delete `_summary_refresh_pending`, `_summary_refresh_active`, `_schedule_summary_refresh`, runner, and `refresh_summary_after_turn`. Register/publish notifications only after successful commit and invalidate prompt caches after persistence.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run path, streaming, stop, resume, HITL, and history pipeline tests. Expected: every committed assistant boundary has durable work independent of notification success.
 
-- [ ] **Step 5: Run task gate, update logs, and commit**
+- [x] **Step 5: Run task gate, update logs, and commit**
 
 Run Ruff and legacy-runner symbol scan; record and commit with `feat(compaction): integrate atomic assistant persistence`.
 
@@ -489,6 +489,9 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Task 8, steps 1–2 | In progress | Added complete-accounting, ratio action, bounded emergency compaction, structure-safe reduction, fixed-overflow, and one-shot provider-overflow tests. RED: collection failed for the missing request-budget module and aggressive overflow APIs. |
 | 2026-07-15 | Task 8, steps 3–4 | In progress | Implemented complete-request preflight with provider/model context metadata, bounded injectable emergency compaction, deterministic atomic-turn reduction, safe fixed-input rejection, and request-budget metadata at BaseAgent, agentic-RAG, planning, and fallback-provider boundaries. The first focused gate produced `57 passed`; review found generic backoff could multiply overflow attempts, so context overflow now bypasses generic retries and terminates with a sanitized code after exactly one aggressive retry. The repeated gate produced `58 passed`; the expanded request/counter/chat/RAG/planning gate produced `134 passed`. |
 | 2026-07-15 | Task 8 | Complete | Final request-budget, counter, context-window, runtime override, chat, RAG, and planning gate produced `194 passed`. Ruff lint and format checks passed across all seven task code/test files; `git diff --check` passed. Boundary tests prove oversized removable history is reduced before I/O, irreducible fixed input performs zero provider calls, and repeated provider overflow performs exactly two calls with no raw provider detail in the response. |
+| 2026-07-15 | Task 9, steps 1–2 | In progress | Added terminal-category publication ordering, user exclusion, broker-failure durability, hidden-placeholder filtering, and legacy-runner deletion tests. RED produced `9 failed, 3 passed`: `MessageRepository` has no after-commit publisher dependency and `MessageService` still contains the in-process summary runner. |
+| 2026-07-15 | Task 9, steps 3–4 | In progress | `MessageRepository.create` now returns from the atomic message/sequence/job transaction before publishing a content-free Celery hint; broker failures are sanitized and suppressed because the committed job remains reconcilable. Removed all MessageService pending/active state, runner methods, refresh method, scheduling calls, and obsolete constructor wiring. Focused GREEN produced `30 passed`; expanded ordinary/stream/partial/stop/error/resume/HITL/history coverage produced `77 passed`. The PostgreSQL suite was discovered but skipped without `TEST_DATABASE_URL`; its unchanged atomic persistence implementation previously passed the disposable Task 4 gate. |
+| 2026-07-15 | Task 9 | Complete | Final repository/worker/message-stream/stop/error/resume/HITL/history/container gate produced `94 passed`. Ruff lint passed for all task files with only the two documented pre-existing `message.py` E501 lines ignored; new/central files passed format checks; `git diff --check` passed. The application scan found none of the six legacy in-process runner symbols. |
 
 ## Decision Log
 
@@ -520,3 +523,5 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Keep memory outside the legacy per-agent history trim pending full-request budgeting. | Dropping validated memory as the oldest item would silently reintroduce context loss; Task 8 counts and reduces the complete assembled request deterministically. |
 | 2026-07-15 | Make synchronous request-path compaction an injected callback with deterministic complete-turn reduction as the mandatory fallback. | The budget service stays independent of database/provider orchestration, bounds the callback with the configured timeout, recounts its output with the identical counter, and guarantees a safe request even when compaction is unavailable or fails. |
 | 2026-07-15 | Exclude context-overflow errors from generic provider retries and provider fallback. | Replaying the same oversized payload with backoff cannot help; one aggressive structural reduction is permitted, then a sanitized `provider_context_overflow` is surfaced without leaking provider details or looping across fallbacks. |
+| 2026-07-15 | Publish compaction hints in `MessageRepository.create` after the transaction-owning compaction repository returns. | Every assistant persistence path already converges on this repository boundary; this gives ordinary, streaming, partial, stopped, resumed, and error terminals identical ordering while user messages remain notification-free. |
+| 2026-07-15 | Treat broker publication as a recoverable hint, never part of message durability. | The assistant row and coalesced PostgreSQL job commit together first; publication failure cannot roll them back, and periodic reconciliation recovers the pending job. |

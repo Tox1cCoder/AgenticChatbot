@@ -122,8 +122,6 @@ class MessageService(IMessageService):
         tool_approval_repository: ToolApprovalRepository | None = None,
         hitl_interrupt_repository: HITLInterruptRepository | None = None,
         task_plan_service: ITaskPlanService | None = None,
-        summary_repository: Any | None = None,
-        conversation_summarizer: Any | None = None,
         custom_agent_service: Any | None = None,
         tool_approval_setting_repository=None,
     ):
@@ -134,19 +132,11 @@ class MessageService(IMessageService):
         self.tool_approval_repository = tool_approval_repository
         self.hitl_interrupt_repository = hitl_interrupt_repository
         self.task_plan_service = task_plan_service
-        self.summary_repository = summary_repository
-        self.conversation_summarizer = conversation_summarizer
         # Resolves attached custom agents into workflow state each user turn.
         self.custom_agent_service = custom_agent_service
         # Resolves the per-user HITL approval policy into workflow state each turn.
         self.tool_approval_setting_repository = tool_approval_setting_repository
         self.redis_client = self._init_redis_client()
-        # Coalesces concurrent summary refreshes per conversation. ``_pending``
-        # holds the latest (user_id, through_message_id) tuple for an
-        # in-flight refresh runner; ``_active`` tracks which conversations
-        # already have a runner draining the pending state.
-        self._summary_refresh_pending: dict[UUID, tuple[UUID, UUID]] = {}
-        self._summary_refresh_active: set[UUID] = set()
 
     def _init_redis_client(self):
         redis_url = getattr(settings, "redis_url", "") or ""
@@ -2179,17 +2169,6 @@ class MessageService(IMessageService):
             metadata=bot_metadata,
         )
 
-        # Resume produces a final assistant turn just like a normal completion;
-        # schedule durable summary refresh so the cursor advances on this path
-        # too.
-        bot_message_id = getattr(bot_message, "id", None)
-        if user_id is not None and bot_message_id:
-            self._schedule_summary_refresh(
-                conversation_id=conversation_id,
-                user_id=user_id,
-                through_message_id=bot_message_id,
-            )
-
         await self._compact_checkpoint_after_persist(
             conversation_id=conversation_id,
             thread_id=str(conversation_id),
@@ -2585,152 +2564,7 @@ class MessageService(IMessageService):
             message_id=message_id,
         )
 
-        # Schedule durable summary refresh off the request hot path. We do not
-        # await it: long-term memory must never block the user-visible reply.
-        if user_id is not None and getattr(bot_message, "id", None):
-            self._schedule_summary_refresh(
-                conversation_id=conversation_id,
-                user_id=user_id,
-                through_message_id=bot_message.id,
-            )
-
         return bot_message
-
-    def _schedule_summary_refresh(
-        self,
-        *,
-        conversation_id: UUID,
-        user_id: UUID,
-        through_message_id: UUID,
-    ) -> None:
-        """Coalesce concurrent summary refreshes per conversation.
-
-        Records the latest desired ``through_message_id`` for the conversation
-        and starts a single runner if none is active. The runner drains the
-        pending state until empty, so the most recent turn always wins and we
-        never pile up parallel refreshes that could race the cursor backward.
-        """
-        self._summary_refresh_pending[conversation_id] = (user_id, through_message_id)
-        if conversation_id in self._summary_refresh_active:
-            return
-        self._summary_refresh_active.add(conversation_id)
-        asyncio.create_task(self._summary_refresh_runner(conversation_id))
-
-    async def _summary_refresh_runner(self, conversation_id: UUID) -> None:
-        try:
-            while True:
-                pending = self._summary_refresh_pending.pop(conversation_id, None)
-                if pending is None:
-                    return
-                user_id, through_message_id = pending
-                await self._refresh_summary_after_turn_safely(
-                    conversation_id=conversation_id,
-                    user_id=user_id,
-                    through_message_id=through_message_id,
-                )
-        finally:
-            self._summary_refresh_active.discard(conversation_id)
-
-    async def _refresh_summary_after_turn_safely(
-        self,
-        *,
-        conversation_id: UUID,
-        user_id: UUID,
-        through_message_id: UUID,
-    ) -> None:
-        """Best-effort durable summary refresh; never raises into the caller."""
-        try:
-            await self.refresh_summary_after_turn(
-                conversation_id=conversation_id,
-                user_id=user_id,
-                through_message_id=through_message_id,
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            logging.warning(
-                "Durable summary refresh failed for conversation=%s: %s",
-                conversation_id,
-                exc,
-            )
-
-    async def refresh_summary_after_turn(
-        self,
-        *,
-        conversation_id: UUID,
-        user_id: UUID,
-        through_message_id: UUID,
-    ) -> None:
-        """Refresh the durable conversation summary up through ``through_message_id``.
-
-        Loads any unsummarized DB rows after the previous cursor, keeps the
-        newest ``memory_summary_keep_messages`` out of the summary window,
-        and asks the summarizer to fold everything else into the summary
-        text. The summary repository is upserted only when the model returns
-        a non-empty result; failures leave the previous summary unchanged.
-        """
-        if self.summary_repository is None or self.conversation_summarizer is None:
-            return
-
-        existing = self.summary_repository.get_by_conversation_id(conversation_id)
-        after_id = (
-            existing.last_summarized_message_id
-            if existing is not None and existing.last_summarized_message_id is not None
-            else None
-        )
-        rows = self.repository.get_summarization_window(
-            conversation_id,
-            after_message_id=after_id,
-            through_message_id=through_message_id,
-        )
-        if not rows:
-            return
-
-        keep = max(0, int(getattr(settings, "memory_summary_keep_messages", 8) or 0))
-        summarized_rows = rows[:-keep] if keep > 0 else rows
-        if not summarized_rows:
-            return
-
-        min_messages = int(getattr(settings, "memory_summary_min_unsummarized_messages", 0) or 0)
-        min_tokens = int(getattr(settings, "memory_summary_min_unsummarized_tokens", 0) or 0)
-        if min_messages > 0 or min_tokens > 0:
-            estimated_window_tokens = sum(len(row.content or "") for row in summarized_rows) // 4
-            message_threshold_met = min_messages > 0 and len(summarized_rows) >= min_messages
-            token_threshold_met = min_tokens > 0 and estimated_window_tokens >= min_tokens
-            if not (message_threshold_met or token_threshold_met):
-                return
-
-        # Convert DB rows to AgentMessages via the same normalizer the history
-        # provider uses so we never feed paused/empty placeholders back in.
-        from app.ai.history import db_message_to_agent_message
-
-        agent_messages = [
-            msg for row in summarized_rows if (msg := db_message_to_agent_message(row))
-        ]
-        if not agent_messages:
-            return
-
-        existing_text = existing.summary_text if existing is not None else None
-        new_text = await self.conversation_summarizer.summarize(
-            existing_summary=existing_text,
-            messages=agent_messages,
-            user_id=str(user_id),
-        )
-        if not new_text:
-            return
-
-        last_row = summarized_rows[-1]
-        estimated_tokens = max(1, len(new_text) // 4)
-        self.summary_repository.upsert(
-            conversation_id=conversation_id,
-            user_id=user_id,
-            summary_text=new_text,
-            last_summarized_message_id=last_row.id,
-            source_message_count=len(summarized_rows),
-            estimated_tokens=estimated_tokens,
-        )
-        # Drop any stale prompt-history caches so the next turn picks up the
-        # refreshed summary cursor and version.
-        with contextlib.suppress(Exception):
-            self.ai_service.invalidate_history_cache(str(conversation_id))
 
     def _sync_todos_to_database(
         self,

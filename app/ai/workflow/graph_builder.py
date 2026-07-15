@@ -16,8 +16,8 @@ from app.ai.schemas import GraphState
 def build_workflow_graph(workflow: Any, *, checkpointer: Any | None) -> Any:
     graph = StateGraph(GraphState)
 
-    # Long-term summary refresh happens after assistant persistence, not on
-    # the request hot path (see MessageService.refresh_summary_after_turn).
+    # Durable compaction work advances atomically with assistant persistence;
+    # provider-backed processing stays off the request hot path.
     graph.add_node("route", workflow._route_node)
     graph.add_node("chat_agent", workflow._chat_node)
     graph.add_node("rag_agent", workflow._rag_node)

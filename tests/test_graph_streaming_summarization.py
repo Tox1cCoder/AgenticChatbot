@@ -2,9 +2,9 @@
 
 The graph no longer contains the legacy ``summarize`` node at all — it was a
 no-op orphan (no incoming/outgoing edges) kept only for old checkpoints, and
-was verified to be scheduled by zero live checkpoints before removal. Durable
-summaries refresh after assistant persistence (in ``MessageService``) —
-verified separately in ``test_message_history_pipeline.py``.
+was verified to be scheduled by zero live checkpoints before removal. Assistant
+persistence atomically advances durable compaction work; a content-free Celery
+hint is published after commit and PostgreSQL reconciliation recovers losses.
 """
 
 from __future__ import annotations
@@ -38,10 +38,9 @@ def test_workflow_has_no_summarize_node_or_method():
     assert 'add_edge(START, "route")' in source
 
 
-def test_message_service_refresh_summary_method_exists():
-    """MessageService must expose the off-hot-path summary refresh entry
-    point used after assistant persistence."""
+def test_message_service_has_no_in_process_summary_refresh():
+    """Assistant persistence owns durable work; the service has no runner."""
     from app.services.message_service import MessageService
 
-    assert hasattr(MessageService, "refresh_summary_after_turn")
-    assert callable(MessageService.refresh_summary_after_turn)
+    assert not hasattr(MessageService, "refresh_summary_after_turn")
+    assert not hasattr(MessageService, "_schedule_summary_refresh")

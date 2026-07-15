@@ -280,6 +280,12 @@ def compact_conversation_task(conversation_id: str) -> dict[str, str]:
     return outcome._asdict()
 
 
+def publish_conversation_compaction(conversation_id: UUID) -> None:
+    """Publish a content-free hint after message/job commit."""
+    if settings.conversation_summary_enabled:
+        compact_conversation_task.delay(str(conversation_id))
+
+
 @celery_app.task(
     name="app.workers.conversation_compaction.reconcile_conversation_summaries_task",
     ignore_result=True,
