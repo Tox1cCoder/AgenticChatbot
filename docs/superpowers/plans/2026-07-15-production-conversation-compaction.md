@@ -211,23 +211,23 @@ Run Ruff, affected repository tests, Alembic check, and `git diff --check`; reco
 - Create: `tests/test_conversation_memory.py`
 - Create: `tests/test_conversation_compactor.py`
 
-- [ ] **Step 1: Write failing payload and compactor tests**
+- [x] **Step 1: Write failing payload and compactor tests**
 
 Test exactly six list keys; bounded strings/items; forbidden unknown/nested/executable/base64/secret content; safe attachment descriptors; prompt injection retained only as quoted data; empty/invalid/over-budget output preserving prior valid memory; exact trigger boundaries; disabled individual thresholds; full-window threshold evaluation; and prefix selection ending on an assistant turn while retaining configured complete turns.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run both new test files. Expected: module import failures.
 
-- [ ] **Step 3: Implement schema, canonical renderer, selection, and provider adapter boundary**
+- [x] **Step 3: Implement schema, canonical renderer, selection, and provider adapter boundary**
 
 The compactor accepts injected `TokenCounter` and async generator callback, treats previous payload/transcript as delimited untrusted data, parses JSON only, validates, recounts, and returns a typed result without writing the database. Its provider adapter resolves a credential for the configured provider only: use a permitted user credential when policy allows, otherwise require the explicitly configured server-managed credential; never substitute a key from another provider.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run both test files plus token-counter tests. Expected: all pass without network calls.
 
-- [ ] **Step 5: Run task gate, update logs, and commit**
+- [x] **Step 5: Run task gate, update logs, and commit**
 
 Run Ruff and `git diff --check`; record and commit with `feat(compaction): add structured memory compactor`.
 
@@ -479,6 +479,8 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Task 4, steps 1–2 | In progress | Added fast SQL-contract tests plus PostgreSQL state-machine/invalidation coverage. RED: `.conda\\python.exe -m pytest tests/test_conversation_compaction_repository.py -q` failed during collection with the expected `ModuleNotFoundError` for `app.repositories.conversation_compaction`. |
 | 2026-07-15 | Task 4, steps 3–4 | In progress | Fast SQL contracts passed (`4 passed`). A disposable PostgreSQL suite passed (`9 passed`) after proving and fixing nullable eager-join locking and stale mutation-lease races. Coverage includes concurrent `1..12` allocation, target `12`, real `SKIP LOCKED`, live/expired/wrong-token leases, retry/dead/reconcile, ownership, version/cursor/lease CAS, edit/delete rebuild, and cross-conversation composite-FK rejection. Affected history/container regressions passed (`12 passed`). |
 | 2026-07-15 | Task 4 | Complete | Final gate: new/affected repository, schema, history, and container suites produced `19 passed`; disposable PostgreSQL produced `9 passed`; Ruff lint passed for all task changes (with pre-existing message-file E501 ignored only for that legacy file); all three new files are Ruff-formatted; `alembic check` reported no new operations; `git diff --check` passed. |
+| 2026-07-15 | Task 5, steps 1–2 | In progress | Added structured-memory, safety, trigger, selection, preservation, prompt-boundary, and credential-isolation tests. RED: both files failed collection with the expected missing `conversation_memory` and `conversation_compactor` modules. |
+| 2026-07-15 | Task 5 | Complete | GREEN: focused structured-memory/compactor suite produced `32 passed`. Final gate with the real token counter produced `48 passed`; Ruff lint and format checks passed for all four files; `git diff --check` passed. Tests cover exact threshold boundaries, independently disabled thresholds, full-window evaluation, assistant-ended prefix retention, strict six-key validation, content safety, prior-memory preservation, delimited prompt injection, and provider-exact credentials. |
 
 ## Decision Log
 
@@ -500,3 +502,6 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Revoke an active compaction lease when a covered transcript message is edited or deleted. | Target coalescing normally preserves a live lease, but a mutation makes that worker's captured transcript stale; clearing the lease and forcing `pending` makes its subsequent CAS fail and guarantees a full rebuild. |
 | 2026-07-15 | Require an unexpired lease for input loading, memory CAS, completion, and failure transitions. | A token alone does not remain authoritative after its deadline; reconciliation owns recovery once a lease expires. |
 | 2026-07-15 | Build disposable repository tests from only their required PostgreSQL tables. | Metadata-wide `create_all` hits a pre-existing malformed `task_plans.task_metadata` JSONB default; isolating the authoritative compaction tables plus mapper-required `feedbacks` tests this subsystem without altering unrelated code. |
+| 2026-07-15 | Bound each structured-memory section to 50 items and each item to 500 characters. | The design requires bounded strings/items without prescribing limits; these caps allow useful durable facts while preventing a single field from bypassing the configured token cap or carrying full artifacts. |
+| 2026-07-15 | Permit quoted prompt-injection text as inert facts but reject executable, credential-shaped, and raw-base64 content. | User intent can legitimately mention malicious instructions; safety comes from strict JSON strings, untrusted prompt boundaries, validation, and application-enforced permissions rather than deleting semantically relevant quoted text. |
+| 2026-07-15 | Model compaction failure as a typed result that carries the prior memory but no candidate memory. | The pure compactor cannot accidentally overwrite durable state on invalid/empty/over-budget output, while workers receive a sanitized code for retry classification. |
