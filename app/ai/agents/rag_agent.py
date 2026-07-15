@@ -26,7 +26,7 @@ from ...models.document import Document
 from ...models.document_chunk import DocumentChunk
 from ...repositories.document_chunk import DocumentChunkRepository
 from ...repositories.document_image import DocumentImageRepository
-from ..context_overflow import compact_tool_messages_for_retry, is_context_overflow_error
+from ..context_overflow import is_context_overflow_error, prepare_aggressive_context_retry
 from ..image_context import build_multimodal_content, has_image_parts, image_url_part
 from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
 from ..model_factory import ModelFactory
@@ -35,6 +35,7 @@ from ..prompts import (
     TOOL_EXPLORATION_SUFFIX,
 )
 from ..rag_tools import create_search_documents_tool
+from ..request_budget import ContextBudgetExceededError
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..token_instrumentation import compute_token_breakdown, extract_actual_usage
 from ..utils import coerce_response_text
@@ -758,6 +759,13 @@ class RAGAgent(BaseAgent):
         """
         current_runtime = runtime_config
         context_overflow_retried = False
+        budget_result = None
+        system_messages = [message for message in messages if isinstance(message, SystemMessage)]
+        non_system_messages = [
+            message for message in messages if not isinstance(message, SystemMessage)
+        ]
+        current_messages = non_system_messages[-1:] if non_system_messages else []
+        history_messages = non_system_messages[:-1] if non_system_messages else []
         system_prompt = "\n\n".join(
             coerce_response_text(getattr(message, "content", ""))
             for message in messages
@@ -798,25 +806,44 @@ class RAGAgent(BaseAgent):
                         tools,
                         tool_choice=getattr(settings, "tool_choice_mode", "auto"),
                     )
+                budget_result = await self._preflight_model_request(
+                    current_runtime,
+                    system_messages=system_messages,
+                    history_messages=history_messages,
+                    current_messages=current_messages,
+                    tools=[] if disable_tools else tools,
+                )
+                request_messages = (
+                    list(budget_result.envelope.messages) if budget_result is not None else messages
+                )
                 try:
-                    response = await _invoke_with_optional_config(llm_with_tools, messages)
+                    response = await _invoke_with_optional_config(llm_with_tools, request_messages)
                 except Exception as exc:
                     if not settings.context_overflow_retry_enabled or not is_context_overflow_error(
                         exc
                     ):
                         raise
-                    compacted_messages = compact_tool_messages_for_retry(
-                        messages,
-                        max_chars=settings.context_overflow_retry_tool_preview_chars,
+                    compacted_messages = prepare_aggressive_context_retry(
+                        request_messages,
+                        tool_preview_chars=(settings.context_overflow_retry_tool_preview_chars),
                     )
-                    response = await _invoke_with_optional_config(
-                        llm_with_tools,
-                        compacted_messages,
-                    )
+                    try:
+                        response = await _invoke_with_optional_config(
+                            llm_with_tools,
+                            compacted_messages,
+                        )
+                    except Exception as retry_exc:
+                        if is_context_overflow_error(retry_exc):
+                            raise ContextBudgetExceededError(
+                                "provider_context_overflow"
+                            ) from retry_exc
+                        raise
                     context_overflow_retried = True
                 runtime_config = current_runtime
                 break
             except Exception as exc:
+                if isinstance(exc, ContextBudgetExceededError):
+                    raise
                 logger.warning(
                     "Agentic RAG provider call failed for %s: %s",
                     current_runtime.provider,
@@ -869,6 +896,9 @@ class RAGAgent(BaseAgent):
             metadata["disable_tools"] = True
         if context_overflow_retried:
             metadata["context_overflow_retry"] = True
+        request_budget_metadata = self._request_budget_metadata(budget_result)
+        if request_budget_metadata is not None:
+            metadata["request_budget"] = request_budget_metadata
         self._apply_runtime_metadata(metadata, runtime_config)
         self._merge_context_window_usage(metadata, metadata["token_breakdown"])
 
@@ -981,9 +1011,7 @@ class RAGAgent(BaseAgent):
             page = img.get("page_number", "?")
 
             if img_data:
-                human_content.append(
-                    image_url_part(f"data:{mime_type};base64,{img_data}")
-                )
+                human_content.append(image_url_part(f"data:{mime_type};base64,{img_data}"))
                 if caption:
                     human_content.append(
                         {

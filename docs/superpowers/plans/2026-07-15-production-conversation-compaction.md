@@ -300,23 +300,23 @@ Run Ruff and legacy-symbol scan for graph summary keys; record and commit with `
 - Create: `tests/test_request_budget.py`
 - Modify: `tests/test_context_overflow_retry.py`
 
-- [ ] **Step 1: Write failing budget tests**
+- [x] **Step 1: Write failing budget tests**
 
 Test complete input accounting; below-soft proceed; soft-to-hard durable request; hard synchronous compaction and recount; timeout/failure deterministic oldest-complete-turn removal; no split user/assistant or tool-call/result structures; fixed input overflow safe error; one aggressive provider-overflow retry reducing old turns and tool previews; repeated overflow surfaced.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run request-budget and overflow tests. Expected: missing preflight/reducer APIs.
 
-- [ ] **Step 3: Implement request budget service and integrate before invocation**
+- [x] **Step 3: Implement request budget service and integrate before invocation**
 
 Calculate `available_input = max_input - reserved_output - safety_margin`. Operate on the actual provider request, preserving required system/current/tool schemas. Use bounded `asyncio.timeout` for emergency compaction and the same counter for every recount.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run budget, counter, and agent invocation tests. Expected: every emitted request is within budget or returns the specific safe budget error.
 
-- [ ] **Step 5: Run task gate, update logs, and commit**
+- [x] **Step 5: Run task gate, update logs, and commit**
 
 Run Ruff and `git diff --check`; record and commit with `feat(compaction): enforce full request budgets`.
 
@@ -486,6 +486,9 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Task 7, steps 1–2 | In progress | Added ownership, validity, canonical untrusted-memory, sequence non-overlap, message priority, and current-turn ordering tests; migrated history expectations to structured memory. RED: five expected failures showed the legacy unscoped summary lookup/context fields and missing dedicated memory role. |
 | 2026-07-15 | Task 7, steps 3–4 | In progress | Hydration/history suite produced `10 passed`; subagent/history coverage produced `56 passed`; base/chat/search/RAG/canvas/custom-agent/graph regressions produced `105 passed`. Owned valid memory is canonicalized into a dedicated lower-priority message, sequence-scoped recent history follows it, and no active agent caller passes memory into system-prompt construction. |
 | 2026-07-15 | Task 7 | Complete | Final agent/history/container gate produced `162 passed`; structured-memory/compactor/repository regression produced `36 passed`. Active graph/schema/agent/workflow scan found no `history_summary` or `summary_cursor_message_id`; Ruff lint passed for all task files (with only the two documented pre-existing message-file E501 lines ignored); new/central files are formatted; `git diff --check` passed. |
+| 2026-07-15 | Task 8, steps 1–2 | In progress | Added complete-accounting, ratio action, bounded emergency compaction, structure-safe reduction, fixed-overflow, and one-shot provider-overflow tests. RED: collection failed for the missing request-budget module and aggressive overflow APIs. |
+| 2026-07-15 | Task 8, steps 3–4 | In progress | Implemented complete-request preflight with provider/model context metadata, bounded injectable emergency compaction, deterministic atomic-turn reduction, safe fixed-input rejection, and request-budget metadata at BaseAgent, agentic-RAG, planning, and fallback-provider boundaries. The first focused gate produced `57 passed`; review found generic backoff could multiply overflow attempts, so context overflow now bypasses generic retries and terminates with a sanitized code after exactly one aggressive retry. The repeated gate produced `58 passed`; the expanded request/counter/chat/RAG/planning gate produced `134 passed`. |
+| 2026-07-15 | Task 8 | Complete | Final request-budget, counter, context-window, runtime override, chat, RAG, and planning gate produced `194 passed`. Ruff lint and format checks passed across all seven task code/test files; `git diff --check` passed. Boundary tests prove oversized removable history is reduced before I/O, irreducible fixed input performs zero provider calls, and repeated provider overflow performs exactly two calls with no raw provider detail in the response. |
 
 ## Decision Log
 
@@ -515,3 +518,5 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Run a dedicated third worker process for the `summary` queue using existing general worker concurrency. | Queue isolation prevents model compaction from delaying parse/index jobs without adding an unplanned configuration field; `solo` mode is clamped to one process slot. |
 | 2026-07-15 | Represent durable memory with an explicit `memory` agent role that converts to a LangChain `HumanMessage`. | It remains below trusted system instructions, stays distinguishable in application history, precedes recent transcript, and requires no provider-specific developer-role support. |
 | 2026-07-15 | Keep memory outside the legacy per-agent history trim pending full-request budgeting. | Dropping validated memory as the oldest item would silently reintroduce context loss; Task 8 counts and reduces the complete assembled request deterministically. |
+| 2026-07-15 | Make synchronous request-path compaction an injected callback with deterministic complete-turn reduction as the mandatory fallback. | The budget service stays independent of database/provider orchestration, bounds the callback with the configured timeout, recounts its output with the identical counter, and guarantees a safe request even when compaction is unavailable or fails. |
+| 2026-07-15 | Exclude context-overflow errors from generic provider retries and provider fallback. | Replaying the same oversized payload with backoff cannot help; one aggressive structural reduction is permitted, then a sanitized `provider_context_overflow` is surfaced without leaking provider details or looping across fallbacks. |

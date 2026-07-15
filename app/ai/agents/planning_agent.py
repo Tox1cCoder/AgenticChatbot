@@ -25,6 +25,7 @@ from ..planning_rubric import (
 )
 from ..planning_tools import create_write_todos_tool
 from ..prompts import PLANNING_EXECUTION_PROMPT
+from ..request_budget import ContextBudgetExceededError
 from ..schemas import (
     AgentMessage,
     AgentResponse,
@@ -176,8 +177,9 @@ class PlanningAgent(BaseAgent):
 
         phase = planning_phase or "planning"
         if phase == "planning":
-            phase_prompt = dedent(
-                """
+            phase_prompt = (
+                dedent(
+                    """
                 # CURRENT PHASE: PLANNING
                 - Create or modify the task plan using: set_todos, add_todo,
                   update_todo, remove_todo
@@ -198,10 +200,14 @@ class PlanningAgent(BaseAgent):
                 {handoff_planning_guidance}
                 Otherwise, plan creation/editing uses `write_todos` only.
                 """
-            ).strip().replace("{handoff_planning_guidance}", handoff_planning_guidance)
+                )
+                .strip()
+                .replace("{handoff_planning_guidance}", handoff_planning_guidance)
+            )
         else:
-            phase_prompt = dedent(
-                """
+            phase_prompt = (
+                dedent(
+                    """
                 # CURRENT PHASE: EXECUTING
 
                 ## Decision order on every turn
@@ -292,7 +298,10 @@ class PlanningAgent(BaseAgent):
                 Stop only when all tasks are completed (then summarize), you
                 need user clarification, or an unresolvable error occurs.
                 """
-            ).strip().replace("{handoff_execution_guidance}", handoff_execution_guidance)
+                )
+                .strip()
+                .replace("{handoff_execution_guidance}", handoff_execution_guidance)
+            )
 
         prompt = f"{base_prompt}\n\n{phase_prompt}"
 
@@ -459,6 +468,9 @@ class PlanningAgent(BaseAgent):
         langchain_messages.append(HumanMessage(content=message_content))
 
         runtime_config = self._resolve_runtime_model_config(request_user_id, model_request)
+        budget_result = None
+        planning_history = langchain_messages[1:-1]
+        planning_current = langchain_messages[-1:]
 
         while True:
             try:
@@ -472,8 +484,29 @@ class PlanningAgent(BaseAgent):
                     [write_todos_tool],
                     tool_choice="write_todos",
                 )
-                raw_response = await self._ainvoke_with_retries(bound_llm, langchain_messages)
+                budget_result = await self._preflight_model_request(
+                    runtime_config,
+                    system_messages=langchain_messages[:1],
+                    history_messages=planning_history,
+                    current_messages=planning_current,
+                    tools=[write_todos_tool],
+                )
+                request_messages = (
+                    list(budget_result.envelope.messages)
+                    if budget_result is not None
+                    else langchain_messages
+                )
+                raw_response = await self._ainvoke_with_retries(bound_llm, request_messages)
                 break
+            except ContextBudgetExceededError as exc:
+                return self._build_error_response(
+                    (
+                        "This planning request is too large for the selected model's "
+                        "context window. Please shorten the request."
+                    ),
+                    conversation_id,
+                    error=exc.code,
+                )
             except Exception:
                 fallback_runtime = self._create_fallback_runtime_config(
                     runtime_config.fallback_config,
@@ -541,6 +574,9 @@ class PlanningAgent(BaseAgent):
             "todos": canonical_todos,
         }
         self._apply_runtime_metadata(metadata, runtime_config)
+        request_budget_metadata = self._request_budget_metadata(budget_result)
+        if request_budget_metadata is not None:
+            metadata["request_budget"] = request_budget_metadata
         if plan_modified:
             metadata["plan_modified"] = True
         if rubric_attempt is not None:

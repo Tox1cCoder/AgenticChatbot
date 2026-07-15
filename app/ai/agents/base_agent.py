@@ -26,7 +26,7 @@ from ..client_runtime_tools import (
     get_active_client_runtime_session,
     get_client_runtime_tools,
 )
-from ..context_overflow import compact_tool_messages_for_retry, is_context_overflow_error
+from ..context_overflow import is_context_overflow_error, prepare_aggressive_context_retry
 from ..deferred_tool_binding import (
     build_deferred_tool_list,
     should_use_deferred_loading,
@@ -35,9 +35,17 @@ from ..image_context import build_multimodal_content, has_image_parts
 from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
 from ..model_context import build_context_window_usage, resolve_model_context_window
 from ..prompts import TOOL_CONTEXT_SUFFIX, TOOL_EXPLORATION_SUFFIX
+from ..request_budget import (
+    BudgetConfig,
+    BudgetResult,
+    ContextBudgetExceededError,
+    RequestBudgetService,
+    RequestEnvelope,
+)
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..skills_tool import create_activate_skill_tool, get_available_skill_summaries
 from ..time_context import build_runtime_time_context_block
+from ..token_counter import TokenCounter
 from ..token_instrumentation import compute_token_breakdown, extract_actual_usage
 from ..tool_execution import _WIDGET_SESSION_BOUND_TOOLS, _bind_widget_session_args
 from ..tool_scope import is_client_only_scope
@@ -782,6 +790,76 @@ class BaseAgent(ABC):
         merged.update(build_context_window_usage(context_window, token_breakdown))
         metadata["context_window"] = merged
 
+    async def _preflight_model_request(
+        self,
+        runtime_config: ResolvedRuntimeModelConfig,
+        *,
+        system_messages: list[Any],
+        history_messages: list[Any],
+        current_messages: list[Any],
+        tools: list[Any] | None = None,
+        attachments: list[Any] | None = None,
+        durable_request: Any | None = None,
+        emergency_compact: Any | None = None,
+    ) -> BudgetResult | None:
+        """Enforce the resolved provider's complete input budget before I/O."""
+        context_window = runtime_config.context_window
+        if context_window is None:
+            context_window = resolve_model_context_window(
+                runtime_config.provider,
+                runtime_config.model,
+            ).to_dict()
+        max_input = context_window.get("max_input_tokens")
+        if max_input is None:
+            return None
+
+        try:
+            config = BudgetConfig(
+                max_input_tokens=int(max_input),
+                reserved_output_tokens=(
+                    settings.conversation_summary_default_reserved_output_tokens
+                ),
+                safety_margin_tokens=settings.conversation_summary_safety_margin_tokens,
+                soft_ratio=settings.conversation_summary_soft_context_ratio,
+                hard_ratio=settings.conversation_summary_hard_context_ratio,
+                emergency_timeout_seconds=settings.conversation_summary_timeout_seconds,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ContextBudgetExceededError("context_budget_invalid") from exc
+
+        result = await RequestBudgetService(TokenCounter()).preflight(
+            RequestEnvelope(
+                provider=runtime_config.provider,
+                model=runtime_config.model,
+                system_messages=tuple(system_messages),
+                history_messages=tuple(history_messages),
+                current_messages=tuple(current_messages),
+                tools=tuple(tools or ()),
+                attachments=tuple(attachments or ()),
+            ),
+            config,
+            durable_request=durable_request,
+            emergency_compact=emergency_compact,
+        )
+        if result.error_code:
+            raise ContextBudgetExceededError(result.error_code)
+        return result
+
+    @staticmethod
+    def _request_budget_metadata(result: BudgetResult | None) -> dict[str, Any] | None:
+        if result is None:
+            return None
+        return {
+            "action": result.action,
+            "input_tokens": result.input_tokens,
+            "available_input_tokens": result.available_input_tokens,
+            "usage_ratio": result.usage_ratio,
+            "count_strategy": result.count_strategy,
+            "durable_requested": result.durable_requested,
+            "emergency_compacted": result.emergency_compacted,
+            "removed_groups": result.removed_groups,
+        }
+
     async def _ainvoke_with_retries(
         self,
         llm_with_tools: Any,
@@ -813,6 +891,12 @@ class BaseAgent(ABC):
                 return await llm_with_tools.ainvoke(messages)
             except Exception as exc:
                 last_exc = exc
+
+                # Context overflows have their own single structure-aware retry
+                # at the assembled-request boundary. Generic backoff cannot make
+                # the same oversized payload succeed.
+                if is_context_overflow_error(exc):
+                    raise
 
                 if attempt >= attempts:
                     break
@@ -872,6 +956,10 @@ class BaseAgent(ABC):
         **system_prompt_kwargs: Any,
     ) -> AgentResponse:
         try:
+            durable_compaction_request = system_prompt_kwargs.pop(
+                "durable_compaction_request", None
+            )
+            emergency_compact = system_prompt_kwargs.pop("emergency_compact", None)
             await self._init_tools()
             runtime_config = self._resolve_runtime_model_config(user_id, model_request)
             llm, openai_reasoning_summary_requested = self._create_langchain_model_from_runtime(
@@ -935,6 +1023,19 @@ class BaseAgent(ABC):
             # Add current turn messages
             langchain_messages.extend(messages)
 
+            budget_result = await self._preflight_model_request(
+                runtime_config,
+                system_messages=[langchain_messages[0]],
+                history_messages=history_messages_lc,
+                current_messages=messages,
+                tools=bound_tools,
+                durable_request=durable_compaction_request,
+                emergency_compact=emergency_compact,
+            )
+            if budget_result is not None:
+                history_messages_lc = list(budget_result.envelope.history_messages)
+                langchain_messages = list(budget_result.envelope.messages)
+
             # === Token Instrumentation ===
             # Compute and log token breakdown for observability
             # Use bound_tools (not self.tools) to reflect actual schema tokens sent
@@ -970,15 +1071,24 @@ class BaseAgent(ABC):
                         exc
                     ):
                         raise
-                    compacted_messages = compact_tool_messages_for_retry(
+                    compacted_messages = prepare_aggressive_context_retry(
                         langchain_messages,
-                        max_chars=settings.context_overflow_retry_tool_preview_chars,
+                        tool_preview_chars=(settings.context_overflow_retry_tool_preview_chars),
                     )
-                    response = await _invoke_with_optional_config(
-                        llm_with_tools,
-                        compacted_messages,
-                    )
+                    try:
+                        response = await _invoke_with_optional_config(
+                            llm_with_tools,
+                            compacted_messages,
+                        )
+                    except Exception as retry_exc:
+                        if is_context_overflow_error(retry_exc):
+                            raise ContextBudgetExceededError(
+                                "provider_context_overflow"
+                            ) from retry_exc
+                        raise
                     context_overflow_retried = True
+            except ContextBudgetExceededError:
+                raise
             except Exception:
                 if (
                     runtime_config.provider == "openai"
@@ -1022,6 +1132,18 @@ class BaseAgent(ABC):
                             raise
 
                         runtime_config = fallback_runtime
+                        budget_result = await self._preflight_model_request(
+                            runtime_config,
+                            system_messages=[langchain_messages[0]],
+                            history_messages=history_messages_lc,
+                            current_messages=messages,
+                            tools=bound_tools,
+                            durable_request=durable_compaction_request,
+                            emergency_compact=emergency_compact,
+                        )
+                        if budget_result is not None:
+                            history_messages_lc = list(budget_result.envelope.history_messages)
+                            langchain_messages = list(budget_result.envelope.messages)
                         llm, _ = self._create_langchain_model_from_runtime(
                             runtime_config,
                             user_id=user_id,
@@ -1054,6 +1176,18 @@ class BaseAgent(ABC):
                         raise
 
                     runtime_config = fallback_runtime
+                    budget_result = await self._preflight_model_request(
+                        runtime_config,
+                        system_messages=[langchain_messages[0]],
+                        history_messages=history_messages_lc,
+                        current_messages=messages,
+                        tools=bound_tools,
+                        durable_request=durable_compaction_request,
+                        emergency_compact=emergency_compact,
+                    )
+                    if budget_result is not None:
+                        history_messages_lc = list(budget_result.envelope.history_messages)
+                        langchain_messages = list(budget_result.envelope.messages)
                     llm, _ = self._create_langchain_model_from_runtime(
                         runtime_config,
                         user_id=user_id,
@@ -1119,6 +1253,9 @@ class BaseAgent(ABC):
             }
             if context_overflow_retried:
                 metadata["context_overflow_retry"] = True
+            request_budget_metadata = self._request_budget_metadata(budget_result)
+            if request_budget_metadata is not None:
+                metadata["request_budget"] = request_budget_metadata
             self._apply_runtime_metadata(metadata, runtime_config)
             self._merge_context_window_usage(metadata, token_breakdown_dict)
 
@@ -1152,6 +1289,16 @@ class BaseAgent(ABC):
                 metadata=metadata,
             )
 
+        except ContextBudgetExceededError as e:
+            logger.warning("Model request rejected before provider call code=%s", e.code)
+            return self._build_error_response(
+                message=(
+                    "This request is too large for the selected model's context window. "
+                    "Please shorten the current request or remove large attachments."
+                ),
+                conversation_id=conversation_id,
+                error=e.code,
+            )
         except Exception as e:
             logger.error(f"Error invoking model with history: {e}")
             return self._build_error_response(
