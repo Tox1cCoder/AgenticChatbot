@@ -99,7 +99,7 @@ Run Ruff on changed files plus `git diff --check`. Record exact results below. C
 - Create: `tests/test_token_counter.py`
 - Modify: `requirements.txt` only if the installed tiktoken dependency is not declared.
 
-- [ ] **Step 1: Write failing counter tests**
+- [x] **Step 1: Write failing counter tests**
 
 Define the wished-for API:
 
@@ -122,21 +122,21 @@ counter.count_request(
 
 Test OpenAI model encoding/fallback, conservative Gemini/Anthropic estimates, byte-upper-bound unknown models, Thai not using chars/4, canonical JSON tools, tool calls/results, image metadata/fallback, authoritative callback near boundaries, and extraction of OpenAI/Gemini/Anthropic reported usage.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `pytest tests/test_token_counter.py -q`
 Expected: import failure for `app.ai.token_counter`.
 
-- [ ] **Step 3: Implement minimal strategies and canonical serialization**
+- [x] **Step 3: Implement minimal strategies and canonical serialization**
 
 `TokenCounter` returns counts with strategy identifiers; it never silently changes provider. Local counters include role/envelope overhead, `json.dumps(..., sort_keys=True, separators=(",", ":"))` tool serialization, image costs, reserved output, and safety margin as separate breakdown values.
 
-- [ ] **Step 4: Verify GREEN and boundary cases**
+- [x] **Step 4: Verify GREEN and boundary cases**
 
 Run: `pytest tests/test_token_counter.py -q`
 Expected: all counter tests pass including Thai and unknown-model conservative assertions.
 
-- [ ] **Step 5: Run task gate, update logs, and commit**
+- [x] **Step 5: Run task gate, update logs, and commit**
 
 Run Ruff and `git diff --check`; record results. Commit with `feat(compaction): add unified token counter`.
 
@@ -474,6 +474,7 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 |---|---|---|---|
 | 2026-07-15 | Plan | Complete | Placeholder scan returned no matches; requirement coverage scan found sequence/jobs, structured memory, token counting/Thai, invalidation, leases/CAS/reconciliation, emergency retry, health/metrics, cleanup, docs, and migration gates; plan-file verification found no whitespace errors. |
 | 2026-07-15 | Task 1 | Complete | RED: `pytest tests/test_conversation_summary_config.py -q` produced 26 expected failures for missing fields/invariants. GREEN: targeted plus config/summarizer regressions produced `36 passed`. Ruff formatting reports both changed Python files formatted; the new test has zero lint errors and the diff adds zero overlong lines. Whole-file `config.py` still reports the same 42 pre-existing E501 errors as `HEAD`; `git diff --check` passed. |
+| 2026-07-15 | Task 2 | Complete | RED: token-counter tests failed at collection with the expected missing-module error. GREEN: 16 focused tests passed. Final gate: token, context-window, image-history, and model-context suites produced `76 passed`; Ruff lint passed; both files were formatted after one formatter-only iteration; `git diff --check` passed. |
 
 ## Decision Log
 
@@ -485,3 +486,5 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Resolve credentials only for the configured compaction provider. | Prevents the legacy class of silently sending one provider's key to another provider and makes server-managed fallback explicit. |
 | 2026-07-15 | Add new settings before deleting legacy settings. | Migrating callers and deleting old fields in Task 11 keeps every intermediate gate runnable while still shipping without compatibility aliases. |
 | 2026-07-15 | Default reconciliation to 60 seconds, safety margin to 1,024 tokens, and reserved output to 4,096 tokens. | The design names these controls but does not assign numbers; these conservative values match the existing operational scale and are now locked by tests/docs. |
+| 2026-07-15 | Split local `estimate_request` from async authoritative `count_request`. | Most calls remain fast and deterministic while near-boundary/background callers can opt into injected provider-native counting without duplicating serialization logic. |
+| 2026-07-15 | Use dimension-aware image formulas with a 1,200-token fallback. | OpenAI tile accounting, Anthropic area accounting, and conservative Gemini area accounting improve estimates when metadata exists; the established 1,200 fallback protects metadata-poor images. |
