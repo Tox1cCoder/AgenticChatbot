@@ -1,6 +1,17 @@
 import uuid
 
-from sqlalchemy import Column, DateTime, ForeignKey, Index, Text, func
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    Index,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
@@ -24,13 +35,27 @@ class Message(Base):
     sender = Column(MessageRoleType, nullable=False)
     content = Column(Text, nullable=False)
     message_metadata = Column(JSONB, nullable=True, default=dict)
+    sequence = Column(BigInteger, nullable=False)
 
     # Relationships
     conversation = relationship("Conversation", back_populates="messages")
     feedback = relationship("Feedback", back_populates="message", uselist=False, lazy="joined")
 
-    # Index for efficient querying by conversation and timestamp
-    __table_args__ = (Index("idx_message_conversation_created", "conversation_id", "created_at"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "conversation_id",
+            "sequence",
+            name="uq_messages_conversation_sequence",
+        ),
+        CheckConstraint("sequence > 0", name="ck_messages_sequence_positive"),
+        Index("idx_message_conversation_created", "conversation_id", "created_at"),
+        Index(
+            "ix_messages_prompt_history",
+            "conversation_id",
+            "sequence",
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+    )
 
     def __repr__(self) -> str:
         return (

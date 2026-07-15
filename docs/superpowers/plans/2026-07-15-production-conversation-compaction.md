@@ -151,26 +151,26 @@ Run Ruff and `git diff --check`; record results. Commit with `feat(compaction): 
 - Create: `app/alembic/versions/x1y2z3a4b5c6_production_conversation_compaction.py`
 - Create: `tests/test_conversation_compaction_schema.py`
 
-- [ ] **Step 1: Write failing SQLAlchemy metadata tests**
+- [x] **Step 1: Write failing SQLAlchemy metadata tests**
 
 Assert column types/nullability/defaults, positive/non-negative checks, one summary/job per conversation, unique `(conversation_id, sequence)`, partial prompt index, same-conversation composite FKs, job statuses, and cascades.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `pytest tests/test_conversation_compaction_schema.py -q`
 Expected: missing columns/model/constraints.
 
-- [ ] **Step 3: Implement models and forward migration**
+- [x] **Step 3: Implement models and forward migration**
 
 The migration must: add/backfill message sequences using `(created_at, id)` only for migration ordering; set `next_message_sequence = max(sequence)+1`; replace the legacy summary table in place while preserving defensively converted rows as invalid empty payloads; create jobs; add composite uniqueness before composite FKs; validate constraints; and provide a reversible downgrade to the previous schema.
 
-- [ ] **Step 4: Verify GREEN and Alembic metadata**
+- [x] **Step 4: Verify GREEN and Alembic metadata**
 
 Run: `pytest tests/test_conversation_compaction_schema.py tests/test_database_schema_contract.py -q`
 Run: `python -m alembic heads`
 Expected: one head `x1y2z3a4b5c6` and schema tests pass.
 
-- [ ] **Step 5: Run task gate, update logs, and commit**
+- [x] **Step 5: Run task gate, update logs, and commit**
 
 Run Ruff, `alembic check`, and `git diff --check`; record results. Commit with `feat(compaction): add sequence summary and job schema`.
 
@@ -475,6 +475,7 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Plan | Complete | Placeholder scan returned no matches; requirement coverage scan found sequence/jobs, structured memory, token counting/Thai, invalidation, leases/CAS/reconciliation, emergency retry, health/metrics, cleanup, docs, and migration gates; plan-file verification found no whitespace errors. |
 | 2026-07-15 | Task 1 | Complete | RED: `pytest tests/test_conversation_summary_config.py -q` produced 26 expected failures for missing fields/invariants. GREEN: targeted plus config/summarizer regressions produced `36 passed`. Ruff formatting reports both changed Python files formatted; the new test has zero lint errors and the diff adds zero overlong lines. Whole-file `config.py` still reports the same 42 pre-existing E501 errors as `HEAD`; `git diff --check` passed. |
 | 2026-07-15 | Task 2 | Complete | RED: token-counter tests failed at collection with the expected missing-module error. GREEN: 16 focused tests passed. Final gate: token, context-window, image-history, and model-context suites produced `76 passed`; Ruff lint passed; both files were formatted after one formatter-only iteration; `git diff --check` passed. |
+| 2026-07-15 | Task 3 | Complete | RED: schema and migration tests failed for the missing job model/revision. GREEN: model/migration contracts passed. Disposable PostgreSQL verification from supported previous head validated deterministic `1,2,3` sequence backfill, next sequence `4`, named constraints/indexes, legacy payload invalidation/version `7→8`, `alembic current/check`, downgrade restoration, and re-upgrade. Final schema/container gate: `17 passed`; Ruff lint/format and `git diff --check` passed. A from-zero run was blocked in immutable history by the pre-existing duplicate `decision_type` enum migration; no old revision was altered. |
 
 ## Decision Log
 
@@ -488,3 +489,7 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Default reconciliation to 60 seconds, safety margin to 1,024 tokens, and reserved output to 4,096 tokens. | The design names these controls but does not assign numbers; these conservative values match the existing operational scale and are now locked by tests/docs. |
 | 2026-07-15 | Split local `estimate_request` from async authoritative `count_request`. | Most calls remain fast and deterministic while near-boundary/background callers can opt into injected provider-native counting without duplicating serialization logic. |
 | 2026-07-15 | Use dimension-aware image formulas with a 1,200-token fallback. | OpenAI tile accounting, Anthropic area accounting, and conservative Gemini area accounting improve estimates when metadata exists; the established 1,200 fallback protects metadata-poor images. |
+| 2026-07-15 | Name summary/job primary keys and all new foreign keys explicitly. | The legacy table remains temporarily during data conversion; explicit names prevent PostgreSQL schema-wide constraint-name collisions and make inspection deterministic. |
+| 2026-07-15 | Convert legacy free-form summaries into invalid empty structured rows with an incremented version. | Free-form text cannot be safely or deterministically promoted into the validated schema; invalidation guarantees it is never reused while preserving conversation/version continuity. |
+| 2026-07-15 | Verify migration from `w7x8y9z0a1b2`, not by rewriting old migration history. | The repository's from-zero history has a pre-existing duplicate enum defect; production rollout starts from the applied previous head, and the design explicitly forbids rewriting applied revisions. |
+| 2026-07-15 | Do not downgrade the live development database after automatic startup migration advanced it. | Active API processes applied the new head when the revision appeared; destructive rollback would disrupt those sessions, so all downgrade testing remained disposable. |

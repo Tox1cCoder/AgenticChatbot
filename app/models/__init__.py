@@ -2,6 +2,7 @@ from app.models.agent_model_config import AgentModelConfig
 from app.models.client_device import ClientDevice, DevicePlatform, DeviceStatus
 from app.models.conversation import Conversation
 from app.models.conversation_memory_summary import ConversationMemorySummary
+from app.models.conversation_summary_job import ConversationSummaryJob, SummaryJobStatus
 from app.models.custom_agent import ConversationCustomAgent, CustomAgent
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
@@ -33,6 +34,8 @@ __all__ = [
     "User",
     "Conversation",
     "ConversationMemorySummary",
+    "ConversationSummaryJob",
+    "SummaryJobStatus",
     "CustomAgent",
     "ConversationCustomAgent",
     "Message",

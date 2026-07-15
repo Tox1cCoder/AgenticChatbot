@@ -1,75 +1,137 @@
-"""Durable conversation memory summary model.
+"""Structured, sequence-scoped conversation memory."""
 
-Stores a single rolling summary per conversation alongside a database
-``messages.id`` cursor. The cursor lets the prompt-history pipeline replay
-recent unsummarized messages without overlapping the summary, replacing
-the previous LangGraph-message-ID approach.
-"""
-
-import uuid
-
-from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, Text, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Integer,
+    PrimaryKeyConstraint,
+    SmallInteger,
+    String,
+    func,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
 from app.models.base import Base
 
 
 class ConversationMemorySummary(Base):
-    """Per-conversation rolling summary with a DB-message cursor."""
+    """Validated derived memory owned one-to-one by a conversation."""
 
     __tablename__ = "conversation_memory_summaries"
     __table_args__ = (
-        Index(
-            "ux_conversation_memory_summaries_conversation_id",
+        PrimaryKeyConstraint(
             "conversation_id",
-            unique=True,
+            name="pk_conversation_memory_summaries",
         ),
-        Index(
-            "ix_conversation_memory_summaries_last_message",
-            "last_summarized_message_id",
+        ForeignKeyConstraint(
+            ["conversation_id", "last_summarized_sequence"],
+            ["messages.conversation_id", "messages.sequence"],
+            name="fk_memory_summary_conversation_sequence",
+        ),
+        CheckConstraint(
+            "summary_schema_version > 0",
+            name="ck_memory_summary_schema_version_positive",
+        ),
+        CheckConstraint(
+            "summary_version > 0",
+            name="ck_memory_summary_version_positive",
+        ),
+        CheckConstraint(
+            "source_message_count >= 0",
+            name="ck_memory_summary_source_message_count_nonnegative",
+        ),
+        CheckConstraint(
+            "source_token_count >= 0",
+            name="ck_memory_summary_source_token_count_nonnegative",
+        ),
+        CheckConstraint(
+            "summary_token_count >= 0",
+            name="ck_memory_summary_token_count_nonnegative",
         ),
     )
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     conversation_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("conversations.id"),
+        ForeignKey(
+            "conversations.id",
+            name="fk_memory_summary_conversation",
+            ondelete="CASCADE",
+        ),
+        primary_key=True,
+    )
+    summary_payload = Column(
+        JSONB,
         nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
     )
-    user_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("users.id"),
+    summary_schema_version = Column(
+        SmallInteger,
         nullable=False,
-        index=True,
+        default=1,
+        server_default=text("1"),
     )
-    summary_text = Column(Text, nullable=False, default="")
-    # Cursor to the newest DB message folded into the summary. NULL means the
-    # summary spans no committed range yet.
-    last_summarized_message_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("messages.id"),
-        nullable=True,
+    last_summarized_sequence = Column(BigInteger, nullable=True)
+    summary_version = Column(
+        BigInteger,
+        nullable=False,
+        default=1,
+        server_default=text("1"),
     )
-    source_message_count = Column(Integer, nullable=False, default=0)
-    estimated_tokens = Column(Integer, nullable=False, default=0)
-    # Monotonically incremented on every upsert; useful as a cache-busting key.
-    summary_version = Column(Integer, nullable=False, default=1)
-    created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
+    source_message_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    source_token_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    summary_token_count = Column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    provider = Column(String(64), nullable=False, default="", server_default=text("''"))
+    model = Column(String(255), nullable=False, default="", server_default=text("''"))
+    tokenizer = Column(String(128), nullable=False, default="", server_default=text("''"))
+    prompt_version = Column(String(64), nullable=False, default="", server_default=text("''"))
+    is_valid = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+    )
     updated_at = Column(
         DateTime(timezone=True),
+        nullable=False,
         default=func.now(),
         onupdate=func.now(),
-        nullable=False,
+        server_default=func.now(),
     )
 
-    conversation = relationship("Conversation", backref="memory_summary")
-    user = relationship("User")
-    last_summarized_message = relationship("Message", foreign_keys=[last_summarized_message_id])
+    conversation = relationship("Conversation", back_populates="memory_summary")
 
     def __repr__(self) -> str:
         return (
             f"<ConversationMemorySummary(conversation_id={self.conversation_id}, "
-            f"version={self.summary_version}, "
-            f"cursor={self.last_summarized_message_id})>"
+            f"version={self.summary_version}, cursor={self.last_summarized_sequence}, "
+            f"valid={self.is_valid})>"
         )
