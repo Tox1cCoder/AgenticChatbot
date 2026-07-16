@@ -12,7 +12,14 @@ from app.ai.tool_execution_policy import ToolExecutionPolicy, ToolIdentity
 from app.core.config import settings
 
 
-def _attempt_policy(*, cancellation: str = "cooperative") -> ToolExecutionPolicy:
+def _attempt_policy(
+    *,
+    cancellation: str = "cooperative",
+    timeout_seconds: float = 0.05,
+    hard_timeout_seconds: float = 0.15,
+    total_timeout_seconds: float = 0.3,
+    outer_timeout_disabled: bool = False,
+) -> ToolExecutionPolicy:
     return ToolExecutionPolicy(
         identity=ToolIdentity(
             tool_origin="internal",
@@ -21,14 +28,14 @@ def _attempt_policy(*, cancellation: str = "cooperative") -> ToolExecutionPolicy
             source_tool_name="deadline_test",
             server_name=None,
         ),
-        timeout_seconds=0.05,
-        hard_timeout_seconds=0.15,
-        total_timeout_seconds=0.3,
+        timeout_seconds=timeout_seconds,
+        hard_timeout_seconds=hard_timeout_seconds,
+        total_timeout_seconds=total_timeout_seconds,
         max_attempts=1,
         retry_safe=False,
         idempotent=False,
         metadata_trusted=False,
-        outer_timeout_disabled=False,
+        outer_timeout_disabled=outer_timeout_disabled,
         cancellation=cancellation,
         client_execution_timeout_seconds=None,
         client_response_timeout_seconds=None,
@@ -111,15 +118,23 @@ async def test_sync_thread_timeout_is_recorded_as_abandon_only():
             finished.set()
             return worker_results[-1]
 
-    outcome = await invoke_tool_attempt(
-        _BlockingSyncTool(),
-        {},
-        policy=_attempt_policy(cancellation="abandon_only"),
-        remaining_total_seconds=0.3,
+    runner = asyncio.create_task(
+        invoke_tool_attempt(
+            _BlockingSyncTool(),
+            {},
+            policy=_attempt_policy(
+                cancellation="abandon_only",
+                timeout_seconds=0.3,
+                hard_timeout_seconds=0.5,
+                total_timeout_seconds=0.6,
+            ),
+            remaining_total_seconds=0.6,
+        )
     )
 
     try:
-        assert started.is_set()
+        assert await asyncio.to_thread(started.wait, 1)
+        outcome = await runner
         assert isinstance(outcome.exception, TimeoutError)
         assert outcome.timeout_phase == "soft_timeout"
         assert outcome.cancellation_attempted is True
@@ -130,6 +145,151 @@ async def test_sync_thread_timeout_is_recorded_as_abandon_only():
         assert await asyncio.to_thread(finished.wait, 1)
 
     assert worker_results == ["thread-result"]
+
+
+@pytest.mark.asyncio
+async def test_parent_cancellation_during_soft_wait_cancels_and_consumes_child():
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    child_cancelled = asyncio.Event()
+    finished = asyncio.Event()
+    exception_contexts: list[dict] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: exception_contexts.append(context))
+
+    class _LateFailingCancellationTool:
+        async def ainvoke(self, args):
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                child_cancelled.set()
+                raise RuntimeError("child cleanup failed") from None
+            finally:
+                finished.set()
+
+    runner = asyncio.create_task(
+        invoke_tool_attempt(
+            _LateFailingCancellationTool(),
+            {},
+            policy=_attempt_policy(
+                timeout_seconds=1,
+                hard_timeout_seconds=1.2,
+                total_timeout_seconds=1.5,
+            ),
+            remaining_total_seconds=1.5,
+        )
+    )
+
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        runner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await runner
+        await asyncio.sleep(0)
+
+        assert child_cancelled.is_set()
+        assert finished.is_set()
+        assert not any(
+            "Task exception was never retrieved" in str(context.get("message", ""))
+            for context in exception_contexts
+        )
+    finally:
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=1)
+        await asyncio.sleep(0)
+        loop.set_exception_handler(previous_handler)
+
+
+@pytest.mark.asyncio
+async def test_parent_cancellation_during_hard_cleanup_cancels_and_consumes_child():
+    loop = asyncio.get_running_loop()
+    release = asyncio.Event()
+    soft_cancellation_observed = asyncio.Event()
+    parent_cancellation_observed = asyncio.Event()
+    finished = asyncio.Event()
+    exception_contexts: list[dict] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: exception_contexts.append(context))
+
+    class _TwiceCancelledTool:
+        async def ainvoke(self, args):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                soft_cancellation_observed.set()
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    parent_cancellation_observed.set()
+                    raise RuntimeError("second cancellation cleanup failed") from None
+            finally:
+                finished.set()
+
+    runner = asyncio.create_task(
+        invoke_tool_attempt(
+            _TwiceCancelledTool(),
+            {},
+            policy=_attempt_policy(
+                timeout_seconds=0.05,
+                hard_timeout_seconds=1,
+                total_timeout_seconds=1.2,
+            ),
+            remaining_total_seconds=1.2,
+        )
+    )
+
+    try:
+        await asyncio.wait_for(soft_cancellation_observed.wait(), timeout=1)
+        runner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await runner
+        await asyncio.sleep(0)
+
+        assert parent_cancellation_observed.is_set()
+        assert finished.is_set()
+        assert not any(
+            "Task exception was never retrieved" in str(context.get("message", ""))
+            for context in exception_contexts
+        )
+    finally:
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=1)
+        await asyncio.sleep(0)
+        loop.set_exception_handler(previous_handler)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "remaining_total_seconds",
+    [pytest.param(float("nan"), id="nan"), pytest.param(float("-inf"), id="negative-infinity")],
+)
+async def test_invalid_cumulative_deadline_fails_closed(remaining_total_seconds):
+    release = asyncio.Event()
+
+    class _BlockingTool:
+        async def ainvoke(self, args):
+            await release.wait()
+            return "late"
+
+    runner = asyncio.create_task(
+        invoke_tool_attempt(
+            _BlockingTool(),
+            {},
+            policy=_attempt_policy(outer_timeout_disabled=True),
+            remaining_total_seconds=remaining_total_seconds,
+        )
+    )
+
+    try:
+        outcome = await asyncio.wait_for(asyncio.shield(runner), timeout=0.2)
+        assert isinstance(outcome.exception, TimeoutError)
+        assert outcome.cancellation_attempted is True
+    finally:
+        release.set()
+        if not runner.done():
+            await asyncio.wait_for(runner, timeout=1)
 
 
 @pytest.mark.asyncio
