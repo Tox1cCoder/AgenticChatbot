@@ -32,10 +32,43 @@ _FILE_SEARCH_TERMS = {"search", "find", "grep", "pattern", "contents", "content"
 _FILE_EDIT_TERMS = {"edit", "patch", "apply", "replace", "modify", "surgical"}
 _FILE_WRITE_TERMS = {"write", "create", "append", "save"}
 _CONFIG_TERMS = {"config", "configuration", "settings", "blockedcommands"}
+_EXTERNAL_OPEN_ACTION_TERMS = {"open", "launch", "play", "show"}
+_EXTERNAL_OPEN_TARGET_TERMS = {
+    "app",
+    "application",
+    "browser",
+    "link",
+    "media",
+    "url",
+    "urls",
+    "video",
+    "webpage",
+    "website",
+}
+_CONTENT_READ_ACTION_TERMS = {
+    "analyze",
+    "analyse",
+    "extract",
+    "fetch",
+    "inspect",
+    "read",
+    "summarize",
+    "summarise",
+}
+_WEB_RESOURCE_TERMS = {
+    "article",
+    "content",
+    "page",
+    "source",
+    "url",
+    "urls",
+    "webpage",
+    "website",
+}
 _WEB_SEARCH_TERMS = {"web", "search", "current", "recent", "news", "source", "sources"}
-_WEB_EXTRACT_TERMS = {"extract", "url", "urls", "page", "article", "content", "source"}
 _WEB_MAP_TERMS = {"map", "sitemap", "site", "structure", "pages", "urls", "discover"}
 _WEB_CRAWL_TERMS = {"crawl", "site", "website", "docs", "documentation", "section", "pages"}
+_URL_ARGUMENT_TERMS = {"link", "uri", "url", "urls"}
 
 
 def infer_query_intent(query: str | None) -> QueryIntent:
@@ -43,7 +76,6 @@ def infer_query_intent(query: str | None) -> QueryIntent:
     tokens = set(tokenize_text(raw_query))
     capabilities: set[str] = set()
     action_verbs: set[str] = set()
-    target_terms: set[str] = set(tokens)
 
     if tokens & _SHELL_TERMS and (
         tokens & {"run", "execute", "command", "shell", "python", "script"}
@@ -57,18 +89,53 @@ def infer_query_intent(query: str | None) -> QueryIntent:
         capabilities.add("file_write")
     if tokens & _CONFIG_TERMS:
         capabilities.add("config_read")
-    if tokens & _WEB_SEARCH_TERMS and tokens & {"web", "search", "current", "recent", "news"}:
-        capabilities.add("web_search")
-    if tokens & _WEB_EXTRACT_TERMS and tokens & {"url", "urls", "extract", "page", "article"}:
+
+    external_open_actions = tokens & _EXTERNAL_OPEN_ACTION_TERMS
+    external_open_targets = tokens & _EXTERNAL_OPEN_TARGET_TERMS
+    content_read_actions = tokens & _CONTENT_READ_ACTION_TERMS
+    web_resource_targets = tokens & _WEB_RESOURCE_TERMS
+
+    if external_open_actions and external_open_targets:
+        capabilities.add("external_open")
+    if content_read_actions and web_resource_targets:
         capabilities.add("web_extract")
-    if tokens & _WEB_MAP_TERMS and tokens & {"map", "sitemap", "structure", "discover", "urls"}:
+    if tokens & _WEB_SEARCH_TERMS and tokens & {
+        "web",
+        "search",
+        "current",
+        "recent",
+        "news",
+    }:
+        capabilities.add("web_search")
+    if tokens & _WEB_MAP_TERMS and tokens & {
+        "map",
+        "sitemap",
+        "structure",
+        "discover",
+        "urls",
+    }:
         capabilities.add("web_map")
-    if tokens & _WEB_CRAWL_TERMS and tokens & {"crawl", "site", "website", "docs", "documentation"}:
+    if tokens & _WEB_CRAWL_TERMS and tokens & {
+        "crawl",
+        "site",
+        "website",
+        "docs",
+        "documentation",
+    }:
         capabilities.add("web_crawl")
 
     action_verbs.update(
-        tokens & (_SHELL_TERMS | _FILE_SEARCH_TERMS | _FILE_EDIT_TERMS | _FILE_WRITE_TERMS)
+        tokens
+        & (
+            _SHELL_TERMS
+            | _FILE_SEARCH_TERMS
+            | _FILE_EDIT_TERMS
+            | _FILE_WRITE_TERMS
+            | _EXTERNAL_OPEN_ACTION_TERMS
+            | _CONTENT_READ_ACTION_TERMS
+        )
     )
+    target_terms = external_open_targets | web_resource_targets
     return QueryIntent(
         raw_query=raw_query,
         tokens=tokens,
@@ -118,15 +185,26 @@ def infer_tool_profile(
         capabilities.add("config_write")
     if "interact" in name_tokens and "process" in name_tokens:
         capabilities.add("process_interaction")
-    if "tavily" in server_name.lower():
-        if "search" in name_tokens:
-            capabilities.add("web_search")
-        if "extract" in name_tokens:
-            capabilities.add("web_extract")
-        if "map" in name_tokens:
-            capabilities.add("web_map")
-        if "crawl" in name_tokens:
-            capabilities.add("web_crawl")
+    url_arg_tokens = (arg_tokens | required_arg_tokens) & _URL_ARGUMENT_TERMS
+    direct_open_signal = bool(
+        ({"open", "launch"} & name_tokens)
+        and (url_arg_tokens or {"browser", "link", "url"} & description_tokens)
+    )
+    if direct_open_signal:
+        capabilities.add("external_open")
+
+    if "extract" in name_tokens and url_arg_tokens:
+        capabilities.add("web_extract")
+    if (
+        "search" in name_tokens
+        and "query" in (arg_tokens | required_arg_tokens)
+        and {"internet", "news", "online", "source", "web"} & description_tokens
+    ):
+        capabilities.add("web_search")
+    if "map" in name_tokens and url_arg_tokens:
+        capabilities.add("web_map")
+    if "crawl" in name_tokens and url_arg_tokens:
+        capabilities.add("web_crawl")
 
     purpose = _compact_purpose(tool_name, capabilities, description, all_tokens)
     return ToolCapabilityProfile(
@@ -147,6 +225,8 @@ def _compact_purpose(
     description: str,
     all_tokens: set[str],
 ) -> str:
+    if "external_open" in capabilities:
+        return "Open an external URL or resource in a local application."
     if "web_search" in capabilities:
         return "Search the web for current facts, news, and source discovery."
     if "web_extract" in capabilities:
