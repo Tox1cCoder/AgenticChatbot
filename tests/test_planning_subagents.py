@@ -37,6 +37,7 @@ from app.ai.schemas import (
     AgentType,
     MessageRole,
 )
+from app.ai.tool_execution_policy import resolve_tool_execution_policy
 from app.core.config import settings
 
 # ---------------------------------------------------------------------------
@@ -575,9 +576,28 @@ async def test_dispatch_tool_returns_full_answer_and_stashes_full_activity(monke
     assert activity_result["summary"] == long_answer.strip()
 
 
-def test_dispatch_tool_opts_out_of_generic_execution_timeout():
+def test_dispatch_tool_declares_internal_identity_and_disables_outer_timeout():
     tool = create_dispatch_subagents_tool(dispatcher=None, parent_state_provider=None)
-    assert tool.metadata == {"execution_timeout_seconds": None}
+    assert tool.metadata == {
+        "tool_origin": "internal",
+        "qualified_tool_id": "internal::dispatch_subagents",
+        "application_execution_policy": {"disable_outer_timeout": True},
+    }
+
+
+def test_dispatch_tool_policy_resolves_outer_timeout_disabled():
+    """The metadata shape above is only useful if the resolver actually
+    accepts it: this is the one identity on the code-owned allowlist."""
+    tool = create_dispatch_subagents_tool(dispatcher=None, parent_state_provider=None)
+
+    policy = resolve_tool_execution_policy(
+        tool, exposed_tool_name="dispatch_subagents", invocation_kind="native_async"
+    )
+
+    assert policy.identity.tool_origin == "internal"
+    assert policy.identity.qualified_tool_id == "internal::dispatch_subagents"
+    assert policy.outer_timeout_disabled is True
+    assert policy.metadata_trusted is True
 
 
 @pytest.mark.asyncio

@@ -816,7 +816,13 @@ def create_dispatch_subagents_tool(
         description=_DISPATCH_TOOL_DESCRIPTION,
         args_schema=DispatchSubagentsInput,
         # The dispatch blocks for the whole worker fan-out (multiple model +
-        # tool rounds), so the generic per-tool timeout must not apply here;
-        # workers remain bounded by their own tool/provider timeouts.
-        metadata={"execution_timeout_seconds": None},
+        # tool rounds), so the generic per-tool outer timeout must not apply
+        # here; workers remain bounded by their own tool/provider timeouts.
+        # `disable_outer_timeout` is only honored for this exact identity —
+        # see the code-owned allowlist in app.ai.tool_execution_policy.
+        metadata={
+            "tool_origin": "internal",
+            "qualified_tool_id": "internal::dispatch_subagents",
+            "application_execution_policy": {"disable_outer_timeout": True},
+        },
     )

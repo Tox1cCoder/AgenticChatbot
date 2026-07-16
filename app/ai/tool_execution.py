@@ -1136,16 +1136,35 @@ def _tool_execution_timeout_seconds() -> float:
     return max(0.001, parsed)
 
 
+# Narrow, temporary compatibility bridge: the only identity allowed to disable
+# the outer timeout via `application_execution_policy` (see the code-owned
+# allowlist in `app.ai.tool_execution_policy`). This legacy resolver predates
+# the policy resolver and is removed once the runner calls it directly.
+_LEGACY_DISABLE_OUTER_TIMEOUT_IDENTITY = ("internal", "internal::dispatch_subagents")
+
+
 def _resolve_tool_timeout_seconds(tool: Any) -> float | None:
-    """Per-tool timeout from ``tool.metadata["execution_timeout_seconds"]``.
+    """Per-tool timeout from tool metadata.
 
     ``None`` disables the outer timeout — for long-running orchestration tools
     (e.g. ``dispatch_subagents``) whose inner operations already run under
     their own tool/provider timeouts. Absent or invalid values fall back to
     the global ``tool_execution_timeout``.
+
+    Understands two metadata shapes:
+
+    - The legacy top-level ``execution_timeout_seconds`` key (removed once
+      this module is migrated onto ``resolve_tool_execution_policy``).
+    - The new ``application_execution_policy.disable_outer_timeout`` key
+      (see "Metadata Trust"), honored only for the exact
+      ``("internal", "internal::dispatch_subagents")`` identity so a
+      first-party tool cannot self-declare an unbounded timeout.
     """
     metadata = getattr(tool, "metadata", None)
-    if isinstance(metadata, dict) and "execution_timeout_seconds" in metadata:
+    if not isinstance(metadata, dict):
+        return _tool_execution_timeout_seconds()
+
+    if "execution_timeout_seconds" in metadata:
         value = metadata["execution_timeout_seconds"]
         if value is None:
             return None
@@ -1153,6 +1172,17 @@ def _resolve_tool_timeout_seconds(tool: Any) -> float | None:
             return max(0.001, float(value))
         except (TypeError, ValueError):
             pass
+        return _tool_execution_timeout_seconds()
+
+    identity_key = (metadata.get("tool_origin"), metadata.get("qualified_tool_id"))
+    if identity_key == _LEGACY_DISABLE_OUTER_TIMEOUT_IDENTITY:
+        application_policy = metadata.get("application_execution_policy")
+        if (
+            isinstance(application_policy, dict)
+            and application_policy.get("disable_outer_timeout") is True
+        ):
+            return None
+
     return _tool_execution_timeout_seconds()
 
 

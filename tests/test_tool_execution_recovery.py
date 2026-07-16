@@ -230,6 +230,44 @@ async def test_execute_tool_calls_metadata_none_disables_timeout(monkeypatch):
     assert artifacts[0].get("status") != "error"
 
 
+def test_resolve_tool_timeout_seconds_bridges_dispatch_subagents_policy_metadata(monkeypatch):
+    """The new ``application_execution_policy`` metadata shape (Task 2) must
+    keep disabling the outer timeout for the one allowlisted identity, until
+    the runner is migrated onto ``resolve_tool_execution_policy`` directly."""
+    from app.ai.tool_execution import _resolve_tool_timeout_seconds
+
+    monkeypatch.setattr(settings, "tool_execution_timeout", 30)
+
+    dispatch_tool = SimpleNamespace(
+        name="dispatch_subagents",
+        metadata={
+            "tool_origin": "internal",
+            "qualified_tool_id": "internal::dispatch_subagents",
+            "application_execution_policy": {"disable_outer_timeout": True},
+        },
+    )
+    assert _resolve_tool_timeout_seconds(dispatch_tool) is None
+
+
+def test_resolve_tool_timeout_seconds_ignores_disable_for_other_internal_tools(monkeypatch):
+    """Only the exact dispatch_subagents identity may disable the outer
+    timeout — a different internal tool claiming the same metadata key must
+    still get the ordinary bounded timeout."""
+    from app.ai.tool_execution import _resolve_tool_timeout_seconds
+
+    monkeypatch.setattr(settings, "tool_execution_timeout", 30)
+
+    other_tool = SimpleNamespace(
+        name="some_other_tool",
+        metadata={
+            "tool_origin": "internal",
+            "qualified_tool_id": "internal::some_other_tool",
+            "application_execution_policy": {"disable_outer_timeout": True},
+        },
+    )
+    assert _resolve_tool_timeout_seconds(other_tool) == 30.0
+
+
 @pytest.mark.asyncio
 async def test_execute_tool_calls_metadata_overrides_timeout(monkeypatch):
     monkeypatch.setattr(settings, "tool_execution_timeout", 10)
