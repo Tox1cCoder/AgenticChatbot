@@ -430,7 +430,7 @@ artifact truncation/offload behavior.
 - Test: `tests/test_tool_execution_policy.py`
 - Test: `tests/test_mcp_adapter_utils.py`
 
-- [ ] **Step 1: Write failing configuration and identity tests**
+- [x] **Step 1: Write failing configuration and identity tests**
 
 Add tests proving:
 
@@ -479,7 +479,7 @@ def test_clone_mcp_tool_overwrites_remote_identity_fields():
     assert cloned.metadata["server_name"] == "trusted_config_name"
 ```
 
-- [ ] **Step 2: Run the tests and verify they fail**
+- [x] **Step 2: Run the tests and verify they fail**
 
 Run:
 
@@ -490,7 +490,7 @@ Run:
 Expected: failures because the policy models, `ToolIdentity`, and exact-key
 validation do not exist and MCP identity still uses `setdefault()`.
 
-- [ ] **Step 3: Implement the configuration models and identity extractor**
+- [x] **Step 3: Implement the configuration models and identity extractor**
 
 Implement the contracts from “Deployment Configuration” and “Canonical Tool
 Identity.” Expose `resolve_tool_identity(tool, *, exposed_tool_name)`,
@@ -503,11 +503,11 @@ The implementation must reject same-specificity ambiguity and sort valid rules
 from least to most specific. Change MCP identity assignment from `setdefault()`
 to application-owned assignment.
 
-- [ ] **Step 4: Run the focused tests**
+- [x] **Step 4: Run the focused tests**
 
 Run the Task 1 command again. Expected: all selected tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add app/ai/tool_execution_policy.py app/core/config.py app/core/mcp_adapter_utils.py tests/test_tool_execution_policy.py tests/test_mcp_adapter_utils.py
@@ -522,7 +522,7 @@ git commit -m "feat: add origin-aware tool policy identity"
 - Test: `tests/test_tool_execution_policy.py`
 - Test: `tests/test_planning_subagents.py`
 
-- [ ] **Step 1: Write failing resolver tests**
+- [x] **Step 1: Write failing resolver tests**
 
 Cover these exact cases:
 
@@ -548,7 +548,7 @@ Cover these exact cases:
 Assertions must include resolved timeout, hard timeout, total timeout,
 `max_attempts`, metadata trust, config keys, and outer-timeout state.
 
-- [ ] **Step 2: Run the resolver tests and verify they fail**
+- [x] **Step 2: Run the resolver tests and verify they fail**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_tool_execution_policy.py tests/test_planning_subagents.py -q
@@ -557,7 +557,7 @@ Assertions must include resolved timeout, hard timeout, total timeout,
 Expected: the new resolver cases fail because metadata normalization and policy
 resolution are not implemented.
 
-- [ ] **Step 3: Implement the resolver and scoped context**
+- [x] **Step 3: Implement the resolver and scoped context**
 
 Expose `resolve_tool_execution_policy(tool, *, exposed_tool_name,
 invocation_kind) -> ToolExecutionPolicy`,
@@ -581,11 +581,11 @@ metadata={
 
 Keep a code-owned exact allowlist containing only that identity.
 
-- [ ] **Step 4: Run the resolver and subagent tests**
+- [x] **Step 4: Run the resolver and subagent tests**
 
 Run the Task 2 command again. Expected: all selected tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add app/ai/tool_execution_policy.py app/ai/planning_subagents.py tests/test_tool_execution_policy.py tests/test_planning_subagents.py
@@ -1111,3 +1111,27 @@ changed, do not create an empty commit.
 - `dispatch_subagents` is the only code-allowlisted disabled-outer-timeout tool.
 - No undefined `background` execution mode or generic job system is introduced.
 - Focused tests, the full suite, compilation, and `git diff --check` pass.
+
+---
+
+## Progress Log & Design Decisions (execution record)
+
+### Task 1 — complete (commits a81df99..c443031, review Approved)
+
+46 new tests green; ruff clean on touched files. Reviewer verified both `clone_mcp_tool` call sites tolerate setdefault→overwrite.
+
+Design decisions:
+- `resolve_tool_identity` defaults a missing `tool_origin` to `internal` (matches the plan's internal fallback; an unrecognized origin string can never match a `Literal`-constrained deployment rule, so it cannot gain policy trust).
+- Match-shape validation (exactly one of four shapes, partial server/source pairs rejected) lives on the `ToolExecutionPolicyMatch` Pydantic model; same-specificity ambiguity raises `AmbiguousToolExecutionPolicyError` from `matching_policy_rules`, failing closed on the first ambiguous bucket.
+- `disable_outer_timeout` code-owned allowlist enforcement deferred to Task 2 (needs the resolver).
+
+### Task 2 — complete (commits c443031..1520b74, review Needs-fixes → re-review Approved)
+
+Resolver + scoped ContextVar policy context + dispatch_subagents metadata migration; 119 policy/subagent tests green, 186 across the wider regression sweep.
+
+Design decisions:
+- `policy_source` values: `default` | `config` | `metadata` | `config+metadata` (deterministic, recorded in artifacts).
+- Temporary compat bridge in `tool_execution._resolve_tool_timeout_seconds`: honors `application_execution_policy.disable_outer_timeout` for ONLY the exact `("internal", "internal::dispatch_subagents")` identity so production dispatch_subagents keeps its unbounded timeout until Task 8 migrates the runner onto the resolver. Bridge + tests are removed/replaced in Task 8.
+- Review finding (fixed): `max_timeout_seconds` now min()-accumulates across ALL matching rules plus the global interactive cap — last-write-wins would have let a specific override bypass a broad operational cap.
+- Plan-text conflict resolved: `tool_execution_cancellation_grace_seconds` is `ge=0` per plan, but strict `soft < hard` cannot hold at grace=0 (default derivation is `hard = soft + grace`). Adopted invariant: `soft <= hard`, `hard - soft >= grace` — strict inequality guaranteed whenever grace > 0; `soft == hard` permitted only in the degenerate grace=0 configuration. Pinned by tests.
+- Internal `application_execution_policy` trust accepts the full override-shaped field set (plan trusts the namespace for internal tools); only `disable_outer_timeout` has a real caller today.
