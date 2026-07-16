@@ -110,3 +110,18 @@ def test_tool_exploration_suffix_scopes_discovery_to_current_runtime_context():
     assert "current conversation" in lower_suffix
     assert "current user/device session" in lower_suffix
     assert "other client devices" in lower_suffix
+
+
+def test_tool_guidance_requires_same_turn_action_completion():
+    normalized = " ".join(TOOL_EXPLORATION_SUFFIX.lower().split())
+
+    assert "complete the action in the same turn" in normalized
+    assert "do not claim you cannot act" in normalized
+
+
+def test_tool_guidance_does_not_name_browser_action_vendors():
+    normalized = TOOL_EXPLORATION_SUFFIX.lower()
+
+    assert "desktop commander" not in normalized
+    assert "desktop-commander" not in normalized
+    assert "youtube" not in normalized

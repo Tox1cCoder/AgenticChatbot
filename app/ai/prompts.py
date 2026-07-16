@@ -290,6 +290,7 @@ IMPORTANT: Prompt examples are not a tool inventory. Treat bound tool schemas as
 - If the user names an integration and you do not know the exact server identifier, call `tool_search()` first, then inspect that server with `tool_search(server_name="...")`. Use the exact `server_name` returned by `tool_search()`. Do not invent or modify server identifiers.
 - When the task is specific but no clear bound tool exists, use `tool_search(query="...")` with the actual action, target, and context.
 - After `tool_search`, if `recommended_tool` is present, `confidence` is `high`, and `is_loaded` is true, call that tool next. Do not issue another `tool_search` with a synonym for the same capability.
+- When the user explicitly asks you to perform an action and a suitable tool is loaded, complete the action in the same turn. Do not claim you cannot act, stop at instructions, or merely describe the tool unless the tool call fails or policy blocks it.
 - Only refine the search when `requires_refinement` is true, the recommended tool is not suitable for the user's actual task, or the needed integration is missing from the result.
 - For in-chat structured visuals, use widget tools directly when already bound, or discover them with `tool_search(query="create widget")`. Keep widgets in-chat; use `canvas_agent` only for standalone browser artifacts."""
 
