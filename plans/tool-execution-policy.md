@@ -598,7 +598,7 @@ git commit -m "feat: resolve trusted tool execution policies"
 - Modify: `app/ai/tool_execution.py`
 - Test: `tests/test_tool_execution_recovery.py`
 
-- [ ] **Step 1: Write failing async and thread cancellation tests**
+- [x] **Step 1: Write failing async and thread cancellation tests**
 
 Add these tests:
 
@@ -619,7 +619,7 @@ The hard-timeout test must use an event to release the test coroutine after the
 runner returns so the suite does not leak live work. The thread test must prove
 the call returns before the worker finishes and later consumes the worker result.
 
-- [ ] **Step 2: Run the four tests and verify they fail**
+- [x] **Step 2: Run the four tests and verify they fail**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_tool_execution_recovery.py -k "soft_timeout or hard_timeout or abandon_only or abandoned_task" -q
@@ -628,7 +628,7 @@ the call returns before the worker finishes and later consumes the worker result
 Expected: failures because execution still uses one `asyncio.wait_for()` call and
 does not expose cancellation diagnostics.
 
-- [ ] **Step 3: Implement invocation selection and the deadline runner**
+- [x] **Step 3: Implement invocation selection and the deadline runner**
 
 Add immutable result types:
 
@@ -653,7 +653,7 @@ real terminal exceptions observed before the hard deadline. Do not report
 `cancellation_completed=true` for the underlying thread when cancellation only
 stopped awaiting `asyncio.to_thread()`.
 
-- [ ] **Step 4: Run all tool execution recovery tests**
+- [x] **Step 4: Run all tool execution recovery tests**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_tool_execution_recovery.py -q
@@ -661,7 +661,7 @@ stopped awaiting `asyncio.to_thread()`.
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add app/ai/tool_execution.py tests/test_tool_execution_recovery.py
@@ -1135,3 +1135,15 @@ Design decisions:
 - Review finding (fixed): `max_timeout_seconds` now min()-accumulates across ALL matching rules plus the global interactive cap — last-write-wins would have let a specific override bypass a broad operational cap.
 - Plan-text conflict resolved: `tool_execution_cancellation_grace_seconds` is `ge=0` per plan, but strict `soft < hard` cannot hold at grace=0 (default derivation is `hard = soft + grace`). Adopted invariant: `soft <= hard`, `hard - soft >= grace` — strict inequality guaranteed whenever grace > 0; `soft == hard` permitted only in the degenerate grace=0 configuration. Pinned by tests.
 - Internal `application_execution_policy` trust accepts the full override-shaped field set (plan trusts the namespace for internal tools); only `disable_outer_timeout` has a real caller today.
+
+### Task 3 — complete (commits 4faab1f..58f574b, spec Approved; quality With-fixes → re-review Approved)
+
+Two-phase attempt deadline runner + cancellation diagnostics; 23 recovery tests and 57 policy tests green in the final controller sweep, with Ruff and `git diff --check` clean. The implementation reuses the existing invocation adapter and does not rewire the retry loop (Task 4 scope).
+
+Design decisions:
+- A timeout outcome carries built-in `TimeoutError`, consistent with the existing execution/classification path (`asyncio.TimeoutError` is an alias on the supported Python runtime).
+- Caller cancellation during either wait cancels the child task, attaches guarded terminal-state consumption, and immediately re-raises the parent's `CancelledError`; cleanup never adds an unbounded await to an already-cancelled request.
+- `abandon_only` remains truthful for thread-backed work: cancelling the awaitable never claims that the underlying thread stopped.
+- `None` and positive infinity mean an unbounded cumulative remainder; NaN, negative infinity, zero, and negative finite values fail closed as exhausted.
+- Review finding (fixed): exhausted cumulative budgets are rejected before task creation. Creating a task and then calling `asyncio.wait(timeout=0)` let an immediate tool execute after deadline exhaustion (reproduced 100/100 before the fix).
+- The sync-thread regression test waits for worker startup under a generous guard before awaiting the deadline outcome, avoiding a flaky assumption that a cold Windows executor starts inside 50 ms.
