@@ -18,7 +18,7 @@
 - Test: `tests/test_mcp_adapter_utils.py`
 - Test: `tests/test_tool_execution_policy.py`
 
-- [ ] **Step 1: Write failing identity regressions**
+- [x] **Step 1: Write failing identity regressions**
 
 Add tests proving that a server MCP tool cannot preserve a forged source name and that unknown origins fail closed:
 
@@ -43,7 +43,7 @@ def test_unknown_runtime_tool_origin_is_rejected():
         )
 ```
 
-- [ ] **Step 2: Run the new tests and verify RED**
+- [x] **Step 2: Run the new tests and verify RED**
 
 Run:
 
@@ -53,7 +53,7 @@ Run:
 
 Expected: the forged source name remains and the unknown origin resolves instead of raising.
 
-- [ ] **Step 3: Implement application-owned source identity and origin validation**
+- [x] **Step 3: Implement application-owned source identity and origin validation**
 
 In `clone_mcp_tool()`, assign all canonical fields together:
 
@@ -73,7 +73,7 @@ if tool_origin not in _KNOWN_TOOL_ORIGINS:
     )
 ```
 
-- [ ] **Step 4: Run the focused identity suites and verify GREEN**
+- [x] **Step 4: Run the focused identity suites and verify GREEN**
 
 Run:
 
@@ -83,7 +83,7 @@ Run:
 
 Expected: all selected tests pass.
 
-- [ ] **Step 5: Commit the identity fix**
+- [x] **Step 5: Commit the identity fix**
 
 ```powershell
 git add app/core/mcp_adapter_utils.py app/ai/tool_execution_policy.py tests/test_mcp_adapter_utils.py tests/test_tool_execution_policy.py
@@ -99,7 +99,7 @@ git commit -m "fix: harden tool policy identity ownership"
 - Test: `tests/test_tool_execution_policy.py`
 - Test: `tests/test_planning_subagents.py`
 
-- [ ] **Step 1: Write failing validation regressions**
+- [x] **Step 1: Write failing validation regressions**
 
 Add focused tests for finite numbers, internal metadata bounds, duplicate selectors, global ordering, and config-only outer disable:
 
@@ -172,7 +172,7 @@ def test_config_cannot_disable_dispatch_outer_timeout(monkeypatch):
         )
 ```
 
-- [ ] **Step 2: Run validation tests and verify RED**
+- [x] **Step 2: Run validation tests and verify RED**
 
 Run:
 
@@ -182,7 +182,7 @@ Run:
 
 Expected: the current models accept non-finite values, raw internal metadata, duplicate selectors, or config-only disablement.
 
-- [ ] **Step 3: Add strict policy models and Settings checks**
+- [x] **Step 3: Add strict policy models and Settings checks**
 
 Use finite numeric fields in `ToolExecutionPolicyOverride`:
 
@@ -217,7 +217,7 @@ for key, override in self.tool_execution_policies.items():
 
 Require `internal_trusted` as well as the allowlisted identity before honoring `disable_outer_timeout`.
 
-- [ ] **Step 4: Run policy/configuration suites and verify GREEN**
+- [x] **Step 4: Run policy/configuration suites and verify GREEN**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_tool_execution_policy.py tests/test_planning_subagents.py -q
@@ -225,7 +225,7 @@ Require `internal_trusted` as well as the allowlisted identity before honoring `
 
 Expected: all selected tests pass.
 
-- [ ] **Step 5: Commit strict policy validation**
+- [x] **Step 5: Commit strict policy validation**
 
 ```powershell
 git add app/core/config.py app/ai/tool_execution_policy.py app/ai/planning_subagents.py tests/test_tool_execution_policy.py tests/test_planning_subagents.py
@@ -240,7 +240,7 @@ git commit -m "fix: validate tool policy inputs at boundaries"
 - Test: `tests/client_backend/test_runtime_bridge.py`
 - Test: `tests/test_client_invocation_isolation.py`
 
-- [ ] **Step 1: Write failing whole-operation timeout tests**
+- [x] **Step 1: Write failing whole-operation timeout tests**
 
 Add a bridge test whose execution ignores cancellation until released and assert that `_handle_tool_request()` sends a timeout response before release:
 
@@ -277,7 +277,7 @@ async def test_handle_tool_request_bounds_complete_client_execution(monkeypatch)
     await asyncio.sleep(0)
 ```
 
-- [ ] **Step 2: Run the timeout test and verify RED**
+- [x] **Step 2: Run the timeout test and verify RED**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/client_backend/test_runtime_bridge.py -k "bounds_complete_client_execution" -q
@@ -285,7 +285,7 @@ async def test_handle_tool_request_bounds_complete_client_execution(monkeypatch)
 
 Expected: `_handle_tool_request()` remains blocked until the outer test timeout.
 
-- [ ] **Step 3: Add a bounded task runner around the complete operation**
+- [x] **Step 3: Add a bounded task runner around the complete operation**
 
 Create one task for `_execute_tool_request()` and wait only for the request deadline:
 
@@ -313,7 +313,7 @@ return RuntimeErrorContext(
 
 Keep the MCP manager's inner timeout as defense in depth, but treat the bridge deadline as authoritative for initialization, discovery, invocation, and reload.
 
-- [ ] **Step 4: Run runtime deadline suites and verify GREEN**
+- [x] **Step 4: Run runtime deadline suites and verify GREEN**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/client_backend/test_runtime_bridge.py tests/test_client_invocation_isolation.py tests/test_skills_tool.py -q
@@ -321,7 +321,7 @@ Keep the MCP manager's inner timeout as defense in depth, but treat the bridge d
 
 Expected: all selected tests pass without leaked-task warnings.
 
-- [ ] **Step 5: Commit the client deadline fix**
+- [x] **Step 5: Commit the client deadline fix**
 
 ```powershell
 git add client_backend/services/runtime_bridge.py client_backend/services/local_mcp_manager.py tests/client_backend/test_runtime_bridge.py tests/test_client_invocation_isolation.py
@@ -336,7 +336,7 @@ git commit -m "fix: bound complete client runtime execution"
 - Test: `tests/test_tool_execution_recovery.py`
 - Test: `tests/test_tool_error_policy.py`
 
-- [ ] **Step 1: Write failing diagnostics and sanitization tests**
+- [x] **Step 1: Write failing diagnostics and sanitization tests**
 
 Add a reconnect failure test asserting the terminal history record and a policy ambiguity test asserting a fixed model message:
 
@@ -349,7 +349,7 @@ assert json.loads(output["content"])["error_type"] == "configuration"
 
 Remove tests importing or exercising `should_auto_retry_tool()` because the canonical resolver is now the only retry authority.
 
-- [ ] **Step 2: Run diagnostics tests and verify RED**
+- [x] **Step 2: Run diagnostics tests and verify RED**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_tool_execution_recovery.py tests/test_tool_error_policy.py -k "reconnect_failure or policy_resolution" -q
@@ -357,7 +357,7 @@ Remove tests importing or exercising `should_auto_retry_tool()` because the cano
 
 Expected: reconnect history ends on the original session record and policy keys appear in model content.
 
-- [ ] **Step 3: Record terminal reconnect failures and sanitize configuration errors**
+- [x] **Step 3: Record terminal reconnect failures and sanitize configuration errors**
 
 When reconnect fails, append one terminal record with the reconnect outcome and `auto_retry_allowed=False` before building payloads. Catch `AmbiguousToolExecutionPolicyError` and `ToolExecutionPolicyValidationError` around policy resolution and return this fixed model payload:
 
@@ -369,7 +369,7 @@ When reconnect fails, append one terminal record with the reconnect outcome and 
 
 Keep the raw exception only in the artifact diagnostic and server log. Delete `should_auto_retry_tool()` and its import/tests.
 
-- [ ] **Step 4: Run execution/error suites and verify GREEN**
+- [x] **Step 4: Run execution/error suites and verify GREEN**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_tool_execution_recovery.py tests/test_tool_error_policy.py tests/test_tool_execution_rendering.py -q
@@ -377,7 +377,7 @@ Keep the raw exception only in the artifact diagnostic and server log. Delete `s
 
 Expected: all selected tests pass.
 
-- [ ] **Step 5: Commit diagnostics cleanup**
+- [x] **Step 5: Commit diagnostics cleanup**
 
 ```powershell
 git add app/ai/tool_execution.py app/ai/tool_error_policy.py tests/test_tool_execution_recovery.py tests/test_tool_error_policy.py
@@ -394,7 +394,7 @@ git commit -m "fix: align tool policy failure diagnostics"
 - Modify: `app/ai/mcp_config.json`
 - Modify: `tests/test_widget_runtime.py:514-522`
 
-- [ ] **Step 1: Add a failing legacy single-upload contract test**
+- [x] **Step 1: Add a failing legacy single-upload contract test**
 
 In `tests/client_backend/test_server_api.py`, use a stubbed `request_response()` and assert:
 
@@ -404,7 +404,7 @@ assert captured["files"]["file"][0] == "report.txt"
 assert result["data"]["document"]["id"] == "doc-1"
 ```
 
-- [ ] **Step 2: Run the seven previously failing tests and verify the baseline failures**
+- [x] **Step 2: Run the seven previously failing tests and verify the baseline failures**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/client_backend/test_live_server_integration.py::test_live_document_upload_list_get_task_and_delete_flow tests/test_brave_image_search_config.py::test_brave_image_search_defaults tests/test_conversation_compaction_health.py tests/test_mcp_global_allowlist.py tests/test_widget_runtime.py::TestBuildToolArtifactWidgets::test_non_widget_artifact_still_respects_truncation_limit -q
@@ -412,7 +412,7 @@ assert result["data"]["document"]["id"] == "doc-1"
 
 Expected: the same seven failures reproduced in the review, plus the new single-upload unit regression.
 
-- [ ] **Step 3: Restore the single-upload endpoint contract**
+- [x] **Step 3: Restore the single-upload endpoint contract**
 
 Change `upload_document_bytes()` to send one multipart field to `/documents/upload` and parse it with `_handle_response()`:
 
@@ -426,7 +426,7 @@ response = await self.request_response(
 return await self._handle_response(response)
 ```
 
-- [ ] **Step 4: Isolate environment defaults and use public route introspection**
+- [x] **Step 4: Isolate environment defaults and use public route introspection**
 
 Construct Brave settings with `_env_file=None`:
 
@@ -445,7 +445,7 @@ Use OpenAPI paths rather than FastAPI's private `app.routes` representation:
 paths = set(app.openapi()["paths"])
 ```
 
-- [ ] **Step 5: Restore the declared global MCP configuration and artifact contract**
+- [x] **Step 5: Restore the declared global MCP configuration and artifact contract**
 
 Remove `calculator` and `desktop-commander` from `app/ai/mcp_config.json`, leaving exactly `widgets`, `tavily`, `time`, and `brave_image_search` enabled. Update the stale artifact test to assert the current explicit default:
 
@@ -455,7 +455,7 @@ def test_non_widget_artifact_preserves_full_output_by_default(self):
     assert len(artifact["output"]) == 1200
 ```
 
-- [ ] **Step 6: Run focused regression tests and verify GREEN**
+- [x] **Step 6: Run focused regression tests and verify GREEN**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/client_backend/test_server_api.py tests/client_backend/test_document_routes.py tests/client_backend/test_document_upload_proxy_guard.py tests/test_brave_image_search_config.py tests/test_conversation_compaction_health.py tests/test_mcp_global_allowlist.py tests/test_widget_runtime.py -q
@@ -463,7 +463,7 @@ def test_non_widget_artifact_preserves_full_output_by_default(self):
 
 Expected: all selected tests pass.
 
-- [ ] **Step 7: Commit full-suite regression fixes**
+- [x] **Step 7: Commit full-suite regression fixes**
 
 ```powershell
 git add client_backend/services/server_api.py tests/client_backend/test_server_api.py tests/test_brave_image_search_config.py tests/test_conversation_compaction_health.py app/ai/mcp_config.json tests/test_widget_runtime.py
@@ -481,7 +481,7 @@ git commit -m "fix: restore repository regression contracts"
 - Modify: `tests/test_rich_response_contract.py`
 - Modify: `tests/test_widgets_api.py`
 
-- [ ] **Step 1: Capture the non-E501 lint baseline**
+- [x] **Step 1: Capture the non-E501 lint baseline**
 
 ```powershell
 .venv\Scripts\python.exe -m ruff check app client_backend tests --ignore E501
@@ -489,7 +489,7 @@ git commit -m "fix: restore repository regression contracts"
 
 Expected: 16 findings across `E402`, `B904`, `B017`, `SIM102`, and `F401`.
 
-- [ ] **Step 2: Apply the safe automatic import fix**
+- [x] **Step 2: Apply the safe automatic import fix**
 
 ```powershell
 .venv\Scripts\python.exe -m ruff check tests/test_hitl_policy.py --select F401 --fix
@@ -497,7 +497,7 @@ Expected: 16 findings across `E402`, `B904`, `B017`, `SIM102`, and `F401`.
 
 Expected: the unused `pytest` import is removed.
 
-- [ ] **Step 3: Fix exception chaining and collapsible conditions**
+- [x] **Step 3: Fix exception chaining and collapsible conditions**
 
 Use `raise ServerConnectionError(...) from e` in all three `B904` sites. Combine each nested condition without changing its body:
 
@@ -511,15 +511,15 @@ if target_username and current_username and (
     return
 ```
 
-- [ ] **Step 4: Make test exception assertions specific**
+- [x] **Step 4: Make test exception assertions specific**
 
 Import `pydantic.ValidationError` and replace the five `pytest.raises(Exception)` contexts in `tests/test_rich_response_contract.py` with `pytest.raises(ValidationError)`.
 
-- [ ] **Step 5: Resolve intentional late imports explicitly**
+- [x] **Step 5: Resolve intentional late imports explicitly**
 
 Move imports above executable module setup where safe. Where import order is required by environment setup, append `# noqa: E402` to the exact intentional imports in `widgets_server.py` and `tests/test_widgets_api.py`.
 
-- [ ] **Step 6: Verify semantic Ruff findings are zero**
+- [x] **Step 6: Verify semantic Ruff findings are zero**
 
 ```powershell
 .venv\Scripts\python.exe -m ruff check app client_backend tests --ignore E501
@@ -527,7 +527,7 @@ Move imports above executable module setup where safe. Where import order is req
 
 Expected: exit 0 with no findings.
 
-- [ ] **Step 7: Run tests covering semantic edits**
+- [x] **Step 7: Run tests covering semantic edits**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_rich_response_contract.py tests/test_widgets_api.py tests/test_hitl_policy.py tests/test_runtime_model_overrides.py tests/client_backend/test_server_api.py -q
@@ -535,7 +535,7 @@ Expected: exit 0 with no findings.
 
 Expected: all selected tests pass.
 
-- [ ] **Step 8: Commit semantic lint cleanup**
+- [x] **Step 8: Commit semantic lint cleanup**
 
 ```powershell
 git add app/ai/mcp_servers/widgets_server.py app/services/model_config_service.py client_backend/api/auth.py client_backend/services/server_api.py tests/test_hitl_policy.py tests/test_rich_response_contract.py tests/test_widgets_api.py
@@ -547,7 +547,7 @@ git commit -m "style: resolve semantic Ruff findings"
 **Files:**
 - Modify: every file reported by `ruff check app client_backend tests --select E501`
 
-- [ ] **Step 1: Record the exact E501 file list**
+- [x] **Step 1: Record the exact E501 file list**
 
 ```powershell
 .venv\Scripts\python.exe -m ruff check app client_backend tests --select E501 --output-format concise
@@ -555,7 +555,7 @@ git commit -m "style: resolve semantic Ruff findings"
 
 Expected: 79 findings in the reviewed baseline.
 
-- [ ] **Step 2: Wrap Python expressions and strings mechanically**
+- [x] **Step 2: Wrap Python expressions and strings mechanically**
 
 Use adjacent string literals inside parentheses, multiline calls, and multiline comprehensions. Preserve string contents. The required transformation pattern is:
 
@@ -575,7 +575,7 @@ query = (
 )
 ```
 
-- [ ] **Step 3: Re-run E501 until the diagnostic list is empty**
+- [x] **Step 3: Re-run E501 until the diagnostic list is empty**
 
 ```powershell
 .venv\Scripts\python.exe -m ruff check app client_backend tests --select E501
@@ -583,7 +583,7 @@ query = (
 
 Expected: exit 0 with no findings.
 
-- [ ] **Step 4: Run the entire Ruff ruleset**
+- [x] **Step 4: Run the entire Ruff ruleset**
 
 ```powershell
 .venv\Scripts\python.exe -m ruff check app client_backend tests
@@ -591,7 +591,7 @@ Expected: exit 0 with no findings.
 
 Expected: exit 0 with no findings.
 
-- [ ] **Step 5: Run focused tests for files with executable expression wrapping**
+- [x] **Step 5: Run focused tests for files with executable expression wrapping**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_planning_agent_rubric.py tests/test_tool_approval_setting_repository.py tests/test_demo_meaningful_widgets.py tests/test_demo_stream_rendering.py tests/test_document_processing_service.py tests/test_runtime_model_overrides.py -q
@@ -599,7 +599,7 @@ Expected: exit 0 with no findings.
 
 Expected: all selected tests pass.
 
-- [ ] **Step 6: Commit E501 cleanup**
+- [x] **Step 6: Commit E501 cleanup**
 
 ```powershell
 git add app client_backend tests
@@ -613,11 +613,11 @@ git commit -m "style: clear repository line-length debt"
 - Modify: `plans/tool-execution-policy.md:1030-1221`
 - Modify: `docs/superpowers/plans/2026-07-16-tool-policy-and-repository-remediation.md`
 
-- [ ] **Step 1: Update the outer-timeout operations contract**
+- [x] **Step 1: Update the outer-timeout operations contract**
 
 State that `internal::dispatch_subagents` requires exact identity, trusted application metadata, and the code-owned allowlist; deployment and remote metadata cannot grant the exception.
 
-- [ ] **Step 2: Run the complete policy/runtime matrix**
+- [x] **Step 2: Run the complete policy/runtime matrix**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_tool_execution_policy.py tests/test_tool_error_policy.py tests/test_tool_execution_recovery.py tests/test_tool_execution_rendering.py tests/test_client_invocation_isolation.py tests/test_skills_tool.py tests/test_planning_subagents.py tests/test_mcp_adapter_utils.py tests/client_backend/test_runtime_bridge.py -q
@@ -625,7 +625,7 @@ State that `internal::dispatch_subagents` requires exact identity, trusted appli
 
 Expected: all selected tests pass without leaked-task warnings.
 
-- [ ] **Step 3: Run repository-wide Ruff and compilation**
+- [x] **Step 3: Run repository-wide Ruff and compilation**
 
 ```powershell
 .venv\Scripts\python.exe -m ruff check app client_backend tests
@@ -634,7 +634,7 @@ Expected: all selected tests pass without leaked-task warnings.
 
 Expected: both commands exit 0.
 
-- [ ] **Step 4: Run the full test suite**
+- [x] **Step 4: Run the full test suite**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q
@@ -642,7 +642,7 @@ Expected: both commands exit 0.
 
 Expected: zero failures; environment-dependent tests may skip only through existing skip conditions.
 
-- [ ] **Step 5: Check diff hygiene and status**
+- [x] **Step 5: Check diff hygiene and status**
 
 ```powershell
 git diff --check
@@ -651,7 +651,7 @@ git status --short
 
 Expected: no whitespace errors; status contains only the intended documentation updates before the final commit.
 
-- [ ] **Step 6: Record fresh verification evidence and commit**
+- [x] **Step 6: Record fresh verification evidence and commit**
 
 Update the original plan's Task 9 checkbox and progress log with the exact fresh test/lint counts, then commit:
 
@@ -659,3 +659,11 @@ Update the original plan's Task 9 checkbox and progress log with the exact fresh
 git add docs/operations/tool-execution-policy.md plans/tool-execution-policy.md docs/superpowers/plans/2026-07-16-tool-policy-and-repository-remediation.md
 git commit -m "docs: record tool policy remediation verification"
 ```
+
+## Completion evidence
+
+- Focused policy/runtime matrix: 235 passed.
+- Focused line-wrapping regression matrix: 48 passed.
+- Full repository suite: 1,921 passed and 14 skipped.
+- Repository-wide Ruff and `compileall`: exit 0.
+- `git diff --check`: no whitespace errors.

@@ -122,9 +122,10 @@ in canary artifacts before expanding the change.
 `internal::dispatch_subagents` is the only code-allowlisted identity permitted
 to set `disable_outer_timeout=true`. Its inner worker and provider operations
 already enforce their own budgets, and the outer call must remain available to
-collect their results. Both the exact internal identity and trusted application
-metadata are checked; no deployment or remote rule can grant this exception to
-another tool.
+collect their results. The resolver requires all three controls: the exact
+internal identity, trusted application metadata, and membership in the
+code-owned allowlist. Deployment configuration and remote metadata cannot grant
+this exception, even when they name the same identity.
 
 This exception is not a generic long-running mode. Interactive tools that cannot
 finish inside a bounded policy must either return an existing provider-owned

@@ -1042,7 +1042,7 @@ git commit -m "docs: document tool execution policy operations"
 Expected: all selected tests pass with no leaked-task or unhandled-exception
 warnings.
 
-- [ ] **Step 2: Run the full test suite**
+- [x] **Step 2: Run the full test suite**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q
@@ -1202,20 +1202,18 @@ Design decisions:
 - Updated legacy recovery tests to assert both `None` and numeric top-level timeout metadata are ignored.
 - Added the operator runbook with deterministic matching, JSON configuration, diagnostic-only rollout, incident caps, strict client deadline ordering, sanitized observability, and background-job scope boundaries.
 
-### Task 9 — partial (full-suite acceptance blocked by unrelated failures)
+### Task 9 — complete (repository remediation verified)
 
-- Focused policy/runtime matrix: 213 passed with no leaked-task or unhandled-exception warnings.
-- Full repository suite: 1,891 passed, 14 skipped, and 7 failed.
+- Focused policy/runtime matrix: 235 passed with no leaked-task or
+  unhandled-exception warnings.
+- Full repository suite: 1,921 passed and 14 skipped.
 - Compilation: `compileall` exit 0.
-- `git diff --check`, clean-worktree check, and policy invariant audit passed.
-- No verification-only production or regression change was required, so no empty commit was created.
+- Repository-wide Ruff: zero findings across `app`, `client_backend`, and
+  `tests`, including the previously reported semantic and E501 debt.
+- `git diff --check` and the policy invariant audit passed.
 
-The seven full-suite failures reproduce outside the tool-policy matrix and are unchanged by this plan's diff:
-
-- one live-server document upload response-contract failure;
-- one environment-loaded Brave API-key default mismatch;
-- two FastAPI route-introspection compatibility failures involving `_IncludedRouter`;
-- two pre-existing server MCP config/allowlist mismatches for machine-specific servers;
-- one artifact truncation expectation that conflicts with the repository's newer full-output-by-default contract.
-
-Resolving these requires expanding scope into live integration infrastructure, environment isolation, FastAPI test compatibility, MCP deployment configuration, and artifact-retention semantics. Task 9 Step 2 and the final acceptance criterion remain open pending explicit authorization for that expansion.
+The seven previously unrelated failures were remediated at their demonstrated
+sources: the legacy single-upload contract, environment-isolated Brave defaults,
+public FastAPI route introspection, the declared global MCP allowlist, and the
+full-output artifact expectation. Task 9 and the final acceptance criterion are
+now complete.
