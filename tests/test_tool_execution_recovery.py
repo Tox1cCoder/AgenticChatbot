@@ -263,33 +263,33 @@ async def test_parent_cancellation_during_hard_cleanup_cancels_and_consumes_chil
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "remaining_total_seconds",
-    [pytest.param(float("nan"), id="nan"), pytest.param(float("-inf"), id="negative-infinity")],
+    [
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("-inf"), id="negative-infinity"),
+        pytest.param(0.0, id="zero"),
+        pytest.param(-0.1, id="negative-finite"),
+    ],
 )
-async def test_invalid_cumulative_deadline_fails_closed(remaining_total_seconds):
-    release = asyncio.Event()
+async def test_exhausted_cumulative_deadline_prevents_attempt_start(remaining_total_seconds):
+    invocations: list[dict] = []
 
-    class _BlockingTool:
+    class _ImmediateTool:
         async def ainvoke(self, args):
-            await release.wait()
-            return "late"
+            invocations.append(args)
+            return "side effect"
 
-    runner = asyncio.create_task(
-        invoke_tool_attempt(
-            _BlockingTool(),
-            {},
-            policy=_attempt_policy(outer_timeout_disabled=True),
-            remaining_total_seconds=remaining_total_seconds,
-        )
+    outcome = await invoke_tool_attempt(
+        _ImmediateTool(),
+        {"value": 1},
+        policy=_attempt_policy(outer_timeout_disabled=True),
+        remaining_total_seconds=remaining_total_seconds,
     )
 
-    try:
-        outcome = await asyncio.wait_for(asyncio.shield(runner), timeout=0.2)
-        assert isinstance(outcome.exception, TimeoutError)
-        assert outcome.cancellation_attempted is True
-    finally:
-        release.set()
-        if not runner.done():
-            await asyncio.wait_for(runner, timeout=1)
+    assert isinstance(outcome.exception, TimeoutError)
+    assert outcome.timeout_phase == "hard_timeout"
+    assert outcome.cancellation_attempted is False
+    assert outcome.cancellation_completed is False
+    assert invocations == []
 
 
 @pytest.mark.asyncio

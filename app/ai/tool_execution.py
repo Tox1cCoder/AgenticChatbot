@@ -1139,6 +1139,13 @@ async def invoke_tool_attempt(
     else:
         cumulative_seconds = max(0.0, remaining_total_seconds)
 
+    if cumulative_seconds == 0:
+        return AttemptOutcome(
+            exception=TimeoutError("Tool cumulative deadline exhausted before attempt start"),
+            elapsed_ms=max(0, round((time.monotonic() - started_at) * 1000)),
+            timeout_phase="hard_timeout",
+        )
+
     if policy.outer_timeout_disabled:
         soft_seconds = cumulative_seconds
         hard_seconds = cumulative_seconds
