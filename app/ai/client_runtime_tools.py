@@ -13,6 +13,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 from app.core.config import settings
 from app.services.client_device_service import ClientDeviceService
 
+from .client_runtime_errors import client_runtime_error_from_response
 from .text_normalization import sanitize_identifier
 from .tool_context import get_tool_context
 from .tool_execution_policy import get_current_tool_policy
@@ -191,31 +192,6 @@ def _format_tool_result(result: Any) -> str:
     return json.dumps(result, indent=2, ensure_ascii=False, default=str)
 
 
-def _format_runtime_tool_error(response: dict[str, Any]) -> str:
-    error_context = response.get("error_context")
-    if isinstance(error_context, dict):
-        message = str(
-            error_context.get("message")
-            or response.get("error")
-            or "Unknown client-local tool error"
-        )
-        code = error_context.get("code")
-        detail = error_context.get("detail")
-        extras: list[str] = []
-        if code:
-            extras.append(f"code={code}")
-        if detail not in (None, "", {}):
-            extras.append(f"detail={_format_tool_result(detail)}")
-        if extras:
-            return f"{message} ({'; '.join(extras)})"
-        return message
-
-    error_message = response.get("error")
-    if isinstance(error_message, str) and error_message:
-        return error_message
-    return "Unknown client-local tool error"
-
-
 # Model-facing guard errors. FR-2: mention only this chat session's client,
 # never device identifiers or the existence of other clients.
 _ERR_TOOL_NOT_THIS_SESSION = (
@@ -315,7 +291,7 @@ def _build_tool(
             return _ERR_CLIENT_DISCONNECTED
 
         if not response.get("success", False):
-            raise RuntimeError(_format_runtime_tool_error(response))
+            raise client_runtime_error_from_response(response)
 
         return _format_tool_result(response.get("result"))
 

@@ -586,3 +586,50 @@ async def test_dispatch_race_disconnect_returns_graceful_tool_error(monkeypatch)
         _assert_graceful_tool_error(result)
     finally:
         _reset_runtime_state()
+
+
+@pytest.mark.asyncio
+async def test_client_tool_preserves_structured_sidecar_error_context(monkeypatch):
+    from app.ai.client_runtime_errors import ClientRuntimeToolError
+
+    _reset_runtime_state()
+    store = InMemoryClientRuntimeStore()
+    runtime_store_module._store = store
+    user_id = uuid4()
+    device_id = uuid4()
+
+    async def _sidecar_failure(**kwargs):
+        return {
+            "success": False,
+            "error": "permission denied",
+            "error_context": {
+                "message": "local path was denied",
+                "code": "PERMISSION_DENIED",
+                "detail": {"path": "C:/private/secret.txt"},
+            },
+        }
+
+    monkeypatch.setattr(ClientDeviceService, "dispatch_tool_call", _sidecar_failure)
+
+    try:
+        tool = await _bound_tool_for_device(
+            store,
+            user_id=user_id,
+            device_id=device_id,
+            session_id="session-structured-error",
+        )
+        with (
+            tool_execution_context(
+                conversation_id="conversation-structured-error",
+                user_id=str(user_id),
+                agent_key="chat",
+                device_id=str(device_id),
+            ),
+            pytest.raises(ClientRuntimeToolError) as exc_info,
+        ):
+            await tool.coroutine()
+
+        assert exc_info.value.context.code == "PERMISSION_DENIED"
+        assert exc_info.value.context.detail == {"path": "C:/private/secret.txt"}
+    finally:
+        _reset_runtime_state()

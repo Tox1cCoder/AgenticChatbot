@@ -7,6 +7,11 @@ from typing import Any
 
 from anyio import BrokenResourceError, ClosedResourceError
 
+from .client_runtime_errors import (
+    ClientRuntimeToolError,
+    classify_client_runtime_error_code,
+)
+
 
 class ToolErrorKind(str, Enum):
     TIMEOUT = "timeout"
@@ -54,6 +59,51 @@ def classify_tool_error(
     attempts: int,
 ) -> ToolErrorSummary:
     raw = str(exc).lower()
+
+    if isinstance(exc, ClientRuntimeToolError):
+        error_type = classify_client_runtime_error_code(exc.context.code)
+        failure_retryable = error_type in {
+            ToolErrorKind.SESSION.value,
+            ToolErrorKind.NETWORK.value,
+            ToolErrorKind.TIMEOUT.value,
+        }
+        messages = {
+            ToolErrorKind.VALIDATION.value: "Client runtime rejected the provided values.",
+            ToolErrorKind.PERMISSION.value: "Client runtime denied the requested operation.",
+            ToolErrorKind.SESSION.value: "Client runtime session was interrupted.",
+            ToolErrorKind.NETWORK.value: (
+                "Client runtime could not reach the requested service."
+            ),
+            ToolErrorKind.TIMEOUT.value: "Client runtime operation timed out.",
+            ToolErrorKind.UNKNOWN.value: "Client runtime tool failed with an unknown error.",
+        }
+        hints = {
+            ToolErrorKind.VALIDATION.value: (
+                "Correct the values before retrying. Do not repeat the same arguments."
+            ),
+            ToolErrorKind.PERMISSION.value: (
+                "Ask the user for access, choose a permitted alternative, or explain the blocker."
+            ),
+            ToolErrorKind.SESSION.value: (
+                "Use the active client session or ask the user to reconnect before retrying."
+            ),
+            ToolErrorKind.NETWORK.value: (
+                "Retry only if the operation is safe to repeat; otherwise use another tool."
+            ),
+            ToolErrorKind.TIMEOUT.value: (
+                "Retry only if the operation is safe to repeat; otherwise adjust the request."
+            ),
+            ToolErrorKind.UNKNOWN.value: (
+                "Do not repeat the same call without changing inputs or choosing another tool."
+            ),
+        }
+        return ToolErrorSummary(
+            error_type=error_type,
+            failure_retryable=failure_retryable,
+            message=messages[error_type],
+            hint=hints[error_type],
+            attempts=attempts,
+        )
 
     if isinstance(exc, TimeoutError):
         if timeout_seconds is None:
@@ -193,4 +243,6 @@ def build_tool_error_payloads(
         "exception_type": type(exception).__name__,
         "diagnostic": _clean_text(exception, max_chars=1000),
     }
+    if isinstance(exception, ClientRuntimeToolError):
+        artifact_detail["runtime_error_context"] = exception.context.model_dump(mode="json")
     return model_content, artifact_detail

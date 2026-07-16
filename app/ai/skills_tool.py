@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from app.core.config import settings
 from app.services.client_device_service import ClientDeviceService
 
+from .client_runtime_errors import client_runtime_error_from_response
 from .client_runtime_tools import get_exposed_client_tool_name
 from .skill_resolver import (
     get_available_skill_summaries as get_resolved_skill_summaries,
@@ -50,31 +51,6 @@ class ActivateSkillInput(BaseModel):
             "Available Skills list in your system prompt)."
         ),
     )
-
-
-def _format_runtime_skill_error(response: dict[str, Any]) -> str:
-    error_context = response.get("error_context")
-    if isinstance(error_context, dict):
-        message = str(
-            error_context.get("message")
-            or response.get("error")
-            or "Unknown client-side skill error"
-        )
-        code = error_context.get("code")
-        detail = error_context.get("detail")
-        extras: list[str] = []
-        if code:
-            extras.append(f"code={code}")
-        if detail not in (None, "", {}):
-            extras.append("detail=" + json.dumps(detail, indent=2, ensure_ascii=False, default=str))
-        if extras:
-            return f"{message} ({'; '.join(extras)})"
-        return message
-
-    error_message = response.get("error")
-    if isinstance(error_message, str) and error_message:
-        return error_message
-    return "Unknown client-side skill error"
 
 
 def get_available_skill_summaries(
@@ -180,7 +156,7 @@ def create_activate_skill_tool(
         )
 
         if not response.get("success", False):
-            return f"Error: {_format_runtime_skill_error(response)}"
+            raise client_runtime_error_from_response(response)
 
         result = response.get("result")
         if isinstance(result, str):

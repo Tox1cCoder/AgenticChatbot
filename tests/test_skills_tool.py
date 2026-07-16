@@ -191,6 +191,42 @@ async def test_activate_skill_uses_scoped_policy_deadlines_and_client_identity(m
 
 
 @pytest.mark.asyncio
+async def test_activate_skill_preserves_structured_sidecar_error_context(monkeypatch):
+    from app.ai.client_runtime_errors import ClientRuntimeToolError
+
+    device_id = str(uuid4())
+    session = _client_session(
+        [{"name": "client-skill", "description": "d", "enabled": True}],
+        device_id=device_id,
+    )
+    monkeypatch.setattr(
+        skill_resolver.ClientDeviceService,
+        "lookup_active_session",
+        lambda _device_uuid: session,
+    )
+
+    async def _dispatch(**kwargs):
+        return {
+            "success": False,
+            "error": "session unavailable",
+            "error_context": {
+                "message": "device session expired",
+                "code": "SESSION_EXPIRED",
+                "detail": {"device_id": "private-device-id"},
+            },
+        }
+
+    monkeypatch.setattr(skills_tool.ClientDeviceService, "dispatch_tool_call", _dispatch)
+    tool = skills_tool.create_activate_skill_tool(user_id="user-1", device_id=device_id)
+
+    with pytest.raises(ClientRuntimeToolError) as exc_info:
+        await tool.ainvoke({"skill_name": "client-skill"})
+
+    assert exc_info.value.context.code == "SESSION_EXPIRED"
+    assert exc_info.value.context.detail == {"device_id": "private-device-id"}
+
+
+@pytest.mark.asyncio
 async def test_client_skill_activation_dispatch_is_not_rejected_by_mcp_tool_catalog():
     reset_client_runtime_store()
     store = InMemoryClientRuntimeStore()
