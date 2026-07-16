@@ -965,7 +965,7 @@ git commit -m "feat: record tool policy attempt diagnostics"
 - Test: `tests/test_tool_execution_policy.py`
 - Test: `tests/test_conversation_compaction_docs.py` only if its documentation inventory requires the new operations page
 
-- [ ] **Step 1: Write a failing legacy-metadata regression test**
+- [x] **Step 1: Write a failing legacy-metadata regression test**
 
 ```python
 def test_legacy_top_level_timeout_metadata_is_ignored_for_non_internal_tool():
@@ -987,7 +987,7 @@ def test_legacy_top_level_timeout_metadata_is_ignored_for_non_internal_tool():
     assert policy.timeout_seconds == settings.tool_execution_timeout
 ```
 
-- [ ] **Step 2: Run the regression test and verify its state**
+- [x] **Step 2: Run the regression test and verify its state**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_tool_execution_policy.py -k legacy_top_level -q
@@ -996,7 +996,7 @@ def test_legacy_top_level_timeout_metadata_is_ignored_for_non_internal_tool():
 Expected before cleanup: fail if any compatibility path still trusts top-level
 third-party timeout metadata.
 
-- [ ] **Step 3: Delete obsolete helpers and document operator behavior**
+- [x] **Step 3: Delete obsolete helpers and document operator behavior**
 
 Remove `_resolve_tool_timeout_seconds()` and the now-unused
 `tool_execution_max_retries` setting after every caller uses the resolved
@@ -1011,7 +1011,7 @@ policy. Document:
 - why `dispatch_subagents` is the only disabled-outer-timeout exception;
 - why generic long-running/background jobs are outside this feature.
 
-- [ ] **Step 4: Run documentation and policy tests**
+- [x] **Step 4: Run documentation and policy tests**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_tool_execution_policy.py tests/test_conversation_compaction_docs.py -q
@@ -1020,7 +1020,7 @@ policy. Document:
 Expected: all selected tests pass. If the documentation inventory test is not
 generic and does not cover this page, it must still pass unchanged.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add app/ai/tool_execution.py README.md docs/operations/tool-execution-policy.md tests/test_tool_execution_policy.py
@@ -1190,3 +1190,14 @@ Design decisions:
 - `_attempt_record()` is the single emission point for `tool_execution_attempt`, guaranteeing one sanitized log event per stored attempt.
 - Attempt logs contain no tool arguments, raw results, exception messages, or `RuntimeErrorContext.detail`; raw structured context remains artifact-only.
 - Policy `max_attempts` is capped at five and artifacts defensively retain only the last five records.
+
+### Task 8 — complete (commit f28c5e3, controller review Approved)
+
+61 policy/documentation tests and 34 recovery/rendering tests green; Ruff clean on touched code (with repository-existing `config.py` E501 debt excluded) and `git diff --check` clean.
+
+Design decisions:
+- The plan's resolver-only legacy regression already passed before cleanup, so a runner-level asynchronous case was added to prove top-level remote `execution_timeout_seconds=None` can no longer bypass the outer deadline.
+- Removed `_resolve_tool_timeout_seconds`, its temporary dispatch compatibility bridge, `_tool_execution_max_retries`, the `tool_execution_max_retries` setting, and `TOOL_EXECUTION_MAX_RETRIES` from `.env.example`.
+- Retained the `dispatch_subagents` exception entirely through the canonical resolver and code-owned allowlist.
+- Updated legacy recovery tests to assert both `None` and numeric top-level timeout metadata are ignored.
+- Added the operator runbook with deterministic matching, JSON configuration, diagnostic-only rollout, incident caps, strict client deadline ordering, sanitized observability, and background-job scope boundaries.
