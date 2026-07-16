@@ -74,6 +74,9 @@ policy must either:
 not accepted configuration values in this change. This prevents an undefined
 mode from silently bypassing the interactive guardrail.
 
+The approved server-side follow-up design is documented in
+`docs/superpowers/specs/2026-07-16-background-tool-execution-design.md`.
+
 ### Non-Goals
 
 - Do not globally raise the default 30-second soft timeout.
