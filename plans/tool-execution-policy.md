@@ -901,7 +901,7 @@ git commit -m "fix: preserve structured client runtime errors"
 - Test: `tests/test_tool_execution_recovery.py`
 - Test: `tests/test_tool_execution_rendering.py`
 
-- [ ] **Step 1: Write failing observability tests**
+- [x] **Step 1: Write failing observability tests**
 
 Add one failure case and one fail-then-success case. Assert:
 
@@ -917,7 +917,7 @@ assert "attempt_history" not in json.loads(output["content"])
 Capture logs and assert one `tool_execution_attempt` event per attempt with no
 raw tool arguments or `RuntimeErrorContext.detail`.
 
-- [ ] **Step 2: Run observability tests and verify they fail**
+- [x] **Step 2: Run observability tests and verify they fail**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_tool_execution_recovery.py tests/test_tool_execution_rendering.py -k "attempt_history or policy_diagnostics or attempt_log" -q
@@ -926,7 +926,7 @@ raw tool arguments or `RuntimeErrorContext.detail`.
 Expected: failures because current artifacts record only final error summary and
 successful retries lose prior attempt information.
 
-- [ ] **Step 3: Attach bounded diagnostics**
+- [x] **Step 3: Attach bounded diagnostics**
 
 Add a JSON-safe policy snapshot and at most five attempt records to both success
 and error artifacts. Emit structured logs with:
@@ -941,7 +941,7 @@ logger.info(
 Do not log tool arguments, raw results, secrets, or sidecar detail. Keep the
 model payload below the existing compact-payload test threshold.
 
-- [ ] **Step 4: Run rendering and recovery suites**
+- [x] **Step 4: Run rendering and recovery suites**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_tool_execution_recovery.py tests/test_tool_execution_rendering.py -q
@@ -949,7 +949,7 @@ model payload below the existing compact-payload test threshold.
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add app/ai/tool_execution.py app/ai/tool_error_policy.py tests/test_tool_execution_recovery.py tests/test_tool_execution_rendering.py
@@ -1179,3 +1179,14 @@ Design decisions:
 - Model-facing summaries and hints are fixed sanitized text and never interpolate sidecar messages or detail.
 - The full context is attached only to artifact diagnostics under `runtime_error_context`.
 - Both client MCP tools and `activate_skill` raise the typed error instead of flattening or returning sidecar failures as strings.
+
+### Task 7 — complete (commit 16dccdc, controller review Approved)
+
+37 complete rendering and recovery tests green; Ruff and `git diff --check` clean.
+
+Design decisions:
+- Final success and error artifacts receive the same flattened, JSON-safe policy snapshot.
+- Attempt records include resolved soft/hard/total deadlines and metadata-trust state in addition to retry and cancellation diagnostics.
+- `_attempt_record()` is the single emission point for `tool_execution_attempt`, guaranteeing one sanitized log event per stored attempt.
+- Attempt logs contain no tool arguments, raw results, exception messages, or `RuntimeErrorContext.detail`; raw structured context remains artifact-only.
+- Policy `max_attempts` is capped at five and artifacts defensively retain only the last five records.
