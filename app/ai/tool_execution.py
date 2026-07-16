@@ -6,10 +6,8 @@ import logging
 import math
 import time
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
-
-from anyio import BrokenResourceError, ClosedResourceError
 
 from ..core.config import settings
 from ..core.rich_response import (
@@ -29,9 +27,12 @@ from .tool_error_policy import (
     ToolErrorSummary,
     build_tool_error_payloads,
     classify_tool_error,
-    should_auto_retry_tool,
 )
-from .tool_execution_policy import ToolExecutionPolicy
+from .tool_execution_policy import (
+    ToolExecutionPolicy,
+    resolve_tool_execution_policy,
+    tool_policy_context,
+)
 from .tool_result_rendering import normalize_tool_result_for_rendering
 from .tool_scope import is_client_only_scope
 from .tool_search_tool import create_tool_search_tool
@@ -44,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 # Tool names that may load additional tools dynamically
 TOOL_LOADING_TOOLS = {"tool_search"}
+_RETRY_COMPATIBILITY_ALLOWLIST = frozenset({("internal", "internal::tool_search")})
 _WIDGET_ARTIFACT_TOOLS = {"widget_create", "widget_update"}
 _WIDGET_SESSION_BOUND_TOOLS = {"widget_create", "session_list_widgets"}
 _FULL_MODEL_HANDOFF_TOOLS = {"dispatch_subagents"}
@@ -1330,71 +1332,217 @@ async def invoke_tool_with_policy(
     tool_args: Any,
     *,
     tool_name: str,
-) -> tuple[Any | None, dict[str, Any] | None, str | None]:
-    """Invoke a tool with a bounded timeout and conservative automatic retries.
-
-    Returns ``(result, None, None)`` on success. On a handled failure it returns
-    ``(None, artifact_detail, model_content)`` where ``model_content`` is compact
-    JSON for the ToolMessage and ``artifact_detail`` carries full diagnostics.
-
-    Session errors (``ClosedResourceError`` / ``BrokenResourceError``) are
-    re-raised so the caller's MCP reconnect path can run.
-    """
-    timeout_seconds = _resolve_tool_timeout_seconds(tool)
-    max_retries = _tool_execution_max_retries()
+    tool_map: dict[str, Any] | None = None,
+) -> tuple[Any | None, dict[str, Any] | None, str | None, dict[str, Any]]:
+    """Invoke retries and server-MCP reconnects under one resolved policy deadline."""
+    invocation_kind = _tool_invocation_kind(tool)
+    policy = resolve_tool_execution_policy(
+        tool,
+        exposed_tool_name=tool_name,
+        invocation_kind=invocation_kind,
+    )
+    policy = _apply_legacy_timeout_compatibility(tool, policy)
+    policy_retry_allowed = (policy.retry_safe or policy.idempotent) or (
+        policy.identity.tool_origin,
+        policy.identity.qualified_tool_id,
+    ) in _RETRY_COMPATIBILITY_ALLOWLIST
+    started_at = time.monotonic()
     attempts = 0
-    last_exc: BaseException | None = None
+    attempt_history: list[dict[str, Any]] = []
+    current_tool = tool
 
-    while attempts <= max_retries:
+    while attempts < policy.max_attempts:
+        remaining_total_seconds = max(
+            0.0,
+            policy.total_timeout_seconds - (time.monotonic() - started_at),
+        )
         attempts += 1
-        try:
-            if timeout_seconds is None:
-                result = await invoke_tool(tool, tool_args)
-            else:
-                result = await asyncio.wait_for(
-                    invoke_tool(tool, tool_args),
-                    timeout=timeout_seconds,
+        with tool_policy_context(policy):
+            outcome = await invoke_tool_attempt(
+                current_tool,
+                tool_args,
+                policy=policy,
+                remaining_total_seconds=remaining_total_seconds,
+            )
+
+        if outcome.exception is None:
+            attempt_history.append(
+                _attempt_record(
+                    policy=policy,
+                    tool_name=tool_name,
+                    attempt=attempts,
+                    outcome=outcome,
+                    summary=None,
+                    policy_retry_allowed=policy_retry_allowed,
+                    auto_retry_allowed=False,
                 )
-            return result, None, None
-        except asyncio.TimeoutError:
-            last_exc = TimeoutError(f"Tool timed out after {timeout_seconds}s")
-        except (ClosedResourceError, BrokenResourceError):
-            raise
-        except Exception as exc:
-            last_exc = exc
+            )
+            diagnostics = {
+                "attempts": attempts,
+                "attempt_history": attempt_history[-5:],
+            }
+            return outcome.result, None, None, diagnostics
 
         summary = classify_tool_error(
-            last_exc,
+            outcome.exception,
             tool_name=tool_name,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=policy.timeout_seconds,
             attempts=attempts,
         )
-        if attempts > max_retries or not should_auto_retry_tool(
-            tool,
+        remaining_after_attempt = max(
+            0.0,
+            policy.total_timeout_seconds - (time.monotonic() - started_at),
+        )
+        auto_retry_allowed = (
+            summary.failure_retryable
+            and policy_retry_allowed
+            and attempts < policy.max_attempts
+            and remaining_after_attempt > 0
+        )
+        attempt_history.append(
+            _attempt_record(
+                policy=policy,
+                tool_name=tool_name,
+                attempt=attempts,
+                outcome=outcome,
+                summary=summary,
+                policy_retry_allowed=policy_retry_allowed,
+                auto_retry_allowed=auto_retry_allowed,
+            )
+        )
+
+        if auto_retry_allowed:
+            if (
+                summary.error_type == ToolErrorKind.SESSION.value
+                and policy.identity.tool_origin == "server_mcp"
+            ):
+                current_tool, reconnect_exc = await _reconnect_server_tool(
+                    tool_name,
+                    remaining_total_seconds=remaining_after_attempt,
+                )
+                if reconnect_exc is not None or current_tool is None:
+                    final_exc = reconnect_exc or RuntimeError("MCP reconnect returned no tool")
+                    summary = classify_tool_error(
+                        final_exc,
+                        tool_name=tool_name,
+                        timeout_seconds=policy.timeout_seconds,
+                        attempts=attempts,
+                    )
+                    outcome = AttemptOutcome(exception=final_exc)
+                else:
+                    if tool_map is not None:
+                        tool_map[tool_name] = current_tool
+                    continue
+            else:
+                continue
+
+        model_content, artifact_detail = build_tool_error_payloads(
             summary,
             tool_name=tool_name,
-            retry_safe_tool_names=TOOL_LOADING_TOOLS,
-        ):
-            model_content, artifact_detail = build_tool_error_payloads(
-                summary,
-                tool_name=tool_name,
-                exception=last_exc,
-            )
-            return None, artifact_detail, model_content
+            exception=outcome.exception,
+            policy_retry_allowed=policy_retry_allowed,
+        )
+        artifact_detail["attempt_history"] = attempt_history[-5:]
+        return None, artifact_detail, model_content, {
+            "attempts": attempts,
+            "attempt_history": attempt_history[-5:],
+        }
 
-    fallback_exc = last_exc or RuntimeError("Tool failed")
-    summary = classify_tool_error(
-        fallback_exc,
-        tool_name=tool_name,
-        timeout_seconds=timeout_seconds,
-        attempts=attempts,
+    raise RuntimeError("Tool execution attempt loop ended without an outcome")
+
+
+def _tool_invocation_kind(tool: Any) -> str:
+    metadata = getattr(tool, "metadata", None)
+    if isinstance(metadata, dict) and metadata.get("tool_origin") in {
+        "client_mcp",
+        "client_skill",
+    }:
+        return "client_runtime"
+    if getattr(tool, "coroutine", None) or callable(getattr(tool, "ainvoke", None)):
+        return "native_async"
+    return "sync_thread"
+
+
+def _apply_legacy_timeout_compatibility(
+    tool: Any,
+    policy: ToolExecutionPolicy,
+) -> ToolExecutionPolicy:
+    """Preserve legacy top-level timeout metadata until Task 8 removes it."""
+    if policy.outer_timeout_disabled:
+        return policy
+    metadata = getattr(tool, "metadata", None)
+    if not isinstance(metadata, dict) or "execution_timeout_seconds" not in metadata:
+        return policy
+    legacy_timeout = _resolve_tool_timeout_seconds(tool)
+    if legacy_timeout is None:
+        return replace(policy, outer_timeout_disabled=True)
+    return replace(
+        policy,
+        timeout_seconds=legacy_timeout,
+        hard_timeout_seconds=legacy_timeout,
+        total_timeout_seconds=legacy_timeout,
     )
-    model_content, artifact_detail = build_tool_error_payloads(
-        summary,
-        tool_name=tool_name,
-        exception=fallback_exc,
-    )
-    return None, artifact_detail, model_content
+
+
+def _attempt_record(
+    *,
+    policy: ToolExecutionPolicy,
+    tool_name: str,
+    attempt: int,
+    outcome: AttemptOutcome,
+    summary: ToolErrorSummary | None,
+    policy_retry_allowed: bool,
+    auto_retry_allowed: bool,
+) -> dict[str, Any]:
+    return {
+        "attempt": attempt,
+        "tool_name": tool_name,
+        "tool_origin": policy.identity.tool_origin,
+        "qualified_tool_id": policy.identity.qualified_tool_id,
+        "policy_source": policy.policy_source,
+        "policy_config_keys": list(policy.policy_config_keys),
+        "elapsed_ms": outcome.elapsed_ms,
+        "failure_retryable": summary.failure_retryable if summary else False,
+        "policy_retry_allowed": policy_retry_allowed,
+        "auto_retry_allowed": auto_retry_allowed,
+        "error_type": summary.error_type if summary else None,
+        "retryable": (
+            summary.failure_retryable and policy_retry_allowed if summary else False
+        ),
+        "cancellation": policy.cancellation,
+        "cancellation_attempted": outcome.cancellation_attempted,
+        "cancellation_completed": outcome.cancellation_completed,
+        "timeout_phase": outcome.timeout_phase,
+    }
+
+
+async def _reconnect_server_tool(
+    tool_name: str,
+    *,
+    remaining_total_seconds: float,
+) -> tuple[Any | None, BaseException | None]:
+    async def _reconnect() -> Any:
+        from .mcp_registry import get_global_mcp_manager
+
+        manager = await get_global_mcp_manager()
+        return await manager.reconnect_and_get_tool(tool_name)
+
+    if remaining_total_seconds <= 0:
+        return None, TimeoutError("Tool cumulative deadline exhausted before reconnect")
+
+    task = asyncio.create_task(_reconnect())
+    try:
+        done, _ = await asyncio.wait({task}, timeout=remaining_total_seconds)
+    except asyncio.CancelledError:
+        _cancel_and_consume_task(task)
+        raise
+    if not done:
+        _cancel_and_consume_task(task)
+        return None, TimeoutError("MCP reconnect exceeded the cumulative tool deadline")
+    try:
+        return task.result(), None
+    except BaseException as exc:
+        return None, exc
 
 
 async def execute_tool_calls(
@@ -1499,7 +1647,7 @@ async def execute_tool_calls(
         if not tool_name or tool_name == "unknown":
             summary = ToolErrorSummary(
                 error_type=ToolErrorKind.ARGUMENT.value,
-                retryable=False,
+                failure_retryable=False,
                 message="Tool name is missing.",
                 hint="Provide the tool name to call, or inspect available tools if unsure.",
                 attempts=1,
@@ -1508,6 +1656,7 @@ async def execute_tool_calls(
                 summary,
                 tool_name=tool_name or "unknown",
                 exception=ValueError("Tool name is missing."),
+                policy_retry_allowed=False,
             )
             _append_tool_error_output(
                 tool_call_id=tool_id,
@@ -1533,7 +1682,7 @@ async def execute_tool_calls(
             if tool_name.startswith(CLIENT_TOOL_PREFIX):
                 summary = ToolErrorSummary(
                     error_type=ToolErrorKind.NOT_FOUND.value,
-                    retryable=False,
+                    failure_retryable=False,
                     message=(
                         f"Client tool {tool_name} is not available for the current "
                         "device session."
@@ -1547,7 +1696,7 @@ async def execute_tool_calls(
             else:
                 summary = ToolErrorSummary(
                     error_type=ToolErrorKind.NOT_FOUND.value,
-                    retryable=False,
+                    failure_retryable=False,
                     message=f"Tool {tool_name} is not currently bound.",
                     hint=(
                         "Use a currently bound suitable tool if one exists. If the needed "
@@ -1559,6 +1708,7 @@ async def execute_tool_calls(
                 summary,
                 tool_name=tool_name,
                 exception=LookupError(summary.message),
+                policy_retry_allowed=False,
             )
             _append_tool_error_output(
                 tool_call_id=tool_id,
@@ -1574,7 +1724,7 @@ async def execute_tool_calls(
         if device_error:
             summary = ToolErrorSummary(
                 error_type=ToolErrorKind.PERMISSION.value,
-                retryable=False,
+                failure_retryable=False,
                 message=(
                     f"Client tool {tool_name} cannot execute from the current "
                     "device session."
@@ -1586,6 +1736,7 @@ async def execute_tool_calls(
                 summary,
                 tool_name=tool_name,
                 exception=PermissionError(device_error),
+                policy_retry_allowed=False,
             )
             _append_tool_error_output(
                 tool_call_id=tool_id,
@@ -1597,10 +1748,11 @@ async def execute_tool_calls(
             continue
 
         try:
-            result, error_detail, error_content = await invoke_tool_with_policy(
+            result, error_detail, error_content, execution_detail = await invoke_tool_with_policy(
                 tool,
                 tool_args,
                 tool_name=tool_name,
+                tool_map=tool_map,
             )
             if error_detail is not None:
                 _append_tool_error_output(
@@ -1637,6 +1789,7 @@ async def execute_tool_calls(
                 max_output_chars=artifact_max_output_chars,
                 render=normalized_result.render,
             )
+            artifact.update(execution_detail)
             _attach_rich_candidates_to_artifact(
                 artifact,
                 raw_result=result,
@@ -1664,91 +1817,6 @@ async def execute_tool_calls(
                     user_id=user_id,
                     device_id=device_id,
                     tool_scope=tool_scope,
-                )
-        except (ClosedResourceError, BrokenResourceError) as session_exc:
-            # MCP session died – attempt reconnect once, then retry
-            logger.warning(
-                "Session error executing tool '%s': %s. Attempting reconnect…",
-                tool_name,
-                session_exc,
-            )
-            reconnected = False
-            try:
-                from .mcp_registry import get_global_mcp_manager
-
-                manager = await get_global_mcp_manager()
-                fresh_tool = await manager.reconnect_and_get_tool(tool_name)
-                if fresh_tool:
-                    # Update tool_map so later calls in the same batch also use it
-                    tool_map[tool_name] = fresh_tool
-                    result = await asyncio.wait_for(
-                        invoke_tool(fresh_tool, tool_args),
-                        timeout=_tool_execution_timeout_seconds(),
-                    )
-                    normalized_result = normalize_tool_result_for_rendering(
-                        result,
-                        tool_name=tool_name,
-                        error=_structured_tool_error(result),
-                    )
-                    result_text = normalized_result.model_content
-                    structured_error = _structured_tool_error(result)
-
-                    outputs.append(
-                        {
-                            "tool_call_id": tool_id,
-                            "name": tool_name,
-                            "content": result_text,
-                            "render": normalized_result.render,
-                        }
-                    )
-                    artifact = build_tool_artifact(
-                        tool_call_id=tool_id,
-                        tool_name=tool_name,
-                        tool_args=tool_args,
-                        output_text=result_text,
-                        error=structured_error,
-                        max_output_chars=artifact_max_output_chars,
-                        render=normalized_result.render,
-                    )
-                    _attach_rich_candidates_to_artifact(
-                        artifact,
-                        raw_result=result,
-                        result_text=result_text,
-                        render=normalized_result.render,
-                        tool_call_id=tool_id,
-                        tool_name=tool_name,
-                    )
-                    artifacts.append(artifact)
-                    if capture_images:
-                        images.extend(extract_images_from_tool_result(result_text))
-                        images.extend(extract_images_from_tool_content(result))
-                    _mark_tool_used_if_deferred(tool_name)
-                    reconnected = True
-            except Exception as retry_exc:
-                logger.error(
-                    "Retry after reconnect failed for tool '%s': %s",
-                    tool_name,
-                    retry_exc,
-                )
-
-            if not reconnected:
-                summary = classify_tool_error(
-                    session_exc,
-                    tool_name=tool_name,
-                    timeout_seconds=_tool_execution_timeout_seconds(),
-                    attempts=1,
-                )
-                model_content, artifact_detail = build_tool_error_payloads(
-                    summary,
-                    tool_name=tool_name,
-                    exception=session_exc,
-                )
-                _append_tool_error_output(
-                    tool_call_id=tool_id,
-                    tool_name=tool_name,
-                    tool_args=tool_args,
-                    model_content=model_content,
-                    artifact_detail=artifact_detail,
                 )
         except Exception as exc:
             error_msg = f"Error: {exc}"

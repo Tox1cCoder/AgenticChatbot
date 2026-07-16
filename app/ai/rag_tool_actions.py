@@ -33,12 +33,16 @@ def compact_rag_tool_error(
     """
     summary = ToolErrorSummary(
         error_type=error_type,
-        retryable=retryable,
+        failure_retryable=retryable,
         message=message,
         hint=hint,
         attempts=1,
     )
-    return json.dumps(summary.model_dict(), ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(
+        summary.model_dict(policy_retry_allowed=True),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def canonicalize_rag_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:

@@ -3,13 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
+from anyio import ClosedResourceError
 
 from app.ai.tool_execution import execute_tool_calls, invoke_tool_attempt
 from app.ai.tool_execution_policy import ToolExecutionPolicy, ToolIdentity
-from app.core.config import settings
+from app.core.config import ToolExecutionPolicyOverride, settings
 
 
 def _attempt_policy(
@@ -526,7 +528,9 @@ async def test_execute_tool_calls_times_out_slow_tool(monkeypatch):
     payload = json.loads(outputs[0]["content"])
     assert payload["status"] == "error"
     assert payload["error_type"] == "timeout"
-    assert payload["retryable"] is True
+    assert payload["retryable"] is False
+    assert artifacts[0]["failure_retryable"] is True
+    assert artifacts[0]["policy_retry_allowed"] is False
     assert artifacts[0]["status"] == "error"
     assert artifacts[0]["error_type"] == "timeout"
 
@@ -616,13 +620,16 @@ async def test_execute_tool_calls_metadata_overrides_timeout(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_execute_tool_calls_retries_retry_safe_transient_failure(monkeypatch):
-    monkeypatch.setattr(settings, "tool_execution_timeout", 1)
-    monkeypatch.setattr(settings, "tool_execution_max_retries", 1)
     calls = 0
 
     class _RetrySafeTool:
         name = "safe_reader"
-        metadata = {"retry_safe": True}
+        metadata = {
+            "application_execution_policy": {
+                "max_attempts": 2,
+                "retry_safe": True,
+            }
+        }
 
         async def ainvoke(self, args):
             nonlocal calls
@@ -664,8 +671,184 @@ async def test_execute_tool_calls_does_not_auto_retry_unknown_side_effect_tool(m
     payload = json.loads(outputs[0]["content"])
     assert calls == 1
     assert payload["error_type"] == "network"
-    assert payload["retryable"] is True
+    assert payload["retryable"] is False
+    assert artifacts[0]["failure_retryable"] is True
+    assert artifacts[0]["policy_retry_allowed"] is False
     assert artifacts[0]["attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_retries_share_one_total_deadline(monkeypatch):
+    monkeypatch.setattr(settings, "tool_execution_cancellation_grace_seconds", 0.01)
+    remaining_by_attempt: list[float | None] = []
+    calls = 0
+
+    class _SlowTransientTool:
+        name = "slow_reader"
+        metadata = {
+            "application_execution_policy": {
+                "timeout_seconds": 0.08,
+                "hard_timeout_seconds": 0.09,
+                "total_timeout_seconds": 0.1,
+                "max_attempts": 2,
+                "retry_safe": True,
+            }
+        }
+
+        async def ainvoke(self, args):
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.06)
+            raise ConnectionError("temporarily unavailable")
+
+    from app.ai import tool_execution as tool_execution_module
+
+    real_invoke_tool_attempt = tool_execution_module.invoke_tool_attempt
+
+    async def _record_remaining(tool, tool_args, *, policy, remaining_total_seconds):
+        remaining_by_attempt.append(remaining_total_seconds)
+        return await real_invoke_tool_attempt(
+            tool,
+            tool_args,
+            policy=policy,
+            remaining_total_seconds=remaining_total_seconds,
+        )
+
+    monkeypatch.setattr(tool_execution_module, "invoke_tool_attempt", _record_remaining)
+
+    started_at = time.monotonic()
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-1", "name": "slow_reader", "args": {}}],
+        tool_map={"slow_reader": _SlowTransientTool()},
+    )
+    elapsed = time.monotonic() - started_at
+
+    assert calls == 2
+    assert len(remaining_by_attempt) == 2
+    assert remaining_by_attempt[0] is not None
+    assert remaining_by_attempt[1] is not None
+    assert 0 < remaining_by_attempt[1] < remaining_by_attempt[0]
+    assert remaining_by_attempt[1] < 0.06
+    assert elapsed <= 0.2
+    assert json.loads(outputs[0]["content"])["error_type"] == "timeout"
+    assert artifacts[0]["attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_unsafe_session_failure_does_not_reconnect_and_repeat(monkeypatch):
+    invocations = 0
+    reconnect_calls = 0
+
+    class _UnsafeServerTool:
+        name = "mutate_remote"
+        metadata = {
+            "tool_origin": "server_mcp",
+            "server_name": "remote",
+            "source_tool_name": "mutate_remote",
+            "qualified_tool_id": "remote::mutate_remote",
+        }
+
+        async def ainvoke(self, args):
+            nonlocal invocations
+            invocations += 1
+            raise ClosedResourceError
+
+    class _Manager:
+        async def reconnect_and_get_tool(self, tool_name):
+            nonlocal reconnect_calls
+            reconnect_calls += 1
+            raise AssertionError("unsafe tool must not reconnect")
+
+    async def _manager():
+        return _Manager()
+
+    monkeypatch.setattr("app.ai.mcp_registry.get_global_mcp_manager", _manager)
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-1", "name": "mutate_remote", "args": {}}],
+        tool_map={"mutate_remote": _UnsafeServerTool()},
+    )
+
+    assert invocations == 1
+    assert reconnect_calls == 0
+    assert json.loads(outputs[0]["content"])["retryable"] is False
+    assert artifacts[0]["attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_safe_session_reconnect_counts_as_next_attempt(monkeypatch):
+    monkeypatch.setattr(settings, "tool_execution_cancellation_grace_seconds", 0.01)
+    monkeypatch.setattr(
+        settings,
+        "tool_execution_policies",
+        {
+            "safe-session": ToolExecutionPolicyOverride(
+                match={
+                    "tool_origin": "server_mcp",
+                    "qualified_tool_id": "remote::read_remote",
+                },
+                timeout_seconds=0.08,
+                hard_timeout_seconds=0.09,
+                total_timeout_seconds=0.12,
+                max_attempts=2,
+                retry_safe=True,
+            )
+        },
+    )
+    invocations = 0
+    reconnect_calls = 0
+
+    class _ServerTool:
+        name = "read_remote"
+        metadata = {
+            "tool_origin": "server_mcp",
+            "server_name": "remote",
+            "source_tool_name": "read_remote",
+            "qualified_tool_id": "remote::read_remote",
+        }
+
+        async def ainvoke(self, args):
+            nonlocal invocations
+            invocations += 1
+            await asyncio.sleep(0.02)
+            raise ClosedResourceError
+
+    class _FreshServerTool(_ServerTool):
+        async def ainvoke(self, args):
+            nonlocal invocations
+            invocations += 1
+            await asyncio.sleep(0.01)
+            return "recovered"
+
+    class _Manager:
+        async def reconnect_and_get_tool(self, tool_name):
+            nonlocal reconnect_calls
+            reconnect_calls += 1
+            await asyncio.sleep(0.02)
+            return _FreshServerTool()
+
+    async def _manager():
+        return _Manager()
+
+    monkeypatch.setattr("app.ai.mcp_registry.get_global_mcp_manager", _manager)
+
+    started_at = time.monotonic()
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-1", "name": "read_remote", "args": {}}],
+        tool_map={"read_remote": _ServerTool()},
+    )
+    elapsed = time.monotonic() - started_at
+
+    assert invocations == 2
+    assert reconnect_calls == 1
+    assert outputs[0]["content"] == "recovered"
+    assert artifacts[0]["attempts"] == 2
+    assert len(artifacts[0]["attempt_history"]) == 2
+    first, second = artifacts[0]["attempt_history"]
+    assert first["qualified_tool_id"] == second["qualified_tool_id"]
+    assert first["policy_source"] == second["policy_source"]
+    assert first["policy_config_keys"] == second["policy_config_keys"] == ["safe-session"]
+    assert elapsed <= 0.2
 
 
 @pytest.mark.asyncio

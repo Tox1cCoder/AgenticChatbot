@@ -22,16 +22,16 @@ class ToolErrorKind(str, Enum):
 @dataclass(frozen=True)
 class ToolErrorSummary:
     error_type: str
-    retryable: bool
+    failure_retryable: bool
     message: str
     hint: str
     attempts: int
 
-    def model_dict(self) -> dict[str, Any]:
+    def model_dict(self, *, policy_retry_allowed: bool) -> dict[str, Any]:
         return {
             "status": "error",
             "error_type": self.error_type,
-            "retryable": self.retryable,
+            "retryable": self.failure_retryable and policy_retry_allowed,
             "message": self.message,
             "hint": self.hint,
         }
@@ -65,7 +65,7 @@ def classify_tool_error(
             timeout_message = f"Tool timed out after {timeout_value}s."
         return ToolErrorSummary(
             error_type=ToolErrorKind.TIMEOUT.value,
-            retryable=True,
+            failure_retryable=True,
             message=timeout_message,
             hint=(
                 "Retry only if the operation is likely safe; otherwise adjust inputs, "
@@ -77,7 +77,7 @@ def classify_tool_error(
     if isinstance(exc, (ClosedResourceError, BrokenResourceError)):
         return ToolErrorSummary(
             error_type=ToolErrorKind.SESSION.value,
-            retryable=True,
+            failure_retryable=True,
             message="Tool session was interrupted.",
             hint=(
                 "The runtime may reconnect. If it still fails, use another "
@@ -89,7 +89,7 @@ def classify_tool_error(
     if isinstance(exc, TypeError):
         return ToolErrorSummary(
             error_type=ToolErrorKind.ARGUMENT.value,
-            retryable=False,
+            failure_retryable=False,
             message="Tool arguments did not match the expected schema.",
             hint=(
                 "Read the tool schema or prior error, then call the tool again "
@@ -101,7 +101,7 @@ def classify_tool_error(
     if isinstance(exc, (ValueError, KeyError)):
         return ToolErrorSummary(
             error_type=ToolErrorKind.VALIDATION.value,
-            retryable=False,
+            failure_retryable=False,
             message=_clean_text(exc) or "Tool rejected the provided values.",
             hint="Correct the values before retrying. Do not repeat the same arguments.",
             attempts=attempts,
@@ -110,7 +110,7 @@ def classify_tool_error(
     if isinstance(exc, (PermissionError,)):
         return ToolErrorSummary(
             error_type=ToolErrorKind.PERMISSION.value,
-            retryable=False,
+            failure_retryable=False,
             message="Tool lacks permission for that operation.",
             hint="Ask the user for access, choose a permitted alternative, or explain the blocker.",
             attempts=attempts,
@@ -119,7 +119,7 @@ def classify_tool_error(
     if isinstance(exc, FileNotFoundError) or "not found" in raw:
         return ToolErrorSummary(
             error_type=ToolErrorKind.NOT_FOUND.value,
-            retryable=False,
+            failure_retryable=False,
             message=_clean_text(exc) or "Requested resource was not found.",
             hint=(
                 "Verify the target exists, adjust the query/path, or ask the "
@@ -134,7 +134,7 @@ def classify_tool_error(
     ):
         return ToolErrorSummary(
             error_type=ToolErrorKind.NETWORK.value,
-            retryable=True,
+            failure_retryable=True,
             message="Tool failed because the connection or service was unavailable.",
             hint=(
                 "Retry only if the tool is safe to repeat; otherwise use "
@@ -145,7 +145,7 @@ def classify_tool_error(
 
     return ToolErrorSummary(
         error_type=ToolErrorKind.UNKNOWN.value,
-        retryable=False,
+        failure_retryable=False,
         message=_clean_text(exc) or "Tool failed with an unknown error.",
         hint="Do not repeat the same call without changing inputs or choosing a better tool.",
         attempts=attempts,
@@ -159,7 +159,7 @@ def should_auto_retry_tool(
     tool_name: str,
     retry_safe_tool_names: set[str] | None = None,
 ) -> bool:
-    if not summary.retryable:
+    if not summary.failure_retryable:
         return False
     if tool_name in (retry_safe_tool_names or set()):
         return True
@@ -174,13 +174,21 @@ def build_tool_error_payloads(
     *,
     tool_name: str,
     exception: BaseException,
+    policy_retry_allowed: bool,
 ) -> tuple[str, dict[str, Any]]:
-    model_content = json.dumps(summary.model_dict(), ensure_ascii=False, separators=(",", ":"))
+    model_retryable = summary.failure_retryable and policy_retry_allowed
+    model_content = json.dumps(
+        summary.model_dict(policy_retry_allowed=policy_retry_allowed),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     artifact_detail = {
         "status": "error",
         "tool": tool_name,
         "error_type": summary.error_type,
-        "retryable": summary.retryable,
+        "retryable": model_retryable,
+        "failure_retryable": summary.failure_retryable,
+        "policy_retry_allowed": policy_retry_allowed,
         "attempts": summary.attempts,
         "exception_type": type(exception).__name__,
         "diagnostic": _clean_text(exception, max_chars=1000),
