@@ -76,7 +76,9 @@ def test_client_scoped_binding_excludes_server_mcp_tools(monkeypatch):
     ]
 
 
-def test_deferred_binding_keeps_hand_off_available(monkeypatch):
+def test_deferred_binding_keeps_graph_injected_hand_off_available(monkeypatch):
+    from app.ai.hand_off_tool import create_hand_off_tool
+
     agent = _BindingTestAgent(agent_config_key="canvas")
     agent.tools = []
     agent.mcp_manager = None
@@ -90,6 +92,10 @@ def test_deferred_binding_keeps_hand_off_available(monkeypatch):
         lambda **kwargs: [],
     )
 
-    tools = agent._get_tools_for_binding(conversation_id="conversation-1")
+    hand_off = create_hand_off_tool(["search_agent"])
+    tools = agent._get_tools_for_binding(
+        conversation_id="conversation-1",
+        internal_tools=[hand_off],
+    )
 
     assert "hand_off" in [tool.name for tool in tools]
