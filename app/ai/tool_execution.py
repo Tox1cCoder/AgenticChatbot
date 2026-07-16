@@ -3,6 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
+import time
+from contextlib import suppress
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from anyio import BrokenResourceError, ClosedResourceError
@@ -27,6 +31,7 @@ from .tool_error_policy import (
     classify_tool_error,
     should_auto_retry_tool,
 )
+from .tool_execution_policy import ToolExecutionPolicy
 from .tool_result_rendering import normalize_tool_result_for_rendering
 from .tool_scope import is_client_only_scope
 from .tool_search_tool import create_tool_search_tool
@@ -1094,6 +1099,109 @@ async def invoke_tool(tool: Any, tool_args: Any) -> Any:
         return await asyncio.to_thread(tool, tool_args)
 
     raise TypeError("Tool has no invoke/ainvoke and is not callable")
+
+
+@dataclass(frozen=True)
+class AttemptOutcome:
+    result: Any = None
+    exception: BaseException | None = None
+    elapsed_ms: int = 0
+    cancellation_attempted: bool = False
+    cancellation_completed: bool = False
+    timeout_phase: str = "none"
+
+
+def _consume_abandoned_task_exception(task: asyncio.Task[Any]) -> None:
+    """Retrieve a terminal exception from work abandoned at its hard deadline."""
+    with suppress(asyncio.CancelledError):
+        task.exception()
+
+
+async def invoke_tool_attempt(
+    tool: Any,
+    tool_args: Any,
+    *,
+    policy: ToolExecutionPolicy,
+    remaining_total_seconds: float | None,
+) -> AttemptOutcome:
+    """Invoke one tool attempt under soft-cancel and hard-abandon deadlines."""
+    started_at = time.monotonic()
+    cumulative_seconds = (
+        max(0.0, remaining_total_seconds)
+        if remaining_total_seconds is not None and math.isfinite(remaining_total_seconds)
+        else None
+    )
+
+    if policy.outer_timeout_disabled:
+        soft_seconds = cumulative_seconds
+        hard_seconds = cumulative_seconds
+    else:
+        soft_seconds = policy.timeout_seconds
+        hard_seconds = policy.hard_timeout_seconds
+        if cumulative_seconds is not None:
+            soft_seconds = min(soft_seconds, cumulative_seconds)
+            hard_seconds = min(hard_seconds, cumulative_seconds)
+
+    hard_deadline = started_at + hard_seconds if hard_seconds is not None else None
+    task = asyncio.create_task(invoke_tool(tool, tool_args))
+
+    done, _ = await asyncio.wait({task}, timeout=soft_seconds)
+    if done:
+        try:
+            result = task.result()
+        except BaseException as exc:
+            return AttemptOutcome(
+                exception=exc,
+                elapsed_ms=max(0, round((time.monotonic() - started_at) * 1000)),
+            )
+        return AttemptOutcome(
+            result=result,
+            elapsed_ms=max(0, round((time.monotonic() - started_at) * 1000)),
+        )
+
+    task.cancel()
+    hard_wait_seconds = (
+        None if hard_deadline is None else max(0.0, hard_deadline - time.monotonic())
+    )
+    done, _ = await asyncio.wait({task}, timeout=hard_wait_seconds)
+    cancellation_completed = policy.cancellation != "abandon_only"
+
+    if done:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            timeout_exception: BaseException = TimeoutError(
+                f"Tool timed out after {soft_seconds}s"
+            )
+        except BaseException as exc:
+            return AttemptOutcome(
+                exception=exc,
+                elapsed_ms=max(0, round((time.monotonic() - started_at) * 1000)),
+                cancellation_attempted=True,
+                cancellation_completed=cancellation_completed,
+                timeout_phase="soft_timeout",
+            )
+        else:
+            timeout_exception = TimeoutError(f"Tool timed out after {soft_seconds}s")
+
+        return AttemptOutcome(
+            exception=timeout_exception,
+            elapsed_ms=max(0, round((time.monotonic() - started_at) * 1000)),
+            cancellation_attempted=True,
+            cancellation_completed=cancellation_completed,
+            timeout_phase="soft_timeout",
+        )
+
+    task.add_done_callback(_consume_abandoned_task_exception)
+    return AttemptOutcome(
+        exception=TimeoutError(
+            f"Tool timed out after {soft_seconds}s and did not stop before {hard_seconds}s"
+        ),
+        elapsed_ms=max(0, round((time.monotonic() - started_at) * 1000)),
+        cancellation_attempted=True,
+        cancellation_completed=False,
+        timeout_phase="hard_timeout",
+    )
 
 
 def _structured_tool_error(result: Any) -> str | None:

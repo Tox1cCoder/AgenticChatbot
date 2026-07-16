@@ -2,12 +2,175 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from types import SimpleNamespace
 
 import pytest
 
-from app.ai.tool_execution import execute_tool_calls
+from app.ai.tool_execution import execute_tool_calls, invoke_tool_attempt
+from app.ai.tool_execution_policy import ToolExecutionPolicy, ToolIdentity
 from app.core.config import settings
+
+
+def _attempt_policy(*, cancellation: str = "cooperative") -> ToolExecutionPolicy:
+    return ToolExecutionPolicy(
+        identity=ToolIdentity(
+            tool_origin="internal",
+            qualified_tool_id="internal::deadline_test",
+            exposed_tool_name="deadline_test",
+            source_tool_name="deadline_test",
+            server_name=None,
+        ),
+        timeout_seconds=0.05,
+        hard_timeout_seconds=0.15,
+        total_timeout_seconds=0.3,
+        max_attempts=1,
+        retry_safe=False,
+        idempotent=False,
+        metadata_trusted=False,
+        outer_timeout_disabled=False,
+        cancellation=cancellation,
+        client_execution_timeout_seconds=None,
+        client_response_timeout_seconds=None,
+        policy_source="test",
+        policy_config_keys=(),
+        timeout_hint="",
+    )
+
+
+@pytest.mark.asyncio
+async def test_soft_timeout_cancels_cooperative_async_tool():
+    cancellation_observed = asyncio.Event()
+
+    class _CooperativeTool:
+        async def ainvoke(self, args):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_observed.set()
+                raise
+
+    outcome = await invoke_tool_attempt(
+        _CooperativeTool(),
+        {},
+        policy=_attempt_policy(),
+        remaining_total_seconds=0.3,
+    )
+
+    assert cancellation_observed.is_set()
+    assert isinstance(outcome.exception, TimeoutError)
+    assert outcome.timeout_phase == "soft_timeout"
+    assert outcome.cancellation_attempted is True
+    assert outcome.cancellation_completed is True
+
+
+@pytest.mark.asyncio
+async def test_hard_timeout_stops_waiting_for_cancellation_suppressing_tool():
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    class _CancellationSuppressingTool:
+        async def ainvoke(self, args):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release.wait()
+            finally:
+                finished.set()
+
+    outcome = await invoke_tool_attempt(
+        _CancellationSuppressingTool(),
+        {},
+        policy=_attempt_policy(),
+        remaining_total_seconds=0.3,
+    )
+
+    try:
+        assert isinstance(outcome.exception, TimeoutError)
+        assert outcome.timeout_phase == "hard_timeout"
+        assert outcome.cancellation_attempted is True
+        assert outcome.cancellation_completed is False
+        assert not finished.is_set()
+    finally:
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_sync_thread_timeout_is_recorded_as_abandon_only():
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    worker_results: list[str] = []
+
+    class _BlockingSyncTool:
+        def invoke(self, args):
+            started.set()
+            release.wait(timeout=2)
+            worker_results.append("thread-result")
+            finished.set()
+            return worker_results[-1]
+
+    outcome = await invoke_tool_attempt(
+        _BlockingSyncTool(),
+        {},
+        policy=_attempt_policy(cancellation="abandon_only"),
+        remaining_total_seconds=0.3,
+    )
+
+    try:
+        assert started.is_set()
+        assert isinstance(outcome.exception, TimeoutError)
+        assert outcome.timeout_phase == "soft_timeout"
+        assert outcome.cancellation_attempted is True
+        assert outcome.cancellation_completed is False
+        assert not finished.is_set()
+    finally:
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 1)
+
+    assert worker_results == ["thread-result"]
+
+
+@pytest.mark.asyncio
+async def test_abandoned_task_exception_is_consumed():
+    loop = asyncio.get_running_loop()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+    exception_contexts: list[dict] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: exception_contexts.append(context))
+
+    class _LateFailingTool:
+        async def ainvoke(self, args):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release.wait()
+                raise RuntimeError("late failure") from None
+            finally:
+                finished.set()
+
+    try:
+        outcome = await invoke_tool_attempt(
+            _LateFailingTool(),
+            {},
+            policy=_attempt_policy(),
+            remaining_total_seconds=0.3,
+        )
+        assert outcome.timeout_phase == "hard_timeout"
+
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=1)
+        await asyncio.sleep(0)
+
+        assert not any(
+            context.get("message") == "Task exception was never retrieved"
+            for context in exception_contexts
+        )
+    finally:
+        release.set()
+        loop.set_exception_handler(previous_handler)
 
 
 @pytest.mark.asyncio
