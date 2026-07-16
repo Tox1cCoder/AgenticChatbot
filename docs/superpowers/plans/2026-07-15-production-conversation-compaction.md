@@ -391,23 +391,23 @@ Run Ruff and `git diff --check`; record and commit with `feat(compaction): add s
 - Modify/Delete: legacy summary tests
 - Create: `tests/test_conversation_compaction_legacy_cleanup.py`
 
-- [ ] **Step 1: Write failing repository-wide cleanup assertions**
+- [x] **Step 1: Write failing repository-wide cleanup assertions**
 
 Scan outside applied migrations and explicit migration notes for removed modules, `MemoryManager`, refresh-runner symbols, timestamp/UUID summary cursors, graph keys, `history_summary`, legacy env names, duplicate public estimators, `len(text)//4`, and tool-only retry plumbing superseded by request budgeting.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run cleanup test. Expected: it lists every remaining legacy path.
 
-- [ ] **Step 3: Migrate callers to `TokenCounter` and remove legacy implementation**
+- [x] **Step 3: Migrate callers to `TokenCounter` and remove legacy implementation**
 
 Preserve unrelated user-memory functionality. Document chunking receives an explicit tokenizer strategy. Delete obsolete tests rather than rewriting them to preserve removed behavior.
 
-- [ ] **Step 4: Verify GREEN and focused regressions**
+- [x] **Step 4: Verify GREEN and focused regressions**
 
 Run cleanup, token, prompt, document chunking, RAG, graph, and context-window tests. Expected: no removed symbol outside allowed immutable history/notes.
 
-- [ ] **Step 5: Run task gate, update logs, and commit**
+- [x] **Step 5: Run task gate, update logs, and commit**
 
 Run Ruff and repository-wide scan; record and commit with `refactor(compaction): remove legacy summarization paths`.
 
@@ -420,23 +420,23 @@ Run Ruff and repository-wide scan; record and commit with `refactor(compaction):
 - Create: `docs/operations/conversation-compaction.md`
 - Create: `tests/test_conversation_compaction_docs.py`
 
-- [ ] **Step 1: Write failing documentation contract test**
+- [x] **Step 1: Write failing documentation contract test**
 
 Assert exact environment-name/default mapping, summary worker/Beat startup, migration/rollback, backfill, health, dashboards/alerts, credential policy, rollout steps, and absence of legacy names outside the migration mapping table.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run docs test. Expected: missing operations document and legacy README text.
 
-- [ ] **Step 3: Write deployment and operations documentation**
+- [x] **Step 3: Write deployment and operations documentation**
 
 Include explicit production provider/model requirements, `summary` queue, reconciler, backfill, observable thresholds, rollback limitations, and mapping from old names to new names as release guidance only.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run docs and cleanup tests. Expected: exact names/defaults match `Settings`.
 
-- [ ] **Step 5: Run task gate, update logs, and commit**
+- [x] **Step 5: Run task gate, update logs, and commit**
 
 Run Markdown-relevant checks, Ruff for test, and `git diff --check`; record and commit with `docs: add conversation compaction operations guide`.
 
@@ -446,19 +446,19 @@ Run Markdown-relevant checks, Ruff for test, and `git diff --check`; record and 
 - Modify only files required by defects proven during this gate, always with a failing regression test first.
 - Update: this plan's Progress Log and Decision Log.
 
-- [ ] **Step 1: Run disposable PostgreSQL upgrade and schema inspection**
+- [x] **Step 1: Run disposable PostgreSQL upgrade and schema inspection**
 
 Run upgrade from previous head to new head, inspect tables/indexes/checks/composite FKs, validate backfill ordering/next sequence, run `alembic current`, `alembic check`, then downgrade to the previous schema and upgrade again.
 
-- [ ] **Step 2: Run PostgreSQL integration and failure suites**
+- [x] **Step 2: Run PostgreSQL integration and failure suites**
 
 Run concurrency, atomicity, crash windows, duplicate delivery, lease expiry, CAS conflict, edit/delete rebuild, end-to-end hydration, emergency fallback, and backfill tests.
 
-- [ ] **Step 3: Run complete static and test verification**
+- [x] **Step 3: Run complete static and test verification**
 
 Run full `pytest`, `ruff check`, `ruff format --check`, configured type checks, `git diff --check`, and repository-wide cleanup scan. Distinguish pre-existing unrelated failures with a clean reproduction; do not mark complete while plan-owned failures remain.
 
-- [ ] **Step 4: Inspect final diff and requirements checklist**
+- [x] **Step 4: Inspect final diff and requirements checklist**
 
 Review every design success criterion against code/tests, confirm no unrelated file was staged, and record exact evidence in Progress Log.
 
@@ -495,6 +495,12 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Task 10, steps 1–2 | In progress | Added tests for required compaction metrics, bounded provider/model/content-class/error labels, cost/calibration metadata, deterministic trim/overflow measurements, aggregate queue/dead/lease/lag status, content exclusion, and endpoint separation from Celery health. RED failed collection with the expected missing `app.api.health` module. |
 | 2026-07-15 | Task 10, steps 3–4 | In progress | Added a private Prometheus registry, bounded label normalization, worker/request-path metric emission, repository aggregate health queries, and separate `/health/conversation-compaction` plus `/metrics/conversation-compaction` endpoints. Initial health GREEN produced `3 passed`; the expanded worker/budget/RAG/container gate first found and fixed a handler-name shadowing bug, then found and fixed a lazy-import circular dependency. Repeated gate produced `66 passed`. |
 | 2026-07-15 | Task 10 | Complete | Full compaction schema/migration/repository/compactor/worker/message/budget/token/health/container gate produced `92 passed, 10 skipped` (PostgreSQL tests require `TEST_DATABASE_URL`); the post-format affected repeat produced `60 passed`. Ruff lint and new/central-file format checks passed; `git diff --check` passed. Metrics and health output contain only bounded labels and aggregate counts/ages/lag. |
+| 2026-07-16 | Review fixes | Complete | Added RED/GREEN regressions for default request-path callbacks, emergency publish/claim ordering, disabled task entry points, per-conversation backfill rate limiting, incomplete-prefix structural reduction, positive summary caps, bounded background input, canonical provider usage/cost, and complete-turn history/tool grouping. Final affected gate produced `282 passed`; commit `3de5c47`. |
+| 2026-07-16 | Task 11 | Complete | Repository-wide cleanup first listed deleted modules, symbols, environment names, and duplicate estimators. The final cleanup/token/document/history/graph gate is included in the `282 passed` affected suite; scoped lint passed, central/new files are formatted, and `git diff --check` passed. Legacy implementation and tests were deleted in commit `7cc17d4`. |
+| 2026-07-16 | Task 12 | Complete | Documentation contract first failed because the operations guide was absent. The final docs plus cleanup gate produced `6 passed`. README and `.env.example` now use only the production namespace; the runbook covers worker/Beat startup, migration, rollback, backfill, health, alerts, rollout, and credential rotation. Commit `fe2be09`. |
+| 2026-07-16 | Task 13, steps 1–2 | Complete | Cloned the live PostgreSQL schema into a uniquely named disposable database, seeded head state, downgraded `x1y2z3a4b5c6 → w7x8y9z0a1b2`, upgraded back to head, ran `alembic current/check`, and dropped the database. Real PostgreSQL integration produced `10 passed`. |
+| 2026-07-16 | Task 13, steps 3–4 | Complete | Full pytest produced `1761 passed, 14 skipped, 6 failed`; all six failures are outside the compaction diff (client upload response shape, environment-contaminated Brave default, deferred handoff binding, machine-specific MCP config, and the separately modified tool-output truncation path). The plan-owned gate produced `282 passed`; scoped Ruff passed, full Ruff reported 97 pre-existing repository violations, no type checker is configured, Alembic reported one head/current and no new operations, and `git diff --check` passed. Unrelated dirty files remain unstaged. |
+| 2026-07-16 | Task 13, step 5 | Blocked | Final verification fixes were committed as `3de5c47`, but the required finishing-branch workflow stops before merge/PR options while the repository-wide suite has six unrelated failures. No worktree was created or cleaned up. |
 
 ## Decision Log
 
@@ -530,3 +536,7 @@ Commit only proven fixes with `test(compaction): complete production verificatio
 | 2026-07-15 | Treat broker publication as a recoverable hint, never part of message durability. | The assistant row and coalesced PostgreSQL job commit together first; publication failure cannot roll them back, and periodic reconciliation recovers the pending job. |
 | 2026-07-15 | Normalize provider/model/content/error metric labels into fixed coarse families. | Provider payloads, custom model identifiers, transcript fragments, UUIDs, and arbitrary error strings must never become labels; fixed families bound cardinality and keep telemetry content-free. |
 | 2026-07-15 | Classify dead jobs or expired leases as unhealthy and stale/retrying/lagged work as degraded. | Permanent loss and abandoned ownership require immediate operator action, while recoverable backlog should remain distinguishable from both healthy operation and terminal failure. |
+| 2026-07-16 | Run emergency compaction directly against the durable claim instead of publishing first. | Publishing before the synchronous claim creates a race with a Celery worker; the request path now upserts the target and claims it directly, while reconciliation still recovers abandoned work. |
+| 2026-07-16 | Apply the 10/minute backfill limit to each conversation child task. | Rate-limiting only the hourly batch task still allowed an unbounded burst of child publications; one rate-limited idempotent child per conversation enforces the intended provider pressure. |
+| 2026-07-16 | Bound compaction input to the model's resolved input window minus output and safety reserves. | A large historical backlog must advance incrementally through assistant-ended complete prefixes instead of sending an oversized background request. |
+| 2026-07-16 | Preserve unrelated thinking-level and tool-execution work outside compaction commits. | The checkout was already dirty and the user explicitly requested direct implementation; interactive hunk staging committed only the removed summary config while leaving the user's other `agent_config.py`, `tool_execution.py`, plan, and test changes untouched. |
