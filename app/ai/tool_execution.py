@@ -1342,6 +1342,7 @@ async def invoke_tool_with_policy(
         invocation_kind=invocation_kind,
     )
     policy = _apply_legacy_timeout_compatibility(tool, policy)
+    policy_snapshot = _policy_snapshot(policy)
     policy_retry_allowed = (policy.retry_safe or policy.idempotent) or (
         policy.identity.tool_origin,
         policy.identity.qualified_tool_id,
@@ -1384,6 +1385,7 @@ async def invoke_tool_with_policy(
             diagnostics = {
                 "attempts": attempts,
                 "attempt_history": attempt_history[-5:],
+                "policy": policy_snapshot,
             }
             return outcome.result, None, None, diagnostics
 
@@ -1447,9 +1449,11 @@ async def invoke_tool_with_policy(
             policy_retry_allowed=policy_retry_allowed,
         )
         artifact_detail["attempt_history"] = attempt_history[-5:]
+        artifact_detail["policy"] = policy_snapshot
         return None, artifact_detail, model_content, {
             "attempts": attempts,
             "attempt_history": attempt_history[-5:],
+            "policy": policy_snapshot,
         }
 
     raise RuntimeError("Tool execution attempt loop ended without an outcome")
@@ -1488,6 +1492,35 @@ def _apply_legacy_timeout_compatibility(
     )
 
 
+def _policy_snapshot(policy: ToolExecutionPolicy) -> dict[str, Any]:
+    identity = policy.identity
+    return make_json_safe(
+        {
+            "tool_origin": identity.tool_origin,
+            "qualified_tool_id": identity.qualified_tool_id,
+            "exposed_tool_name": identity.exposed_tool_name,
+            "source_tool_name": identity.source_tool_name,
+            "server_name": identity.server_name,
+            "timeout_seconds": policy.timeout_seconds,
+            "hard_timeout_seconds": policy.hard_timeout_seconds,
+            "total_timeout_seconds": policy.total_timeout_seconds,
+            "max_attempts": policy.max_attempts,
+            "retry_safe": policy.retry_safe,
+            "idempotent": policy.idempotent,
+            "metadata_trusted": policy.metadata_trusted,
+            "outer_timeout_disabled": policy.outer_timeout_disabled,
+            "cancellation": policy.cancellation,
+            "client_execution_timeout_seconds": (
+                policy.client_execution_timeout_seconds
+            ),
+            "client_response_timeout_seconds": policy.client_response_timeout_seconds,
+            "policy_source": policy.policy_source,
+            "policy_config_keys": list(policy.policy_config_keys),
+            "timeout_hint": policy.timeout_hint,
+        }
+    )
+
+
 def _attempt_record(
     *,
     policy: ToolExecutionPolicy,
@@ -1498,13 +1531,17 @@ def _attempt_record(
     policy_retry_allowed: bool,
     auto_retry_allowed: bool,
 ) -> dict[str, Any]:
-    return {
+    record = {
         "attempt": attempt,
         "tool_name": tool_name,
         "tool_origin": policy.identity.tool_origin,
         "qualified_tool_id": policy.identity.qualified_tool_id,
         "policy_source": policy.policy_source,
         "policy_config_keys": list(policy.policy_config_keys),
+        "metadata_trusted": policy.metadata_trusted,
+        "timeout_seconds": policy.timeout_seconds,
+        "hard_timeout_seconds": policy.hard_timeout_seconds,
+        "total_timeout_seconds": policy.total_timeout_seconds,
         "elapsed_ms": outcome.elapsed_ms,
         "failure_retryable": summary.failure_retryable if summary else False,
         "policy_retry_allowed": policy_retry_allowed,
@@ -1518,6 +1555,11 @@ def _attempt_record(
         "cancellation_completed": outcome.cancellation_completed,
         "timeout_phase": outcome.timeout_phase,
     }
+    logger.info(
+        "tool_execution_attempt",
+        extra={"tool_execution": make_json_safe(record)},
+    )
+    return record
 
 
 async def _reconnect_server_tool(

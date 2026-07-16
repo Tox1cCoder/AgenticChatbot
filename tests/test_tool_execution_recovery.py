@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import time
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from anyio import ClosedResourceError
 
+from app.ai.client_runtime_errors import ClientRuntimeToolError
 from app.ai.tool_execution import (
     execute_tool_calls,
     invoke_tool_attempt,
@@ -16,6 +18,7 @@ from app.ai.tool_execution import (
 )
 from app.ai.tool_execution_policy import ToolExecutionPolicy, ToolIdentity
 from app.core.config import ToolExecutionPolicyOverride, settings
+from app.schemas.runtime_protocol import RuntimeErrorContext
 
 
 def _attempt_policy(
@@ -679,6 +682,110 @@ async def test_execute_tool_calls_retries_retry_safe_transient_failure(monkeypat
     assert calls == 2
     assert outputs[0]["content"] == "ok"
     assert artifacts[0]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_retry_success_preserves_attempt_history_policy_diagnostics_and_logs(
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.setattr(settings, "tool_execution_timeout", 30.0)
+    calls = 0
+
+    class _RetryThenSuccessTool:
+        name = "diagnostic_reader"
+        metadata = {
+            "application_execution_policy": {
+                "max_attempts": 2,
+                "retry_safe": True,
+            }
+        }
+
+        async def ainvoke(self, args):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ConnectionError("temporary network failure")
+            return "ok"
+
+    with caplog.at_level(logging.INFO, logger="app.ai.tool_execution"):
+        outputs, artifacts, _ = await execute_tool_calls(
+            tool_calls=[
+                {
+                    "id": "call-diagnostics-success",
+                    "name": "diagnostic_reader",
+                    "args": {"token": "raw-secret-argument"},
+                }
+            ],
+            tool_map={"diagnostic_reader": _RetryThenSuccessTool()},
+        )
+
+    artifact = artifacts[0]
+    assert outputs[0]["content"] == "ok"
+    assert artifact["policy"]["tool_origin"] == "internal"
+    assert artifact["policy"]["timeout_seconds"] == 30.0
+    assert len(artifact["attempt_history"]) == 2
+    assert artifact["attempt_history"][0]["error_type"] == "network"
+    assert artifact["attempt_history"][1]["error_type"] is None
+    assert artifact["attempt_history"][0]["metadata_trusted"] is True
+
+    attempt_logs = [
+        record.tool_execution
+        for record in caplog.records
+        if record.getMessage() == "tool_execution_attempt"
+    ]
+    assert len(attempt_logs) == 2
+    assert "raw-secret-argument" not in json.dumps(attempt_logs)
+
+
+@pytest.mark.asyncio
+async def test_terminal_failure_has_policy_diagnostics_and_sanitized_attempt_log(
+    caplog,
+):
+    class _StructuredFailureTool:
+        name = "structured_failure"
+        metadata = {}
+
+        async def ainvoke(self, args):
+            raise ClientRuntimeToolError(
+                RuntimeErrorContext(
+                    message="local secret path was denied",
+                    code="PERMISSION_DENIED",
+                    detail={"path": "C:/private/secret.txt"},
+                )
+            )
+
+    with caplog.at_level(logging.INFO, logger="app.ai.tool_execution"):
+        outputs, artifacts, _ = await execute_tool_calls(
+            tool_calls=[
+                {
+                    "id": "call-diagnostics-failure",
+                    "name": "structured_failure",
+                    "args": {"path": "C:/private/secret.txt"},
+                }
+            ],
+            tool_map={"structured_failure": _StructuredFailureTool()},
+        )
+
+    payload = json.loads(outputs[0]["content"])
+    artifact = artifacts[0]
+    assert "attempt_history" not in payload
+    assert "policy" not in payload
+    assert artifact["policy"]["tool_origin"] == "internal"
+    assert artifact["policy"]["timeout_seconds"] == 30.0
+    assert len(artifact["attempt_history"]) == 1
+    assert artifact["attempt_history"][0]["error_type"] == "permission"
+    assert artifact["runtime_error_context"]["detail"]["path"].endswith("secret.txt")
+
+    attempt_logs = [
+        record.tool_execution
+        for record in caplog.records
+        if record.getMessage() == "tool_execution_attempt"
+    ]
+    assert len(attempt_logs) == 1
+    serialized_logs = json.dumps(attempt_logs)
+    assert "secret.txt" not in serialized_logs
+    assert "raw-secret-argument" not in serialized_logs
 
 
 @pytest.mark.asyncio
