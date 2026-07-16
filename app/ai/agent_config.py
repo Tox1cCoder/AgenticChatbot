@@ -25,6 +25,7 @@ AGENT_CONFIG = {
     "chat": {
         "model": settings.chat_agent_model,
         "temperature": 1.0,
+        "thinking_level": settings.chat_agent_thinking_level,
     },
     "rag": {
         "model": settings.rag_agent_model,
@@ -105,6 +106,22 @@ def _build_thinking_config(model_name: str) -> types.ThinkingConfig | None:
         thinking_kwargs["thinking_level"] = settings.thinking_level
 
     return types.ThinkingConfig(**thinking_kwargs)
+
+
+def _resolve_thinking_level(agent_type: str, thinking_level_override: str | None) -> str:
+    """Resolve the Gemini 3 ``thinking_level`` for an agent call.
+
+    Precedence: an explicit per-request override (derived from
+    ``reasoning_effort``) wins; otherwise a per-agent ``thinking_level`` from
+    ``AGENT_CONFIG`` applies (chat_agent runs lower than the global default);
+    otherwise the global ``settings.thinking_level``.
+    """
+    if thinking_level_override:
+        return thinking_level_override
+    per_agent = AGENT_CONFIG.get(agent_type, {}).get("thinking_level")
+    if per_agent:
+        return per_agent
+    return settings.thinking_level
 
 
 def build_gemini_generate_config(
@@ -205,5 +222,7 @@ def create_langchain_model(
                 thinking_budget = 8192
             model_kwargs["thinking_budget"] = thinking_budget
         else:
-            model_kwargs["thinking_level"] = thinking_level_override or settings.thinking_level
+            model_kwargs["thinking_level"] = _resolve_thinking_level(
+                agent_type, thinking_level_override
+            )
     return ChatGoogleGenerativeAI(**model_kwargs)
