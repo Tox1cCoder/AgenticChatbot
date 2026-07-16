@@ -74,9 +74,7 @@ def test_two_machine_profile_roots_do_not_share_secret_bindings(tmp_path, monkey
         SkillSecretStore().set_for_skill("calendar", "TOKEN", "machine-b-token")
 
         client_settings.profile_root = str(machine_a)
-        assert SkillSecretStore().get_for_skill("calendar") == {
-            "TOKEN": "machine-a-token"
-        }
+        assert SkillSecretStore().get_for_skill("calendar") == {"TOKEN": "machine-a-token"}
     finally:
         client_settings.profile_root = original
 
@@ -129,9 +127,7 @@ def test_per_skill_secret_api_never_returns_values(monkeypatch):
 
     assert saved.status_code == 200
     assert listed.status_code == 200
-    assert listed.json()["data"] == {
-        "secrets": [{"name": "ACCESS_TOKEN", "configured": True}]
-    }
+    assert listed.json()["data"] == {"secrets": [{"name": "ACCESS_TOKEN", "configured": True}]}
     assert "never-echo" not in saved.text
     assert "never-echo" not in listed.text
     assert removed.status_code == 200

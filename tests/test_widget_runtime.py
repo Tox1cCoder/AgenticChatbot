@@ -869,7 +869,7 @@ class TestWidgetToolHtmlContract:
     @pytest.mark.parametrize(
         "bad_state,match",
         [
-            ("\"just-a-string\"", "JSON object"),
+            ('"just-a-string"', "JSON object"),
             ('{"html": "", "height": 540}', "html content"),
             ('{"html": "<div>hi</div>"}', "height"),
             ('{"html": "<div>hi</div>", "height": "tall"}', "numeric"),

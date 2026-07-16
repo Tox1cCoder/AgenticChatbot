@@ -432,16 +432,20 @@ class LocalSkillsRegistry:
     def _discover_executable_assets(bundle_root: Path) -> dict:
         bin_dir = bundle_root / "bin"
         scripts_dir = bundle_root / "scripts"
-        bin_files = sorted(
-            path.name
-            for path in bin_dir.iterdir()
-            if is_supported_bundle_command(path)
-        ) if bin_dir.is_dir() else []
-        script_files = sorted(
-            path.relative_to(bundle_root).as_posix()
-            for path in scripts_dir.rglob("*.py")
-            if path.is_file() and not path.is_symlink()
-        ) if scripts_dir.is_dir() else []
+        bin_files = (
+            sorted(path.name for path in bin_dir.iterdir() if is_supported_bundle_command(path))
+            if bin_dir.is_dir()
+            else []
+        )
+        script_files = (
+            sorted(
+                path.relative_to(bundle_root).as_posix()
+                for path in scripts_dir.rglob("*.py")
+                if path.is_file() and not path.is_symlink()
+            )
+            if scripts_dir.is_dir()
+            else []
+        )
         return {
             "bin": bin_files,
             "scripts": script_files,

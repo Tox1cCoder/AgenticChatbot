@@ -240,7 +240,8 @@ class ModelConfigService(IRuntimeModelResolver):
 
         if provider == "openai" and not default_model:
             default_config["warnings"].append(
-                "OpenAI is configured but no model catalog is available yet. Sync models before selecting it."
+                "OpenAI is configured but no model catalog is available yet. "
+                "Sync models before selecting it."
             )
 
         return default_config
@@ -279,7 +280,8 @@ class ModelConfigService(IRuntimeModelResolver):
             catalog_lookup = self._get_catalog_model_lookup(provider_snapshot)
             if model and catalog_lookup and model not in catalog_lookup and not allow_custom_model:
                 effective[agent_key]["warnings"].append(
-                    "Saved model is no longer present in the provider catalog. Showing a valid default instead."
+                    "Saved model is no longer present in the provider catalog. "
+                    "Showing a valid default instead."
                 )
                 continue
 
@@ -419,7 +421,8 @@ class ModelConfigService(IRuntimeModelResolver):
             allow_custom_model = False
         elif not allow_custom_model:
             raise ValueError(
-                f"Model '{model}' is not present in the current {provider} catalog for agent {agent_key}. "
+                f"Model '{model}' is not present in the current {provider} catalog for "
+                f"agent {agent_key}. "
                 "Enable the explicit custom model override to save it."
             )
 
@@ -578,7 +581,8 @@ class ModelConfigService(IRuntimeModelResolver):
 
         if user_id is None:
             logger.warning(
-                "Runtime config resolved without user context for agent=%s; using default Gemini configuration",
+                "Runtime config resolved without user context for agent=%s; "
+                "using default Gemini configuration",
                 normalized_agent_key,
             )
             return ResolvedRuntimeModelConfig(
@@ -637,7 +641,8 @@ class ModelConfigService(IRuntimeModelResolver):
 
             if not requested_snapshot.get("configured") or not requested_credentials.get("api_key"):
                 warnings.append(
-                    f"Requested provider '{requested_provider}' is unavailable. Falling back to {provider}."
+                    f"Requested provider '{requested_provider}' is unavailable. "
+                    f"Falling back to {provider}."
                 )
                 if requested_provider != provider:
                     provider_fallback = {
@@ -660,7 +665,8 @@ class ModelConfigService(IRuntimeModelResolver):
                     and not requested_allow_custom
                 ):
                     warnings.append(
-                        f"Requested model '{requested_model}' is not in the current {requested_provider} catalog. "
+                        f"Requested model '{requested_model}' is not in the current "
+                        f"{requested_provider} catalog. "
                         f"Falling back to {provider}:{model}."
                     )
                 else:
@@ -674,7 +680,8 @@ class ModelConfigService(IRuntimeModelResolver):
                     )
                     if is_custom_model:
                         warnings.append(
-                            "Runtime is using an explicit custom model override outside the synced catalog."
+                            "Runtime is using an explicit custom model override outside "
+                            "the synced catalog."
                         )
 
         # Use cached credentials if available, otherwise fetch and cache
@@ -699,7 +706,8 @@ class ModelConfigService(IRuntimeModelResolver):
 
         if (not isinstance(api_key, str) or not api_key.strip()) and fallback_config:
             warnings.append(
-                f"Selected provider '{provider}' is unavailable at runtime. Falling back to {fallback_config.provider}."
+                f"Selected provider '{provider}' is unavailable at runtime. "
+                f"Falling back to {fallback_config.provider}."
             )
             provider_fallback = {
                 "from": provider,
@@ -746,7 +754,8 @@ class ModelConfigService(IRuntimeModelResolver):
             )
 
         logger.info(
-            "Resolved runtime config for user=%s agent=%s provider=%s model=%s source=%s key_source=%s custom=%s warnings=%d",
+            "Resolved runtime config for user=%s agent=%s provider=%s model=%s "
+            "source=%s key_source=%s custom=%s warnings=%d",
             user_id,
             normalized_agent_key,
             provider,
@@ -806,7 +815,8 @@ class ModelConfigService(IRuntimeModelResolver):
             agent_key = _normalize_agent_key(raw_agent_key)
             if not agent_key:
                 raise ValueError(
-                    f"Invalid agent_key: {raw_agent_key}. Must be one of {list(SUPPORTED_AGENT_KEYS)}"
+                    f"Invalid agent_key: {raw_agent_key}. Must be one of "
+                    f"{list(SUPPORTED_AGENT_KEYS)}"
                 )
 
             if not isinstance(raw_patch, Mapping):

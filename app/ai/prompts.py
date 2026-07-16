@@ -402,11 +402,14 @@ def _select_history_for_prompt(
         if max_messages and len(selected) >= max_messages:
             break
 
-        message_tokens = _PROMPT_TOKEN_COUNTER.count_text(
-            provider="gemini",
-            model=settings.chat_agent_model,
-            text=message.content,
-        ).tokens + 4
+        message_tokens = (
+            _PROMPT_TOKEN_COUNTER.count_text(
+                provider="gemini",
+                model=settings.chat_agent_model,
+                text=message.content,
+            ).tokens
+            + 4
+        )
 
         if max_tokens and total_tokens + message_tokens > max_tokens:
             if not selected:

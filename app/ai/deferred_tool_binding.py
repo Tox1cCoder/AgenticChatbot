@@ -133,9 +133,7 @@ def get_pinned_tools(
     """
     required_specs = _get_required_pinned_specs(agent_key)
     user_specs = [
-        spec
-        for spec in (settings.mcp_tool_search_pinned_tools or [])
-        if spec not in required_specs
+        spec for spec in (settings.mcp_tool_search_pinned_tools or []) if spec not in required_specs
     ]
     max_pinned = settings.mcp_tool_search_max_pinned_tools
 

@@ -69,9 +69,7 @@ class CheckpointRetentionService:
                 self.hitl_interrupt_repository.mark_expired(record.id)
                 counts["hitl_interrupts_expired"] += 1
             except Exception:
-                logger.warning(
-                    "Failed to mark HITL interrupt %s expired", record.id, exc_info=True
-                )
+                logger.warning("Failed to mark HITL interrupt %s expired", record.id, exc_info=True)
                 continue
 
             thread_id = getattr(record, "thread_id", None)

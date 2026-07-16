@@ -139,7 +139,7 @@ class MessageCRUDStrategy(
         return Paginator.create(items, total, page, limit)
 
     def count_by_user_id(self, db: Session, user_id: UUID) -> int:
-        """Count messages by conversation owner using SQL ``COUNT`` and excluding soft-deleted rows."""
+        """Count an owner's non-deleted messages using SQL ``COUNT``."""
         statement = (
             select(func.count(Message.id))
             .join(Message.conversation)
@@ -173,12 +173,8 @@ class MessageCRUDStrategy(
         predicates differ across dialects and the candidate set is small.
         """
 
-        before_anchor = (
-            self._lookup_sequence(db, before_message_id) if before_message_id else None
-        )
-        after_anchor = (
-            self._lookup_sequence(db, after_message_id) if after_message_id else None
-        )
+        before_anchor = self._lookup_sequence(db, before_message_id) if before_message_id else None
+        after_anchor = self._lookup_sequence(db, after_message_id) if after_message_id else None
 
         clauses = [
             Message.conversation_id == conversation_id,
@@ -194,9 +190,7 @@ class MessageCRUDStrategy(
         if after_sequence is not None:
             clauses.append(Message.sequence > after_sequence)
 
-        statement = (
-            select(Message).where(*clauses).order_by(Message.sequence.desc())
-        )
+        statement = select(Message).where(*clauses).order_by(Message.sequence.desc())
         if limit is not None and limit > 0:
             statement = statement.limit(limit)
 
@@ -336,18 +330,14 @@ class MessageRepository:
                 input_schema.role,
             )
         message = self._compaction_repository.persist_message(message_data)
-        if (
-            message.sender == MessageRole.assistant.value
-            and self._compaction_publisher is not None
-        ):
+        if message.sender == MessageRole.assistant.value and self._compaction_publisher is not None:
             try:
                 self._compaction_publisher(message.conversation_id)
             except Exception:
                 # The message and coalesced database job are already committed.
                 # Reconciliation recovers a lost notification.
                 logger.warning(
-                    "Conversation compaction notification failed "
-                    "code=broker_publish_failed"
+                    "Conversation compaction notification failed code=broker_publish_failed"
                 )
         return message
 

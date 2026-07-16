@@ -442,9 +442,7 @@ def build_bot_metadata(
         content = message_content
     has_markers = bool(parse_inline_rich_references(content))
     has_v1_signal = (
-        bool(candidates)
-        or has_markers
-        or (capable_response and bool(widget_items or canvas_item))
+        bool(candidates) or has_markers or (capable_response and bool(widget_items or canvas_item))
     )
 
     if not has_v1_signal:

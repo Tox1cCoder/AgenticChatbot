@@ -56,9 +56,7 @@ def validate_html_widget_state(state: Any) -> None:
 
     html = str(state.get("html") or "").strip()
     if not html:
-        raise ValueError(
-            "html widget requires non-empty html content in state.html"
-        )
+        raise ValueError("html widget requires non-empty html content in state.html")
 
     if "height" not in state or state.get("height") is None:
         raise ValueError("html widget requires a numeric height in state.height")

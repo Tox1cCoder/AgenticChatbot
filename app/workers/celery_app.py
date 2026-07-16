@@ -52,9 +52,7 @@ celery_app.conf.task_routes = {
     "app.workers.document_processor.parse_document_task": {"queue": "parse"},
     "app.workers.document_processor.index_document_task": {"queue": "index"},
     "app.workers.conversation_compaction.compact_conversation_task": {"queue": "summary"},
-    "app.workers.conversation_compaction.compact_backfill_conversation_task": {
-        "queue": "summary"
-    },
+    "app.workers.conversation_compaction.compact_backfill_conversation_task": {"queue": "summary"},
     "app.workers.conversation_compaction.reconcile_conversation_summaries_task": {
         "queue": "summary"
     },

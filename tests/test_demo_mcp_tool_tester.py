@@ -89,9 +89,7 @@ def test_tester_execution_payload_and_results_are_qualified_by_server(monkeypatc
 
     demo._clear_mcp_tool_execution_result("alpha::inspect")
 
-    assert streamlit_stub.session_state["mcp_tool_execution_results"] == {
-        "beta::inspect": beta
-    }
+    assert streamlit_stub.session_state["mcp_tool_execution_results"] == {"beta::inspect": beta}
 
 
 def test_tester_renders_mcp_image_content_as_rich_image_not_base64_json(monkeypatch):

@@ -695,7 +695,10 @@ def get_error_recovery_hint(error: Exception, tool_name: str, tool_args: dict[st
 
     # Key errors
     if isinstance(error, KeyError):
-        return "Missing key in arguments: verify all required parameters are provided with correct names"
+        return (
+            "Missing key in arguments: verify all required parameters are provided with "
+            "correct names"
+        )
 
     # Connection/Network errors
     if "connection" in error_msg or "network" in error_msg or "timeout" in error_msg:
@@ -710,7 +713,10 @@ def get_error_recovery_hint(error: Exception, tool_name: str, tool_args: dict[st
         return "Resource not found: verify the resource exists or try alternative search terms"
 
     # Generic fallback
-    return f"Unexpected {error_type}: review the error message and adjust arguments or try a different approach"
+    return (
+        f"Unexpected {error_type}: review the error message and adjust arguments or "
+        "try a different approach"
+    )
 
 
 def extract_content_from_result(result: Any) -> Any:

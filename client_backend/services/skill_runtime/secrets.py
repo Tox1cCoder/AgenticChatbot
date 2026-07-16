@@ -79,9 +79,7 @@ class SkillSecretStore:
         if not skill_name.strip():
             raise ValueError("skill name must not be empty")
         if not _ENV_NAME.fullmatch(name):
-            raise ValueError(
-                "secret name must be a valid environment variable identifier"
-            )
+            raise ValueError("secret name must be a valid environment variable identifier")
 
     @staticmethod
     def _resolve_user_id() -> str | None:
@@ -127,9 +125,7 @@ class SkillSecretStore:
         for skill_name, raw_values in raw_skills.items():
             if not isinstance(raw_values, dict):
                 continue
-            result[str(skill_name)] = {
-                str(name): str(value) for name, value in raw_values.items()
-            }
+            result[str(skill_name)] = {str(name): str(value) for name, value in raw_values.items()}
         return result
 
     def _write_bindings(

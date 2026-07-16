@@ -153,8 +153,7 @@ class ToolExecutionPolicyOverride(BaseModel):
     def _validate_trust_requires_exact_qualified_match(self) -> "ToolExecutionPolicyOverride":
         if self.trust_mcp_metadata and self.match.qualified_tool_id is None:
             raise ValueError(
-                "trust_mcp_metadata is only valid on an exact origin + "
-                "qualified_tool_id match rule"
+                "trust_mcp_metadata is only valid on an exact origin + qualified_tool_id match rule"
             )
         return self
 
@@ -322,7 +321,9 @@ class Settings(BaseSettings):
     # Multi-Provider Configuration
     model_encryption_key: str = Field(
         default="",
-        description="Fernet encryption key for storing provider API keys (32 url-safe base64-encoded bytes)",
+        description=(
+            "Fernet encryption key for storing provider API keys (32 url-safe base64-encoded bytes)"
+        ),
     )
     openai_request_timeout_seconds: int = Field(
         default=60,
@@ -404,7 +405,11 @@ class Settings(BaseSettings):
     )
     rag_index_batch_size: int = Field(
         default=16,
-        description="[DEPRECATED] Formerly controlled index-level batching. Batching is now internal to the embedding service (rag_embedding_batch_size). This setting is ignored.",
+        description=(
+            "[DEPRECATED] Formerly controlled index-level batching. Batching is now "
+            "internal to the embedding service (rag_embedding_batch_size). This setting "
+            "is ignored."
+        ),
     )
     # Gemini Embeddings API accepts up to 100 contents per embed_content call
     # (documented limit for gemini-embedding-2). Default 32 is conservative.
@@ -423,7 +428,10 @@ class Settings(BaseSettings):
     # Media Resolution Configuration (for vision models)
     media_resolution: str = Field(
         default="high",
-        description="Media resolution for vision models: low, medium, high (Gemini 3 supports per-part resolution)",
+        description=(
+            "Media resolution for vision models: low, medium, high "
+            "(Gemini 3 supports per-part resolution)"
+        ),
     )
     enable_gemini_code_execution: bool = Field(
         default=True,
@@ -459,7 +467,10 @@ class Settings(BaseSettings):
     )
     image_caption_retry_delay_seconds: float = Field(
         default=5.0,
-        description="Base delay (seconds) to wait before retrying caption requests when no retry hint is provided",
+        description=(
+            "Base delay (seconds) to wait before retrying caption requests when no retry "
+            "hint is provided"
+        ),
     )
     image_caption_max_concurrency: int = Field(
         default=4,
@@ -485,16 +496,24 @@ class Settings(BaseSettings):
     )
     memory_load_batch_size: int = Field(
         default=100,
-        description="Number of messages to load per batch when hydrating memory from the database (max 100)",
+        description=(
+            "Number of messages to load per batch when hydrating memory from the database (max 100)"
+        ),
     )
     # Durable conversation memory (Memory Refactor 2026-04-29)
     memory_cache_ttl_seconds: int = Field(
         default=60,
-        description="TTL (seconds) for the in-process prompt-history cache used by ConversationHistoryProvider",
+        description=(
+            "TTL (seconds) for the in-process prompt-history cache used by "
+            "ConversationHistoryProvider"
+        ),
     )
     memory_cache_max_conversations: int = Field(
         default=256,
-        description="Maximum number of conversations cached by ConversationHistoryProvider before LRU eviction",
+        description=(
+            "Maximum number of conversations cached by ConversationHistoryProvider "
+            "before LRU eviction"
+        ),
     )
 
     # Production conversation compaction. These settings are intentionally
@@ -576,7 +595,9 @@ class Settings(BaseSettings):
     )
     chat_history_max_tokens: int = Field(
         default=9000,
-        description="Approximate maximum tokens of chat history to include in prompts (0 = no limit)",
+        description=(
+            "Approximate maximum tokens of chat history to include in prompts (0 = no limit)"
+        ),
     )
     rag_history_max_messages: int = Field(
         default=12,
@@ -584,12 +605,15 @@ class Settings(BaseSettings):
     )
     rag_history_max_tokens: int = Field(
         default=3000,
-        description="Approximate maximum tokens of RAG history to include in prompts (0 = no limit)",
+        description=(
+            "Approximate maximum tokens of RAG history to include in prompts (0 = no limit)"
+        ),
     )
 
     suppress_internal_stream_chunks: bool = Field(
         default=True,
-        description="When True, stream chunks tagged as 'internal' (e.g. summarization node output) "
+        description="When True, stream chunks tagged as 'internal' "
+        "(e.g. summarization node output) "
         "are silently dropped before being forwarded to clients. "
         "Disable only for debugging.",
     )
@@ -597,14 +621,16 @@ class Settings(BaseSettings):
     # Redis Configuration
     redis_url: str = Field(
         default="",
-        description="Redis connection URL used for widget runtime state, HITL timeout tracking, and other shared-state features. "
+        description="Redis connection URL used for widget runtime state, HITL timeout "
+        "tracking, and other shared-state features. "
         "Required for live widget flows when the widgets MCP server runs out-of-process. "
         "Falls back to celery_broker_url if blank.",
     )
     redis_password: str = Field(
         default="",
         description="Optional Redis password convenience variable for local Docker setups. "
-        "When set, it is automatically injected into redis:// and rediss:// URLs that omit credentials.",
+        "When set, it is automatically injected into redis:// and rediss:// URLs that "
+        "omit credentials.",
     )
     celery_broker_url: str = Field(
         default="redis://localhost:6379/0",
@@ -722,7 +748,10 @@ class Settings(BaseSettings):
     )
     mineru_extra_args: list[str] = Field(
         default_factory=list,
-        description="Extra CLI arguments forwarded verbatim to the mineru command (e.g. ['--device', 'cpu'])",
+        description=(
+            "Extra CLI arguments forwarded verbatim to the mineru command "
+            "(e.g. ['--device', 'cpu'])"
+        ),
     )
     document_images_storage_path: str = Field(
         default="app/storage/document_images",
@@ -791,17 +820,23 @@ class Settings(BaseSettings):
     )
     search_history_max_tokens: int = Field(
         default=5000,
-        description="Approximate maximum tokens of search history to include in prompts (0 = no limit)",
+        description=(
+            "Approximate maximum tokens of search history to include in prompts (0 = no limit)"
+        ),
     )
 
     # Planning Agent History Configuration
     planning_history_max_messages: int = Field(
         default=16,
-        description="Maximum prior messages to include when building planning prompts (0 = no limit)",
+        description=(
+            "Maximum prior messages to include when building planning prompts (0 = no limit)"
+        ),
     )
     planning_history_max_tokens: int = Field(
         default=5000,
-        description="Approximate maximum tokens of planning history to include in prompts (0 = no limit)",
+        description=(
+            "Approximate maximum tokens of planning history to include in prompts (0 = no limit)"
+        ),
     )
 
     # ReAct Agent Configuration
@@ -905,7 +940,10 @@ class Settings(BaseSettings):
     # Tool Result Token Management
     tool_result_max_chars: int = Field(
         default=16000,
-        description="Maximum characters to include in ToolMessage content sent to model (0 = no limit). Full output is preserved in artifacts for UI.",
+        description=(
+            "Maximum characters to include in ToolMessage content sent to model "
+            "(0 = no limit). Full output is preserved in artifacts for UI."
+        ),
     )
     tool_result_truncation_suffix: str = Field(
         default="\n\n[Output truncated - full result available in tool artifacts]",
@@ -914,7 +952,10 @@ class Settings(BaseSettings):
 
     tool_result_offload_enabled: bool = Field(
         default=True,
-        description="Persist full large tool outputs outside model-visible ToolMessages and return a preview plus blob_id.",
+        description=(
+            "Persist full large tool outputs outside model-visible ToolMessages and "
+            "return a preview plus blob_id."
+        ),
     )
     tool_result_offload_threshold_chars: int = Field(
         default=16000,
@@ -934,7 +975,10 @@ class Settings(BaseSettings):
 
     context_overflow_retry_enabled: bool = Field(
         default=True,
-        description="Retry one model call with compacted tool messages when a provider rejects the prompt for context length.",
+        description=(
+            "Retry one model call with compacted tool messages when a provider rejects "
+            "the prompt for context length."
+        ),
     )
     context_overflow_retry_tool_preview_chars: int = Field(
         default=4000,
@@ -1037,11 +1081,17 @@ class Settings(BaseSettings):
     )
     hitl_tools_require_approval: list[str] = Field(
         default=[],
-        description="List of tool names that require human approval. Empty list means NO tools require approval when HITL is enabled.",
+        description=(
+            "List of tool names that require human approval. Empty list means NO tools "
+            "require approval when HITL is enabled."
+        ),
     )
     hitl_approval_timeout_minutes: int = Field(
         default=30,
-        description="Timeout in minutes for pending approval requests. After timeout, the workflow can be auto-rejected or cleaned up.",
+        description=(
+            "Timeout in minutes for pending approval requests. After timeout, the "
+            "workflow can be auto-rejected or cleaned up."
+        ),
     )
 
     # Gemini Thinking Configuration
@@ -1051,7 +1101,9 @@ class Settings(BaseSettings):
     )
     include_thoughts_in_response: bool = Field(
         default=True,
-        description="Include thought summaries in streaming responses when thinking mode is enabled",
+        description=(
+            "Include thought summaries in streaming responses when thinking mode is enabled"
+        ),
     )
     thinking_level: str = Field(
         default="high",
@@ -1059,7 +1111,10 @@ class Settings(BaseSettings):
     )
     thinking_budget: int = Field(
         default=-1,
-        description="Thinking budget for Gemini 2.5 models (-1 for dynamic, 0 to disable, or specific token count like 1024).",
+        description=(
+            "Thinking budget for Gemini 2.5 models (-1 for dynamic, 0 to disable, or "
+            "specific token count like 1024)."
+        ),
     )
     chat_agent_thinking_level: str = Field(
         default="low",
@@ -1092,7 +1147,10 @@ class Settings(BaseSettings):
     )
     auto_continue_soft_limit_ratio: float = Field(
         default=0.8,
-        description="Fraction of the loop budget to consume per round before rolling to the next round (0.1-1.0)",
+        description=(
+            "Fraction of the loop budget to consume per round before rolling to the "
+            "next round (0.1-1.0)"
+        ),
     )
     auto_continue_emit_events: bool = Field(
         default=False,
@@ -1149,7 +1207,10 @@ class Settings(BaseSettings):
     # MCP Tool Search Configuration (Deferred Loading)
     mcp_tool_search_enabled: bool = Field(
         default=True,
-        description="Enable deferred MCP tool loading via tool_search. When enabled, only tool_search + pinned tools are bound by default.",
+        description=(
+            "Enable deferred MCP tool loading via tool_search. When enabled, only "
+            "tool_search + pinned tools are bound by default."
+        ),
     )
     mcp_tool_search_default_top_k: int = Field(
         default=3,
@@ -1176,11 +1237,16 @@ class Settings(BaseSettings):
     )
     mcp_tool_search_autoload_top_k: int = Field(
         default=1,
-        description="Maximum high-confidence recommended tools to automatically load after tool_search.",
+        description=(
+            "Maximum high-confidence recommended tools to automatically load after tool_search."
+        ),
     )
     mcp_tool_search_inventory_default_top_k: int = Field(
         default=20,
-        description="Default number of tools to return per server in per-server inventory mode (tool_search with server_name but no query).",
+        description=(
+            "Default number of tools to return per server in per-server inventory mode "
+            "(tool_search with server_name but no query)."
+        ),
     )
     mcp_tool_search_inventory_max_top_k: int = Field(
         default=50,
@@ -1188,7 +1254,10 @@ class Settings(BaseSettings):
     )
     mcp_tool_search_pinned_tools: list[str] = Field(
         default=[],
-        description="Tool names (or server::tool_name) that are always bound, not deferred. Recommended 3-5 high-frequency tools.",
+        description=(
+            "Tool names (or server::tool_name) that are always bound, not deferred. "
+            "Recommended 3-5 high-frequency tools."
+        ),
     )
     mcp_tool_search_max_pinned_tools: int = Field(
         default=5,
@@ -1205,16 +1274,24 @@ class Settings(BaseSettings):
     mcp_tool_search_min_relevance_score: float = Field(
         default=0.5,
         ge=0.0,
-        description="Minimum relevance score for a tool to appear in search results. Tools below this threshold are excluded entirely.",
+        description=(
+            "Minimum relevance score for a tool to appear in search results. Tools "
+            "below this threshold are excluded entirely."
+        ),
     )
     mcp_tool_search_autoload_min_relevance_score: float = Field(
         default=2.0,
         ge=0.0,
-        description="Minimum relevance score for a tool to be autoloaded. Stricter than min_relevance_score to prevent arbitrary autoloading.",
+        description=(
+            "Minimum relevance score for a tool to be autoloaded. Stricter than "
+            "min_relevance_score to prevent arbitrary autoloading."
+        ),
     )
     mcp_tool_search_log_queries: bool = Field(
         default=False,
-        description="Log tool_search queries (disable in production to avoid logging sensitive queries).",
+        description=(
+            "Log tool_search queries (disable in production to avoid logging sensitive queries)."
+        ),
     )
 
     # Client Runtime Bridge Configuration
@@ -1225,7 +1302,9 @@ class Settings(BaseSettings):
     )
     client_runtime_ws_timeout_seconds: int = Field(
         default=60,
-        description="Timeout in seconds for client runtime WebSocket operations (tool dispatch, heartbeat).",
+        description=(
+            "Timeout in seconds for client runtime WebSocket operations (tool dispatch, heartbeat)."
+        ),
     )
     client_runtime_catalog_cache_ttl_seconds: int = Field(
         default=300,
@@ -1234,7 +1313,8 @@ class Settings(BaseSettings):
     )
     client_runtime_require_connected_device_for_local_tools: bool = Field(
         default=True,
-        description="When True, tool calls targeting client-local tools fail if no device is connected. "
+        description="When True, tool calls targeting client-local tools fail if no "
+        "device is connected. "
         "When False, such calls return a recoverable error allowing the model to adapt.",
     )
     client_runtime_heartbeat_interval_seconds: int = Field(
@@ -1244,7 +1324,8 @@ class Settings(BaseSettings):
     )
     client_runtime_max_tool_result_size_bytes: int = Field(
         default=1048576,
-        description="Maximum size in bytes for tool results returned from client devices (1MB default). "
+        description="Maximum size in bytes for tool results returned from client "
+        "devices (1MB default). "
         "Results exceeding this are truncated with a warning.",
     )
 
@@ -1259,11 +1340,15 @@ class Settings(BaseSettings):
     )
     rich_item_inventory_max_items: int = Field(
         default=12,
-        description="Maximum rich-item candidates exposed to the model in the bounded inventory block.",
+        description=(
+            "Maximum rich-item candidates exposed to the model in the bounded inventory block."
+        ),
     )
     rich_item_inventory_max_chars: int = Field(
         default=2400,
-        description="Maximum characters of the bounded rich-item inventory block injected into prompts.",
+        description=(
+            "Maximum characters of the bounded rich-item inventory block injected into prompts."
+        ),
     )
     rich_item_summary_max_chars: int = Field(
         default=180,
@@ -1464,8 +1549,7 @@ class Settings(BaseSettings):
             selector = override.match.model_dump_json(exclude_none=True)
             if selector in selectors:
                 raise ValueError(
-                    "duplicate tool execution policy selectors: "
-                    f"{selectors[selector]!r}, {key!r}"
+                    f"duplicate tool execution policy selectors: {selectors[selector]!r}, {key!r}"
                 )
             selectors[selector] = key
             if override.disable_outer_timeout:

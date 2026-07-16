@@ -145,8 +145,7 @@ def resolve_tool_identity(tool: Any, *, exposed_tool_name: str) -> ToolIdentity:
     tool_origin = str(metadata.get("tool_origin") or "").strip() or _DEFAULT_TOOL_ORIGIN
     if tool_origin not in _KNOWN_TOOL_ORIGINS:
         raise ToolExecutionPolicyValidationError(
-            f"Unknown tool_origin {tool_origin!r}; expected one of "
-            f"{sorted(_KNOWN_TOOL_ORIGINS)}"
+            f"Unknown tool_origin {tool_origin!r}; expected one of {sorted(_KNOWN_TOOL_ORIGINS)}"
         )
 
     exposed_name = str(exposed_tool_name or "").strip()
@@ -520,9 +519,7 @@ def resolve_tool_execution_policy(
         response_grace = float(settings.tool_execution_client_response_grace_seconds)
         client_execution_timeout_seconds = soft - execution_grace
         client_response_timeout_seconds = soft - response_grace
-        if not (
-            0 < client_execution_timeout_seconds < client_response_timeout_seconds < soft
-        ):
+        if not (0 < client_execution_timeout_seconds < client_response_timeout_seconds < soft):
             raise ToolExecutionPolicyValidationError(
                 f"resolved soft timeout {soft} for identity {identity_key!r} is too short "
                 "to preserve strict client deadline ordering (client execution < bridge "

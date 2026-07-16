@@ -47,7 +47,7 @@ def fill_form(natural_language_input: str) -> str:
         current_time = datetime.now().strftime("%H:%M:%S")
 
         # Create prompt for Gemini to extract structured data
-        prompt = f"""You are an incident report form filler. Extract structured information from the natural language input provided by the user.
+        prompt = f"""Fill incident reports by extracting structured details from the user's input.
 
 Current date: {current_date}
 Current time: {current_time}
@@ -63,7 +63,7 @@ Extract the following information and return ONLY a valid JSON object (no markdo
   "incident_time": "HH:MM format or null (extract from input like '10h' -> '10:00')",
   "location": "string describing the location or null",
   "severity": "low, medium, high, or critical based on the incident description",
-  "category": "string describing incident type (e.g., 'Water Leak', 'Fire', 'Safety', 'Equipment Failure', etc.)",
+  "category": "incident type (e.g., 'Water Leak', 'Fire', 'Safety', or 'Equipment Failure')",
   "title": "brief title summarizing the incident",
   "description": "detailed description of the incident",
   "witnesses": "string or null if not mentioned",

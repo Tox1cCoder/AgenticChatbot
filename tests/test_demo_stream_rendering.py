@@ -20,7 +20,10 @@ def test_normalize_stream_markdown_text_unescapes_quotes_only():
     HTML render and is the wrong tradeoff."""
     from app.ui.stream_markdown import normalize_stream_markdown_text
 
-    raw = "model: &quot;gemini-3.1-pro&quot;, provider: &#34;gemini&#34;: &lt;b&gt;safe text&lt;/b&gt;"
+    raw = (
+        "model: &quot;gemini-3.1-pro&quot;, provider: &#34;gemini&#34;: "
+        "&lt;b&gt;safe text&lt;/b&gt;"
+    )
 
     assert normalize_stream_markdown_text(raw) == (
         'model: "gemini-3.1-pro", provider: "gemini": &lt;b&gt;safe text&lt;/b&gt;'

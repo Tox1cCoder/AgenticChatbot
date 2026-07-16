@@ -668,9 +668,7 @@ def test_dedupe_tool_refs_collapses_group_and_individual_duplicates():
 
     result = CustomAgentService._dedupe_tool_refs(refs)
 
-    assert [
-        (r["type"], r.get("qualified_tool_id"), r.get("tool_instance_id")) for r in result
-    ] == [
+    assert [(r["type"], r.get("qualified_tool_id"), r.get("tool_instance_id")) for r in result] == [
         ("server_mcp", "calc::add", None),
         ("server_mcp", "calc::sub", None),
         ("client", "csv::p", "i1"),

@@ -62,9 +62,7 @@ class SkillAuditWriter:
         try:
             resolved_user_id = user_id or get_upstream_auth_service().get_current_user_id()
             if not resolved_user_id:
-                logger.debug(
-                    "skipping audit record for %s: no active user profile", qualified_id
-                )
+                logger.debug("skipping audit record for %s: no active user profile", qualified_id)
                 return
 
             record = {

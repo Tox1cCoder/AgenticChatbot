@@ -104,13 +104,9 @@ class SkillRuntimeManager:
             )
 
         if setup_status == "stale":
-            repair_hints = [
-                {"type": "rebuild_skill_runtime", "skill": skill.name}
-            ]
+            repair_hints = [{"type": "rebuild_skill_runtime", "skill": skill.name}]
         elif setup_status == "failed":
-            repair_hints = [
-                {"type": "inspect_setup_failure", "skill": skill.name}
-            ]
+            repair_hints = [{"type": "inspect_setup_failure", "skill": skill.name}]
         else:
             repair_hints = [{"type": "setup_skill", "skill": skill.name}]
 

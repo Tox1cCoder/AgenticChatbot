@@ -6,7 +6,7 @@ from google import genai
 
 from .agent_config import AGENT_CONFIG, create_gemini_client
 
-SUGGESTION_PROMPT = """Based on this conversation exchange, generate follow-up questions the user might want to ask next.
+SUGGESTION_PROMPT = """Generate useful follow-up questions for this conversation exchange.
 
 User asked: {user_query}
 

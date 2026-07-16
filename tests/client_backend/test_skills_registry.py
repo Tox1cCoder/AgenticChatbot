@@ -283,9 +283,7 @@ async def test_skill_enabled_state_is_isolated_per_user_profile(tmp_path, monkey
         await registry.initialize()
         assert registry.get_skill("demo-skill").enabled is False
         state = json.loads(
-            (get_profile_subdir("user-a", "skills") / "state.json").read_text(
-                encoding="utf-8"
-            )
+            (get_profile_subdir("user-a", "skills") / "state.json").read_text(encoding="utf-8")
         )
         assert state == {"enabled": {"demo-skill": False}}
     finally:

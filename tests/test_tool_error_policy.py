@@ -197,9 +197,7 @@ def test_structured_runtime_error_detail_is_artifact_only():
     )
 
     assert "secret.txt" not in model_content
-    assert artifact_detail["runtime_error_context"]["detail"]["path"].endswith(
-        "secret.txt"
-    )
+    assert artifact_detail["runtime_error_context"]["detail"]["path"].endswith("secret.txt")
 
 
 def test_missing_sidecar_error_context_falls_back_to_typed_unknown_error():
@@ -212,5 +210,3 @@ def test_missing_sidecar_error_context_falls_back_to_typed_unknown_error():
     assert error.context.message == "sidecar returned no structured context"
     assert error.context.code == "UNKNOWN_RUNTIME_ERROR"
     assert error.context.detail is None
-
-

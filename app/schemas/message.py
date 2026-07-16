@@ -31,8 +31,7 @@ class MessageCreate(BaseModel):
     attachments: list[dict[str, str]] | None = Field(
         default=None,
         description=(
-            "Optional image attachments with structure "
-            "{name: str, mime: str, data: str (base64)}"
+            "Optional image attachments with structure {name: str, mime: str, data: str (base64)}"
         ),
     )
     model_config_field: dict[str, Any] | None = Field(

@@ -640,8 +640,9 @@ class ConversationCompactionRepository:
         now = self._utcnow()
         with self.session_factory() as session:
             count_rows = session.execute(
-                select(ConversationSummaryJob.status, func.count())
-                .group_by(ConversationSummaryJob.status)
+                select(ConversationSummaryJob.status, func.count()).group_by(
+                    ConversationSummaryJob.status
+                )
             ).all()
             job_counts = {str(status): int(count) for status, count in count_rows}
             oldest_updated = session.execute(
@@ -656,9 +657,10 @@ class ConversationCompactionRepository:
             ).scalar_one()
             expired_lease_count = int(
                 session.execute(
-                    select(func.count()).select_from(ConversationSummaryJob).where(
-                        ConversationSummaryJob.status
-                        == SummaryJobStatus.PROCESSING.value,
+                    select(func.count())
+                    .select_from(ConversationSummaryJob)
+                    .where(
+                        ConversationSummaryJob.status == SummaryJobStatus.PROCESSING.value,
                         ConversationSummaryJob.lease_expires_at <= now,
                     )
                 ).scalar_one()

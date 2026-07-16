@@ -45,9 +45,7 @@ def test_demo_has_names_only_local_skill_credential_seams_and_runtime_guidance()
 
     def helper_call(name: str) -> str:
         helper = next(
-            node
-            for node in tree.body
-            if isinstance(node, ast.FunctionDef) and node.name == name
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name
         )
         call = next(
             node

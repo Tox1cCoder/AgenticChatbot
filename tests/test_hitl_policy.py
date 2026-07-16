@@ -98,22 +98,28 @@ def test_precedence_tool_qualified_overrides_server():
         tools={"desktop_commander::list_files": False},
     )
     gated = SimpleNamespace(
-        name="client__desktop_commander__run", server_name="desktop_commander",
-        qualified_tool_id="desktop_commander::run", origin="client_mcp",
+        name="client__desktop_commander__run",
+        server_name="desktop_commander",
+        qualified_tool_id="desktop_commander::run",
+        origin="client_mcp",
     )
     exempt = SimpleNamespace(
-        name="client__desktop_commander__list_files", server_name="desktop_commander",
-        qualified_tool_id="desktop_commander::list_files", origin="client_mcp",
+        name="client__desktop_commander__list_files",
+        server_name="desktop_commander",
+        qualified_tool_id="desktop_commander::list_files",
+        origin="client_mcp",
     )
-    assert identity_requires_approval(gated, policy) is True   # inherits server ON
+    assert identity_requires_approval(gated, policy) is True  # inherits server ON
     assert identity_requires_approval(exempt, policy) is False  # tool override SKIP
 
 
 def test_precedence_tool_can_force_on_when_server_off():
     policy = _policy(servers={"excel": False}, tools={"excel::delete_sheet": True})
     ident = SimpleNamespace(
-        name="client__excel__delete_sheet", server_name="excel",
-        qualified_tool_id="excel::delete_sheet", origin="client_mcp",
+        name="client__excel__delete_sheet",
+        server_name="excel",
+        qualified_tool_id="excel::delete_sheet",
+        origin="client_mcp",
     )
     assert identity_requires_approval(ident, policy) is True
 
@@ -121,8 +127,10 @@ def test_precedence_tool_can_force_on_when_server_off():
 def test_precedence_master_off_disables_everything():
     policy = _policy(master=False, servers={"excel": True})
     ident = SimpleNamespace(
-        name="client__excel__x", server_name="excel",
-        qualified_tool_id="excel::x", origin="client_mcp",
+        name="client__excel__x",
+        server_name="excel",
+        qualified_tool_id="excel::x",
+        origin="client_mcp",
     )
     assert identity_requires_approval(ident, policy) is False
 
@@ -130,7 +138,10 @@ def test_precedence_master_off_disables_everything():
 def test_precedence_legacy_global_floor_still_gates():
     policy = _policy(global_tools=["dangerous_tool"])
     ident = SimpleNamespace(
-        name="dangerous_tool", server_name=None, qualified_tool_id=None, origin="internal",
+        name="dangerous_tool",
+        server_name=None,
+        qualified_tool_id=None,
+        origin="internal",
     )
     assert identity_requires_approval(ident, policy) is True
 

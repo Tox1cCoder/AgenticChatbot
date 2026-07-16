@@ -17,7 +17,8 @@ def get_current_time(
 
     Args:
         timezone: IANA timezone identifier string. Must be a valid IANA timezone name.
-            Common timezones: 'UTC', 'America/New_York', 'Europe/London', 'Asia/Tokyo', 'Asia/Ho_Chi_Minh'
+            Common timezones include 'UTC', 'America/New_York', 'Europe/London',
+            'Asia/Tokyo', and 'Asia/Ho_Chi_Minh'.
 
         format: Optional strftime-compatible format string for the human_readable field.
             Format examples:

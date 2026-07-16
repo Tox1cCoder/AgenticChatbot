@@ -881,9 +881,7 @@ async def test_browser_action_prefers_client_process_over_remote_direct_opener(m
         ),
     )
 
-    result = await _execute_tool_search(
-        query="open url in browser play youtube video"
-    )
+    result = await _execute_tool_search(query="open url in browser play youtube video")
 
     expected_name = "client__desktop_commander__start_process"
     assert result["recommended_tool"] == {
@@ -938,10 +936,7 @@ def test_compact_tool_search_output_stays_within_representative_budget(caplog):
         _serialize_tool_search_output,
     )
 
-    arg_names = [
-        f"parameter_{index}_with_a_deliberately_long_schema_name"
-        for index in range(20)
-    ]
+    arg_names = [f"parameter_{index}_with_a_deliberately_long_schema_name" for index in range(20)]
     tools = [
         ToolDescriptor(
             tool_name=f"open_url_variant_{index}",

@@ -53,6 +53,7 @@ def test_inline_image_html_supports_data_uri_and_omits_empty_caption():
     assert "data:image/png;base64,QUJD" in out
     assert "figcaption" not in out
 
+
 metadata_with_selected_image = {
     "rich_items_version": 1,
     "rich_items": [

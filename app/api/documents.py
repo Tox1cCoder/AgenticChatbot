@@ -297,7 +297,10 @@ async def upload_document(
         accepted = upload_result.files[0]
         return ApiResponse(
             success=True,
-            message=f"Document '{accepted.filename}' uploaded successfully and is being processed in the background.",
+            message=(
+                f"Document '{accepted.filename}' uploaded successfully and is being "
+                "processed in the background."
+            ),
             data={
                 "document": accepted.document.model_dump() if accepted.document else None,
                 "processing": accepted.processing,

@@ -31,9 +31,7 @@ def _make_projector(
     suppress_internal_stream_chunks: bool = False,
 ) -> GraphPublicStreamProjector:
     return GraphPublicStreamProjector(
-        tool_end_events_from_node_state=(
-            tool_end_events_from_node_state or _no_tool_end_events
-        ),
+        tool_end_events_from_node_state=(tool_end_events_from_node_state or _no_tool_end_events),
         suppress_internal_stream_chunks=suppress_internal_stream_chunks,
     )
 

@@ -49,9 +49,7 @@ def make_tool_instance_id(
     session starts, so the same tool name from a reconnected sidecar gets
     a new tool_instance_id even if the catalog entry is identical.
     """
-    composite = (
-        f"{device_id}:{session_id}:{qualified_tool_id}:{catalog_version}:{source_hash}"
-    )
+    composite = f"{device_id}:{session_id}:{qualified_tool_id}:{catalog_version}:{source_hash}"
     return hashlib.sha256(composite.encode()).hexdigest()[:16]
 
 

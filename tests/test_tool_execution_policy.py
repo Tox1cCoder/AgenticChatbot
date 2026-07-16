@@ -388,8 +388,7 @@ def test_settings_accepts_configured_tool_execution_policies():
                 "idempotent": False,
                 "trust_mcp_metadata": False,
                 "timeout_hint": (
-                    "The process did not finish in the interactive budget. "
-                    "Ask before repeating it."
+                    "The process did not finish in the interactive budget. Ask before repeating it."
                 ),
             },
         }
@@ -875,9 +874,7 @@ def test_grace_zero_allows_soft_equal_hard_degenerate_case(monkeypatch):
     assert policy.hard_timeout_seconds == 10.0
     assert policy.timeout_seconds == policy.hard_timeout_seconds
     assert policy.hard_timeout_seconds <= policy.total_timeout_seconds
-    assert (
-        policy.total_timeout_seconds <= settings.tool_execution_max_interactive_timeout_seconds
-    )
+    assert policy.total_timeout_seconds <= settings.tool_execution_max_interactive_timeout_seconds
 
 
 def test_grace_positive_still_enforces_strict_soft_less_than_hard(monkeypatch):

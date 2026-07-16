@@ -45,9 +45,7 @@ class ToolLoopMixin:
         tool_artifacts: list[dict[str, Any]],
     ) -> None:
         """Move transient artifact candidates into turn context and sanitize artifacts."""
-        existing_candidates: list[dict[str, Any]] = list(
-            context.get("rich_item_candidates", [])
-        )
+        existing_candidates: list[dict[str, Any]] = list(context.get("rich_item_candidates", []))
         seen_ids = {c.get("id") for c in existing_candidates if isinstance(c, dict)}
         for artifact in tool_artifacts:
             if not isinstance(artifact, dict):
@@ -192,11 +190,15 @@ class ToolLoopMixin:
         if not isinstance(context, dict):
             context = {}
         trail = context.get("agents_invoked")
-        visited_agents = {
-            entry.get("id")
-            for entry in trail
-            if isinstance(entry, dict) and isinstance(entry.get("id"), str)
-        } if isinstance(trail, list) else set()
+        visited_agents = (
+            {
+                entry.get("id")
+                for entry in trail
+                if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+            }
+            if isinstance(trail, list)
+            else set()
+        )
         if target_agent in visited_agents:
             reject(handoff_output, f"'{target_agent}' has already handled this turn.")
             return state
@@ -373,9 +375,7 @@ class ToolLoopMixin:
         state["context"] = context
 
         if not human_decisions:
-            approved_tool_calls, rejected_feedback = _apply_decisions(
-                last_message.tool_calls, []
-            )
+            approved_tool_calls, rejected_feedback = _apply_decisions(last_message.tool_calls, [])
         else:
             approved_tool_calls, rejected_feedback = _apply_decisions(
                 last_message.tool_calls, human_decisions
@@ -387,16 +387,13 @@ class ToolLoopMixin:
         # original, pre-approval args.  Rejected calls remain on the message so
         # their ToolMessages still form a valid assistant/tool sequence.
         approved_by_id = {
-            normalize_tool_call(tool_call).get("id"): tool_call
-            for tool_call in approved_tool_calls
+            normalize_tool_call(tool_call).get("id"): tool_call for tool_call in approved_tool_calls
         }
         rewritten_tool_calls = [
             approved_by_id.get(normalize_tool_call(tool_call).get("id"), tool_call)
             for tool_call in last_message.tool_calls
         ]
-        last_message = last_message.model_copy(
-            update={"tool_calls": rewritten_tool_calls}
-        )
+        last_message = last_message.model_copy(update={"tool_calls": rewritten_tool_calls})
 
         rejection_messages = [
             ToolMessage(

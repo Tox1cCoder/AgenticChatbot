@@ -80,6 +80,7 @@ _ENV_PASSTHROUGH_NAMES = frozenset(
     }
 )
 
+
 class _OutputLimitExceeded(Exception):
     """Internal signal used to terminate a child while reading its output."""
 
@@ -310,9 +311,7 @@ class SkillExecutionEngine:
                 start,
                 call_context,
             )
-            return self._success_envelope(
-                skill_name, result, stdout, stderr, start, audit_id
-            )
+            return self._success_envelope(skill_name, result, stdout, stderr, start, audit_id)
         except SkillRuntimeError as exc:
             self._write_audit(
                 audit_id,
@@ -395,17 +394,14 @@ class SkillExecutionEngine:
         runtime_inspection = self._environment.inspect(skill)
         runtime_dir = self._environment.command_directory(skill)
         search_dirs = [skill.bundle_root / "bin"]
-        runtime_commands = {
-            str(command) for command in runtime_inspection.get("commands", [])
-        }
+        runtime_commands = {str(command) for command in runtime_inspection.get("commands", [])}
         if runtime_dir is not None and requested in runtime_commands:
             search_dirs.append(runtime_dir)
         for directory in search_dirs:
             for candidate_name in self._candidate_names(requested):
                 candidate = (directory / candidate_name).resolve()
-                if (
-                    not is_under_root(candidate, directory)
-                    or not is_supported_bundle_command(candidate)
+                if not is_under_root(candidate, directory) or not is_supported_bundle_command(
+                    candidate
                 ):
                     continue
                 runtime_root = self._runtime_root(skill)
@@ -475,9 +471,7 @@ class SkillExecutionEngine:
         if getter is None:
             return {}
         return {
-            str(name): str(value)
-            for name, value in getter(skill_name).items()
-            if value is not None
+            str(name): str(value) for name, value in getter(skill_name).items() if value is not None
         }
 
     @staticmethod
@@ -590,9 +584,7 @@ class SkillExecutionEngine:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             creationflags=(
-                subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
-                if windows
-                else 0
+                subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP if windows else 0
             ),
             start_new_session=not windows,
         )
@@ -604,11 +596,14 @@ class SkillExecutionEngine:
             windows_job = _WindowsKillJob.attach(process.pid)
             if windows_job is None or process.stdin is None:
                 raise OSError("Windows process containment is unavailable")
-            request = json.dumps(
-                cmd,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8") + b"\n"
+            request = (
+                json.dumps(
+                    cmd,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                + b"\n"
+            )
             process.stdin.write(request)
             await process.stdin.drain()
             process.stdin.close()

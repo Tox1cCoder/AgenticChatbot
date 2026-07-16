@@ -113,20 +113,13 @@ def _resolve_manager_tool(
                 tool
                 for tool in matches
                 if tool.get("qualifiedId") == normalized_qualified_id
-                and (
-                    not normalized_server_name
-                    or tool.get("serverName") == normalized_server_name
-                )
+                and (not normalized_server_name or tool.get("serverName") == normalized_server_name)
             ),
             None,
         )
     if normalized_server_name:
         return next(
-            (
-                tool
-                for tool in matches
-                if tool.get("serverName") == normalized_server_name
-            ),
+            (tool for tool in matches if tool.get("serverName") == normalized_server_name),
             None,
         )
     return matches[0] if matches else None

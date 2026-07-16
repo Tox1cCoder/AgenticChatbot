@@ -86,8 +86,11 @@ def upgrade() -> None:
     # Data migration from old tables to new tables
     op.execute(
         """
-        INSERT INTO users (id, username, email, password_hash, avatar_url, created_at, updated_at, deleted_at)
-        SELECT id, username, email, password_hash, avatar_url, created_at, updated_at, NULL as deleted_at
+        INSERT INTO users (
+            id, username, email, password_hash, avatar_url, created_at, updated_at, deleted_at
+        )
+        SELECT id, username, email, password_hash, avatar_url, created_at, updated_at,
+               NULL as deleted_at
         FROM "user"
     """
     )
@@ -103,7 +106,9 @@ def upgrade() -> None:
     # Convert enum sender to integer (assuming 'user'=1, 'assistant'=2)
     op.execute(
         """
-        INSERT INTO messages (id, conversation_id, sender, content, created_at, updated_at, deleted_at)
+        INSERT INTO messages (
+            id, conversation_id, sender, content, created_at, updated_at, deleted_at
+        )
         SELECT id, conversation_id,
                CASE
                    WHEN sender = 'user' THEN 1
@@ -199,10 +204,14 @@ def downgrade() -> None:
 
     # Move data back
     op.execute(
-        'INSERT INTO "user" SELECT id, username, email, password_hash, avatar_url, created_at, updated_at FROM users'
+        'INSERT INTO "user" '
+        "SELECT id, username, email, password_hash, avatar_url, created_at, updated_at "
+        "FROM users"
     )
     op.execute(
-        "INSERT INTO conversation SELECT id, owner_id as user_id, title, created_at, updated_at FROM conversations"
+        "INSERT INTO conversation "
+        "SELECT id, owner_id as user_id, title, created_at, updated_at "
+        "FROM conversations"
     )
     op.execute(
         """

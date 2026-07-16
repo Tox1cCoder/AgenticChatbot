@@ -144,7 +144,8 @@ def _wait_for_runtime_status(
         time.sleep(0.25)
 
     raise AssertionError(
-        f"Runtime status did not reach '{expected_status}' within {timeout_seconds}s: {last_payload}"
+        f"Runtime status did not reach '{expected_status}' within {timeout_seconds}s: "
+        f"{last_payload}"
     )
 
 

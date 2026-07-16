@@ -24,19 +24,21 @@ def upgrade() -> None:
         "tool_approval_settings",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), nullable=False,
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
             server_default=sa.text("now()"),
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), nullable=False,
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
             server_default=sa.text("now()"),
         ),
         sa.Column("user_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("scope_type", sa.String(length=16), nullable=False),
         sa.Column("scope_value", sa.String(length=512), nullable=False),
-        sa.Column(
-            "require_approval", sa.Boolean(), nullable=False, server_default=sa.text("true")
-        ),
+        sa.Column("require_approval", sa.Boolean(), nullable=False, server_default=sa.text("true")),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"]),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint(
@@ -52,11 +54,15 @@ def upgrade() -> None:
     )
     op.create_index(
         op.f("ix_tool_approval_settings_user_id"),
-        "tool_approval_settings", ["user_id"], unique=False,
+        "tool_approval_settings",
+        ["user_id"],
+        unique=False,
     )
     op.create_index(
         op.f("ix_tool_approval_settings_scope_value"),
-        "tool_approval_settings", ["scope_value"], unique=False,
+        "tool_approval_settings",
+        ["scope_value"],
+        unique=False,
     )
 
 

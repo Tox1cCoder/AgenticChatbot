@@ -148,9 +148,7 @@ def cleanup_abandoned_interrupts():
             finally:
                 loop.close()
         except Exception as retention_exc:
-            logger.warning(
-                "Checkpoint retention cleanup failed: %s", retention_exc, exc_info=True
-            )
+            logger.warning("Checkpoint retention cleanup failed: %s", retention_exc, exc_info=True)
 
         db_expired_count = retention_counts["hitl_interrupts_expired"]
         checkpoint_cleaned_count = (

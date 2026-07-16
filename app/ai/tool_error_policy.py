@@ -71,9 +71,7 @@ def classify_tool_error(
             ToolErrorKind.VALIDATION.value: "Client runtime rejected the provided values.",
             ToolErrorKind.PERMISSION.value: "Client runtime denied the requested operation.",
             ToolErrorKind.SESSION.value: "Client runtime session was interrupted.",
-            ToolErrorKind.NETWORK.value: (
-                "Client runtime could not reach the requested service."
-            ),
+            ToolErrorKind.NETWORK.value: ("Client runtime could not reach the requested service."),
             ToolErrorKind.TIMEOUT.value: "Client runtime operation timed out.",
             ToolErrorKind.UNKNOWN.value: "Client runtime tool failed with an unknown error.",
         }
@@ -179,8 +177,7 @@ def classify_tool_error(
         )
 
     if any(
-        token in raw
-        for token in ("connection", "network", "temporarily", "reset", "unavailable")
+        token in raw for token in ("connection", "network", "temporarily", "reset", "unavailable")
     ):
         return ToolErrorSummary(
             error_type=ToolErrorKind.NETWORK.value,

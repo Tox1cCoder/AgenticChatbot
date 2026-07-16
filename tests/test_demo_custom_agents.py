@@ -53,8 +53,8 @@ def _import_demo_with_ui_stubs(monkeypatch: pytest.MonkeyPatch):
     components_module = types.ModuleType("streamlit.components")
     components_v1_module = types.ModuleType("streamlit.components.v1")
     components_v1_module.html = lambda *args, **kwargs: None
-    components_v1_module.declare_component = (
-        lambda *args, **kwargs: (lambda **_component_kwargs: _component_kwargs.get("default"))
+    components_v1_module.declare_component = lambda *args, **kwargs: (
+        lambda **_component_kwargs: _component_kwargs.get("default")
     )
     components_module.v1 = components_v1_module
     streamlit_stub.components = components_module
@@ -243,9 +243,7 @@ def test_custom_agent_edit_defaults_detect_all_tools_from_server(monkeypatch):
     ]
     tool_refs = [server_tools[0], server_tools[1], server_tools[2]]
 
-    selected_servers = demo._custom_agent_selected_server_group_keys(
-        tool_refs, server_tools, []
-    )
+    selected_servers = demo._custom_agent_selected_server_group_keys(tool_refs, server_tools, [])
     selected_tool_keys = demo._custom_agent_selected_tool_keys(
         tool_refs,
         server_tools,
@@ -274,9 +272,7 @@ def _desktop_commander_client_tools(count: int = 3) -> list[dict[str, Any]]:
 
 
 def _desktop_commander_client_servers(count: int = 3) -> list[dict[str, Any]]:
-    return [
-        {"server_name": "desktop_commander", "device_id": "device-1", "tool_count": count}
-    ]
+    return [{"server_name": "desktop_commander", "device_id": "device-1", "tool_count": count}]
 
 
 def test_server_groups_surface_sidecar_server_distinct_from_backend(monkeypatch):

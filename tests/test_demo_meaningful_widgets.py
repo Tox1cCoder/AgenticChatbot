@@ -69,8 +69,8 @@ def _import_demo_with_ui_stubs(monkeypatch: pytest.MonkeyPatch):
     components_module = types.ModuleType("streamlit.components")
     components_v1_module = types.ModuleType("streamlit.components.v1")
     components_v1_module.html = lambda *args, **kwargs: None
-    components_v1_module.declare_component = (
-        lambda *args, **kwargs: (lambda **_component_kwargs: _component_kwargs.get("default"))
+    components_v1_module.declare_component = lambda *args, **kwargs: (
+        lambda **_component_kwargs: _component_kwargs.get("default")
     )
     components_module.v1 = components_v1_module
     streamlit_stub.components = components_module
@@ -137,7 +137,13 @@ def test_live_widget_component_reads_only_contract_html_fields(monkeypatch):
     markup = demo._build_live_widget_component_html(_sample_widget(), "token")
 
     # The HTML renderer must read only the contract keys, not the old aliases.
-    for alias in ("data.document", "data.content", "data.srcdoc", "data.min_height", "data.minHeight"):
+    for alias in (
+        "data.document",
+        "data.content",
+        "data.srcdoc",
+        "data.min_height",
+        "data.minHeight",
+    ):
         assert alias not in markup, f"alias {alias} must not be read by the HTML renderer"
 
 

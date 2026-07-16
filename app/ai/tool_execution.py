@@ -1196,9 +1196,7 @@ async def invoke_tool_attempt(
         try:
             task.result()
         except asyncio.CancelledError:
-            timeout_exception: BaseException = TimeoutError(
-                f"Tool timed out after {soft_seconds}s"
-            )
+            timeout_exception: BaseException = TimeoutError(f"Tool timed out after {soft_seconds}s")
         except BaseException as exc:
             return AttemptOutcome(
                 exception=exc,
@@ -1281,9 +1279,7 @@ async def invoke_tool_with_policy(
         summary = ToolErrorSummary(
             error_type="configuration",
             failure_retryable=False,
-            message=(
-                "Tool execution is unavailable because its server policy is invalid."
-            ),
+            message=("Tool execution is unavailable because its server policy is invalid."),
             hint="Use another available tool or report the configuration problem.",
             attempts=0,
         )
@@ -1293,10 +1289,15 @@ async def invoke_tool_with_policy(
             exception=exc,
             policy_retry_allowed=False,
         )
-        return None, artifact_detail, model_content, {
-            "attempts": 0,
-            "attempt_history": [],
-        }
+        return (
+            None,
+            artifact_detail,
+            model_content,
+            {
+                "attempts": 0,
+                "attempt_history": [],
+            },
+        )
     policy_snapshot = _policy_snapshot(policy)
     policy_retry_allowed = (policy.retry_safe or policy.idempotent) or (
         policy.identity.tool_origin,
@@ -1417,11 +1418,16 @@ async def invoke_tool_with_policy(
         )
         artifact_detail["attempt_history"] = attempt_history[-5:]
         artifact_detail["policy"] = policy_snapshot
-        return None, artifact_detail, model_content, {
-            "attempts": attempts,
-            "attempt_history": attempt_history[-5:],
-            "policy": policy_snapshot,
-        }
+        return (
+            None,
+            artifact_detail,
+            model_content,
+            {
+                "attempts": attempts,
+                "attempt_history": attempt_history[-5:],
+                "policy": policy_snapshot,
+            },
+        )
 
     raise RuntimeError("Tool execution attempt loop ended without an outcome")
 
@@ -1456,9 +1462,7 @@ def _policy_snapshot(policy: ToolExecutionPolicy) -> dict[str, Any]:
             "metadata_trusted": policy.metadata_trusted,
             "outer_timeout_disabled": policy.outer_timeout_disabled,
             "cancellation": policy.cancellation,
-            "client_execution_timeout_seconds": (
-                policy.client_execution_timeout_seconds
-            ),
+            "client_execution_timeout_seconds": (policy.client_execution_timeout_seconds),
             "client_response_timeout_seconds": policy.client_response_timeout_seconds,
             "policy_source": policy.policy_source,
             "policy_config_keys": list(policy.policy_config_keys),
@@ -1493,9 +1497,7 @@ def _attempt_record(
         "policy_retry_allowed": policy_retry_allowed,
         "auto_retry_allowed": auto_retry_allowed,
         "error_type": summary.error_type if summary else None,
-        "retryable": (
-            summary.failure_retryable and policy_retry_allowed if summary else False
-        ),
+        "retryable": (summary.failure_retryable and policy_retry_allowed if summary else False),
         "cancellation": policy.cancellation,
         "cancellation_attempted": outcome.cancellation_attempted,
         "cancellation_completed": outcome.cancellation_completed,
@@ -1676,8 +1678,7 @@ async def execute_tool_calls(
                     error_type=ToolErrorKind.NOT_FOUND.value,
                     failure_retryable=False,
                     message=(
-                        f"Client tool {tool_name} is not available for the current "
-                        "device session."
+                        f"Client tool {tool_name} is not available for the current device session."
                     ),
                     hint=(
                         "The device may be disconnected. Ask the user to reconnect, "
@@ -1718,8 +1719,7 @@ async def execute_tool_calls(
                 error_type=ToolErrorKind.PERMISSION.value,
                 failure_retryable=False,
                 message=(
-                    f"Client tool {tool_name} cannot execute from the current "
-                    "device session."
+                    f"Client tool {tool_name} cannot execute from the current device session."
                 ),
                 hint="Ask the user to use the bound device, or choose another available tool.",
                 attempts=1,

@@ -14,7 +14,7 @@ def create_search_documents_tool():
         pattern: str | None = None,
         reason: str | None = None,
     ) -> str:
-        """Explore documents using SCAN_ALL, READ_DOCUMENT, SEARCH_CHUNKS, GREP_DOCUMENT, LIST_DOCUMENTS, or VIEW_IMAGES."""
+        """Explore documents with scan, read, search, grep, list, or image actions."""
         # Stub: actual execution in graph._rag_tools_node
         return f"Tool call recorded: {action}"
 

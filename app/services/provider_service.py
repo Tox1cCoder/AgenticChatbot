@@ -88,7 +88,8 @@ class ProviderService:
         if not settings.model_encryption_key:
             raise ValueError(
                 "MODEL_ENCRYPTION_KEY must be configured in environment. "
-                "Generate one with: python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'"
+                "Generate one with: python -c 'from cryptography.fernet import Fernet; "
+                "print(Fernet.generate_key().decode())'"
             )
 
         try:
@@ -103,7 +104,8 @@ class ProviderService:
         normalized = str(provider_type or "").strip().lower()
         if normalized not in SUPPORTED_PROVIDERS:
             raise ValueError(
-                f"Invalid provider_type: {provider_type}. Must be one of {list(SUPPORTED_PROVIDERS)}"
+                f"Invalid provider_type: {provider_type}. Must be one of "
+                f"{list(SUPPORTED_PROVIDERS)}"
             )
         return normalized
 

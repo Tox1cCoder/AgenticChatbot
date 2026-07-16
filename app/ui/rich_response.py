@@ -62,6 +62,7 @@ def build_inline_image_html(
     )
     return f'<figure style="margin:8px 0;text-align:center;">{img}{caption_html}</figure>'
 
+
 # ---------------------------------------------------------------------------
 # Public view model
 # ---------------------------------------------------------------------------

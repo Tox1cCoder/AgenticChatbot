@@ -80,7 +80,8 @@ class DocumentProcessingService:
         max_size_bytes = self.settings.max_file_size_mb * 1024 * 1024
         if file_size > max_size_bytes:
             raise ValueError(
-                f"File size ({file_size} bytes) exceeds maximum allowed size of {self.settings.max_file_size_mb}MB"
+                f"File size ({file_size} bytes) exceeds maximum allowed size of "
+                f"{self.settings.max_file_size_mb}MB"
             )
 
         file_extension = self._validate_file_extension(filename)
@@ -129,7 +130,8 @@ class DocumentProcessingService:
                     bytes_written += len(chunk)
                     if bytes_written > max_size_bytes:
                         raise ValueError(
-                            f"File size ({bytes_written} bytes) exceeds maximum allowed size of {self.settings.max_file_size_mb}MB"
+                            f"File size ({bytes_written} bytes) exceeds maximum allowed "
+                            f"size of {self.settings.max_file_size_mb}MB"
                         )
 
                     staged_file.write(chunk)
@@ -801,7 +803,8 @@ class DocumentProcessingService:
 
         if last_error:
             logger.error(
-                f"Exhausted caption retries for {image_name} after {max_attempts} attempts: {last_error}"
+                f"Exhausted caption retries for {image_name} after {max_attempts} "
+                f"attempts: {last_error}"
             )
         return None
 
@@ -872,7 +875,10 @@ class DocumentProcessingService:
             return {
                 "files_removed": removed_count,
                 "folders_removed": removed_folders,
-                "message": f"Cleaned up {removed_count} files and {removed_folders} folders older than {older_than_hours} hours",
+                "message": (
+                    f"Cleaned up {removed_count} files and {removed_folders} folders "
+                    f"older than {older_than_hours} hours"
+                ),
             }
 
         except Exception as e:

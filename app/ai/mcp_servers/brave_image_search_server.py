@@ -172,9 +172,7 @@ def brave_image_search(
     """
     api_key = _resolve_api_key()
     if not api_key:
-        return _error(
-            "BRAVE_SEARCH_API_KEY not configured. Set it in environment or config.py"
-        )
+        return _error("BRAVE_SEARCH_API_KEY not configured. Set it in environment or config.py")
 
     safesearch_value, invalid = _resolve_safesearch(safesearch)
     if invalid is not None:

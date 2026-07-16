@@ -1,4 +1,3 @@
-
 import pytest
 
 from client_backend.schemas.runtime import ToolDispatchRequest
@@ -139,6 +138,4 @@ async def test_command_failure_uses_structured_runtime_error(monkeypatch):
         )
 
     assert getattr(exc_info.value, "code", None) == "COMMAND_NOT_FOUND"
-    assert getattr(exc_info.value, "repair", None) == {
-        "type": "inspect_skill_commands"
-    }
+    assert getattr(exc_info.value, "repair", None) == {"type": "inspect_skill_commands"}

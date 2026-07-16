@@ -387,7 +387,8 @@ class RedisWidgetStore:
                         current_version = int(data.get("version", 0))
                         if expected_version is not None and current_version != expected_version:
                             raise ValueError(
-                                f"Version mismatch: expected {expected_version}, current {current_version}"
+                                f"Version mismatch: expected {expected_version}, "
+                                f"current {current_version}"
                             )
                         new_version = current_version + 1
                         now = time.time()

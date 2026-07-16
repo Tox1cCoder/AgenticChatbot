@@ -40,9 +40,7 @@ async def test_standard_skill_bundle_executes_named_cli_without_global_install(m
     )
 
     assert readiness.status == "ready"
-    assert [entry["qualified_id"] for entry in entries] == [
-        "skill::echo-python::run_skill_command"
-    ]
+    assert [entry["qualified_id"] for entry in entries] == ["skill::echo-python::run_skill_command"]
     assert envelope["ok"] is True
     assert envelope["result"] == {"message": "hello fixtures"}
     assert "echo-python" not in os.environ.get("PATH", "")

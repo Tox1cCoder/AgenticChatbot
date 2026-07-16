@@ -831,9 +831,7 @@ class BaseAgent(ABC):
         except (TypeError, ValueError) as exc:
             raise ContextBudgetExceededError("context_budget_invalid") from exc
 
-        if conversation_id and user_id and (
-            durable_request is None or emergency_compact is None
-        ):
+        if conversation_id and user_id and (durable_request is None or emergency_compact is None):
             default_durable, default_emergency = self._build_compaction_callbacks(
                 conversation_id,
                 user_id,
@@ -1033,9 +1031,7 @@ class BaseAgent(ABC):
                             HumanMessage(content=content, additional_kwargs=metadata)
                         )
                 elif role == "assistant":
-                    langchain_history.append(
-                        AIMessage(content=content, additional_kwargs=metadata)
-                    )
+                    langchain_history.append(AIMessage(content=content, additional_kwargs=metadata))
                 elif role == "memory":
                     metadata["conversation_memory"] = True
                     langchain_history.append(

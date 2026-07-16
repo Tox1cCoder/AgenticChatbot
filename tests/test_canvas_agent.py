@@ -16,7 +16,7 @@ def test_truncated_code_block_still_extracts_artifact():
         "  <head><title>Calculator</title></head>\n"
         "  <body>\n"
         "    <button onclick=\"append('8')\">8</button>\n"
-        "    <button onclick=\"append"
+        '    <button onclick="append'
     )
 
     artifact = _extract_artifact(text)
@@ -26,7 +26,7 @@ def test_truncated_code_block_still_extracts_artifact():
     assert artifact["title"] == "Calculator"
     assert artifact["truncated"] is True
     assert artifact["content"].startswith("<!DOCTYPE html>")
-    assert artifact["content"].endswith("<button onclick=\"append")
+    assert artifact["content"].endswith('<button onclick="append')
 
 
 def test_truncated_code_block_strip_keeps_description_only():

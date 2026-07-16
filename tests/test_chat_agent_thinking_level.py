@@ -42,9 +42,7 @@ def test_create_langchain_model_builds_chat_with_lower_thinking(monkeypatch):
     monkeypatch.setattr(agent_config.settings, "enable_thinking", True)
     monkeypatch.setitem(agent_config.AGENT_CONFIG["chat"], "thinking_level", "low")
 
-    agent_config.create_langchain_model(
-        agent_type="chat", model_override="gemini-3-flash-preview"
-    )
+    agent_config.create_langchain_model(agent_type="chat", model_override="gemini-3-flash-preview")
     assert captured.get("thinking_level") == "low"
 
 

@@ -1844,9 +1844,7 @@ class MultiAgentWorkflow(
                     user_id=user_id,
                     device_id=device_id,
                 )
-            if await self._needs_approval(
-                parent_state, normalized_worker_calls, tool_map=tool_map
-            ):
+            if await self._needs_approval(parent_state, normalized_worker_calls, tool_map=tool_map):
                 if response.metadata is None:
                     response.metadata = {}
                 response.metadata["requires_approval"] = True

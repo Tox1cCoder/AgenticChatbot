@@ -65,9 +65,7 @@ def _is_internal_stream_chunk(metadata: Any) -> bool:
     return isinstance(nested_metadata, dict) and nested_metadata.get("internal") is True
 
 
-def _consume_stream_text_chunk(
-    accumulated_content: str, text_chunk: Any
-) -> tuple[str, str | None]:
+def _consume_stream_text_chunk(accumulated_content: str, text_chunk: Any) -> tuple[str, str | None]:
     """
     Return (new_accumulated_content, delta_to_emit) for a streaming text chunk.
 

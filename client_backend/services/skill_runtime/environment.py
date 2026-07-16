@@ -39,6 +39,7 @@ RUNTIME_FORMAT_VERSION = 1
 SETUP_TIMEOUT_SECONDS = 300
 MAX_SETUP_LOG_BYTES = 64_000
 
+
 def _default_venv_builder(venv_root: Path) -> None:
     venv.EnvBuilder(with_pip=True, clear=True).create(venv_root)
 
@@ -83,18 +84,14 @@ class SkillEnvironmentManager:
         payload = self._read_pyproject(pyproject)
         project = payload.get("project") if isinstance(payload.get("project"), dict) else {}
         build_system = (
-            payload.get("build-system")
-            if isinstance(payload.get("build-system"), dict)
-            else {}
+            payload.get("build-system") if isinstance(payload.get("build-system"), dict) else {}
         )
         scripts = project.get("scripts") if isinstance(project.get("scripts"), dict) else {}
         dependencies = project.get("dependencies")
         build_requirements = build_system.get("requires")
         return {
             "python_project": True,
-            "dependencies": sorted(
-                str(item) for item in dependencies if isinstance(item, str)
-            )
+            "dependencies": sorted(str(item) for item in dependencies if isinstance(item, str))
             if isinstance(dependencies, list)
             else [],
             "build_requirements": sorted(
@@ -104,9 +101,7 @@ class SkillEnvironmentManager:
             else [],
             "declared_commands": sorted(str(name) for name in scripts),
             "dependency_lock": (
-                "requirements.lock"
-                if (skill.bundle_root / "requirements.lock").is_file()
-                else None
+                "requirements.lock" if (skill.bundle_root / "requirements.lock").is_file() else None
             ),
             # Python builds execute project-controlled backend code, even when
             # the project has no remote dependencies.
@@ -192,9 +187,7 @@ class SkillEnvironmentManager:
                 )
                 stdout = completed.stdout or b""
                 stderr = completed.stderr or b""
-                log_bytes = (log_bytes + stdout + b"\n" + stderr + b"\n")[
-                    -MAX_SETUP_LOG_BYTES:
-                ]
+                log_bytes = (log_bytes + stdout + b"\n" + stderr + b"\n")[-MAX_SETUP_LOG_BYTES:]
                 (stage / "setup.log").write_bytes(log_bytes)
                 if completed.returncode != 0:
                     raise SkillRuntimeError(
@@ -224,9 +217,7 @@ class SkillEnvironmentManager:
                 "commands": commands,
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
-            (stage / "runtime.json").write_text(
-                json.dumps(metadata, indent=2), encoding="utf-8"
-            )
+            (stage / "runtime.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
             if target.exists():
                 os.replace(target, backup)

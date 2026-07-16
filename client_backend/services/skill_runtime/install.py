@@ -107,9 +107,7 @@ class SkillBundleInstaller:
             "executable_assets": dict(source_skill.executable_assets),
             "setup": setup_preview,
         }
-        setup_requires_confirmation = bool(
-            preview["setup"].get("confirmation_required")
-        )
+        setup_requires_confirmation = bool(preview["setup"].get("confirmation_required"))
         if setup_requires_confirmation and not expected_source_hash:
             raise SkillRuntimeError(
                 SKILL_INSTALL_INVALID,
@@ -198,9 +196,10 @@ class SkillBundleInstaller:
                     approve_setup=approve_setup,
                 )
                 runtime_status = str(runtime.get("status") or "not_ready")
-            elif installed_skill.executable_assets["bin"] or installed_skill.executable_assets[
-                "scripts"
-            ]:
+            elif (
+                installed_skill.executable_assets["bin"]
+                or installed_skill.executable_assets["scripts"]
+            ):
                 runtime_status = "ready"
             else:
                 runtime_status = "instruction_only"
@@ -259,10 +258,7 @@ class SkillBundleInstaller:
             )
         except SkillRuntimeError:
             raise
-        if (
-            expected_source_hash != skill.source_hash
-            or live_source_hash != skill.source_hash
-        ):
+        if expected_source_hash != skill.source_hash or live_source_hash != skill.source_hash:
             raise SkillRuntimeError(
                 SKILL_INSTALL_INVALID,
                 "skill changed after preview; request a new preview before setup",
@@ -281,9 +277,7 @@ class SkillBundleInstaller:
         install_root = self._resolve_install_root()
         bundle = _find_installed_bundle(install_root, name)
         if bundle is None:
-            raise SkillRuntimeError(
-                SKILL_INSTALL_INVALID, f"no installed skill named '{name}'"
-            )
+            raise SkillRuntimeError(SKILL_INSTALL_INVALID, f"no installed skill named '{name}'")
         if not is_under_root(bundle, install_root):
             raise SkillRuntimeError(
                 UNSAFE_BUNDLE_PATH, "installed bundle path escapes the profile root"

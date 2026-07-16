@@ -378,8 +378,6 @@ def test_site_structure_query_prefers_map_over_crawl():
         ),
     ]
 
-    ranked = rank_tool_candidates(
-        query="map the docs site and list API pages", candidates=tools
-    )
+    ranked = rank_tool_candidates(query="map the docs site and list API pages", candidates=tools)
 
     assert ranked[0].tool.tool_name == "tavily_map"

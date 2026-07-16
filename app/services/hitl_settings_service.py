@@ -18,14 +18,22 @@ class HitlSettingsService:
             "master_enabled": is_hitl_enabled(),
             "global_tools": list(get_tools_requiring_approval()),
             "servers": [
-                {"scope_type": "server", "scope_value": r.scope_value,
-                 "require_approval": bool(r.require_approval)}
-                for r in rows if r.scope_type == "server"
+                {
+                    "scope_type": "server",
+                    "scope_value": r.scope_value,
+                    "require_approval": bool(r.require_approval),
+                }
+                for r in rows
+                if r.scope_type == "server"
             ],
             "tools": [
-                {"scope_type": "tool", "scope_value": r.scope_value,
-                 "require_approval": bool(r.require_approval)}
-                for r in rows if r.scope_type == "tool"
+                {
+                    "scope_type": "tool",
+                    "scope_value": r.scope_value,
+                    "require_approval": bool(r.require_approval),
+                }
+                for r in rows
+                if r.scope_type == "tool"
             ],
         }
 

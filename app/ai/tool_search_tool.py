@@ -49,9 +49,7 @@ def _compact_arg_hints(value: Any) -> str:
 def _serialize_tool_search_output(result: dict[str, Any]) -> str:
     payload = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
     recommended = result.get("recommended_tool")
-    recommended_name = (
-        recommended.get("tool_name") if isinstance(recommended, dict) else None
-    )
+    recommended_name = recommended.get("tool_name") if isinstance(recommended, dict) else None
     logger.debug(
         "tool_search output: mode=%s response_bytes=%d results=%d "
         "recommended=%s next_action=%s requires_refinement=%s",
@@ -646,9 +644,7 @@ def _search_item_to_dicts(item: Any, idx: int) -> tuple[float, dict[str, Any], d
         else:
             descriptor = item
         profile = infer_tool_profile(
-            tool_name=str(
-                getattr(descriptor, "tool_name", getattr(descriptor, "name", "")) or ""
-            ),
+            tool_name=str(getattr(descriptor, "tool_name", getattr(descriptor, "name", "")) or ""),
             server_name=str(getattr(descriptor, "server_name", "") or ""),
             description=str(getattr(descriptor, "description", "") or ""),
             arg_names=list(getattr(descriptor, "arg_names", []) or []),

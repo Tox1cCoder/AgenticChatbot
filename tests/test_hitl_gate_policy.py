@@ -49,13 +49,20 @@ async def test_gate_gates_all_tools_from_a_server_via_policy(monkeypatch):
 
     state = {
         "selected_agent": "chat_agent",
-        "conversation_id": "c1", "user_id": "u1", "device_id": None,
-        "context": {"hitl_policy": {
-            "master_enabled": True, "servers": {"tavily": True}, "tools": {}, "global_tools": [],
-        }},
-        "messages": [AIMessage(content="", tool_calls=[
-            {"name": "search", "args": {}, "id": "call-1"}
-        ])],
+        "conversation_id": "c1",
+        "user_id": "u1",
+        "device_id": None,
+        "context": {
+            "hitl_policy": {
+                "master_enabled": True,
+                "servers": {"tavily": True},
+                "tools": {},
+                "global_tools": [],
+            }
+        },
+        "messages": [
+            AIMessage(content="", tool_calls=[{"name": "search", "args": {}, "id": "call-1"}])
+        ],
     }
     assert await wf._should_call_tools(state) == "approval"
 
@@ -64,25 +71,36 @@ async def test_gate_gates_all_tools_from_a_server_via_policy(monkeypatch):
 async def test_gate_lets_tool_override_exempt_a_server_tool(monkeypatch):
     tool = SimpleNamespace(
         name="client__desktop_commander__list_files",
-        metadata={"server_name": "desktop_commander",
-                  "qualified_tool_id": "desktop_commander::list_files",
-                  "tool_origin": "client_mcp"},
+        metadata={
+            "server_name": "desktop_commander",
+            "qualified_tool_id": "desktop_commander::list_files",
+            "tool_origin": "client_mcp",
+        },
     )
     tool_map = {tool.name: tool}
     wf = _workflow_stub(tool_map, _FakeManager({}), monkeypatch)
 
     state = {
         "selected_agent": "chat_agent",
-        "conversation_id": "c1", "user_id": "u1", "device_id": None,
-        "context": {"hitl_policy": {
-            "master_enabled": True,
-            "servers": {"desktop_commander": True},
-            "tools": {"desktop_commander::list_files": False},
-            "global_tools": [],
-        }},
-        "messages": [AIMessage(content="", tool_calls=[
-            {"name": "client__desktop_commander__list_files", "args": {}, "id": "call-1"}
-        ])],
+        "conversation_id": "c1",
+        "user_id": "u1",
+        "device_id": None,
+        "context": {
+            "hitl_policy": {
+                "master_enabled": True,
+                "servers": {"desktop_commander": True},
+                "tools": {"desktop_commander::list_files": False},
+                "global_tools": [],
+            }
+        },
+        "messages": [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "client__desktop_commander__list_files", "args": {}, "id": "call-1"}
+                ],
+            )
+        ],
     }
     assert await wf._should_call_tools(state) == "tools"
 
@@ -92,9 +110,17 @@ async def test_gate_master_off_never_gates(monkeypatch):
     wf = _workflow_stub({}, _FakeManager({}), monkeypatch)
     state = {
         "selected_agent": "chat_agent",
-        "conversation_id": "c1", "user_id": "u1", "device_id": None,
-        "context": {"hitl_policy": {"master_enabled": False, "servers": {"tavily": True},
-                                    "tools": {}, "global_tools": []}},
+        "conversation_id": "c1",
+        "user_id": "u1",
+        "device_id": None,
+        "context": {
+            "hitl_policy": {
+                "master_enabled": False,
+                "servers": {"tavily": True},
+                "tools": {},
+                "global_tools": [],
+            }
+        },
         "messages": [AIMessage(content="", tool_calls=[{"name": "search", "args": {}, "id": "x"}])],
     }
     assert await wf._should_call_tools(state) == "tools"
@@ -127,9 +153,14 @@ async def test_generic_worker_uses_parent_state_hitl_policy(monkeypatch):
         "conversation_id": "c1",
         "user_id": "u1",
         "device_id": None,
-        "context": {"hitl_policy": {
-            "master_enabled": True, "servers": {"tavily": True}, "tools": {}, "global_tools": [],
-        }},
+        "context": {
+            "hitl_policy": {
+                "master_enabled": True,
+                "servers": {"tavily": True},
+                "tools": {},
+                "global_tools": [],
+            }
+        },
     }
 
     response = await wf._run_agent_in_isolated_context(

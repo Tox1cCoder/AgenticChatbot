@@ -141,9 +141,7 @@ def test_inspect_marks_runtime_stale_when_source_hash_changes(tmp_path):
         runner=lambda command, **kwargs: subprocess.CompletedProcess(command, 0, b"", b""),
     )
     manager.prepare(skill, approve_setup=True)
-    changed = SkillMetadata(
-        **{**skill.__dict__, "source_hash": "b" * 64}
-    )
+    changed = SkillMetadata(**{**skill.__dict__, "source_hash": "b" * 64})
 
     assert manager.inspect(changed)["status"] == "stale"
     assert manager.inspect_existing_for_skill(changed)["status"] == "stale"

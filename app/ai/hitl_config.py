@@ -162,9 +162,7 @@ def any_call_requires_approval(
     if not policy.get("master_enabled", True):
         return False
     for tool_call in tool_calls or []:
-        identity = resolve_call_identity(
-            tool_call, tool_map=tool_map, mcp_manager=mcp_manager
-        )
+        identity = resolve_call_identity(tool_call, tool_map=tool_map, mcp_manager=mcp_manager)
         if identity_requires_approval(identity, policy):
             return True
     return False
@@ -201,14 +199,13 @@ def redact_sensitive_args(args: dict) -> dict:
     """
     if not isinstance(args, dict):
         return {}
+
     def redact(value: Any) -> Any:
         if isinstance(value, dict):
             return {
                 key: (
                     _REDACTED_ARG_PLACEHOLDER
-                    if any(
-                        marker in str(key).lower() for marker in _SENSITIVE_ARG_KEY_MARKERS
-                    )
+                    if any(marker in str(key).lower() for marker in _SENSITIVE_ARG_KEY_MARKERS)
                     else redact(nested)
                 )
                 for key, nested in value.items()

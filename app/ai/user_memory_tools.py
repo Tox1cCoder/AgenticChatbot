@@ -10,7 +10,7 @@ def create_user_memory_tools(*, repository: Any, user_id: str | None):
         return []
 
     def remember_memory(content: str, source: str = "explicit_user_request") -> str:
-        """Save a durable memory item for the current user. Use only when the user explicitly asks to remember something."""
+        """Save a memory item when the user explicitly asks to remember something."""
         text = str(content or "").strip()
         if not text:
             return "Error: memory content is required."

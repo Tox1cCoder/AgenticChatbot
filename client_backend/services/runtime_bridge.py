@@ -61,9 +61,7 @@ def _make_tool_instance_id(
     Compute the opaque tool capability identifier that the server will echo
     back in ToolDispatchRequest for sidecar-side validation.
     """
-    composite = (
-        f"{device_id}:{session_id}:{qualified_tool_id}:{catalog_version}:{source_hash}"
-    )
+    composite = f"{device_id}:{session_id}:{qualified_tool_id}:{catalog_version}:{source_hash}"
     return hashlib.sha256(composite.encode()).hexdigest()[:16]
 
 
@@ -755,9 +753,7 @@ class RuntimeBridgeService:
                 readiness = skill_manager.evaluate_readiness(skill)
                 if readiness.status != "ready":
                     continue
-                skill_tools.extend(
-                    skill_manager.capability_catalog_entries(skill, readiness)
-                )
+                skill_tools.extend(skill_manager.capability_catalog_entries(skill, readiness))
             return skill_tools
         except Exception:
             # Swallow-and-continue so a skill-runtime hiccup never breaks MCP

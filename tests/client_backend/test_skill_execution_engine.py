@@ -150,9 +150,7 @@ async def test_relative_python_script_under_scripts_is_supported(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_workspace_cwd_defaults_to_first_configured_workspace_root(
-    tmp_path, monkeypatch
-):
+async def test_workspace_cwd_defaults_to_first_configured_workspace_root(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     skill = _skill(
@@ -392,8 +390,7 @@ async def test_timeout_terminates_descendant_after_parent_already_exited(tmp_pat
         f"time.sleep(0.4); Path({str(marker)!r}).write_text('survived')"
     )
     parent_code = (
-        "import subprocess, sys\n"
-        f"subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+        f"import subprocess, sys\nsubprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
     )
     skill = _skill(tmp_path, parent_code)
 
@@ -410,9 +407,7 @@ async def test_timeout_terminates_descendant_after_parent_already_exited(tmp_pat
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows process-containment protocol")
 @pytest.mark.asyncio
-async def test_windows_skill_command_is_released_only_after_job_attachment(
-    tmp_path, monkeypatch
-):
+async def test_windows_skill_command_is_released_only_after_job_attachment(tmp_path, monkeypatch):
     events = []
 
     class FakeStdin:

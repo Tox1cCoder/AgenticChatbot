@@ -170,9 +170,7 @@ def test_collect_skill_tools_publishes_only_ready_fixed_command(monkeypatch):
 
     entries = RuntimeBridgeService._collect_skill_capability_tools()
 
-    assert [entry["qualified_id"] for entry in entries] == [
-        "skill::ready-skill::run_skill_command"
-    ]
+    assert [entry["qualified_id"] for entry in entries] == ["skill::ready-skill::run_skill_command"]
     assert entries[0]["mutation"] is True
 
 

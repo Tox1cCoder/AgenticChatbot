@@ -70,7 +70,10 @@ async def test_generate_plan_attaches_satisfied_rubric_metadata(monkeypatch):
     responses = [
         AIMessage(content="", tool_calls=[_todo_call("Implement native planning rubric grading")]),
         AIMessage(
-            content='{"rubric":"- request_fit: The tasks fit the user request.","rationale":"Small feature plan."}'
+            content=(
+                '{"rubric":"- request_fit: The tasks fit the user request.",'
+                '"rationale":"Small feature plan."}'
+            )
         ),
         AIMessage(
             content='{"result":"satisfied","explanation":"ok","criteria":[{"name":"request_fit","passed":true}]}'
@@ -124,10 +127,17 @@ async def test_generate_plan_revises_after_needs_revision(monkeypatch):
     responses = [
         AIMessage(content="", tool_calls=[_todo_call("Fix backend")]),
         AIMessage(
-            content='{"rubric":"- concrete_backend_scope: Backend tasks name concrete behavior.","rationale":"The candidate is vague."}'
+            content=(
+                '{"rubric":"- concrete_backend_scope: Backend tasks name concrete '
+                'behavior.","rationale":"The candidate is vague."}'
+            )
         ),
         AIMessage(
-            content='{"result":"needs_revision","explanation":"vague","criteria":[{"name":"concrete_backend_scope","passed":false,"gap":"Name the concrete backend behavior."}]}'
+            content=(
+                '{"result":"needs_revision","explanation":"vague","criteria":['
+                '{"name":"concrete_backend_scope","passed":false,"gap":'
+                '"Name the concrete backend behavior."}]}'
+            )
         ),
         AIMessage(
             content="",
@@ -190,10 +200,16 @@ async def test_generate_plan_marks_max_iterations_reached(monkeypatch):
     responses = [
         AIMessage(content="", tool_calls=[_todo_call("Fix backend")]),
         AIMessage(
-            content='{"rubric":"- concrete_scope: Tasks should name the concrete behavior for this request.","rationale":"The candidate is vague."}'
+            content=(
+                '{"rubric":"- concrete_scope: Tasks should name the concrete behavior '
+                'for this request.","rationale":"The candidate is vague."}'
+            )
         ),
         AIMessage(
-            content='{"result":"needs_revision","explanation":"vague","criteria":[{"name":"concrete_scope","passed":false,"gap":"Be concrete."}]}'
+            content=(
+                '{"result":"needs_revision","explanation":"vague","criteria":['
+                '{"name":"concrete_scope","passed":false,"gap":"Be concrete."}]}'
+            )
         ),
     ]
 
@@ -240,7 +256,10 @@ async def test_generate_plan_marks_grader_error(monkeypatch):
     responses = [
         AIMessage(content="", tool_calls=[_todo_call("Implement native planning rubric grading")]),
         AIMessage(
-            content='{"rubric":"- request_fit: Tasks fit this request.","rationale":"Generated from context."}'
+            content=(
+                '{"rubric":"- request_fit: Tasks fit this request.",'
+                '"rationale":"Generated from context."}'
+            )
         ),
         RuntimeError("grader unavailable"),
     ]

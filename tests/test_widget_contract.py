@@ -77,16 +77,12 @@ def test_non_numeric_height_is_rejected():
 
 def test_out_of_range_height_low_is_rejected():
     with pytest.raises(ValueError, match="between"):
-        validate_html_widget_state(
-            {"html": "<div>hi</div>", "height": MIN_WIDGET_HEIGHT - 1}
-        )
+        validate_html_widget_state({"html": "<div>hi</div>", "height": MIN_WIDGET_HEIGHT - 1})
 
 
 def test_out_of_range_height_high_is_rejected():
     with pytest.raises(ValueError, match="between"):
-        validate_html_widget_state(
-            {"html": "<div>hi</div>", "height": MAX_WIDGET_HEIGHT + 1}
-        )
+        validate_html_widget_state({"html": "<div>hi</div>", "height": MAX_WIDGET_HEIGHT + 1})
 
 
 def test_document_alias_is_not_accepted_as_html():

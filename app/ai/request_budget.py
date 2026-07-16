@@ -295,9 +295,7 @@ def _atomic_history_groups(messages: Sequence[Any]) -> list[_HistoryGroup]:
                 waiting_for_tool_completion = True
             else:
                 waiting_for_tool_completion = False
-                groups.append(
-                    _HistoryGroup(tuple(current), _group_is_complete(current))
-                )
+                groups.append(_HistoryGroup(tuple(current), _group_is_complete(current)))
                 current = []
         elif role == "tool":
             waiting_for_tool_completion = True

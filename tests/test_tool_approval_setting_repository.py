@@ -79,8 +79,12 @@ def test_set_updates_when_present():
 
 def test_build_policy_groups_by_scope():
     rows = [
-        SimpleNamespace(scope_type="server", scope_value="desktop_commander", require_approval=True),
-        SimpleNamespace(scope_type="tool", scope_value="desktop_commander::list_files", require_approval=False),
+        SimpleNamespace(
+            scope_type="server", scope_value="desktop_commander", require_approval=True
+        ),
+        SimpleNamespace(
+            scope_type="tool", scope_value="desktop_commander::list_files", require_approval=False
+        ),
         SimpleNamespace(scope_type="garbage", scope_value="ignored", require_approval=True),
     ]
     repo = ToolApprovalSettingRepository(_factory(_FakeSession(rows=rows)))

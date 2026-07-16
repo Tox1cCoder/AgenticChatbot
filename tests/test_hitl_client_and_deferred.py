@@ -18,8 +18,12 @@ class _FakeManager:
 
 def test_client_server_rule_gates_a_sidecar_tool_by_name_alone():
     # Sidecar tool, NOT yet in any tool_map (e.g. resolved purely from the call name).
-    policy = {"master_enabled": True, "servers": {"desktop_commander": True},
-              "tools": {}, "global_tools": []}
+    policy = {
+        "master_enabled": True,
+        "servers": {"desktop_commander": True},
+        "tools": {},
+        "global_tools": [],
+    }
     calls = [{"name": "client__desktop_commander__start_process", "args": {}, "id": "c1"}]
     assert any_call_requires_approval(calls, policy=policy) is True
 
@@ -30,8 +34,12 @@ def test_deferred_server_tool_gated_by_server_after_autoload():
     loaded_tool = SimpleNamespace(name="run_query", metadata={})
     tool_map = {"run_query": loaded_tool}
     manager = _FakeManager({id(loaded_tool): "postgres"})
-    policy = {"master_enabled": True, "servers": {"postgres": True},
-              "tools": {}, "global_tools": []}
+    policy = {
+        "master_enabled": True,
+        "servers": {"postgres": True},
+        "tools": {},
+        "global_tools": [],
+    }
 
     identity = resolve_call_identity({"name": "run_query"}, tool_map=tool_map, mcp_manager=manager)
     assert identity.server_name == "postgres"
@@ -50,8 +58,11 @@ async def test_prepare_interrupt_payload_carries_client_provenance():
     wf = graph_module.MultiAgentWorkflow.__new__(graph_module.MultiAgentWorkflow)
     client_tool = SimpleNamespace(
         name="client__excel__delete_sheet",
-        metadata={"server_name": "excel", "qualified_tool_id": "excel::delete_sheet",
-                  "tool_origin": "client_mcp"},
+        metadata={
+            "server_name": "excel",
+            "qualified_tool_id": "excel::delete_sheet",
+            "tool_origin": "client_mcp",
+        },
     )
 
     # agent=None + explicit tool_map => _prepare_interrupt_payload skips building a real map.
@@ -143,12 +154,15 @@ async def test_approval_helpers_rebuild_the_live_scoped_handoff_map(monkeypatch)
     state = {"context": {}, "device_id": "device-1"}
     calls = [{"name": "hand_off", "args": {"target_agent": "search_agent"}, "id": "h1"}]
 
-    assert await wf._needs_approval(
-        state,
-        calls,
-        agent=object(),
-        internal_tools=[handoff_tool],
-    ) is False
+    assert (
+        await wf._needs_approval(
+            state,
+            calls,
+            agent=object(),
+            internal_tools=[handoff_tool],
+        )
+        is False
+    )
     await wf._prepare_interrupt_payload(
         state,
         tool_calls=calls,

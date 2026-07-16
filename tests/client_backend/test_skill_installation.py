@@ -171,14 +171,10 @@ async def test_install_rejects_changed_source_hash_before_copy(install_env):
 
 
 @pytest.mark.asyncio
-async def test_install_rejects_bundle_changed_while_it_is_being_copied(
-    install_env, monkeypatch
-):
+async def test_install_rejects_bundle_changed_while_it_is_being_copied(install_env, monkeypatch):
     source = _write_skill(install_env.sources / "demo")
     (source / "bin").mkdir()
-    (source / "bin" / "demo-skill-cli.py").write_text(
-        "print('original')\n", encoding="utf-8"
-    )
+    (source / "bin" / "demo-skill-cli.py").write_text("print('original')\n", encoding="utf-8")
     _, installer = _installer(install_env)
     preview = await installer.preview(source)
     real_copytree = install_module.shutil.copytree

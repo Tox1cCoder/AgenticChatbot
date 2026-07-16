@@ -54,8 +54,7 @@ def test_rag_agent_includes_user_attachments_in_multimodal_query():
     human_messages = [m for m in captured["messages"] if isinstance(m, HumanMessage)]
     assert any(
         isinstance(m.content, list)
-        and {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}
-        in m.content
+        and {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}} in m.content
         for m in human_messages
     )
 
@@ -114,7 +113,6 @@ def test_rag_agent_keeps_prior_user_image_attachments_in_history():
     human_messages = [m for m in captured["messages"] if isinstance(m, HumanMessage)]
     assert any(
         isinstance(m.content, list)
-        and {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}
-        in m.content
+        and {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}} in m.content
         for m in human_messages
     )

@@ -247,10 +247,7 @@ def test_mineru_content_list_table_body_is_indexed_as_searchable_text(tmp_path):
                 "page_idx": 0,
                 "table_caption": ["Revenue by segment"],
                 "table_body": (
-                    "| Segment | Revenue |\n"
-                    "|---|---|\n"
-                    "| Cloud | 12345 |\n"
-                    "| Devices | 67890 |"
+                    "| Segment | Revenue |\n|---|---|\n| Cloud | 12345 |\n| Devices | 67890 |"
                 ),
                 "table_footnote": [],
             },
