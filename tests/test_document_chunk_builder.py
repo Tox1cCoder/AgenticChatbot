@@ -10,6 +10,8 @@ from __future__ import annotations
 import inspect
 from hashlib import sha256
 
+from app.ai.token_counter import TokenCount
+
 
 def _block(
     *,
@@ -65,6 +67,31 @@ def test_chunk_content_sha256_is_deterministic():
     assert len(chunks) == 1
     expected = sha256(b"Hello world.").hexdigest()
     assert chunks[0].content_sha256 == expected
+
+
+def test_chunk_builder_uses_explicit_token_counter_strategy():
+    from app.services.document_chunk_builder import DocumentChunkBuilder
+
+    calls = []
+
+    class Counter:
+        def count_text(self, *, provider, model, text):
+            calls.append((provider, model, text))
+            return TokenCount(tokens=7, strategy="test")
+
+    builder = DocumentChunkBuilder(
+        target_tokens=20,
+        overlap_tokens=0,
+        max_tokens=40,
+        token_counter=Counter(),
+        token_provider="openai",
+        token_model="gpt-test",
+    )
+
+    chunks = builder.build([_block(block_id="b1", kind="paragraph", text="hello")])
+
+    assert chunks[0].token_count == 7
+    assert calls == [("openai", "gpt-test", "hello"), ("openai", "gpt-test", "hello")]
 
 
 def test_section_path_carries_through_from_blocks():

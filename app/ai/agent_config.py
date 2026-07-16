@@ -63,10 +63,6 @@ AGENT_CONFIG = {
         "model": "gemini-3-flash-preview",
         "temperature": 1.0,
     },
-    "summarization": {
-        "model": (getattr(settings, "summarization_model", None) or "gemini-3-flash-preview"),
-        "temperature": 1.0,
-    },
 }
 
 

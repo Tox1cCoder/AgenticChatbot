@@ -7,7 +7,6 @@ from qdrant_client import QdrantClient
 
 from app.ai.agents.planning_agent import PlanningAgent
 from app.ai.checkpoint import CheckpointManager
-from app.ai.conversation_summarizer import ConversationSummarizer
 from app.ai.graph import create_workflow
 from app.ai.history import ConversationHistoryProvider
 from app.ai.mcp_integration import MCPManager
@@ -29,9 +28,6 @@ from app.interfaces.task_plan_service_interface import ITaskPlanService
 from app.repositories.agent_model_config import AgentModelConfigRepository
 from app.repositories.conversation import ConversationRepository
 from app.repositories.conversation_compaction import ConversationCompactionRepository
-from app.repositories.conversation_memory_summary import (
-    ConversationMemorySummaryRepository,
-)
 from app.repositories.custom_agent import CustomAgentRepository
 from app.repositories.document import DocumentRepository
 from app.repositories.document_chunk import DocumentChunkRepository
@@ -286,11 +282,6 @@ class Container(containers.DeclarativeContainer):
         session_factory=db.provided.session,
     )
 
-    conversation_memory_summary_repository = providers.Factory(
-        ConversationMemorySummaryRepository,
-        session_factory=db.provided.session,
-    )
-
     history_provider = providers.Singleton(
         ConversationHistoryProvider,
         message_repository=message_repository,
@@ -332,15 +323,6 @@ class Container(containers.DeclarativeContainer):
     model_config_service = providers.Factory(
         ModelConfigService,
         repository=agent_model_config_repository,
-        provider_service=provider_service,
-    )
-
-    # Durable summarizer resolves Gemini credentials directly from provider
-    # settings so it never passes another provider's key to the Gemini summary
-    # model.
-    conversation_summarizer = providers.Singleton(
-        ConversationSummarizer,
-        settings=providers.Object(settings),
         provider_service=provider_service,
     )
 

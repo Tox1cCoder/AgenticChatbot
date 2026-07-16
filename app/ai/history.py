@@ -7,9 +7,8 @@ node receives both:
   JSON, when owned valid memory exists; and
 * recent unsummarized DB rows after its sequence cursor.
 
-This replaces the previous ``MemoryManager`` indirection plus a
-checkpoint-backed summary cursor with a single deterministic source of
-truth keyed on database message sequences.
+This replaces multiple prompt-memory paths with a single deterministic
+source of truth keyed on database message sequences.
 """
 
 from __future__ import annotations

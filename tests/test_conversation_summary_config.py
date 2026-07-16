@@ -75,7 +75,6 @@ def test_disabled_summary_allows_both_background_thresholds_disabled():
         ("conversation_summary_trigger_messages", -1),
         ("conversation_summary_trigger_tokens", -1),
         ("conversation_summary_keep_recent_turns", -1),
-        ("conversation_summary_max_tokens", -1),
         ("conversation_summary_safety_margin_tokens", -1),
         ("conversation_summary_default_reserved_output_tokens", -1),
     ],
@@ -83,6 +82,12 @@ def test_disabled_summary_allows_both_background_thresholds_disabled():
 def test_summary_budget_fields_must_be_non_negative(field, value):
     with pytest.raises(ValidationError, match="non-negative"):
         _settings(**{field: value})
+
+
+@pytest.mark.parametrize("value", [-1, 0])
+def test_non_positive_summary_token_cap_is_rejected(value):
+    with pytest.raises(ValidationError, match="positive"):
+        _settings(conversation_summary_max_tokens=value)
 
 
 @pytest.mark.parametrize(

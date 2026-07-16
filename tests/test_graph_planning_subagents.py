@@ -601,7 +601,7 @@ async def test_run_agent_in_isolated_context_stamps_subagent_task_id_in_run_conf
 
 
 @pytest.mark.asyncio
-async def test_run_agent_in_isolated_context_inherits_scoped_identifiers_without_history_summary(
+async def test_run_agent_in_isolated_context_inherits_scoped_identifiers(
     monkeypatch,
 ):
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
@@ -627,7 +627,6 @@ async def test_run_agent_in_isolated_context_inherits_scoped_identifiers_without
         "device_id": "device-7",
         "persona": "Alice",
         "model_request": {"chat": {"model": "x"}},
-        "history_summary": "older chat summary",
         "context": {},
         "messages": [],
     }
@@ -642,7 +641,6 @@ async def test_run_agent_in_isolated_context_inherits_scoped_identifiers_without
     assert captured_kwargs["user_id"] == "user-99"
     assert captured_kwargs["device_id"] == "device-7"
     assert captured_kwargs["model_request"] == {"chat": {"model": "x"}}
-    assert "history_summary" not in captured_kwargs
 
 
 @pytest.mark.asyncio
@@ -728,7 +726,6 @@ async def test_run_agent_in_isolated_context_tags_rag_worker_internal(monkeypatc
     assert "internal" in (run_config.get("tags") or [])
     assert "planning_subagent" in (run_config.get("tags") or [])
     assert (run_config.get("metadata") or {}).get("internal") is True
-    assert captured["metadata"].get("history_summary") is None
 
 
 @pytest.mark.asyncio
@@ -792,7 +789,6 @@ async def test_run_agent_in_isolated_context_drives_rag_search_loop(monkeypatch)
             "conversation_id": "conv-rag",
             "user_id": "user-1",
             "device_id": "device-1",
-            "history_summary": "parent memory should not be injected",
             "context": {},
             "messages": [],
         },
@@ -802,7 +798,6 @@ async def test_run_agent_in_isolated_context_drives_rag_search_loop(monkeypatch)
     assert len(captured_metadata) == 2
     assert captured_metadata[0]["tool_context"] == []
     assert captured_metadata[1]["tool_context"] == ["SEARCH RESULT"]
-    assert "history_summary" not in captured_metadata[1]
     assert response.tool_artifacts is not None
     assert response.tool_artifacts[0]["tool"] == "search_documents"
 

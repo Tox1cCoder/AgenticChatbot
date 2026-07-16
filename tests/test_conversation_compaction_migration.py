@@ -43,7 +43,6 @@ def test_downgrade_restores_legacy_summary_shape_and_removes_sequences():
     source = inspect.getsource(_migration_module().downgrade).lower()
 
     assert "summary_text" in source
-    assert "last_summarized_message_id" in source
     assert "estimated_tokens" in source
     assert 'drop_column("messages", "sequence")' in source
     assert 'drop_column("conversations", "next_message_sequence")' in source

@@ -15,11 +15,31 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from hashlib import sha256
-from typing import Any
+from typing import Any, Protocol
 
-from app.utils.text_processing import estimate_tokens
+from app.ai.token_counter import TokenCounter
 
 _MIN_ORPHAN_TOKENS = 20
+
+
+class _TextCounter(Protocol):
+    def count_text(self, *, provider: str, model: str, text: str): ...
+
+
+@dataclass(frozen=True)
+class DocumentTokenStrategy:
+    counter: _TextCounter
+    provider: str
+    model: str
+
+    def count(self, text: str) -> int:
+        return int(
+            self.counter.count_text(
+                provider=self.provider,
+                model=self.model,
+                text=text,
+            ).tokens
+        )
 
 
 @dataclass(frozen=True)
@@ -56,12 +76,13 @@ def _finalize_chunk(
     *,
     chunk_index: int,
     buffered_blocks: list[NormalizedBlock],
+    token_strategy: DocumentTokenStrategy,
     text: str | None = None,
 ) -> BuiltChunk:
     if text is None:
         text = "\n\n".join(b.text for b in buffered_blocks)
     char_count = len(text)
-    token_count = estimate_tokens(text)
+    token_count = token_strategy.count(text)
     page_starts = [b.page for b in buffered_blocks if b.page is not None]
     page_ends = [
         b.metadata.get("page_end", b.page)
@@ -125,7 +146,12 @@ def _finalize_chunk(
     )
 
 
-def _split_large_table(block: NormalizedBlock, *, target_tokens: int) -> list[str]:
+def _split_large_table(
+    block: NormalizedBlock,
+    *,
+    target_tokens: int,
+    token_strategy: DocumentTokenStrategy,
+) -> list[str]:
     """Split a big table on row-group boundaries, keeping the header row."""
     lines = [line for line in block.text.splitlines() if line.strip()]
     if not lines:
@@ -135,13 +161,13 @@ def _split_large_table(block: NormalizedBlock, *, target_tokens: int) -> list[st
     header_lines = lines[:2] if len(lines) >= 2 and "---" in lines[1] else lines[:1]
     row_lines = lines[len(header_lines) :]
 
-    header_tokens = estimate_tokens("\n".join(header_lines))
+    header_tokens = token_strategy.count("\n".join(header_lines))
     out: list[str] = []
     current_rows: list[str] = []
     current_tokens = header_tokens
 
     for row in row_lines:
-        row_tokens = estimate_tokens(row)
+        row_tokens = token_strategy.count(row)
         if current_rows and current_tokens + row_tokens > target_tokens:
             out.append("\n".join(header_lines + current_rows))
             current_rows = []
@@ -155,14 +181,20 @@ def _split_large_table(block: NormalizedBlock, *, target_tokens: int) -> list[st
     return out
 
 
-def _split_by_words(text: str, *, target_tokens: int, overlap_tokens: int) -> list[str]:
+def _split_by_words(
+    text: str,
+    *,
+    target_tokens: int,
+    overlap_tokens: int,
+    token_strategy: DocumentTokenStrategy,
+) -> list[str]:
     words = text.split()
     if not words:
         return [text]
 
     # Estimate how many words roughly fit in target_tokens.
     sample_text = " ".join(words[: min(len(words), 256)])
-    sample_tokens = max(1, estimate_tokens(sample_text))
+    sample_tokens = max(1, token_strategy.count(sample_text))
     words_per_token = len(words[: min(len(words), 256)]) / sample_tokens
     target_word_count = max(1, int(target_tokens * words_per_token))
     overlap_word_count = max(0, int(overlap_tokens * words_per_token))
@@ -192,14 +224,18 @@ def _split_sentence_units(text: str) -> list[str]:
     return units or [text]
 
 
-def _tail_units_for_overlap(units: list[str], overlap_tokens: int) -> list[str]:
+def _tail_units_for_overlap(
+    units: list[str],
+    overlap_tokens: int,
+    token_strategy: DocumentTokenStrategy,
+) -> list[str]:
     if overlap_tokens <= 0:
         return []
 
     tail: list[str] = []
     for unit in reversed(units):
         candidate = [unit, *tail]
-        if estimate_tokens(" ".join(candidate)) > overlap_tokens and tail:
+        if token_strategy.count(" ".join(candidate)) > overlap_tokens and tail:
             break
         tail = candidate
     return tail
@@ -211,14 +247,16 @@ def _split_long_text(
     target_tokens: int,
     overlap_tokens: int,
     max_tokens: int,
+    token_strategy: DocumentTokenStrategy,
 ) -> list[str]:
     """Split long text on sentence boundaries when possible."""
     sentence_units = _split_sentence_units(text)
-    if len(sentence_units) == 1 and estimate_tokens(sentence_units[0]) > max_tokens:
+    if len(sentence_units) == 1 and token_strategy.count(sentence_units[0]) > max_tokens:
         return _split_by_words(
             sentence_units[0],
             target_tokens=target_tokens,
             overlap_tokens=overlap_tokens,
+            token_strategy=token_strategy,
         )
 
     chunks: list[str] = []
@@ -230,10 +268,14 @@ def _split_long_text(
             return
         emitted = current_units
         chunks.append(" ".join(emitted))
-        current_units = _tail_units_for_overlap(emitted, overlap_tokens)
+        current_units = _tail_units_for_overlap(
+            emitted,
+            overlap_tokens,
+            token_strategy,
+        )
 
     for unit in sentence_units:
-        unit_tokens = estimate_tokens(unit)
+        unit_tokens = token_strategy.count(unit)
         if unit_tokens > max_tokens:
             emit_current()
             chunks.extend(
@@ -241,6 +283,7 @@ def _split_long_text(
                     unit,
                     target_tokens=target_tokens,
                     overlap_tokens=overlap_tokens,
+                    token_strategy=token_strategy,
                 )
             )
             current_units = []
@@ -248,11 +291,11 @@ def _split_long_text(
 
         candidate_units = [*current_units, unit]
         candidate_text = " ".join(candidate_units)
-        if current_units and estimate_tokens(candidate_text) > target_tokens:
+        if current_units and token_strategy.count(candidate_text) > target_tokens:
             emit_current()
             candidate_units = [*current_units, unit]
             candidate_text = " ".join(candidate_units)
-            if current_units and estimate_tokens(candidate_text) > max_tokens:
+            if current_units and token_strategy.count(candidate_text) > max_tokens:
                 current_units = []
                 candidate_units = [unit]
 
@@ -273,6 +316,9 @@ class DocumentChunkBuilder:
         target_tokens: int = 400,
         overlap_tokens: int = 40,
         max_tokens: int = 800,
+        token_counter: _TextCounter | None = None,
+        token_provider: str = "openai",
+        token_model: str = "gpt-4o",
     ):
         if target_tokens <= 0 or max_tokens < target_tokens:
             raise ValueError(
@@ -281,6 +327,11 @@ class DocumentChunkBuilder:
         self.target_tokens = target_tokens
         self.overlap_tokens = overlap_tokens
         self.max_tokens = max_tokens
+        self.token_strategy = DocumentTokenStrategy(
+            counter=token_counter or TokenCounter(),
+            provider=token_provider,
+            model=token_model,
+        )
 
     def build(self, blocks: list[NormalizedBlock]) -> list[BuiltChunk]:
         chunks: list[BuiltChunk] = []
@@ -293,13 +344,19 @@ class DocumentChunkBuilder:
             if not buffered:
                 return
             # Merge tiny orphan trailing blocks into the previous chunk if possible.
-            chunks.append(_finalize_chunk(chunk_index=chunk_index, buffered_blocks=list(buffered)))
+            chunks.append(
+                _finalize_chunk(
+                    chunk_index=chunk_index,
+                    buffered_blocks=list(buffered),
+                    token_strategy=self.token_strategy,
+                )
+            )
             chunk_index += 1
             buffered = []
             buffered_tokens = 0
 
         for block in blocks:
-            block_tokens = estimate_tokens(block.text)
+            block_tokens = self.token_strategy.count(block.text)
 
             # --- Atomic tables ----------------------------------------
             if _is_table(block):
@@ -307,12 +364,22 @@ class DocumentChunkBuilder:
                 emit_buffered()
 
                 if block_tokens <= self.max_tokens:
-                    chunks.append(_finalize_chunk(chunk_index=chunk_index, buffered_blocks=[block]))
+                    chunks.append(
+                        _finalize_chunk(
+                            chunk_index=chunk_index,
+                            buffered_blocks=[block],
+                            token_strategy=self.token_strategy,
+                        )
+                    )
                     chunk_index += 1
                     continue
 
                 # Oversized table: split on row groups but keep rows intact.
-                for piece in _split_large_table(block, target_tokens=self.target_tokens):
+                for piece in _split_large_table(
+                    block,
+                    target_tokens=self.target_tokens,
+                    token_strategy=self.token_strategy,
+                ):
                     synthetic = NormalizedBlock(
                         block_id=f"{block.block_id}::chunk-{chunk_index}",
                         kind=block.kind,
@@ -322,7 +389,11 @@ class DocumentChunkBuilder:
                         metadata={**block.metadata, "is_table_split_piece": True},
                     )
                     chunks.append(
-                        _finalize_chunk(chunk_index=chunk_index, buffered_blocks=[synthetic])
+                        _finalize_chunk(
+                            chunk_index=chunk_index,
+                            buffered_blocks=[synthetic],
+                            token_strategy=self.token_strategy,
+                        )
                     )
                     chunk_index += 1
                 continue
@@ -335,6 +406,7 @@ class DocumentChunkBuilder:
                     target_tokens=self.target_tokens,
                     overlap_tokens=self.overlap_tokens,
                     max_tokens=self.max_tokens,
+                    token_strategy=self.token_strategy,
                 ):
                     synthetic = NormalizedBlock(
                         block_id=f"{block.block_id}::chunk-{chunk_index}",
@@ -345,7 +417,11 @@ class DocumentChunkBuilder:
                         metadata=block.metadata,
                     )
                     chunks.append(
-                        _finalize_chunk(chunk_index=chunk_index, buffered_blocks=[synthetic])
+                        _finalize_chunk(
+                            chunk_index=chunk_index,
+                            buffered_blocks=[synthetic],
+                            token_strategy=self.token_strategy,
+                        )
                     )
                     chunk_index += 1
                 continue

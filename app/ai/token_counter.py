@@ -50,6 +50,8 @@ class ReportedTokenUsage:
     output_tokens: int | None
     total_tokens: int | None
     reasoning_tokens: int | None
+    cost_amount: float | None = None
+    cost_currency: str | None = None
     source: Literal["reported"] = "reported"
 
 
@@ -313,15 +315,36 @@ class TokenCounter:
                 envelope,
                 ("reasoning_tokens", "thoughts_token_count"),
             )
+            if reasoning_tokens is None:
+                reasoning_tokens = self._first_nested_usage_int(
+                    envelope,
+                    (
+                        ("output_token_details", "reasoning"),
+                        ("output_token_details", "reasoning_tokens"),
+                        ("completion_tokens_details", "reasoning_tokens"),
+                    ),
+                )
             if input_tokens is None and output_tokens is None and total_tokens is None:
                 continue
             if total_tokens is None and input_tokens is not None and output_tokens is not None:
                 total_tokens = input_tokens + output_tokens
+            cost_amount = self._first_usage_float(
+                envelope,
+                ("cost", "cost_amount", "total_cost"),
+            )
+            raw_currency = self._raw_value(envelope, "currency")
+            cost_currency = (
+                str(raw_currency).strip().upper()
+                if isinstance(raw_currency, str) and raw_currency.strip()
+                else None
+            )
             return ReportedTokenUsage(
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
                 reasoning_tokens=reasoning_tokens,
+                cost_amount=cost_amount,
+                cost_currency=cost_currency,
             )
         return None
 
@@ -351,6 +374,42 @@ class TokenCounter:
     def _first_usage_int(cls, data: Any, keys: tuple[str, ...]) -> int | None:
         for key in keys:
             value = cls._raw_value(data, key)
+            if value is None or isinstance(value, bool):
+                continue
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed >= 0:
+                return parsed
+        return None
+
+    @classmethod
+    def _first_usage_float(cls, data: Any, keys: tuple[str, ...]) -> float | None:
+        for key in keys:
+            value = cls._raw_value(data, key)
+            if value is None or isinstance(value, bool):
+                continue
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(parsed) and parsed >= 0:
+                return parsed
+        return None
+
+    @classmethod
+    def _first_nested_usage_int(
+        cls,
+        data: Any,
+        paths: tuple[tuple[str, ...], ...],
+    ) -> int | None:
+        for path in paths:
+            value = data
+            for key in path:
+                value = cls._raw_value(value, key)
+                if value is None:
+                    break
             if value is None or isinstance(value, bool):
                 continue
             try:

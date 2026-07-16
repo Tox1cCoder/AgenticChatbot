@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -8,7 +7,6 @@ import pytest
 
 from app.models.enums import MessageRole
 from app.repositories.message import MessageRepository
-from app.services.message_service import MessageService
 
 
 class _CommittedPersistence:
@@ -135,17 +133,3 @@ def test_hidden_placeholders_are_excluded_from_compaction_input(metadata, hidden
     )
 
     assert ConversationCompactionRepository._is_hidden_artifact(row) is hidden
-
-
-def test_legacy_in_process_summary_runner_is_deleted() -> None:
-    source = inspect.getsource(MessageService)
-
-    for symbol in (
-        "_summary_refresh_pending",
-        "_summary_refresh_active",
-        "_schedule_summary_refresh",
-        "_summary_refresh_runner",
-        "_refresh_summary_after_turn_safely",
-        "refresh_summary_after_turn",
-    ):
-        assert symbol not in source

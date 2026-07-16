@@ -1,8 +1,10 @@
 # Prompt prose intentionally exceeds the line limit; reflowing model-facing text harms readability.
 # ruff: noqa: E501
+from app.ai.token_counter import TokenCounter
 from app.core.config import settings
 from app.core.rich_response import build_rich_item_inventory_block
-from app.utils.text_processing import estimate_tokens
+
+_PROMPT_TOKEN_COUNTER = TokenCounter()
 
 INLINE_RICH_RESPONSE_SUFFIX = (
     "Use `<!--rich:<id>-->` on its own line only for an available rich item that improves\n"
@@ -399,7 +401,11 @@ def _select_history_for_prompt(
         if max_messages and len(selected) >= max_messages:
             break
 
-        message_tokens = estimate_tokens(message.content) + 4
+        message_tokens = _PROMPT_TOKEN_COUNTER.count_text(
+            provider="gemini",
+            model=settings.chat_agent_model,
+            text=message.content,
+        ).tokens + 4
 
         if max_tokens and total_tokens + message_tokens > max_tokens:
             if not selected:

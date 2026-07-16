@@ -3,7 +3,7 @@ from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, asc, desc, func, or_, select
+from sqlalchemy import asc, desc, func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.factories.message_factory import MessageFactory
@@ -211,63 +211,6 @@ class MessageCRUDStrategy(
         return int(anchor.sequence) if anchor is not None else None
 
     @staticmethod
-    def _lookup_anchor(db: Session, message_id: UUID) -> tuple | None:
-        """Return ``(created_at, id)`` for the given message, or ``None`` if absent."""
-        statement = select(Message).where(Message.id == message_id)
-        anchor = db.execute(statement).scalar_one_or_none()
-        if anchor is None:
-            return None
-        return anchor.created_at, anchor.id
-
-    def get_summarization_window(
-        self,
-        db: Session,
-        conversation_id: UUID,
-        *,
-        after_message_id: UUID | None = None,
-        through_message_id: UUID | None = None,
-    ) -> list[Message]:
-        """Return all summary-eligible messages between cursors (inclusive of through)."""
-        clauses = [
-            Message.conversation_id == conversation_id,
-            Message.deleted_at.is_(None),
-        ]
-
-        if after_message_id is not None:
-            anchor = self._lookup_anchor(db, after_message_id)
-            if anchor is not None:
-                anchor_created_at, anchor_id = anchor
-                clauses.append(
-                    or_(
-                        Message.created_at > anchor_created_at,
-                        and_(
-                            Message.created_at == anchor_created_at,
-                            Message.id > anchor_id,
-                        ),
-                    )
-                )
-
-        if through_message_id is not None:
-            anchor = self._lookup_anchor(db, through_message_id)
-            if anchor is not None:
-                anchor_created_at, anchor_id = anchor
-                clauses.append(
-                    or_(
-                        Message.created_at < anchor_created_at,
-                        and_(
-                            Message.created_at == anchor_created_at,
-                            Message.id <= anchor_id,
-                        ),
-                    )
-                )
-
-        statement = (
-            select(Message).where(*clauses).order_by(Message.created_at.asc(), Message.id.asc())
-        )
-        rows = list(db.execute(statement).scalars().all())
-        return [row for row in rows if not self._is_hidden_artifact(row)]
-
-    @staticmethod
     def _is_hidden_artifact(message: Message) -> bool:
         """Empty paused/interrupt assistant placeholders are not real transcript turns."""
         if message.sender != MessageRole.assistant.value:
@@ -456,22 +399,6 @@ class MessageRepository:
                 after_message_id=after_message_id,
                 after_sequence=after_sequence,
                 limit=limit,
-            )
-
-    def get_summarization_window(
-        self,
-        conversation_id: UUID,
-        *,
-        after_message_id: UUID | None = None,
-        through_message_id: UUID | None = None,
-    ) -> list[Message]:
-        """Return summary-eligible messages strictly after ``after_message_id`` and up to (inclusive) ``through_message_id``."""
-        with self.session_factory() as session:
-            return self._crud_strategy.get_summarization_window(
-                session,
-                conversation_id,
-                after_message_id=after_message_id,
-                through_message_id=through_message_id,
             )
 
     def get_latest_by_conversation(self, conversation_id: UUID) -> Message | None:

@@ -10,19 +10,7 @@ import re
 
 logger = logging.getLogger(__name__)
 
-import tiktoken  # noqa: E402
 from nltk.tokenize import sent_tokenize  # noqa: E402
-
-
-def estimate_tokens(text: str) -> int:
-    """
-    Estimate the number of tokens in a text string.
-    """
-    if not text:
-        return 0
-
-    encoding = tiktoken.get_encoding("cl100k_base")
-    return len(encoding.encode(text))
 
 
 def split_into_sentences(text: str) -> list[str]:

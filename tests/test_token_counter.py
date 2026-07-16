@@ -42,7 +42,8 @@ def test_gemini_thai_estimate_is_conservative_not_four_character_heuristic():
     result = counter.count_text(provider="gemini", model="gemini-2.5-flash", text=text)
 
     assert result.tokens >= math.ceil(len(text.encode("utf-8")) / 3)
-    assert result.tokens > len(text) // 4
+    old_ascii_heuristic = math.floor(len(text) / 4)
+    assert result.tokens > old_ascii_heuristic
     assert result.strategy == "gemini:utf8_bytes_div_3"
 
 
@@ -255,3 +256,20 @@ def test_extract_reported_usage_rejects_empty_or_negative_values():
     response = SimpleNamespace(usage_metadata={"input_tokens": -1, "output_tokens": None})
 
     assert TokenCounter().extract_reported_usage(provider="anthropic", response=response) is None
+
+
+def test_extract_reported_usage_preserves_provider_cost_metadata():
+    response = SimpleNamespace(
+        usage_metadata={
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_cost": "0.0042",
+            "currency": "USD",
+        }
+    )
+
+    usage = TokenCounter().extract_reported_usage(provider="openai", response=response)
+
+    assert usage is not None
+    assert usage.cost_amount == pytest.approx(0.0042)
+    assert usage.cost_currency == "USD"

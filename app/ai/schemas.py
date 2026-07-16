@@ -171,7 +171,6 @@ class GraphContext(TypedDict, total=False):
     agentic_rag_iteration: int
     consecutive_errors: int
     all_tasks_completed: bool
-    conversation_summarized: bool
     tool_provenance: dict[str, dict[str, Any]]
     force_final_response: bool
     tool_budget: dict[str, Any]

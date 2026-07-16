@@ -3,11 +3,9 @@ import contextlib
 import json
 import logging
 import time
-from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Optional
 from uuid import UUID
 
-from cachetools import TTLCache
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -51,7 +49,6 @@ from .hitl_config import (
     build_interrupt_response,
 )
 from .image_context import build_multimodal_content, has_image_parts
-from .memory import get_memory_manager
 from .rag_tool_actions import canonicalize_rag_tool_call, execute_search_documents_action
 from .schemas import (
     AgentMessage,
@@ -64,10 +61,6 @@ from .schemas import (
     MessageRole,
     TodoStatus,
     WorkflowExecutionRequest,
-)
-from .token_instrumentation import (
-    HistoryBudgetConfig,
-    trim_history_to_budget,
 )
 from .tool_context import tool_execution_context
 from .tool_execution import (
@@ -148,9 +141,8 @@ class MultiAgentWorkflow(
         history_provider: ConversationHistoryProvider | None = None,
     ):
         self.qdrant_client = qdrant_client
-        # Canonical prompt-history source. When ``None`` the workflow falls
-        # back to the legacy ``MemoryManager``-driven path so tests that
-        # construct ``MultiAgentWorkflow.__new__`` directly keep working.
+        # Canonical prompt-history source. Workflows without it intentionally
+        # run without persisted history rather than using a second source.
         self.history_provider = history_provider
         self.router = Router()
         self.chat_agent = ChatAgent(runtime_model_resolver=runtime_model_resolver)
@@ -181,13 +173,6 @@ class MultiAgentWorkflow(
         # Stored so per-turn CustomAgent instances resolve models the same way
         # base agents do. Custom agents are built on demand from workflow state.
         self._runtime_model_resolver = runtime_model_resolver
-
-        # Conversation history cache with bounded size + automatic TTL eviction.
-        # Replaces the plain dict to prevent unbounded memory growth.
-        self._history_cache_ttl_seconds: int = 60
-        self._history_cache: TTLCache = TTLCache(maxsize=256, ttl=self._history_cache_ttl_seconds)
-        # Per-conversation lock to prevent duplicate DB lookups under concurrency.
-        self._history_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
         self.graph = self._build_graph()
         self._cleanup_agents = [
@@ -231,9 +216,8 @@ class MultiAgentWorkflow(
     ):
         """Build a full ``ConversationHistoryContext`` from the provider.
 
-        Returns ``None`` when the provider is not wired (e.g. tests that
-        construct ``MultiAgentWorkflow.__new__`` directly) or when ids are
-        missing — callers must handle this and fall back to the legacy path.
+        Returns ``None`` when the provider is not wired or identifiers are
+        missing.
         """
         if not conversation_id or not user_id or self.history_provider is None:
             return None
@@ -262,7 +246,7 @@ class MultiAgentWorkflow(
         state: GraphState | None = None,
     ) -> list:
         """
-        Get conversation history with caching and budget trimming.
+        Get sequence-scoped conversation history from the canonical provider.
 
         When the workflow is wired with a ``ConversationHistoryProvider``
         (production path), the provider is the single source of truth: it
@@ -270,18 +254,13 @@ class MultiAgentWorkflow(
         by ``user_message_id`` and the durable memory sequence cursor. Owned
         valid memory is already the first lower-priority history message.
 
-        When the provider is absent (legacy/test path) we fall back to the
-        ``MemoryManager`` + tail-position exclusion.
-
-        History is trimmed according to agent-specific settings:
-        - {agent_key}_history_max_messages
-        - {agent_key}_history_max_tokens
+        When the provider is absent, no persisted history is injected.
         """
         if not conversation_id or not user_id:
             return []
 
         # Provider path — preferred.
-        if self.history_provider is not None:
+        if getattr(self, "history_provider", None) is not None:
             current_message_id = None
             if state is not None:
                 current_message_id = state.get("user_message_id")
@@ -294,44 +273,11 @@ class MultiAgentWorkflow(
             if context is not None:
                 return list(context.messages)
 
-        # Legacy fallback (no provider wired).
-        cache_key = conversation_id
-        async with self._history_locks[cache_key]:
-            if cache_key in self._history_cache:
-                cached_history = self._history_cache[cache_key]
-                if agent_key:
-                    budget_config = HistoryBudgetConfig.for_agent(agent_key, settings)
-                    return trim_history_to_budget(
-                        cached_history,
-                        max_messages=budget_config.max_messages,
-                        max_tokens=budget_config.max_tokens,
-                    )
-                return cached_history
-
-            try:
-                memory_manager = get_memory_manager()
-                conv_memory = await memory_manager.get_memory(
-                    UUID(conversation_id), UUID(user_id), force_refresh=True
-                )
-                history = conv_memory.get_recent_messages(limit=None, exclude_last=1)
-
-                self._history_cache[cache_key] = history
-
-                if agent_key:
-                    budget_config = HistoryBudgetConfig.for_agent(agent_key, settings)
-                    return trim_history_to_budget(
-                        history,
-                        max_messages=budget_config.max_messages,
-                        max_tokens=budget_config.max_tokens,
-                    )
-                return history
-            except Exception:
-                return []
+        return []
 
     def invalidate_history_cache(self, conversation_id: str) -> None:
         """Invalidate cached history for a conversation (call when new messages added)."""
-        self._history_cache.pop(conversation_id, None)
-        if self.history_provider is not None:
+        if getattr(self, "history_provider", None) is not None:
             self.history_provider.invalidate(conversation_id)
 
     def _find_last_human_message_index(self, messages: list) -> int | None:
@@ -2120,12 +2066,6 @@ class MultiAgentWorkflow(
         ctx = state_view.context_copy()
         ctx.pop("pause_reason", None)
         ctx.pop("continuation_signal", None)
-
-        # NOTE (P2 regression-check): `conversation_summarized` is deliberately
-        # *not* popped here so the summarize node skips re-summarization in
-        # subsequent auto-continue rounds within the same user turn.
-        # If this key were cleared, each continuation round would re-trigger
-        # summarization and double-remove messages already covered.
 
         # Add lightweight trace context (helpful for logs/prompts).
         ctx["continuation_round"] = round_num

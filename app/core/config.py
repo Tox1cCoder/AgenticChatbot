@@ -474,26 +474,6 @@ class Settings(BaseSettings):
         description="Default output-token reservation used by request preflight",
     )
 
-    memory_summary_min_unsummarized_messages: int = Field(
-        default=60,
-        description="Refresh the durable summary once this many unsummarized messages exist (0 disables the message threshold)",
-    )
-    memory_summary_min_unsummarized_tokens: int = Field(
-        default=18000,
-        description="Refresh the durable summary once unsummarized history exceeds this token estimate (0 disables the token threshold)",
-    )
-    memory_summary_keep_messages: int = Field(
-        default=8,
-        description="When refreshing the durable summary, keep this many newest messages out of the summary",
-    )
-    memory_summary_max_tokens: int = Field(
-        default=1500,
-        description="Approximate maximum tokens to allow in a generated durable summary",
-    )
-    memory_summary_timeout_seconds: int = Field(
-        default=30,
-        description="Maximum seconds to wait for a durable summary refresh before giving up and leaving the previous summary in place",
-    )
     chat_history_max_messages: int = Field(
         default=24,
         description="Maximum prior messages to include when building chat prompts (0 = no limit)",
@@ -511,46 +491,6 @@ class Settings(BaseSettings):
         description="Approximate maximum tokens of RAG history to include in prompts (0 = no limit)",
     )
 
-    # Summarization Middleware Configuration
-    enable_summarization: bool = Field(
-        default=True,
-        description="Enable automatic conversation summarization for long conversations",
-    )
-    summarization_trigger_tokens: int = Field(
-        default=18000,
-        description="Trigger summarization when estimated tokens exceed this threshold",
-    )
-    summarization_trigger_messages: int = Field(
-        default=60,
-        description="Trigger summarization when message count exceeds this threshold",
-    )
-    summarization_trigger_fraction: float = Field(
-        default=0.55,
-        description="Trigger summarization when context usage exceeds this fraction of model's context window (0.0-1.0)",
-    )
-    summarization_model_context_size: int = Field(
-        default=128000,
-        description="Model context window size in tokens (cross-provider practical baseline)",
-    )
-    summarization_keep_messages: int = Field(
-        default=8,
-        description="Number of recent messages to keep after summarization",
-    )
-    summarization_model: str = Field(
-        default="gemini-3-flash-preview",
-        description="Model to use for generating conversation summaries",
-    )
-    summarization_max_summary_tokens: int = Field(
-        default=1500,
-        description="Hard cap on rolling summary size in estimated tokens. "
-        "Summaries exceeding this limit are truncated to stay within budget. "
-        "Set to 0 for unlimited (no truncation).",
-    )
-    summarization_timeout_seconds: int = Field(
-        default=30,
-        description="Maximum seconds to wait for a summarization model call before timing out. "
-        "On timeout the original state is returned unchanged (fail-closed).",
-    )
     suppress_internal_stream_chunks: bool = Field(
         default=True,
         description="When True, stream chunks tagged as 'internal' (e.g. summarization node output) "
@@ -1246,6 +1186,7 @@ class Settings(BaseSettings):
         "conversation_summary_retry_base_seconds",
         "conversation_summary_retry_max_seconds",
         "conversation_summary_reconcile_seconds",
+        "conversation_summary_max_tokens",
         mode="before",
     )
     @classmethod
@@ -1330,15 +1271,9 @@ class Settings(BaseSettings):
         "search_history_max_tokens",
         "planning_history_max_messages",
         "planning_history_max_tokens",
-        "summarization_trigger_tokens",
-        "summarization_trigger_messages",
-        "summarization_keep_messages",
-        "summarization_model_context_size",
         "memory_max_messages",
         "memory_load_batch_size",
         "tool_result_max_chars",
-        "summarization_max_summary_tokens",
-        "summarization_timeout_seconds",
         "mcp_tool_search_default_top_k",
         "mcp_tool_search_max_top_k",
         "mcp_tool_search_description_max_chars",
@@ -1352,7 +1287,6 @@ class Settings(BaseSettings):
         "conversation_summary_trigger_messages",
         "conversation_summary_trigger_tokens",
         "conversation_summary_keep_recent_turns",
-        "conversation_summary_max_tokens",
         "conversation_summary_safety_margin_tokens",
         "conversation_summary_default_reserved_output_tokens",
         mode="before",
@@ -1365,7 +1299,6 @@ class Settings(BaseSettings):
         return v
 
     @field_validator(
-        "summarization_trigger_fraction",
         "auto_continue_soft_limit_ratio",
         mode="before",
     )
@@ -1440,16 +1373,6 @@ class Settings(BaseSettings):
                 raise ValueError("conversation summary model must be explicit in production")
             if "preview" in self.conversation_summary_model.strip().lower():
                 raise ValueError("conversation summary model must be stable in production")
-        if self.summarization_keep_messages >= self.summarization_trigger_messages:
-            raise ValueError(
-                f"summarization_keep_messages ({self.summarization_keep_messages}) "
-                f"must be less than summarization_trigger_messages ({self.summarization_trigger_messages})"
-            )
-        if self.summarization_model_context_size < self.summarization_trigger_tokens:
-            raise ValueError(
-                f"summarization_model_context_size ({self.summarization_model_context_size}) "
-                f"must be >= summarization_trigger_tokens ({self.summarization_trigger_tokens})"
-            )
         return self
 
 
