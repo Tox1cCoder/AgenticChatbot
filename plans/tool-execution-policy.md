@@ -676,7 +676,7 @@ git commit -m "feat: enforce two-phase tool deadlines"
 - Test: `tests/test_tool_error_policy.py`
 - Test: `tests/test_tool_execution_recovery.py`
 
-- [ ] **Step 1: Write failing retry-budget tests**
+- [x] **Step 1: Write failing retry-budget tests**
 
 Add these cases:
 
@@ -699,7 +699,7 @@ For the unsafe session case, assert the tool invocation count is exactly one and
 attempt count is two and elapsed wall time remains below the total deadline plus
 a small scheduler tolerance.
 
-- [ ] **Step 2: Run focused retry tests and verify they fail**
+- [x] **Step 2: Run focused retry tests and verify they fail**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_tool_error_policy.py tests/test_tool_execution_recovery.py -k "retry or reconnect or total_deadline" -q
@@ -708,7 +708,7 @@ a small scheduler tolerance.
 Expected: failures because model retryability still reflects only failure class
 and reconnect bypasses the policy loop.
 
-- [ ] **Step 3: Separate failure classification from repeat policy**
+- [x] **Step 3: Separate failure classification from repeat policy**
 
 Replace the overloaded summary flag with:
 
@@ -731,14 +731,14 @@ model_retryable = summary.failure_retryable and policy_retry_allowed
 Record both values in artifacts. Keep the compact model payload keys unchanged
 apart from the corrected boolean meaning.
 
-- [ ] **Step 4: Move reconnect into the cumulative attempt loop**
+- [x] **Step 4: Move reconnect into the cumulative attempt loop**
 
 Remove the separate reconnect execution branch. On a session failure, reconnect
 only when `auto_retry_allowed` is true, bound reconnect with the remaining total
 deadline, replace the tool in `tool_map`, and continue the same loop. Preserve
 one final artifact and one `attempt_history` list.
 
-- [ ] **Step 5: Run the complete error-policy and recovery suites**
+- [x] **Step 5: Run the complete error-policy and recovery suites**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_tool_error_policy.py tests/test_tool_execution_recovery.py -q
@@ -746,7 +746,7 @@ one final artifact and one `attempt_history` list.
 
 Expected: all tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add app/ai/tool_execution.py app/ai/tool_error_policy.py tests/test_tool_error_policy.py tests/test_tool_execution_recovery.py
@@ -767,14 +767,14 @@ git commit -m "fix: unify safe tool retries and reconnects"
 - Test: `tests/test_skills_tool.py`
 - Test: `tests/client_backend/test_runtime_bridge.py`
 
-- [ ] **Step 1: Write failing deadline propagation tests**
+- [x] **Step 1: Write failing deadline propagation tests**
 
 Add tests asserting:
 
 ```python
-assert dispatch_kwargs["execution_timeout_seconds"] == 27.0
+assert dispatch_kwargs["execution_timeout_seconds"] == 28.0
 assert dispatch_kwargs["response_timeout_seconds"] == 29.0
-assert request.timeout_seconds == 27.0
+assert request.timeout_seconds == 28.0
 assert store_dispatch_timeout == 29.0
 ```
 
@@ -783,7 +783,7 @@ grace plus one-second response grace. Add an `activate_skill` case with the same
 assertions and a no-policy-context case that preserves the existing
 `client_runtime_ws_timeout_seconds` fallback.
 
-- [ ] **Step 2: Run the client deadline tests and verify they fail**
+- [x] **Step 2: Run the client deadline tests and verify they fail**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_client_invocation_isolation.py tests/test_skills_tool.py tests/client_backend/test_runtime_bridge.py -k "timeout or deadline or dispatch" -q
@@ -792,7 +792,7 @@ assertions and a no-policy-context case that preserves the existing
 Expected: failures because dispatch currently accepts one integer timeout and
 ignores resolved policy context.
 
-- [ ] **Step 3: Split execution and response deadlines**
+- [x] **Step 3: Split execution and response deadlines**
 
 Change `ClientDeviceService.dispatch_tool_call()` to keep its current identity,
 argument, binding, and mutation parameters, replace `timeout_seconds` with the
@@ -804,7 +804,7 @@ pass `response_timeout_seconds` only to the server runtime store wait. Change th
 protocol field and sidecar call paths to positive floats; remove the integer cast
 in `RuntimeBridgeService._execute_tool_request()`.
 
-- [ ] **Step 4: Read scoped policy in both client wrappers**
+- [x] **Step 4: Read scoped policy in both client wrappers**
 
 When policy context exists, use its client execution and response fields. When
 it does not exist, pass the current WebSocket timeout for both values so direct
@@ -814,7 +814,7 @@ and manual dispatch behavior remains compatible. Give the generated
 `qualified_tool_id="client_skill::activate"` so its policy cannot fall back to
 an unrelated internal-tool identity.
 
-- [ ] **Step 5: Run the three client suites**
+- [x] **Step 5: Run the three client suites**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_client_invocation_isolation.py tests/test_skills_tool.py tests/client_backend/test_runtime_bridge.py -q
@@ -822,7 +822,7 @@ an unrelated internal-tool identity.
 
 Expected: all tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add app/ai/client_runtime_tools.py app/ai/skills_tool.py app/services/client_device_service.py app/services/client_runtime_store.py app/schemas/runtime_protocol.py client_backend/services/runtime_bridge.py client_backend/services/local_mcp_manager.py tests/test_client_invocation_isolation.py tests/test_skills_tool.py tests/client_backend/test_runtime_bridge.py
@@ -1147,3 +1147,24 @@ Design decisions:
 - `None` and positive infinity mean an unbounded cumulative remainder; NaN, negative infinity, zero, and negative finite values fail closed as exhausted.
 - Review finding (fixed): exhausted cumulative budgets are rejected before task creation. Creating a task and then calling `asyncio.wait(timeout=0)` let an immediate tool execute after deadline exhaustion (reproduced 100/100 before the fix).
 - The sync-thread regression test waits for worker startup under a generous guard before awaiting the deadline outcome, avoiding a flaky assumption that a cold Windows executor starts inside 50 ms.
+
+### Task 4 — complete (commits 1616862..601f376, controller review Approved)
+
+35 complete error-policy and recovery tests green; `git diff --check` clean.
+
+Design decisions:
+- Failure transience and safe repeatability are now distinct; model-facing `retryable` requires both.
+- Ordinary retries and server-MCP reconnects share one attempt loop and cumulative deadline.
+- `dispatch_subagents` remains unbounded through the unified runner via the exact code-owned allowlist while the legacy bridge awaits Task 8 removal.
+- Subagent review was not used because the active workspace policy requires explicit user authorization for delegation; the controller reviewed the exact Task 4 diff and focused suite before proceeding.
+
+### Task 5 — complete (commit ae88c0c, controller review Approved)
+
+29 planned client/runtime tests green; 53 tests green including the adjacent multi-sidecar gateway suite; Ruff and `git diff --check` clean.
+
+Design decisions:
+- Corrected the stale Task 5 example from 27/29 to 28/29. The accepted resolver contract independently subtracts the two-second execution grace and one-second response grace from the 30-second server soft timeout.
+- Client MCP wrappers and `activate_skill` read the scoped policy and retain the prior WebSocket timeout for both values when invoked outside policy context.
+- `activate_skill` now carries application-owned `client_skill` identity metadata.
+- A full call-site audit found `DeviceRuntimeGateway` outside the original Task 5 file map. Its manual single timeout now maps to both deadlines, preserving that compatibility API.
+- Float deadlines are preserved through the protocol, bridge, runtime store, and local MCP manager without integer truncation.
