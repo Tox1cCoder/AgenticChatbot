@@ -9,7 +9,11 @@ from types import SimpleNamespace
 import pytest
 from anyio import ClosedResourceError
 
-from app.ai.tool_execution import execute_tool_calls, invoke_tool_attempt
+from app.ai.tool_execution import (
+    execute_tool_calls,
+    invoke_tool_attempt,
+    invoke_tool_with_policy,
+)
 from app.ai.tool_execution_policy import ToolExecutionPolicy, ToolIdentity
 from app.core.config import ToolExecutionPolicyOverride, settings
 
@@ -555,6 +559,35 @@ async def test_execute_tool_calls_metadata_none_disables_timeout(monkeypatch):
 
     assert outputs[0]["content"] == "done"
     assert artifacts[0].get("status") != "error"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_subagents_policy_stays_unbounded_through_unified_path(monkeypatch):
+    monkeypatch.setattr(settings, "tool_execution_timeout", 0.02)
+    monkeypatch.setattr(settings, "tool_execution_cancellation_grace_seconds", 0.01)
+
+    class _DispatchSubagentsTool:
+        name = "dispatch_subagents"
+        metadata = {
+            "tool_origin": "internal",
+            "qualified_tool_id": "internal::dispatch_subagents",
+            "application_execution_policy": {"disable_outer_timeout": True},
+        }
+
+        async def ainvoke(self, args):
+            await asyncio.sleep(0.08)
+            return "done"
+
+    result, error_detail, error_content, diagnostics = await invoke_tool_with_policy(
+        _DispatchSubagentsTool(),
+        {},
+        tool_name="dispatch_subagents",
+    )
+
+    assert result == "done"
+    assert error_detail is None
+    assert error_content is None
+    assert diagnostics["attempts"] == 1
 
 
 def test_resolve_tool_timeout_seconds_bridges_dispatch_subagents_policy_metadata(monkeypatch):

@@ -1352,9 +1352,13 @@ async def invoke_tool_with_policy(
     current_tool = tool
 
     while attempts < policy.max_attempts:
-        remaining_total_seconds = max(
-            0.0,
-            policy.total_timeout_seconds - (time.monotonic() - started_at),
+        remaining_total_seconds = (
+            None
+            if policy.outer_timeout_disabled
+            else max(
+                0.0,
+                policy.total_timeout_seconds - (time.monotonic() - started_at),
+            )
         )
         attempts += 1
         with tool_policy_context(policy):
