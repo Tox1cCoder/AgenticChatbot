@@ -33,6 +33,7 @@ from .skill_resolver import (
     resolve_skill_reference as resolve_runtime_skill_reference,
 )
 from .tool_context import get_tool_context
+from .tool_execution_policy import get_current_tool_policy
 
 logger = logging.getLogger(__name__)
 
@@ -156,13 +157,25 @@ def create_activate_skill_tool(
                 "Retry from the active device session."
             )
 
+        policy = get_current_tool_policy()
+        execution_timeout_seconds = (
+            policy.client_execution_timeout_seconds
+            if policy is not None and policy.client_execution_timeout_seconds is not None
+            else float(settings.client_runtime_ws_timeout_seconds)
+        )
+        response_timeout_seconds = (
+            policy.client_response_timeout_seconds
+            if policy is not None and policy.client_response_timeout_seconds is not None
+            else float(settings.client_runtime_ws_timeout_seconds)
+        )
         response = await ClientDeviceService.dispatch_tool_call(
             user_id=bound_user_id,
             device_id=bound_device_id,
             tool_name="activate_skill",
             qualified_tool_id="client_skill::activate",
             arguments={"skill_name": resolved_skill.name},
-            timeout_seconds=settings.client_runtime_ws_timeout_seconds,
+            execution_timeout_seconds=execution_timeout_seconds,
+            response_timeout_seconds=response_timeout_seconds,
             bound_session_id=expected_session_id,
         )
 
@@ -191,4 +204,9 @@ def create_activate_skill_tool(
             )
         return content
 
+    activate_skill.metadata = {
+        "tool_origin": "client_skill",
+        "qualified_tool_id": "client_skill::activate",
+        "source_tool_name": "activate_skill",
+    }
     return activate_skill

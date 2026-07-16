@@ -253,7 +253,7 @@ class DeviceRuntimeGateway:
         tool_name: str,
         qualified_tool_id: str,
         arguments: dict[str, Any],
-        timeout_seconds: int = 30,
+        timeout_seconds: float = 30.0,
     ) -> dict:
         """
         Dispatch a tool call to the device and wait for the result.
@@ -278,7 +278,8 @@ class DeviceRuntimeGateway:
             tool_name=tool_name,
             qualified_tool_id=qualified_tool_id,
             arguments=arguments,
-            timeout_seconds=timeout_seconds,
+            execution_timeout_seconds=timeout_seconds,
+            response_timeout_seconds=timeout_seconds,
             bound_session_id=self.session.session_id,
         )
 

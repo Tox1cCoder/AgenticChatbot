@@ -27,7 +27,7 @@ class ToolDispatchRequest(BaseModel):
     tool_name: str
     qualified_tool_id: str
     arguments: dict[str, Any]
-    timeout_seconds: int = 30
+    timeout_seconds: float = Field(default=30.0, gt=0)
     # Execution-scope validation fields - sidecar must reject if they mismatch.
     tool_instance_id: str | None = None
     expected_session_id: str | None = None

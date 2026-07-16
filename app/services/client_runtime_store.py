@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -77,8 +78,10 @@ def _runtime_redis_url() -> str:
     return ""
 
 
-def _request_tracking_ttl_seconds(timeout_seconds: int | None = None) -> int:
-    requested_timeout = int(timeout_seconds or settings.client_runtime_ws_timeout_seconds or 0)
+def _request_tracking_ttl_seconds(timeout_seconds: float | None = None) -> int:
+    requested_timeout = math.ceil(
+        timeout_seconds or settings.client_runtime_ws_timeout_seconds or 0
+    )
     return max(_session_ttl_seconds(), requested_timeout + _RESULT_TTL_SECONDS)
 
 
@@ -226,7 +229,7 @@ class BaseClientRuntimeStore:
         self,
         session: DeviceSessionRecord,
         request: ToolDispatchRequest,
-        timeout_seconds: int,
+        timeout_seconds: float,
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -381,7 +384,7 @@ class InMemoryClientRuntimeStore(BaseClientRuntimeStore):
         self,
         session: DeviceSessionRecord,
         request: ToolDispatchRequest,
-        timeout_seconds: int,
+        timeout_seconds: float,
     ) -> dict[str, Any]:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[ToolDispatchResult] = loop.create_future()
@@ -642,7 +645,7 @@ class RedisClientRuntimeStore(BaseClientRuntimeStore):
         self,
         session: DeviceSessionRecord,
         request: ToolDispatchRequest,
-        timeout_seconds: int,
+        timeout_seconds: float,
     ) -> dict[str, Any]:
         tracking_ttl = _request_tracking_ttl_seconds(timeout_seconds)
         pipeline = self._async.pipeline()

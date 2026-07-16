@@ -118,6 +118,35 @@ async def test_runtime_bridge_executes_activate_skill_locally(monkeypatch):
     assert "Desktop Commander" in result
 
 
+@pytest.mark.asyncio
+async def test_runtime_bridge_preserves_float_tool_execution_timeout(monkeypatch):
+    bridge = RuntimeBridgeService(server_client=_ServerClientStub())
+    calls: list[dict] = []
+
+    async def _call_tool(**kwargs):
+        calls.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        runtime_bridge_module,
+        "get_mcp_manager",
+        lambda: SimpleNamespace(call_tool=_call_tool),
+    )
+
+    result = await bridge._execute_tool_request(
+        ToolDispatchRequest(
+            request_id="req-float-timeout",
+            tool_name="echo_text",
+            qualified_tool_id="demo::echo_text",
+            arguments={"text": "hello"},
+            timeout_seconds=27.5,
+        )
+    )
+
+    assert result == {"ok": True}
+    assert calls[0]["timeout"] == 27.5
+
+
 def test_collect_skill_tools_publishes_only_ready_fixed_command(monkeypatch):
     ready = SimpleNamespace(
         name="ready-skill",

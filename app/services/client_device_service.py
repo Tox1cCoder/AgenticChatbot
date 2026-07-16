@@ -60,7 +60,8 @@ class ClientDeviceService:
         tool_name: str,
         qualified_tool_id: str,
         arguments: dict[str, Any],
-        timeout_seconds: int,
+        execution_timeout_seconds: float,
+        response_timeout_seconds: float,
         bound_session_id: str | None = None,
         bound_catalog_version: int | None = None,
         tool_instance_id: str | None = None,
@@ -111,7 +112,7 @@ class ClientDeviceService:
             tool_name=tool_name,
             qualified_tool_id=qualified_tool_id,
             arguments=arguments,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=execution_timeout_seconds,
             tool_instance_id=tool_instance_id,
             expected_session_id=session.session_id,
             expected_catalog_version=(
@@ -121,7 +122,11 @@ class ClientDeviceService:
             ),
             mutation_approved=mutation_approved,
         )
-        return await get_client_runtime_store().dispatch_request(session, request, timeout_seconds)
+        return await get_client_runtime_store().dispatch_request(
+            session,
+            request,
+            response_timeout_seconds,
+        )
 
     async def register_or_update_device(
         self,

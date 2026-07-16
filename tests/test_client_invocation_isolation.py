@@ -30,6 +30,11 @@ from app.ai.deferred_tool_state import get_deferred_tool_state, reset_deferred_t
 from app.ai.graph import MultiAgentWorkflow
 from app.ai.schemas import GraphState, WorkflowExecutionRequest
 from app.ai.tool_context import tool_execution_context
+from app.ai.tool_execution_policy import (
+    resolve_tool_execution_policy,
+    tool_policy_context,
+)
+from app.api.device_runtime import DeviceRuntimeGateway
 from app.core.config import settings
 from app.services import client_runtime_store as runtime_store_module
 from app.services.client_device_service import ClientDeviceService
@@ -158,8 +163,93 @@ async def test_turn_from_device_b_binds_and_dispatches_only_b(monkeypatch):
 
         assert result == "ok"
         assert [d["device_id"] for d in dispatches] == [str(device_b)]
+        assert dispatches[0]["execution_timeout_seconds"] == (
+            settings.client_runtime_ws_timeout_seconds
+        )
+        assert dispatches[0]["response_timeout_seconds"] == (
+            settings.client_runtime_ws_timeout_seconds
+        )
     finally:
         _reset_runtime_state()
+
+
+@pytest.mark.asyncio
+async def test_client_tool_dispatch_uses_scoped_policy_deadlines(monkeypatch):
+    _reset_runtime_state()
+    store = InMemoryClientRuntimeStore()
+    runtime_store_module._store = store
+
+    user_id = uuid4()
+    device_id = uuid4()
+    await _connect_device(
+        store,
+        user_id=user_id,
+        device_id=device_id,
+        session_id="session-policy",
+        server="time_server",
+        tool="get_current_time",
+    )
+    dispatches: list[dict] = []
+
+    async def _capture_dispatch(**kwargs):
+        dispatches.append(kwargs)
+        return {"success": True, "result": "ok"}
+
+    monkeypatch.setattr(ClientDeviceService, "dispatch_tool_call", _capture_dispatch)
+
+    try:
+        tool = get_client_runtime_tools(user_id=str(user_id), device_id=str(device_id))[0]
+        policy = resolve_tool_execution_policy(
+            tool,
+            exposed_tool_name=tool.name,
+            invocation_kind="client_runtime",
+        )
+
+        with (
+            tool_execution_context(
+                conversation_id="conversation-policy",
+                user_id=str(user_id),
+                agent_key="chat",
+                device_id=str(device_id),
+            ),
+            tool_policy_context(policy),
+        ):
+            result = await tool.coroutine()
+
+        assert result == "ok"
+        assert dispatches[0]["execution_timeout_seconds"] == 28.0
+        assert dispatches[0]["response_timeout_seconds"] == 29.0
+    finally:
+        _reset_runtime_state()
+
+
+@pytest.mark.asyncio
+async def test_device_runtime_gateway_maps_manual_timeout_to_both_deadlines(monkeypatch):
+    dispatches: list[dict] = []
+
+    async def _capture_dispatch(**kwargs):
+        dispatches.append(kwargs)
+        return {"success": True, "result": "ok"}
+
+    monkeypatch.setattr(ClientDeviceService, "dispatch_tool_call", _capture_dispatch)
+    gateway = DeviceRuntimeGateway(
+        websocket=SimpleNamespace(),
+        device_id=uuid4(),
+        session=SimpleNamespace(user_id=uuid4(), device_id=uuid4(), session_id="session-1"),
+        service=SimpleNamespace(),
+    )
+
+    result = await gateway.dispatch_tool_call(
+        request_id="request-1",
+        tool_name="echo_text",
+        qualified_tool_id="demo::echo_text",
+        arguments={"text": "hello"},
+        timeout_seconds=5.5,
+    )
+
+    assert result == {"success": True, "result": "ok"}
+    assert dispatches[0]["execution_timeout_seconds"] == 5.5
+    assert dispatches[0]["response_timeout_seconds"] == 5.5
 
 
 def _build_message_service() -> MessageService:

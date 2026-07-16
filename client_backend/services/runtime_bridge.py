@@ -586,7 +586,9 @@ class RuntimeBridgeService:
     async def _execute_tool_request(self, request: ToolDispatchRequest) -> Any:
         qualified_tool_id = request.qualified_tool_id
         arguments = request.arguments
-        timeout_seconds = int(request.timeout_seconds or client_settings.tool_call_timeout_seconds)
+        timeout_seconds = float(
+            request.timeout_seconds or client_settings.tool_call_timeout_seconds
+        )
 
         if qualified_tool_id == "client_skill::activate":
             return await self._execute_client_skill_request(arguments=arguments)
@@ -606,7 +608,7 @@ class RuntimeBridgeService:
         self,
         qualified_tool_id: str,
         arguments: dict[str, Any],
-        timeout_seconds: int,
+        timeout_seconds: float,
         mutation_approved: bool = False,
     ) -> Any:
         context = {

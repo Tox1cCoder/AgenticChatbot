@@ -6,6 +6,11 @@ from uuid import uuid4
 import pytest
 
 from app.ai import skill_resolver, skills_tool
+from app.ai.tool_execution_policy import (
+    resolve_tool_execution_policy,
+    tool_policy_context,
+)
+from app.core.config import settings
 from app.services import client_runtime_store as runtime_store_module
 from app.services.client_device_service import ClientDeviceService
 from app.services.client_runtime_store import (
@@ -130,7 +135,10 @@ async def test_activation_appends_exact_model_callable_skill_tool_name(monkeypat
         lambda _device_uuid: session,
     )
 
+    dispatches = []
+
     async def _dispatch(**kwargs):
+        dispatches.append(kwargs)
         return {"success": True, "result": "skill body"}
 
     monkeypatch.setattr(skills_tool.ClientDeviceService, "dispatch_tool_call", _dispatch)
@@ -141,6 +149,45 @@ async def test_activation_appends_exact_model_callable_skill_tool_name(monkeypat
     assert "skill body" in result
     assert "client__skill_client_skill__run_skill_command_2" in result
     assert "exact model-callable tool" in result.lower()
+    assert dispatches[0]["execution_timeout_seconds"] == settings.client_runtime_ws_timeout_seconds
+    assert dispatches[0]["response_timeout_seconds"] == settings.client_runtime_ws_timeout_seconds
+
+
+@pytest.mark.asyncio
+async def test_activate_skill_uses_scoped_policy_deadlines_and_client_identity(monkeypatch):
+    device_id = str(uuid4())
+    session = _client_session(
+        [{"name": "client-skill", "description": "d", "enabled": True}],
+        device_id=device_id,
+    )
+    monkeypatch.setattr(
+        skill_resolver.ClientDeviceService,
+        "lookup_active_session",
+        lambda _device_uuid: session,
+    )
+    dispatches = []
+
+    async def _dispatch(**kwargs):
+        dispatches.append(kwargs)
+        return {"success": True, "result": "skill body"}
+
+    monkeypatch.setattr(skills_tool.ClientDeviceService, "dispatch_tool_call", _dispatch)
+    tool = skills_tool.create_activate_skill_tool(user_id="user-1", device_id=device_id)
+
+    assert tool.metadata["tool_origin"] == "client_skill"
+    assert tool.metadata["qualified_tool_id"] == "client_skill::activate"
+
+    policy = resolve_tool_execution_policy(
+        tool,
+        exposed_tool_name=tool.name,
+        invocation_kind="client_runtime",
+    )
+    with tool_policy_context(policy):
+        result = await tool.ainvoke({"skill_name": "client-skill"})
+
+    assert result == "skill body"
+    assert dispatches[0]["execution_timeout_seconds"] == 28.0
+    assert dispatches[0]["response_timeout_seconds"] == 29.0
 
 
 @pytest.mark.asyncio
@@ -188,7 +235,8 @@ async def test_client_skill_activation_dispatch_is_not_rejected_by_mcp_tool_cata
             tool_name="activate_skill",
             qualified_tool_id="client_skill::activate",
             arguments={"skill_name": "client-skill"},
-            timeout_seconds=5,
+            execution_timeout_seconds=4.0,
+            response_timeout_seconds=5.0,
         )
     finally:
         reset_client_runtime_store()
@@ -196,3 +244,5 @@ async def test_client_skill_activation_dispatch_is_not_rejected_by_mcp_tool_cata
     assert result == {"success": True, "result": "skill body"}
     assert len(dispatched) == 1
     assert dispatched[0][1].qualified_tool_id == "client_skill::activate"
+    assert dispatched[0][1].timeout_seconds == 4.0
+    assert dispatched[0][2] == 5.0

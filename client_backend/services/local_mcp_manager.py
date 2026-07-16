@@ -528,7 +528,7 @@ class LocalMCPManager:
         self,
         qualified_tool_id: str,
         arguments: dict[str, Any],
-        timeout: int = 30,
+        timeout: float = 30.0,
     ) -> dict[str, Any]:
         """
         Call a tool by its qualified ID.
@@ -570,7 +570,7 @@ class LocalMCPManager:
         server_name: str,
         qualified_tool_id: str,
         arguments: dict[str, Any],
-        timeout: int,
+        timeout: float,
     ) -> Any:
         if self._client is None:
             raise RuntimeError("MCP client is not initialized")

@@ -15,6 +15,7 @@ from app.services.client_device_service import ClientDeviceService
 
 from .text_normalization import sanitize_identifier
 from .tool_context import get_tool_context
+from .tool_execution_policy import get_current_tool_policy
 
 logger = logging.getLogger(__name__)
 
@@ -278,13 +279,25 @@ def _build_tool(
             return _ERR_CLIENT_RECONNECTED
 
         try:
+            policy = get_current_tool_policy()
+            execution_timeout_seconds = (
+                policy.client_execution_timeout_seconds
+                if policy is not None and policy.client_execution_timeout_seconds is not None
+                else float(settings.client_runtime_ws_timeout_seconds)
+            )
+            response_timeout_seconds = (
+                policy.client_response_timeout_seconds
+                if policy is not None and policy.client_response_timeout_seconds is not None
+                else float(settings.client_runtime_ws_timeout_seconds)
+            )
             response = await ClientDeviceService.dispatch_tool_call(
                 user_id=bound_user_id,
                 device_id=bound_device_id,
                 tool_name=spec.name,
                 qualified_tool_id=spec.qualified_tool_id,
                 arguments=kwargs,
-                timeout_seconds=settings.client_runtime_ws_timeout_seconds,
+                execution_timeout_seconds=execution_timeout_seconds,
+                response_timeout_seconds=response_timeout_seconds,
                 bound_session_id=bound_session_id,
                 bound_catalog_version=bound_catalog_version,
                 tool_instance_id=tool_instance_id,
