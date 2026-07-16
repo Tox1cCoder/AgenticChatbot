@@ -675,22 +675,14 @@ class ServerAPIClient:
         content: bytes,
         content_type: str = "application/octet-stream",
     ) -> dict[str, Any]:
-        """Upload a single document using in-memory bytes.
-
-        Kept as a thin wrapper around ``upload_documents_bytes`` so internal
-        callers and existing tests have a single canonical batch code
-        path.
-        """
-        return await self.upload_documents_bytes(
-            conversation_id=conversation_id,
-            files=[
-                {
-                    "filename": filename,
-                    "content": content,
-                    "content_type": content_type,
-                }
-            ],
+        """Upload one document through the legacy single-file contract."""
+        response = await self.request_response(
+            "POST",
+            "/documents/upload",
+            data={"conversation_id": conversation_id},
+            files={"file": (filename, content, content_type)},
         )
+        return await self._handle_response(response)
 
     async def upload_document(
         self,

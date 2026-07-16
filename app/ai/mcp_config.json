@@ -9,15 +9,6 @@
       ],
       "description": "Live UI widget tools for showing interactive tables, charts, dashboards, and forms inside chat"
     },
-    "calculator": {
-      "enabled": true,
-      "transport": "stdio",
-      "command": "python",
-      "args": [
-        "app/ai/mcp_servers/calculator_server.py"
-      ],
-      "description": "Basic calculator operations (add, subtract, multiply, divide, power)"
-    },
     "tavily": {
       "enabled": true,
       "transport": "stdio",
@@ -69,15 +60,6 @@
         "app/ai/mcp_servers/boring_servers/boring_reader_server.py"
       ],
       "description": "Borehole PDF data extractor - extracts structured borehole log data from PDF files"
-    },
-    "desktop-commander": {
-      "transport": "stdio",
-      "command": "npx",
-      "args": [
-        "-y",
-        "@wonderwhy-er/desktop-commander@latest"
-      ],
-      "enabled": true
     }
   }
 }

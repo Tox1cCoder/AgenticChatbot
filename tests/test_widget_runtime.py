@@ -511,7 +511,7 @@ class TestBuildToolArtifactWidgets:
         assert parsed["version"] == 1
         assert "state" not in parsed
 
-    def test_non_widget_artifact_still_respects_truncation_limit(self):
+    def test_non_widget_artifact_preserves_full_output_by_default(self):
         artifact = build_tool_artifact(
             tool_call_id="tc-2",
             tool_name="some_other_tool",
@@ -519,7 +519,7 @@ class TestBuildToolArtifactWidgets:
             output_text="x" * 1200,
             error=None,
         )
-        assert len(artifact["output"]) == 1000
+        assert len(artifact["output"]) == 1200
 
     def test_tool_artifact_preserves_render_payload(self):
         render = {

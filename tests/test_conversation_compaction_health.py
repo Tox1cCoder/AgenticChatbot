@@ -173,13 +173,13 @@ def test_health_router_is_aggregate_content_free_and_separate_from_celery() -> N
     assert secret_id not in rendered
     assert "conversation_id" not in rendered
     assert "summary_payload" not in rendered
-    assert all(route.path != "/health/celery" for route in app.routes)
+    assert "/health/celery" not in app.openapi()["paths"]
 
 
 def test_main_application_registers_compaction_health_separately() -> None:
     from app.main import app
 
-    paths = {route.path for route in app.routes}
+    paths = set(app.openapi()["paths"])
 
     assert "/health/conversation-compaction" in paths
     assert "/metrics/conversation-compaction" in paths

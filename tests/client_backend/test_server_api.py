@@ -1,5 +1,6 @@
 import json
 
+import httpx
 import pytest
 
 from client_backend.services.server_api import ServerAPIClient, ServerAPIError
@@ -13,6 +14,40 @@ class _ServerAPIClientStub(ServerAPIClient):
     async def stream_sse(self, path: str, json: dict | None = None, **kwargs):
         self.stream_calls.append((path, json or {}))
         yield {"type": "complete"}
+
+
+@pytest.mark.asyncio
+async def test_single_document_upload_uses_legacy_server_contract(monkeypatch):
+    client = ServerAPIClient(base_url="http://example.test", timeout=5)
+    captured = {}
+    payload = {
+        "success": True,
+        "data": {
+            "document": {"id": "doc-1"},
+            "processing": {"task_id": "task-1"},
+        },
+    }
+
+    async def _request_response(method, path, **kwargs):
+        captured.update({"method": method, "path": path, **kwargs})
+        return httpx.Response(
+            201,
+            json=payload,
+            request=httpx.Request(method, f"http://example.test{path}"),
+        )
+
+    monkeypatch.setattr(client, "request_response", _request_response)
+
+    result = await client.upload_document_bytes(
+        conversation_id="conv-1",
+        filename="report.txt",
+        content=b"report",
+        content_type="text/plain",
+    )
+
+    assert captured["path"] == "/documents/upload"
+    assert captured["files"]["file"][0] == "report.txt"
+    assert result["data"]["document"]["id"] == "doc-1"
 
 
 @pytest.mark.asyncio

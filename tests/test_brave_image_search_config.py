@@ -13,10 +13,16 @@ from app.core.config import Settings
 
 
 def _settings(**overrides):
-    return Settings(secret_key="test-secret", environment="development", **overrides)
+    return Settings(
+        _env_file=None,
+        secret_key="test-secret",
+        environment="development",
+        **overrides,
+    )
 
 
-def test_brave_image_search_defaults():
+def test_brave_image_search_defaults(monkeypatch):
+    monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
     settings = _settings()
     assert settings.brave_search_api_key == ""
     assert settings.brave_image_search_default_count == 6
