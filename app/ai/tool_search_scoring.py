@@ -241,13 +241,17 @@ def _score_candidate(intent: QueryIntent, tool: Any) -> ToolSearchScore:
     if description_overlap:
         score += min(4.0, 1.0 * len(description_overlap))
 
-    score += _capability_specific_adjustment(intent, profile)
+    adjustment, adjustment_reasons = _capability_specific_adjustment(intent, profile)
+    score += adjustment
+    reasons = adjustment_reasons + reasons
+
+    unique_reasons = list(dict.fromkeys(reasons))
 
     return ToolSearchScore(
         tool=tool,
         score=score,
         confidence=_confidence_for(score, 0.0),
-        match_reasons=reasons or ["weak lexical match"],
+        match_reasons=unique_reasons or ["weak lexical match"],
         profile=profile,
         autoload_eligible=False,
     )
@@ -256,8 +260,22 @@ def _score_candidate(intent: QueryIntent, tool: Any) -> ToolSearchScore:
 def _capability_specific_adjustment(
     intent: QueryIntent,
     profile: ToolCapabilityProfile,
-) -> float:
+) -> tuple[float, list[str]]:
     score = 0.0
+    reasons: list[str] = []
+
+    if "external_open" in intent.capabilities:
+        if "external_open" in profile.capabilities:
+            score += 55.0
+            reasons.append("direct external opener")
+        elif "shell_exec" in profile.capabilities:
+            score += 65.0
+            reasons.append("can execute launch command")
+        if "web_extract" in profile.capabilities:
+            score -= 60.0
+        if "web_search" in profile.capabilities:
+            score -= 30.0
+
     if "shell_exec" in intent.capabilities:
         if "shell_exec" in profile.capabilities:
             score += 35.0
@@ -318,7 +336,7 @@ def _capability_specific_adjustment(
         if "web_map" in profile.capabilities and "content" in intent.tokens:
             score -= 8.0
 
-    return score
+    return score, reasons
 
 
 def _confidence_for(score: float, margin: float) -> str:
