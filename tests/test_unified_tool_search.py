@@ -762,3 +762,166 @@ def test_client_tool_catalog_indexes_mcp_and_skill_tools_together():
 
     results = catalog.search("calendar events")
     assert "client__skill_example_calendar__event_list" in {tool.tool_name for tool in results}
+
+
+@pytest.mark.asyncio
+async def test_browser_action_prefers_client_process_over_remote_direct_opener(monkeypatch):
+    from app.ai.client_tool_catalog import ClientToolDescriptor
+    from app.ai.mcp_tool_catalog import ToolDescriptor
+    from app.ai.tool_context import ToolContext
+    from app.ai.tool_search_scoring import rank_tool_candidates
+    from app.ai.tool_search_tool import _execute_tool_search
+
+    server_tools = [
+        ToolDescriptor(
+            tool_name="open_url",
+            server_name="remote_runtime",
+            description="Open a URL in the default browser on the server host.",
+            arg_names=["url"],
+            required_arg_names=["url"],
+            schema_fingerprint="fp-remote-open",
+        ),
+        ToolDescriptor(
+            tool_name="extract_url",
+            server_name="web_content",
+            description="Extract page content from known URLs.",
+            arg_names=["urls"],
+            required_arg_names=["urls"],
+            schema_fingerprint="fp-extract",
+        ),
+        ToolDescriptor(
+            tool_name="web_search",
+            server_name="web_content",
+            description="Search the web for current sources.",
+            arg_names=["query"],
+            required_arg_names=["query"],
+            schema_fingerprint="fp-search",
+        ),
+    ]
+    client_tool = ClientToolDescriptor(
+        tool_name="client__desktop_commander__start_process",
+        server_name="desktop_commander",
+        description="Start a shell command or local process.",
+        arg_names=["command", "timeout_ms", "shell", "origin"],
+        required_arg_names=["command"],
+        qualified_tool_id="desktop_commander::start_process",
+        origin="client_mcp",
+        device_id="device-123",
+        session_id="session-7",
+        catalog_version=7,
+        tool_instance_id="instance-7",
+    )
+
+    class FakeServerCatalog:
+        def search_scored(self, query=None, top_k=5, server_name=None, allowlist=None):
+            return rank_tool_candidates(query=query, candidates=server_tools)[:top_k]
+
+        def search(self, query=None, top_k=5, server_name=None, allowlist=None):
+            return []
+
+        def is_ambiguous(self, tool_name):
+            return False
+
+    class FakeClientCatalog:
+        tool_count = 1
+        session_id = "session-7"
+        catalog_version = 7
+
+        def search_scored(self, query=None, top_k=5, server_name=None, allowlist=None):
+            return rank_tool_candidates(query=query, candidates=[client_tool])[:top_k]
+
+        def search(self, query=None, top_k=5, server_name=None, allowlist=None):
+            return []
+
+    class DeferredStateStub:
+        def __init__(self):
+            self.server_refs = []
+            self.client_refs = []
+
+        def autoload(self, **kwargs):
+            self.server_refs.extend(kwargs["references"])
+            return kwargs["references"]
+
+        def autoload_client_tools(self, **kwargs):
+            self.client_refs.extend(kwargs["references"])
+            return kwargs["references"]
+
+    state = DeferredStateStub()
+
+    async def fake_get_global_mcp_manager():
+        return object()
+
+    async def fake_get_tool_catalog(_manager):
+        return FakeServerCatalog()
+
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_global_mcp_manager",
+        fake_get_global_mcp_manager,
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_tool_catalog",
+        fake_get_tool_catalog,
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_client_tool_catalog",
+        lambda device_id, user_id: FakeClientCatalog(),
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_deferred_tool_state",
+        lambda: state,
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_tool_context",
+        lambda: ToolContext(
+            conversation_id="conversation-1",
+            user_id="user-1",
+            agent_key="search",
+            device_id="device-123",
+            tool_scope="default",
+        ),
+    )
+
+    result = await _execute_tool_search(
+        query="open url in browser play youtube video"
+    )
+
+    expected_name = "client__desktop_commander__start_process"
+    assert result["recommended_tool"] == {
+        "tool_name": expected_name,
+        "confidence": "high",
+        "is_loaded": True,
+    }
+    assert result["next_action"] == "call_recommended_tool"
+    assert result["requires_refinement"] is False
+    assert result["results"][0]["tool_name"] == expected_name
+    assert state.server_refs == []
+    assert [ref.tool_name for ref in state.client_refs] == [expected_name]
+
+
+def test_external_open_server_executor_is_not_autoload_eligible_without_client_action():
+    from app.ai.mcp_tool_catalog import ToolDescriptor
+    from app.ai.tool_search_scoring import rank_tool_candidates
+    from app.ai.tool_search_tool import _merge_search_results
+
+    remote_process = ToolDescriptor(
+        tool_name="start_process",
+        server_name="remote_runtime",
+        description="Start a shell command or local process on the server host.",
+        arg_names=["command"],
+        required_arg_names=["command"],
+        schema_fingerprint="fp-remote-process",
+    )
+    server_results = rank_tool_candidates(
+        query="open URL in browser",
+        candidates=[remote_process],
+    )
+
+    public, internal = _merge_search_results(
+        server_results=server_results,
+        client_results=[],
+        query="open URL in browser",
+        top_k=3,
+    )
+
+    assert public[0]["tool_name"] == "start_process"
+    assert internal[0]["_autoload_eligible"] is False

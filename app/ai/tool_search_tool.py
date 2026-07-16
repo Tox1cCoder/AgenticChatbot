@@ -30,6 +30,7 @@ from .mcp_tool_catalog import (
 )
 from .tool_context import get_tool_context
 from .tool_scope import is_client_only_scope
+from .tool_search_profiles import infer_query_intent, infer_tool_profile
 from .tool_search_scoring import build_query_tokens
 
 logger = logging.getLogger(__name__)
@@ -580,6 +581,7 @@ def _public_result_from_scored(item: Any) -> tuple[dict[str, Any], dict[str, Any
         internal["_confidence"] = score_meta.confidence
         internal["_autoload_eligible"] = score_meta.autoload_eligible
         internal["_match_reasons"] = list(score_meta.match_reasons)
+        internal["_capabilities"] = sorted(score_meta.profile.capabilities)
         if settings.mcp_tool_search_debug_scores:
             internal["_debug_score"] = {
                 "score": score_meta.score,
@@ -608,6 +610,23 @@ def _search_item_to_dicts(item: Any, idx: int) -> tuple[float, dict[str, Any], d
         real_score = float(1000 - idx)
         public_dict = desc.to_search_result()
         internal_dict = desc._to_internal_result()
+    if "_capabilities" not in internal_dict:
+        if hasattr(item, "tool"):
+            descriptor = item.tool
+        elif isinstance(item, tuple):
+            descriptor = item[0]
+        else:
+            descriptor = item
+        profile = infer_tool_profile(
+            tool_name=str(
+                getattr(descriptor, "tool_name", getattr(descriptor, "name", "")) or ""
+            ),
+            server_name=str(getattr(descriptor, "server_name", "") or ""),
+            description=str(getattr(descriptor, "description", "") or ""),
+            arg_names=list(getattr(descriptor, "arg_names", []) or []),
+            required_arg_names=list(getattr(descriptor, "required_arg_names", []) or []),
+        )
+        internal_dict["_capabilities"] = sorted(profile.capabilities)
     internal_dict["_score"] = real_score
     return real_score, public_dict, internal_dict
 
@@ -651,6 +670,37 @@ def _build_recommendation(
             "call_recommended_tool",
         )
     return None, True, "refine_search"
+
+
+_EXTERNAL_ACTION_TOOL_CAPABILITIES = {"external_open", "shell_exec"}
+
+
+def _prioritize_external_action_results(
+    chosen_results: list[tuple[dict[str, Any], dict[str, Any]]],
+    *,
+    query: str | None,
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    intent = infer_query_intent(query)
+    if "external_open" not in intent.capabilities:
+        return chosen_results
+
+    client_actions: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    remaining: list[tuple[dict[str, Any], dict[str, Any]]] = []
+
+    for public, internal in chosen_results:
+        capabilities = set(internal.get("_capabilities") or [])
+        is_action_tool = bool(capabilities & _EXTERNAL_ACTION_TOOL_CAPABILITIES)
+        is_client_action = bool(internal.get("is_client_tool")) and is_action_tool
+
+        if is_action_tool and not internal.get("is_client_tool"):
+            internal["_autoload_eligible"] = False
+
+        if is_client_action:
+            client_actions.append((public, internal))
+        else:
+            remaining.append((public, internal))
+
+    return [*client_actions, *remaining]
 
 
 def _merge_search_results(
@@ -716,6 +766,10 @@ def _merge_search_results(
         if _prefer_search_result_candidate(internal, existing_internal):
             chosen_results[duplicate_index] = (public, internal)
 
+    chosen_results = _prioritize_external_action_results(
+        chosen_results,
+        query=query,
+    )
     chosen_results = chosen_results[:top_k]
     public_results = [public for public, _ in chosen_results]
     internal_results = [internal for _, internal in chosen_results]
