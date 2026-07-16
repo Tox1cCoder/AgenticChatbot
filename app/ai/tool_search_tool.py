@@ -36,6 +36,34 @@ from .tool_search_scoring import build_query_tokens
 logger = logging.getLogger(__name__)
 _ALLOWLIST_UNSET = object()
 
+_ARG_HINTS_MAX_CHARS = 160
+
+
+def _compact_arg_hints(value: Any) -> str:
+    normalized = " ".join(str(value or "").split())
+    if len(normalized) <= _ARG_HINTS_MAX_CHARS:
+        return normalized
+    return normalized[: _ARG_HINTS_MAX_CHARS - 3] + "..."
+
+
+def _serialize_tool_search_output(result: dict[str, Any]) -> str:
+    payload = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    recommended = result.get("recommended_tool")
+    recommended_name = (
+        recommended.get("tool_name") if isinstance(recommended, dict) else None
+    )
+    logger.debug(
+        "tool_search output: mode=%s response_bytes=%d results=%d "
+        "recommended=%s next_action=%s requires_refinement=%s",
+        result.get("mode"),
+        len(payload.encode("utf-8")),
+        len(result.get("results") or []),
+        recommended_name,
+        result.get("next_action"),
+        result.get("requires_refinement"),
+    )
+    return payload
+
 
 def _search_results_refer_to_same_capability(
     public_a: dict[str, Any],
@@ -102,7 +130,7 @@ class ToolSearchInput(BaseModel):
     top_k: int | None = Field(
         default=None,
         description=(
-            "Maximum number of tools to return. Defaults to 5. "
+            "Maximum number of tools to return. Defaults to 3. "
             "Use a larger value to see more options."
         ),
     )
@@ -627,6 +655,7 @@ def _search_item_to_dicts(item: Any, idx: int) -> tuple[float, dict[str, Any], d
             required_arg_names=list(getattr(descriptor, "required_arg_names", []) or []),
         )
         internal_dict["_capabilities"] = sorted(profile.capabilities)
+    public_dict["arg_hints"] = _compact_arg_hints(public_dict.get("arg_hints"))
     internal_dict["_score"] = real_score
     return real_score, public_dict, internal_dict
 
@@ -831,7 +860,7 @@ async def tool_search(
     )
 
     # Format as JSON string for tool output
-    return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    return _serialize_tool_search_output(result)
 
 
 def create_tool_search_tool(
@@ -897,7 +926,7 @@ def create_tool_search_tool(
             server_allowlist=server_allowlist,
             client_allowlist=client_allowlist,
         )
-        return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        return _serialize_tool_search_output(result)
 
     return tool_search_impl
 

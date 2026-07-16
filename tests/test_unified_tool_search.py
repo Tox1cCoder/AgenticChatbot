@@ -925,3 +925,68 @@ def test_external_open_server_executor_is_not_autoload_eligible_without_client_a
 
     assert public[0]["tool_name"] == "start_process"
     assert internal[0]["_autoload_eligible"] is False
+
+
+def test_compact_tool_search_output_stays_within_representative_budget(caplog):
+    import json
+    import logging
+
+    from app.ai.mcp_tool_catalog import ToolDescriptor
+    from app.ai.tool_search_scoring import rank_tool_candidates
+    from app.ai.tool_search_tool import (
+        _merge_search_results,
+        _serialize_tool_search_output,
+    )
+
+    arg_names = [
+        f"parameter_{index}_with_a_deliberately_long_schema_name"
+        for index in range(20)
+    ]
+    tools = [
+        ToolDescriptor(
+            tool_name=f"open_url_variant_{index}",
+            server_name="remote_runtime",
+            description="x" * 200,
+            arg_names=arg_names,
+            required_arg_names=arg_names,
+            schema_fingerprint=f"fp-{index}",
+        )
+        for index in range(3)
+    ]
+    scored = rank_tool_candidates(query="open URL in browser", candidates=tools)
+    public, _internal = _merge_search_results(
+        server_results=scored,
+        client_results=[],
+        query="open URL in browser",
+        top_k=3,
+    )
+
+    result = {
+        "query": "open URL in browser",
+        "mode": "discovery",
+        "recommended_tool": None,
+        "results": public,
+        "requires_refinement": True,
+        "next_action": "refine_search",
+        "loaded_count": 0,
+        "more_available": False,
+    }
+
+    with caplog.at_level(logging.DEBUG, logger="app.ai.tool_search_tool"):
+        payload = _serialize_tool_search_output(result)
+
+    assert json.loads(payload) == result
+    assert len(public) == 3
+    assert all(len(item["arg_hints"]) <= 160 for item in public)
+    assert all(item["arg_hints"].endswith("...") for item in public)
+    assert len(payload.encode("utf-8")) <= 2000
+    assert "response_bytes=" in caplog.text
+    assert "next_action=refine_search" in caplog.text
+    assert "open URL in browser" not in caplog.text
+
+
+def test_tool_search_top_k_description_matches_configured_default():
+    from app.ai.tool_search_tool import ToolSearchInput
+
+    description = ToolSearchInput.model_fields["top_k"].description or ""
+    assert "Defaults to 3" in description
