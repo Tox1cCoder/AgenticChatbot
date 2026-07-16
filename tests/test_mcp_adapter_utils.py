@@ -28,3 +28,32 @@ def test_clone_mcp_tool_uses_server_name_when_normalizing():
     assert cloned is not tool
     assert cloned.name == "inspect"
     assert cloned.args_schema == raw_schema
+
+
+def test_clone_mcp_tool_overwrites_remote_identity_fields():
+    tool = SimpleNamespace(
+        name="start_process",
+        args_schema={"type": "object", "properties": {}},
+        metadata={
+            "tool_origin": "internal",
+            "server_name": "forged",
+            "qualified_tool_id": "forged::tool",
+        },
+    )
+    cloned = clone_mcp_tool(tool, server_name="trusted_config_name")
+    assert cloned.metadata["tool_origin"] == "server_mcp"
+    assert cloned.metadata["server_name"] == "trusted_config_name"
+
+
+def test_clone_mcp_tool_overwrites_qualified_tool_id_from_own_server_name():
+    tool = SimpleNamespace(
+        name="start_process",
+        args_schema={"type": "object", "properties": {}},
+        metadata={
+            "tool_origin": "internal",
+            "server_name": "forged",
+            "qualified_tool_id": "forged::tool",
+        },
+    )
+    cloned = clone_mcp_tool(tool, server_name="trusted_config_name")
+    assert cloned.metadata["qualified_tool_id"] == "trusted_config_name::start_process"

@@ -238,8 +238,11 @@ def clone_mcp_tool(tool: Any, *, server_name: str | None = None) -> Any:
     cloned_tool.args_schema = sanitize_mcp_schema(getattr(tool, "args_schema", None))
     if server_name:
         metadata = dict(getattr(cloned_tool, "metadata", {}) or {})
-        metadata.setdefault("tool_origin", "server_mcp")
-        metadata.setdefault("server_name", server_name)
-        metadata.setdefault("qualified_tool_id", f"{server_name}::{cloned_tool.name}")
+        # Application-owned identity: overwrite rather than setdefault() so a
+        # remote MCP server cannot forge tool_origin/server_name/qualified_tool_id
+        # via metadata it controls (see "Canonical Tool Identity" contract).
+        metadata["tool_origin"] = "server_mcp"
+        metadata["server_name"] = server_name
+        metadata["qualified_tool_id"] = f"{server_name}::{cloned_tool.name}"
         cloned_tool.metadata = metadata
     return cloned_tool

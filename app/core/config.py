@@ -4,10 +4,11 @@ import secrets
 import sys
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse, urlunparse
 
 from dotenv import load_dotenv
-from pydantic import Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 # Load .env from the workspace root
@@ -77,6 +78,85 @@ def _normalize_redis_loopback_host(url: str) -> str:
         credentials = f"{username}:{password}@" if username else f":{password}@"
 
     return urlunparse(parsed._replace(netloc=f"{credentials}{hostport}"))
+
+
+class ToolExecutionPolicyMatch(BaseModel):
+    """Deployment-configured selector for one tool execution policy override.
+
+    Accepts exactly one of four shapes, in increasing specificity: origin
+    only; origin + exposed tool name; origin + server name + source tool
+    name; or origin + qualified tool id. Mixed shapes and partial
+    server/source pairs are rejected so a rule's specificity — and therefore
+    its precedence against other rules — never depends on which optional
+    fields happen to be set.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_origin: Literal["internal", "server_mcp", "client_mcp", "client_skill"]
+    qualified_tool_id: str | None = None
+    server_name: str | None = None
+    source_tool_name: str | None = None
+    exposed_tool_name: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_single_match_shape(self) -> "ToolExecutionPolicyMatch":
+        has_server = self.server_name is not None
+        has_source = self.source_tool_name is not None
+        if has_server != has_source:
+            raise ValueError(
+                "tool execution policy match must set server_name and "
+                "source_tool_name together, not one without the other"
+            )
+
+        shape_count = sum(
+            [
+                self.qualified_tool_id is not None,
+                self.exposed_tool_name is not None,
+                has_server and has_source,
+            ]
+        )
+        if shape_count > 1:
+            raise ValueError(
+                "tool execution policy match must use exactly one of: "
+                "origin only; origin + exposed_tool_name; "
+                "origin + server_name + source_tool_name; or "
+                "origin + qualified_tool_id"
+            )
+        return self
+
+
+class ToolExecutionPolicyOverride(BaseModel):
+    """One deployment-configured tool execution policy override.
+
+    Keyed by a diagnostic dict key (not identity) in
+    `Settings.tool_execution_policies`. Resolution, caps, and the
+    `disable_outer_timeout` code-owned allowlist check are applied by the
+    policy resolver, not here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    match: ToolExecutionPolicyMatch
+    timeout_seconds: float | None = Field(default=None, gt=0)
+    hard_timeout_seconds: float | None = Field(default=None, gt=0)
+    total_timeout_seconds: float | None = Field(default=None, gt=0)
+    max_timeout_seconds: float | None = Field(default=None, gt=0)
+    max_attempts: int | None = Field(default=None, ge=1, le=5)
+    retry_safe: bool | None = None
+    idempotent: bool | None = None
+    trust_mcp_metadata: bool = False
+    disable_outer_timeout: bool = False
+    timeout_hint: str | None = Field(default=None, max_length=240)
+
+    @model_validator(mode="after")
+    def _validate_trust_requires_exact_qualified_match(self) -> "ToolExecutionPolicyOverride":
+        if self.trust_mcp_metadata and self.match.qualified_tool_id is None:
+            raise ValueError(
+                "trust_mcp_metadata is only valid on an exact origin + "
+                "qualified_tool_id match rule"
+            )
+        return self
 
 
 class Settings(BaseSettings):
@@ -763,6 +843,47 @@ class Settings(BaseSettings):
     tool_validation_enabled: bool = Field(
         default=True,
         description="Enable/disable Pydantic validation for tool arguments and results",
+    )
+
+    # Tool Execution Policy Configuration (origin-aware timeout/retry policy)
+    tool_execution_policies: dict[str, ToolExecutionPolicyOverride] = Field(
+        default_factory=dict,
+        description=(
+            "Deployment-configured tool execution policy overrides, keyed by "
+            "diagnostic rule name (the key is not identity — see match)."
+        ),
+    )
+    tool_execution_max_interactive_timeout_seconds: float = Field(
+        default=120.0,
+        gt=0,
+        description=(
+            "Global wall-clock cap for any single interactive tool call; "
+            "participates as the final accumulated timeout cap."
+        ),
+    )
+    tool_execution_cancellation_grace_seconds: float = Field(
+        default=2.0,
+        ge=0,
+        description=(
+            "Grace period reserved between a tool's soft timeout and its hard "
+            "timeout for cooperative cancellation to complete."
+        ),
+    )
+    tool_execution_client_execution_grace_seconds: float = Field(
+        default=2.0,
+        gt=0,
+        description=(
+            "Seconds subtracted from the server soft timeout to derive the "
+            "client-side execution deadline for client-runtime tools."
+        ),
+    )
+    tool_execution_client_response_grace_seconds: float = Field(
+        default=1.0,
+        gt=0,
+        description=(
+            "Seconds subtracted from the server soft timeout to derive the "
+            "server-side bridge response deadline for client-runtime tools."
+        ),
     )
 
     # Tool Result Token Management
