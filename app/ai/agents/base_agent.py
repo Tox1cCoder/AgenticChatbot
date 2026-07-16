@@ -220,6 +220,7 @@ class BaseAgent(ABC):
         self.langchain_model = None
         self.mcp_manager = None
         self.tools: list[BaseTool] = []
+        self._request_compaction_coordinator = None
 
         # Track tools generation to detect when refresh is needed
         self._tools_generation_seen: int = 0
@@ -802,6 +803,8 @@ class BaseAgent(ABC):
         attachments: list[Any] | None = None,
         durable_request: Any | None = None,
         emergency_compact: Any | None = None,
+        conversation_id: str | None = None,
+        user_id: str | None = None,
     ) -> BudgetResult | None:
         """Enforce the resolved provider's complete input budget before I/O."""
         context_window = runtime_config.context_window
@@ -827,6 +830,16 @@ class BaseAgent(ABC):
             )
         except (TypeError, ValueError) as exc:
             raise ContextBudgetExceededError("context_budget_invalid") from exc
+
+        if conversation_id and user_id and (
+            durable_request is None or emergency_compact is None
+        ):
+            default_durable, default_emergency = self._build_compaction_callbacks(
+                conversation_id,
+                user_id,
+            )
+            durable_request = durable_request or default_durable
+            emergency_compact = emergency_compact or default_emergency
 
         result = await RequestBudgetService(TokenCounter()).preflight(
             RequestEnvelope(
@@ -868,6 +881,62 @@ class BaseAgent(ABC):
                 duration_seconds=0,
             )
         return result
+
+    def _build_compaction_callbacks(self, conversation_id: str, user_id: str):
+        coordinator = self._get_request_compaction_coordinator()
+        if coordinator is None:
+            return None, None
+
+        def request_durable():
+            return coordinator.request_durable(conversation_id)
+
+        async def compact_history(history_messages):
+            reference = await coordinator.compact_now(conversation_id, user_id)
+            if reference is None:
+                return history_messages
+            retained = []
+            for message in history_messages:
+                metadata = getattr(message, "additional_kwargs", {}) or {}
+                if metadata.get("conversation_memory"):
+                    continue
+                sequence = metadata.get("sequence")
+                if sequence is None or int(sequence) > reference.cursor:
+                    retained.append(message)
+            return [
+                HumanMessage(
+                    content=reference.content,
+                    additional_kwargs={
+                        "conversation_memory": True,
+                        "memory_sequence": reference.cursor,
+                    },
+                ),
+                *retained,
+            ]
+
+        return request_durable, compact_history
+
+    def _get_request_compaction_coordinator(self):
+        coordinator = getattr(self, "_request_compaction_coordinator", None)
+        if coordinator is not None:
+            return coordinator
+        try:
+            from app.ai.request_compaction import RequestCompactionCoordinator
+            from app.core.container import get_container
+            from app.workers.conversation_compaction import (
+                publish_conversation_compaction,
+                run_conversation_compaction_now,
+            )
+
+            self._request_compaction_coordinator = RequestCompactionCoordinator(
+                repository=get_container().conversation_compaction_repository(),
+                publisher=publish_conversation_compaction,
+                runner=run_conversation_compaction_now,
+                enabled=settings.conversation_summary_enabled,
+            )
+        except Exception as exc:
+            logger.warning("Request compaction coordinator unavailable: %s", exc)
+            return None
+        return self._request_compaction_coordinator
 
     @staticmethod
     def _request_budget_metadata(result: BudgetResult | None) -> dict[str, Any] | None:
@@ -947,18 +1016,31 @@ class BaseAgent(ABC):
             if hasattr(msg, "role") and hasattr(msg, "content"):
                 role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
                 content = msg.content or ""
+                metadata = dict(getattr(msg, "metadata", {}) or {})
 
                 if role == "user":
                     attachments = getattr(msg, "attachments", None)
                     multimodal_content = build_multimodal_content(content, attachments)
                     if has_image_parts(multimodal_content):
-                        langchain_history.append(HumanMessage(content=multimodal_content))
+                        langchain_history.append(
+                            HumanMessage(
+                                content=multimodal_content,
+                                additional_kwargs=metadata,
+                            )
+                        )
                     else:
-                        langchain_history.append(HumanMessage(content=content))
+                        langchain_history.append(
+                            HumanMessage(content=content, additional_kwargs=metadata)
+                        )
                 elif role == "assistant":
-                    langchain_history.append(AIMessage(content=content))
+                    langchain_history.append(
+                        AIMessage(content=content, additional_kwargs=metadata)
+                    )
                 elif role == "memory":
-                    langchain_history.append(HumanMessage(content=content))
+                    metadata["conversation_memory"] = True
+                    langchain_history.append(
+                        HumanMessage(content=content, additional_kwargs=metadata)
+                    )
                 # Skip system messages as we add our own system prompt
         return langchain_history
 
@@ -1055,6 +1137,8 @@ class BaseAgent(ABC):
                 tools=bound_tools,
                 durable_request=durable_compaction_request,
                 emergency_compact=emergency_compact,
+                conversation_id=conversation_id,
+                user_id=user_id,
             )
             if budget_result is not None:
                 history_messages_lc = list(budget_result.envelope.history_messages)
@@ -1168,6 +1252,8 @@ class BaseAgent(ABC):
                             tools=bound_tools,
                             durable_request=durable_compaction_request,
                             emergency_compact=emergency_compact,
+                            conversation_id=conversation_id,
+                            user_id=user_id,
                         )
                         if budget_result is not None:
                             history_messages_lc = list(budget_result.envelope.history_messages)
@@ -1212,6 +1298,8 @@ class BaseAgent(ABC):
                         tools=bound_tools,
                         durable_request=durable_compaction_request,
                         emergency_compact=emergency_compact,
+                        conversation_id=conversation_id,
+                        user_id=user_id,
                     )
                     if budget_result is not None:
                         history_messages_lc = list(budget_result.envelope.history_messages)

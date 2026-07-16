@@ -15,6 +15,7 @@ from app.ai.conversation_compactor import (
     ConversationCompactor,
 )
 from app.ai.conversation_memory import ConversationMemory
+from app.ai.model_context import resolve_model_context_window
 from app.ai.model_factory import ModelFactory
 from app.ai.token_counter import TokenCounter
 from app.core.config import settings
@@ -32,6 +33,7 @@ _PERMANENT_ERRORS = {
     "memory_over_budget",
     "ownership_invalid",
     "invariant_invalid",
+    "compaction_input_over_budget",
 }
 _SKIPPED_ERRORS = {"not_triggered", "no_complete_turn"}
 
@@ -72,7 +74,7 @@ class ConversationCompactionWorker:
         self.jitter = jitter
         self.metrics = conversation_compaction_metrics
 
-    async def execute(self, conversation_id: UUID) -> WorkerOutcome:
+    async def execute(self, conversation_id: UUID, *, force: bool = False) -> WorkerOutcome:
         started = time.perf_counter()
         claim = self.repository.claim_job(
             conversation_id,
@@ -94,18 +96,20 @@ class ConversationCompactionWorker:
             return WorkerOutcome("dead", "ownership_invalid")
 
         previous_memory = self._previous_memory(compaction_input.summary_payload)
+        mode = "emergency" if force else "background"
         try:
             result = await asyncio.wait_for(
                 self.compactor.compact(
                     compaction_input.messages,
                     previous_memory=previous_memory,
                     user_id=compaction_input.owner_id,
+                    force=force,
                 ),
                 timeout=self.settings.conversation_summary_timeout_seconds,
             )
         except TimeoutError:
             self.metrics.record_compaction(
-                mode="background",
+                mode=mode,
                 outcome="timeout",
                 provider=self.compactor.provider,
                 model=self.compactor.model,
@@ -117,15 +121,25 @@ class ConversationCompactionWorker:
             return self._retry(claim, "provider_timeout")
 
         self.metrics.record_compaction(
-            mode="background",
+            mode=mode,
             outcome="success" if result.success else "failure",
             provider=self.compactor.provider,
             model=self.compactor.model,
             content_class="text",
-            input_tokens=result.trigger.token_count,
+            input_tokens=result.input_token_count,
             output_tokens=result.summary_token_count,
             duration_seconds=time.perf_counter() - started,
+            cost_amount=result.reported_cost_amount,
+            cost_currency=result.reported_cost_currency,
         )
+        if result.reported_input_tokens is not None:
+            self.metrics.record_token_calibration(
+                provider=self.compactor.provider,
+                model=self.compactor.model,
+                content_class="text",
+                estimated_tokens=result.input_token_count,
+                actual_tokens=result.reported_input_tokens,
+            )
 
         if not result.success:
             error_code = result.error_code or "generation_failed"
@@ -256,7 +270,7 @@ async def _langchain_generate(
     model: str,
     api_key: str | None,
     **_kwargs,
-) -> str:
+) -> Any:
     if not api_key:
         raise ValueError("credential_unavailable")
     client = ModelFactory.create_model(
@@ -266,15 +280,7 @@ async def _langchain_generate(
         temperature=0,
         timeout=settings.conversation_summary_timeout_seconds,
     )
-    response = await client.ainvoke(prompt)
-    content = getattr(response, "content", response)
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "".join(
-            str(item.get("text", "")) if isinstance(item, dict) else str(item) for item in content
-        )
-    return str(content)
+    return await client.ainvoke(prompt)
 
 
 def _build_worker() -> ConversationCompactionWorker:
@@ -289,6 +295,19 @@ def _build_worker() -> ConversationCompactionWorker:
         user_credential_resolver=provider_service.resolve_provider_credentials,
         allow_user_credentials=True,
     )
+    context_window = resolve_model_context_window(
+        settings.conversation_summary_provider,
+        settings.conversation_summary_model,
+    )
+    max_compaction_input = None
+    if context_window.max_input_tokens is not None:
+        max_compaction_input = (
+            context_window.max_input_tokens
+            - settings.conversation_summary_default_reserved_output_tokens
+            - settings.conversation_summary_safety_margin_tokens
+        )
+        if max_compaction_input <= 0:
+            raise ValueError("conversation_summary_available_input_must_be_positive")
     compactor = ConversationCompactor(
         token_counter=TokenCounter(),
         generator=_langchain_generate,
@@ -298,6 +317,7 @@ def _build_worker() -> ConversationCompactionWorker:
         trigger_tokens=settings.conversation_summary_trigger_tokens,
         keep_recent_turns=settings.conversation_summary_keep_recent_turns,
         max_summary_tokens=settings.conversation_summary_max_tokens,
+        max_input_tokens=max_compaction_input,
         credential_resolver=resolver,
     )
     return ConversationCompactionWorker(
@@ -313,12 +333,34 @@ def _build_worker() -> ConversationCompactionWorker:
 )
 def compact_conversation_task(conversation_id: str) -> dict[str, str]:
     """Process one content-free conversation notification."""
+    if not settings.conversation_summary_enabled:
+        return WorkerOutcome("disabled", "compaction_disabled")._asdict()
     try:
         parsed_id = UUID(str(conversation_id))
     except (TypeError, ValueError):
         return WorkerOutcome("dead", "invalid_conversation_id")._asdict()
     outcome = asyncio.run(_build_worker().execute(parsed_id))
     return outcome._asdict()
+
+
+async def run_conversation_compaction_now(
+    conversation_id: UUID,
+    *,
+    force: bool = False,
+) -> WorkerOutcome:
+    if not settings.conversation_summary_enabled:
+        return WorkerOutcome("disabled", "compaction_disabled")
+    return await _build_worker().execute(conversation_id, force=force)
+
+
+@celery_app.task(
+    name="app.workers.conversation_compaction.compact_backfill_conversation_task",
+    ignore_result=True,
+    rate_limit="10/m",
+)
+def compact_backfill_conversation_task(conversation_id: str) -> dict[str, str]:
+    """Process one rate-limited historical backfill notification."""
+    return compact_conversation_task(conversation_id)
 
 
 def publish_conversation_compaction(conversation_id: UUID) -> None:
@@ -332,6 +374,8 @@ def publish_conversation_compaction(conversation_id: UUID) -> None:
     ignore_result=True,
 )
 def reconcile_conversation_summaries_task(limit: int = 100) -> int:
+    if not settings.conversation_summary_enabled:
+        return 0
     worker = _build_worker()
     return dispatch_due_jobs(
         worker.repository,
@@ -344,12 +388,13 @@ def reconcile_conversation_summaries_task(limit: int = 100) -> int:
 @celery_app.task(
     name="app.workers.conversation_compaction.backfill_conversation_summaries_task",
     ignore_result=True,
-    rate_limit="10/m",
 )
 def backfill_conversation_summaries_task(batch_size: int = 100) -> int:
+    if not settings.conversation_summary_enabled:
+        return 0
     worker = _build_worker()
     return request_historical_backfill(
         worker.repository,
-        compact_conversation_task.delay,
+        compact_backfill_conversation_task.delay,
         batch_size=batch_size,
     )

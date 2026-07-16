@@ -31,6 +31,15 @@ class WeightedCounter:
         )
 
 
+class NativeAwareCounter(WeightedCounter):
+    async def count_request(self, **_kwargs):
+        return SimpleNamespace(
+            input_tokens=75,
+            strategy="gemini:native_count",
+            source="provider",
+        )
+
+
 def _weight(message) -> int:
     if isinstance(message, dict):
         return int(message.get("tokens", 0))
@@ -83,6 +92,22 @@ async def test_complete_input_accounting_and_below_soft_proceeds() -> None:
     assert result.input_tokens == 60
     assert result.usage_ratio == 0.60
     assert result.action == "proceed"
+
+
+@pytest.mark.asyncio
+async def test_near_boundary_uses_authoritative_provider_count() -> None:
+    service = RequestBudgetService(NativeAwareCounter())
+    envelope = _envelope(
+        system=20,
+        history=[_message("user", 15), _message("assistant", 15)],
+        current=15,
+    )
+
+    result = await service.preflight(envelope, _config())
+
+    assert result.action == "durable_requested"
+    assert result.input_tokens == 75
+    assert result.count_strategy == "gemini:native_count"
 
 
 @pytest.mark.asyncio
@@ -180,6 +205,27 @@ async def test_reduction_never_splits_tool_call_result_or_user_assistant_turn() 
     remaining = result.envelope.history_messages
     assert [message["content"] for message in remaining] == ["recent", "recent answer"]
     assert not any(message.get("tool_call_id") == "c1" for message in remaining)
+
+
+@pytest.mark.asyncio
+async def test_reduction_skips_incomplete_prefix_and_removes_complete_old_turn() -> None:
+    service = RequestBudgetService(WeightedCounter())
+    history = [
+        {"role": "tool", "content": "orphan", "tokens": 10, "tool_call_id": "orphan"},
+        _message("user", 30, "old question"),
+        _message("assistant", 30, "old answer"),
+        _message("user", 10, "recent question"),
+        _message("assistant", 10, "recent answer"),
+    ]
+
+    result = await service.preflight(_envelope(history=history), _config())
+
+    assert result.action == "reduced"
+    assert [message["content"] for message in result.envelope.history_messages] == [
+        "orphan",
+        "recent question",
+        "recent answer",
+    ]
 
 
 @pytest.mark.asyncio
@@ -311,6 +357,49 @@ async def test_base_agent_reduces_before_emitting_provider_request(monkeypatch) 
     assert counted.input_tokens <= int((1_000 - 100 - 50) * 0.85)
     assert all("oldest persisted detail" not in str(message.content) for message in emitted)
     assert response.metadata["request_budget"]["action"] == "reduced"
+
+
+@pytest.mark.asyncio
+async def test_base_preflight_builds_default_durable_and_emergency_callbacks(monkeypatch) -> None:
+    agent, _model = _configure_boundary_agent(monkeypatch, max_input_tokens=1_000)
+    events = []
+
+    def build_callbacks(conversation_id, user_id):
+        events.append(("built", conversation_id, user_id))
+
+        def durable():
+            events.append(("durable",))
+
+        async def emergency(_history):
+            events.append(("emergency",))
+            return [HumanMessage(content="compacted memory")]
+
+        return durable, emergency
+
+    monkeypatch.setattr(agent, "_build_compaction_callbacks", build_callbacks)
+
+    result = await agent._preflight_model_request(
+        _runtime_with_limit(1_000),
+        system_messages=[HumanMessage(content="system")],
+        history_messages=[
+            HumanMessage(content="old history " * 600),
+            AIMessage(content="old answer " * 600),
+        ],
+        current_messages=[HumanMessage(content="current")],
+        conversation_id="11111111-1111-1111-1111-111111111111",
+        user_id="22222222-2222-2222-2222-222222222222",
+    )
+
+    assert result.action == "emergency_compacted"
+    assert events == [
+        (
+            "built",
+            "11111111-1111-1111-1111-111111111111",
+            "22222222-2222-2222-2222-222222222222",
+        ),
+        ("durable",),
+        ("emergency",),
+    ]
 
 
 @pytest.mark.asyncio

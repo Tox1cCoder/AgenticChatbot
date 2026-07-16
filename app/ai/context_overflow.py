@@ -21,7 +21,7 @@ def is_context_overflow_error(exc: BaseException) -> bool:
     return any(marker in text for marker in _CONTEXT_ERROR_MARKERS)
 
 
-def compact_tool_messages_for_retry(messages: list[Any], *, max_chars: int) -> list[Any]:
+def _compact_tool_results_for_retry(messages: list[Any], *, max_chars: int) -> list[Any]:
     compacted: list[Any] = []
     for message in messages:
         if not isinstance(message, ToolMessage):
@@ -54,7 +54,7 @@ def prepare_aggressive_context_retry(
 ) -> list[Any]:
     """Drop oldest complete history turns and compact remaining tool results."""
     if len(messages) <= 2:
-        return compact_tool_messages_for_retry(messages, max_chars=tool_preview_chars)
+        return _compact_tool_results_for_retry(messages, max_chars=tool_preview_chars)
     system_prefix = [messages[0]] if _message_role(messages[0]) == "system" else []
     current_suffix = [messages[-1]] if _message_role(messages[-1]) == "user" else []
     start = len(system_prefix)
@@ -63,9 +63,15 @@ def prepare_aggressive_context_retry(
     groups = _atomic_history_groups(history)
     complete_groups = [group for group in groups if group.complete]
     remove_count = max(1, len(complete_groups) // 2) if complete_groups else 0
-    removed_messages = sum(len(group.messages) for group in complete_groups[:remove_count])
-    reduced = [*system_prefix, *history[removed_messages:], *current_suffix]
-    return compact_tool_messages_for_retry(reduced, max_chars=tool_preview_chars)
+    removed = 0
+    retained_history: list[Any] = []
+    for group in groups:
+        if group.complete and removed < remove_count:
+            removed += 1
+            continue
+        retained_history.extend(group.messages)
+    reduced = [*system_prefix, *retained_history, *current_suffix]
+    return _compact_tool_results_for_retry(reduced, max_chars=tool_preview_chars)
 
 
 async def invoke_with_context_overflow_retry(

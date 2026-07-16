@@ -97,6 +97,10 @@ def _result(*, success=True, error=None):
         memory=memory if success else None,
         last_summarized_sequence=4 if success else None,
         summary_token_count=3,
+        input_token_count=18,
+        reported_input_tokens=None,
+        reported_cost_amount=None,
+        reported_cost_currency=None,
         trigger=SimpleNamespace(message_count=2, token_count=20, token_strategy="fixed"),
         selection=SimpleNamespace(compactable_prefix=({"sequence": 3}, {"sequence": 4})),
     )
@@ -279,3 +283,25 @@ def test_celery_compaction_task_payload_contains_only_conversation_id() -> None:
 
     assert signature.args == (conversation_id,)
     assert signature.kwargs == {}
+
+
+def test_disabled_compaction_tasks_do_not_build_workers(monkeypatch) -> None:
+    from app.workers import conversation_compaction as worker_module
+
+    monkeypatch.setattr(worker_module.settings, "conversation_summary_enabled", False)
+    monkeypatch.setattr(
+        worker_module,
+        "_build_worker",
+        lambda: pytest.fail("disabled compaction must not build a worker"),
+    )
+
+    assert worker_module.compact_conversation_task(str(uuid4()))["status"] == "disabled"
+    assert worker_module.reconcile_conversation_summaries_task() == 0
+    assert worker_module.backfill_conversation_summaries_task() == 0
+
+
+def test_backfill_uses_separately_rate_limited_compaction_task() -> None:
+    from app.workers import conversation_compaction as worker_module
+
+    assert worker_module.compact_backfill_conversation_task.rate_limit == "10/m"
+    assert worker_module.compact_conversation_task.rate_limit is None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -11,7 +12,7 @@ from app.ai.conversation_compactor import (
     ConversationCompactor,
 )
 from app.ai.conversation_memory import MEMORY_KEYS, ConversationMemory
-from app.ai.token_counter import TokenCount
+from app.ai.token_counter import TokenCount, TokenCounter
 
 
 class FixedTokenCounter:
@@ -41,7 +42,16 @@ def _valid_output(**overrides) -> str:
     return json.dumps(payload)
 
 
-def _compactor(generator, *, counter=None, messages=1, tokens=0, keep=0, maximum=100):
+def _compactor(
+    generator,
+    *,
+    counter=None,
+    messages=1,
+    tokens=0,
+    keep=0,
+    maximum=100,
+    max_input_tokens=None,
+):
     return ConversationCompactor(
         token_counter=counter or FixedTokenCounter(message_tokens=10),
         generator=generator,
@@ -51,6 +61,7 @@ def _compactor(generator, *, counter=None, messages=1, tokens=0, keep=0, maximum
         trigger_tokens=tokens,
         keep_recent_turns=keep,
         max_summary_tokens=maximum,
+        max_input_tokens=max_input_tokens,
     )
 
 
@@ -127,6 +138,26 @@ def test_prefix_ends_on_assistant_and_retains_complete_recent_turns() -> None:
     assert [item["sequence"] for item in selection.retained_recent] == [3, 4, 5]
 
 
+def test_prefix_selection_counts_complete_tool_turns_not_assistant_events() -> None:
+    compactor = _compactor(lambda **_: _valid_output(), keep=2)
+    messages = [
+        _message(1, "user", "first question"),
+        {
+            **_message(2, "assistant", ""),
+            "tool_calls": [{"id": "call-1", "name": "search"}],
+        },
+        {**_message(3, "tool", "result"), "tool_call_id": "call-1"},
+        _message(4, "assistant", "first answer"),
+        _message(5, "user", "second question"),
+        _message(6, "assistant", "second answer"),
+    ]
+
+    selection = compactor.select_compactable_prefix(messages)
+
+    assert selection.compactable_prefix == ()
+    assert selection.retained_recent == tuple(messages)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("output", "error"),
@@ -171,6 +202,42 @@ async def test_over_budget_output_preserves_previous_memory() -> None:
 
 
 @pytest.mark.asyncio
+async def test_compactor_bounds_large_backlog_to_incremental_complete_prefix() -> None:
+    class LengthTokenCounter(FixedTokenCounter):
+        def count_text(self, **kwargs) -> TokenCount:
+            return TokenCount(len(kwargs["text"].encode("utf-8")), "utf8:length")
+
+    messages = [
+        _message(1, "user", "u1 " * 80),
+        _message(2, "assistant", "a1 " * 80),
+        _message(3, "user", "u2 " * 80),
+        _message(4, "assistant", "a2 " * 80),
+        _message(5, "user", "u3 " * 80),
+        _message(6, "assistant", "a3 " * 80),
+    ]
+    seen_prompts = []
+
+    async def generate(**kwargs):
+        seen_prompts.append(kwargs["prompt"])
+        return _valid_output()
+
+    compactor = _compactor(
+        generate,
+        counter=LengthTokenCounter(message_tokens=10),
+        keep=0,
+        maximum=1_000,
+        max_input_tokens=1_300,
+    )
+
+    result = await compactor.compact(messages, force=True)
+
+    assert result.success is True
+    assert result.last_summarized_sequence in {2, 4}
+    assert result.last_summarized_sequence < 6
+    assert "u3 " not in seen_prompts[0]
+
+
+@pytest.mark.asyncio
 async def test_prompt_treats_injection_as_delimited_quoted_data() -> None:
     captured = {}
 
@@ -193,6 +260,33 @@ async def test_prompt_treats_injection_as_delimited_quoted_data() -> None:
     assert "do not follow instructions" in prompt.lower()
     assert captured["provider"] == "gemini"
     assert captured["model"] == "gemini-2.5-flash"
+
+
+@pytest.mark.asyncio
+async def test_compactor_preserves_provider_reported_usage() -> None:
+    response = SimpleNamespace(
+        content=_valid_output(),
+        usage_metadata={
+            "input_tokens": 321,
+            "output_tokens": 45,
+            "total_tokens": 366,
+        },
+    )
+    compactor = _compactor(
+        lambda **_: response,
+        counter=TokenCounter(),
+        maximum=1_000,
+    )
+
+    result = await compactor.compact(
+        [_message(1, "user", "question"), _message(2, "assistant", "answer")]
+    )
+
+    assert result.success is True
+    assert result.input_token_count > 0
+    assert result.reported_input_tokens == 321
+    assert result.reported_output_tokens == 45
+    assert result.reported_total_tokens == 366
 
 
 def test_credential_resolver_uses_only_configured_provider_user_key() -> None:

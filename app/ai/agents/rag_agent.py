@@ -813,6 +813,8 @@ class RAGAgent(BaseAgent):
                     history_messages=history_messages,
                     current_messages=current_messages,
                     tools=[] if disable_tools else tools,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
                 )
                 request_messages = (
                     list(budget_result.envelope.messages) if budget_result is not None else messages

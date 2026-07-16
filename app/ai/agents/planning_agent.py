@@ -490,6 +490,8 @@ class PlanningAgent(BaseAgent):
                     history_messages=planning_history,
                     current_messages=planning_current,
                     tools=[write_todos_tool],
+                    conversation_id=conversation_id,
+                    user_id=request_user_id,
                 )
                 request_messages = (
                     list(budget_result.envelope.messages)

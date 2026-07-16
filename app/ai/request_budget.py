@@ -102,6 +102,9 @@ class RequestBudgetService:
     ) -> BudgetResult:
         count = self._count(envelope)
         ratio = count.input_tokens / config.available_input_tokens
+        if ratio >= config.soft_ratio * 0.9:
+            count = await self._count_authoritative(envelope)
+            ratio = count.input_tokens / config.available_input_tokens
         if ratio < config.soft_ratio:
             return self._result("proceed", envelope, count, config)
 
@@ -117,7 +120,7 @@ class RequestBudgetService:
 
         hard_limit = int(config.available_input_tokens * config.hard_ratio)
         fixed_envelope = envelope.with_history(())
-        fixed_count = self._count(fixed_envelope)
+        fixed_count = await self._count_authoritative(fixed_envelope)
         if fixed_count.input_tokens > hard_limit:
             return self._result(
                 "error",
@@ -136,7 +139,7 @@ class RequestBudgetService:
                     timeout=config.emergency_timeout_seconds,
                 )
                 candidate = envelope.with_history(compacted_history)
-                compacted_count = self._count(candidate)
+                compacted_count = await self._count_authoritative(candidate)
                 if compacted_count.input_tokens <= hard_limit:
                     return self._result(
                         "emergency_compacted",
@@ -149,7 +152,7 @@ class RequestBudgetService:
             except Exception:
                 candidate = envelope
 
-        reduced, reduced_count, removed = self._reduce_to_limit(
+        reduced, reduced_count, removed = await self._reduce_to_limit(
             candidate,
             hard_limit=hard_limit,
         )
@@ -172,25 +175,32 @@ class RequestBudgetService:
             error_code="context_budget_unreducible",
         )
 
-    def _reduce_to_limit(
+    async def _reduce_to_limit(
         self,
         envelope: RequestEnvelope,
         *,
         hard_limit: int,
     ) -> tuple[RequestEnvelope, Any, int]:
         groups = _atomic_history_groups(envelope.history_messages)
+        remaining_groups: list[_HistoryGroup | None] = list(groups)
         remaining = list(envelope.history_messages)
         removed = 0
-        count = self._count(envelope)
-        for group in groups:
+        count = await self._count_authoritative(envelope)
+        for index, group in enumerate(groups):
             if count.input_tokens <= hard_limit:
                 break
             if not group.complete:
-                break
-            del remaining[: len(group.messages)]
+                continue
+            remaining_groups[index] = None
+            remaining = [
+                message
+                for retained_group in remaining_groups
+                if retained_group is not None
+                for message in retained_group.messages
+            ]
             removed += 1
             candidate = envelope.with_history(remaining)
-            count = self._count(candidate)
+            count = await self._count_authoritative(candidate)
         return envelope.with_history(remaining), count, removed
 
     def _count(self, envelope: RequestEnvelope):
@@ -203,6 +213,24 @@ class RequestBudgetService:
             reserved_output_tokens=0,
             safety_margin_tokens=0,
         )
+
+    async def _count_authoritative(self, envelope: RequestEnvelope):
+        count_request = getattr(self.token_counter, "count_request", None)
+        if count_request is None:
+            return self._count(envelope)
+        try:
+            return await count_request(
+                provider=envelope.provider,
+                model=envelope.model,
+                messages=envelope.messages,
+                tools=envelope.tools,
+                attachments=envelope.attachments,
+                reserved_output_tokens=0,
+                safety_margin_tokens=0,
+                authoritative=True,
+            )
+        except Exception:
+            return self._count(envelope)
 
     @staticmethod
     async def _request_durable(callback: Callable[[], Any] | None) -> bool:
@@ -267,7 +295,9 @@ def _atomic_history_groups(messages: Sequence[Any]) -> list[_HistoryGroup]:
                 waiting_for_tool_completion = True
             else:
                 waiting_for_tool_completion = False
-                groups.append(_HistoryGroup(tuple(current), True))
+                groups.append(
+                    _HistoryGroup(tuple(current), _group_is_complete(current))
+                )
                 current = []
         elif role == "tool":
             waiting_for_tool_completion = True
@@ -282,7 +312,12 @@ def _atomic_history_groups(messages: Sequence[Any]) -> list[_HistoryGroup]:
 
 
 def _group_is_complete(messages: Sequence[Any]) -> bool:
-    return bool(messages) and _role(messages[-1]) == "assistant" and not _tool_calls(messages[-1])
+    return (
+        bool(messages)
+        and _role(messages[0]) == "user"
+        and _role(messages[-1]) == "assistant"
+        and not _tool_calls(messages[-1])
+    )
 
 
 def _role(message: Any) -> str:

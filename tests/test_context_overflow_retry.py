@@ -2,7 +2,6 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app.ai.context_overflow import (
-    compact_tool_messages_for_retry,
     invoke_with_context_overflow_retry,
     is_context_overflow_error,
     prepare_aggressive_context_retry,
@@ -16,7 +15,7 @@ def test_detects_common_context_limit_errors():
     assert not is_context_overflow_error(Exception("network timeout"))
 
 
-def test_compact_tool_messages_replaces_large_tool_output():
+def test_aggressive_retry_compacts_large_tool_output():
     messages = [
         ToolMessage(
             content="x" * 200,
@@ -25,7 +24,7 @@ def test_compact_tool_messages_replaces_large_tool_output():
         )
     ]
 
-    compacted = compact_tool_messages_for_retry(messages, max_chars=40)
+    compacted = prepare_aggressive_context_retry(messages, tool_preview_chars=40)
 
     assert len(compacted) == 1
     assert isinstance(compacted[0], ToolMessage)
@@ -53,6 +52,24 @@ def test_aggressive_retry_reduces_old_turns_and_tool_previews_without_splitting(
     assert reduced[-1].content == "current"
     assert all("c1" not in str(getattr(message, "tool_call_id", "")) for message in reduced)
     assert any(message.content == "recent question" for message in reduced)
+
+
+def test_aggressive_retry_does_not_slice_through_group_after_incomplete_prefix() -> None:
+    messages = [
+        SystemMessage(content="system"),
+        ToolMessage(content="orphan result", tool_call_id="orphan"),
+        HumanMessage(content="older user"),
+        AIMessage(content="older answer"),
+        HumanMessage(content="current user"),
+    ]
+
+    reduced = prepare_aggressive_context_retry(messages, tool_preview_chars=100)
+
+    assert [(message.type, message.content) for message in reduced] == [
+        ("system", "system"),
+        ("tool", "orphan result"),
+        ("human", "current user"),
+    ]
 
 
 @pytest.mark.asyncio
