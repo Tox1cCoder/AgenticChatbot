@@ -931,6 +931,96 @@ async def test_safe_session_reconnect_counts_as_next_attempt(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_reconnect_failure_records_terminal_attempt(monkeypatch):
+    monkeypatch.setattr(settings, "tool_execution_cancellation_grace_seconds", 0.01)
+    monkeypatch.setattr(
+        settings,
+        "tool_execution_policies",
+        {
+            "safe-session": ToolExecutionPolicyOverride(
+                match={
+                    "tool_origin": "server_mcp",
+                    "qualified_tool_id": "remote::read_remote",
+                },
+                timeout_seconds=0.08,
+                hard_timeout_seconds=0.09,
+                total_timeout_seconds=0.2,
+                max_attempts=2,
+                retry_safe=True,
+            )
+        },
+    )
+
+    class _ServerTool:
+        name = "read_remote"
+        metadata = {
+            "tool_origin": "server_mcp",
+            "server_name": "remote",
+            "source_tool_name": "read_remote",
+            "qualified_tool_id": "remote::read_remote",
+        }
+
+        async def ainvoke(self, args):
+            raise ClosedResourceError
+
+    class _Manager:
+        async def reconnect_and_get_tool(self, tool_name):
+            raise TimeoutError("reconnect timed out")
+
+    async def _manager():
+        return _Manager()
+
+    monkeypatch.setattr("app.ai.mcp_registry.get_global_mcp_manager", _manager)
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-1", "name": "read_remote", "args": {}}],
+        tool_map={"read_remote": _ServerTool()},
+    )
+
+    assert json.loads(outputs[0]["content"])["error_type"] == "timeout"
+    assert artifacts[0]["attempts"] == 2
+    assert artifacts[0]["attempt_history"][-1]["error_type"] == "timeout"
+    assert artifacts[0]["attempt_history"][-1]["auto_retry_allowed"] is False
+
+
+@pytest.mark.asyncio
+async def test_policy_resolution_failure_is_sanitized_for_model(monkeypatch):
+    monkeypatch.setattr(
+        settings,
+        "tool_execution_policies",
+        {
+            "policy-a": ToolExecutionPolicyOverride(
+                match={"tool_origin": "internal"},
+                timeout_seconds=1,
+            ),
+            "policy-b": ToolExecutionPolicyOverride(
+                match={"tool_origin": "internal"},
+                timeout_seconds=2,
+            ),
+        },
+    )
+
+    class _Tool:
+        name = "read"
+        metadata = {}
+
+        async def ainvoke(self, args):
+            return "unreachable"
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-1", "name": "read", "args": {}}],
+        tool_map={"read": _Tool()},
+    )
+
+    payload = json.loads(outputs[0]["content"])
+    assert payload["error_type"] == "configuration"
+    assert payload["retryable"] is False
+    assert "policy-a" not in outputs[0]["content"]
+    assert "policy-b" not in outputs[0]["content"]
+    assert "policy-a" in artifacts[0]["diagnostic"]
+
+
+@pytest.mark.asyncio
 async def test_execute_tool_calls_empty_tool_map_returns_error_for_each_call(monkeypatch):
     monkeypatch.setattr(settings, "mcp_tool_search_enabled", False)
 

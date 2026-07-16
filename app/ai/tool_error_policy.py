@@ -202,23 +202,6 @@ def classify_tool_error(
     )
 
 
-def should_auto_retry_tool(
-    tool: Any,
-    summary: ToolErrorSummary,
-    *,
-    tool_name: str,
-    retry_safe_tool_names: set[str] | None = None,
-) -> bool:
-    if not summary.failure_retryable:
-        return False
-    if tool_name in (retry_safe_tool_names or set()):
-        return True
-    metadata = getattr(tool, "metadata", None) or {}
-    if not isinstance(metadata, dict):
-        return False
-    return metadata.get("retry_safe") is True or metadata.get("idempotent") is True
-
-
 def build_tool_error_payloads(
     summary: ToolErrorSummary,
     *,

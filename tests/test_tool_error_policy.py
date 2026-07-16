@@ -10,29 +10,8 @@ from app.ai.tool_error_policy import (
     ToolErrorKind,
     build_tool_error_payloads,
     classify_tool_error,
-    should_auto_retry_tool,
 )
 from app.schemas.runtime_protocol import RuntimeErrorContext
-
-
-class _Tool:
-    name = "example_tool"
-    metadata = {}
-
-
-class _RetrySafeTool:
-    name = "safe_reader"
-    metadata = {"retry_safe": True}
-
-
-class _StringMetadataTool:
-    name = "unsafe_string_flag"
-    metadata = {"retry_safe": "true"}
-
-
-class _ToolSearchTool:
-    name = "tool_search"
-    metadata = {}
 
 
 def test_compact_rag_tool_error_preserves_retryable_parameter_semantics():
@@ -235,58 +214,3 @@ def test_missing_sidecar_error_context_falls_back_to_typed_unknown_error():
     assert error.context.detail is None
 
 
-def test_auto_retry_requires_retryable_error_and_safe_tool():
-    retryable_summary = classify_tool_error(
-        ConnectionError("connection reset"),
-        tool_name="safe_reader",
-        timeout_seconds=30,
-        attempts=1,
-    )
-    argument_summary = classify_tool_error(
-        ValueError("bad date"),
-        tool_name="safe_reader",
-        timeout_seconds=30,
-        attempts=1,
-    )
-
-    assert (
-        should_auto_retry_tool(
-            _RetrySafeTool(),
-            retryable_summary,
-            tool_name="safe_reader",
-        )
-        is True
-    )
-    assert (
-        should_auto_retry_tool(
-            _Tool(),
-            retryable_summary,
-            tool_name="example_tool",
-        )
-        is False
-    )
-    assert (
-        should_auto_retry_tool(
-            _ToolSearchTool(),
-            retryable_summary,
-            tool_name="tool_search",
-            retry_safe_tool_names={"tool_search"},
-        )
-        is True
-    )
-    assert (
-        should_auto_retry_tool(
-            _StringMetadataTool(),
-            retryable_summary,
-            tool_name="unsafe_string_flag",
-        )
-        is False
-    )
-    assert (
-        should_auto_retry_tool(
-            _RetrySafeTool(),
-            argument_summary,
-            tool_name="safe_reader",
-        )
-        is False
-    )

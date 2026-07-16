@@ -29,7 +29,9 @@ from .tool_error_policy import (
     classify_tool_error,
 )
 from .tool_execution_policy import (
+    AmbiguousToolExecutionPolicyError,
     ToolExecutionPolicy,
+    ToolExecutionPolicyValidationError,
     resolve_tool_execution_policy,
     tool_policy_context,
 )
@@ -1268,11 +1270,33 @@ async def invoke_tool_with_policy(
 ) -> tuple[Any | None, dict[str, Any] | None, str | None, dict[str, Any]]:
     """Invoke retries and server-MCP reconnects under one resolved policy deadline."""
     invocation_kind = _tool_invocation_kind(tool)
-    policy = resolve_tool_execution_policy(
-        tool,
-        exposed_tool_name=tool_name,
-        invocation_kind=invocation_kind,
-    )
+    try:
+        policy = resolve_tool_execution_policy(
+            tool,
+            exposed_tool_name=tool_name,
+            invocation_kind=invocation_kind,
+        )
+    except (AmbiguousToolExecutionPolicyError, ToolExecutionPolicyValidationError) as exc:
+        logger.error("Invalid tool execution policy for %s: %s", tool_name, exc)
+        summary = ToolErrorSummary(
+            error_type="configuration",
+            failure_retryable=False,
+            message=(
+                "Tool execution is unavailable because its server policy is invalid."
+            ),
+            hint="Use another available tool or report the configuration problem.",
+            attempts=0,
+        )
+        model_content, artifact_detail = build_tool_error_payloads(
+            summary,
+            tool_name=tool_name,
+            exception=exc,
+            policy_retry_allowed=False,
+        )
+        return None, artifact_detail, model_content, {
+            "attempts": 0,
+            "attempt_history": [],
+        }
     policy_snapshot = _policy_snapshot(policy)
     policy_retry_allowed = (policy.retry_safe or policy.idempotent) or (
         policy.identity.tool_origin,
@@ -1359,6 +1383,7 @@ async def invoke_tool_with_policy(
                 )
                 if reconnect_exc is not None or current_tool is None:
                     final_exc = reconnect_exc or RuntimeError("MCP reconnect returned no tool")
+                    attempts += 1
                     summary = classify_tool_error(
                         final_exc,
                         tool_name=tool_name,
@@ -1366,6 +1391,17 @@ async def invoke_tool_with_policy(
                         attempts=attempts,
                     )
                     outcome = AttemptOutcome(exception=final_exc)
+                    attempt_history.append(
+                        _attempt_record(
+                            policy=policy,
+                            tool_name=tool_name,
+                            attempt=attempts,
+                            outcome=outcome,
+                            summary=summary,
+                            policy_retry_allowed=policy_retry_allowed,
+                            auto_retry_allowed=False,
+                        )
+                    )
                 else:
                     if tool_map is not None:
                         tool_map[tool_name] = current_tool
