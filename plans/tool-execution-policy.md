@@ -840,7 +840,7 @@ git commit -m "fix: order client runtime execution deadlines"
 - Test: `tests/test_skills_tool.py`
 - Test: `tests/test_tool_error_policy.py`
 
-- [ ] **Step 1: Write failing structured-error tests**
+- [x] **Step 1: Write failing structured-error tests**
 
 Cover validation, permission, session, network, timeout, unknown, and missing
 error context. Assert that raw `detail` is present in artifact diagnostics but
@@ -858,7 +858,7 @@ assert summary.error_type == "permission"
 assert "secret.txt" not in summary.message
 ```
 
-- [ ] **Step 2: Run focused structured-error tests and verify they fail**
+- [x] **Step 2: Run focused structured-error tests and verify they fail**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_client_invocation_isolation.py tests/test_skills_tool.py tests/test_tool_error_policy.py -k "error_context or structured_runtime or sidecar" -q
@@ -866,7 +866,7 @@ assert "secret.txt" not in summary.message
 
 Expected: failures because wrappers still flatten or stringify sidecar context.
 
-- [ ] **Step 3: Implement the typed error and classifier mapping**
+- [x] **Step 3: Implement the typed error and classifier mapping**
 
 Define:
 
@@ -882,11 +882,11 @@ Add a constructor that safely converts response dictionaries to
 error from both client wrappers on unsuccessful sidecar responses. Classify code
 families exactly as specified in “Client Runtime Errors.”
 
-- [ ] **Step 4: Run all three suites**
+- [x] **Step 4: Run all three suites**
 
 Run the Task 6 command without `-k`. Expected: all tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add app/ai/client_runtime_errors.py app/ai/client_runtime_tools.py app/ai/skills_tool.py app/ai/tool_error_policy.py tests/test_client_invocation_isolation.py tests/test_skills_tool.py tests/test_tool_error_policy.py
@@ -1168,3 +1168,14 @@ Design decisions:
 - `activate_skill` now carries application-owned `client_skill` identity metadata.
 - A full call-site audit found `DeviceRuntimeGateway` outside the original Task 5 file map. Its manual single timeout now maps to both deadlines, preserving that compatibility API.
 - Float deadlines are preserved through the protocol, bridge, runtime store, and local MCP manager without integer truncation.
+
+### Task 6 — complete (commit 5b39f7f, controller review Approved)
+
+43 complete client-wrapper and error-policy tests green; Ruff and `git diff --check` clean.
+
+Design decisions:
+- `ClientRuntimeToolError` preserves the validated `RuntimeErrorContext`; missing or invalid contexts fall back to `UNKNOWN_RUNTIME_ERROR`.
+- Classification uses only the specified code prefixes. Session, network, and timeout families are transient; validation, permission, and unknown families are not.
+- Model-facing summaries and hints are fixed sanitized text and never interpolate sidecar messages or detail.
+- The full context is attached only to artifact diagnostics under `runtime_error_context`.
+- Both client MCP tools and `activate_skill` raise the typed error instead of flattening or returning sidecar failures as strings.
