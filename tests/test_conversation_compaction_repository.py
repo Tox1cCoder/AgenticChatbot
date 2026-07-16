@@ -3,12 +3,16 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from sqlalchemy import inspect
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.orm import make_transient_to_detached
 
+from app.models.enums import MessageRole
 from app.repositories.conversation_compaction import (
     ConversationCompactionRepository,
     SummaryJobClaim,
 )
+from app.schemas.message import MessageRead
 
 
 def _sql(statement) -> str:
@@ -18,6 +22,55 @@ def _sql(statement) -> str:
 def _params(statement) -> list[object]:
     compiled = statement.compile(dialect=postgresql.dialect())
     return list(compiled.params.values())
+
+
+class _AllocatedSequenceResult:
+    def scalar_one_or_none(self) -> int:
+        return 1
+
+
+class _DetachingPersistenceSession:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, _statement):
+        return _AllocatedSequenceResult()
+
+    def add(self, message) -> None:
+        self.message = message
+
+    def flush(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.message.created_at = now
+        self.message.updated_at = now
+        self.message.deleted_at = None
+
+    def commit(self) -> None:
+        pass
+
+    def expunge(self, message) -> None:
+        make_transient_to_detached(message)
+
+
+def test_persisted_message_serializes_feedback_after_session_detaches_it() -> None:
+    session = _DetachingPersistenceSession()
+    repository = ConversationCompactionRepository(lambda: session)
+
+    message = repository.persist_message(
+        {
+            "id": uuid4(),
+            "conversation_id": uuid4(),
+            "sender": MessageRole.user.value,
+            "content": "hello",
+            "message_metadata": {},
+        }
+    )
+
+    assert inspect(message).detached
+    assert MessageRead.model_validate(message).feedback is None
 
 
 def test_job_upsert_coalesces_targets_and_preserves_a_live_lease() -> None:

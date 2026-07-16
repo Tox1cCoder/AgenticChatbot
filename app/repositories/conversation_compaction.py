@@ -194,7 +194,7 @@ class ConversationCompactionRepository:
                 session.rollback()
                 raise ValueError("conversation_not_found")
 
-            message = Message(**data, sequence=int(allocated))
+            message = Message(**data, sequence=int(allocated), feedback=None)
             session.add(message)
             session.flush()
             if message.sender == MessageRole.assistant.value:
