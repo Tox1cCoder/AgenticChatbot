@@ -326,16 +326,27 @@ def resolve_tool_execution_policy(
 
     Layering order: (1) an internal tool's own trusted
     `application_execution_policy` metadata; (2) deployment-configured rules,
-    applied least to most specific, each overriding only the fields it sets;
-    (3) — only when the single matching exact rule set
-    `trust_mcp_metadata=True` — the four allowlisted remote MCP fields,
-    filling in only fields that exact rule left unset. Accumulated
-    `max_timeout_seconds` caps (plus the global interactive cap) are then
-    enforced as a wall-clock ceiling, followed by invariant validation
-    (`soft < hard <= total <= cap`, shortening soft to preserve the
-    cancellation grace where needed) and the two fail-closed safety checks:
-    `disable_outer_timeout` against the code-owned allowlist, and
-    `max_attempts > 1` against `retry_safe`/`idempotent`.
+    applied least to most specific, each overriding only the fields it sets —
+    except `max_timeout_seconds`, which never gets overwritten: every matching
+    rule's value (a broad origin-level cap alongside a narrow exact override)
+    accumulates as a running minimum, so a broad operational cap can never be
+    bypassed by a more-specific rule that sets a larger one; (3) — only when
+    the single matching exact rule set `trust_mcp_metadata=True` — the four
+    allowlisted remote MCP fields, filling in only fields that exact rule left
+    unset. The accumulated `max_timeout_seconds` minimum (plus the global
+    interactive cap) is then enforced as a wall-clock ceiling, followed by
+    invariant validation (`soft <= hard <= total <= cap`, with
+    `hard - soft >= cancellation grace`, shortening soft where needed) and the
+    two fail-closed safety checks: `disable_outer_timeout` against the
+    code-owned allowlist, and `max_attempts > 1` against
+    `retry_safe`/`idempotent`.
+
+    The soft/hard invariant is strict (`soft < hard`) whenever the configured
+    cancellation grace is greater than zero. `soft == hard` is permitted only
+    in the degenerate `tool_execution_cancellation_grace_seconds == 0`
+    configuration (legal because that field is `ge=0`), where the soft-cancel
+    and hard-abandon phases collapse into the same instant by construction —
+    there is no grace window left to reserve.
 
     Raises `AmbiguousToolExecutionPolicyError` if deployment config matches
     the same identity twice at one specificity level, or
@@ -384,7 +395,12 @@ def resolve_tool_execution_policy(
         if override.total_timeout_seconds is not None:
             effective["total_timeout_seconds"] = override.total_timeout_seconds
         if override.max_timeout_seconds is not None:
-            effective["max_timeout_seconds"] = override.max_timeout_seconds
+            current_cap = effective["max_timeout_seconds"]
+            effective["max_timeout_seconds"] = (
+                override.max_timeout_seconds
+                if current_cap is None
+                else min(current_cap, override.max_timeout_seconds)
+            )
         if override.max_attempts is not None:
             effective["max_attempts"] = override.max_attempts
         if override.retry_safe is not None:
@@ -459,6 +475,14 @@ def resolve_tool_execution_policy(
             f"resolved hard timeout {hard} for identity {identity_key!r} does not leave "
             f"room for the configured cancellation grace {grace}"
         )
+
+    # Invariant enforced from here on: `hard - soft >= grace` (equivalently
+    # `soft <= hard`). When `grace > 0` this forces strict `soft < hard`. When
+    # `grace == 0` (legal — the field is `ge=0`) the floor collapses to
+    # `soft == hard`: the soft-cancel and hard-abandon phases coincide by
+    # construction because there is no grace window left to reserve. Deployment
+    # config may legitimately land in that degenerate configuration; it must
+    # not raise here.
     if soft >= hard or (hard - soft) < grace:
         soft = hard - grace
 

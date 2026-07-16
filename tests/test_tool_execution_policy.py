@@ -650,6 +650,12 @@ def test_remote_meta_cannot_disable_outer_timeout(monkeypatch):
 
 
 def test_broad_cap_still_limits_more_specific_override(monkeypatch):
+    # The exact rule ALSO sets its own, larger max_timeout_seconds (200). If
+    # the resolver let the more-specific rule's cap simply overwrite the
+    # broader one instead of accumulating a minimum across every matching
+    # rule, the effective cap would become 200 (then only clamped by the
+    # global 120s cap) and the broad 60s origin-level cap would be bypassed
+    # entirely. The accumulated cap must be min(60, 200, 120) == 60.
     monkeypatch.setattr(
         settings,
         "tool_execution_policies",
@@ -664,6 +670,7 @@ def test_broad_cap_still_limits_more_specific_override(monkeypatch):
                     "qualified_tool_id": "desktop_commander::start_process",
                 },
                 timeout_seconds=90,
+                max_timeout_seconds=200,
             ),
         },
     )
@@ -687,6 +694,116 @@ def test_broad_cap_still_limits_more_specific_override(monkeypatch):
     assert policy.metadata_trusted is False
     assert policy.outer_timeout_disabled is False
     assert policy.policy_source == "config"
+
+
+def test_max_timeout_seconds_accumulates_as_minimum_across_all_rules(monkeypatch):
+    # Reproduces the originally-reported defect exactly: an origin-level cap
+    # of 60 plus an exact rule with both max_timeout_seconds=200 and
+    # timeout_seconds=90 previously resolved to total_timeout_seconds=92.0
+    # (the 60s cap silently bypassed). The accumulated cap must win: 60.
+    monkeypatch.setattr(
+        settings,
+        "tool_execution_policies",
+        {
+            "origin-cap": ToolExecutionPolicyOverride(
+                match={"tool_origin": "server_mcp"},
+                max_timeout_seconds=60,
+            ),
+            "exact-rule": ToolExecutionPolicyOverride(
+                match={
+                    "tool_origin": "server_mcp",
+                    "qualified_tool_id": "desktop_commander::start_process",
+                },
+                timeout_seconds=90,
+                max_timeout_seconds=200,
+            ),
+        },
+    )
+    tool = SimpleNamespace(
+        name="start_process",
+        metadata={
+            "tool_origin": "server_mcp",
+            "server_name": "desktop_commander",
+            "qualified_tool_id": "desktop_commander::start_process",
+        },
+    )
+
+    policy = resolve_tool_execution_policy(
+        tool, exposed_tool_name="start_process", invocation_kind="native_async"
+    )
+
+    assert policy.total_timeout_seconds == 60.0
+    assert policy.hard_timeout_seconds == 60.0
+    assert policy.timeout_seconds < policy.hard_timeout_seconds
+
+
+def test_grace_zero_allows_soft_equal_hard_degenerate_case(monkeypatch):
+    # tool_execution_cancellation_grace_seconds=0 is legal (the field is
+    # ge=0). With a rule pinning timeout_seconds == hard_timeout_seconds == 10,
+    # the resolved soft and hard timeouts necessarily coincide: there is no
+    # grace window left to reserve, so soft == hard is the correct degenerate
+    # resolution, not a validation error. Resolution must not raise, and the
+    # result must still be bounded by the caps.
+    monkeypatch.setattr(settings, "tool_execution_cancellation_grace_seconds", 0.0)
+    monkeypatch.setattr(
+        settings,
+        "tool_execution_policies",
+        {
+            "exact-rule": ToolExecutionPolicyOverride(
+                match={"tool_origin": "internal", "qualified_tool_id": "internal::pinned_tool"},
+                timeout_seconds=10,
+                hard_timeout_seconds=10,
+            ),
+        },
+    )
+    tool = SimpleNamespace(
+        name="pinned_tool",
+        metadata={"tool_origin": "internal", "qualified_tool_id": "internal::pinned_tool"},
+    )
+
+    policy = resolve_tool_execution_policy(
+        tool, exposed_tool_name="pinned_tool", invocation_kind="native_async"
+    )
+
+    assert policy.timeout_seconds == 10.0
+    assert policy.hard_timeout_seconds == 10.0
+    assert policy.timeout_seconds == policy.hard_timeout_seconds
+    assert policy.hard_timeout_seconds <= policy.total_timeout_seconds
+    assert (
+        policy.total_timeout_seconds <= settings.tool_execution_max_interactive_timeout_seconds
+    )
+
+
+def test_grace_positive_still_enforces_strict_soft_less_than_hard(monkeypatch):
+    # Same shape (timeout_seconds == hard_timeout_seconds == 10) but with the
+    # default positive grace: the strict soft < hard invariant must hold, so
+    # the resolver is required to shorten soft below hard by at least grace.
+    monkeypatch.setattr(
+        settings,
+        "tool_execution_policies",
+        {
+            "exact-rule": ToolExecutionPolicyOverride(
+                match={"tool_origin": "internal", "qualified_tool_id": "internal::pinned_tool"},
+                timeout_seconds=10,
+                hard_timeout_seconds=10,
+            ),
+        },
+    )
+    tool = SimpleNamespace(
+        name="pinned_tool",
+        metadata={"tool_origin": "internal", "qualified_tool_id": "internal::pinned_tool"},
+    )
+
+    policy = resolve_tool_execution_policy(
+        tool, exposed_tool_name="pinned_tool", invocation_kind="native_async"
+    )
+
+    grace = settings.tool_execution_cancellation_grace_seconds
+    assert grace > 0
+    assert policy.timeout_seconds < policy.hard_timeout_seconds
+    assert policy.hard_timeout_seconds - policy.timeout_seconds >= grace
+    assert policy.timeout_seconds == 8.0
+    assert policy.hard_timeout_seconds == 10.0
 
 
 def test_retry_attempts_require_retry_safe_or_idempotent(monkeypatch):
