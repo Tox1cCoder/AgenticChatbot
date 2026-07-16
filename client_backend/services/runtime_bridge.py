@@ -70,6 +70,17 @@ def _make_tool_instance_id(
 logger = get_logger(__name__)
 
 
+class ClientExecutionTimeoutError(TimeoutError):
+    """The complete client runtime operation exceeded its execution deadline."""
+
+
+def _consume_task_exception(task: asyncio.Task[Any]) -> None:
+    """Retrieve the terminal state of work abandoned after its deadline."""
+
+    with suppress(asyncio.CancelledError):
+        task.exception()
+
+
 class RuntimeBridgeService:
     """Owns the device registration + runtime WebSocket lifecycle."""
 
@@ -252,6 +263,13 @@ class RuntimeBridgeService:
         *,
         detail: dict[str, Any] | None = None,
     ) -> RuntimeErrorContext:
+        if isinstance(exc, ClientExecutionTimeoutError):
+            return RuntimeErrorContext(
+                message="Client runtime operation timed out.",
+                code="TIMEOUT_CLIENT_EXECUTION",
+                detail=detail or None,
+            )
+
         if isinstance(exc, SkillRuntimeError):
             merged_detail = dict(detail or {})
             if exc.repair is not None:
@@ -555,7 +573,23 @@ class RuntimeBridgeService:
             if validation_error:
                 raise ValueError(f"Tool request rejected: {validation_error}")
 
-            result = await self._execute_tool_request(request)
+            task = asyncio.create_task(self._execute_tool_request(request))
+            try:
+                done, _ = await asyncio.wait(
+                    {task},
+                    timeout=float(request.timeout_seconds),
+                )
+            except asyncio.CancelledError:
+                task.cancel()
+                task.add_done_callback(_consume_task_exception)
+                raise
+            if not done:
+                task.cancel()
+                task.add_done_callback(_consume_task_exception)
+                raise ClientExecutionTimeoutError(
+                    f"Client runtime execution exceeded {request.timeout_seconds}s"
+                )
+            result = task.result()
             duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
             payload = ToolDispatchResult(
                 request_id=request.request_id,

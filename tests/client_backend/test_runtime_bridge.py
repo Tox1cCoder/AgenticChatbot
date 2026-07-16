@@ -255,6 +255,45 @@ async def test_handle_tool_request_sends_shared_typed_tool_result(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_handle_tool_request_bounds_complete_client_execution(monkeypatch):
+    bridge = RuntimeBridgeService(server_client=_ServerClientStub())
+    bridge._current_tool_catalog = {
+        "demo::read": {
+            "qualified_id": "demo::read",
+            "name": "read",
+        }
+    }
+    release = asyncio.Event()
+    sent_payloads = []
+
+    async def _hung_execution(_request):
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            await release.wait()
+
+    async def _capture(payload):
+        sent_payloads.append(payload)
+
+    monkeypatch.setattr(bridge, "_execute_tool_request", _hung_execution)
+    monkeypatch.setattr(bridge, "_send_runtime_message", _capture)
+    request = ToolDispatchRequest(
+        request_id="timeout-1",
+        tool_name="read",
+        qualified_tool_id="demo::read",
+        arguments={},
+        timeout_seconds=0.01,
+    )
+
+    await asyncio.wait_for(bridge._handle_tool_request(request), timeout=0.1)
+
+    assert sent_payloads[0].success is False
+    assert sent_payloads[0].error_context.code == "TIMEOUT_CLIENT_EXECUTION"
+    release.set()
+    await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
 async def test_handle_server_message_uses_typed_runtime_error_context():
     bridge = RuntimeBridgeService(server_client=_ServerClientStub())
 
