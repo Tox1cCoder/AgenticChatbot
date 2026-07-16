@@ -138,10 +138,10 @@ class ToolExecutionPolicyOverride(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     match: ToolExecutionPolicyMatch
-    timeout_seconds: float | None = Field(default=None, gt=0)
-    hard_timeout_seconds: float | None = Field(default=None, gt=0)
-    total_timeout_seconds: float | None = Field(default=None, gt=0)
-    max_timeout_seconds: float | None = Field(default=None, gt=0)
+    timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    hard_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    total_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    max_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     max_attempts: int | None = Field(default=None, ge=1, le=5)
     retry_safe: bool | None = None
     idempotent: bool | None = None
@@ -157,6 +157,22 @@ class ToolExecutionPolicyOverride(BaseModel):
                 "qualified_tool_id match rule"
             )
         return self
+
+
+class InternalToolExecutionPolicy(BaseModel):
+    """Strict application-owned execution metadata for internal tools."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    hard_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    total_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    max_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    max_attempts: int | None = Field(default=None, ge=1, le=5)
+    retry_safe: bool | None = None
+    idempotent: bool | None = None
+    disable_outer_timeout: bool | None = None
+    timeout_hint: str | None = Field(default=None, max_length=240)
 
 
 class Settings(BaseSettings):
@@ -852,6 +868,7 @@ class Settings(BaseSettings):
     tool_execution_max_interactive_timeout_seconds: float = Field(
         default=120.0,
         gt=0,
+        allow_inf_nan=False,
         description=(
             "Global wall-clock cap for any single interactive tool call; "
             "participates as the final accumulated timeout cap."
@@ -860,6 +877,7 @@ class Settings(BaseSettings):
     tool_execution_cancellation_grace_seconds: float = Field(
         default=2.0,
         ge=0,
+        allow_inf_nan=False,
         description=(
             "Grace period reserved between a tool's soft timeout and its hard "
             "timeout for cooperative cancellation to complete."
@@ -868,6 +886,7 @@ class Settings(BaseSettings):
     tool_execution_client_execution_grace_seconds: float = Field(
         default=2.0,
         gt=0,
+        allow_inf_nan=False,
         description=(
             "Seconds subtracted from the server soft timeout to derive the "
             "client-side execution deadline for client-runtime tools."
@@ -876,6 +895,7 @@ class Settings(BaseSettings):
     tool_execution_client_response_grace_seconds: float = Field(
         default=1.0,
         gt=0,
+        allow_inf_nan=False,
         description=(
             "Seconds subtracted from the server soft timeout to derive the "
             "server-side bridge response deadline for client-runtime tools."
@@ -1428,6 +1448,29 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _cross_field_checks(self) -> "Settings":
+        if (
+            self.tool_execution_max_interactive_timeout_seconds
+            <= self.tool_execution_cancellation_grace_seconds
+        ):
+            raise ValueError("tool execution maximum must exceed cancellation grace")
+        if (
+            self.tool_execution_client_execution_grace_seconds
+            <= self.tool_execution_client_response_grace_seconds
+        ):
+            raise ValueError("client execution grace must exceed client response grace")
+
+        selectors: dict[str, str] = {}
+        for key, override in self.tool_execution_policies.items():
+            selector = override.match.model_dump_json(exclude_none=True)
+            if selector in selectors:
+                raise ValueError(
+                    "duplicate tool execution policy selectors: "
+                    f"{selectors[selector]!r}, {key!r}"
+                )
+            selectors[selector] = key
+            if override.disable_outer_timeout:
+                raise ValueError("deployment policy cannot disable the outer timeout")
+
         if self.redis_password:
             self.redis_url = _inject_redis_password(self.redis_url, self.redis_password)
             self.celery_broker_url = _inject_redis_password(

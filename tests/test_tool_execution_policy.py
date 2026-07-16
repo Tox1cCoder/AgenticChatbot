@@ -328,6 +328,19 @@ def test_override_rejects_non_positive_timeouts(field):
         ToolExecutionPolicyOverride(match={"tool_origin": "internal"}, **{field: 0})
 
 
+@pytest.mark.parametrize(
+    "field",
+    ["timeout_seconds", "hard_timeout_seconds", "total_timeout_seconds", "max_timeout_seconds"],
+)
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+def test_override_rejects_non_finite_timeouts(field, value):
+    with pytest.raises(ValidationError):
+        ToolExecutionPolicyOverride(
+            match={"tool_origin": "internal"},
+            **{field: value},
+        )
+
+
 @pytest.mark.parametrize("value", [0, 6])
 def test_override_rejects_max_attempts_outside_bounds(value):
     with pytest.raises(ValidationError):
@@ -399,6 +412,47 @@ def test_settings_rejects_invalid_tool_execution_policy_match_shape():
                     "timeout_seconds": 45,
                 },
             }
+        )
+
+
+def test_settings_rejects_duplicate_policy_selectors():
+    with pytest.raises(ValidationError, match="duplicate"):
+        _settings(
+            tool_execution_policies={
+                "a": {"match": {"tool_origin": "internal"}},
+                "b": {"match": {"tool_origin": "internal"}},
+            }
+        )
+
+
+def test_settings_rejects_outer_timeout_disable_in_deployment_policy():
+    with pytest.raises(ValidationError, match="deployment policy"):
+        _settings(
+            tool_execution_policies={
+                "config-disable": {
+                    "match": {
+                        "tool_origin": "internal",
+                        "qualified_tool_id": "internal::dispatch_subagents",
+                    },
+                    "disable_outer_timeout": True,
+                }
+            }
+        )
+
+
+def test_settings_rejects_global_cap_that_cannot_fit_cancellation_grace():
+    with pytest.raises(ValidationError, match="maximum must exceed cancellation grace"):
+        _settings(
+            tool_execution_max_interactive_timeout_seconds=2.0,
+            tool_execution_cancellation_grace_seconds=2.0,
+        )
+
+
+def test_settings_rejects_reversed_client_deadline_graces():
+    with pytest.raises(ValidationError, match="execution grace must exceed"):
+        _settings(
+            tool_execution_client_execution_grace_seconds=1.0,
+            tool_execution_client_response_grace_seconds=2.0,
         )
 
 
@@ -876,6 +930,55 @@ def test_retry_attempts_require_retry_safe_or_idempotent(monkeypatch):
     with pytest.raises(ToolExecutionPolicyValidationError):
         resolve_tool_execution_policy(
             tool, exposed_tool_name="write_todos", invocation_kind="native_async"
+        )
+
+
+def test_internal_metadata_cannot_exceed_five_attempts():
+    tool = SimpleNamespace(
+        name="read",
+        metadata={
+            "application_execution_policy": {
+                "max_attempts": 999,
+                "retry_safe": True,
+            }
+        },
+    )
+
+    with pytest.raises(ToolExecutionPolicyValidationError, match="max_attempts"):
+        resolve_tool_execution_policy(
+            tool,
+            exposed_tool_name="read",
+            invocation_kind="native_async",
+        )
+
+
+def test_config_cannot_disable_dispatch_outer_timeout(monkeypatch):
+    monkeypatch.setattr(
+        settings,
+        "tool_execution_policies",
+        {
+            "config-disable": ToolExecutionPolicyOverride(
+                match={
+                    "tool_origin": "internal",
+                    "qualified_tool_id": "internal::dispatch_subagents",
+                },
+                disable_outer_timeout=True,
+            )
+        },
+    )
+    tool = SimpleNamespace(
+        name="dispatch_subagents",
+        metadata={
+            "tool_origin": "internal",
+            "qualified_tool_id": "internal::dispatch_subagents",
+        },
+    )
+
+    with pytest.raises(ToolExecutionPolicyValidationError, match="trusted application"):
+        resolve_tool_execution_policy(
+            tool,
+            exposed_tool_name="dispatch_subagents",
+            invocation_kind="native_async",
         )
 
 

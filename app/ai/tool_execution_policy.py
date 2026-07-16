@@ -20,7 +20,14 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from app.core.config import ToolExecutionPolicyMatch, ToolExecutionPolicyOverride, settings
+from pydantic import ValidationError
+
+from app.core.config import (
+    InternalToolExecutionPolicy,
+    ToolExecutionPolicyMatch,
+    ToolExecutionPolicyOverride,
+    settings,
+)
 
 # Allowed values for ToolIdentity.tool_origin. Kept in sync with the
 # Literal declared on ToolExecutionPolicyMatch.tool_origin in app.core.config.
@@ -280,7 +287,17 @@ def _trusted_internal_policy_fields(raw_metadata: dict[str, Any]) -> dict[str, A
     app_policy = raw_metadata.get("application_execution_policy")
     if not isinstance(app_policy, dict):
         return {}
-    return {key: app_policy[key] for key in _INTERNAL_TRUSTED_POLICY_FIELDS if key in app_policy}
+    try:
+        validated = InternalToolExecutionPolicy.model_validate(app_policy)
+    except ValidationError as exc:
+        raise ToolExecutionPolicyValidationError(
+            f"Invalid application_execution_policy metadata: {exc}"
+        ) from exc
+    return {
+        key: value
+        for key, value in validated.model_dump(exclude_none=True).items()
+        if key in _INTERNAL_TRUSTED_POLICY_FIELDS
+    }
 
 
 def _remote_mcp_trusted_fields(raw_metadata: dict[str, Any]) -> dict[str, Any]:
@@ -437,11 +454,16 @@ def resolve_tool_execution_policy(
     config_keys = tuple(config_key for config_key, _ in rules)
 
     identity_key = (identity.tool_origin, identity.qualified_tool_id)
-    if effective["disable_outer_timeout"] and identity_key not in _DISABLE_OUTER_TIMEOUT_ALLOWLIST:
-        raise ToolExecutionPolicyValidationError(
-            "disable_outer_timeout is only permitted for "
-            f"{sorted(_DISABLE_OUTER_TIMEOUT_ALLOWLIST)}; got {identity_key!r}"
-        )
+    if effective["disable_outer_timeout"]:
+        if not internal_trusted:
+            raise ToolExecutionPolicyValidationError(
+                "disable_outer_timeout requires trusted application metadata"
+            )
+        if identity_key not in _DISABLE_OUTER_TIMEOUT_ALLOWLIST:
+            raise ToolExecutionPolicyValidationError(
+                "disable_outer_timeout is only permitted for "
+                f"{sorted(_DISABLE_OUTER_TIMEOUT_ALLOWLIST)}; got {identity_key!r}"
+            )
 
     if effective["max_attempts"] > 1 and not (effective["retry_safe"] or effective["idempotent"]):
         raise ToolExecutionPolicyValidationError(
