@@ -243,6 +243,7 @@ def clone_mcp_tool(tool: Any, *, server_name: str | None = None) -> Any:
         # via metadata it controls (see "Canonical Tool Identity" contract).
         metadata["tool_origin"] = "server_mcp"
         metadata["server_name"] = server_name
+        metadata["source_tool_name"] = cloned_tool.name
         metadata["qualified_tool_id"] = f"{server_name}::{cloned_tool.name}"
         cloned_tool.metadata = metadata
     return cloned_tool

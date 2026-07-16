@@ -576,6 +576,17 @@ def test_unknown_tool_uses_single_attempt_bounded_default():
     assert policy.cancellation == "cooperative"
 
 
+def test_unknown_runtime_tool_origin_is_rejected():
+    tool = SimpleNamespace(name="read", metadata={"tool_origin": "server"})
+
+    with pytest.raises(ToolExecutionPolicyValidationError, match="tool_origin"):
+        resolve_tool_execution_policy(
+            tool,
+            exposed_tool_name="read",
+            invocation_kind="native_async",
+        )
+
+
 def test_untrusted_mcp_meta_cannot_raise_timeout_or_enable_retry():
     tool = SimpleNamespace(
         name="start_process",

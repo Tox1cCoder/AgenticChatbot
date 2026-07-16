@@ -136,6 +136,11 @@ def resolve_tool_identity(tool: Any, *, exposed_tool_name: str) -> ToolIdentity:
     metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
 
     tool_origin = str(metadata.get("tool_origin") or "").strip() or _DEFAULT_TOOL_ORIGIN
+    if tool_origin not in _KNOWN_TOOL_ORIGINS:
+        raise ToolExecutionPolicyValidationError(
+            f"Unknown tool_origin {tool_origin!r}; expected one of "
+            f"{sorted(_KNOWN_TOOL_ORIGINS)}"
+        )
 
     exposed_name = str(exposed_tool_name or "").strip()
     fallback_source_name = str(getattr(tool, "name", "") or exposed_name).strip()
