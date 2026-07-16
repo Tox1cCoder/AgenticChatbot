@@ -54,7 +54,7 @@ A Streamlit **demo UI** ([`demo.py`](demo.py)) and a ready-to-import **Postman c
 | **Client runtime bridge** | Devices register, heartbeat, sync tool/skill catalogs, and receive WebSocket-dispatched tool calls — enabling local shell/filesystem/MCP execution without exposing them to the public network. |
 | **Skills** | Markdown-defined skills with YAML frontmatter, owned by each client device. The sidecar scans `CLIENT_SKILLS_ROOTS`, syncs a per-device catalog to the server, and serves skill content over the runtime bridge ([`client_backend/services/local_skills_registry.py`](client_backend/services/local_skills_registry.py)). The server has no skills of its own. |
 | **Live widgets** | Token-minted handshake (`POST /widgets/{id}/connection`) followed by a stateful WebSocket (`/widgets/{id}/connect`) for interactive, server-driven UI components. |
-| **Summarization middleware** | Context-budget-aware rolling summarisation ([`summarization_middleware.py`](app/ai/summarization_middleware.py)) with token/message/fraction triggers, hard summary caps, and fail-closed timeouts. |
+| **Durable conversation compaction** | PostgreSQL-backed compacted memory with sequence cursors, leased Celery jobs, request-budget preflight, and a bounded emergency path. |
 | **Auto-continue** | Automatic continuation rounds when an agent hits iteration limits (`auto_continue_enabled`), with absolute wall-clock and iteration safety caps. |
 | **Thinking / reasoning** | First-class support for Gemini 3 thinking levels (`minimal` / `low` / `medium` / `high`) and Gemini 2.5 thinking budgets, surfaced as streaming `reasoning` events. |
 | **Gemini code execution** | Optional native tool for agentic vision + computation across agents (`enable_gemini_code_execution`). |
@@ -119,9 +119,9 @@ Both services speak the same schemas (`app/schemas/`). The **client backend** ex
 │   │   ├── agents/                   chat / rag / search / image / planning / canvas / router
 │   │   ├── mcp_servers/              Built-in MCP servers (calculator, tavily, brave_image_search, time, widgets, form_filler, boring_reader)
 │   │   ├── graph.py                  MultiAgentWorkflow + streaming + HITL
-│   │   ├── memory.py                 Conversation memory manager
-│   │   ├── summarization_middleware.py   Rolling summarisation
-│   │   ├── token_instrumentation.py  History-budget + token truncation
+│   │   ├── history.py                Canonical compacted-memory + transcript assembly
+│   │   ├── conversation_compactor.py Durable compaction orchestration
+│   │   ├── token_counter.py          Provider-aware request token accounting
 │   │   ├── tool_search_tool.py       Deferred tool loading
 │   │   ├── deferred_tool_*.py        Deferred binding + state machine
 │   │   ├── skills_*.py               Skill registry / resolver / snapshot / tool
@@ -319,33 +319,30 @@ embedding migration" below).
 
 `MEMORY_MAX_MESSAGES`, `CHAT_HISTORY_MAX_MESSAGES` / `_TOKENS`, `RAG_HISTORY_MAX_*`, `SEARCH_HISTORY_MAX_*`, `PLANNING_HISTORY_MAX_*`.
 
-### Durable conversation memory (memory refactor 2026-04-29)
+### Durable conversation compaction
 
-Prompt memory is built in one place — `app.ai.history.ConversationHistoryProvider` — and combines a durable per-conversation summary stored in PostgreSQL (`conversation_memory_summaries`) with the recent unsummarized messages from the `messages` table. The summary cursor is a database `messages.id`, never a LangChain message id, so prompt history can never overlap with the summary text.
+Prompt memory is built in one place — `app.ai.history.ConversationHistoryProvider` — and combines a durable per-conversation compacted-memory record in PostgreSQL with transcript rows after its numeric message-sequence cursor. Request preflight uses the same provider-aware token counter as the background compactor and can request durable work or, at the hard boundary, run one bounded synchronous compaction attempt.
 
 | Variable | Default | Notes |
 |---|---|---|
 | `MEMORY_CACHE_TTL_SECONDS` | `60` | TTL for the in-process prompt-history cache. |
 | `MEMORY_CACHE_MAX_CONVERSATIONS` | `256` | LRU cap before older conversations are evicted. |
-| `MEMORY_SUMMARY_MIN_UNSUMMARIZED_MESSAGES` | `60` | Refresh threshold; `0` disables. |
-| `MEMORY_SUMMARY_MIN_UNSUMMARIZED_TOKENS` | `18000` | Token threshold; `0` disables. |
-| `MEMORY_SUMMARY_KEEP_MESSAGES` | `8` | Newest messages to keep out of the summary. |
-| `MEMORY_SUMMARY_MAX_TOKENS` | `1500` | Hard cap on the generated summary text. |
-| `MEMORY_SUMMARY_TIMEOUT_SECONDS` | `30` | Fail-closed timeout for the summarizer call. |
+| `CONVERSATION_SUMMARY_ENABLED` | `true` | Enables durable and emergency compaction. |
+| `CONVERSATION_SUMMARY_TRIGGER_MESSAGES` | `60` | Pending-message trigger; pair with the token trigger. |
+| `CONVERSATION_SUMMARY_TRIGGER_TOKENS` | `18000` | Pending-token trigger. |
+| `CONVERSATION_SUMMARY_KEEP_RECENT_TURNS` | `4` | Complete recent turns excluded from compaction. |
+| `CONVERSATION_SUMMARY_MAX_TOKENS` | `1500` | Positive output cap for compacted memory. |
+| `CONVERSATION_SUMMARY_TIMEOUT_SECONDS` | `30` | Model-call timeout. |
 
 Operational behaviour:
 
-- Summaries are best-effort and fail-closed — a timeout or model error leaves the previous summary in place.
-- Prompt history is cached by `(conversation_id, user_id, current_message_id, agent_key, summary_cursor, summary_version)`; transcript writes invalidate the cache.
+- Compaction is idempotent and leased; a timeout or model error leaves the previous valid memory in place and retries with bounded backoff.
+- Prompt history is cached by conversation, user, current message, agent, cursor, and memory version; transcript writes invalidate the cache.
 - Soft-deleted messages and empty paused/interrupt assistant placeholders are excluded from prompt history.
 - Checkpoint state is **not** long-term memory. After the terminal assistant response is persisted, the service issues `RemoveMessage` for every checkpoint message id; PostgreSQL is the canonical transcript.
 - AI SDK clients may post their full UI history at `POST /api/chat/{conversation_id}`; the server only consumes the latest user message and rebuilds prior memory from the database.
 
-### Summarization middleware (rolling, off the hot path)
-
-`ENABLE_SUMMARIZATION`, `SUMMARIZATION_TRIGGER_TOKENS`, `SUMMARIZATION_TRIGGER_MESSAGES`, `SUMMARIZATION_TRIGGER_FRACTION`, `SUMMARIZATION_MODEL_CONTEXT_SIZE`, `SUMMARIZATION_KEEP_MESSAGES`, `SUMMARIZATION_MODEL`, `SUMMARIZATION_MAX_SUMMARY_TOKENS`, `SUMMARIZATION_TIMEOUT_SECONDS`.
-
-After the memory refactor, summarization no longer runs on the streaming hot path. `MessageService.refresh_summary_after_turn` schedules the durable refresh via `asyncio.create_task` once the assistant message is persisted. The `_summarization_node` graph node was reduced to a no-op; `START` now connects directly to `route` so streaming yields the first user-facing token without waiting on a summary call.
+Deployment, migration, rollback, backfill, monitoring, and credential-rotation procedures are documented in [`docs/operations/conversation-compaction.md`](docs/operations/conversation-compaction.md).
 
 ### Document processing
 
