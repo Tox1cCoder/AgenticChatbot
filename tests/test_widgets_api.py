@@ -45,8 +45,8 @@ widgets_api = importlib.util.module_from_spec(widgets_module_spec)
 widgets_module_spec.loader.exec_module(widgets_api)
 router = widgets_api.router
 
-from app.core.auth import get_current_user_id
-from app.services.widget_runtime import (
+from app.core.auth import get_current_user_id  # noqa: E402
+from app.services.widget_runtime import (  # noqa: E402
     InMemoryWidgetStore,
     WidgetConnectionManager,
     WidgetTokenService,

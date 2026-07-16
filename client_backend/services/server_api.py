@@ -172,9 +172,11 @@ class ServerAPIClient:
                 **kwargs,
             )
         except httpx.ConnectError as e:
-            raise ServerConnectionError(f"Cannot connect to server at {self.base_url}: {e}")
+            raise ServerConnectionError(
+                f"Cannot connect to server at {self.base_url}: {e}"
+            ) from e
         except httpx.TimeoutException as e:
-            raise ServerConnectionError(f"Server request timed out: {e}")
+            raise ServerConnectionError(f"Server request timed out: {e}") from e
 
     async def _handle_response(self, response: httpx.Response) -> dict[str, Any]:
         """Handle response and raise appropriate errors."""
@@ -334,7 +336,9 @@ class ServerAPIClient:
                         yield parsed
 
         except httpx.ConnectError as e:
-            raise ServerConnectionError(f"Cannot connect to server at {self.base_url}: {e}")
+            raise ServerConnectionError(
+                f"Cannot connect to server at {self.base_url}: {e}"
+            ) from e
         except httpx.ReadTimeout:
             logger.warning(
                 "SSE stream read timeout on %s (this should not happen with read=None)", path

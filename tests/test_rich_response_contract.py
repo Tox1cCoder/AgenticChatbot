@@ -7,6 +7,7 @@ See response_format.md Task 1.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from app.core.rich_response import (
     ImageRichItem,
@@ -220,7 +221,7 @@ def test_transient_upserts_omit_null_keys_and_default_provenance():
 
 
 def test_image_record_rejects_append_display_policy():
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         ImageRichItem(
             id="image:tool:call-1:0",
             type=RichItemType.image,
@@ -304,7 +305,7 @@ def test_inventory_block_is_empty_when_no_items():
 
 
 def test_image_payload_requires_exactly_one_source():
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         ImageRichItem(
             id="image:invalid",
             type=RichItemType.image,
@@ -315,7 +316,7 @@ def test_image_payload_requires_exactly_one_source():
 
 
 def test_image_payload_rejects_both_url_and_data():
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         ImageRichItem(
             id="image:invalid",
             type=RichItemType.image,
@@ -326,7 +327,7 @@ def test_image_payload_rejects_both_url_and_data():
 
 
 def test_image_payload_rejects_unknown_mime_category():
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         ImageRichItem(
             id="image:invalid",
             type=RichItemType.image,
@@ -337,7 +338,7 @@ def test_image_payload_rejects_unknown_mime_category():
 
 
 def test_image_payload_rejects_invalid_url_scheme():
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         ImageRichItem(
             id="image:invalid",
             type=RichItemType.image,

@@ -697,32 +697,31 @@ class ModelConfigService(IRuntimeModelResolver):
             credentials_cache=credentials_cache,
         )
 
-        if not isinstance(api_key, str) or not api_key.strip():
-            if fallback_config:
-                warnings.append(
-                    f"Selected provider '{provider}' is unavailable at runtime. Falling back to {fallback_config.provider}."
-                )
-                provider_fallback = {
-                    "from": provider,
-                    "to": fallback_config.provider,
-                    "reason": "provider_not_configured",
-                }
-                provider = fallback_config.provider
-                model = fallback_config.model
-                temperature = fallback_config.temperature
-                api_key = fallback_config.api_key
-                key_source = fallback_config.key_source
-                source = "fallback"
+        if (not isinstance(api_key, str) or not api_key.strip()) and fallback_config:
+            warnings.append(
+                f"Selected provider '{provider}' is unavailable at runtime. Falling back to {fallback_config.provider}."
+            )
+            provider_fallback = {
+                "from": provider,
+                "to": fallback_config.provider,
+                "reason": "provider_not_configured",
+            }
+            provider = fallback_config.provider
+            model = fallback_config.model
+            temperature = fallback_config.temperature
+            api_key = fallback_config.api_key
+            key_source = fallback_config.key_source
+            source = "fallback"
 
-                # Recompute fallback candidate for the new provider (for downstream use)
-                fallback_config = self._build_runtime_fallback_candidate(
-                    user_id=user_id,
-                    agent_key=normalized_agent_key,
-                    provider_snapshots=provider_snapshots,
-                    effective_config=effective_config,
-                    current_provider=provider,
-                    credentials_cache=credentials_cache,
-                )
+            # Recompute fallback candidate for the new provider (for downstream use)
+            fallback_config = self._build_runtime_fallback_candidate(
+                user_id=user_id,
+                agent_key=normalized_agent_key,
+                provider_snapshots=provider_snapshots,
+                effective_config=effective_config,
+                current_provider=provider,
+                credentials_cache=credentials_cache,
+            )
 
         capabilities = self._build_capabilities(
             provider,

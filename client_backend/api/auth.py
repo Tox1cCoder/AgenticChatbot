@@ -115,9 +115,12 @@ def _assert_single_active_upstream_user(
     if target_user_id and current_user_id and str(target_user_id) == str(current_user_id):
         return
 
-    if target_username and current_username:
-        if str(target_username).strip().lower() == str(current_username).strip().lower():
-            return
+    if (
+        target_username
+        and current_username
+        and str(target_username).strip().lower() == str(current_username).strip().lower()
+    ):
+        return
 
     raise HTTPException(
         status_code=status.HTTP_409_CONFLICT,

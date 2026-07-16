@@ -2,8 +2,6 @@
 
 from types import SimpleNamespace
 
-import pytest
-
 from app.ai.hitl_config import (
     any_call_requires_approval,
     build_global_policy,

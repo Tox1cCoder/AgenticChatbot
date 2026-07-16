@@ -21,14 +21,14 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP  # noqa: E402
 
-from app.services.widget_contract import (
+from app.services.widget_contract import (  # noqa: E402
     SUPPORTED_WIDGET_TYPE,
     assert_supported_widget_type,
     validate_html_widget_state,
 )
-from app.services.widget_runtime import get_widget_store
+from app.services.widget_runtime import get_widget_store  # noqa: E402
 
 mcp = FastMCP("widgets")
 
