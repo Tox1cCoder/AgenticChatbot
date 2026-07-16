@@ -202,7 +202,6 @@ async def test_execute_tool_calls_structured_error_render_stays_compact(monkeypa
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "tool_execution_timeout", 1)
-    monkeypatch.setattr(settings, "tool_execution_max_retries", 0)
 
     class _BrokenTool:
         name = "broken_tool"

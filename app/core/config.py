@@ -829,10 +829,6 @@ class Settings(BaseSettings):
         default=30,
         description="Timeout for individual tool calls in seconds",
     )
-    tool_execution_max_retries: int = Field(
-        default=2,
-        description="Maximum retry attempts for failed tool executions",
-    )
     tool_execution_consecutive_errors_limit: int = Field(
         default=3,
         description=(

@@ -517,7 +517,6 @@ async def test_recover_missing_tool_does_not_bind_unloaded_server_tool(monkeypat
 @pytest.mark.asyncio
 async def test_execute_tool_calls_times_out_slow_tool(monkeypatch):
     monkeypatch.setattr(settings, "tool_execution_timeout", 0.01)
-    monkeypatch.setattr(settings, "tool_execution_max_retries", 0)
 
     class _SlowTool:
         name = "slow_tool"
@@ -543,27 +542,6 @@ async def test_execute_tool_calls_times_out_slow_tool(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_execute_tool_calls_metadata_none_disables_timeout(monkeypatch):
-    monkeypatch.setattr(settings, "tool_execution_timeout", 0.01)
-    monkeypatch.setattr(settings, "tool_execution_max_retries", 0)
-
-    class _LongRunningTool:
-        name = "dispatch_like_tool"
-        metadata = {"execution_timeout_seconds": None}
-
-        async def ainvoke(self, args):
-            await asyncio.sleep(0.05)
-            return "done"
-
-    outputs, artifacts, _ = await execute_tool_calls(
-        tool_calls=[{"id": "call-1", "name": "dispatch_like_tool", "args": {}}],
-        tool_map={"dispatch_like_tool": _LongRunningTool()},
-    )
-
-    assert outputs[0]["content"] == "done"
-    assert artifacts[0].get("status") != "error"
-
-
 @pytest.mark.asyncio
 async def test_dispatch_subagents_policy_stays_unbounded_through_unified_path(monkeypatch):
     monkeypatch.setattr(settings, "tool_execution_timeout", 0.02)
@@ -593,55 +571,17 @@ async def test_dispatch_subagents_policy_stays_unbounded_through_unified_path(mo
     assert diagnostics["attempts"] == 1
 
 
-def test_resolve_tool_timeout_seconds_bridges_dispatch_subagents_policy_metadata(monkeypatch):
-    """The new ``application_execution_policy`` metadata shape (Task 2) must
-    keep disabling the outer timeout for the one allowlisted identity, until
-    the runner is migrated onto ``resolve_tool_execution_policy`` directly."""
-    from app.ai.tool_execution import _resolve_tool_timeout_seconds
-
-    monkeypatch.setattr(settings, "tool_execution_timeout", 30)
-
-    dispatch_tool = SimpleNamespace(
-        name="dispatch_subagents",
-        metadata={
-            "tool_origin": "internal",
-            "qualified_tool_id": "internal::dispatch_subagents",
-            "application_execution_policy": {"disable_outer_timeout": True},
-        },
-    )
-    assert _resolve_tool_timeout_seconds(dispatch_tool) is None
-
-
-def test_resolve_tool_timeout_seconds_ignores_disable_for_other_internal_tools(monkeypatch):
-    """Only the exact dispatch_subagents identity may disable the outer
-    timeout — a different internal tool claiming the same metadata key must
-    still get the ordinary bounded timeout."""
-    from app.ai.tool_execution import _resolve_tool_timeout_seconds
-
-    monkeypatch.setattr(settings, "tool_execution_timeout", 30)
-
-    other_tool = SimpleNamespace(
-        name="some_other_tool",
-        metadata={
-            "tool_origin": "internal",
-            "qualified_tool_id": "internal::some_other_tool",
-            "application_execution_policy": {"disable_outer_timeout": True},
-        },
-    )
-    assert _resolve_tool_timeout_seconds(other_tool) == 30.0
-
-
 @pytest.mark.asyncio
-async def test_execute_tool_calls_metadata_overrides_timeout(monkeypatch):
-    monkeypatch.setattr(settings, "tool_execution_timeout", 10)
-    monkeypatch.setattr(settings, "tool_execution_max_retries", 0)
+async def test_execute_tool_calls_ignores_legacy_numeric_timeout_metadata(monkeypatch):
+    monkeypatch.setattr(settings, "tool_execution_timeout", 0.01)
+    monkeypatch.setattr(settings, "tool_execution_cancellation_grace_seconds", 0.005)
 
     class _SlowOverrideTool:
         name = "slow_override_tool"
-        metadata = {"execution_timeout_seconds": 0.01}
+        metadata = {"execution_timeout_seconds": 10.0}
 
         async def ainvoke(self, args):
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.05)
             return "too late"
 
     outputs, _, _ = await execute_tool_calls(
@@ -791,7 +731,6 @@ async def test_terminal_failure_has_policy_diagnostics_and_sanitized_attempt_log
 @pytest.mark.asyncio
 async def test_execute_tool_calls_does_not_auto_retry_unknown_side_effect_tool(monkeypatch):
     monkeypatch.setattr(settings, "tool_execution_timeout", 1)
-    monkeypatch.setattr(settings, "tool_execution_max_retries", 2)
     calls = 0
 
     class _MaybeSideEffectTool:

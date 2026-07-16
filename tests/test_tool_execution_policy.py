@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
+from app.ai.tool_execution import execute_tool_calls
 from app.ai.tool_execution_policy import (
     AmbiguousToolExecutionPolicyError,
     ToolExecutionPolicyValidationError,
@@ -31,6 +34,44 @@ def _settings(**overrides) -> Settings:
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)
+
+
+@pytest.mark.asyncio
+async def test_legacy_top_level_timeout_metadata_is_ignored_for_non_internal_tool(
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "tool_execution_timeout", 0.01)
+    monkeypatch.setattr(settings, "tool_execution_cancellation_grace_seconds", 0.005)
+
+    class _RemoteTool:
+        name = "remote_tool"
+        metadata = {
+            "tool_origin": "server_mcp",
+            "server_name": "remote",
+            "qualified_tool_id": "remote::remote_tool",
+            "execution_timeout_seconds": None,
+        }
+
+        async def ainvoke(self, args):
+            await asyncio.sleep(0.05)
+            return "late success"
+
+    tool = _RemoteTool()
+    policy = resolve_tool_execution_policy(
+        tool,
+        exposed_tool_name="remote_tool",
+        invocation_kind="native_async",
+    )
+    assert policy.outer_timeout_disabled is False
+    assert policy.timeout_seconds == pytest.approx(settings.tool_execution_timeout)
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "legacy-timeout", "name": "remote_tool", "args": {}}],
+        tool_map={"remote_tool": tool},
+    )
+
+    assert json.loads(outputs[0]["content"])["error_type"] == "timeout"
+    assert artifacts[0]["policy"]["outer_timeout_disabled"] is False
 
 
 def _identity(**overrides) -> ToolIdentity:

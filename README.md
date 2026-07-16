@@ -352,6 +352,28 @@ Deployment, migration, rollback, backfill, monitoring, and credential-rotation p
 
 `MCP_TOOL_SEARCH_ENABLED`, `MCP_TOOL_SEARCH_DEFAULT_TOP_K`, `MCP_TOOL_SEARCH_AUTOLOAD_TOP_K`, `MCP_TOOL_SEARCH_PINNED_TOOLS`, `MCP_TOOL_SEARCH_MAX_LOADED_TOOLS_PER_CONVERSATION`, `MCP_TOOL_SEARCH_LOADED_TOOLS_TTL_MINUTES`, `MCP_TOOL_SEARCH_MIN_RELEVANCE_SCORE`, `MCP_TOOL_SEARCH_AUTOLOAD_MIN_RELEVANCE_SCORE`.
 
+### Tool execution policy
+
+Interactive tools resolve an origin-aware policy from the canonical
+`tool_origin` plus `qualified_tool_id`, trusted internal metadata, and layered
+deployment rules. Unknown tools keep the 30-second soft timeout and one attempt;
+automatic retries require both a transient failure and explicit safe-repeat
+policy. Client execution and bridge-response deadlines finish before the server
+soft deadline.
+
+| Variable | Default |
+|---|---:|
+| `TOOL_EXECUTION_TIMEOUT` | `30` |
+| `TOOL_EXECUTION_POLICIES` | `{}` |
+| `TOOL_EXECUTION_MAX_INTERACTIVE_TIMEOUT_SECONDS` | `120` |
+| `TOOL_EXECUTION_CANCELLATION_GRACE_SECONDS` | `2` |
+| `TOOL_EXECUTION_CLIENT_EXECUTION_GRACE_SECONDS` | `2` |
+| `TOOL_EXECUTION_CLIENT_RESPONSE_GRACE_SECONDS` | `1` |
+
+Matching, JSON configuration, safe rollout, incident caps, cancellation
+semantics, and the sole `dispatch_subagents` exception are documented in
+[`docs/operations/tool-execution-policy.md`](docs/operations/tool-execution-policy.md).
+
 ### HITL & planning
 
 `ENABLE_HUMAN_IN_THE_LOOP`, `HITL_TOOLS_REQUIRE_APPROVAL`, `HITL_APPROVAL_TIMEOUT_MINUTES`, `MAX_AUTO_PLAN_TASKS`, `EXECUTION_CALL_BUDGET`, `PLANNING_MAX_ITERATIONS`, `PLANNING_CONSECUTIVE_ERRORS_LIMIT`.
@@ -529,7 +551,7 @@ The agent workflow is a **LangGraph state machine** defined in [`app/ai/graph.py
 2. **Hydrate prompt memory** — `ConversationHistoryProvider` (`app/ai/history.py`) returns the durable summary plus recent unsummarized DB messages after the summary cursor. Soft-deleted rows and empty paused/interrupt placeholders are filtered. Per-agent budgets (`chat_history_max_messages` / `_tokens`, …) trim the result.
 3. **Router** — [`Router`](app/ai/agents/router.py) invokes Gemini with `ROUTER_SYSTEM_PROMPT` plus server-generated runtime time context and returns one of `chat_agent` / `rag_agent` / `search_agent` / `image_generator_agent` / `planning_agent` / `canvas_agent`. (The legacy `summarize` node is kept as a no-op; `START` connects directly to `route`.)
 4. **Agent execution** — the selected agent runs a ReAct-style loop with deferred tool binding, HITL gating, streaming, and the same runtime time context in its system prompt. Configure the local time anchor with `RUNTIME_TIME_CONTEXT_TIMEZONE`; UTC is always included.
-5. **Tool execution** — `tool_execution.execute_tool_calls` runs each tool with bounded per-tool timeout, conservative retry for retry-safe transient failures, compact model-facing error summaries, and truncated `ToolMessage` bodies (full artifacts preserved for the UI).
+5. **Tool execution** — `tool_execution.execute_tool_calls` resolves an origin-aware soft/hard/total deadline policy, shares its attempt budget across retries and MCP reconnect, emits sanitized attempt diagnostics, and keeps compact model-facing errors separate from full UI artifacts.
 6. **Auto-continue** — on hitting iteration limits, continuation rounds run until user-configured caps (`auto_continue_max_rounds`, `auto_continue_max_total_iterations`, `auto_continue_timeout_seconds`).
 7. **Stream** — every token, reasoning chunk, tool call, artifact, and interrupt is serialized as a structured SSE event.
 8. **Persist assistant reply, refresh durable summary, compact checkpoint** — once the terminal `complete` event is received, the service persists the assistant message, schedules a non-blocking durable summary refresh, then compacts the checkpoint transcript with `RemoveMessage` so it does not drift from DB truth.

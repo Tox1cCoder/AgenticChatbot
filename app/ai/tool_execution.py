@@ -6,7 +6,7 @@ import logging
 import math
 import time
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..core.config import settings
@@ -1259,74 +1259,6 @@ def _structured_tool_error(result: Any) -> str | None:
     return "\n".join(text_parts) or str(safe_result.get("message") or "Tool execution failed")
 
 
-def _tool_execution_timeout_seconds() -> float:
-    value = getattr(settings, "tool_execution_timeout", 30) or 30
-    try:
-        parsed = float(value)
-    except Exception:
-        return 30.0
-    return max(0.001, parsed)
-
-
-# Narrow, temporary compatibility bridge: the only identity allowed to disable
-# the outer timeout via `application_execution_policy` (see the code-owned
-# allowlist in `app.ai.tool_execution_policy`). This legacy resolver predates
-# the policy resolver and is removed once the runner calls it directly.
-_LEGACY_DISABLE_OUTER_TIMEOUT_IDENTITY = ("internal", "internal::dispatch_subagents")
-
-
-def _resolve_tool_timeout_seconds(tool: Any) -> float | None:
-    """Per-tool timeout from tool metadata.
-
-    ``None`` disables the outer timeout — for long-running orchestration tools
-    (e.g. ``dispatch_subagents``) whose inner operations already run under
-    their own tool/provider timeouts. Absent or invalid values fall back to
-    the global ``tool_execution_timeout``.
-
-    Understands two metadata shapes:
-
-    - The legacy top-level ``execution_timeout_seconds`` key (removed once
-      this module is migrated onto ``resolve_tool_execution_policy``).
-    - The new ``application_execution_policy.disable_outer_timeout`` key
-      (see "Metadata Trust"), honored only for the exact
-      ``("internal", "internal::dispatch_subagents")`` identity so a
-      first-party tool cannot self-declare an unbounded timeout.
-    """
-    metadata = getattr(tool, "metadata", None)
-    if not isinstance(metadata, dict):
-        return _tool_execution_timeout_seconds()
-
-    if "execution_timeout_seconds" in metadata:
-        value = metadata["execution_timeout_seconds"]
-        if value is None:
-            return None
-        try:
-            return max(0.001, float(value))
-        except (TypeError, ValueError):
-            pass
-        return _tool_execution_timeout_seconds()
-
-    identity_key = (metadata.get("tool_origin"), metadata.get("qualified_tool_id"))
-    if identity_key == _LEGACY_DISABLE_OUTER_TIMEOUT_IDENTITY:
-        application_policy = metadata.get("application_execution_policy")
-        if (
-            isinstance(application_policy, dict)
-            and application_policy.get("disable_outer_timeout") is True
-        ):
-            return None
-
-    return _tool_execution_timeout_seconds()
-
-
-def _tool_execution_max_retries() -> int:
-    value = getattr(settings, "tool_execution_max_retries", 0) or 0
-    try:
-        parsed = int(value)
-    except Exception:
-        return 0
-    return max(0, parsed)
-
-
 async def invoke_tool_with_policy(
     tool: Any,
     tool_args: Any,
@@ -1341,7 +1273,6 @@ async def invoke_tool_with_policy(
         exposed_tool_name=tool_name,
         invocation_kind=invocation_kind,
     )
-    policy = _apply_legacy_timeout_compatibility(tool, policy)
     policy_snapshot = _policy_snapshot(policy)
     policy_retry_allowed = (policy.retry_safe or policy.idempotent) or (
         policy.identity.tool_origin,
@@ -1469,27 +1400,6 @@ def _tool_invocation_kind(tool: Any) -> str:
     if getattr(tool, "coroutine", None) or callable(getattr(tool, "ainvoke", None)):
         return "native_async"
     return "sync_thread"
-
-
-def _apply_legacy_timeout_compatibility(
-    tool: Any,
-    policy: ToolExecutionPolicy,
-) -> ToolExecutionPolicy:
-    """Preserve legacy top-level timeout metadata until Task 8 removes it."""
-    if policy.outer_timeout_disabled:
-        return policy
-    metadata = getattr(tool, "metadata", None)
-    if not isinstance(metadata, dict) or "execution_timeout_seconds" not in metadata:
-        return policy
-    legacy_timeout = _resolve_tool_timeout_seconds(tool)
-    if legacy_timeout is None:
-        return replace(policy, outer_timeout_disabled=True)
-    return replace(
-        policy,
-        timeout_seconds=legacy_timeout,
-        hard_timeout_seconds=legacy_timeout,
-        total_timeout_seconds=legacy_timeout,
-    )
 
 
 def _policy_snapshot(policy: ToolExecutionPolicy) -> dict[str, Any]:
