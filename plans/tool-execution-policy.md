@@ -1033,7 +1033,7 @@ git commit -m "docs: document tool execution policy operations"
 - No production changes expected
 - Modify tests only if verification reveals a genuine missing regression, using a separate red-green commit
 
-- [ ] **Step 1: Run the focused policy and runtime suite**
+- [x] **Step 1: Run the focused policy and runtime suite**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_tool_execution_policy.py tests/test_tool_error_policy.py tests/test_tool_execution_recovery.py tests/test_tool_execution_rendering.py tests/test_client_invocation_isolation.py tests/test_skills_tool.py tests/test_planning_subagents.py tests/test_mcp_adapter_utils.py tests/client_backend/test_runtime_bridge.py -q
@@ -1051,7 +1051,7 @@ warnings.
 Expected: all repository tests pass. Environment-dependent integration tests may
 skip only through their existing skip conditions; new failures are not accepted.
 
-- [ ] **Step 3: Verify source compilation**
+- [x] **Step 3: Verify source compilation**
 
 ```powershell
 .venv\Scripts\python.exe -m compileall -q app client_backend tests
@@ -1059,7 +1059,7 @@ skip only through their existing skip conditions; new failures are not accepted.
 
 Expected: exit code 0 with no syntax errors.
 
-- [ ] **Step 4: Inspect the final diff and policy invariants**
+- [x] **Step 4: Inspect the final diff and policy invariants**
 
 ```powershell
 git diff --check
@@ -1075,7 +1075,7 @@ Confirm from the diff that:
 - model-facing `retryable` requires both a transient failure and safe-repeat policy;
 - no generic background job implementation entered this change.
 
-- [ ] **Step 5: Commit any verification-only regression tests**
+- [x] **Step 5: Commit any verification-only regression tests**
 
 If Step 2 exposed a missing regression and production behavior was corrected via
 red-green TDD, commit that isolated correction with its exact files. If no files
@@ -1201,3 +1201,21 @@ Design decisions:
 - Retained the `dispatch_subagents` exception entirely through the canonical resolver and code-owned allowlist.
 - Updated legacy recovery tests to assert both `None` and numeric top-level timeout metadata are ignored.
 - Added the operator runbook with deterministic matching, JSON configuration, diagnostic-only rollout, incident caps, strict client deadline ordering, sanitized observability, and background-job scope boundaries.
+
+### Task 9 — partial (full-suite acceptance blocked by unrelated failures)
+
+- Focused policy/runtime matrix: 213 passed with no leaked-task or unhandled-exception warnings.
+- Full repository suite: 1,891 passed, 14 skipped, and 7 failed.
+- Compilation: `compileall` exit 0.
+- `git diff --check`, clean-worktree check, and policy invariant audit passed.
+- No verification-only production or regression change was required, so no empty commit was created.
+
+The seven full-suite failures reproduce outside the tool-policy matrix and are unchanged by this plan's diff:
+
+- one live-server document upload response-contract failure;
+- one environment-loaded Brave API-key default mismatch;
+- two FastAPI route-introspection compatibility failures involving `_IncludedRouter`;
+- two pre-existing server MCP config/allowlist mismatches for machine-specific servers;
+- one artifact truncation expectation that conflicts with the repository's newer full-output-by-default contract.
+
+Resolving these requires expanding scope into live integration infrastructure, environment isolation, FastAPI test compatibility, MCP deployment configuration, and artifact-retention semantics. Task 9 Step 2 and the final acceptance criterion remain open pending explicit authorization for that expansion.
