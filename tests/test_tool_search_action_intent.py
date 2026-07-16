@@ -66,6 +66,19 @@ def test_url_without_action_does_not_guess_extract_or_open():
     assert "external_open" not in intent.capabilities
 
 
+def test_file_content_search_does_not_infer_web_search():
+    intent = infer_query_intent("search file contents")
+
+    assert "file_search" in intent.capabilities
+    assert "web_search" not in intent.capabilities
+
+
+def test_web_context_search_still_infers_web_search():
+    intent = infer_query_intent("search the web for current news")
+
+    assert "web_search" in intent.capabilities
+
+
 def test_tool_profiles_do_not_depend_on_server_brand():
     first = infer_tool_profile(
         tool_name="extract_url",

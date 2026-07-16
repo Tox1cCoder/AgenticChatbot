@@ -65,7 +65,8 @@ _WEB_RESOURCE_TERMS = {
     "webpage",
     "website",
 }
-_WEB_SEARCH_TERMS = {"web", "search", "current", "recent", "news", "source", "sources"}
+_WEB_SEARCH_ACTION_TERMS = {"search", "find", "lookup"}
+_WEB_SEARCH_CONTEXT_TERMS = {"web", "internet", "online", "news", "current", "recent"}
 _WEB_MAP_TERMS = {"map", "sitemap", "site", "structure", "pages", "urls", "discover"}
 _WEB_CRAWL_TERMS = {"crawl", "site", "website", "docs", "documentation", "section", "pages"}
 _URL_ARGUMENT_TERMS = {"link", "uri", "url", "urls"}
@@ -99,13 +100,7 @@ def infer_query_intent(query: str | None) -> QueryIntent:
         capabilities.add("external_open")
     if content_read_actions and web_resource_targets:
         capabilities.add("web_extract")
-    if tokens & _WEB_SEARCH_TERMS and tokens & {
-        "web",
-        "search",
-        "current",
-        "recent",
-        "news",
-    }:
+    if tokens & _WEB_SEARCH_ACTION_TERMS and tokens & _WEB_SEARCH_CONTEXT_TERMS:
         capabilities.add("web_search")
     if tokens & _WEB_MAP_TERMS and tokens & {
         "map",
