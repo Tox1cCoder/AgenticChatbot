@@ -179,8 +179,8 @@ marshmallow==3.26.1
 matplotlib==3.10.8
 mcp==1.24.0
 mdurl==0.1.2
-mineru==3.0.9
-mineru_vl_utils==0.2.3
+mineru==3.4.4
+mineru_vl_utils==1.0.5
 mistune==3.2.0
 mmengine-lite==0.10.7
 modelscope==1.35.4

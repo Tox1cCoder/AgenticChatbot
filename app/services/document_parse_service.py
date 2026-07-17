@@ -292,15 +292,17 @@ class DocumentParseService:
                 .lower()
             )
             backend_aliases = {
-                "vlm": "vlm-auto-engine",
-                "hybrid": "hybrid-auto-engine",
+                "vlm": "vlm-engine",
+                "hybrid": "hybrid-engine",
+                "vlm-auto-engine": "vlm-engine",
+                "hybrid-auto-engine": "hybrid-engine",
             }
             backend = backend_aliases.get(backend_raw, backend_raw)
             valid_backends = {
                 "pipeline",
-                "hybrid-auto-engine",
+                "hybrid-engine",
                 "hybrid-http-client",
-                "vlm-auto-engine",
+                "vlm-engine",
                 "vlm-http-client",
             }
             if backend not in valid_backends:

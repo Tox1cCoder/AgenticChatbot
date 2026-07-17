@@ -725,9 +725,12 @@ class Settings(BaseSettings):
     mineru_backend: str = Field(
         default="pipeline",
         description=(
-            "MinerU parse backend. Options: 'pipeline', 'hybrid-auto-engine', "
-            "'hybrid-http-client', 'vlm-auto-engine', 'vlm-http-client'. "
-            "Use 'hybrid-http-client' or 'vlm-http-client' when MINERU_API_URL is set."
+            "MinerU parse backend. Options: 'pipeline', 'hybrid-engine', "
+            "'hybrid-http-client', 'vlm-engine', 'vlm-http-client'. "
+            "Legacy names 'hybrid-auto-engine'/'vlm-auto-engine' are still accepted. "
+            "Use 'hybrid-http-client' or 'vlm-http-client' when MINERU_API_URL is set. "
+            "Hybrid backends default to '--effort medium', which skips image/chart "
+            "analysis; add ['--effort', 'high'] to MINERU_EXTRA_ARGS to re-enable it."
         ),
     )
     mineru_method: str = Field(
@@ -739,7 +742,9 @@ class Settings(BaseSettings):
     mineru_lang: str = Field(
         default="",
         description=(
-            "Optional MinerU OCR language for pipeline/hybrid backends (for example: 'en', 'ch')."
+            "Optional MinerU OCR language for pipeline/hybrid backends (for example: 'ch', "
+            "'korean', 'th'). Since MinerU 3.4 'en', 'japan', 'chinese_cht', and 'latin' "
+            "are remapped to the unified 'ch' model."
         ),
     )
     extract_formulas_from_pdf: bool = Field(
