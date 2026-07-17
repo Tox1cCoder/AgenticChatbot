@@ -51,6 +51,10 @@ def legacy_event_from_v3(event: V3StreamEvent) -> dict[str, Any] | None:
             "operation": event.data.get("operation", "upsert"),
             "items": list(event.data.get("items") or []),
         }
+    if event.type == "image_preview":
+        payload = dict(event.data)
+        payload["type"] = "image_preview"
+        return payload
     if event.type == "agent_selected":
         payload = {
             "type": "agent_selected",

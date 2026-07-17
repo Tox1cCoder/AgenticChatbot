@@ -36,6 +36,7 @@ StreamEventType = Literal[
     "subagent_end",
     "state_snapshot",
     "rich_items",
+    "image_preview",
     "interrupt",
     "complete",
     "error",

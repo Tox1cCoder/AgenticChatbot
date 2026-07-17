@@ -327,6 +327,13 @@ class AIService:
                             data={"operation": "upsert", "items": rich_items},
                         )
 
+            elif event_type == "image_preview":
+                yield make_event(
+                    "image_preview",
+                    sequence=_next_sequence(),
+                    data={key: value for key, value in event.items() if key != "type"},
+                )
+
             elif event_type == "complete":
                 final_response = self._to_service_response(event.get("response"))
 

@@ -206,6 +206,11 @@ class AISDKV6StreamAdapter:
                 yield chunk
             return
 
+        if etype == "image_preview":
+            async for chunk in self._image_preview(data):
+                yield chunk
+            return
+
         if etype == "agent_selected":
             yield _sse(
                 {
@@ -334,6 +339,33 @@ class AISDKV6StreamAdapter:
             {
                 "type": "data-rich-items",
                 "data": {"operation": data.get("operation") or "upsert", "items": safe_items},
+                "transient": True,
+            }
+        )
+
+    async def _image_preview(self, data: dict[str, Any]) -> AsyncGenerator[str, None]:
+        """Project an early-delivery image preview as a transient data part.
+
+        The stable part ``id`` (one per image index) lets AI SDK clients
+        replace a partial preview with the next partial/final in place. The
+        authoritative image still arrives as a ``file`` part on ``complete``.
+        """
+        data_b64 = data.get("data_b64")
+        item_id = data.get("item_id")
+        if not data_b64 or not item_id:
+            return
+        media_type = data.get("mime") or "image/png"
+        yield _sse(
+            {
+                "type": "data-image-preview",
+                "id": str(item_id),
+                "data": {
+                    "imageIndex": data.get("image_index"),
+                    "status": data.get("status") or "final",
+                    "mediaType": media_type,
+                    "url": f"data:{media_type};base64,{data_b64}",
+                    "seq": data.get("seq") or 0,
+                },
                 "transient": True,
             }
         )

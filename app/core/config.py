@@ -455,6 +455,20 @@ class Settings(BaseSettings):
         default=1,
         description="Maximum number of images to request per generation",
     )
+    enable_image_streaming: bool = Field(
+        default=True,
+        description=(
+            "Stream generated images to clients as transient previews the moment "
+            "each one is ready, instead of only with the terminal complete event."
+        ),
+    )
+    image_stream_preview_max_b64_chars: int = Field(
+        default=4_000_000,
+        description=(
+            "Maximum base64 length for a streamed image preview (~3 MB binary). "
+            "Larger images skip the preview and arrive only at completion."
+        ),
+    )
 
     # Image Captioning Configuration
     image_caption_model: str = Field(

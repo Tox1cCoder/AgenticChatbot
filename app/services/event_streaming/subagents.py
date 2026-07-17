@@ -58,6 +58,14 @@ class SubagentEventSink:
             )
         )
 
+    def emit_event(self, event: V3StreamEvent) -> None:
+        """Enqueue a prebuilt canonical event (e.g. ``image_preview``).
+
+        Synchronous on purpose: producers inside graph nodes must not await
+        the stream; the queue is unbounded so ``put_nowait`` never fails.
+        """
+        self._queue.put_nowait(event.model_copy(update={"sequence": self._next_sequence()}))
+
     async def drain(self) -> list[V3StreamEvent]:
         events: list[V3StreamEvent] = []
         while not self._queue.empty():

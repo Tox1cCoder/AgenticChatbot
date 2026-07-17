@@ -21,6 +21,7 @@ from ..core.response_constants import NO_RESPONSE_GENERATED
 from ..interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..interfaces.workflow_runtime_interface import IWorkflowRuntime
 from ..models.enums import PlanLifecycle
+from ..services.event_streaming.events import make_event
 from ..services.event_streaming.graph_public_projection import (
     GraphPublicStreamProjector,
     StreamProjectionContext,
@@ -29,6 +30,7 @@ from ..services.event_streaming.langchain_v3 import iter_v3_events_from_graph
 from ..services.event_streaming.subagents import (
     SubagentEventSink,
     register_subagent_event_sink,
+    resolve_subagent_event_sink,
     stream_with_subagent_events,
 )
 from .agent_metadata import (
@@ -49,6 +51,7 @@ from .hitl_config import (
     build_interrupt_response,
 )
 from .image_context import build_multimodal_content, has_image_parts
+from .image_generation import use_image_preview_emitter
 from .rag_tool_actions import canonicalize_rag_tool_call, execute_search_documents_action
 from .schemas import (
     AgentMessage,
@@ -1443,6 +1446,34 @@ class MultiAgentWorkflow(
         self._merge_tool_artifacts(state, response)
         return self._finalize_agent_response(state, response)
 
+    def _build_image_preview_emitter(self, state: GraphState):
+        """Bind an image-preview emitter to this run's live event sink.
+
+        Returns None (previews disabled) when the run is not streaming — the
+        sink token only exists for ``execute_request_stream`` runs and weakly
+        resolves to None after resume.
+        """
+        if not settings.enable_image_streaming:
+            return None
+        context = state.get("context") if isinstance(state, dict) else None
+        token = context.get("subagent_event_sink_token") if isinstance(context, dict) else None
+        sink = resolve_subagent_event_sink(token)
+        if sink is None:
+            return None
+
+        def _emit(payload: dict[str, Any]) -> None:
+            sink.emit_event(
+                make_event(
+                    "image_preview",
+                    sequence=0,
+                    agent="image_generator_agent",
+                    node="image_generator_agent",
+                    data=payload,
+                )
+            )
+
+        return _emit
+
     async def _image_generator_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
         if not messages:
@@ -1465,17 +1496,18 @@ class MultiAgentWorkflow(
             current_turn_messages,
         )
 
-        response = await self.image_generator_agent.invoke_model_with_history(
-            current_turn_messages,
-            conversation_history,
-            state.get("persona"),
-            conversation_id,
-            user_id=user_id,
-            device_id=state.get("device_id"),
-            model_request=state.get("model_request"),
-            **self._final_response_kwargs(state),
-            **self._multi_agent_kwargs(state, "image_generator_agent"),
-        )
+        with use_image_preview_emitter(self._build_image_preview_emitter(state)):
+            response = await self.image_generator_agent.invoke_model_with_history(
+                current_turn_messages,
+                conversation_history,
+                state.get("persona"),
+                conversation_id,
+                user_id=user_id,
+                device_id=state.get("device_id"),
+                model_request=state.get("model_request"),
+                **self._final_response_kwargs(state),
+                **self._multi_agent_kwargs(state, "image_generator_agent"),
+            )
 
         self._mark_response_has_images(response, has_images)
 

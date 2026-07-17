@@ -1,9 +1,7 @@
-import base64
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from google.genai import types
 from langchain_core.messages import BaseMessage
 from langchain_core.messages import HumanMessage as LCHumanMessage
 
@@ -11,6 +9,14 @@ from ...core.config import settings
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..agent_config import AGENT_CONFIG, create_gemini_client, create_langchain_model
 from ..image_context import build_multimodal_content
+from ..image_generation import (
+    ImageFinal,
+    ImageGenerationRequest,
+    ImagePartial,
+    ImagePreviewPublisher,
+    NarrativeDelta,
+    resolve_image_provider,
+)
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..utils import coerce_response_text, extract_inline_images_from_content
 from .base_agent import BaseAgent
@@ -359,96 +365,60 @@ Do not output anything else, just the prompt."""
         *,
         source_images: list[dict[str, str]] | None = None,
     ) -> tuple[list[dict], str]:
-        if not self.gemini_client:
+        provider = resolve_image_provider(
+            self.model_name,
+            gemini_client=self.gemini_client,
+        )
+        if provider is None:
             return [], ""
 
-        parts = [types.Part.from_text(text=prepared_prompt)]
-        for source_image in source_images or []:
-            encoded = source_image.get("data")
-            if not encoded:
-                continue
-            try:
-                parts.append(
-                    types.Part.from_bytes(
-                        data=base64.b64decode(encoded, validate=True),
-                        mime_type=source_image.get("mime") or "image/png",
-                    )
-                )
-            except (TypeError, ValueError):
-                logger.warning("Skipping invalid source image supplied for image editing")
-
-        contents = [types.Content(role="user", parts=parts)]
-
-        config_kwargs = {"response_modalities": ["IMAGE", "TEXT"]}
-        image_config_cls = getattr(types, "ImageGenerationConfig", None)
-        if image_config_cls is not None:
-            config_kwargs["image_generation_config"] = image_config_cls(
-                number_of_images=self.max_images,
-                aspect_ratio=self.default_aspect_ratio,
-            )
-
-        generate_config = types.GenerateContentConfig(**config_kwargs)
+        request = ImageGenerationRequest(
+            prompt=prepared_prompt,
+            model=self.model_name,
+            max_images=self.max_images,
+            aspect_ratio=self.default_aspect_ratio,
+            source_images=list(source_images or []),
+        )
+        publisher = ImagePreviewPublisher(
+            enabled=settings.enable_image_streaming,
+            max_b64_chars=settings.image_stream_preview_max_b64_chars,
+        )
 
         images: list[dict] = []
         narrative_parts: list[str] = []
 
-        response = self.gemini_client.models.generate_content(
-            model=self.model_name,
-            contents=contents,
-            config=generate_config,
-        )
-
-        for candidate in getattr(response, "candidates", []) or []:
-            if not candidate or not getattr(candidate, "content", None):
-                continue
-
-            for part in getattr(candidate.content, "parts", []) or []:
-                inline_data = getattr(part, "inline_data", None)
-                if inline_data and getattr(inline_data, "data", None):
-                    encoded = self._encode_image(inline_data.data)
-                    if encoded:
-                        images.append(
-                            {
-                                "data": encoded,
-                                "mime": inline_data.mime_type or "image/png",
-                                "prompt": original_prompt,
-                                "model": self.model_name,
-                                "aspect_ratio": self.default_aspect_ratio,
-                            }
-                        )
-                        if len(images) >= self.max_images:
-                            break
-
-                text_segment = getattr(part, "text", None)
-                if text_segment:
-                    narrative_parts.append(text_segment)
-
-            top_level_text = getattr(candidate, "text", None)
-            if top_level_text:
-                narrative_parts.append(top_level_text)
-
-            if len(images) >= self.max_images:
-                break
+        async for event in provider.stream_generate(request):
+            if isinstance(event, ImageFinal):
+                images.append(
+                    {
+                        "data": event.data_b64,
+                        "mime": event.mime,
+                        "prompt": original_prompt,
+                        "model": self.model_name,
+                        "aspect_ratio": self.default_aspect_ratio,
+                    }
+                )
+                publisher.publish(
+                    image_index=event.index,
+                    status="final",
+                    mime=event.mime,
+                    data_b64=event.data_b64,
+                )
+                if len(images) >= self.max_images:
+                    break
+            elif isinstance(event, ImagePartial):
+                publisher.publish(
+                    image_index=event.index,
+                    status="partial",
+                    mime=event.mime,
+                    data_b64=event.data_b64,
+                    seq=event.seq,
+                )
+            elif isinstance(event, NarrativeDelta) and event.text:
+                narrative_parts.append(event.text)
 
         narrative = " ".join(segment.strip() for segment in narrative_parts if segment)
         return images, narrative.strip()
-
-    @staticmethod
-    def _encode_image(raw_data) -> str | None:
-        if raw_data is None:
-            return None
-
-        try:
-            if isinstance(raw_data, (bytes, bytearray)):
-                return base64.b64encode(raw_data).decode("utf-8")
-            if isinstance(raw_data, str):
-                return raw_data
-            if isinstance(raw_data, memoryview):
-                return base64.b64encode(raw_data.tobytes()).decode("utf-8")
-            return base64.b64encode(bytes(raw_data)).decode("utf-8")
-        except Exception as err:
-            logger.error("Failed to encode image data: %s", err)
-            return None
 
     async def cleanup(self):
         await super().cleanup()

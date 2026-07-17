@@ -1122,10 +1122,10 @@ In addition to proxying most server routes under both `/...` and `/api/...`, the
 
 | API namespace | Endpoint | Stream protocol | Primary events |
 | --- | --- | --- | --- |
-| assistant-ui / AI SDK v6 | `POST /api/chat/{conversation_id}` and `POST /ai/chat/{conversation_id}` | Vercel AI SDK UI Message Stream over SSE | `start`, `start-step`, `text-start`, `text-delta`, `reasoning-start`, `reasoning-delta`, `tool-input-start`, `tool-input-available`, `tool-output-available`, `data-interrupt`, `data-rich-items`, `finish-step`, `finish`, `[DONE]` |
+| assistant-ui / AI SDK v6 | `POST /api/chat/{conversation_id}` and `POST /ai/chat/{conversation_id}` | Vercel AI SDK UI Message Stream over SSE | `start`, `start-step`, `text-start`, `text-delta`, `reasoning-start`, `reasoning-delta`, `tool-input-start`, `tool-input-available`, `tool-output-available`, `data-interrupt`, `data-rich-items`, `data-image-preview`, `finish-step`, `finish`, `[DONE]` |
 | assistant-ui / AI SDK v6 | `POST /ai/resume-interrupt` | As above | As above |
-| Streamlit internal client | `POST /messages/stream` and `POST /messages/resume-interrupt` | Backend JSON SSE compatibility stream | `user_message_created`, `agent_selected`, `token`, `thinking`, `tool`, `rich_items`, `interrupt`, `title_updated`, `complete`, `error`, `heartbeat` |
-| Backend internal | service layer | Canonical v3 event model (`V3StreamEvent`, `schema_version="v3"`) | `message_delta`, `reasoning_delta`, `tool_call_available`, `tool_execution_end`, `subagent_start`, `subagent_end`, `interrupt`, `complete`, `error` |
+| Streamlit internal client | `POST /messages/stream` and `POST /messages/resume-interrupt` | Backend JSON SSE compatibility stream | `user_message_created`, `agent_selected`, `token`, `thinking`, `tool`, `rich_items`, `image_preview`, `interrupt`, `title_updated`, `complete`, `error`, `heartbeat` |
+| Backend internal | service layer | Canonical v3 event model (`V3StreamEvent`, `schema_version="v3"`) | `message_delta`, `reasoning_delta`, `tool_call_available`, `tool_execution_end`, `image_preview`, `subagent_start`, `subagent_end`, `interrupt`, `complete`, `error` |
 | Device runtime | WS `/device-runtime/{device_id}/connect` | WebSocket | Tool dispatch + results |
 | Live widgets | WS `/widgets/{widget_id}/connect` | WebSocket | Widget state streaming |
 

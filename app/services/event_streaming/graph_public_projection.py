@@ -184,6 +184,13 @@ class GraphPublicStreamProjector:
                 yield from self._map_v3_values_snapshot(data, ctx)
             return
 
+        if etype == "image_preview":
+            # Early-delivery image previews bypass token suppression: the
+            # suppressed image_generator tokens are the internal enhanced
+            # prompt, whereas previews are user-facing by definition.
+            yield {"type": "image_preview", **data}
+            return
+
         if etype in (
             "subagent_start",
             "subagent_end",

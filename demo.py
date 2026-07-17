@@ -6614,6 +6614,47 @@ class _StreamingRichResponseRenderer:
                     )
 
 
+class _StreamingImagePreviewPanel:
+    """Render early-delivery `image_preview` events during an active stream.
+
+    Keeps the latest payload per image index; a partial preview is replaced by
+    the next partial/final for the same index. `clear()` runs at `complete` —
+    the finalized message owns the authoritative image rendering.
+    """
+
+    def __init__(self, placeholder: Any) -> None:
+        self.placeholder = placeholder
+        self._by_index: dict[int, dict[str, Any]] = {}
+
+    def apply(self, event: dict[str, Any]) -> None:
+        data_b64 = event.get("data_b64")
+        image_index = event.get("image_index")
+        if not data_b64 or not isinstance(image_index, int):
+            return
+        self._by_index[image_index] = event
+        self._render()
+
+    def _render(self) -> None:
+        with self.placeholder.container():
+            for index in sorted(self._by_index):
+                event = self._by_index[index]
+                try:
+                    raw = base64.b64decode(event.get("data_b64") or "")
+                except Exception:
+                    continue
+                caption = (
+                    "Generating image... (preview)"
+                    if event.get("status") == "partial"
+                    else "Generated image"
+                )
+                st.image(raw, caption=caption)
+
+    def clear(self) -> None:
+        if self._by_index:
+            self._by_index = {}
+            self.placeholder.empty()
+
+
 def _render_pending_rich_placeholder(item_id: str | None) -> None:
     """Reserve the authored inline position until a stream upsert resolves it."""
     label = (
@@ -8037,6 +8078,7 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
             response_placeholder,
             message_key=f"resume::{conversation_id or thread_id}",
         )
+        image_preview_panel = _StreamingImagePreviewPanel(st.empty())
         accumulated_content = ""
         accumulated_thinking = ""
 
@@ -8095,6 +8137,11 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
                 stream_renderer.apply_rich_items_upsert(event.get("items") or [])
                 continue
 
+            if event_type == "image_preview":
+                image_preview_panel.apply(event)
+                status.update(label="Image ready — finishing response...", state="running")
+                continue
+
             if event_type == "interrupt":
                 next_interrupt = event.get("interrupt")
                 resume_succeeded = True
@@ -8117,6 +8164,7 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
                 break
 
             if event_type == "complete":
+                image_preview_panel.clear()
                 stream_renderer.finalize(event.get("message"))
                 status.update(label="Resume completed", state="complete")
                 resume_succeeded = True
@@ -8687,6 +8735,7 @@ def render_chat_view():
                         response_placeholder,
                         message_key=f"stream::{conversation_id}",
                     )
+                    image_preview_panel = _StreamingImagePreviewPanel(st.empty())
                     accumulated_content = ""  # Initialize empty for accumulation
                     accumulated_thinking = ""  # Accumulate thinking content
                     final_message = None
@@ -8767,6 +8816,13 @@ def render_chat_view():
                         elif event_type == "rich_items":
                             stream_renderer.apply_rich_items_upsert(event.get("items") or [])
 
+                        elif event_type == "image_preview":
+                            image_preview_panel.apply(event)
+                            status.update(
+                                label="Image ready — finishing response...",
+                                state="running",
+                            )
+
                         elif event_type == "node_complete":
                             if _upsert_stream_subagent_activity(event):
                                 render_live_trace_panel(trace_placeholder)
@@ -8805,6 +8861,7 @@ def render_chat_view():
                         elif event_type == "complete":
                             # Store final message and complete
                             final_message = event.get("message")
+                            image_preview_panel.clear()
                             stream_renderer.finalize(final_message)
                             status.update(label="Message sent!", state="complete")
 
