@@ -166,6 +166,7 @@ Event catalog:
 | `data-agent-selected` | yes | Routing decision. |
 | `data-continuation`, `data-node-complete` | yes | Planning-loop progress. |
 | `data-rich-items` | yes | Live rich-item upserts (capable requests only; see emission rules). |
+| `data-image-preview` | yes | Early-delivery image preview while generation is still running. |
 | `data-subagent` | yes | Live worker progress. |
 | `data-assistant-message` | no | Final assistant message side-channel (metadata + parts). |
 | `data-interrupt` | no | HITL pause. Terminal. |
@@ -255,8 +256,40 @@ image-only, or no rich activity). The authoritative registry is always
 Transient upserts use the same public rich-item serialization as final metadata:
 null-valued keys are omitted, and `provenance` is `{}` when there is no origin
 metadata.
+
 A marker streamed in `text-delta` whose item has not arrived yet renders as a
 pending placeholder until `finish`.
+
+Image preview (early delivery, independent of the rich-items registry):
+
+```json
+{ "type": "data-image-preview",
+  "id": "image-preview-0",
+  "data": { "imageIndex": 0, "status": "partial", "mediaType": "image/png",
+            "url": "data:image/png;base64,...", "seq": 1 },
+  "transient": true }
+```
+
+Emitted per generated image as soon as the provider produces it — before the
+narrative text and the terminal message. `status` is `"partial"` for
+provider progress previews (OpenAI `gpt-image-1`) and `"final"` for the
+completed image (emitted at most once per `imageIndex`). The part `id` is
+stable per image index, so each event replaces the previous preview for that
+index. Previews are ephemeral display state: the authoritative image still
+arrives as `file` parts / `metadata.rich_items` on the final
+`data-assistant-message`, and previews are never persisted to history.
+Disabled server-side via `ENABLE_IMAGE_STREAMING=false`; oversized payloads
+(`IMAGE_STREAM_PREVIEW_MAX_B64_CHARS`) skip the preview.
+
+Emitted only on `POST /api/chat/{conversationId}` streams. Resume streams
+(`POST /ai/resume-interrupt`) do not emit image previews — the completed
+image still arrives via `file` parts and `metadata.rich_items` on the final
+`data-assistant-message`. Unlike `data-rich-items`, `data-image-preview`
+does **not** require `inlineRichResponseV1`; it is emitted for any streaming
+chat request while `ENABLE_IMAGE_STREAMING` is on (clients that do not
+handle it fall under the standard unknown-event rule). Because
+image-generator turns suppress token streaming, previews may arrive before
+any `text-delta` of the turn.
 
 Final assistant message side-channel:
 
@@ -936,6 +969,10 @@ You will not receive them. RAG citations are delivered through
    is required.
 7. Append unreferenced `inline_or_append` items below the answer. Never
    append `inline_only` images.
+8. In `useChat({ onData })`, keep the latest `data-image-preview` payload per
+   part `id` and render it under the streaming text; discard all previews at
+   `data-assistant-message` / `finish` — the final message's `file` parts and
+   `rich_items` are authoritative.
 
 ## Live Widgets
 
