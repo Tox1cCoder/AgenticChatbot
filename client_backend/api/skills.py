@@ -197,7 +197,7 @@ async def list_installed_skills(
     return make_api_response(
         success=True,
         message="Installed skill bundles retrieved",
-        data={"installed": installed, "total_count": len(installed)},
+        data={"installed": installed, "totalCount": len(installed)},
     )
 
 

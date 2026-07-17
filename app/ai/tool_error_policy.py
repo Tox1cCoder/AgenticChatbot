@@ -51,6 +51,42 @@ def _clean_text(value: Any, *, max_chars: int = 180) -> str:
     return text
 
 
+_SKILL_COMMAND_CAPABILITY = "run_skill_command"
+_SKILL_TERMINAL_HINT = (
+    "Read untrusted_terminal_output and address the reported problem. "
+    "If it reports a missing credential or environment variable, ask the user to "
+    "add that secret binding in the skill's secret settings; it is injected into "
+    "the command environment automatically on the next run. Never pass secret "
+    "values as command arguments, set environment variables through another "
+    "tool, or repeat secret values in conversation."
+)
+
+
+def skill_terminal_output(exception: BaseException) -> str | None:
+    """Return the complete redacted terminal error for a skill command failure.
+
+    Skill command failures are the one class of client-runtime errors whose raw
+    message must reach the model verbatim (uncapped-terminal-errors design).
+    Returns ``None`` unless the exception is a structured client-runtime
+    failure whose ``qualified_tool_id`` has the canonical
+    ``skill::<name>::run_skill_command`` shape and whose message is nonempty.
+    """
+    if not isinstance(exception, ClientRuntimeToolError):
+        return None
+    detail = exception.context.detail
+    if not isinstance(detail, dict):
+        return None
+    parts = str(detail.get("qualified_tool_id") or "").split("::")
+    if len(parts) != 3 or parts[0] != "skill" or not parts[1]:
+        return None
+    if parts[2] != _SKILL_COMMAND_CAPABILITY:
+        return None
+    message = exception.context.message
+    if not message or not message.strip():
+        return None
+    return message
+
+
 def classify_tool_error(
     exc: BaseException,
     *,
@@ -207,8 +243,14 @@ def build_tool_error_payloads(
     policy_retry_allowed: bool,
 ) -> tuple[str, dict[str, Any]]:
     model_retryable = summary.failure_retryable and policy_retry_allowed
+    model_payload = summary.model_dict(policy_retry_allowed=policy_retry_allowed)
+    terminal_output = skill_terminal_output(exception)
+    if terminal_output is not None:
+        if summary.error_type == ToolErrorKind.UNKNOWN.value:
+            model_payload["hint"] = _SKILL_TERMINAL_HINT
+        model_payload["untrusted_terminal_output"] = terminal_output
     model_content = json.dumps(
-        summary.model_dict(policy_retry_allowed=policy_retry_allowed),
+        model_payload,
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -225,4 +267,6 @@ def build_tool_error_payloads(
     }
     if isinstance(exception, ClientRuntimeToolError):
         artifact_detail["runtime_error_context"] = exception.context.model_dump(mode="json")
+    if terminal_output is not None:
+        artifact_detail["skill_terminal_error"] = True
     return model_content, artifact_detail

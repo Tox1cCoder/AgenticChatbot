@@ -522,8 +522,11 @@ def _apply_offload_to_outputs_and_artifacts(
     for output in outputs:
         # The Planning supervisor must receive complete worker answers from
         # dispatch_subagents; replacing that ToolMessage with a blob preview
-        # would hide the result it needs to reconcile todos.
-        if output.get("name") in _FULL_MODEL_HANDOFF_TOOLS:
+        # would hide the result it needs to reconcile todos. Skill terminal
+        # errors carry the same flag: their content must reach the model uncut.
+        if output.get("name") in _FULL_MODEL_HANDOFF_TOOLS or output.get(
+            "preserve_full_content"
+        ):
             continue
         tool_call_id = output.get("tool_call_id")
         public_text, blob_info = apply_tool_output_offload(
@@ -1608,14 +1611,17 @@ async def execute_tool_calls(
             or artifact_detail.get("error_type")
             or "Tool execution failed"
         )
-        outputs.append(
-            {
-                "tool_call_id": tool_call_id,
-                "name": tool_name,
-                "content": model_content,
-                "render": render,
-            }
-        )
+        output: dict[str, Any] = {
+            "tool_call_id": tool_call_id,
+            "name": tool_name,
+            "content": model_content,
+            "render": render,
+        }
+        if artifact_detail.get("skill_terminal_error"):
+            # The complete skill terminal error must reach the model verbatim,
+            # bypassing ordinary truncation and blob offload.
+            output["preserve_full_content"] = True
+        outputs.append(output)
         artifact = build_tool_artifact(
             tool_call_id=tool_call_id,
             tool_name=tool_name,

@@ -586,7 +586,9 @@ class ToolLoopMixin:
         assistant_message_id = state.get("assistant_message_id")
         for output in tool_outputs:
             content = output["content"]
-            if truncate_outputs and max_chars > 0:
+            # Outputs flagged preserve_full_content (skill terminal errors)
+            # must reach the model verbatim, never truncated.
+            if truncate_outputs and max_chars > 0 and not output.get("preserve_full_content"):
                 content, was_truncated = truncate_tool_result(
                     content,
                     max_chars=max_chars,

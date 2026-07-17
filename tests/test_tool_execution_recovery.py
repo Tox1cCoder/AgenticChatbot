@@ -1079,3 +1079,82 @@ async def test_execute_tool_calls_client_device_mismatch_returns_compact_error(m
     assert payload["retryable"] is False
     assert artifacts[0]["status"] == "error"
     assert artifacts[0]["error_type"] == "permission"
+
+
+@pytest.mark.asyncio
+async def test_skill_terminal_error_output_is_flagged_to_reach_model_uncut():
+    terminal = "skill command exited with code 1: " + "x" * 6000
+
+    class _SkillFailureTool:
+        name = "client__demo__run_skill_command"
+        metadata = {}
+
+        async def ainvoke(self, args):
+            raise ClientRuntimeToolError(
+                RuntimeErrorContext(
+                    message=terminal,
+                    code="RUNTIME_ERROR",
+                    detail={"qualified_tool_id": "skill::demo::run_skill_command"},
+                )
+            )
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[
+            {
+                "id": "call-skill",
+                "name": "client__demo__run_skill_command",
+                "args": {"argv": ["demo-cli"]},
+            }
+        ],
+        tool_map={"client__demo__run_skill_command": _SkillFailureTool()},
+    )
+
+    payload = json.loads(outputs[0]["content"])
+    assert payload["untrusted_terminal_output"] == terminal
+    assert outputs[0]["preserve_full_content"] is True
+    assert artifacts[0]["skill_terminal_error"] is True
+
+
+def test_skill_terminal_error_output_is_not_offloaded():
+    from app.ai.tool_execution import _apply_offload_to_outputs_and_artifacts
+
+    class _FakeOffloadService:
+        threshold_chars = 10
+
+        def offload_if_large(self, **kwargs):
+            return {
+                "blob_id": "blob-1",
+                "size_bytes": len(kwargs["output_text"].encode("utf-8")),
+                "output": "preview only\n\n[Output offloaded]",
+            }
+
+    content = json.dumps(
+        {"status": "error", "untrusted_terminal_output": "x" * 200},
+        separators=(",", ":"),
+    )
+    outputs = [
+        {
+            "tool_call_id": "call-1",
+            "name": "client__demo__run_skill_command",
+            "content": content,
+            "preserve_full_content": True,
+        }
+    ]
+    artifacts = [
+        {
+            "tool_call_id": "call-1",
+            "tool": "client__demo__run_skill_command",
+            "output": content,
+        }
+    ]
+
+    _apply_offload_to_outputs_and_artifacts(
+        outputs=outputs,
+        artifacts=artifacts,
+        conversation_id="00000000-0000-0000-0000-000000000001",
+        user_id="00000000-0000-0000-0000-000000000002",
+        offload_service=_FakeOffloadService(),
+    )
+
+    assert outputs[0]["content"] == content
+    assert "blob_id" not in artifacts[0]

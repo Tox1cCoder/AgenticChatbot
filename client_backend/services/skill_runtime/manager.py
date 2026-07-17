@@ -17,6 +17,11 @@ COMMAND_INPUT_SCHEMA = {
             "type": "array",
             "items": {"type": "string"},
             "minItems": 1,
+            "description": (
+                "Full command argv. argv[0] must be one of the skill-owned "
+                "commands named in the tool description; put flags and "
+                "subcommands after it."
+            ),
         },
         "cwd": {
             "type": "string",
@@ -127,12 +132,19 @@ class SkillRuntimeManager:
             return []
 
         server_name = SKILL_SERVER_NAME_PREFIX + skill.name.replace("-", "_")
+        command_names = ", ".join(repr(command) for command in readiness.commands)
+        command_requirement = (
+            f"argv[0] must be {command_names}."
+            if len(readiness.commands) == 1
+            else f"argv[0] must be one of: {command_names}."
+        )
         return [
             {
                 "name": RUN_SKILL_COMMAND,
                 "description": (
                     f"Run a command bundled with the {skill.name} skill. "
-                    "Pass an argv array; this is not a general shell."
+                    f"{command_requirement} Include the command itself before its "
+                    "flags and arguments; this is not a general shell."
                 ),
                 "origin": "skill",
                 "server_name": server_name,

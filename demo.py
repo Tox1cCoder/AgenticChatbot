@@ -5412,12 +5412,15 @@ def _render_trace_tool_card(tool_item: dict[str, Any], index: int) -> None:
 
     result = tool_item.get("result")
     render = tool_item.get("render")
+    render_error_shown = False
     if isinstance(render, dict):
         st.markdown(
             '<div class="trace-preview-label">Result Preview</div>',
             unsafe_allow_html=True,
         )
-        if not render_tool_render_payload(render, fallback_output=result):
+        if render_tool_render_payload(render, fallback_output=result):
+            render_error_shown = str(render.get("type") or "").lower() == "error"
+        else:
             _render_trace_preview_block(
                 "Result Preview",
                 result,
@@ -5436,7 +5439,7 @@ def _render_trace_tool_card(tool_item: dict[str, Any], index: int) -> None:
         )
 
     error_message = tool_item.get("error")
-    if isinstance(error_message, str) and error_message.strip():
+    if not render_error_shown and isinstance(error_message, str) and error_message.strip():
         st.error(error_message.strip())
 
     hint = tool_item.get("hint")

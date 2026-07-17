@@ -13,6 +13,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, status
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
@@ -361,11 +362,28 @@ async def device_runtime_connect(
         await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
 
 
-@router.get("/connected-devices")
+class ConnectedDeviceInfo(BaseModel):
+    """Connection status for one of the caller's active device sessions."""
+
+    device_id: str
+    session_id: str
+    connected_at: str
+    last_heartbeat: str
+    is_alive: bool
+
+
+class ConnectedDevicesResponse(BaseModel):
+    """The caller's currently connected devices."""
+
+    connected_devices: list[ConnectedDeviceInfo]
+    total: int
+
+
+@router.get("/connected-devices", response_model=ConnectedDevicesResponse)
 async def list_connected_devices(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> dict:
+) -> ConnectedDevicesResponse:
     """
     List currently connected devices for the user.
 
@@ -374,16 +392,16 @@ async def list_connected_devices(
     service = ClientDeviceService(db)
     sessions = service.get_active_sessions_for_user(user.id)
 
-    return {
-        "connected_devices": [
-            {
-                "device_id": str(session.device_id),
-                "session_id": session.session_id,
-                "connected_at": session.connected_at.isoformat(),
-                "last_heartbeat": session.last_heartbeat.isoformat(),
-                "is_alive": session.is_alive(),
-            }
+    return ConnectedDevicesResponse(
+        connected_devices=[
+            ConnectedDeviceInfo(
+                device_id=str(session.device_id),
+                session_id=session.session_id,
+                connected_at=session.connected_at.isoformat(),
+                last_heartbeat=session.last_heartbeat.isoformat(),
+                is_alive=session.is_alive(),
+            )
             for session in sessions
         ],
-        "total": len(sessions),
-    }
+        total=len(sessions),
+    )

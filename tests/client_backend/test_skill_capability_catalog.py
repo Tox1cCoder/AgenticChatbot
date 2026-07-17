@@ -42,6 +42,7 @@ def test_ready_skill_publishes_exactly_one_fixed_command_tool(tmp_path):
     assert entry["server_name"] == "skill_example_calendar"
     assert entry["mutation"] is True
     assert entry["source_hash"] == "b" * 64
+    assert "argv[0] must be 'calendar-cli'" in entry["description"]
     assert entry["input_schema"] == {
         "type": "object",
         "properties": {
@@ -49,6 +50,11 @@ def test_ready_skill_publishes_exactly_one_fixed_command_tool(tmp_path):
                 "type": "array",
                 "items": {"type": "string"},
                 "minItems": 1,
+                "description": (
+                    "Full command argv. argv[0] must be one of the skill-owned "
+                    "commands named in the tool description; put flags and "
+                    "subcommands after it."
+                ),
             },
             "cwd": {
                 "type": "string",

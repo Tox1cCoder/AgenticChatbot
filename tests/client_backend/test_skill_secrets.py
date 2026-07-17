@@ -1,6 +1,7 @@
 import json
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -39,6 +40,26 @@ def test_secret_bindings_are_encrypted_and_namespaced_by_skill(tmp_path, monkeyp
         assert "calendar-secret" not in raw
         assert "mail-secret" not in raw
         assert json.loads(raw)["encryption"]
+    finally:
+        client_settings.profile_root = original
+
+
+def test_set_for_skill_strips_pasted_whitespace(tmp_path, monkeypatch):
+    original = _configure_profile(tmp_path, monkeypatch)
+    try:
+        store = SkillSecretStore()
+        store.set_for_skill("calendar", "ACCESS_TOKEN", "  ya29.token-value\n")
+
+        assert store.get_for_skill("calendar") == {"ACCESS_TOKEN": "ya29.token-value"}
+    finally:
+        client_settings.profile_root = original
+
+
+def test_set_for_skill_rejects_blank_value(tmp_path, monkeypatch):
+    original = _configure_profile(tmp_path, monkeypatch)
+    try:
+        with pytest.raises(ValueError, match="secret value"):
+            SkillSecretStore().set_for_skill("calendar", "ACCESS_TOKEN", "   \n")
     finally:
         client_settings.profile_root = original
 

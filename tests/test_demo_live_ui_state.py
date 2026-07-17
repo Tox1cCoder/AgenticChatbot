@@ -69,6 +69,28 @@ def test_live_tool_trace_renders_queued_start_and_retains_end_presentation(monke
     assert hints == ["Try a smaller date range."]
 
 
+def test_failed_tool_card_renders_error_once(monkeypatch):
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+
+    errors: list[str] = []
+    streamlit_stub.error = errors.append
+
+    demo._render_trace_tool_card(
+        {
+            "type": "tool",
+            "state": "error",
+            "tool_call_id": "call-1",
+            "name": "client__skill_demo__run_skill_command",
+            "result": None,
+            "render": {"type": "error", "error": "skill command exited with code 1: boom"},
+            "error": "skill command exited with code 1: boom",
+        },
+        1,
+    )
+
+    assert errors == ["skill command exited with code 1: boom"]
+
+
 def test_live_tool_end_without_id_reuses_queued_start(monkeypatch):
     demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
     demo._reset_stream_trace_state()

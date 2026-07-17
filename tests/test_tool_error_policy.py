@@ -210,3 +210,124 @@ def test_missing_sidecar_error_context_falls_back_to_typed_unknown_error():
     assert error.context.message == "sidecar returned no structured context"
     assert error.context.code == "UNKNOWN_RUNTIME_ERROR"
     assert error.context.detail is None
+
+
+def _skill_runtime_error(
+    message: str,
+    *,
+    code: str = "RUNTIME_ERROR",
+    qualified_tool_id: str | None = "skill::demo::run_skill_command",
+):
+    from app.ai.client_runtime_errors import ClientRuntimeToolError
+
+    return ClientRuntimeToolError(
+        RuntimeErrorContext(
+            message=message,
+            code=code,
+            detail={
+                "request_id": "req-1",
+                "tool_name": "client__demo__run_skill_command",
+                "qualified_tool_id": qualified_tool_id,
+            },
+        )
+    )
+
+
+def _payloads_for(error):
+    summary = classify_tool_error(
+        error,
+        tool_name="client__demo__run_skill_command",
+        timeout_seconds=30,
+        attempts=1,
+    )
+    return build_tool_error_payloads(
+        summary,
+        tool_name="client__demo__run_skill_command",
+        exception=error,
+        policy_retry_allowed=False,
+    )
+
+
+def test_skill_terminal_error_includes_complete_terminal_output():
+    terminal = "skill command exited with code 1: " + "e" * 6000
+    error = _skill_runtime_error(terminal)
+
+    model_content, artifact_detail = _payloads_for(error)
+
+    payload = json.loads(model_content)
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "unknown"
+    assert payload["retryable"] is False
+    assert payload["message"] == "Client runtime tool failed with an unknown error."
+    assert payload["hint"].startswith(
+        "Read untrusted_terminal_output and address the reported problem."
+    )
+    assert payload["untrusted_terminal_output"] == terminal
+    assert artifact_detail["skill_terminal_error"] is True
+
+
+def test_skill_terminal_error_hint_explains_secret_binding_remediation():
+    error = _skill_runtime_error(
+        "skill command exited with code 1: Missing OAuth bearer token. "
+        "Set GOOGLE_CALENDAR_ACCESS_TOKEN to a Google Calendar API access token."
+    )
+
+    model_content, _ = _payloads_for(error)
+
+    payload = json.loads(model_content)
+    assert payload["error_type"] == "unknown"
+    assert "missing credential or environment variable" in payload["hint"]
+    assert "secret settings" in payload["hint"]
+    assert "Never pass secret values as command arguments" in payload["hint"]
+
+
+def test_skill_terminal_error_keeps_specific_hint_for_classified_failures():
+    error = _skill_runtime_error(
+        "running a command from skill 'demo' requires approval",
+        code="PERMISSION_REQUIRED",
+    )
+
+    model_content, _ = _payloads_for(error)
+
+    payload = json.loads(model_content)
+    assert payload["error_type"] == "permission"
+    assert payload["hint"] == (
+        "Ask the user for access, choose a permitted alternative, or explain the blocker."
+    )
+    assert payload["untrusted_terminal_output"] == (
+        "running a command from skill 'demo' requires approval"
+    )
+
+
+@pytest.mark.parametrize(
+    "qualified_tool_id",
+    [
+        None,
+        "",
+        "client_mcp::server::tool",
+        "client_skill::activate",
+        "skill::demo::other_capability",
+        "skill::::run_skill_command",
+        "skill::demo::run_skill_command::extra",
+    ],
+)
+def test_non_canonical_identities_do_not_expose_terminal_output(qualified_tool_id):
+    error = _skill_runtime_error(
+        "raw sidecar text C:/private/secret.txt",
+        qualified_tool_id=qualified_tool_id,
+    )
+
+    model_content, artifact_detail = _payloads_for(error)
+
+    assert "untrusted_terminal_output" not in json.loads(model_content)
+    assert "secret.txt" not in model_content
+    assert "skill_terminal_error" not in artifact_detail
+
+
+def test_skill_terminal_output_requires_nonempty_runtime_message():
+    error = _skill_runtime_error("   \n  ")
+
+    model_content, artifact_detail = _payloads_for(error)
+
+    assert "untrusted_terminal_output" not in json.loads(model_content)
+    assert "skill_terminal_error" not in artifact_detail

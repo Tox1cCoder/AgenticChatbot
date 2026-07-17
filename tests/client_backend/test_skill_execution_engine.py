@@ -15,8 +15,8 @@ from shared.skills.errors import (
     COMMAND_NOT_FOUND,
     EXECUTION_TIMEOUT,
     INVALID_ARGUMENTS,
-    OUTPUT_TOO_LARGE,
     PERMISSION_REQUIRED,
+    RUNTIME_ERROR,
     SKILL_RUNTIME_STALE,
 )
 
@@ -449,9 +449,25 @@ async def test_windows_skill_command_is_released_only_after_job_attachment(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_output_limit_is_enforced(tmp_path, monkeypatch):
-    skill = _skill(tmp_path, "print('x' * 100)\n")
-    monkeypatch.setattr(execution_module, "MAX_OUTPUT_BYTES", 20)
+async def test_output_larger_than_one_megabyte_is_captured_completely(tmp_path):
+    skill = _skill(tmp_path, "import sys\nsys.stdout.write('x' * 1_100_000)\n")
+
+    envelope = await _engine(skill).execute(
+        "skill::demo-skill::run_skill_command",
+        {"argv": ["demo-cli"]},
+        _context(),
+    )
+
+    assert envelope["ok"] is True
+    assert envelope["result"] == "x" * 1_100_000
+
+
+@pytest.mark.asyncio
+async def test_nonzero_exit_preserves_terminal_error_beyond_four_thousand_chars(tmp_path):
+    skill = _skill(
+        tmp_path,
+        "import sys\nsys.stderr.write('BEGIN-' + 'e' * 6000 + '-END')\nsys.exit(1)\n",
+    )
 
     envelope = await _engine(skill).execute(
         "skill::demo-skill::run_skill_command",
@@ -460,7 +476,31 @@ async def test_output_limit_is_enforced(tmp_path, monkeypatch):
     )
 
     assert envelope["ok"] is False
-    assert envelope["error"]["code"] == OUTPUT_TOO_LARGE
+    assert envelope["error"]["code"] == RUNTIME_ERROR
+    message = envelope["error"]["message"]
+    assert message.startswith("skill command exited with code 1: BEGIN-")
+    assert message.endswith("-END")
+    assert "e" * 6000 in message
+
+
+@pytest.mark.asyncio
+async def test_nonzero_exit_with_empty_stderr_reports_full_stdout(tmp_path):
+    skill = _skill(
+        tmp_path,
+        "import sys\nsys.stdout.write('structured failure detail on stdout')\nsys.exit(2)\n",
+    )
+
+    envelope = await _engine(skill).execute(
+        "skill::demo-skill::run_skill_command",
+        {"argv": ["demo-cli"]},
+        _context(),
+    )
+
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == RUNTIME_ERROR
+    assert envelope["error"]["message"] == (
+        "skill command exited with code 2: structured failure detail on stdout"
+    )
 
 
 @pytest.mark.asyncio

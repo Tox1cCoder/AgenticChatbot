@@ -47,9 +47,14 @@ class SkillSecretStore:
 
     def set_for_skill(self, skill_name: str, name: str, value: str) -> None:
         self._validate_binding(skill_name, name)
+        # Pasted tokens routinely carry surrounding whitespace or a trailing
+        # newline, which downstream services reject as invalid credentials.
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("secret value must not be empty or whitespace-only")
         user_id = self._require_user_id()
         bindings = self._read_bindings(user_id=user_id)
-        bindings.setdefault(skill_name, {})[name] = value
+        bindings.setdefault(skill_name, {})[name] = cleaned
         self._write_bindings(user_id, bindings)
 
     def delete_for_skill(self, skill_name: str, name: str) -> bool:

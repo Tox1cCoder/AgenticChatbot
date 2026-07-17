@@ -33,7 +33,6 @@ from shared.skills.errors import (
     COMMAND_NOT_FOUND,
     EXECUTION_TIMEOUT,
     INVALID_ARGUMENTS,
-    OUTPUT_TOO_LARGE,
     PERMISSION_REQUIRED,
     RUNTIME_ERROR,
     SKILL_NOT_READY,
@@ -44,7 +43,6 @@ from shared.skills.errors import (
 
 DEFAULT_TIMEOUT_SECONDS = 30
 MAX_TIMEOUT_SECONDS = 300
-MAX_OUTPUT_BYTES = 1_000_000
 
 _ENV_PASSTHROUGH_NAMES = frozenset(
     name.upper()
@@ -79,10 +77,6 @@ _ENV_PASSTHROUGH_NAMES = frozenset(
         "OS",
     }
 )
-
-
-class _OutputLimitExceeded(Exception):
-    """Internal signal used to terminate a child while reading its output."""
 
 
 class _JobBasicLimitInformation(ctypes.Structure):
@@ -292,9 +286,12 @@ class SkillExecutionEngine:
                 cmd, cwd, env, timeout, secret_values
             )
             if returncode != 0:
+                # The agent must receive the complete redacted terminal error;
+                # CLIs that report structured errors on stdout stay useful too.
+                terminal_output = stderr if stderr.strip() else stdout
                 raise SkillRuntimeError(
                     RUNTIME_ERROR,
-                    f"skill command exited with code {returncode}: {stderr[-4000:]}",
+                    f"skill command exited with code {returncode}: {terminal_output}",
                 )
             try:
                 result = json.loads(stdout)
@@ -505,20 +502,19 @@ class SkillExecutionEngine:
                 "unable to establish the command process boundary",
             ) from exc
 
-        async def read_limited(stream: asyncio.StreamReader) -> bytes:
+        # No byte ceiling by design: the model-facing error must carry the
+        # complete redacted terminal output, accepting the memory and context
+        # window consequences documented in the uncapped-terminal-errors spec.
+        async def read_stream(stream: asyncio.StreamReader) -> bytes:
             chunks: list[bytes] = []
-            total = 0
             while True:
                 chunk = await stream.read(64 * 1024)
                 if not chunk:
                     return b"".join(chunks)
-                total += len(chunk)
-                if total > MAX_OUTPUT_BYTES:
-                    raise _OutputLimitExceeded
                 chunks.append(chunk)
 
-        stdout_task = asyncio.create_task(read_limited(process.stdout))
-        stderr_task = asyncio.create_task(read_limited(process.stderr))
+        stdout_task = asyncio.create_task(read_stream(process.stdout))
+        stderr_task = asyncio.create_task(read_stream(process.stderr))
         wait_task = asyncio.create_task(process.wait())
         tasks = (stdout_task, stderr_task, wait_task)
         try:
@@ -534,15 +530,6 @@ class SkillExecutionEngine:
             raise SkillRuntimeError(
                 EXECUTION_TIMEOUT,
                 f"skill command exceeded {timeout}s timeout",
-            ) from exc
-        except _OutputLimitExceeded as exc:
-            await SkillExecutionEngine._terminate_process_tree(process, windows_job)
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise SkillRuntimeError(
-                OUTPUT_TOO_LARGE,
-                f"skill command output exceeded {MAX_OUTPUT_BYTES} bytes",
             ) from exc
         except BaseException:
             await SkillExecutionEngine._terminate_process_tree(process, windows_job)

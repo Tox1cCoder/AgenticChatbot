@@ -47,6 +47,7 @@ from client_backend.services.local_skills_registry import (
 from client_backend.services.server_api import ServerAPIClient, get_server_client
 from client_backend.services.skill_runtime.execution import SkillExecutionEngine
 from client_backend.services.skill_runtime.manager import SkillRuntimeManager
+from client_backend.services.skill_runtime.secrets import SkillSecretStore
 from shared.skills.errors import SkillRuntimeError
 
 
@@ -681,13 +682,26 @@ class RuntimeBridgeService:
 
         readiness = SkillRuntimeManager().evaluate_readiness(skill)
         if readiness.status == "ready":
+            command = readiness.commands[0]
+            secret_names = SkillSecretStore().list_for_skill(skill.name)
             runtime_footer = (
                 f"Runtime status: ready\n"
                 f"Command binding: `skill::{skill.name}::run_skill_command`.\n"
                 "The activation service appends the exact model-callable tool name; "
-                "use that exposed name with an argv array, not this internal binding id.\n"
+                "use that exposed name, not this internal binding id.\n"
+                f"The argv array must start with the owned command, for example: "
+                f'argv: ["{command}", "<arg>", "..."].\n'
                 "Do not use Desktop Commander or search for another shell executor "
-                "for this skill's commands."
+                "for this skill's commands.\n"
+                f"Configured secret bindings: {', '.join(secret_names) or 'none'}. "
+                "Secret bindings are injected into the command environment "
+                "automatically at execution; you cannot set environment variables "
+                "yourself.\n"
+                "If a command fails because a credential or environment variable is "
+                "missing, ask the user to add that secret binding in this skill's "
+                "secret settings, then rerun the command. Do not pass secret values "
+                "as command arguments, set them through another tool, or repeat "
+                "them in conversation."
             )
         elif readiness.status == "not_ready":
             runtime_footer = (

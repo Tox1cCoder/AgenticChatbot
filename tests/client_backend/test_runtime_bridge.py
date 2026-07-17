@@ -8,6 +8,7 @@ from client_backend.schemas.runtime import CatalogSyncResult, RuntimeStatus, Too
 from client_backend.services import runtime_bridge as runtime_bridge_module
 from client_backend.services.runtime_bridge import RuntimeBridgeService
 from client_backend.services.skill_runtime.manager import SkillReadiness
+from shared.skills.errors import SkillRuntimeError
 
 
 class _ServerClientStub:
@@ -115,7 +116,74 @@ async def test_runtime_bridge_executes_activate_skill_locally(monkeypatch):
     assert "Skill: demo" in result
     assert "Follow the demo instructions." in result
     assert "skill::demo::run_skill_command" in result
+    assert 'argv: ["demo-cli", "<arg>", "..."]' in result
     assert "Desktop Commander" in result
+    assert "Configured secret bindings: none" in result
+
+
+class _SecretStoreStub:
+    def __init__(self, names):
+        self._names = list(names)
+
+    def list_for_skill(self, skill_name):
+        return list(self._names)
+
+
+def _ready_skill(name="demo"):
+    return SimpleNamespace(
+        name=name,
+        enabled=True,
+        content="Follow the demo instructions.",
+        source_hash="a" * 64,
+        executable_assets={
+            "bin": [f"{name}-cli.py"],
+            "scripts": [],
+            "python_project": False,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_ready_activation_reports_configured_secret_binding_names(monkeypatch):
+    bridge = RuntimeBridgeService(server_client=_ServerClientStub())
+    skill = _ready_skill()
+    monkeypatch.setattr(
+        runtime_bridge_module,
+        "get_skills_registry",
+        lambda: SimpleNamespace(get_skill=lambda name: skill if name == skill.name else None),
+    )
+    monkeypatch.setattr(
+        runtime_bridge_module,
+        "SkillSecretStore",
+        lambda: _SecretStoreStub(["GOOGLE_CALENDAR_ACCESS_TOKEN"]),
+    )
+
+    result = await bridge._execute_client_skill_request(arguments={"skill_name": skill.name})
+
+    assert "Configured secret bindings: GOOGLE_CALENDAR_ACCESS_TOKEN" in result
+    assert "injected into the command environment automatically" in result
+
+
+@pytest.mark.asyncio
+async def test_ready_activation_explains_missing_secret_remediation(monkeypatch):
+    bridge = RuntimeBridgeService(server_client=_ServerClientStub())
+    skill = _ready_skill()
+    monkeypatch.setattr(
+        runtime_bridge_module,
+        "get_skills_registry",
+        lambda: SimpleNamespace(get_skill=lambda name: skill if name == skill.name else None),
+    )
+    monkeypatch.setattr(
+        runtime_bridge_module,
+        "SkillSecretStore",
+        lambda: _SecretStoreStub([]),
+    )
+
+    result = await bridge._execute_client_skill_request(arguments={"skill_name": skill.name})
+
+    assert "Configured secret bindings: none" in result
+    assert "ask the user to add that secret binding" in result
+    assert "Do not pass secret values as command arguments" in result
 
 
 @pytest.mark.asyncio
@@ -289,6 +357,51 @@ async def test_handle_tool_request_bounds_complete_client_execution(monkeypatch)
     assert sent_payloads[0].error_context.code == "TIMEOUT_CLIENT_EXECUTION"
     release.set()
     await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_handle_tool_request_preserves_skill_terminal_error_context(monkeypatch):
+    bridge = RuntimeBridgeService(server_client=_ServerClientStub())
+    bridge._session_id = "session-123"
+    bridge._tool_catalog_version = 1
+    bridge._current_tool_catalog = {
+        "skill::demo::run_skill_command": {
+            "qualified_id": "skill::demo::run_skill_command",
+            "name": "run_skill_command",
+            "tool_instance_id": "instance-1",
+        }
+    }
+    sent_payloads = []
+    terminal = "skill command exited with code 1: " + "e" * 6000
+
+    async def _failing_execution(_request):
+        raise SkillRuntimeError("RUNTIME_ERROR", terminal)
+
+    async def _capture(payload):
+        sent_payloads.append(payload)
+
+    monkeypatch.setattr(bridge, "_execute_tool_request", _failing_execution)
+    monkeypatch.setattr(bridge, "_send_runtime_message", _capture)
+
+    await bridge._handle_tool_request(
+        ToolDispatchRequest(
+            request_id="req-skill-1",
+            tool_name="run_skill_command",
+            qualified_tool_id="skill::demo::run_skill_command",
+            arguments={"argv": ["demo-cli"]},
+            timeout_seconds=5,
+            tool_instance_id="instance-1",
+            expected_session_id="session-123",
+            expected_catalog_version=1,
+            mutation_approved=True,
+        )
+    )
+
+    payload = sent_payloads[0]
+    assert payload.success is False
+    assert payload.error_context.message == terminal
+    assert payload.error_context.code == "RUNTIME_ERROR"
+    assert payload.error_context.detail["qualified_tool_id"] == ("skill::demo::run_skill_command")
 
 
 @pytest.mark.asyncio

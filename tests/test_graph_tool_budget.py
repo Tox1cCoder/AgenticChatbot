@@ -275,6 +275,35 @@ def test_apply_tool_outputs_tracks_same_error_streak(monkeypatch):
     assert streak["signature"]["args"] == '{"path":"missing.txt"}'
 
 
+def test_apply_tool_outputs_preserves_flagged_skill_terminal_errors(monkeypatch):
+    monkeypatch.setattr(settings, "tool_result_max_chars", 120, raising=False)
+    graph = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    state = {"messages": [], "context": {}}
+    terminal_content = '{"status":"error","untrusted_terminal_output":"' + "x" * 4000 + '"}'
+
+    graph._apply_tool_outputs_to_state(
+        state,
+        tool_outputs=[
+            {
+                "tool_call_id": "call-skill",
+                "name": "client__demo__run_skill_command",
+                "content": terminal_content,
+                "preserve_full_content": True,
+            },
+            {
+                "tool_call_id": "call-2",
+                "name": "big_tool",
+                "content": "y" * 4000,
+            },
+        ],
+        truncate_outputs=True,
+    )
+
+    skill_message, other_message = state["messages"]
+    assert skill_message.content == terminal_content
+    assert len(other_message.content) <= 120
+
+
 def test_apply_tool_outputs_lifts_but_does_not_persist_internal_rich_candidates():
     graph = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
     state = {"messages": [], "context": {}}

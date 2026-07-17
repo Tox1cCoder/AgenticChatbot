@@ -83,6 +83,20 @@ class DeviceInfoResponse(BaseModel):
     created_at: str
 
 
+class ToolCatalogUpdateResponse(BaseModel):
+    """Response for a device tool-catalog sync."""
+
+    status: str = Field(..., description='Always "updated" on success')
+    tool_count: int
+
+
+class SkillCatalogUpdateResponse(BaseModel):
+    """Response for a device skill-catalog sync."""
+
+    status: str = Field(..., description='Always "updated" on success')
+    skill_count: int
+
+
 def get_device_service(db: Session = Depends(get_db)) -> ClientDeviceService:
     """Dependency to get the device service."""
     return ClientDeviceService(db)
@@ -195,13 +209,13 @@ async def list_my_devices(
     ]
 
 
-@router.put("/{device_id}/tool-catalog")
+@router.put("/{device_id}/tool-catalog", response_model=ToolCatalogUpdateResponse)
 async def update_tool_catalog(
     device_id: str,
     request: ToolCatalogUpdateRequest,
     user: User = Depends(get_current_user),
     service: ClientDeviceService = Depends(get_device_service),
-) -> dict:
+) -> ToolCatalogUpdateResponse:
     """
     Update the tool catalog for a device.
 
@@ -230,19 +244,19 @@ async def update_tool_catalog(
             detail="Device session not found",
         )
 
-    return {
-        "status": "updated",
-        "tool_count": len(request.catalog.get("tools", [])),
-    }
+    return ToolCatalogUpdateResponse(
+        status="updated",
+        tool_count=len(request.catalog.get("tools", [])),
+    )
 
 
-@router.put("/{device_id}/skill-catalog")
+@router.put("/{device_id}/skill-catalog", response_model=SkillCatalogUpdateResponse)
 async def update_skill_catalog(
     device_id: str,
     request: SkillCatalogUpdateRequest,
     user: User = Depends(get_current_user),
     service: ClientDeviceService = Depends(get_device_service),
-) -> dict:
+) -> SkillCatalogUpdateResponse:
     """
     Update the skill catalog for a device.
 
@@ -271,10 +285,10 @@ async def update_skill_catalog(
             detail="Device session not found",
         )
 
-    return {
-        "status": "updated",
-        "skill_count": len(request.catalog.get("skills", [])),
-    }
+    return SkillCatalogUpdateResponse(
+        status="updated",
+        skill_count=len(request.catalog.get("skills", [])),
+    )
 
 
 @router.get("/{device_id}")
