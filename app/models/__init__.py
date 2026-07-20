@@ -18,6 +18,7 @@ from app.models.feedback import Feedback
 from app.models.hitl_interrupt import HITLInterrupt, HITLInterruptStatus
 from app.models.message import Message
 from app.models.model_provider import ModelProvider
+from app.models.model_usage import ModelUsageEvent, ModelUsageMinute
 from app.models.skill_setting import SkillSetting
 from app.models.task_plan import TaskPlan
 from app.models.tool_approval import DecisionType, ToolApproval
@@ -58,4 +59,6 @@ __all__ = [
     "SkillSetting",
     "TaskPlan",
     "AgentModelConfig",
+    "ModelUsageEvent",
+    "ModelUsageMinute",
 ]

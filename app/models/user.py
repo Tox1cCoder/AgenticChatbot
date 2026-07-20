@@ -27,6 +27,7 @@ class User(Base):
     feedback = relationship("Feedback", back_populates="user")
     model_providers = relationship("ModelProvider", back_populates="user")
     agent_model_configs = relationship("AgentModelConfig", back_populates="user")
+    usage_events = relationship("ModelUsageEvent", back_populates="user")
 
     def __repr__(self) -> str:
         return f"<User(id={self.id}, username='{self.username}', email='{self.email}')>"
