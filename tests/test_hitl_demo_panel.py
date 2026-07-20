@@ -23,6 +23,61 @@ def test_demo_defines_hitl_helpers_and_calls_settings_endpoint():
     assert "tool_origin={tool_origin}" in src
 
 
+def test_hitl_settings_failure_keeps_actionable_api_error(monkeypatch):
+    import demo
+
+    session_state = {
+        "device_id": "device-a",
+        "_last_api_error_message": "HITL settings service is unavailable",
+    }
+    monkeypatch.setattr(demo, "st", SimpleNamespace(session_state=session_state))
+    monkeypatch.setattr(demo, "make_api_request", lambda *_args, **_kwargs: {})
+
+    assert demo.get_hitl_settings() is None
+    assert demo._hitl_settings_unavailable_message() == (
+        "Human approval settings are unavailable: "
+        "HITL settings service is unavailable. "
+        "Confirm the local sidecar is connected, then refresh."
+    )
+
+
+def test_hitl_settings_rejects_a_different_device_with_recovery_guidance(monkeypatch):
+    import demo
+
+    session_state = {"device_id": "device-a"}
+    monkeypatch.setattr(demo, "st", SimpleNamespace(session_state=session_state))
+    monkeypatch.setattr(
+        demo,
+        "make_api_request",
+        lambda *_args, **_kwargs: {"data": {"deviceId": "device-b", "tools": [], "servers": []}},
+    )
+
+    assert demo.get_hitl_settings() is None
+    assert demo._hitl_settings_unavailable_message() == (
+        "Human approval settings are unavailable because the response belongs "
+        "to another device. Reconnect the local sidecar and refresh."
+    )
+
+
+def test_hitl_settings_success_clears_previous_unavailable_reason(monkeypatch):
+    import demo
+
+    session_state = {
+        "device_id": "device-a",
+        "_hitl_settings_unavailable_reason": "stale failure",
+    }
+    payload = {"deviceId": "device-a", "tools": [], "servers": []}
+    monkeypatch.setattr(demo, "st", SimpleNamespace(session_state=session_state))
+    monkeypatch.setattr(
+        demo,
+        "make_api_request",
+        lambda *_args, **_kwargs: {"data": payload},
+    )
+
+    assert demo.get_hitl_settings() == payload
+    assert "_hitl_settings_unavailable_reason" not in session_state
+
+
 def test_demo_renders_per_server_and_per_tool_controls():
     src = _demo_source()
     assert "Approval: ON" in src  # per-server toggle label

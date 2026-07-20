@@ -3380,9 +3380,7 @@ def _pending_message_draft_key(conversation_id: str) -> str:
     return f"pending_message_draft_{conversation_id}"
 
 
-def _preserve_message_draft_for_attachment_toggle(
-    conversation_id: str, message: str
-) -> None:
+def _preserve_message_draft_for_attachment_toggle(conversation_id: str, message: str) -> None:
     st.session_state[_pending_message_draft_key(conversation_id)] = message
 
 
@@ -3579,9 +3577,7 @@ def _mcp_tool_execution_results() -> dict[str, dict[str, Any]]:
     return results
 
 
-def _remember_mcp_tool_execution_result(
-    qualified_tool_id: str, result: dict[str, Any]
-) -> None:
+def _remember_mcp_tool_execution_result(qualified_tool_id: str, result: dict[str, Any]) -> None:
     _mcp_tool_execution_results()[qualified_tool_id] = result
 
 
@@ -3591,15 +3587,38 @@ def _clear_mcp_tool_execution_result(qualified_tool_id: str) -> None:
 
 def get_hitl_settings() -> dict[str, Any] | None:
     """Fetch this device's editable HITL settings through the local sidecar."""
+    st.session_state.pop("_hitl_settings_unavailable_reason", None)
     response = make_api_request("GET", "/hitl/settings", use_cache=False)
     data = response.get("data") if response else None
     if not isinstance(data, dict):
+        detail = _last_api_error_message(
+            "The local sidecar did not return valid HITL settings"
+        ).rstrip(". ")
+        st.session_state["_hitl_settings_unavailable_reason"] = (
+            f"Human approval settings are unavailable: {detail}. "
+            "Confirm the local sidecar is connected, then refresh."
+        )
         return None
     expected_device_id = str(st.session_state.get("device_id") or "").strip()
     response_device_id = str(data.get("deviceId") or "").strip()
     if expected_device_id and response_device_id != expected_device_id:
+        st.session_state["_hitl_settings_unavailable_reason"] = (
+            "Human approval settings are unavailable because the response belongs "
+            "to another device. Reconnect the local sidecar and refresh."
+        )
         return None
     return data
+
+
+def _hitl_settings_unavailable_message() -> str:
+    """Return safe, actionable guidance for an unavailable HITL policy."""
+    message = st.session_state.get("_hitl_settings_unavailable_reason")
+    if isinstance(message, str) and message.strip():
+        return message.strip()
+    return (
+        "Human approval settings are unavailable. Confirm the local sidecar is "
+        "connected, then refresh."
+    )
 
 
 def get_hitl_interrupt_state(interrupt_id: str) -> dict[str, Any] | None:
@@ -3715,9 +3734,7 @@ def _persist_skill_hitl_mode(
     if chosen == "Inherit":
         result = clear_hitl_setting("client_skill", "tool", skill_qualified_id)
     else:
-        result = set_hitl_setting(
-            "client_skill", "tool", skill_qualified_id, chosen == "Require"
-        )
+        result = set_hitl_setting("client_skill", "tool", skill_qualified_id, chosen == "Require")
     if result is None:
         st.session_state[widget_key] = current_mode
         st.session_state[f"{widget_key}_error"] = _last_api_error_message(
@@ -3783,8 +3800,7 @@ def render_tool_result_payload(payload: Any, use_expander: bool = False) -> None
         else []
     )
     if any(
-        isinstance(block, dict)
-        and str(block.get("type") or "").strip().lower() == "image"
+        isinstance(block, dict) and str(block.get("type") or "").strip().lower() == "image"
         for block in image_blocks
     ):
         _render_image_tool_result({"content": image_blocks})
@@ -3897,9 +3913,7 @@ def _render_chart_tool_result(render: dict[str, Any]) -> bool:
         return True
 
     chart_type = str(structured.get("chart_type") or structured.get("chartType") or "line").lower()
-    series_names = list(
-        dict.fromkeys(key for row in chart_rows for key in row if key != "label")
-    )
+    series_names = list(dict.fromkeys(key for row in chart_rows for key in row if key != "label"))
     chart_data: dict[str, list[Any]] = {
         "label": [row.get("label") for row in chart_rows],
         **{name: [row.get(name) for row in chart_rows] for name in series_names},
@@ -3970,7 +3984,9 @@ def _render_image_tool_result(render: dict[str, Any]) -> bool:
         raw_data = block.get("data") or block.get("base64")
         data = raw_data.strip() if isinstance(raw_data, str) else ""
         mime = str(block.get("mimeType") or block.get("mime_type") or "image/png")
-        src = url or (data if data.startswith("data:") else f"data:{mime};base64,{data}" if data else "")
+        src = url or (
+            data if data.startswith("data:") else f"data:{mime};base64,{data}" if data else ""
+        )
         if not src:
             continue
 
@@ -7420,10 +7436,7 @@ def render_tools_tab():
     # Display tools as selectbox, keyed by qualified id so duplicate tool names
     # across servers each select their own rule (server::tool).
     qualified_tool_options = {
-        str(
-            tool.get("qualifiedId")
-            or f"{tool.get('serverName', '')}::{tool.get('name')}"
-        ): tool
+        str(tool.get("qualifiedId") or f"{tool.get('serverName', '')}::{tool.get('name')}"): tool
         for tool in filtered_tools
         if tool.get("name")
     }
@@ -7487,9 +7500,7 @@ def render_tools_tab():
             if chosen == "Inherit":
                 result = clear_hitl_setting("client_mcp", "tool", qualified_id)
             else:
-                result = set_hitl_setting(
-                    "client_mcp", "tool", qualified_id, chosen == "Require"
-                )
+                result = set_hitl_setting("client_mcp", "tool", qualified_id, chosen == "Require")
             if result is not None:
                 st.rerun()
 
@@ -7529,7 +7540,6 @@ def render_tools_tab():
     # Display execution result
     result = _mcp_tool_execution_results().get(qualified_id)
     if result:
-
         st.markdown("---")
         st.markdown("### Execution Result")
 
@@ -7637,7 +7647,7 @@ def render_skills_tab():
     hitl_settings = get_hitl_settings()
     skill_tool_rules: dict[str, bool] = {}
     if hitl_settings is None:
-        st.warning("Human approval settings are unavailable. Skill approval controls are disabled.")
+        st.warning(_hitl_settings_unavailable_message())
     else:
         hitl_master = bool(hitl_settings.get("masterEnabled", True))
         skill_tool_rules = {
