@@ -3590,9 +3590,16 @@ def _clear_mcp_tool_execution_result(qualified_tool_id: str) -> None:
 
 
 def get_hitl_settings() -> dict[str, Any] | None:
-    """Fetch this user's HITL approval settings (via the sidecar proxy)."""
-    response = make_api_request("GET", "/hitl/settings")
-    return response.get("data") if response else None
+    """Fetch this device's editable HITL settings through the local sidecar."""
+    response = make_api_request("GET", "/hitl/settings", use_cache=False)
+    data = response.get("data") if response else None
+    if not isinstance(data, dict):
+        return None
+    expected_device_id = str(st.session_state.get("device_id") or "").strip()
+    response_device_id = str(data.get("deviceId") or "").strip()
+    if expected_device_id and response_device_id != expected_device_id:
+        return None
+    return data
 
 
 def get_hitl_interrupt_state(interrupt_id: str) -> dict[str, Any] | None:
@@ -3664,14 +3671,18 @@ def _reconcile_interrupt(interrupt_id: str) -> str:
 
 
 def set_hitl_setting(
-    scope_type: str, scope_value: str, require_approval: bool
+    tool_origin: str,
+    scope_type: str,
+    scope_value: str,
+    require_approval: bool,
 ) -> dict[str, Any] | None:
-    """Upsert one HITL approval rule (server- or tool-scoped)."""
+    """Upsert one device-scoped client HITL approval rule."""
     payload = {
         "items": [
             {
                 "scopeType": scope_type,
                 "scopeValue": scope_value,
+                "toolOrigin": tool_origin,
                 "requireApproval": require_approval,
             }
         ]
@@ -3680,10 +3691,14 @@ def set_hitl_setting(
     return response.get("data") if response else None
 
 
-def clear_hitl_setting(scope_type: str, scope_value: str) -> dict[str, Any] | None:
-    """Delete one HITL approval rule (revert to inherit/default)."""
+def clear_hitl_setting(
+    tool_origin: str, scope_type: str, scope_value: str
+) -> dict[str, Any] | None:
+    """Delete one device-scoped client rule (revert to inherit/default)."""
     response = make_api_request(
-        "DELETE", f"/hitl/settings?scope_type={scope_type}&scope_value={scope_value}"
+        "DELETE",
+        f"/hitl/settings?scope_type={scope_type}&scope_value={scope_value}"
+        f"&tool_origin={tool_origin}",
     )
     return response.get("data") if response else None
 
@@ -3698,9 +3713,11 @@ def _persist_skill_hitl_mode(
     if chosen == current_mode:
         return
     if chosen == "Inherit":
-        result = clear_hitl_setting("tool", skill_qualified_id)
+        result = clear_hitl_setting("client_skill", "tool", skill_qualified_id)
     else:
-        result = set_hitl_setting("tool", skill_qualified_id, chosen == "Require")
+        result = set_hitl_setting(
+            "client_skill", "tool", skill_qualified_id, chosen == "Require"
+        )
     if result is None:
         st.session_state[widget_key] = current_mode
         st.session_state[f"{widget_key}_error"] = _last_api_error_message(
@@ -7303,7 +7320,9 @@ def render_tools_tab():
             hitl_settings = get_hitl_settings() or {}
             hitl_master = bool(hitl_settings.get("masterEnabled", True))
             hitl_servers = {
-                s["scopeValue"]: s["requireApproval"] for s in hitl_settings.get("servers", [])
+                item["scopeValue"]: item["requireApproval"]
+                for item in hitl_settings.get("servers", [])
+                if item.get("toolOrigin") == "client_mcp"
             }
             if not hitl_master:
                 st.caption(
@@ -7358,7 +7377,9 @@ def render_tools_tab():
                     ):
                         with st.spinner("Updating approval rule..."):
                             if (
-                                set_hitl_setting("server", server_name, not server_gated)
+                                set_hitl_setting(
+                                    "client_mcp", "server", server_name, not server_gated
+                                )
                                 is not None
                             ):
                                 st.rerun()
@@ -7441,7 +7462,11 @@ def render_tools_tab():
     st.markdown("**Human approval**")
     qualified_id = selected_tool_key
     hitl_settings = get_hitl_settings() or {}
-    tool_rules = {t["scopeValue"]: t["requireApproval"] for t in hitl_settings.get("tools", [])}
+    tool_rules = {
+        item["scopeValue"]: item["requireApproval"]
+        for item in hitl_settings.get("tools", [])
+        if item.get("toolOrigin") == "client_mcp"
+    }
 
     if qualified_id in tool_rules:
         current_mode = "Require" if tool_rules[qualified_id] else "Skip"
@@ -7460,9 +7485,11 @@ def render_tools_tab():
     if chosen != current_mode:
         with st.spinner("Updating tool approval..."):
             if chosen == "Inherit":
-                result = clear_hitl_setting("tool", qualified_id)
+                result = clear_hitl_setting("client_mcp", "tool", qualified_id)
             else:
-                result = set_hitl_setting("tool", qualified_id, chosen == "Require")
+                result = set_hitl_setting(
+                    "client_mcp", "tool", qualified_id, chosen == "Require"
+                )
             if result is not None:
                 st.rerun()
 
@@ -7614,7 +7641,9 @@ def render_skills_tab():
     else:
         hitl_master = bool(hitl_settings.get("masterEnabled", True))
         skill_tool_rules = {
-            item["scopeValue"]: item["requireApproval"] for item in hitl_settings.get("tools", [])
+            item["scopeValue"]: item["requireApproval"]
+            for item in hitl_settings.get("tools", [])
+            if item.get("toolOrigin") == "client_skill"
         }
         if not hitl_master:
             st.caption(

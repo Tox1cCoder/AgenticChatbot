@@ -17,8 +17,10 @@ def test_demo_defines_hitl_helpers_and_calls_settings_endpoint():
     assert "def get_hitl_settings(" in src
     assert "def set_hitl_setting(" in src
     assert "def clear_hitl_setting(" in src
-    assert 'make_api_request("GET", "/hitl/settings")' in src
+    assert 'make_api_request("GET", "/hitl/settings", use_cache=False)' in src
     assert 'make_api_request("POST", "/hitl/settings"' in src
+    assert '"toolOrigin": tool_origin' in src
+    assert "tool_origin={tool_origin}" in src
 
 
 def test_demo_renders_per_server_and_per_tool_controls():
@@ -30,13 +32,27 @@ def test_demo_renders_per_server_and_per_tool_controls():
 
 def test_demo_renders_per_skill_command_hitl_controls():
     src = _demo_source()
+    compact = "".join(src.split())
     assert 'f"skill::{skill_name}::run_skill_command"' in src
     assert 'skill.get("commandCapable", False)' in src
     assert 'widget_key = f"hitl_skill_mode_{skill_hitl_scope}_{skill_name}"' in src
     assert 'modes = ["Inherit", "Require", "Skip"]' in src
-    assert 'clear_hitl_setting("tool", skill_qualified_id)' in src
-    assert 'set_hitl_setting("tool", skill_qualified_id, chosen == "Require")' in src
+    assert 'clear_hitl_setting("client_skill", "tool", skill_qualified_id)' in src
+    assert (
+        'set_hitl_setting("client_skill","tool",skill_qualified_id,chosen=="Require")'
+        in compact
+    )
+    assert 'item.get("toolOrigin") == "client_skill"' in src
     assert "approval rules below are inactive until it is enabled" in src
+
+
+def test_demo_mcp_hitl_controls_are_explicitly_client_origin_scoped():
+    src = _demo_source()
+    compact = "".join(src.split())
+    assert 'item.get("toolOrigin") == "client_mcp"' in src
+    assert 'set_hitl_setting("client_mcp","server",server_name' in compact
+    assert 'clear_hitl_setting("client_mcp", "tool", qualified_id)' in src
+    assert 'set_hitl_setting("client_mcp","tool",qualified_id' in compact
 
 
 def test_demo_has_names_only_local_skill_credential_seams_and_runtime_guidance():

@@ -172,58 +172,60 @@ appear as HITL scope values (below).
 
 ## HITL Settings (Canonical, proxied by the sidecar)
 
-Per-user approval policy for tool execution. **Rules are account-wide**: they
-follow the user across devices. Whether the rule's *target* exists is
-per-device — that asymmetry is exposed explicitly (see `available`).
+Approval policy for tool execution. Editable rules belong to one authenticated
+user **and one client device**. Global-tool policy is read-only and controlled
+by server configuration.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /hitl/settings?deviceId=` | Read policy. Optional `deviceId` adds per-rule availability. |
-| `POST /hitl/settings` | Upsert rules: `{"items": [{"scopeType", "scopeValue", "requireApproval"}]}`. |
-| `DELETE /hitl/settings?scopeType=&scopeValue=` | Remove one rule. Snake-case params also accepted. |
+| `GET /hitl/settings` | Read this sidecar device's editable policy plus read-only global state. |
+| `POST /hitl/settings` | Upsert rules: `{"items": [{"scopeType", "scopeValue", "toolOrigin", "requireApproval"}]}`. |
+| `DELETE /hitl/settings?scopeType=&scopeValue=&toolOrigin=` | Remove one device rule. Snake-case params also accepted. |
 | `GET /hitl/interrupts/{interruptId}` | Interrupt lifecycle — documented in the AI SDK contract. |
 
-`GET /hitl/settings?deviceId=<uuid>` → `data`:
+`GET /hitl/settings` through the sidecar → `data`:
 
 ```json
 {
+  "deviceId": "device-uuid",
   "masterEnabled": true,
-  "globalTools": ["dangerous_tool"],
+  "globalTools": [],
   "servers": [
-    { "scopeType": "server", "scopeValue": "skill_cli_anything_google_calendar",
-      "requireApproval": true, "available": false }
+    { "scopeType": "server", "scopeValue": "desktop-commander",
+      "toolOrigin": "client_mcp", "requireApproval": true }
   ],
   "tools": [
     { "scopeType": "tool",
       "scopeValue": "skill::cli-anything-google-calendar::run_skill_command",
-      "requireApproval": true, "available": false }
+      "toolOrigin": "client_skill", "requireApproval": true }
   ]
 }
 ```
 
 | Field | Rules |
 |---|---|
+| `deviceId` | Authoritative device cache boundary. It is stamped by the local sidecar and echoed by the server. |
 | `masterEnabled` | Server-level HITL kill switch (read-only here). When false, no approvals are enforced regardless of rules. |
 | `globalTools` | Server-configured always-require-approval tool names (read-only here). |
 | `scopeType` | `server` (rule covers every tool of that server name) or `tool` (one tool; overrides its server rule). |
 | `scopeValue` | Server scope: an MCP server name or a skill's `skill_<name>` catalog server name. Tool scope: a qualified id (`server::tool`, `skill::<name>::run_skill_command`) or bare tool name. |
+| `toolOrigin` | Required rule provenance: `client_mcp` or `client_skill`. Other origins are not user-editable. |
 | `requireApproval` | The explicit decision for that scope. |
-| `available` | **Present only when the request passed `deviceId`.** `true` when the scope target currently exists in that device's live catalog or the server-side MCP registry. |
 
 FE behavior:
 
-- **Always pass your own `deviceId`** (from the sidecar login response) when
-  rendering a settings screen. Render `available: false` rules as
-  "Not on this device" — do not hide them (they are real account policy and
-  take effect wherever the target exists), and do not treat them as errors.
-- A rule referencing a skill installed on another of the user's machines is
-  the expected way you'll encounter `available: false`. It does **not** mean
-  the skill leaked to this device: the skill cannot be listed, activated, or
-  executed here.
-- Without `deviceId`, the response is exactly the legacy shape (no `available`
-  key anywhere). Presence-check the field; never expect `null`.
-- `POST` echoes the full updated settings (same shape as `GET`, without
-  `available`). Send only changed rules; upsert is per `(scopeType, scopeValue)`.
+- Call settings routes through the local sidecar. The sidecar removes stale
+  `deviceId`/`device_id` query values and stamps its registered device.
+- Key query caches by response `deviceId`; discard a mismatched cached response.
+- Skills remain in `tools` because HITL approves their executable tool calls.
+  Group `toolOrigin: client_skill` entries under Skills in the UI.
+- Send `toolOrigin` on every POST item and DELETE request. Upsert identity is
+  `(deviceId, toolOrigin, scopeType, scopeValue)` for the authenticated user.
+- Do not render edit controls for `masterEnabled` or `globalTools`.
+- A blank machine correctly receives empty `servers` and `tools` arrays even
+  when another machine owned by the same user has configured rules.
+- Deployment resets legacy account-wide editable rules once because they have
+  no reliable device owner. Clear legacy HITL query caches at the same time.
 - Approval-at-runtime (the `data-interrupt` flow, decisions, resume) is owned
   by [AI_SDK_FE_CONTRACT.md](AI_SDK_FE_CONTRACT.md#human-in-the-loop).
 
@@ -233,7 +235,8 @@ FE behavior:
 |---|---|---|
 | Skill bundles, readiness, secrets | Device | Never. |
 | Device tool/skill catalog | Device (synced to server per device) | Only its names/descriptions, and only in that device's own chat turns. |
-| HITL rules | **User (account-wide)** | `GET /hitl/settings` everywhere, flagged `available: false` where the target is absent. |
+| Editable HITL rules | User + device + origin | Never; another device receives only its own rules. |
+| Global HITL policy | Server configuration | Read-only `masterEnabled` / `globalTools` on every device. |
 | Custom agents and their saved tool/skill refs | **User (account-wide)** | Agent definitions everywhere; client tool refs bound to another device are skipped at run time and reported via `custom_agent_warnings`. |
 | Conversations, messages | User | Everywhere. |
 
@@ -241,7 +244,12 @@ FE behavior:
 
 | Code | Endpoint family | Meaning |
 |---|---|---|
-| `HITL_SCOPE_PARAMS_REQUIRED` | DELETE /hitl/settings | Missing `scopeType`/`scopeValue`. |
+| `HITL_DEVICE_REQUIRED` | HITL settings | Sidecar device context is missing. |
+| `HITL_DEVICE_NOT_FOUND` | HITL settings | Device is unknown or not owned by the authenticated user. |
+| `HITL_DEVICE_RUNTIME_UNAVAILABLE` | POST /hitl/settings | Active device catalog is unavailable for validation. |
+| `HITL_TOOL_ORIGIN_INVALID` | POST/DELETE /hitl/settings | Origin is not `client_mcp` or `client_skill`. |
+| `HITL_TARGET_UNAVAILABLE` | POST /hitl/settings | Target is absent from the active device catalog. |
+| `HITL_SCOPE_PARAMS_REQUIRED` | DELETE /hitl/settings | Missing `toolOrigin`, `scopeType`, or `scopeValue`. |
 | `INTERRUPT_NOT_FOUND` | GET /hitl/interrupts/{id} | Unknown or foreign interrupt. |
 | `SKILL_INSTALL_INVALID` | sidecar /skills | Bad bundle source/structure/hash (HTTP 400; 404 on uninstall). |
 | `SKILL_INSTALL_CONFLICT` | sidecar /skills/install | Bundle already installed (HTTP 409). |
