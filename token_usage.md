@@ -191,7 +191,7 @@ Existing files are modified only where they own call execution, identity propaga
 - Create: `app/usage/context.py`
 - Test: `tests/test_model_usage_context.py`
 
-- [ ] **Step 1: Write failing tests for validation and task isolation**
+- [x] **Step 1: Write failing tests for validation and task isolation**
 
 ```python
 def test_normalized_usage_preserves_unknown_instead_of_zero():
@@ -210,13 +210,13 @@ async def test_usage_context_isolated_between_concurrent_users():
     assert await asyncio.gather(read_bound(first), read_bound(second)) == [first, second]
 ```
 
-- [ ] **Step 2: Run the focused test and confirm missing imports fail**
+- [x] **Step 2: Run the focused test and confirm missing imports fail**
 
 Run: `python -m pytest tests/test_model_usage_context.py -q`
 
 Expected: collection fails because `app.usage` does not exist.
 
-- [ ] **Step 3: Implement immutable types and scoped binding**
+- [x] **Step 3: Implement immutable types and scoped binding**
 
 ```python
 UsageStatus = Literal["success", "error", "cancelled", "timeout"]
@@ -294,13 +294,13 @@ def begin_usage_operation() -> Iterator[UsageOperation]:
 
 Validate every numeric field as a non-boolean non-negative integer in `NormalizedUsage.__post_init__`. Add tests proving nested child contexts share one operation allocator, distinct operations receive distinct IDs, and concurrent operations cannot reuse an `(operation_id, attempt)` pair.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `python -m pytest tests/test_model_usage_context.py -q`
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/usage tests/test_model_usage_context.py
@@ -1352,4 +1352,6 @@ Implementation progress and decisions made during execution. Updated after each 
 
 ### Task progress
 
-(one entry per completed task)
+- **Task 1 — complete (2026-07-20).** Commits `3659e07` + `3f83da1`. 21 tests green (`-W error`), ruff clean. Review round 1 raised two Important findings; both fixed and re-review Approved.
+  - Decision: `generated_images` is validated as a required non-negative int (`None` rejected with `TypeError`), unlike the nine genuinely-Optional token fields where `None` means "unknown".
+  - Decision: CPython's GIL makes a pair-uniqueness stress test (32 threads × 200 allocations, tiny switch interval) unable to detect a lockless `allocate_attempt`; mutual exclusion is instead proven deterministically by `test_allocate_attempt_serializes_concurrent_callers`, which holds `operation._lock` and asserts the allocator blocks. Break-the-code verified (test fails immediately without the lock).
