@@ -18,17 +18,11 @@ class _MemoryRepository:
         self.session_factory = None
 
     def list_by_device(self, user_id, device_id):
-        return [
-            row
-            for row in self.rows
-            if row.user_id == user_id and row.device_id == device_id
-        ]
+        return [row for row in self.rows if row.user_id == user_id and row.device_id == device_id]
 
     def bulk_set(self, user_id, device_id, items):
         for item in items:
-            self.rows.append(
-                SimpleNamespace(user_id=user_id, device_id=device_id, **item)
-            )
+            self.rows.append(SimpleNamespace(user_id=user_id, device_id=device_id, **item))
 
     def delete(self, user_id, device_id, tool_origin, scope_type, scope_value):
         before = len(self.rows)
@@ -168,9 +162,7 @@ def test_apply_rejects_server_owned_origin_with_stable_error(owned_devices, monk
 
 
 @pytest.mark.asyncio
-async def test_api_endpoints_pass_device_and_origin_through_service(
-    owned_devices, monkeypatch
-):
+async def test_api_endpoints_pass_device_and_origin_through_service(owned_devices, monkeypatch):
     user_id, device_a, _device_b = owned_devices
     qualified_id = "skill::kobo-library::run_skill_command"
     repo = _MemoryRepository()

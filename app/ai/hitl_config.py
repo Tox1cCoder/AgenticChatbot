@@ -14,9 +14,7 @@ _CLIENT_POLICY_ORIGINS = frozenset({"client_mcp", "client_skill"})
 
 
 def _empty_client_rules() -> dict[str, dict[str, dict[str, bool]]]:
-    return {
-        origin: {"servers": {}, "tools": {}} for origin in sorted(_CLIENT_POLICY_ORIGINS)
-    }
+    return {origin: {"servers": {}, "tools": {}} for origin in sorted(_CLIENT_POLICY_ORIGINS)}
 
 
 def _tool_call_name(tool_call) -> str:

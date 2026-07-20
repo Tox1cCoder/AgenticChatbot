@@ -40,9 +40,7 @@ def _device_belongs_to_user(user_id: UUID, device_id: UUID, session_factory) -> 
 
 def _build_capability_index(user_id: UUID, device_id: UUID) -> dict[str, dict[str, set[str]]]:
     """Index editable targets reachable from one active client device."""
-    index = {
-        origin: {"servers": set(), "tools": set()} for origin in sorted(_EDITABLE_ORIGINS)
-    }
+    index = {origin: {"servers": set(), "tools": set()} for origin in sorted(_EDITABLE_ORIGINS)}
 
     session = _lookup_device_session(user_id, str(device_id))
     if session is not None:

@@ -38,10 +38,7 @@ def test_demo_renders_per_skill_command_hitl_controls():
     assert 'widget_key = f"hitl_skill_mode_{skill_hitl_scope}_{skill_name}"' in src
     assert 'modes = ["Inherit", "Require", "Skip"]' in src
     assert 'clear_hitl_setting("client_skill", "tool", skill_qualified_id)' in src
-    assert (
-        'set_hitl_setting("client_skill","tool",skill_qualified_id,chosen=="Require")'
-        in compact
-    )
+    assert 'set_hitl_setting("client_skill","tool",skill_qualified_id,chosen=="Require")' in compact
     assert 'item.get("toolOrigin") == "client_skill"' in src
     assert "approval rules below are inactive until it is enabled" in src
 

@@ -2,10 +2,7 @@
 
 from pathlib import Path
 
-
-MIGRATION = Path(
-    "app/alembic/versions/z3a4b5c6d7e8_device_scope_tool_approval_settings.py"
-)
+MIGRATION = Path("app/alembic/versions/z3a4b5c6d7e8_device_scope_tool_approval_settings.py")
 
 
 def test_migration_follows_current_head_and_resets_ambiguous_legacy_rows():
