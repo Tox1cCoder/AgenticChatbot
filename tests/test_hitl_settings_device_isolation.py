@@ -9,7 +9,7 @@ from app.api.hitl import _to_response, clear_hitl_setting, get_hitl_settings, up
 from app.core.exceptions import CustomHTTPException
 from app.schemas.hitl import HitlSettingsUpdate
 from app.services import hitl_settings_service as service_module
-from app.services.hitl_settings_service import HitlSettingsService
+from app.services.hitl_settings_service import HitlSettingsService, _build_capability_index
 
 
 class _MemoryRepository:
@@ -161,6 +161,40 @@ def test_apply_rejects_server_owned_origin_with_stable_error(owned_devices, monk
     assert exc_info.value.error_code == "HITL_TOOL_ORIGIN_INVALID"
 
 
+def test_capability_index_normalizes_raw_sidecar_catalog_origins(owned_devices, monkeypatch):
+    user_id, device_a, _device_b = owned_devices
+    monkeypatch.setattr(
+        service_module,
+        "_lookup_device_session",
+        lambda _user_id, _device_id: SimpleNamespace(
+            tool_catalog={
+                "tools": [
+                    {
+                        "origin": "mcp",
+                        "server_name": "desktop-commander",
+                        "qualified_id": "desktop-commander::start_process",
+                        "name": "start_process",
+                    },
+                    {
+                        "origin": "skill",
+                        "server_name": "skill_kobo_library",
+                        "qualified_id": "skill::kobo-library::run_skill_command",
+                        "name": "run_skill_command",
+                    },
+                ]
+            }
+        ),
+    )
+
+    capabilities = _build_capability_index(user_id, device_a)
+
+    assert capabilities["client_mcp"]["servers"] == {"desktop-commander"}
+    assert capabilities["client_skill"]["tools"] == {
+        "run_skill_command",
+        "skill::kobo-library::run_skill_command",
+    }
+
+
 @pytest.mark.asyncio
 async def test_api_endpoints_pass_device_and_origin_through_service(owned_devices, monkeypatch):
     user_id, device_a, _device_b = owned_devices
@@ -173,7 +207,7 @@ async def test_api_endpoints_pass_device_and_origin_through_service(owned_device
             tool_catalog={
                 "tools": [
                     {
-                        "origin": "client_skill",
+                        "origin": "skill",
                         "server_name": "skill_kobo_library",
                         "qualified_id": qualified_id,
                         "name": "run_skill_command",

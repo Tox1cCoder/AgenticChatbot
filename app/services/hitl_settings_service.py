@@ -12,6 +12,10 @@ from app.models.client_device import ClientDevice
 from app.repositories.tool_approval_setting import ToolApprovalSettingRepository
 
 _EDITABLE_ORIGINS = {"client_mcp", "client_skill"}
+_CATALOG_TO_POLICY_ORIGIN = {
+    "mcp": "client_mcp",
+    "skill": "client_skill",
+}
 
 
 def _lookup_device_session(user_id: UUID, device_id: str):
@@ -48,8 +52,9 @@ def _build_capability_index(user_id: UUID, device_id: UUID) -> dict[str, dict[st
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            origin = str(entry.get("origin") or "").strip().lower()
-            if origin not in index:
+            catalog_origin = str(entry.get("origin") or "").strip().lower()
+            origin = _CATALOG_TO_POLICY_ORIGIN.get(catalog_origin)
+            if origin is None:
                 continue
             origin_index = index[origin]
             server = str(entry.get("server_name") or "").strip()
