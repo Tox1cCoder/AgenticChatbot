@@ -72,7 +72,11 @@ class DocumentProcessingService:
             api_key = api_key.split("=", 1)[-1].strip()
 
         try:
-            self.gemini_client = genai.Client(api_key=api_key)
+            # Application owns retries; attempts=1 disables SDK-internal retry.
+            self.gemini_client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)),
+            )
         except Exception:
             self.gemini_client = None
 

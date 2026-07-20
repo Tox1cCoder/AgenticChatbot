@@ -738,12 +738,13 @@ class ProviderService:
         try:
             import openai
 
+            # Application owns retries; disable SDK-internal retries.
             async_client_cls = getattr(openai, "AsyncOpenAI", None)
             if async_client_cls is not None:
-                client = async_client_cls(api_key=api_key)
+                client = async_client_cls(api_key=api_key, max_retries=0)
                 models_response = await client.models.list()
             else:
-                client = openai.OpenAI(api_key=api_key)
+                client = openai.OpenAI(api_key=api_key, max_retries=0)
                 models_response = await asyncio.to_thread(client.models.list)
 
             normalized_models: list[dict[str, Any]] = []
@@ -762,8 +763,13 @@ class ProviderService:
 
     def _fetch_gemini_models_sync(self, api_key: str) -> list[dict[str, Any]]:
         from google import genai
+        from google.genai import types
 
-        client = genai.Client(api_key=api_key)
+        # Application owns retries; attempts=1 disables SDK-internal retry.
+        client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)),
+        )
         pager = client.models.list(config={"page_size": 100, "query_base": True})
 
         normalized_models: list[dict[str, Any]] = []

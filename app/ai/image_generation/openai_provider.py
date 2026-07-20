@@ -41,7 +41,12 @@ class OpenAIImageProvider:
         else:
             from openai import AsyncOpenAI
 
-            self._client = AsyncOpenAI(api_key=api_key) if api_key else AsyncOpenAI()
+            # Application owns retries; disable SDK-internal retries.
+            self._client = (
+                AsyncOpenAI(api_key=api_key, max_retries=0)
+                if api_key
+                else AsyncOpenAI(max_retries=0)
+            )
 
     @staticmethod
     def _size_for_aspect(aspect_ratio: str) -> str:

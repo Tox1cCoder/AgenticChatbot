@@ -8,6 +8,7 @@ project_root = current_dir.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from google import genai  # noqa: E402
+from google.genai import types  # noqa: E402
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
@@ -39,8 +40,12 @@ def fill_form(natural_language_input: str) -> str:
         if api_key.startswith("GEMINI_API_KEY="):
             api_key = api_key.split("=", 1)[-1].strip()
 
-        # Initialize Gemini client
-        client = genai.Client(api_key=api_key)
+        # Initialize Gemini client. Application owns retries; attempts=1
+        # disables the SDK's own retry of the original request.
+        client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)),
+        )
 
         # Get current date as reference
         current_date = datetime.now().strftime("%Y-%m-%d")

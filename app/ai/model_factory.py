@@ -99,6 +99,9 @@ class ModelFactory:
             "model": model,
             "google_api_key": api_key,
             "temperature": temperature,
+            # The application owns retry boundaries (the usage recorder makes
+            # each provider attempt exactly once); disable SDK-internal retries.
+            "max_retries": 0,
         }
 
         # Apply Gemini-specific thinking configuration
@@ -148,6 +151,8 @@ class ModelFactory:
             "openai_api_key": api_key,
             "temperature": temperature,
             "timeout": timeout or settings.openai_request_timeout_seconds,
+            # Application owns retries; disable SDK-internal retries.
+            "max_retries": 0,
         }
 
         # Merge any additional kwargs (including reasoning, streaming, etc.)

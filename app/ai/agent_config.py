@@ -88,7 +88,12 @@ def create_gemini_client(api_key_override: str | None = None) -> genai.Client:
         genai.Client: Initialized Gemini client
     """
     api_key = get_api_key(api_key_override=api_key_override)
-    return genai.Client(api_key=api_key)
+    # Application owns retry boundaries; the Gen AI SDK counts attempts
+    # inclusive of the original request, so attempts=1 disables SDK retries.
+    return genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)),
+    )
 
 
 def _build_thinking_config(model_name: str) -> types.ThinkingConfig | None:
@@ -205,6 +210,8 @@ def create_langchain_model(
         "model": model_name,
         "google_api_key": api_key,
         "temperature": temperature,
+        # Application owns retries; disable SDK-internal retries.
+        "max_retries": 0,
     }
 
     # Configure thinking based on settings and model version

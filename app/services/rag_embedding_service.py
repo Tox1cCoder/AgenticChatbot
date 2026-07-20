@@ -108,7 +108,12 @@ class GeminiRAGEmbeddingService:
     _BASE_RETRY_DELAY: ClassVar[float] = 5.0
 
     def __post_init__(self) -> None:
-        self.client = genai.Client(api_key=self.api_key)
+        # Application owns retries (see gemini_retry helpers); attempts=1
+        # disables the Gen AI SDK's own retry of the original request.
+        self.client = genai.Client(
+            api_key=self.api_key,
+            http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)),
+        )
         # Clamp to the documented API maximum so misconfigured values fail safe.
         self.embedding_batch_size = min(self.embedding_batch_size, self._API_MAX_BATCH)
 

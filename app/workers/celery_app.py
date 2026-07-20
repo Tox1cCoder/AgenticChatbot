@@ -46,6 +46,7 @@ celery_app.conf.imports = (
     "app.workers.document_processor",
     "app.workers.cleanup_tasks",
     "app.workers.conversation_compaction",
+    "app.workers.model_usage",
 )
 
 celery_app.conf.task_routes = {
@@ -59,6 +60,9 @@ celery_app.conf.task_routes = {
     "app.workers.conversation_compaction.backfill_conversation_summaries_task": {
         "queue": "summary"
     },
+    "app.workers.model_usage.retry_model_usage_write_task": {"queue": "summary"},
+    "app.workers.model_usage.reconcile_model_usage_task": {"queue": "summary"},
+    "app.workers.model_usage.cleanup_model_usage_task": {"queue": "summary"},
 }
 
 celery_app.conf.beat_schedule = {

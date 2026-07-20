@@ -15,7 +15,9 @@ from app.workers.celery_app import celery_app
 logger = logging.getLogger(__name__)
 
 
-celery_app.conf.beat_schedule = {
+# Merge (do NOT reassign) so celery_app.py's conversation-summary beat entries
+# survive this module's import; a bare assignment clobbers them.
+_CLEANUP_BEAT_SCHEDULE = {
     "cleanup-temp-files": {
         "task": "app.workers.cleanup_tasks.cleanup_temp_files_task",
         "schedule": crontab(minute=0, hour="*/6"),
@@ -29,6 +31,7 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(minute="*/10"),  # Run every 10 minutes
     },
 }
+celery_app.conf.beat_schedule.update(_CLEANUP_BEAT_SCHEDULE)
 
 
 @celery_app.task(name="app.workers.cleanup_tasks.cleanup_temp_files_task")

@@ -603,6 +603,44 @@ class Settings(BaseSettings):
         description="Default output-token reservation used by request preflight",
     )
 
+    # Per-user model-usage analytics
+    model_usage_tracking_enabled: bool = Field(
+        default=True,
+        description="Record per-user model-call usage events and minute rollups",
+    )
+    model_usage_ui_enabled: bool = Field(
+        default=True,
+        description="Expose the model-usage analytics UI/read endpoints",
+    )
+    model_usage_raw_retention_days: int = Field(
+        default=90,
+        description="Days of raw model-usage events retained before cleanup",
+    )
+    model_usage_rollup_retention_days: int = Field(
+        default=730,
+        description="Days of model-usage minute rollups retained before cleanup",
+    )
+    model_usage_reconcile_minutes: int = Field(
+        default=2880,
+        description="Trailing window (minutes) rebuilt by the reconcile task",
+    )
+    model_usage_cleanup_batch_size: int = Field(
+        default=5000,
+        description="Batch size for model-usage retention deletes",
+    )
+    model_usage_retry_max_attempts: int = Field(
+        default=5,
+        description="Maximum failed-write retry attempts for a ledger event",
+    )
+    model_usage_retry_base_seconds: int = Field(
+        default=10,
+        description="Base delay for exponential failed-write retry backoff",
+    )
+    model_usage_user_hash_secret: str = Field(
+        default="",
+        description="Secret keying the per-user hash for model-usage identity",
+    )
+
     chat_history_max_messages: int = Field(
         default=24,
         description="Maximum prior messages to include when building chat prompts (0 = no limit)",
@@ -1428,6 +1466,12 @@ class Settings(BaseSettings):
         "conversation_summary_retry_max_seconds",
         "conversation_summary_reconcile_seconds",
         "conversation_summary_max_tokens",
+        "model_usage_raw_retention_days",
+        "model_usage_rollup_retention_days",
+        "model_usage_reconcile_minutes",
+        "model_usage_cleanup_batch_size",
+        "model_usage_retry_max_attempts",
+        "model_usage_retry_base_seconds",
         mode="before",
     )
     @classmethod
@@ -1636,6 +1680,11 @@ class Settings(BaseSettings):
                 raise ValueError("conversation summary model must be explicit in production")
             if "preview" in self.conversation_summary_model.strip().lower():
                 raise ValueError("conversation summary model must be stable in production")
+            if self.langsmith_tracing and not self.model_usage_user_hash_secret.strip():
+                raise ValueError(
+                    "model_usage_user_hash_secret must be set in production when "
+                    "LangSmith tracing is enabled"
+                )
         return self
 
 

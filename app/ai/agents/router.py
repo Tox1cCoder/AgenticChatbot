@@ -3,6 +3,7 @@ import logging
 import re
 
 from google import genai
+from google.genai import types
 
 from ...core.config import settings
 from ..agent_config import build_gemini_generate_config
@@ -32,7 +33,11 @@ class Router:
             return
 
         try:
-            self.gemini_client = genai.Client(api_key=api_key)
+            # Application owns retries; attempts=1 disables SDK-internal retry.
+            self.gemini_client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)),
+            )
         except Exception as exc:
             logger.warning("Router Gemini client initialization failed: %s", exc, exc_info=True)
             self.gemini_client = None
