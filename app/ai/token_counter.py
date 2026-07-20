@@ -52,6 +52,11 @@ class ReportedTokenUsage:
     reasoning_tokens: int | None
     cost_amount: float | None = None
     cost_currency: str | None = None
+    cached_input_tokens: int | None = None
+    input_text_tokens: int | None = None
+    input_image_tokens: int | None = None
+    output_text_tokens: int | None = None
+    output_image_tokens: int | None = None
     source: Literal["reported"] = "reported"
 
 
@@ -328,6 +333,39 @@ class TokenCounter:
                 continue
             if total_tokens is None and input_tokens is not None and output_tokens is not None:
                 total_tokens = input_tokens + output_tokens
+            cached_input_tokens = self._sum_usage_ints(
+                envelope,
+                (
+                    "cache_read_input_tokens",
+                    "cache_creation_input_tokens",
+                    "cached_content_token_count",
+                ),
+            )
+            if cached_input_tokens is None:
+                cached_input_tokens = self._sum_usage_ints(
+                    self._raw_value(envelope, "input_token_details"),
+                    ("cache_read", "cache_creation"),
+                )
+            if cached_input_tokens is None:
+                cached_input_tokens = self._first_nested_usage_int(
+                    envelope,
+                    (
+                        ("input_tokens_details", "cached_tokens"),
+                        ("prompt_tokens_details", "cached_tokens"),
+                    ),
+                )
+            input_text_tokens = self._first_nested_usage_int(
+                envelope, (("input_tokens_details", "text_tokens"),)
+            )
+            input_image_tokens = self._first_nested_usage_int(
+                envelope, (("input_tokens_details", "image_tokens"),)
+            )
+            output_text_tokens = self._first_nested_usage_int(
+                envelope, (("output_tokens_details", "text_tokens"),)
+            )
+            output_image_tokens = self._first_nested_usage_int(
+                envelope, (("output_tokens_details", "image_tokens"),)
+            )
             cost_amount = self._first_usage_float(
                 envelope,
                 ("cost", "cost_amount", "total_cost"),
@@ -345,6 +383,11 @@ class TokenCounter:
                 reasoning_tokens=reasoning_tokens,
                 cost_amount=cost_amount,
                 cost_currency=cost_currency,
+                cached_input_tokens=cached_input_tokens,
+                input_text_tokens=input_text_tokens,
+                input_image_tokens=input_image_tokens,
+                output_text_tokens=output_text_tokens,
+                output_image_tokens=output_image_tokens,
             )
         return None
 
@@ -383,6 +426,30 @@ class TokenCounter:
             if parsed >= 0:
                 return parsed
         return None
+
+    @classmethod
+    def _sum_usage_ints(cls, data: Any, keys: tuple[str, ...]) -> int | None:
+        """Sum every present non-boolean, non-negative int among ``keys``.
+
+        Unlike ``_first_usage_int`` (first match wins), this combines values
+        that represent additive sub-quantities of the same concept — e.g.
+        Anthropic's ``cache_read_input_tokens`` and
+        ``cache_creation_input_tokens`` both count toward "cached input
+        tokens". Returns ``None`` only when none of ``keys`` are present.
+        """
+        total: int | None = None
+        for key in keys:
+            value = cls._raw_value(data, key)
+            if value is None or isinstance(value, bool):
+                continue
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed < 0:
+                continue
+            total = (total or 0) + parsed
+        return total
 
     @classmethod
     def _first_usage_float(cls, data: Any, keys: tuple[str, ...]) -> float | None:

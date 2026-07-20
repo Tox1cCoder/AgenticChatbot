@@ -7,7 +7,7 @@ import pytest
 import tiktoken
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from app.ai.token_counter import TokenCounter
+from app.ai.token_counter import ReportedTokenUsage, TokenCounter
 
 
 def test_openai_uses_model_tokenizer_for_text():
@@ -273,3 +273,84 @@ def test_extract_reported_usage_preserves_provider_cost_metadata():
     assert usage is not None
     assert usage.cost_amount == pytest.approx(0.0042)
     assert usage.cost_currency == "USD"
+
+
+def test_extract_reported_usage_populates_cached_and_modality_details_when_present():
+    response = SimpleNamespace(
+        usage_metadata={
+            "input_tokens": 100,
+            "output_tokens": 40,
+            "total_tokens": 140,
+            "input_tokens_details": {"text_tokens": 70, "image_tokens": 30, "cached_tokens": 20},
+            "output_tokens_details": {"text_tokens": 35},
+            "completion_tokens_details": {"reasoning_tokens": 5},
+        }
+    )
+
+    usage = TokenCounter().extract_reported_usage(provider="openai", response=response)
+
+    assert usage is not None
+    assert usage.cached_input_tokens == 20
+    assert usage.input_text_tokens == 70
+    assert usage.input_image_tokens == 30
+    assert usage.output_text_tokens == 35
+    assert usage.reasoning_tokens == 5
+
+
+def test_extract_reported_usage_sums_anthropic_style_cache_tokens():
+    response = SimpleNamespace(
+        usage_metadata={
+            "input_tokens": 500,
+            "output_tokens": 50,
+            "cache_read_input_tokens": 300,
+            "cache_creation_input_tokens": 100,
+        }
+    )
+
+    usage = TokenCounter().extract_reported_usage(provider="anthropic", response=response)
+
+    assert usage is not None
+    assert usage.cached_input_tokens == 400
+
+
+def test_extract_reported_usage_sums_langchain_input_token_details_cache_fields():
+    response = SimpleNamespace(
+        usage_metadata={
+            "input_tokens": 500,
+            "output_tokens": 50,
+            "input_token_details": {"cache_read": 120, "cache_creation": 30},
+        }
+    )
+
+    usage = TokenCounter().extract_reported_usage(provider="anthropic", response=response)
+
+    assert usage is not None
+    assert usage.cached_input_tokens == 150
+
+
+def test_extract_reported_usage_new_fields_default_to_none_when_absent():
+    response = SimpleNamespace(usage_metadata={"input_tokens": 10, "output_tokens": 5})
+
+    usage = TokenCounter().extract_reported_usage(provider="openai", response=response)
+
+    assert usage is not None
+    assert usage.cached_input_tokens is None
+    assert usage.input_text_tokens is None
+    assert usage.input_image_tokens is None
+    assert usage.output_text_tokens is None
+    assert usage.output_image_tokens is None
+
+
+def test_reported_token_usage_positional_construction_stays_backward_compatible():
+    """Existing positional construction (input, output, total, reasoning)
+    must keep working after the new fields are appended with defaults."""
+    usage = ReportedTokenUsage(100, 20, 120, None)
+
+    assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (100, 20, 120)
+    assert usage.reasoning_tokens is None
+    assert usage.cached_input_tokens is None
+    assert usage.input_text_tokens is None
+    assert usage.input_image_tokens is None
+    assert usage.output_text_tokens is None
+    assert usage.output_image_tokens is None
+    assert usage.source == "reported"
