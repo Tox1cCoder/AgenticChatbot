@@ -31,11 +31,20 @@ class ToolApprovalSetting(Base):
     __tablename__ = "tool_approval_settings"
     __table_args__ = (
         UniqueConstraint(
-            "user_id", "scope_type", "scope_value", name="uq_tool_approval_settings_user_scope"
+            "user_id",
+            "device_id",
+            "tool_origin",
+            "scope_type",
+            "scope_value",
+            name="uq_tool_approval_settings_user_device_origin_scope",
         ),
         CheckConstraint(
             "scope_type IN ('server', 'tool')",
             name="ck_tool_approval_settings_scope_type",
+        ),
+        CheckConstraint(
+            "tool_origin IN ('client_mcp', 'client_skill')",
+            name="ck_tool_approval_settings_tool_origin",
         ),
     )
 
@@ -46,15 +55,24 @@ class ToolApprovalSetting(Base):
     )
 
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    device_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("client_devices.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
 
+    tool_origin = Column(String(32), nullable=False, index=True)
     scope_type = Column(String(16), nullable=False)  # "server" | "tool"
     scope_value = Column(String(512), nullable=False, index=True)
     require_approval = Column(Boolean, nullable=False, default=True)
 
     user = relationship("User", backref="tool_approval_settings")
+    device = relationship("ClientDevice", backref="tool_approval_settings")
 
     def __repr__(self) -> str:
         return (
-            f"<ToolApprovalSetting(user_id={self.user_id}, scope_type='{self.scope_type}', "
+            f"<ToolApprovalSetting(user_id={self.user_id}, device_id={self.device_id}, "
+            f"tool_origin='{self.tool_origin}', scope_type='{self.scope_type}', "
             f"scope_value='{self.scope_value}', require_approval={self.require_approval})>"
         )

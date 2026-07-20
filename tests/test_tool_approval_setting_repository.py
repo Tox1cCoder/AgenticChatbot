@@ -54,10 +54,20 @@ def test_set_creates_when_missing():
     session = _FakeSession(rows=[])
     repo = ToolApprovalSettingRepository(_factory(session))
     user_id = uuid4()
+    device_id = uuid4()
 
-    setting = repo.set(user_id, "server", "desktop_commander", True)
+    setting = repo.set(
+        user_id,
+        device_id,
+        "client_mcp",
+        "server",
+        "desktop_commander",
+        True,
+    )
 
     assert session.added and session.committed >= 1
+    assert setting.device_id == device_id
+    assert setting.tool_origin == "client_mcp"
     assert setting.scope_type == "server"
     assert setting.scope_value == "desktop_commander"
     assert setting.require_approval is True
@@ -65,12 +75,22 @@ def test_set_creates_when_missing():
 
 def test_set_updates_when_present():
     existing = SimpleNamespace(
-        scope_type="tool", scope_value="excel::delete_sheet", require_approval=False
+        tool_origin="client_mcp",
+        scope_type="tool",
+        scope_value="excel::delete_sheet",
+        require_approval=False,
     )
     session = _FakeSession(rows=[existing])
     repo = ToolApprovalSettingRepository(_factory(session))
 
-    setting = repo.set(uuid4(), "tool", "excel::delete_sheet", True)
+    setting = repo.set(
+        uuid4(),
+        uuid4(),
+        "client_mcp",
+        "tool",
+        "excel::delete_sheet",
+        True,
+    )
 
     assert setting is existing
     assert setting.require_approval is True
@@ -80,28 +100,55 @@ def test_set_updates_when_present():
 def test_build_policy_groups_by_scope():
     rows = [
         SimpleNamespace(
-            scope_type="server", scope_value="desktop_commander", require_approval=True
+            tool_origin="client_mcp",
+            scope_type="server",
+            scope_value="desktop_commander",
+            require_approval=True,
         ),
         SimpleNamespace(
-            scope_type="tool", scope_value="desktop_commander::list_files", require_approval=False
+            tool_origin="client_skill",
+            scope_type="tool",
+            scope_value="skill::kobo-library::run_skill_command",
+            require_approval=False,
         ),
-        SimpleNamespace(scope_type="garbage", scope_value="ignored", require_approval=True),
+        SimpleNamespace(
+            tool_origin="client_mcp",
+            scope_type="garbage",
+            scope_value="ignored",
+            require_approval=True,
+        ),
     ]
     repo = ToolApprovalSettingRepository(_factory(_FakeSession(rows=rows)))
 
-    policy = repo.build_policy(uuid4())
+    policy = repo.build_policy(uuid4(), uuid4())
 
     assert policy == {
-        "servers": {"desktop_commander": True},
-        "tools": {"desktop_commander::list_files": False},
+        "client_mcp": {
+            "servers": {"desktop_commander": True},
+            "tools": {},
+        },
+        "client_skill": {
+            "servers": {},
+            "tools": {"skill::kobo-library::run_skill_command": False},
+        },
     }
 
 
 def test_rejects_invalid_scope_type():
     repo = ToolApprovalSettingRepository(_factory(_FakeSession(rows=[])))
     try:
-        repo.set(uuid4(), "garbage", "ignored", True)
+        repo.set(uuid4(), uuid4(), "client_mcp", "garbage", "ignored", True)
     except ValueError as exc:
         assert "scope_type" in str(exc)
     else:
         raise AssertionError("invalid scope_type should fail")
+
+
+def test_rejects_invalid_tool_origin():
+    repo = ToolApprovalSettingRepository(_factory(_FakeSession(rows=[])))
+    try:
+        repo.set(uuid4(), uuid4(), "server_mcp", "tool", "search::query", True)
+    except ValueError as exc:
+        assert "tool_origin" in str(exc)
+    else:
+        raise AssertionError("server-owned origins must not be user editable")

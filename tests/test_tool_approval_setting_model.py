@@ -14,6 +14,8 @@ def test_model_columns_and_table():
         "created_at",
         "updated_at",
         "user_id",
+        "device_id",
+        "tool_origin",
         "scope_type",
         "scope_value",
         "require_approval",
@@ -23,13 +25,29 @@ def test_model_columns_and_table():
         for con in ToolApprovalSetting.__table__.constraints
         if con.__class__.__name__ == "UniqueConstraint"
     }
-    assert ("scope_type", "scope_value", "user_id") in uniques
+    assert (
+        "device_id",
+        "scope_type",
+        "scope_value",
+        "tool_origin",
+        "user_id",
+    ) in uniques
     checks = {
         str(con.sqltext)
         for con in ToolApprovalSetting.__table__.constraints
         if con.__class__.__name__ == "CheckConstraint"
     }
     assert any("scope_type" in check and "server" in check and "tool" in check for check in checks)
+    assert any(
+        "tool_origin" in check and "client_mcp" in check and "client_skill" in check
+        for check in checks
+    )
+
+    foreign_keys = {
+        (fk.parent.name, fk.target_fullname, fk.ondelete)
+        for fk in ToolApprovalSetting.__table__.foreign_keys
+    }
+    assert ("device_id", "client_devices.id", "CASCADE") in foreign_keys
 
 
 def test_model_exported():
