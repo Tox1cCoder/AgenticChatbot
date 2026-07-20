@@ -386,17 +386,17 @@ git commit -m "feat: add model usage ledger schema"
 - Create: `app/repositories/model_usage.py`
 - Test: `tests/integration/test_model_usage_repository_postgres.py`
 
-- [ ] **Step 1: Write PostgreSQL integration tests**
+- [x] **Step 1: Write PostgreSQL integration tests**
 
 Cover seven named cases: `test_record_event_is_idempotent_and_increments_rollup_once`, `test_unknown_tokens_remain_null_while_rollup_uses_zero_for_sum`, `test_same_logical_operation_distinct_attempts_are_recorded`, `test_user_and_conversation_filters_never_cross_tenants`, `test_reconcile_minute_rebuilds_exactly_from_raw_events`, `test_rollup_fk_deletes_do_not_mutate_hashed_dimensions`, and `test_cleanup_deletes_raw_older_than_90_days_and_rollups_older_than_2_years`. Each test creates concrete users, persisted request messages, conversations, timestamps, and token counts through existing PostgreSQL fixtures, then asserts raw rows and rollup sums directly. Also assert that a reserved but unpersisted assistant UUID is rejected if accidentally supplied as `request_message_id`.
 
-- [ ] **Step 2: Run the integration file and confirm failure**
+- [x] **Step 2: Run the integration file and confirm failure**
 
 Run: `python -m pytest tests/integration/test_model_usage_repository_postgres.py -q`
 
 Expected: repository import fails.
 
-- [ ] **Step 3: Implement `record_event()` as one transaction**
+- [x] **Step 3: Implement `record_event()` as one transaction**
 
 Use SQLAlchemy's PostgreSQL `insert(ModelUsageEvent).on_conflict_do_nothing(index_elements=["event_key"]).returning(ModelUsageEvent.id)`. Only when an event ID is returned should the same transaction execute an `insert(ModelUsageMinute).on_conflict_do_update(index_elements=["rollup_key"], set_=aggregate_increments)` statement.
 
@@ -412,17 +412,17 @@ return RecordResult(inserted=True, event_id=inserted_id)
 
 The minute key is `started_at.astimezone(timezone.utc).replace(second=0, microsecond=0)`.
 
-- [ ] **Step 4: Implement bounded analytics and maintenance queries**
+- [x] **Step 4: Implement bounded analytics and maintenance queries**
 
 Provide repository methods for summary totals, minute series, dimension breakdowns, latest relevant conversation event, recent-minute reconciliation, batched raw deletion, and batched rollup deletion. Every user query requires a non-null `user_id` argument and applies it in the first SQL statement.
 
-- [ ] **Step 5: Run integration tests**
+- [x] **Step 5: Run integration tests**
 
 Run: `python -m pytest tests/integration/test_model_usage_repository_postgres.py -q`
 
 Expected: all tests pass against the configured PostgreSQL test database.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/repositories/model_usage.py tests/integration/test_model_usage_repository_postgres.py
@@ -1363,3 +1363,10 @@ Implementation progress and decisions made during execution. Updated after each 
   - Defect caught by controller verification: PostgreSQL's 63-char identifier limit broke `alembic upgrade head` (constraint name was 66 chars). Minute-table check names now use `ck_mu_minute_<col>_nonneg`; a guard test asserts every constraint/index is named and ≤63 chars, and a live-PostgreSQL test runs the migration's real `upgrade()`/`downgrade()` in an isolated scratch schema.
   - Review fix: ORM now names PK/FK constraints identically to the migration (`pk_/fk_` names), enforced by a parity test; migration ondelete checks are column-bound (events: user→CASCADE, others→SET NULL; minute: both→CASCADE).
   - Migration `y2z3a4b5c6d7` was applied to the dev database on 2026-07-20 (schema-first rollout per §8; collection stays disabled until Task 5's flags exist).
+
+- **Task 3 — complete (2026-07-20).** Commit `f07edb5`. `app/repositories/model_usage.py` (`RecordEventCommand`, `compute_rollup_key`, `record_event` one-transaction upsert, bounded per-user reads, `reconcile_minute_range`, batched `delete_*_older_than`, `ModelUsageReferenceError`) + `tests/integration/test_model_usage_repository_postgres.py` (8 tests). Implementer sonnet.
+  - Resumption note: the prior session committed `f07edb5` but stopped before running the task reviewer and updating this log/ledger; the HITL feature (`b23f071`..`2fc86bb`) was layered on top by the user afterward. This session reconciled the gap: re-verified the 8 integration tests pass against live PostgreSQL, regenerated the review package, and ran the deferred opus task review — **Approved**, no Critical/Important findings.
+  - ⚠️ resolved: both `uq_model_usage_events_event_key` and `uq_model_usage_events_operation_attempt` unique constraints confirmed present in migration `y2z3a4b5c6d7` (lines 162, 163–166) — idempotency and the distinct-attempts guarantee rest on them.
+  - Decision: retention cutoffs (90d / 2y) are caller-supplied to `delete_*_older_than`, not hardcoded in the storage layer (a scheduled job in Task 17 owns the policy). Reviewer accepted this reading of "batched raw/rollup deletion".
+  - Decision: `ModelUsageReferenceError` is a bare `Exception` subclass in the repository module, not yet wired into `app/core/exceptions/`; a later service/API task decides its HTTP surface.
+  - Minor findings (for final-review triage): (1) `user_id: UUID` params on the four readers should be `UUID | None` to match the mandated `None`-guard; (2) 6 of 9 token fields' `*_sum`/`*_known_count` are executed but unasserted, `get_dimension_breakdown` only tested single-group, `reconcile_minute_range` only single-bucket; (3) `delete_rollups_older_than`'s batch loop never exercised with a small `batch_size`.
