@@ -437,7 +437,7 @@ git commit -m "feat: persist and aggregate model usage"
 - Test: `tests/test_model_usage_normalizers.py`
 - Test: `tests/test_token_counter.py`
 
-- [ ] **Step 1: Write failing provider-shape tests**
+- [x] **Step 1: Write failing provider-shape tests**
 
 Include Gemini prompt/candidate/thought/cache counts and modality arrays, OpenAI completion usage and image usage details, Anthropic cache/reasoning-compatible aliases, totals missing but input/output present, negative values, booleans, malformed objects, and fully absent usage.
 
@@ -463,21 +463,21 @@ assert usage == NormalizedUsage(
 )
 ```
 
-- [ ] **Step 2: Run tests and confirm new cases fail**
+- [x] **Step 2: Run tests and confirm new cases fail**
 
 Run: `python -m pytest tests/test_model_usage_normalizers.py tests/test_token_counter.py -q`
 
-- [ ] **Step 3: Implement normalization**
+- [x] **Step 3: Implement normalization**
 
 Reuse small safe-number helpers from `TokenCounter`, extend `ReportedTokenUsage` with cached and modality details, and make `normalize_provider_usage()` return `NormalizedUsage(source="unavailable")` rather than `None`. Never retain the input payload.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `python -m pytest tests/test_model_usage_normalizers.py tests/test_token_counter.py tests/test_context_window_message_metadata.py -q`
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/usage/normalizers.py app/ai/token_counter.py tests/test_model_usage_normalizers.py tests/test_token_counter.py
@@ -1370,3 +1370,9 @@ Implementation progress and decisions made during execution. Updated after each 
   - Decision: retention cutoffs (90d / 2y) are caller-supplied to `delete_*_older_than`, not hardcoded in the storage layer (a scheduled job in Task 17 owns the policy). Reviewer accepted this reading of "batched raw/rollup deletion".
   - Decision: `ModelUsageReferenceError` is a bare `Exception` subclass in the repository module, not yet wired into `app/core/exceptions/`; a later service/API task decides its HTTP surface.
   - Minor findings (for final-review triage): (1) `user_id: UUID` params on the four readers should be `UUID | None` to match the mandated `None`-guard; (2) 6 of 9 token fields' `*_sum`/`*_known_count` are executed but unasserted, `get_dimension_breakdown` only tested single-group, `reconcile_minute_range` only single-bucket; (3) `delete_rollups_older_than`'s batch loop never exercised with a small `batch_size`.
+
+- **Task 4 — complete (2026-07-20).** Commits `1f3cdc3` (impl) + `44892ad` (fix round 1) + `91b9c11` (fix round 2). `app/usage/normalizers.py` (`normalize_provider_usage` → always `NormalizedUsage`, source `provider_reported`/`unavailable`) + extended `ReportedTokenUsage`/`extract_reported_usage` with cached+modality fields in `app/ai/token_counter.py`; 22 normalizer tests + additive token_counter tests (63 green, 0 warnings). Implementer sonnet, reviewer sonnet.
+  - Decision: the normalizer does NOT synthesize `total = input + output` (leaves `None` when unreported) so Task 8's ratio precedence (provider total → sum of known split) stays distinguishable; `extract_reported_usage` KEEPS its existing synthesis unchanged.
+  - Decision: both functions share ONE canonical set of envelope-chain + alias/nested-path constants (`_USAGE_*`, `_iter_usage_envelopes`, `_extract_cached_input_tokens` in `token_counter.py`) so they cannot drift — introduced in fix round 1 to close two Important review findings (OpenAI `output_tokens_details.image_tokens` unreachable; cache-token fallback drift) and the ⚠️ (normalizer now searches `response_metadata` because the Task 5 recorder hands it raw LangChain responses).
+  - Decision: total-synthesis, modality-array summation, and the normalizer-only 4th reasoning path (`output_tokens_details.reasoning_tokens`, plural) are kept PER-FUNCTION, not shared. Fix round 2 restored `_USAGE_REASONING_NESTED_PATHS` to `extract_reported_usage`'s original 3 entries after round 1's unification silently widened its reasoning recognition (Important, refactor-introduced) — pinned by a two-sided regression test.
+  - Minor finding (for final-review triage): `normalize_provider_usage` reaches into `TokenCounter`'s underscore-prefixed classmethods across modules; consider a small public helper surface if this coupling grows in Task 5+.
