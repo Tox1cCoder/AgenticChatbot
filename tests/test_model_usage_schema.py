@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKeyConstraint,
+    Integer,
+    PrimaryKeyConstraint,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.models.model_usage import ModelUsageEvent, ModelUsageMinute
@@ -224,11 +233,59 @@ def test_all_constraint_and_index_names_fit_postgres_identifier_limit():
     # these two tables so a future column addition can't regress this
     # (caught this exact failure against real PostgreSQL: several
     # model_usage_minute *_known_count check names were 64-65 chars).
+    #
+    # Every constraint must also be explicitly *named* — an unnamed
+    # constraint previously slipped past this guard (skipped via
+    # `if constraint.name is not None`) while the migration named it,
+    # silently masking an ORM/migration naming drift on every PK and FK.
     postgres_max_identifier_length = 63
 
     for table in (ModelUsageEvent.__table__, ModelUsageMinute.__table__):
         for constraint in table.constraints:
-            if constraint.name is not None:
-                assert len(constraint.name) <= postgres_max_identifier_length, constraint.name
+            assert constraint.name is not None, (table.name, type(constraint).__name__)
+            assert len(constraint.name) <= postgres_max_identifier_length, constraint.name
         for index in table.indexes:
+            assert index.name is not None
             assert len(index.name) <= postgres_max_identifier_length, index.name
+
+
+def test_orm_primary_and_foreign_key_names_match_the_migration():
+    # The migration in
+    # app/alembic/versions/y2z3a4b5c6d7_add_model_usage_ledger.py hand-names
+    # every PK/FK constraint. These literal names are a contract shared
+    # between the ORM and the migration — if they drift, a future
+    # autogenerate diff (or a hand-written follow-up migration) would target
+    # the wrong constraint name, or silently duplicate one.
+    events_table = ModelUsageEvent.__table__
+    minute_table = ModelUsageMinute.__table__
+
+    assert events_table.primary_key.name == "pk_model_usage_events"
+    assert minute_table.primary_key.name == "pk_model_usage_minute"
+
+    events_fk_names = {
+        constraint.name: [column.name for column in constraint.columns]
+        for constraint in events_table.constraints
+        if isinstance(constraint, ForeignKeyConstraint)
+    }
+    assert events_fk_names == {
+        "fk_model_usage_events_user": ["user_id"],
+        "fk_model_usage_events_conversation": ["conversation_id"],
+        "fk_model_usage_events_request_message": ["request_message_id"],
+        "fk_model_usage_events_document": ["document_id"],
+    }
+
+    minute_fk_names = {
+        constraint.name: [column.name for column in constraint.columns]
+        for constraint in minute_table.constraints
+        if isinstance(constraint, ForeignKeyConstraint)
+    }
+    assert minute_fk_names == {
+        "fk_model_usage_minute_user": ["user_id"],
+        "fk_model_usage_minute_conversation": ["conversation_id"],
+    }
+
+    # PrimaryKeyConstraint objects appear once in __table_args__ and are
+    # equivalent to (not duplicates of) the column-level primary_key=True
+    # flags; assert there is exactly one of each per table.
+    assert sum(1 for c in events_table.constraints if isinstance(c, PrimaryKeyConstraint)) == 1
+    assert sum(1 for c in minute_table.constraints if isinstance(c, PrimaryKeyConstraint)) == 1

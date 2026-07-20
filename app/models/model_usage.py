@@ -17,6 +17,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    PrimaryKeyConstraint,
     String,
     UniqueConstraint,
     func,
@@ -86,6 +87,7 @@ class ModelUsageEvent(Base):
 
     __tablename__ = "model_usage_events"
     __table_args__ = (
+        PrimaryKeyConstraint("id", name="pk_model_usage_events"),
         UniqueConstraint("event_key", name="uq_model_usage_events_event_key"),
         UniqueConstraint("operation_id", "attempt", name="uq_model_usage_events_operation_attempt"),
         CheckConstraint("attempt >= 1", name="ck_model_usage_events_attempt_positive"),
@@ -118,12 +120,34 @@ class ModelUsageEvent(Base):
     operation_id = Column(UUID(as_uuid=True), nullable=False, index=True)
     attempt = Column(Integer, nullable=False)
 
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"))
-    conversation_id = Column(
-        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="SET NULL")
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", name="fk_model_usage_events_user", ondelete="CASCADE"),
     )
-    request_message_id = Column(UUID(as_uuid=True), ForeignKey("messages.id", ondelete="SET NULL"))
-    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"))
+    conversation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "conversations.id",
+            name="fk_model_usage_events_conversation",
+            ondelete="SET NULL",
+        ),
+    )
+    request_message_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "messages.id",
+            name="fk_model_usage_events_request_message",
+            ondelete="SET NULL",
+        ),
+    )
+    document_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "documents.id",
+            name="fk_model_usage_events_document",
+            ondelete="SET NULL",
+        ),
+    )
 
     correlation_id = Column(String(128), nullable=True)
     langsmith_run_id = Column(UUID(as_uuid=True), nullable=True)
@@ -176,6 +200,7 @@ class ModelUsageMinute(Base):
 
     __tablename__ = "model_usage_minute"
     __table_args__ = (
+        PrimaryKeyConstraint("rollup_key", name="pk_model_usage_minute"),
         *_rollup_sum_check_constraints(),
         CheckConstraint(
             "generated_images_sum >= 0",
@@ -194,8 +219,18 @@ class ModelUsageMinute(Base):
     rollup_key = Column(String(64), primary_key=True)
 
     bucket_start_utc = Column(DateTime(timezone=True), nullable=False)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"))
-    conversation_id = Column(UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE"))
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", name="fk_model_usage_minute_user", ondelete="CASCADE"),
+    )
+    conversation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "conversations.id",
+            name="fk_model_usage_minute_conversation",
+            ondelete="CASCADE",
+        ),
+    )
     provider = Column(String(32), nullable=False)
     model = Column(String(255), nullable=False)
     operation = Column(String(64), nullable=False)

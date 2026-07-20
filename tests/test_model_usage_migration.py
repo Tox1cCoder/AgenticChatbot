@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import os
+import re
 
 import pytest
 from alembic.operations import Operations
@@ -42,12 +43,52 @@ def test_upgrade_creates_both_tables_with_matching_ondelete_clauses():
 
     assert '"model_usage_events"' in lowered
     assert '"model_usage_minute"' in lowered
-    assert 'ondelete="cascade"' in lowered
-    assert 'ondelete="set null"' in lowered
     assert "uq_model_usage_events_event_key" in lowered
     assert "uq_model_usage_events_operation_attempt" in lowered
     assert "pk_model_usage_minute" in lowered
     assert "insert into" not in lowered
+
+
+# Matches a single `sa.ForeignKeyConstraint([...], [...], name="...",
+# ondelete="...")` call and captures its source column(s), name, and
+# ondelete value as one bounded unit — unlike a bare `'ondelete="..."' in
+# source` substring check, this can't pass if CASCADE/SET NULL were swapped
+# between two columns, because each match is scoped to one FK's own block.
+_FK_BLOCK_RE = re.compile(
+    r"sa\.ForeignKeyConstraint\(\s*"
+    r"\[(?P<source_cols>[^\]]*)\],\s*"
+    r"\[(?P<target_cols>[^\]]*)\],\s*"
+    r'name="(?P<name>[^"]+)",\s*'
+    r'ondelete="(?P<ondelete>[^"]+)",?\s*'
+    r"\)",
+    re.DOTALL,
+)
+
+
+def _parsed_foreign_keys(source: str) -> dict[str, tuple[tuple[str, ...], str]]:
+    parsed = {}
+    for match in _FK_BLOCK_RE.finditer(source):
+        source_cols = tuple(
+            column.strip().strip('"')
+            for column in match.group("source_cols").split(",")
+            if column.strip()
+        )
+        parsed[match.group("name")] = (source_cols, match.group("ondelete"))
+    return parsed
+
+
+def test_upgrade_binds_each_foreign_keys_ondelete_to_the_correct_column():
+    source = inspect.getsource(_migration_module().upgrade)
+    foreign_keys = _parsed_foreign_keys(source)
+
+    assert foreign_keys == {
+        "fk_model_usage_events_user": (("user_id",), "CASCADE"),
+        "fk_model_usage_events_conversation": (("conversation_id",), "SET NULL"),
+        "fk_model_usage_events_request_message": (("request_message_id",), "SET NULL"),
+        "fk_model_usage_events_document": (("document_id",), "SET NULL"),
+        "fk_model_usage_minute_user": (("user_id",), "CASCADE"),
+        "fk_model_usage_minute_conversation": (("conversation_id",), "CASCADE"),
+    }
 
 
 def test_upgrade_creates_indexes_after_tables():
