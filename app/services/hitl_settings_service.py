@@ -4,8 +4,14 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from sqlalchemy import select
+
 from app.ai.hitl_config import get_tools_requiring_approval, is_hitl_enabled
+from app.core.exceptions import CustomHTTPException
+from app.models.client_device import ClientDevice
 from app.repositories.tool_approval_setting import ToolApprovalSettingRepository
+
+_EDITABLE_ORIGINS = {"client_mcp", "client_skill"}
 
 
 def _lookup_device_session(user_id: UUID, device_id: str):
@@ -23,93 +29,160 @@ def _lookup_device_session(user_id: UUID, device_id: str):
     return session
 
 
-def _add_server_side_capabilities(servers: set[str], tools: set[str]) -> None:
-    try:
-        from app.ai.mcp_registry import MCPRegistry
-
-        manager = MCPRegistry.get_manager_sync()
-    except Exception:  # pragma: no cover - defensive; no MCP runtime in scope
-        return
-    if manager is None:
-        return
-    for server_name, server_tools in getattr(manager, "_server_tools", {}).items():
-        server = str(server_name).strip()
-        if server:
-            servers.add(server)
-        for tool in server_tools or []:
-            name = str(getattr(tool, "name", "") or "").strip()
-            if name:
-                tools.add(name)
-                if server:
-                    tools.add(f"{server}::{name}")
+def _device_belongs_to_user(user_id: UUID, device_id: UUID, session_factory) -> bool:
+    with session_factory() as session:
+        stmt = select(ClientDevice.id).where(
+            ClientDevice.id == device_id,
+            ClientDevice.user_id == user_id,
+        )
+        return session.execute(stmt).scalar_one_or_none() is not None
 
 
-def _build_capability_index(user_id: UUID, device_id: str) -> tuple[set[str], set[str]]:
-    """Server names and tool ids reachable from this request's device context."""
-    servers: set[str] = set()
-    tools: set[str] = set()
+def _build_capability_index(user_id: UUID, device_id: UUID) -> dict[str, dict[str, set[str]]]:
+    """Index editable targets reachable from one active client device."""
+    index = {
+        origin: {"servers": set(), "tools": set()} for origin in sorted(_EDITABLE_ORIGINS)
+    }
 
-    session = _lookup_device_session(user_id, device_id)
+    session = _lookup_device_session(user_id, str(device_id))
     if session is not None:
         entries = (session.tool_catalog or {}).get("tools", []) or []
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
+            origin = str(entry.get("origin") or "").strip().lower()
+            if origin not in index:
+                continue
+            origin_index = index[origin]
             server = str(entry.get("server_name") or "").strip()
             qualified_id = str(entry.get("qualified_id") or "").strip()
             name = str(entry.get("name") or "").strip()
             if server:
-                servers.add(server)
+                origin_index["servers"].add(server)
             if qualified_id:
-                tools.add(qualified_id)
+                origin_index["tools"].add(qualified_id)
             if name:
-                tools.add(name)
-
-    _add_server_side_capabilities(servers, tools)
-    return servers, tools
+                origin_index["tools"].add(name)
+    return index
 
 
 class HitlSettingsService:
     def __init__(self, repository: ToolApprovalSettingRepository):
         self.repository = repository
 
+    def _resolve_device(self, user_id: UUID, device_id: str | None) -> UUID:
+        if not device_id:
+            raise CustomHTTPException(
+                422,
+                "A registered client device is required for HITL settings.",
+                "HITL_DEVICE_REQUIRED",
+            )
+        try:
+            resolved = UUID(str(device_id))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise CustomHTTPException(
+                404,
+                "Client device not found.",
+                "HITL_DEVICE_NOT_FOUND",
+            ) from exc
+        if not _device_belongs_to_user(user_id, resolved, self.repository.session_factory):
+            raise CustomHTTPException(
+                404,
+                "Client device not found.",
+                "HITL_DEVICE_NOT_FOUND",
+            )
+        return resolved
+
+    @staticmethod
+    def _validate_origin(tool_origin: str) -> str:
+        normalized = str(tool_origin or "").strip().lower()
+        if normalized not in _EDITABLE_ORIGINS:
+            raise CustomHTTPException(
+                422,
+                "toolOrigin must be 'client_mcp' or 'client_skill'.",
+                "HITL_TOOL_ORIGIN_INVALID",
+            )
+        return normalized
+
     def get_settings(self, user_id: UUID, device_id: str | None = None) -> dict:
-        rows = self.repository.list_by_user(user_id)
-        capability_index = _build_capability_index(user_id, device_id) if device_id else None
+        resolved_device = self._resolve_device(user_id, device_id)
+        rows = self.repository.list_by_device(user_id, resolved_device)
 
         def rule(row) -> dict:
-            item = {
+            return {
                 "scope_type": row.scope_type,
                 "scope_value": row.scope_value,
+                "tool_origin": row.tool_origin,
                 "require_approval": bool(row.require_approval),
             }
-            if capability_index is not None:
-                known_servers, known_tools = capability_index
-                known = known_servers if row.scope_type == "server" else known_tools
-                item["available"] = row.scope_value in known
-            return item
 
         return {
+            "device_id": resolved_device,
             "master_enabled": is_hitl_enabled(),
             "global_tools": list(get_tools_requiring_approval()),
             "servers": [rule(r) for r in rows if r.scope_type == "server"],
             "tools": [rule(r) for r in rows if r.scope_type == "tool"],
         }
 
-    def apply(self, user_id: UUID, items: list[dict]) -> dict:
-        self.repository.bulk_set(user_id, items)
-        return self.get_settings(user_id)
+    def apply(self, user_id: UUID, device_id: str | None, items: list[dict]) -> dict:
+        resolved_device = self._resolve_device(user_id, device_id)
+        session = _lookup_device_session(user_id, str(resolved_device))
+        if session is None:
+            raise CustomHTTPException(
+                409,
+                "The client device runtime is not connected.",
+                "HITL_DEVICE_RUNTIME_UNAVAILABLE",
+            )
+        capabilities = _build_capability_index(user_id, resolved_device)
+        normalized_items = []
+        for item in items:
+            normalized = dict(item)
+            origin = self._validate_origin(normalized.get("tool_origin"))
+            normalized["tool_origin"] = origin
+            scope_type = str(normalized.get("scope_type") or "").strip()
+            scope_value = str(normalized.get("scope_value") or "").strip()
+            target_group = "servers" if scope_type == "server" else "tools"
+            if scope_value not in capabilities[origin][target_group]:
+                raise CustomHTTPException(
+                    409,
+                    "The requested HITL target is not in the active device catalog.",
+                    "HITL_TARGET_UNAVAILABLE",
+                )
+            normalized_items.append(normalized)
+        self.repository.bulk_set(user_id, resolved_device, normalized_items)
+        return self.get_settings(user_id, str(resolved_device))
 
-    def clear(self, user_id: UUID, scope_type: str, scope_value: str) -> dict:
-        self.repository.delete(user_id, scope_type, scope_value)
-        return self.get_settings(user_id)
+    def clear(
+        self,
+        user_id: UUID,
+        device_id: str | None,
+        tool_origin: str,
+        scope_type: str,
+        scope_value: str,
+    ) -> dict:
+        resolved_device = self._resolve_device(user_id, device_id)
+        origin = self._validate_origin(tool_origin)
+        self.repository.delete(
+            user_id,
+            resolved_device,
+            origin,
+            scope_type,
+            scope_value,
+        )
+        return self.get_settings(user_id, str(resolved_device))
 
-    def build_turn_policy(self, user_id: UUID) -> dict:
+    def build_turn_policy(self, user_id: UUID, device_id: UUID | None) -> dict:
         """Full policy dict consumed by the graph gate (checkpoint-safe)."""
-        grouped = self.repository.build_policy(user_id)
+        grouped = (
+            self.repository.build_policy(user_id, device_id)
+            if device_id is not None
+            else {
+                "client_mcp": {"servers": {}, "tools": {}},
+                "client_skill": {"servers": {}, "tools": {}},
+            }
+        )
         return {
             "master_enabled": is_hitl_enabled(),
-            "servers": grouped["servers"],
-            "tools": grouped["tools"],
+            "client_rules": grouped,
             "global_tools": list(get_tools_requiring_approval()),
         }

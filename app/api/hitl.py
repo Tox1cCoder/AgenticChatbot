@@ -24,6 +24,7 @@ router = APIRouter(prefix="/hitl", tags=["hitl"])
 
 def _to_response(data: dict) -> HitlSettingsResponse:
     return HitlSettingsResponse(
+        device_id=data["device_id"],
         master_enabled=data["master_enabled"],
         global_tools=data["global_tools"],
         servers=[HitlScopeRuleState(**r) for r in data["servers"]],
@@ -39,11 +40,7 @@ async def get_hitl_settings(
     device_id: str | None = Query(
         None,
         alias="deviceId",
-        description=(
-            "Optional device context. When present, each rule gains an "
-            "'available' flag computed against that device's live tool "
-            "catalog and the server-side MCP registry."
-        ),
+        description="Registered client device whose editable HITL rules are requested.",
     ),
     device_id_snake: str | None = Query(None, alias="device_id", include_in_schema=False),
 ) -> ApiResponse[HitlSettingsResponse]:
@@ -57,9 +54,11 @@ async def update_hitl_settings(
     payload: HitlSettingsUpdate,
     hitl_settings_service: HitlSettingsService,
     user_id: UUID,
+    device_id: str | None = Query(None, alias="deviceId"),
+    device_id_snake: str | None = Query(None, alias="device_id", include_in_schema=False),
 ) -> ApiResponse[HitlSettingsResponse]:
     items = [r.model_dump() for r in payload.items]
-    data = hitl_settings_service.apply(user_id, items)
+    data = hitl_settings_service.apply(user_id, device_id or device_id_snake, items)
     return ApiResponse(success=True, message="HITL settings updated", data=_to_response(data))
 
 
@@ -68,20 +67,31 @@ async def update_hitl_settings(
 async def clear_hitl_setting(
     hitl_settings_service: HitlSettingsService,
     user_id: UUID,
+    device_id: str | None = Query(None, alias="deviceId"),
+    device_id_snake: str | None = Query(None, alias="device_id", include_in_schema=False),
+    tool_origin: str | None = Query(None, alias="toolOrigin"),
     scope_type: str | None = Query(None, alias="scopeType"),
     scope_value: str | None = Query(None, alias="scopeValue"),
     scope_type_snake: str | None = Query(None, alias="scope_type", include_in_schema=False),
     scope_value_snake: str | None = Query(None, alias="scope_value", include_in_schema=False),
+    tool_origin_snake: str | None = Query(None, alias="tool_origin", include_in_schema=False),
 ) -> ApiResponse[HitlSettingsResponse]:
     resolved_scope_type = scope_type or scope_type_snake
     resolved_scope_value = scope_value or scope_value_snake
-    if not resolved_scope_type or not resolved_scope_value:
+    resolved_tool_origin = tool_origin or tool_origin_snake
+    if not resolved_scope_type or not resolved_scope_value or not resolved_tool_origin:
         raise CustomHTTPException(
             422,
-            "scopeType and scopeValue query parameters are required.",
+            "toolOrigin, scopeType, and scopeValue query parameters are required.",
             "HITL_SCOPE_PARAMS_REQUIRED",
         )
-    data = hitl_settings_service.clear(user_id, resolved_scope_type, resolved_scope_value)
+    data = hitl_settings_service.clear(
+        user_id,
+        device_id or device_id_snake,
+        resolved_tool_origin,
+        resolved_scope_type,
+        resolved_scope_value,
+    )
     return ApiResponse(success=True, message="HITL setting cleared", data=_to_response(data))
 
 
