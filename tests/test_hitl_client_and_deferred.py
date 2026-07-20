@@ -20,15 +20,17 @@ def test_client_server_rule_gates_a_sidecar_tool_by_name_alone():
     # Sidecar tool, NOT yet in any tool_map (e.g. resolved purely from the call name).
     policy = {
         "master_enabled": True,
-        "servers": {"desktop_commander": True},
-        "tools": {},
+        "client_rules": {
+            "client_mcp": {"servers": {"desktop_commander": True}, "tools": {}},
+            "client_skill": {"servers": {}, "tools": {}},
+        },
         "global_tools": [],
     }
     calls = [{"name": "client__desktop_commander__start_process", "args": {}, "id": "c1"}]
     assert any_call_requires_approval(calls, policy=policy) is True
 
 
-def test_deferred_server_tool_gated_by_server_after_autoload():
+def test_deferred_server_tool_gated_by_read_only_global_policy_after_autoload():
     # A server tool discovered + autoloaded via tool_search this turn: bare name, no
     # metadata, server resolved through the MCP manager (the deferred-binding path).
     loaded_tool = SimpleNamespace(name="run_query", metadata={})
@@ -36,9 +38,11 @@ def test_deferred_server_tool_gated_by_server_after_autoload():
     manager = _FakeManager({id(loaded_tool): "postgres"})
     policy = {
         "master_enabled": True,
-        "servers": {"postgres": True},
-        "tools": {},
-        "global_tools": [],
+        "client_rules": {
+            "client_mcp": {"servers": {}, "tools": {}},
+            "client_skill": {"servers": {}, "tools": {}},
+        },
+        "global_tools": ["run_query"],
     }
 
     identity = resolve_call_identity({"name": "run_query"}, tool_map=tool_map, mcp_manager=manager)

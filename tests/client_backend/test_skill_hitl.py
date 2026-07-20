@@ -13,8 +13,10 @@ from app.ai.hitl_config import (
 def _policy(tools=None):
     return {
         "master_enabled": True,
-        "servers": {},
-        "tools": tools or {},
+        "client_rules": {
+            "client_mcp": {"servers": {}, "tools": {}},
+            "client_skill": {"servers": {}, "tools": tools or {}},
+        },
         "global_tools": [],
     }
 
