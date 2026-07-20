@@ -18,9 +18,11 @@ UsageSource = Literal[
     "unavailable",
 ]
 
-# Fields validated by NormalizedUsage.__post_init__: every one must be either
-# None ("unknown") or a non-negative, non-boolean int.
-_NUMERIC_USAGE_FIELDS = (
+# Fields validated by NormalizedUsage.__post_init__ that are `int | None`:
+# None means "unknown" (the provider didn't report it) and is accepted.
+# `generated_images` is NOT in this tuple — it's declared `int = 0`, never
+# Optional, so None is rejected for it (see __post_init__).
+_OPTIONAL_NUMERIC_USAGE_FIELDS = (
     "input_tokens",
     "output_tokens",
     "total_tokens",
@@ -30,8 +32,15 @@ _NUMERIC_USAGE_FIELDS = (
     "input_image_tokens",
     "output_text_tokens",
     "output_image_tokens",
-    "generated_images",
 )
+
+
+def _require_non_negative_int(field_name: str, value: object) -> None:
+    """Raise unless ``value`` is a non-boolean int that is >= 0."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"NormalizedUsage.{field_name} must be a non-negative int, got {value!r}")
+    if value < 0:
+        raise ValueError(f"NormalizedUsage.{field_name} must be a non-negative int, got {value!r}")
 
 
 @dataclass(frozen=True)
@@ -104,15 +113,11 @@ class NormalizedUsage:
     source: UsageSource = "unavailable"
 
     def __post_init__(self) -> None:
-        for field_name in _NUMERIC_USAGE_FIELDS:
+        for field_name in _OPTIONAL_NUMERIC_USAGE_FIELDS:
             value = getattr(self, field_name)
             if value is None:
                 continue
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise TypeError(
-                    f"NormalizedUsage.{field_name} must be a non-negative int, got {value!r}"
-                )
-            if value < 0:
-                raise ValueError(
-                    f"NormalizedUsage.{field_name} must be a non-negative int, got {value!r}"
-                )
+            _require_non_negative_int(field_name, value)
+        # generated_images is declared `int = 0`, not Optional, so unlike the
+        # fields above, None is not a valid "unknown" for it.
+        _require_non_negative_int("generated_images", self.generated_images)

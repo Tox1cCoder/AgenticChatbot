@@ -1,8 +1,8 @@
 """Tests for the model-usage domain types and async-safe context binding."""
 
 import asyncio
+import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from uuid import UUID, uuid4
 
 import pytest
@@ -62,14 +62,27 @@ def test_normalized_usage_rejects_negative_token_counts(field_name):
         NormalizedUsage(**{field_name: -1})
 
 
+def test_normalized_usage_rejects_none_generated_images():
+    # generated_images is declared `int = 0`, not `int | None` — unlike the
+    # other numeric fields, None is not a valid "unknown" for it.
+    with pytest.raises(TypeError):
+        NormalizedUsage(generated_images=None)
+
+
 def test_child_context_shares_parent_operation_allocator():
     with begin_usage_operation() as operation:
         parent = UsageContext(operation="parent")
         with bind_usage_context(parent):
+            assert current_usage_operation() is operation
+            first_attempt = current_usage_operation().allocate_attempt()
+
             child = parent.child(operation="child")
             with bind_usage_context(child):
                 assert current_usage_operation() is operation
                 assert current_usage_context().operation == "child"
+                second_attempt = current_usage_operation().allocate_attempt()
+
+    assert (first_attempt, second_attempt) == (1, 2)
 
 
 def test_distinct_operations_receive_distinct_ids():
@@ -82,21 +95,57 @@ def test_distinct_operations_receive_distinct_ids():
 
 
 def test_concurrent_attempts_never_reuse_operation_attempt_pair():
-    operations = [UsageOperation(), UsageOperation()]
+    operation = UsageOperation()
     pairs: list[tuple[UUID, int]] = []
-    lock = threading.Lock()
+    pairs_lock = threading.Lock()
+    thread_count = 32
+    allocations_per_thread = 200
 
-    def allocate(operation: UsageOperation) -> None:
-        attempt = operation.allocate_attempt()
-        with lock:
-            pairs.append((operation.operation_id, attempt))
+    def allocate_many() -> None:
+        for _ in range(allocations_per_thread):
+            attempt = operation.allocate_attempt()
+            with pairs_lock:
+                pairs.append((operation.operation_id, attempt))
 
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = [executor.submit(allocate, operations[i % 2]) for i in range(100)]
-        for future in futures:
-            future.result()
+    # A tiny switch interval forces CPython to check the GIL-release request
+    # far more often, maximizing the chance that concurrent threads actually
+    # interleave inside allocate_attempt's read-modify-write — without this,
+    # the race window is narrow enough that even thousands of iterations can
+    # pass without ever exposing an unlocked implementation (verified: see
+    # the fix section of task-1-report.md).
+    original_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        threads = [threading.Thread(target=allocate_many) for _ in range(thread_count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(original_interval)
 
-    assert len(pairs) == len(set(pairs)) == 100
-    for operation in operations:
-        attempts = sorted(attempt for op_id, attempt in pairs if op_id == operation.operation_id)
-        assert attempts == list(range(1, len(attempts) + 1))
+    total = thread_count * allocations_per_thread
+    assert len(pairs) == len(set(pairs)) == total
+    assert sorted(attempt for _, attempt in pairs) == list(range(1, total + 1))
+
+
+def test_allocate_attempt_serializes_concurrent_callers():
+    # Deterministic mutual-exclusion proof, independent of GIL scheduling
+    # luck: hold the operation's lock directly from the test thread, prove a
+    # concurrent allocate_attempt() call blocks while it's held, then prove
+    # it completes as soon as the lock is released.
+    operation = UsageOperation()
+    attempts: list[int] = []
+
+    operation._lock.acquire()
+    try:
+        worker = threading.Thread(target=lambda: attempts.append(operation.allocate_attempt()))
+        worker.start()
+        worker.join(timeout=0.2)
+        assert worker.is_alive(), "allocate_attempt should block while the lock is held"
+    finally:
+        operation._lock.release()
+
+    worker.join(timeout=1)
+    assert not worker.is_alive()
+    assert attempts == [1]
