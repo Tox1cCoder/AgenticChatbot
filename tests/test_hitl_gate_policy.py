@@ -53,13 +53,13 @@ async def test_gate_gates_all_tools_from_a_server_via_policy(monkeypatch):
         "user_id": "u1",
         "device_id": None,
         "context": {
-                "hitl_policy": {
-                    "master_enabled": True,
-                    "client_rules": {
-                        "client_mcp": {"servers": {}, "tools": {}},
-                        "client_skill": {"servers": {}, "tools": {}},
-                    },
-                    "global_tools": ["search"],
+            "hitl_policy": {
+                "master_enabled": True,
+                "client_rules": {
+                    "client_mcp": {"servers": {}, "tools": {}},
+                    "client_skill": {"servers": {}, "tools": {}},
+                },
+                "global_tools": ["search"],
             }
         },
         "messages": [
@@ -88,16 +88,16 @@ async def test_gate_lets_tool_override_exempt_a_server_tool(monkeypatch):
         "user_id": "u1",
         "device_id": None,
         "context": {
-                "hitl_policy": {
-                    "master_enabled": True,
-                    "client_rules": {
-                        "client_mcp": {
-                            "servers": {"desktop_commander": True},
-                            "tools": {"desktop_commander::list_files": False},
-                        },
-                        "client_skill": {"servers": {}, "tools": {}},
+            "hitl_policy": {
+                "master_enabled": True,
+                "client_rules": {
+                    "client_mcp": {
+                        "servers": {"desktop_commander": True},
+                        "tools": {"desktop_commander::list_files": False},
                     },
-                    "global_tools": [],
+                    "client_skill": {"servers": {}, "tools": {}},
+                },
+                "global_tools": [],
             }
         },
         "messages": [
@@ -121,13 +121,13 @@ async def test_gate_master_off_never_gates(monkeypatch):
         "user_id": "u1",
         "device_id": None,
         "context": {
-                "hitl_policy": {
-                    "master_enabled": False,
-                    "client_rules": {
-                        "client_mcp": {"servers": {}, "tools": {}},
-                        "client_skill": {"servers": {}, "tools": {}},
-                    },
-                    "global_tools": ["search"],
+            "hitl_policy": {
+                "master_enabled": False,
+                "client_rules": {
+                    "client_mcp": {"servers": {}, "tools": {}},
+                    "client_skill": {"servers": {}, "tools": {}},
+                },
+                "global_tools": ["search"],
             }
         },
         "messages": [AIMessage(content="", tool_calls=[{"name": "search", "args": {}, "id": "x"}])],
@@ -163,13 +163,13 @@ async def test_generic_worker_uses_parent_state_hitl_policy(monkeypatch):
         "user_id": "u1",
         "device_id": None,
         "context": {
-                "hitl_policy": {
-                    "master_enabled": True,
-                    "client_rules": {
-                        "client_mcp": {"servers": {}, "tools": {}},
-                        "client_skill": {"servers": {}, "tools": {}},
-                    },
-                    "global_tools": ["search"],
+            "hitl_policy": {
+                "master_enabled": True,
+                "client_rules": {
+                    "client_mcp": {"servers": {}, "tools": {}},
+                    "client_skill": {"servers": {}, "tools": {}},
+                },
+                "global_tools": ["search"],
             }
         },
     }
