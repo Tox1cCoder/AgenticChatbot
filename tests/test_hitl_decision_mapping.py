@@ -70,11 +70,13 @@ def test_per_user_hitl_policy_load_failure_fails_closed():
         ai_service=SimpleNamespace(),
     )
     service.tool_approval_setting_repository = SimpleNamespace(
-        build_policy=lambda _user_id: (_ for _ in ()).throw(RuntimeError("database unavailable"))
+        build_policy=lambda _user_id, _device_id: (_ for _ in ()).throw(
+            RuntimeError("database unavailable")
+        )
     )
 
     with pytest.raises(RuntimeError, match="Unable to load"):
-        service._resolve_hitl_policy(uuid4())
+        service._resolve_hitl_policy(uuid4(), str(uuid4()))
 
 
 def test_interrupt_validation_rejects_disallowed_and_duplicate_decisions():

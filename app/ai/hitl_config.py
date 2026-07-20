@@ -10,6 +10,13 @@ from app.ai.schemas import InterruptResponse, ToolInterruptRequest
 from app.core.config import settings
 
 CLIENT_TOOL_PREFIX = "client__"
+_CLIENT_POLICY_ORIGINS = frozenset({"client_mcp", "client_skill"})
+
+
+def _empty_client_rules() -> dict[str, dict[str, dict[str, bool]]]:
+    return {
+        origin: {"servers": {}, "tools": {}} for origin in sorted(_CLIENT_POLICY_ORIGINS)
+    }
 
 
 def _tool_call_name(tool_call) -> str:
@@ -65,8 +72,7 @@ def build_global_policy() -> dict:
     """Back-compat policy derived only from process settings (no per-user rules)."""
     return {
         "master_enabled": is_hitl_enabled(),
-        "servers": {},
-        "tools": {},
+        "client_rules": _empty_client_rules(),
         "global_tools": list(get_tools_requiring_approval()),
     }
 
@@ -132,19 +138,21 @@ def resolve_call_identity(
 
 
 def identity_requires_approval(identity: CallIdentity, policy: dict) -> bool:
-    """Apply the precedence ladder (tool override > server default > legacy floor)."""
+    """Apply client-origin rules, then the read-only global and mutation floors."""
     if not policy.get("master_enabled", True):
         return False
 
-    tools = policy.get("tools") or {}
-    if identity.qualified_tool_id and identity.qualified_tool_id in tools:
-        return bool(tools[identity.qualified_tool_id])
-    if identity.name in tools:
-        return bool(tools[identity.name])
+    if identity.origin in _CLIENT_POLICY_ORIGINS:
+        origin_rules = (policy.get("client_rules") or {}).get(identity.origin) or {}
+        tools = origin_rules.get("tools") or {}
+        if identity.qualified_tool_id and identity.qualified_tool_id in tools:
+            return bool(tools[identity.qualified_tool_id])
+        if identity.name in tools:
+            return bool(tools[identity.name])
 
-    servers = policy.get("servers") or {}
-    if identity.server_name and identity.server_name in servers:
-        return bool(servers[identity.server_name])
+        servers = origin_rules.get("servers") or {}
+        if identity.server_name and identity.server_name in servers:
+            return bool(servers[identity.server_name])
 
     if identity.name and identity.name in set(policy.get("global_tools") or []):
         return True
@@ -152,7 +160,7 @@ def identity_requires_approval(identity: CallIdentity, policy: dict) -> bool:
     # A mutation is auto-gated unless an explicit policy entry already
     # decided it above (a per-tool/server/global override still wins and
     # returns earlier). This is the last resort, not a precedence tier.
-    return bool(identity.mutation)
+    return bool(getattr(identity, "mutation", False))
 
 
 def any_call_requires_approval(

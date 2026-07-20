@@ -23,11 +23,18 @@ class _FakeManager:
         return self._mapping.get(id(tool))
 
 
-def _policy(master=True, servers=None, tools=None, global_tools=None):
-    return {
-        "master_enabled": master,
+def _policy(master=True, servers=None, tools=None, global_tools=None, origin="client_mcp"):
+    client_rules = {
+        "client_mcp": {"servers": {}, "tools": {}},
+        "client_skill": {"servers": {}, "tools": {}},
+    }
+    client_rules[origin] = {
         "servers": servers or {},
         "tools": tools or {},
+    }
+    return {
+        "master_enabled": master,
+        "client_rules": client_rules,
         "global_tools": global_tools or [],
     }
 
@@ -122,6 +129,32 @@ def test_precedence_tool_can_force_on_when_server_off():
         origin="client_mcp",
     )
     assert identity_requires_approval(ident, policy) is True
+
+
+def test_skill_rule_cannot_match_same_named_tool_from_another_origin():
+    qualified_id = "skill::kobo-library::run_skill_command"
+    policy = _policy(tools={qualified_id: True}, origin="client_skill")
+
+    matching_skill = SimpleNamespace(
+        name="client__skill_kobo_library__run_skill_command",
+        server_name="skill_kobo_library",
+        qualified_tool_id=qualified_id,
+        origin="client_skill",
+        mutation=False,
+    )
+    wrong_origins = [
+        SimpleNamespace(
+            name="client__collision__run_skill_command",
+            server_name="skill_kobo_library",
+            qualified_tool_id=qualified_id,
+            origin=origin,
+            mutation=False,
+        )
+        for origin in ("client_mcp", "server_mcp", "internal")
+    ]
+
+    assert identity_requires_approval(matching_skill, policy) is True
+    assert all(identity_requires_approval(identity, policy) is False for identity in wrong_origins)
 
 
 def test_precedence_master_off_disables_everything():
