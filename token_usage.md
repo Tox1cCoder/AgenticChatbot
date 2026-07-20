@@ -317,7 +317,7 @@ git commit -m "feat: define model usage context"
 - Test: `tests/test_model_usage_schema.py`
 - Test: `tests/test_model_usage_migration.py`
 
-- [ ] **Step 1: Add failing schema-contract tests**
+- [x] **Step 1: Add failing schema-contract tests**
 
 Assert exact table names, nullable token columns, unique `event_key`, unique `(operation_id, attempt)`, non-negative checks, foreign-key delete behavior, and these indexes:
 
@@ -334,13 +334,13 @@ expected_indexes = {
 
 The migration test must assert `down_revision == "x1y2z3a4b5c6"`, both tables are created on upgrade, and downgrade drops rollups before events.
 
-- [ ] **Step 2: Run schema tests and confirm failure**
+- [x] **Step 2: Run schema tests and confirm failure**
 
 Run: `python -m pytest tests/test_model_usage_schema.py tests/test_model_usage_migration.py -q`
 
 Expected: imports or table assertions fail.
 
-- [ ] **Step 3: Implement SQLAlchemy models and relationships**
+- [x] **Step 3: Implement SQLAlchemy models and relationships**
 
 Use `BigInteger` for all counts, known counts, and latency, `DateTime(timezone=True)` for instants, `Date` is not used, and `server_default=func.now()` for creation time. Add a unique non-null `rollup_key = sha256(canonical_json_bytes).hexdigest()` to the rollup instead of relying on PostgreSQL 14's distinct-null uniqueness behavior. Keep `user_id` and `conversation_id` foreign keys on the minute table with `ON DELETE CASCADE`; hashed rollup dimensions must never be changed to `NULL` by FK actions.
 
@@ -363,17 +363,17 @@ class ModelUsageEvent(Base):
 
 Add `usage_events = relationship("ModelUsageEvent", back_populates="user")` to `User` without eager loading.
 
-- [ ] **Step 4: Create the Alembic migration**
+- [x] **Step 4: Create the Alembic migration**
 
 The migration must use explicit check constraints for attempts, tokens, image counts, and latency; create indexes after tables; and use `ON DELETE` clauses matching the ORM. It must create `model_usage_minute`, not an hourly table. Do not add data backfill SQL.
 
-- [ ] **Step 5: Run schema and migration tests**
+- [x] **Step 5: Run schema and migration tests**
 
 Run: `python -m pytest tests/test_model_usage_schema.py tests/test_model_usage_migration.py tests/test_alembic_autogenerate_filters.py -q`
 
 Expected: all tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/models app/alembic/versions/y2z3a4b5c6d7_add_model_usage_ledger.py tests/test_model_usage_schema.py tests/test_model_usage_migration.py
@@ -1355,3 +1355,11 @@ Implementation progress and decisions made during execution. Updated after each 
 - **Task 1 — complete (2026-07-20).** Commits `3659e07` + `3f83da1`. 21 tests green (`-W error`), ruff clean. Review round 1 raised two Important findings; both fixed and re-review Approved.
   - Decision: `generated_images` is validated as a required non-negative int (`None` rejected with `TypeError`), unlike the nine genuinely-Optional token fields where `None` means "unknown".
   - Decision: CPython's GIL makes a pair-uniqueness stress test (32 threads × 200 allocations, tiny switch interval) unable to detect a lockless `allocate_attempt`; mutual exclusion is instead proven deterministically by `test_allocate_attempt_serializes_concurrent_callers`, which holds `operation._lock` and asserts the allocator blocks. Break-the-code verified (test fails immediately without the lock).
+
+- **Task 2 — complete (2026-07-20).** Commits `1d4dc13` + `2ac5ca5`. 24 tests green against live PostgreSQL, dev-DB schema-contract tests green, ruff clean. Review round 1 Needs-fixes; re-review Approved.
+  - Decision: `rollup_key` is the primary key of `model_usage_minute` (no surrogate id) — matches the contract's "keyed by rollup_key" and the existing business-key-PK pattern (`ConversationMemorySummary`).
+  - Decision: non-negative CHECK constraints cover the minute table's sums/known-counts too, not just the events table.
+  - Decision: `model_usage_minute` gained a conventional `created_at` column beyond §4.2's explicit list.
+  - Defect caught by controller verification: PostgreSQL's 63-char identifier limit broke `alembic upgrade head` (constraint name was 66 chars). Minute-table check names now use `ck_mu_minute_<col>_nonneg`; a guard test asserts every constraint/index is named and ≤63 chars, and a live-PostgreSQL test runs the migration's real `upgrade()`/`downgrade()` in an isolated scratch schema.
+  - Review fix: ORM now names PK/FK constraints identically to the migration (`pk_/fk_` names), enforced by a parity test; migration ondelete checks are column-bound (events: user→CASCADE, others→SET NULL; minute: both→CASCADE).
+  - Migration `y2z3a4b5c6d7` was applied to the dev database on 2026-07-20 (schema-first rollout per §8; collection stays disabled until Task 5's flags exist).
