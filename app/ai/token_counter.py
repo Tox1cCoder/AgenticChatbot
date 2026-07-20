@@ -22,6 +22,56 @@ _TOOL_ENVELOPE_TOKENS = 20
 _TOOL_CALL_ENVELOPE_TOKENS = 10
 _TOOL_RESULT_ENVELOPE_TOKENS = 8
 
+# Canonical usage-field aliases and nested-detail paths, shared by
+# TokenCounter.extract_reported_usage and app.usage.normalizers.
+# normalize_provider_usage. Previously each function hand-maintained its own
+# copy and drifted (missing output-image and cache-fallback paths in one but
+# not the other); every alias/path below now has exactly one definition, used
+# by both call sites, so they cannot drift again. The two functions still
+# differ in their per-function *algorithm* — extract_reported_usage
+# synthesizes total_tokens = input + output when the provider omits a total
+# and normalize_provider_usage deliberately does not — but that difference
+# lives in each function's body, not in these shared constants.
+_USAGE_INPUT_ALIASES = (
+    "input_tokens",
+    "prompt_tokens",
+    "prompt_token_count",
+    "input_token_count",
+)
+_USAGE_OUTPUT_ALIASES = (
+    "output_tokens",
+    "completion_tokens",
+    "candidates_token_count",
+    "output_token_count",
+)
+_USAGE_TOTAL_ALIASES = ("total_tokens", "total_token_count")
+_USAGE_REASONING_ALIASES = ("reasoning_tokens", "thoughts_token_count")
+_USAGE_REASONING_NESTED_PATHS = (
+    ("output_token_details", "reasoning"),
+    ("output_token_details", "reasoning_tokens"),
+    ("completion_tokens_details", "reasoning_tokens"),
+    ("output_tokens_details", "reasoning_tokens"),
+)
+# Cached-input-token sources, tried in order by _extract_cached_input_tokens:
+# flat top-level aliases (summed — Anthropic's cache_read/cache_creation are
+# additive sub-quantities, not aliases for the same value), LangChain's
+# standardized input_token_details.{cache_read,cache_creation} (also summed),
+# then first-match provider-raw nested shapes.
+_USAGE_CACHED_INPUT_FLAT_KEYS = (
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "cached_content_token_count",
+)
+_USAGE_CACHED_INPUT_DETAIL_KEYS = ("cache_read", "cache_creation")
+_USAGE_CACHED_INPUT_NESTED_PATHS = (
+    ("input_tokens_details", "cached_tokens"),
+    ("prompt_tokens_details", "cached_tokens"),
+)
+_USAGE_INPUT_TEXT_NESTED_PATHS = (("input_tokens_details", "text_tokens"),)
+_USAGE_INPUT_IMAGE_NESTED_PATHS = (("input_tokens_details", "image_tokens"),)
+_USAGE_OUTPUT_TEXT_NESTED_PATHS = (("output_tokens_details", "text_tokens"),)
+_USAGE_OUTPUT_IMAGE_NESTED_PATHS = (("output_tokens_details", "image_tokens"),)
+
 
 @dataclass(frozen=True)
 class TokenCount:
@@ -282,89 +332,36 @@ class TokenCounter:
         response: Any,
     ) -> ReportedTokenUsage | None:
         del provider  # Key aliases below cover standardized and provider-native shapes.
-        envelopes = [
-            self._raw_value(response, "usage_metadata"),
-            self._raw_value(response, "usage"),
-        ]
-        response_metadata = self._raw_value(response, "response_metadata")
-        if response_metadata is not None:
-            envelopes.extend(
-                [
-                    self._raw_value(response_metadata, "usage"),
-                    self._raw_value(response_metadata, "token_usage"),
-                    response_metadata,
-                ]
-            )
-
-        for envelope in envelopes:
+        for envelope in self._iter_usage_envelopes(response):
             if envelope is None:
                 continue
-            input_tokens = self._first_usage_int(
-                envelope,
-                ("input_tokens", "prompt_tokens", "prompt_token_count", "input_token_count"),
-            )
-            output_tokens = self._first_usage_int(
-                envelope,
-                (
-                    "output_tokens",
-                    "completion_tokens",
-                    "candidates_token_count",
-                    "output_token_count",
-                ),
-            )
-            total_tokens = self._first_usage_int(
-                envelope,
-                ("total_tokens", "total_token_count"),
-            )
-            reasoning_tokens = self._first_usage_int(
-                envelope,
-                ("reasoning_tokens", "thoughts_token_count"),
-            )
+            input_tokens = self._first_usage_int(envelope, _USAGE_INPUT_ALIASES)
+            output_tokens = self._first_usage_int(envelope, _USAGE_OUTPUT_ALIASES)
+            total_tokens = self._first_usage_int(envelope, _USAGE_TOTAL_ALIASES)
+            reasoning_tokens = self._first_usage_int(envelope, _USAGE_REASONING_ALIASES)
             if reasoning_tokens is None:
                 reasoning_tokens = self._first_nested_usage_int(
-                    envelope,
-                    (
-                        ("output_token_details", "reasoning"),
-                        ("output_token_details", "reasoning_tokens"),
-                        ("completion_tokens_details", "reasoning_tokens"),
-                    ),
+                    envelope, _USAGE_REASONING_NESTED_PATHS
                 )
             if input_tokens is None and output_tokens is None and total_tokens is None:
                 continue
+            # Deliberate difference from normalize_provider_usage: this
+            # function synthesizes a missing total. Keep that here, in the
+            # per-function algorithm, not in the shared constants above.
             if total_tokens is None and input_tokens is not None and output_tokens is not None:
                 total_tokens = input_tokens + output_tokens
-            cached_input_tokens = self._sum_usage_ints(
-                envelope,
-                (
-                    "cache_read_input_tokens",
-                    "cache_creation_input_tokens",
-                    "cached_content_token_count",
-                ),
-            )
-            if cached_input_tokens is None:
-                cached_input_tokens = self._sum_usage_ints(
-                    self._raw_value(envelope, "input_token_details"),
-                    ("cache_read", "cache_creation"),
-                )
-            if cached_input_tokens is None:
-                cached_input_tokens = self._first_nested_usage_int(
-                    envelope,
-                    (
-                        ("input_tokens_details", "cached_tokens"),
-                        ("prompt_tokens_details", "cached_tokens"),
-                    ),
-                )
+            cached_input_tokens = self._extract_cached_input_tokens(envelope)
             input_text_tokens = self._first_nested_usage_int(
-                envelope, (("input_tokens_details", "text_tokens"),)
+                envelope, _USAGE_INPUT_TEXT_NESTED_PATHS
             )
             input_image_tokens = self._first_nested_usage_int(
-                envelope, (("input_tokens_details", "image_tokens"),)
+                envelope, _USAGE_INPUT_IMAGE_NESTED_PATHS
             )
             output_text_tokens = self._first_nested_usage_int(
-                envelope, (("output_tokens_details", "text_tokens"),)
+                envelope, _USAGE_OUTPUT_TEXT_NESTED_PATHS
             )
             output_image_tokens = self._first_nested_usage_int(
-                envelope, (("output_tokens_details", "image_tokens"),)
+                envelope, _USAGE_OUTPUT_IMAGE_NESTED_PATHS
             )
             cost_amount = self._first_usage_float(
                 envelope,
@@ -412,6 +409,53 @@ class TokenCounter:
         if isinstance(data, dict):
             return data.get(key)
         return getattr(data, key, None)
+
+    @classmethod
+    def _iter_usage_envelopes(cls, response: Any) -> list[Any]:
+        """Return the ordered usage envelopes to search for ``response``.
+
+        Shared by ``extract_reported_usage`` and
+        ``app.usage.normalizers.normalize_provider_usage`` so the two entry
+        points can never search a different envelope set: standardized
+        ``usage_metadata``/``usage`` first, then the ``response_metadata``
+        fallbacks some LangChain providers use instead.
+        """
+        envelopes = [
+            cls._raw_value(response, "usage_metadata"),
+            cls._raw_value(response, "usage"),
+        ]
+        response_metadata = cls._raw_value(response, "response_metadata")
+        if response_metadata is not None:
+            envelopes.extend(
+                [
+                    cls._raw_value(response_metadata, "usage"),
+                    cls._raw_value(response_metadata, "token_usage"),
+                    response_metadata,
+                ]
+            )
+        return envelopes
+
+    @classmethod
+    def _extract_cached_input_tokens(cls, envelope: Any) -> int | None:
+        """Canonical cached-input-token extraction for a single envelope.
+
+        Shared by ``extract_reported_usage`` and
+        ``app.usage.normalizers.normalize_provider_usage`` so the two can
+        never drift on which cache-token shapes they recognize. Tries, in
+        order: flat top-level aliases (summed), LangChain's standardized
+        ``input_token_details.{cache_read,cache_creation}`` (also summed),
+        then first-match provider-raw nested shapes.
+        """
+        cached_input_tokens = cls._sum_usage_ints(envelope, _USAGE_CACHED_INPUT_FLAT_KEYS)
+        if cached_input_tokens is not None:
+            return cached_input_tokens
+        cached_input_tokens = cls._sum_usage_ints(
+            cls._raw_value(envelope, "input_token_details"),
+            _USAGE_CACHED_INPUT_DETAIL_KEYS,
+        )
+        if cached_input_tokens is not None:
+            return cached_input_tokens
+        return cls._first_nested_usage_int(envelope, _USAGE_CACHED_INPUT_NESTED_PATHS)
 
     @classmethod
     def _first_usage_int(cls, data: Any, keys: tuple[str, ...]) -> int | None:

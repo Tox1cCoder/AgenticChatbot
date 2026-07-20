@@ -8,54 +8,50 @@ provider omitted a total: later consumers (context-ratio accounting) need to
 distinguish a provider-reported total from a derived one. Callers that want
 that fallback synthesis already have it via
 ``TokenCounter.extract_reported_usage``, which is unaffected by this module.
+
+The envelope-search chain and every alias/nested-path tuple used below are
+imported from ``app.ai.token_counter`` — the single source of truth shared
+with ``TokenCounter.extract_reported_usage`` — so the two functions cannot
+silently drift apart on which provider shapes they recognize. The only
+per-function differences are deliberate: no total-synthesis here, and this
+module additionally sums Gemini's raw modality-detail arrays (a shape
+LangChain's standardized ``usage_metadata`` never surfaces, so
+``extract_reported_usage`` has no use for it).
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from app.ai.token_counter import TokenCounter
+from app.ai.token_counter import (
+    _USAGE_INPUT_ALIASES,
+    _USAGE_INPUT_IMAGE_NESTED_PATHS,
+    _USAGE_INPUT_TEXT_NESTED_PATHS,
+    _USAGE_OUTPUT_ALIASES,
+    _USAGE_OUTPUT_IMAGE_NESTED_PATHS,
+    _USAGE_OUTPUT_TEXT_NESTED_PATHS,
+    _USAGE_REASONING_ALIASES,
+    _USAGE_REASONING_NESTED_PATHS,
+    _USAGE_TOTAL_ALIASES,
+    TokenCounter,
+)
 from app.usage.types import NormalizedUsage
-
-_INPUT_KEYS = ("input_tokens", "prompt_tokens", "prompt_token_count", "input_token_count")
-_OUTPUT_KEYS = (
-    "output_tokens",
-    "completion_tokens",
-    "candidates_token_count",
-    "output_token_count",
-)
-_TOTAL_KEYS = ("total_tokens", "total_token_count")
-_REASONING_KEYS = ("reasoning_tokens", "thoughts_token_count")
-_REASONING_NESTED_PATHS = (
-    ("output_token_details", "reasoning"),
-    ("output_token_details", "reasoning_tokens"),
-    ("completion_tokens_details", "reasoning_tokens"),
-    ("output_tokens_details", "reasoning_tokens"),
-)
-_CACHED_INPUT_KEYS = (
-    "cache_read_input_tokens",
-    "cache_creation_input_tokens",
-    "cached_content_token_count",
-)
-_CACHED_INPUT_NESTED_PATHS = (("input_tokens_details", "cached_tokens"),)
-_INPUT_TEXT_NESTED_PATHS = (("input_tokens_details", "text_tokens"),)
-_INPUT_IMAGE_NESTED_PATHS = (("input_tokens_details", "image_tokens"),)
-_OUTPUT_TEXT_NESTED_PATHS = (("output_tokens_details", "text_tokens"),)
-_ENVELOPE_KEYS = ("usage_metadata", "usage")
 
 
 def normalize_provider_usage(*, provider: str, payload: Any) -> NormalizedUsage:
     """Normalize a raw provider usage payload into a ``NormalizedUsage``.
 
-    ``payload`` may be a dict or a response-like object; both ``usage`` and
-    ``usage_metadata`` envelopes are inspected (``usage_metadata`` first,
-    matching ``TokenCounter.extract_reported_usage``'s precedence). Returns
+    ``payload`` may be a dict or a response-like object. Searches the same
+    ordered envelope chain as ``TokenCounter.extract_reported_usage``:
+    ``usage_metadata``, ``usage``, then ``response_metadata.usage``,
+    ``response_metadata.token_usage``, and bare ``response_metadata`` —
+    covering LangChain response objects whose usage lives only in
+    ``response_metadata`` (e.g. as handed to the recorder in Task 5). Returns
     ``NormalizedUsage(source="unavailable")`` — never ``None`` — when nothing
     usable is found, including for malformed/non-mapping payloads.
     """
     del provider  # Alias-based shape detection covers every supported provider.
-    for key in _ENVELOPE_KEYS:
-        envelope = TokenCounter._raw_value(payload, key)
+    for envelope in TokenCounter._iter_usage_envelopes(payload):
         if envelope is None:
             continue
         usage = _normalize_envelope(envelope)
@@ -70,24 +66,33 @@ def _normalize_envelope(envelope: Any) -> NormalizedUsage | None:
     Returns ``None`` (not an "unavailable" ``NormalizedUsage``) when the
     envelope yields nothing, so the caller can keep trying other envelopes.
     """
-    input_tokens = TokenCounter._first_usage_int(envelope, _INPUT_KEYS)
-    output_tokens = TokenCounter._first_usage_int(envelope, _OUTPUT_KEYS)
-    total_tokens = TokenCounter._first_usage_int(envelope, _TOTAL_KEYS)
+    input_tokens = TokenCounter._first_usage_int(envelope, _USAGE_INPUT_ALIASES)
+    output_tokens = TokenCounter._first_usage_int(envelope, _USAGE_OUTPUT_ALIASES)
+    total_tokens = TokenCounter._first_usage_int(envelope, _USAGE_TOTAL_ALIASES)
 
-    reasoning_tokens = TokenCounter._first_usage_int(envelope, _REASONING_KEYS)
+    reasoning_tokens = TokenCounter._first_usage_int(envelope, _USAGE_REASONING_ALIASES)
     if reasoning_tokens is None:
-        reasoning_tokens = TokenCounter._first_nested_usage_int(envelope, _REASONING_NESTED_PATHS)
-
-    cached_input_tokens = TokenCounter._sum_usage_ints(envelope, _CACHED_INPUT_KEYS)
-    if cached_input_tokens is None:
-        cached_input_tokens = TokenCounter._first_nested_usage_int(
-            envelope, _CACHED_INPUT_NESTED_PATHS
+        reasoning_tokens = TokenCounter._first_nested_usage_int(
+            envelope, _USAGE_REASONING_NESTED_PATHS
         )
 
-    input_text_tokens = TokenCounter._first_nested_usage_int(envelope, _INPUT_TEXT_NESTED_PATHS)
-    input_image_tokens = TokenCounter._first_nested_usage_int(envelope, _INPUT_IMAGE_NESTED_PATHS)
-    output_text_tokens = TokenCounter._first_nested_usage_int(envelope, _OUTPUT_TEXT_NESTED_PATHS)
+    cached_input_tokens = TokenCounter._extract_cached_input_tokens(envelope)
 
+    input_text_tokens = TokenCounter._first_nested_usage_int(
+        envelope, _USAGE_INPUT_TEXT_NESTED_PATHS
+    )
+    input_image_tokens = TokenCounter._first_nested_usage_int(
+        envelope, _USAGE_INPUT_IMAGE_NESTED_PATHS
+    )
+    output_text_tokens = TokenCounter._first_nested_usage_int(
+        envelope, _USAGE_OUTPUT_TEXT_NESTED_PATHS
+    )
+    output_image_tokens = TokenCounter._first_nested_usage_int(
+        envelope, _USAGE_OUTPUT_IMAGE_NESTED_PATHS
+    )
+
+    # Gemini's raw modality-detail arrays are a fallback source only — the
+    # OpenAI-style nested paths above win when both happen to be present.
     prompt_text, prompt_image = _sum_modality_tokens(
         TokenCounter._raw_value(envelope, "prompt_tokens_details")
     )
@@ -101,7 +106,8 @@ def _normalize_envelope(envelope: Any) -> NormalizedUsage | None:
     )
     if output_text_tokens is None:
         output_text_tokens = candidate_text
-    output_image_tokens = candidate_image
+    if output_image_tokens is None:
+        output_image_tokens = candidate_image
 
     fields = (
         input_tokens,
@@ -135,8 +141,9 @@ def _sum_modality_tokens(details: Any) -> tuple[int | None, int | None]:
     """Sum Gemini modality-detail entries into (text_total, image_total).
 
     ``details`` is a list of ``{"modality": "TEXT"|"IMAGE", "token_count": N}``
-    entries (dicts or attribute-bearing objects). Non-list input (missing,
-    malformed) yields ``(None, None)`` rather than raising.
+    entries (dicts or attribute-bearing objects). Non-list input, non-mapping
+    entries, and entries missing "modality" or "token_count" are all skipped
+    as unknown rather than raising.
     """
     if not isinstance(details, (list, tuple)):
         return None, None

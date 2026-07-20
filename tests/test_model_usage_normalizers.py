@@ -227,3 +227,117 @@ def test_normalize_provider_usage_does_not_retain_payload_reference():
 
     assert usage.input_tokens == 10
     assert usage.total_tokens == 15
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 — coverage gaps that let the output-image and cache-fallback
+# bugs ship. See task-4-report.md "Fix round 1" for the root-cause writeup.
+# ---------------------------------------------------------------------------
+
+
+def test_openai_output_image_tokens_maps_from_output_tokens_details_image_tokens():
+    """output_tokens_details.image_tokens is a required OpenAI shape (per the
+    brief) but was previously unreachable — output_image_tokens was only ever
+    populated from Gemini's candidates_tokens_details modality array."""
+    usage = normalize_provider_usage(
+        provider="openai",
+        payload={
+            "usage": {
+                "input_tokens": 40,
+                "output_tokens": 300,
+                "total_tokens": 340,
+                "output_tokens_details": {"text_tokens": 100, "image_tokens": 200},
+            }
+        },
+    )
+    assert usage == NormalizedUsage(
+        input_tokens=40,
+        output_tokens=300,
+        total_tokens=340,
+        output_text_tokens=100,
+        output_image_tokens=200,
+        source="provider_reported",
+    )
+
+
+def test_gemini_candidates_modality_image_entry_maps_to_output_image_tokens():
+    """The only path that sets output_image_tokens from a Gemini modality
+    array was previously entirely unexercised by any test."""
+    payload = {
+        "usage_metadata": {
+            "prompt_token_count": 10,
+            "candidates_token_count": 300,
+            "candidates_tokens_details": [
+                {"modality": "TEXT", "token_count": 50},
+                {"modality": "IMAGE", "token_count": 250},
+            ],
+        }
+    }
+    usage = normalize_provider_usage(provider="gemini", payload=payload)
+    assert usage.output_text_tokens == 50
+    assert usage.output_image_tokens == 250
+
+
+def test_cached_input_tokens_falls_back_to_langchain_input_token_details():
+    """LangChain's standardized InputTokenDetails shape (cache_read /
+    cache_creation nested under input_token_details, singular) must combine
+    into cached_input_tokens the same way extract_reported_usage already
+    does — the two must share one implementation, not two drifting copies."""
+    usage = normalize_provider_usage(
+        provider="anthropic",
+        payload={
+            "usage": {
+                "input_tokens": 500,
+                "output_tokens": 20,
+                "input_token_details": {"cache_read": 120, "cache_creation": 30},
+            }
+        },
+    )
+    assert usage.cached_input_tokens == 150
+
+
+def test_cached_input_tokens_falls_back_to_prompt_tokens_details_cached_tokens():
+    """OpenAI chat-completions raw shape (prompt_tokens_details.cached_tokens)
+    must also resolve to cached_input_tokens."""
+    usage = normalize_provider_usage(
+        provider="openai",
+        payload={
+            "usage": {
+                "input_tokens": 700,
+                "output_tokens": 25,
+                "prompt_tokens_details": {"cached_tokens": 90},
+            }
+        },
+    )
+    assert usage.cached_input_tokens == 90
+
+
+def test_usage_found_only_in_response_metadata_token_usage_normalizes():
+    """The recorder (Task 5) hands the normalizer raw LangChain response
+    objects whose usage sometimes lives only in response_metadata — the
+    normalizer must search the same envelope chain extract_reported_usage
+    does, not just top-level usage/usage_metadata."""
+    payload = SimpleNamespace(
+        response_metadata={"token_usage": {"prompt_tokens": 640, "completion_tokens": 32}}
+    )
+    usage = normalize_provider_usage(provider="openai", payload=payload)
+    assert usage.input_tokens == 640
+    assert usage.output_tokens == 32
+    assert usage.source == "provider_reported"
+
+
+def test_malformed_modality_list_entries_do_not_crash():
+    """A non-dict list entry and an entry missing the 'modality' key must
+    both be skipped as unknown, never raise."""
+    payload = {
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "prompt_tokens_details": ["not-a-mapping", {"token_count": 4}],
+        }
+    }
+    usage = normalize_provider_usage(provider="gemini", payload=payload)
+    assert usage.input_tokens == 10
+    assert usage.output_tokens == 5
+    assert usage.input_text_tokens is None
+    assert usage.input_image_tokens is None
