@@ -14,9 +14,11 @@ router = APIRouter(tags=["proxy"])
 
 
 def _params_with_active_device(request: Request):
-    params = list(request.query_params.multi_items())
-    if any(key == "deviceId" for key, _value in params):
-        return params
+    params = [
+        (key, value)
+        for key, value in request.query_params.multi_items()
+        if key not in {"deviceId", "device_id"}
+    ]
     device_id = get_runtime_bridge().get_registered_device_id()
     if device_id:
         params.append(("deviceId", device_id))
@@ -45,8 +47,11 @@ async def proxy_hitl_settings(
     request: Request,
     _session: LocalSessionPayload = Depends(require_local_session),
 ) -> Response:
-    # Per-user policy: forward verbatim, no device stamping.
-    return await proxy_server_request(request, upstream_path="/hitl/settings")
+    return await proxy_server_request(
+        request,
+        upstream_path="/hitl/settings",
+        params_override=_params_with_active_device(request),
+    )
 
 
 @router.get("/hitl/interrupts/{interrupt_id}")
