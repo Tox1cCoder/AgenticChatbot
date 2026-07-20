@@ -46,11 +46,19 @@ _USAGE_OUTPUT_ALIASES = (
 )
 _USAGE_TOTAL_ALIASES = ("total_tokens", "total_token_count")
 _USAGE_REASONING_ALIASES = ("reasoning_tokens", "thoughts_token_count")
+# Exactly extract_reported_usage's pre-Task-4 3 nested paths (singular
+# "output_token_details" / "completion_tokens_details") — do not widen this.
+# normalize_provider_usage needs a 4th, provider-raw path
+# ("output_tokens_details", "reasoning_tokens", plural) that
+# extract_reported_usage never recognized; that extra path is a
+# normalizer-local extension of this base tuple (see
+# app/usage/normalizers.py's _NORMALIZE_REASONING_NESTED_PATHS), not part of
+# the shared set, so extract_reported_usage's behavior stays byte-for-byte
+# unchanged from before Task 4.
 _USAGE_REASONING_NESTED_PATHS = (
     ("output_token_details", "reasoning"),
     ("output_token_details", "reasoning_tokens"),
     ("completion_tokens_details", "reasoning_tokens"),
-    ("output_tokens_details", "reasoning_tokens"),
 )
 # Cached-input-token sources, tried in order by _extract_cached_input_tokens:
 # flat top-level aliases (summed — Anthropic's cache_read/cache_creation are

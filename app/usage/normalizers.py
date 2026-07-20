@@ -12,11 +12,17 @@ that fallback synthesis already have it via
 The envelope-search chain and every alias/nested-path tuple used below are
 imported from ``app.ai.token_counter`` — the single source of truth shared
 with ``TokenCounter.extract_reported_usage`` — so the two functions cannot
-silently drift apart on which provider shapes they recognize. The only
-per-function differences are deliberate: no total-synthesis here, and this
-module additionally sums Gemini's raw modality-detail arrays (a shape
-LangChain's standardized ``usage_metadata`` never surfaces, so
-``extract_reported_usage`` has no use for it).
+silently drift apart on which provider shapes they recognize. Per-function
+differences are deliberate and never folded into the shared constants:
+no total-synthesis here; this module additionally sums Gemini's raw
+modality-detail arrays (a shape LangChain's standardized ``usage_metadata``
+never surfaces, so ``extract_reported_usage`` has no use for it); and this
+module recognizes one extra reasoning nested path
+(``output_tokens_details.reasoning_tokens``, plural — OpenAI's raw shape)
+via ``_NORMALIZE_REASONING_NESTED_PATHS`` below, layered on top of the
+shared 3-entry base rather than added to it, so
+``extract_reported_usage``'s reasoning extraction stays exactly what it was
+before Task 4.
 """
 
 from __future__ import annotations
@@ -36,6 +42,16 @@ from app.ai.token_counter import (
     TokenCounter,
 )
 from app.usage.types import NormalizedUsage
+
+# Deliberate per-function extension, not shared: extract_reported_usage's
+# reasoning nested-path search must stay its original 3 pre-Task-4 entries
+# (see the comment on _USAGE_REASONING_NESTED_PATHS in token_counter.py), but
+# this normalizer also recognizes OpenAI's raw plural
+# "output_tokens_details.reasoning_tokens" shape, which extract_reported_usage
+# never has (LangChain's standardized usage_metadata doesn't surface it).
+_NORMALIZE_REASONING_NESTED_PATHS = _USAGE_REASONING_NESTED_PATHS + (
+    ("output_tokens_details", "reasoning_tokens"),
+)
 
 
 def normalize_provider_usage(*, provider: str, payload: Any) -> NormalizedUsage:
@@ -73,7 +89,7 @@ def _normalize_envelope(envelope: Any) -> NormalizedUsage | None:
     reasoning_tokens = TokenCounter._first_usage_int(envelope, _USAGE_REASONING_ALIASES)
     if reasoning_tokens is None:
         reasoning_tokens = TokenCounter._first_nested_usage_int(
-            envelope, _USAGE_REASONING_NESTED_PATHS
+            envelope, _NORMALIZE_REASONING_NESTED_PATHS
         )
 
     cached_input_tokens = TokenCounter._extract_cached_input_tokens(envelope)

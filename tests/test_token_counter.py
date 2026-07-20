@@ -341,6 +341,29 @@ def test_extract_reported_usage_new_fields_default_to_none_when_absent():
     assert usage.output_image_tokens is None
 
 
+def test_extract_reported_usage_ignores_plural_output_tokens_details_reasoning():
+    """Regression (Fix round 2): extract_reported_usage's reasoning
+    nested-path search must stay exactly the 3 pre-Task-4 paths
+    (output_token_details.reasoning, output_token_details.reasoning_tokens,
+    completion_tokens_details.reasoning_tokens — all singular "token[_]").
+    The plural output_tokens_details.reasoning_tokens shape is
+    normalizer-only; extract_reported_usage must report None for it, exactly
+    as it did before Task 4, reachable via token_instrumentation.py's
+    extract_actual_usage path."""
+    response = SimpleNamespace(
+        usage_metadata={
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "output_tokens_details": {"reasoning_tokens": 7},
+        }
+    )
+
+    usage = TokenCounter().extract_reported_usage(provider="openai", response=response)
+
+    assert usage is not None
+    assert usage.reasoning_tokens is None
+
+
 def test_reported_token_usage_positional_construction_stays_backward_compatible():
     """Existing positional construction (input, output, total, reasoning)
     must keep working after the new fields are appended with defaults."""
