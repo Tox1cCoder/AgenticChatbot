@@ -992,11 +992,11 @@ git commit -m "feat: aggregate user usage analytics"
 - Modify: `app/main.py`
 - Test: `tests/test_model_usage_api.py`
 
-- [ ] **Step 1: Write failing API isolation tests**
+- [x] **Step 1: Write failing API isolation tests**
 
 Test missing/invalid JWT, user A seeing only A, user B receiving 404 for A's conversation, no accepted `userId` filter, query validation errors, empty success envelopes, both endpoint response shapes, and disabled UI/analytics flag behavior.
 
-- [ ] **Step 2: Implement routes using injected identity**
+- [x] **Step 2: Implement routes using injected identity**
 
 ```python
 router = APIRouter(prefix="/usage", tags=["usage"])
@@ -1014,17 +1014,17 @@ def get_usage_dashboard(
 
 `AppAutoInjector` injects only parameters without defaults, so both the service interface and `user_id` must remain required in the Python signature. Implement the conversation route with the same injected identity. Use existing domain exceptions for invalid range (422) and foreign/not-found conversation (404 without ownership disclosure).
 
-- [ ] **Step 3: Register the router**
+- [x] **Step 3: Register the router**
 
 Export `model_usage_router`, wire its module, and include it exactly once without adding `/ai` aliases; the sidecar will proxy the canonical `/usage` paths.
 
-- [ ] **Step 4: Run API tests**
+- [x] **Step 4: Run API tests**
 
 Run: `python -m pytest tests/test_model_usage_api.py tests/test_exception_handler.py tests/test_private_network_cors.py -q`
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/api/model_usage.py app/api/__init__.py app/main.py tests/test_model_usage_api.py
@@ -1440,3 +1440,5 @@ Implementation progress and decisions made during execution. Updated after each 
 - **Task 11 — complete (2026-07-21).** Commits `fc1d51e`, `39955f8`, `032027f`, and `310464f`. Conversation compaction now records verified owner/conversation attribution and classifies provider timeouts correctly; form filling records unattributed usage with a configurable model and bounded initialization warnings; the image acknowledgement call records the actual auxiliary provider/model; dead image-agent legacy entrypoints were removed. A tracked-file AST inventory pins provider terminals and client constructors, including aliases, safe `getattr` indirection, executor callables, and `functools.partial`; every instrumented manifest entry has an operation-bound exercising proof. Concrete Gemini stream and OpenAI generate/edit paths are tested through the real `ImageGeneratorAgent` recorder boundary. Required suite 59 passed under `-W error`; expanded strict review suite 85 passed; referenced instrumentation tests 56 passed; Ruff check/format and detached clean-checkout inventory passed. Spec review approved; final quality review approved with 0 Critical/Important/Minor findings.
 
 - **Task 12 — complete (2026-07-21).** Commits `2597bdb`, `ab99949`, and `9cbf87c`. Added camelCase analytics/query schemas, `IModelUsageService`, user-scoped service assembly, deferred DI wiring, deterministic breakdowns/top conversations, latest context-gauge metadata, and exact timezone/range validation. Series data is aggregated in one bounded, parameterized PostgreSQL `VALUES`-CTE query (never by loading dimension-cardinality minute rows), scoped by user/conversation and zero-filled by the service. Local wall-clock interval generation covers Bangkok/Kathmandu, New York folds/gaps, ambiguous midnights, and Lord Howe 30-minute DST transitions. Dependency floors now match the required APIs (`fastapi>=0.115.0,<1.0.0`, `sqlalchemy>=2.0.42,<3.0.0`), and latest-event selection has a stable ID tie-breaker. Final review evidence: 44 service/dependency tests and 10 live PostgreSQL tests passed; Ruff/diff checks clean; spec and quality reviews approved with no findings.
+
+- **Task 13 — complete (2026-07-21).** Commits `634b67b`, `4cd764e`, and `80b970b`. Added authenticated, typed `/usage/dashboard` and `/usage/conversations/{conversation_id}` endpoints with injected JWT identity, canonical single router registration, ownership-safe 404 behavior, exact camelCase envelopes, request-time UI feature hiding, and tracking/UI flag independence. Identity-looking query parameters cannot rewrite the injected user. Review caught and fixed two production-readiness issues: API tests now restore both global injector maps so the suite is order-independent, and the synchronous analytics/SQLAlchemy calls use regular FastAPI handlers so database work runs in the worker threadpool rather than blocking the ASGI event loop. Final evidence: 245 model-usage tests passed with 1 skipped, the required Task 13 suite passed 32 tests, Ruff/format/diff checks were clean, and both spec and quality reviews approved with no remaining findings.
