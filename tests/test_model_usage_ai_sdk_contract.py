@@ -18,6 +18,7 @@ from app.repositories.utils.pagination import PaginationMeta
 from app.schemas.model_usage import ConversationUsageResponse, UsageDashboard
 from app.schemas.pagination import MessagePaginationParams
 from app.schemas.responses import ApiResponse
+from app.services.model_usage_service import _DASHBOARD_DAYS, _RETENTION_DAYS
 
 CONTRACT_PATH = Path(__file__).resolve().parents[1] / "plans" / "TOKEN_USAGE_AI_SDK_FE_CONTRACT.md"
 
@@ -43,7 +44,7 @@ def test_dashboard_example_round_trips_through_real_response_schema() -> None:
 
     parsed = ApiResponse[UsageDashboard].model_validate(example)
 
-    assert parsed.model_dump(mode="json", by_alias=True, exclude_none=True) == example
+    assert parsed.model_dump(mode="json", by_alias=True) == example
 
 
 def test_conversation_example_round_trips_through_real_response_schema() -> None:
@@ -51,7 +52,7 @@ def test_conversation_example_round_trips_through_real_response_schema() -> None
 
     parsed = ApiResponse[ConversationUsageResponse].model_validate(example)
 
-    assert parsed.model_dump(mode="json", by_alias=True, exclude_none=True) == example
+    assert parsed.model_dump(mode="json", by_alias=True) == example
 
 
 def test_context_example_is_valid_ai_sdk_metadata_and_preserves_future_fields() -> None:
@@ -145,6 +146,13 @@ def test_contract_covers_endpoint_security_ranges_and_errors() -> None:
 
     for phrase in required_phrases:
         assert phrase in contract
+
+
+def test_contract_default_ranges_track_service_defaults() -> None:
+    contract = _contract()
+
+    assert f"dashboard defaults to {_DASHBOARD_DAYS} local calendar days" in contract
+    assert f"conversation defaults to the retained {_RETENTION_DAYS} days" in contract
 
 
 def test_contract_covers_types_visualization_refresh_and_ui_states() -> None:

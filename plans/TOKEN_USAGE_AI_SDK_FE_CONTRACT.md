@@ -22,6 +22,9 @@ must use local top-of-hour boundaries and cannot exceed 31 days. Day ranges must
 local-midnight boundaries. No range can exceed 730 days. The optional dashboard
 `conversationId` is a UUID. These camelCase spellings are the public query aliases:
 use `conversationId`, never `conversation_id`, and never send `userId` or `user_id`.
+When the range is omitted, the dashboard defaults to 30 local calendar days and a
+conversation defaults to the retained 730 days. Both defaults end at the next local
+midnight in the requested timezone.
 
 Responses are `200`. Missing or invalid JWT is `401`; a disabled usage UI or a
 conversation outside the user's ownership is `404`; malformed UUIDs, timestamps,
@@ -47,7 +50,8 @@ use the existing API error envelope.
     "coverage": {"providerReportedRequests": 2, "mixedRequests": 0, "locallyEstimatedRequests": 1, "unavailableRequests": 0, "requestsWithKnownTotal": 3, "totalRequests": 3, "knownTotalRatio": 1.0},
     "range": {"from": "2026-07-01T00:00:00Z", "to": "2026-07-02T00:00:00Z", "bucket": "day", "timezone": "UTC"},
     "generatedAt": "2026-07-02T00:00:01Z"
-  }
+  },
+  "error": null
 }
 ```
 
@@ -64,7 +68,8 @@ use the existing API error envelope.
     "latestContextWindow": {"provider": "provider-a", "model": "model-a", "context_window_tokens": 128000, "max_input_tokens": 128000, "max_output_tokens": 16384, "limit_type": "shared_context", "source": "provider_api", "known": true, "input_tokens": 1200, "output_tokens": 300, "total_tokens": 1500, "usage_source": "provider_reported", "used_tokens": 1500, "used_token_source": "provider_reported_total", "input_usage_ratio": 0.009375, "output_usage_ratio": 0.00234375, "usage_ratio": 0.01171875, "usage_ratio_basis": "shared_context_total", "display_state": "ok"},
     "range": {"from": "2026-07-01T00:00:00Z", "to": "2026-07-02T00:00:00Z", "bucket": "day", "timezone": "UTC"},
     "generatedAt": "2026-07-02T00:00:01Z"
-  }
+  },
+  "error": null
 }
 ```
 
