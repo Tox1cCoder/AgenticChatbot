@@ -2,6 +2,7 @@
 
 import base64
 import contextlib
+import hashlib
 import html
 import json
 import mimetypes
@@ -10,9 +11,12 @@ import re
 import time
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as datetime_time
 from html.parser import HTMLParser
 from typing import Any
+from urllib.parse import urlencode
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 import markdown as _markdown  # type: ignore
 import requests
@@ -1005,21 +1009,27 @@ APP_STYLE = """
         height: 12px;
         border-radius: 50%;
         flex-shrink: 0;
-        border: 1px solid transparent;
+        border: 1px solid rgba(120, 120, 120, 0.28);
         vertical-align: middle;
+        background: conic-gradient(
+            currentColor var(--ctx-fill, 0%),
+            rgba(148, 163, 184, 0.18) 0
+        );
     }
     .ctx-window-circle.unknown {
         background-color: transparent;
+        background-image: none;
         border-color: rgba(120, 120, 120, 0.6);
+        color: rgba(120, 120, 120, 0.6);
     }
     .ctx-window-circle.ok {
-        background-color: #2ecc71;
+        color: #2ecc71;
     }
     .ctx-window-circle.warn {
-        background-color: #f39c12;
+        color: #f39c12;
     }
     .ctx-window-circle.danger {
-        background-color: #e74c3c;
+        color: #e74c3c;
     }
 </style>
 """
@@ -2220,6 +2230,7 @@ SESSION_STATE_DEFAULTS: dict[str, Callable[[], Any] | Any] = {
     "planning_generate_input": str,
     "planning_manual_input": str,
     "api_cache_version": lambda: 0,
+    "usage_cache_version": lambda: 0,
     "live_widget_mounts": dict,
     # localStorage bridge
     "_ls_op": lambda: None,
@@ -2943,6 +2954,250 @@ def make_api_request(
         st.session_state.api_cache_version = int(st.session_state.get("api_cache_version", 0)) + 1
 
     return response_data
+
+
+def _discover_system_zone_name() -> str | None:
+    """Return an IANA timezone name when the host exposes one."""
+    configured = os.environ.get("TZ", "").strip()
+    candidates = [configured] if configured else []
+    local_tz = datetime.now().astimezone().tzinfo
+    local_key = getattr(local_tz, "key", None)
+    if isinstance(local_key, str):
+        candidates.append(local_key)
+    for candidate in candidates:
+        try:
+            ZoneInfo(candidate)
+        except (ZoneInfoNotFoundError, ValueError):
+            continue
+        return candidate
+    return None
+
+
+def get_local_timezone_name() -> str:
+    """Select a portable dashboard timezone, falling back to UTC."""
+    return _discover_system_zone_name() or "UTC"
+
+
+def align_usage_boundary(
+    value: date | datetime,
+    *,
+    bucket: str,
+    zone: ZoneInfo,
+    exclusive_end: bool = False,
+) -> datetime:
+    """Align a UI boundary to the API's local bucket contract."""
+    if bucket not in {"hour", "day"}:
+        raise ValueError("bucket must be 'hour' or 'day'")
+
+    value_is_datetime = isinstance(value, datetime)
+    if value_is_datetime:
+        localized = value.replace(tzinfo=zone) if value.tzinfo is None else value.astimezone(zone)
+    else:
+        localized = datetime.combine(value, datetime_time.min, tzinfo=zone)
+
+    if bucket == "day":
+        boundary_date = localized.date() + (timedelta(days=1) if exclusive_end else timedelta())
+        return datetime.combine(boundary_date, datetime_time.min, tzinfo=zone)
+    if exclusive_end and not value_is_datetime:
+        next_date = localized.date() + timedelta(days=1)
+        return datetime.combine(next_date, datetime_time.min, tzinfo=zone)
+    return localized.replace(minute=0, second=0, microsecond=0)
+
+
+def _usage_cache_identity() -> str:
+    """Build a non-secret cache partition for the active authenticated user."""
+    user_id = str(st.session_state.get("current_user_id") or "anonymous")
+    auth_token = str(st.session_state.get("auth_token") or "")
+    token_fingerprint = hashlib.sha256(auth_token.encode("utf-8")).hexdigest()
+    return f"{user_id}:{token_fingerprint}"
+
+
+@st.cache_data(show_spinner=False, ttl=30, max_entries=500)
+def _cached_usage_get_request(
+    endpoint: str,
+    *,
+    auth_identity: str,
+    cache_version: int,
+) -> dict[str, Any]:
+    """Cache authenticated usage reads without sharing entries across users."""
+    del auth_identity, cache_version  # Values intentionally participate in the cache key.
+    return make_api_request("GET", endpoint, use_cache=False)
+
+
+def _usage_get(endpoint: str) -> dict[str, Any]:
+    return _cached_usage_get_request(
+        endpoint,
+        auth_identity=_usage_cache_identity(),
+        cache_version=int(st.session_state.get("usage_cache_version", 0)),
+    )
+
+
+def _clear_usage_cache_after_completed_turn() -> None:
+    """Invalidate analytics only after the server completes an AI turn."""
+    st.session_state.usage_cache_version = int(st.session_state.get("usage_cache_version", 0)) + 1
+    _cached_usage_get_request.clear()
+
+
+def _empty_usage_totals() -> dict[str, int]:
+    return {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "totalTokens": 0,
+        "reasoningTokens": 0,
+        "cachedInputTokens": 0,
+        "generatedImages": 0,
+        "requestCount": 0,
+    }
+
+
+def _normalized_usage_totals(value: Any) -> dict[str, int]:
+    source = value if isinstance(value, dict) else {}
+    totals = _empty_usage_totals()
+    for key in totals:
+        candidate = source.get(key)
+        if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate >= 0:
+            totals[key] = candidate
+    return totals
+
+
+def _normalize_usage_dashboard(response: Any) -> dict[str, Any] | None:
+    """Extract known dashboard fields while tolerating forward-compatible additions."""
+    if not isinstance(response, dict) or response.get("success") is not True:
+        return None
+    data = response.get("data")
+    if not isinstance(data, dict):
+        return None
+    array_fields = (
+        "outcomes",
+        "series",
+        "byProvider",
+        "byModel",
+        "byOperation",
+        "byAgent",
+        "topConversations",
+    )
+    return {
+        "totals": _normalized_usage_totals(data.get("totals")),
+        **{
+            key: list(data.get(key) or []) if isinstance(data.get(key), list) else []
+            for key in array_fields
+        },
+        "coverage": dict(data.get("coverage") or {})
+        if isinstance(data.get("coverage"), dict)
+        else {},
+        "range": dict(data.get("range") or {}) if isinstance(data.get("range"), dict) else {},
+        "generatedAt": data.get("generatedAt"),
+    }
+
+
+def _normalize_conversation_usage(response: Any) -> dict[str, Any] | None:
+    if not isinstance(response, dict) or response.get("success") is not True:
+        return None
+    data = response.get("data")
+    if not isinstance(data, dict):
+        return None
+    return {
+        "totals": _normalized_usage_totals(data.get("totals")),
+        "byProvider": list(data.get("byProvider") or [])
+        if isinstance(data.get("byProvider"), list)
+        else [],
+        "byModel": list(data.get("byModel") or []) if isinstance(data.get("byModel"), list) else [],
+        "coverage": dict(data.get("coverage") or {})
+        if isinstance(data.get("coverage"), dict)
+        else {},
+        "latestContextWindow": data.get("latestContextWindow")
+        if isinstance(data.get("latestContextWindow"), dict)
+        else None,
+        "range": dict(data.get("range") or {}) if isinstance(data.get("range"), dict) else {},
+        "generatedAt": data.get("generatedAt"),
+    }
+
+
+def get_usage_dashboard(
+    *,
+    start: date | datetime,
+    end: date | datetime,
+    bucket: str,
+    timezone_name: str,
+    conversation_id: str | None = None,
+) -> dict[str, Any] | None:
+    zone = ZoneInfo(timezone_name)
+    start_at = align_usage_boundary(start, bucket=bucket, zone=zone)
+    end_at = align_usage_boundary(end, bucket=bucket, zone=zone, exclusive_end=True)
+    params = {
+        "from": start_at.isoformat(),
+        "to": end_at.isoformat(),
+        "bucket": bucket,
+        "timezone": timezone_name,
+    }
+    if conversation_id:
+        params["conversationId"] = conversation_id
+    response = _usage_get(f"/usage/dashboard?{urlencode(params)}")
+    return _normalize_usage_dashboard(response)
+
+
+def get_conversation_usage(conversation_id: str) -> dict[str, Any] | None:
+    """Fetch the retained-range cumulative summary for one owned conversation."""
+    return _normalize_conversation_usage(_usage_get(f"/usage/conversations/{conversation_id}"))
+
+
+def _build_usage_trend_frame(series: Any) -> list[dict[str, Any]]:
+    frame: list[dict[str, Any]] = []
+    if not isinstance(series, list):
+        return frame
+    for point in series:
+        if not isinstance(point, dict):
+            continue
+        start = point.get("start")
+        totals = _normalized_usage_totals(point.get("totals"))
+        frame.extend(
+            [
+                {"start": start, "tokenType": "Input", "tokens": totals["inputTokens"]},
+                {"start": start, "tokenType": "Output", "tokens": totals["outputTokens"]},
+            ]
+        )
+    return frame
+
+
+def _build_usage_outcome_frame(
+    outcomes: Any,
+    *,
+    total_requests: int,
+) -> list[dict[str, Any]]:
+    frame: list[dict[str, Any]] = []
+    if not isinstance(outcomes, list):
+        return frame
+    denominator = total_requests if total_requests > 0 else 0
+    for item in outcomes:
+        if not isinstance(item, dict):
+            continue
+        requests_count = _normalized_usage_totals(item.get("totals"))["requestCount"]
+        frame.append(
+            {
+                "outcome": str(item.get("key") or "unknown"),
+                "requests": requests_count,
+                "rate": requests_count / denominator if denominator else 0.0,
+            }
+        )
+    return frame
+
+
+def _build_usage_breakdown_frame(items: Any) -> list[dict[str, Any]]:
+    frame: list[dict[str, Any]] = []
+    if not isinstance(items, list):
+        return frame
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        totals = _normalized_usage_totals(item.get("totals"))
+        frame.append(
+            {
+                "name": str(item.get("key") or "Unknown"),
+                "totalTokens": totals["totalTokens"],
+                "requests": totals["requestCount"],
+            }
+        )
+    return frame
 
 
 def make_streaming_request(endpoint: str, data: dict | None = None):
@@ -6294,7 +6549,7 @@ def _format_tokens(value: Any) -> str:
     if n < 0:
         return "?"
     if n >= 1_000_000:
-        return f"{n / 1_000_000:.1f}M"
+        return f"{n / 1_000_000:.1f}M".replace(".0M", "M")
     if n >= 1_000:
         formatted = f"{n / 1_000:.1f}k"
         return formatted.replace(".0k", "k")
@@ -6313,43 +6568,144 @@ def _get_context_window_metadata(message_metadata: dict[str, Any]) -> dict[str, 
 
 
 def _format_context_window_label(context_window: dict[str, Any]) -> str:
-    """Build a human-readable usage label for the context window tooltip.
+    """Build the accessible tooltip for a context-window gauge."""
+    return str(_context_window_presentation(context_window).get("tooltip") or "")
 
-    Examples:
-      '12.0k / 128k tokens (9%) - actual'
-      '128k token window'
-      'Window unknown'
-    Returns an empty string only if the input is not a dict.
-    """
+
+def _format_context_tokens(value: Any) -> str:
+    if value is None:
+        return "?"
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return "?"
+    if number < 0:
+        return "?"
+    if number >= 1_000_000:
+        return f"{number / 1_000_000:.1f}M"
+    if number >= 1_000:
+        return f"{number / 1_000:.1f}k"
+    return str(number)
+
+
+def _format_usage_percentage(ratio: Any) -> str:
+    if not isinstance(ratio, (int, float)) or isinstance(ratio, bool):
+        return "?"
+    percentage = max(0.0, float(ratio) * 100)
+    if 0 < percentage < 1:
+        return f"{percentage:.1f}%"
+    return f"{percentage:.0f}%"
+
+
+def _context_usage_source(context_window: dict[str, Any]) -> tuple[str, str]:
+    raw_source = context_window.get("usage_source")
+    if not isinstance(raw_source, str) or not raw_source:
+        used_source = context_window.get("used_token_source")
+        raw_source = (
+            "provider_reported"
+            if used_source in {"provider_reported_total", "provider_reported_split"}
+            else "locally_estimated"
+            if used_source == "estimated_total"
+            else "unavailable"
+        )
+    labels = {
+        "provider_reported": "Provider reported",
+        "mixed_reported_estimated": "Mixed reported + estimated",
+        "locally_estimated": "Locally estimated",
+        "unavailable": "Unavailable",
+    }
+    badge = labels.get(raw_source, "Unavailable")
+    return badge, badge.lower()
+
+
+def _valid_ratio(value: Any) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+        return float(value)
+    return None
+
+
+def _context_window_presentation(context_window: dict[str, Any]) -> dict[str, Any]:
+    """Normalize context metadata into one safe, ratio-aware UI presentation."""
     if not isinstance(context_window, dict):
-        return ""
+        return {
+            "tooltip": "Context usage unavailable",
+            "raw_ratio": None,
+            "visual_ratio": 0.0,
+            "source_badge": "Unavailable",
+            "state": "unknown",
+        }
 
-    known = context_window.get("known")
-    window_tokens = context_window.get("context_window_tokens")
-    if known is False and not window_tokens:
-        return "Window unknown"
-    if not window_tokens:
-        return "Window unknown"
-
-    window_str = _format_tokens(window_tokens)
+    source_badge, source_label = _context_usage_source(context_window)
+    input_tokens = context_window.get("input_tokens")
+    output_tokens = context_window.get("output_tokens")
+    total_tokens = context_window.get("total_tokens")
     used_tokens = context_window.get("used_tokens")
-    usage_ratio = context_window.get("usage_ratio")
-    used_source = context_window.get("used_token_source")
+    limit_type = str(context_window.get("limit_type") or "unknown")
+    raw_ratio = _valid_ratio(context_window.get("usage_ratio"))
 
-    parts: list[str] = []
-    if used_tokens is not None:
-        parts.append(f"{_format_tokens(used_tokens)} / {window_str} tokens")
-        if isinstance(usage_ratio, (int, float)):
-            pct = max(0, min(999, int(round(float(usage_ratio) * 100))))
-            parts.append(f"({pct}%)")
+    if limit_type == "shared_context" and context_window.get("context_window_tokens"):
+        limit = context_window["context_window_tokens"]
+        if used_tokens is None:
+            used_tokens = total_tokens
+        if raw_ratio is None and isinstance(used_tokens, int):
+            raw_ratio = used_tokens / int(limit)
+        if used_tokens is None:
+            tooltip = f"{_format_context_tokens(limit)} token window · {source_label}"
+        else:
+            tooltip = (
+                f"{_format_context_tokens(used_tokens)} / {_format_context_tokens(limit)} "
+                f"({_format_usage_percentage(raw_ratio)}) · "
+                f"input {_format_context_tokens(input_tokens)} · "
+                f"output {_format_context_tokens(output_tokens)} · {source_label}"
+            )
+    elif limit_type == "separate_io":
+        input_limit = context_window.get("max_input_tokens")
+        output_limit = context_window.get("max_output_tokens")
+        input_ratio = _valid_ratio(context_window.get("input_usage_ratio"))
+        output_ratio = _valid_ratio(context_window.get("output_usage_ratio"))
+        if input_ratio is None and isinstance(input_tokens, int) and input_limit:
+            input_ratio = input_tokens / int(input_limit)
+        if output_ratio is None and isinstance(output_tokens, int) and output_limit:
+            output_ratio = output_tokens / int(output_limit)
+        known_ratios = [ratio for ratio in (input_ratio, output_ratio) if ratio is not None]
+        if raw_ratio is None and known_ratios:
+            raw_ratio = max(known_ratios)
+        tooltip = (
+            f"{_format_usage_percentage(raw_ratio)} limiting · "
+            f"input {_format_context_tokens(input_tokens)} / "
+            f"{_format_context_tokens(input_limit)} ({_format_usage_percentage(input_ratio)}) · "
+            f"output {_format_context_tokens(output_tokens)} / "
+            f"{_format_context_tokens(output_limit)} ({_format_usage_percentage(output_ratio)}) · "
+            f"{source_label}"
+        )
     else:
-        parts.append(f"{window_str} token window")
+        raw_ratio = None
+        total_display = total_tokens if total_tokens is not None else used_tokens
+        tooltip = (
+            f"{_format_context_tokens(total_display)} total · "
+            f"input {_format_context_tokens(input_tokens)} · "
+            f"output {_format_context_tokens(output_tokens)} · "
+            f"limit unknown · {source_label}"
+        )
 
-    label = " ".join(parts).strip()
-    if isinstance(used_source, str) and used_source.strip():
-        suffix = used_source.strip().replace("_", " ")
-        label = f"{label} - {suffix}"
-    return label
+    display_state = str(context_window.get("display_state") or "").lower()
+    if display_state not in {"ok", "warn", "danger", "unknown"}:
+        if raw_ratio is None:
+            display_state = "unknown"
+        elif raw_ratio >= 0.9:
+            display_state = "danger"
+        elif raw_ratio >= 0.7:
+            display_state = "warn"
+        else:
+            display_state = "ok"
+    visual_ratio = min(max(raw_ratio or 0.0, 0.0), 1.0)
+    return {
+        "tooltip": tooltip,
+        "raw_ratio": raw_ratio,
+        "visual_ratio": visual_ratio,
+        "source_badge": source_badge,
+        "state": display_state,
+    }
 
 
 def _render_context_window_indicator(
@@ -6375,18 +6731,20 @@ def _render_context_window_indicator(
         st.caption(plain_label)
         return
 
-    display_state = str(context_window.get("display_state") or "").strip().lower()
-    if display_state not in {"ok", "warn", "danger"}:
-        display_state = "unknown"
-
-    tooltip = _format_context_window_label(context_window) or "Context usage unavailable"
+    presentation = _context_window_presentation(context_window)
+    display_state = presentation["state"]
+    tooltip = presentation["tooltip"]
+    visual_percent = float(presentation["visual_ratio"]) * 100
+    raw_ratio = presentation["raw_ratio"]
     safe_label = html.escape(plain_label)
-    safe_tooltip = html.escape(tooltip)
+    safe_tooltip = html.escape(str(tooltip), quote=True)
+    raw_ratio_attr = "" if raw_ratio is None else str(raw_ratio)
 
     html_row = (
         '<div class="ctx-window-row">'
         f"<span>{safe_label}</span>"
         f'<span class="ctx-window-circle {display_state}" '
+        f'style="--ctx-fill:{visual_percent:.1f}%" data-usage-ratio="{raw_ratio_attr}" '
         f'title="{safe_tooltip}" aria-label="{safe_tooltip}"></span>'
         "</div>"
     )
@@ -8549,6 +8907,7 @@ def render_chat_view():
     # this turn before the conversation list is refreshed.
     if conversation_id and conversation_id != "pending_new":
         _render_plan_progress_widget(conversation_id, current_conv=current_conv)
+        _render_conversation_usage_panel(str(conversation_id))
 
     # Load more button
     if (
@@ -8900,6 +9259,7 @@ def render_chat_view():
                         elif event_type == "complete":
                             # Store final message and complete
                             final_message = event.get("message")
+                            _clear_usage_cache_after_completed_turn()
                             image_preview_panel.clear()
                             stream_renderer.finalize(final_message)
                             status.update(label="Message sent!", state="complete")
@@ -10324,6 +10684,282 @@ def render_models_view() -> None:
                 st.toast("Failed to save model settings", icon=":material/cancel:")
 
 
+def _render_usage_chart(frame: list[dict[str, Any]], *, kind: str) -> None:
+    """Render a bounded frame with Altair, which ships with Streamlit."""
+    if not frame:
+        return
+    import altair as alt
+
+    data = alt.Data(values=frame)
+    if kind == "trend":
+        chart = (
+            alt.Chart(data)
+            .mark_area()
+            .encode(
+                x=alt.X("start:T", title="Time"),
+                y=alt.Y("tokens:Q", stack="zero", title="Tokens"),
+                color=alt.Color("tokenType:N", title="Token type"),
+                tooltip=["start:T", "tokenType:N", "tokens:Q"],
+            )
+        )
+    elif kind == "outcomes":
+        chart = (
+            alt.Chart(data)
+            .mark_bar()
+            .encode(
+                x=alt.X("outcome:N", title="Outcome"),
+                y=alt.Y("requests:Q", title="Requests"),
+                tooltip=["outcome:N", "requests:Q", alt.Tooltip("rate:Q", format=".1%")],
+            )
+        )
+    else:
+        chart = (
+            alt.Chart(data)
+            .mark_bar()
+            .encode(
+                x=alt.X("totalTokens:Q", title="Total tokens"),
+                y=alt.Y("name:N", sort="-x", title=None),
+                tooltip=["name:N", "totalTokens:Q", "requests:Q"],
+            )
+        )
+    st.altair_chart(chart, width="stretch")
+
+
+def _usage_breakdown_rows(items: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if not isinstance(items, list):
+        return rows
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        totals = _normalized_usage_totals(item.get("totals"))
+        rows.append(
+            {
+                "Name": str(item.get("key") or "Unknown"),
+                "Total tokens": totals["totalTokens"],
+                "Input": totals["inputTokens"],
+                "Output": totals["outputTokens"],
+                "Requests": totals["requestCount"],
+                "Images": totals["generatedImages"],
+            }
+        )
+    return rows
+
+
+def _render_usage_breakdown(title: str, items: Any) -> None:
+    rows = _usage_breakdown_rows(items)
+    chart_frame = _build_usage_breakdown_frame(items)
+    st.markdown(f"#### {title}")
+    if rows:
+        _render_usage_chart(chart_frame, kind="breakdown")
+        st.dataframe(rows, width="stretch", hide_index=True)
+    else:
+        st.caption("No usage in this breakdown.")
+
+
+def _render_context_usage_summary(context_window: dict[str, Any] | None) -> None:
+    if not context_window:
+        st.caption("Latest context-window usage is unavailable.")
+        return
+    presentation = _context_window_presentation(context_window)
+    provider = str(context_window.get("provider") or "")
+    model = str(context_window.get("model") or "")
+    _render_context_window_indicator(provider, model, context_window)
+    st.caption(f"{presentation['tooltip']} · Source: {presentation['source_badge']}")
+
+
+def _render_conversation_usage_panel(conversation_id: str) -> None:
+    """Render retained cumulative usage without allowing analytics errors to block chat."""
+    with st.expander(":material/monitoring: Retained usage", expanded=False):
+        if st.session_state.get("stream_inflight"):
+            st.caption("Usage refreshes after this turn completes.")
+            return
+        try:
+            usage = get_conversation_usage(conversation_id)
+        except Exception:
+            usage = None
+        if usage is None:
+            st.caption("Usage is temporarily unavailable. Chat remains available.")
+            if st.button("Retry usage", key=f"retry_usage_{conversation_id}"):
+                st.session_state.usage_cache_version = (
+                    int(st.session_state.get("usage_cache_version", 0)) + 1
+                )
+                st.rerun()
+            return
+
+        totals = usage["totals"]
+        columns = st.columns(4)
+        columns[0].metric("Total tokens", _format_tokens(totals["totalTokens"]))
+        columns[1].metric("Input", _format_tokens(totals["inputTokens"]))
+        columns[2].metric("Output", _format_tokens(totals["outputTokens"]))
+        columns[3].metric("Requests", totals["requestCount"])
+
+        model_names = [
+            str(item.get("key"))
+            for item in usage.get("byModel", [])
+            if isinstance(item, dict) and item.get("key")
+        ]
+        if model_names:
+            st.caption(f"Models: {', '.join(model_names)}")
+        _render_context_usage_summary(usage.get("latestContextWindow"))
+        retained_range = usage.get("range") or {}
+        if retained_range.get("from") and retained_range.get("to"):
+            st.caption(f"Retained range: {retained_range['from']} to {retained_range['to']}")
+
+
+def render_usage_view() -> None:
+    """Render authenticated, user-scoped usage analytics returned by the API."""
+    st.markdown("# Usage")
+    st.caption("Token and image usage for your authenticated account.")
+
+    local_zone = get_local_timezone_name()
+    timezone_options = sorted(available_timezones())
+    if local_zone not in timezone_options:
+        timezone_options.insert(0, local_zone)
+    zone_index = timezone_options.index(local_zone)
+
+    filter_cols = st.columns([1, 2, 2])
+    with filter_cols[0]:
+        bucket = st.selectbox("Bucket", ["day", "hour"], key="usage_bucket")
+    today = datetime.now(ZoneInfo(local_zone)).date()
+    with filter_cols[1]:
+        selected_range = st.date_input(
+            "Date range",
+            value=(today - timedelta(days=29), today),
+            key="usage_date_range",
+        )
+    with filter_cols[2]:
+        timezone_name = st.selectbox(
+            "Timezone",
+            timezone_options,
+            index=zone_index,
+            key="usage_timezone",
+        )
+
+    conversation_map = {
+        str(item.get("id")): str(item.get("title") or "Untitled conversation")
+        for item in st.session_state.get("conversations_list", [])
+        if isinstance(item, dict) and item.get("id")
+    }
+    conversation_options = [""] + list(conversation_map)
+    conversation_id = st.selectbox(
+        "Conversation (optional)",
+        conversation_options,
+        format_func=lambda value: "All conversations" if not value else conversation_map[value],
+        key="usage_conversation_filter",
+    )
+
+    if not isinstance(selected_range, (tuple, list)) or len(selected_range) != 2:
+        st.info("Choose a start and end date.")
+        return
+
+    query_start: date | datetime = selected_range[0]
+    query_end: date | datetime = selected_range[1]
+    if bucket == "hour":
+        local_now = datetime.now(ZoneInfo(str(timezone_name)))
+        next_hour = (local_now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        hour_columns = st.columns(2)
+        with hour_columns[0]:
+            start_hour = st.time_input(
+                "From hour",
+                value=datetime_time.min,
+                step=timedelta(hours=1),
+                key="usage_start_hour",
+            )
+        with hour_columns[1]:
+            end_hour = st.time_input(
+                "To hour (exclusive)",
+                value=next_hour.time(),
+                step=timedelta(hours=1),
+                key="usage_end_hour",
+            )
+        query_start = datetime.combine(selected_range[0], start_hour)
+        query_end = datetime.combine(selected_range[1], end_hour)
+
+    with st.spinner("Loading usage..."):
+        usage = get_usage_dashboard(
+            start=query_start,
+            end=query_end,
+            bucket=str(bucket),
+            timezone_name=str(timezone_name),
+            conversation_id=str(conversation_id) or None,
+        )
+    if usage is None:
+        st.warning("Usage is temporarily unavailable.")
+        if st.button("Retry dashboard", key="retry_usage_dashboard"):
+            st.session_state.usage_cache_version = (
+                int(st.session_state.get("usage_cache_version", 0)) + 1
+            )
+            st.rerun()
+        return
+
+    totals = usage["totals"]
+    metric_columns = st.columns(5)
+    metric_columns[0].metric("Total tokens", _format_tokens(totals["totalTokens"]))
+    metric_columns[1].metric("Input", _format_tokens(totals["inputTokens"]))
+    metric_columns[2].metric("Output", _format_tokens(totals["outputTokens"]))
+    metric_columns[3].metric("Requests", totals["requestCount"])
+    metric_columns[4].metric("Generated images", totals["generatedImages"])
+
+    if totals["requestCount"] == 0:
+        st.info("No usage was recorded for this range.")
+
+    trend_frame = _build_usage_trend_frame(usage.get("series"))
+    outcome_frame = _build_usage_outcome_frame(
+        usage.get("outcomes"), total_requests=totals["requestCount"]
+    )
+    chart_columns = st.columns(2)
+    with chart_columns[0]:
+        st.markdown("### Input and output trend")
+        if trend_frame:
+            _render_usage_chart(trend_frame, kind="trend")
+        else:
+            st.caption("No trend data for this range.")
+    with chart_columns[1]:
+        st.markdown("### Outcomes")
+        if outcome_frame:
+            _render_usage_chart(outcome_frame, kind="outcomes")
+        else:
+            st.caption("No outcome data for this range.")
+
+    breakdown_columns = st.columns(2)
+    with breakdown_columns[0]:
+        _render_usage_breakdown("Providers", usage.get("byProvider"))
+        _render_usage_breakdown("Operations", usage.get("byOperation"))
+    with breakdown_columns[1]:
+        _render_usage_breakdown("Models", usage.get("byModel"))
+        _render_usage_breakdown("Agents", usage.get("byAgent"))
+
+    st.markdown("### Top conversations")
+    top_rows: list[dict[str, Any]] = []
+    for item in usage.get("topConversations", []):
+        if not isinstance(item, dict):
+            continue
+        row_totals = _normalized_usage_totals(item.get("totals"))
+        top_rows.append(
+            {
+                "Conversation": item.get("title") or "Untitled conversation",
+                "Total tokens": row_totals["totalTokens"],
+                "Requests": row_totals["requestCount"],
+            }
+        )
+    if top_rows:
+        st.dataframe(top_rows, width="stretch", hide_index=True)
+    else:
+        st.caption("No conversations have usage in this range.")
+
+    coverage = usage.get("coverage") or {}
+    known_ratio = coverage.get("knownTotalRatio")
+    if isinstance(known_ratio, (int, float)):
+        st.caption(
+            f"Known token totals: {known_ratio:.1%} "
+            f"({coverage.get('requestsWithKnownTotal', 0)} of "
+            f"{coverage.get('totalRequests', 0)} requests)."
+        )
+    if usage.get("generatedAt"):
+        st.caption(f"Generated at {usage['generatedAt']}")
+
+
 def main():
     """Main application entry point"""
     if (
@@ -10349,6 +10985,7 @@ def main():
         tab_docs,
         tab_instructions,
         tab_models,
+        tab_usage,
         tab_custom_agents,
         tab_mcp,
         tab_skills,
@@ -10359,6 +10996,7 @@ def main():
             ":material/description: Documents",
             ":material/settings: Instructions",
             ":material/smart_toy: Models",
+            ":material/monitoring: Usage",
             ":material/robot_2: Custom Agents",
             ":material/extension: MCP Config",
             ":material/psychology: Skills",
@@ -10379,6 +11017,9 @@ def main():
 
     with tab_models:
         render_models_view()
+
+    with tab_usage:
+        render_usage_view()
 
     with tab_custom_agents:
         render_custom_agents_view()
