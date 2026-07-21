@@ -773,11 +773,11 @@ git commit -m "fix: calculate limit-aware context usage"
 - Test: `tests/test_image_generation_providers.py`
 - Test: `tests/test_model_usage_image_generation.py`
 
-- [ ] **Step 1: Write failing stream-usage tests**
+- [x] **Step 1: Write failing stream-usage tests**
 
 Gemini tests must put `usage_metadata` on a final chunk after the image chunk, proving the provider consumes it. OpenAI tests must attach `event.usage` to `image_generation.completed` and `image_edit.completed`. Agent tests must prove it does not break after the first `ImageFinal` before consuming usage. Add cancellation/error tests proving a started stream attempt is finalized exactly once with the terminal status even when no usage event arrives.
 
-- [ ] **Step 2: Add a provider-neutral terminal usage event**
+- [x] **Step 2: Add a provider-neutral terminal usage event**
 
 ```python
 @dataclass(frozen=True)
@@ -788,25 +788,25 @@ class ImageUsage:
 ImageStreamEvent = ImagePartial | ImageFinal | NarrativeDelta | ImageUsage
 ```
 
-- [ ] **Step 3: Consume complete Gemini streams**
+- [x] **Step 3: Consume complete Gemini streams**
 
 Stop emitting images after `max_images`, but continue iterating chunks. Track the latest `usage_metadata` and response ID; after exhaustion, emit exactly one `ImageUsage`. This avoids cancelling the provider stream before its terminal accounting arrives.
 
-- [ ] **Step 4: Extract OpenAI completion-event usage**
+- [x] **Step 4: Extract OpenAI completion-event usage**
 
 On completed generate/edit events, emit the final image and then `ImageUsage(usage=normalize_provider_usage(provider="openai", payload=event))`. Partial events never record usage.
 
-- [ ] **Step 5: Record the image operation once and select it for final gauge metadata**
+- [x] **Step 5: Record the image operation once and select it for final gauge metadata**
 
 `ImageGeneratorAgent._generate_images()` starts one recorder streaming-attempt handle immediately before each provider stream, consumes all events, captures `ImageUsage`, and finalizes that handle exactly once as success/error/cancelled/timeout. The handle owns the operation-scoped attempt number and accepts terminal usage after stream exhaustion; it does not persist a success event when the stream starts. Count final images and merge the image model's context/usage into the final response. Prompt-enhancement and acknowledgement calls remain separate operations and ledger events but do not replace the image model gauge.
 
-- [ ] **Step 6: Run image tests**
+- [x] **Step 6: Run image tests**
 
 Run: `python -m pytest tests/test_image_generation_providers.py tests/test_model_usage_image_generation.py tests/test_image_generator_harvest.py tests/test_image_preview_stream.py -q`
 
 Expected: all tests pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add app/ai/image_generation app/ai/agents/image_generator_agent.py tests/test_image_generation_providers.py tests/test_model_usage_image_generation.py
@@ -1419,3 +1419,10 @@ Implementation progress and decisions made during execution. Updated after each 
   - **D12 (Step 4):** output estimate is threaded via optional params and NOT written into the breakdown's `actual` block (avoids mislabeling an estimate as "actual"); only the context payload's `usage_source` becomes `mixed_reported_estimated`.
   - **`.env.example` manual handoff (D2 — global-guard blocks the file):** change `IMAGE_GENERATOR_MODEL=gemini-3-pro-image-preview` → `IMAGE_GENERATOR_MODEL=gemini-3-pro-image`.
   - Follow-on note for Task 15/16 (expected, not a regression): demo.py gauge tooltip + ai_sdk projection still read the pre-Task-8 payload shape; Tasks 15/16 update them to the new `limit_type`/split-ratio/`usage_source` fields. No existing demo/ai_sdk test broke (wider sweep 745 passed).
+
+- **Task 9 — complete (2026-07-21). IMPLEMENTED INLINE by the controller** (subagent delegation still blocked per Task 8; inline TDD continued). Commit `3b1a11b`. New provider-neutral `ImageUsage(usage, provider_request_id)` terminal event (`models.py`, exported from `__init__.py`); Gemini caps image emission at `max_images` but keeps consuming the stream, tracking the latest `usage_metadata`/`response_id` and emitting exactly one `ImageUsage` after exhaustion (never truncating before the terminal accounting); OpenAI emits `ImageUsage` after each `image_generation.completed`/`image_edit.completed` (partials never carry usage). New recorder `StreamingAttemptHandle` + `begin_streaming_attempt()` reserve the operation-scoped attempt up front and persist exactly one event only at `finalize()` (idempotent, off-loop via `to_thread`); `ImageGeneratorAgent._generate_images` opens one handle per stream inside a child `image_generation` context, feeds it `set_usage`/`note_generated_image`, and finalizes once as success/error/cancelled. 63 tests green on the Step-6 command + recorder file (`-W error`), broad usage/image/agent sweep 382 passed, ruff check + format clean.
+  - **D13 — `app/usage/recorder.py` folded into scope (brief omitted it).** Step 5 mandates "one recorder streaming-attempt handle," but Task 9's file list does not include the recorder. A streaming attempt can't reuse the one-call wrappers (usage arrives only after stream exhaustion, not from the returned value), so the handle is a genuine new recorder capability. Added `StreamingAttemptHandle` + `begin_streaming_attempt()` and extended `_build_command` with an optional `provider_request_id`. Committed with Task 9; recorder's own tests re-run green under `-W error`.
+  - **D14 — `generated_images` is the app's count of delivered `ImageFinal`s, not a provider field.** Gemini `usage_metadata` reports image *tokens* but no discrete image count, so the handle counts finals via `note_generated_image()` and merges the count into the (frozen) `NormalizedUsage` with `dataclasses.replace` at `finalize`. This stays authoritative even when the provider reports no usage (`source="unavailable"`, count still recorded).
+  - **D15 — provider family from model name, not `isinstance`.** Added a public `image_provider_family(model)` to `registry.py` (single source of truth for the `gpt-image`/`dall-e` prefixes, reused by `resolve_image_provider`) so the recorder's `provider` dimension ("gemini"/"openai") is derived without importing concrete provider classes or duplicating prefix logic. Registry was already in the commit via the `app/ai/image_generation` dir path.
+  - **D16 — Gemini & OpenAI always emit one terminal `ImageUsage`, even when usage is unavailable** (keeps "exactly one terminal event per stream" simple). Existing exact-event-list provider tests were updated to expect the trailing `ImageUsage`; three `__new__`-built agent doubles in `test_image_generation_providers.py` now set `agent.recorder = None` (the real agent always has it from `BaseAgent.__init__`; the `test_image_generator_harvest.py` doubles mock `_generate_images`, so they never touch the recorder).
+  - **Deferred (not a Task 9 step):** `ImageGeneratorAgent._generate_user_facing_response` calls `self.langchain_model.ainvoke` directly (not through the recorder-wrapped `_ainvoke_with_retries`), so the acknowledgement call is currently uninstrumented. Task 11's AST callsite inventory is designed to catch exactly this — flag it there rather than widening Task 9.
