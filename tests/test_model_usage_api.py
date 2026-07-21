@@ -1,5 +1,6 @@
 """HTTP contract tests for authenticated model-usage read APIs."""
 
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -8,9 +9,12 @@ from dependency_injector import providers
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
-from app.core.container import Container, container
+from app.core.container import Container, container, setup_auto_injection
+from app.core.dependency_injection import AppAutoInjector, AppContainerInjector
 from app.core.exceptions import ResourceNotFoundException
+from app.interfaces import IModelUsageService
 from app.main import app
+from app.repositories.model_usage import ModelUsageRepository
 from app.schemas.model_usage import (
     ConversationUsage,
     ConversationUsageQuery,
@@ -22,12 +26,26 @@ from app.schemas.model_usage import (
 )
 from app.services.model_usage_service import ModelUsageService
 
+# Importing app.main builds the global application and temporarily points the
+# injector maps at the container instance. API routes have already captured
+# their providers, so restore the declarative baseline for the rest of pytest.
+setup_auto_injection(Container)
+
 _USER_A = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 _USER_B = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
 _GENERATED_AT = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
 _RANGE_START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 _RANGE_END = datetime(2026, 1, 2, tzinfo=timezone.utc)
 _CONVERSATION_ID = UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_injector_wiring() -> Iterator[None]:
+    setup_auto_injection(Container)
+    try:
+        yield
+    finally:
+        setup_auto_injection(Container)
 
 
 def _usage_range() -> UsageRange:
@@ -111,6 +129,14 @@ def validating_usage_service() -> ModelUsageService:
     )
     with Container.model_usage_service.override(providers.Object(service)):
         yield service
+
+
+def test_api_test_module_preserves_declarative_injector_wiring() -> None:
+    assert AppAutoInjector.wiring_map[IModelUsageService] is Container.model_usage_service
+    assert AppContainerInjector.wiring_map[IModelUsageService] is Container.model_usage_service
+    assert AppContainerInjector.wiring_map[ModelUsageRepository] is (
+        Container.model_usage_repository
+    )
 
 
 @pytest.mark.parametrize(
