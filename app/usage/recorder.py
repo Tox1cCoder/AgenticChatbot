@@ -28,7 +28,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 from app.core.config import settings
@@ -49,6 +49,18 @@ _TIMEOUT_TYPES: tuple[type[BaseException], ...] = (asyncio.TimeoutError, Timeout
 
 EstimateCallback = Callable[[Any], NormalizedUsage]
 FailedWriteEnqueue = Callable[[dict[str, Any]], None]
+
+
+class StreamingAttempt(Protocol):
+    """Common handle returned for enabled and disabled streaming attempts."""
+
+    def set_usage(
+        self, usage: NormalizedUsage, *, provider_request_id: str | None = None
+    ) -> None: ...
+
+    def note_generated_image(self) -> None: ...
+
+    async def finalize(self, status: UsageStatus, *, error_code: str | None = None) -> None: ...
 
 
 def _utc_now() -> datetime:
@@ -291,7 +303,7 @@ class ModelUsageRecorder:
         provider: str,
         model: str,
         operation: UsageOperation,
-    ) -> StreamingAttemptHandle:
+    ) -> StreamingAttempt:
         """Open a handle for one streaming provider attempt.
 
         Unlike the one-call wrappers, a streaming provider yields usage only

@@ -9,12 +9,14 @@ tables, and per-test seed/cleanup via a tenant factory fixture.
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, delete, select
+from sqlalchemy import create_engine, delete, func, select
+from sqlalchemy import event as sa_event
 from sqlalchemy.orm import sessionmaker
 
 from app.models.base import Base
@@ -666,6 +668,98 @@ def test_reconcile_server_aggregation_preserves_all_sums_and_known_counts(
         assert (row.output_text_tokens_sum, row.output_text_tokens_known_count) == (90, 2)
         assert (row.output_image_tokens_sum, row.output_image_tokens_known_count) == (10, 1)
         assert row.generated_images_sum == 3
+
+
+def test_reconcile_minute_lock_serializes_same_minute_but_not_other_minute(
+    repository, tenant_factory, session_factory
+) -> None:
+    user_id, conversation_id, _ = tenant_factory()
+    minute = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(minutes=2)
+    repository.record_event(
+        _command(user_id=user_id, conversation_id=conversation_id, started_at=minute)
+    )
+    locks_acquired = threading.Event()
+    release_reconcile = threading.Event()
+    same_minute_done = threading.Event()
+    other_minute_done = threading.Event()
+    errors: list[BaseException] = []
+    engine = session_factory.kw["bind"]
+
+    def pause_after_exclusive_locks(
+        _connection, _cursor, statement, _parameters, _context, _executemany
+    ):
+        if "pg_advisory_xact_lock(" in statement:
+            locks_acquired.set()
+            if not release_reconcile.wait(5):
+                raise TimeoutError("test did not release reconciliation")
+
+    def run_reconcile():
+        try:
+            repository.reconcile_minute_range(
+                start_inclusive=minute,
+                end_exclusive=minute + timedelta(minutes=1),
+                chunk_minutes=1,
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    def record_at(started_at, done):
+        try:
+            repository.record_event(
+                _command(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    started_at=started_at,
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            done.set()
+
+    sa_event.listen(engine, "after_cursor_execute", pause_after_exclusive_locks)
+    try:
+        reconcile_thread = threading.Thread(target=run_reconcile)
+        reconcile_thread.start()
+        assert locks_acquired.wait(5)
+
+        same_thread = threading.Thread(target=record_at, args=(minute, same_minute_done))
+        other_thread = threading.Thread(
+            target=record_at,
+            args=(minute + timedelta(minutes=1), other_minute_done),
+        )
+        same_thread.start()
+        other_thread.start()
+
+        assert other_minute_done.wait(2), "a different UTC minute must not share the lock"
+        assert not same_minute_done.wait(0.2), "same-minute write must wait for reconciliation"
+        release_reconcile.set()
+        reconcile_thread.join(5)
+        same_thread.join(5)
+        other_thread.join(5)
+        assert not reconcile_thread.is_alive()
+        assert not same_thread.is_alive()
+        assert not other_thread.is_alive()
+        assert errors == []
+    finally:
+        release_reconcile.set()
+        sa_event.remove(engine, "after_cursor_execute", pause_after_exclusive_locks)
+
+    with session_factory() as session:
+        raw_count = session.scalar(
+            select(func.count(ModelUsageEvent.id)).where(
+                ModelUsageEvent.user_id == user_id,
+                ModelUsageEvent.started_at >= minute,
+                ModelUsageEvent.started_at < minute + timedelta(minutes=1),
+            )
+        )
+        rollup_count = session.scalar(
+            select(func.sum(ModelUsageMinute.request_count)).where(
+                ModelUsageMinute.user_id == user_id,
+                ModelUsageMinute.bucket_start_utc == minute,
+            )
+        )
+    assert raw_count == rollup_count == 2
 
 
 def test_rollup_fk_deletes_do_not_mutate_hashed_dimensions(

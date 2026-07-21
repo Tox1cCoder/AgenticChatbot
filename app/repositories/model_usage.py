@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, TypeVar
 from uuid import UUID
 
-from sqlalchemy import DateTime, Integer, and_, column, delete, desc, func, select, values
+from sqlalchemy import DateTime, Integer, and_, column, delete, desc, func, select, text, values
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -35,6 +35,14 @@ from app.usage.types import NormalizedUsage, UsageContext, UsageStatus
 # marker so a future change to the dimension list or encoding can mint a
 # distinct hash space instead of silently colliding with v1 keys.
 _ROLLUP_KEY_VERSION = "v1"
+_MINUTE_LOCK_NAMESPACE = (
+    int.from_bytes(
+        hashlib.sha256(b"model_usage_minute_v1").digest()[:4],
+        byteorder="big",
+    )
+    & 0x7FFFFFFF
+)
+_UINT32_SIZE = 1 << 32
 
 UsageDimension = Literal["provider", "model", "operation", "agent_id", "status", "usage_source"]
 
@@ -70,6 +78,14 @@ def _require_minute_aligned_utc(value: datetime, field_name: str) -> datetime:
     if utc_value.second != 0 or utc_value.microsecond != 0:
         raise ValueError(f"{field_name} must be minute-aligned (second=microsecond=0 UTC)")
     return utc_value
+
+
+def _minute_lock_key(bucket_start_utc: datetime) -> int:
+    aligned = _require_minute_aligned_utc(bucket_start_utc, "bucket_start_utc")
+    minute = int(aligned.timestamp() // 60)
+    if not 0 <= minute < _UINT32_SIZE:
+        raise ValueError("bucket_start_utc is outside the advisory-lock key range")
+    return (_MINUTE_LOCK_NAMESPACE * _UINT32_SIZE) + minute
 
 
 def compute_rollup_key(
@@ -321,6 +337,9 @@ class ModelUsageRepository:
 
         with self.session_factory() as session:
             try:
+                session.execute(
+                    select(func.pg_advisory_xact_lock_shared(_minute_lock_key(bucket_start_utc)))
+                )
                 inserted_id = session.execute(event_insert).scalar_one_or_none()
             except IntegrityError as exc:
                 session.rollback()
@@ -711,6 +730,24 @@ class ModelUsageRepository:
         )
 
         with self.session_factory() as session:
+            session.execute(
+                text(
+                    "SELECT pg_advisory_xact_lock("
+                    "(:namespace * 4294967296::bigint) + "
+                    "floor(extract(epoch FROM minute_at) / 60)::bigint) "
+                    "FROM generate_series("
+                    ":start_inclusive, "
+                    ":end_exclusive - interval '1 minute', "
+                    "interval '1 minute'"
+                    ") AS minute_at "
+                    "ORDER BY minute_at"
+                ),
+                {
+                    "namespace": _MINUTE_LOCK_NAMESPACE,
+                    "start_inclusive": start_inclusive,
+                    "end_exclusive": end_exclusive,
+                },
+            ).all()
             session.execute(
                 delete(ModelUsageMinute).where(
                     ModelUsageMinute.bucket_start_utc >= start_inclusive,

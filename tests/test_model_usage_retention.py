@@ -23,6 +23,16 @@ def test_reconcile_chunk_setting_is_positive_and_configurable():
         )
 
 
+def test_shared_failure_ttl_covers_health_window_and_boundary_bucket():
+    with pytest.raises(ValidationError, match="failure store TTL"):
+        Settings(
+            _env_file=None,
+            secret_key="test-secret-key-with-at-least-32-bytes",
+            model_usage_health_failure_window_seconds=300,
+            model_usage_failure_store_ttl_seconds=300,
+        )
+
+
 def test_reconcile_partitions_full_window_into_bounded_chunks(monkeypatch):
     from app.repositories.model_usage import ModelUsageRepository
 

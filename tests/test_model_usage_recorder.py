@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import typing
 from uuid import uuid4
 
 import pytest
@@ -69,6 +70,13 @@ class CountingCall:
 
 def _metrics() -> ModelUsageMetrics:
     return ModelUsageMetrics(registry=CollectorRegistry())
+
+
+def test_streaming_begin_return_annotation_is_explicit_protocol():
+    from app.usage.recorder import StreamingAttempt
+
+    hints = typing.get_type_hints(ModelUsageRecorder.begin_streaming_attempt)
+    assert hints["return"] is StreamingAttempt
 
 
 def _recorder(repo, *, enqueue=None, metrics=None) -> ModelUsageRecorder:

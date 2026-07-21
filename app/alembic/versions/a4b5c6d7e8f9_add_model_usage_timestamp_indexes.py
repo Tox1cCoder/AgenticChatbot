@@ -22,12 +22,26 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     with op.get_context().autocommit_block():
+        # CREATE INDEX CONCURRENTLY may leave an invalid same-name artifact if
+        # interrupted. Always remove it (or a completed prior artifact) so a
+        # retry deterministically rebuilds a valid index.
+        op.drop_index(
+            "ix_model_usage_events_started_at",
+            table_name="model_usage_events",
+            if_exists=True,
+            postgresql_concurrently=True,
+        )
         op.create_index(
             "ix_model_usage_events_started_at",
             "model_usage_events",
             ["started_at"],
             unique=False,
-            if_not_exists=True,
+            postgresql_concurrently=True,
+        )
+        op.drop_index(
+            "ix_model_usage_minute_bucket_start_utc",
+            table_name="model_usage_minute",
+            if_exists=True,
             postgresql_concurrently=True,
         )
         op.create_index(
@@ -35,7 +49,6 @@ def upgrade() -> None:
             "model_usage_minute",
             ["bucket_start_utc"],
             unique=False,
-            if_not_exists=True,
             postgresql_concurrently=True,
         )
 

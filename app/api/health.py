@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse, Response
 
@@ -18,6 +20,8 @@ from app.observability.model_usage import (
 from app.observability.model_usage import (
     model_usage_metrics as model_usage_metrics_singleton,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _default_service() -> ConversationCompactionHealthService:
@@ -75,7 +79,11 @@ def create_health_router(
     def model_usage_health():
         try:
             return (model_usage_service or _default_model_usage_service()).get_health()
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "model_usage health refresh failed: failure=%s",
+                type(exc).__name__,
+            )
             return JSONResponse(
                 status_code=503,
                 content={"status": "unhealthy", "data_available": False},
@@ -83,6 +91,14 @@ def create_health_router(
 
     @router.get("/metrics/model-usage")
     def model_usage_metrics_endpoint():
+        try:
+            (model_usage_service or _default_model_usage_service()).get_health()
+        except Exception as exc:
+            selected_usage_metrics.mark_health_refresh_failure()
+            logger.warning(
+                "model_usage metrics refresh failed: failure=%s",
+                type(exc).__name__,
+            )
         return Response(
             content=selected_usage_metrics.render(),
             media_type="text/plain; version=0.0.4; charset=utf-8",

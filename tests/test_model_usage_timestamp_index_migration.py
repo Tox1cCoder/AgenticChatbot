@@ -47,6 +47,8 @@ def test_timestamp_index_migration_is_forward_only_and_concurrent():
     assert "postgresql_concurrently=True" in upgrade
     assert "autocommit_block" in downgrade
     assert "postgresql_concurrently=True" in downgrade
+    assert "if_not_exists" not in upgrade
+    assert upgrade.index("op.drop_index") < upgrade.index("op.create_index")
     assert "ix_model_usage_events_started_at" in upgrade
     assert "ix_model_usage_minute_bucket_start_utc" in upgrade
 
@@ -79,6 +81,24 @@ def test_timestamp_index_migration_upgrade_downgrade_on_postgres():
             try:
                 with Operations.context(context):
                     migration_module().upgrade()
+                connection.commit()
+                operations = Operations(context)
+                with context.autocommit_block():
+                    operations.drop_index(
+                        "ix_model_usage_events_started_at",
+                        table_name="model_usage_events",
+                        postgresql_concurrently=True,
+                    )
+                    operations.create_index(
+                        "ix_model_usage_events_started_at",
+                        "model_usage_events",
+                        ["id"],
+                        postgresql_concurrently=True,
+                    )
+                # A retry after a partial/wrong same-name artifact must rebuild
+                # it rather than accepting its name blindly.
+                with Operations.context(context):
+                    migration_module().upgrade()
                 indexes = {
                     index["name"]
                     for table in ("model_usage_events", "model_usage_minute")
@@ -86,6 +106,34 @@ def test_timestamp_index_migration_upgrade_downgrade_on_postgres():
                 }
                 assert "ix_model_usage_events_started_at" in indexes
                 assert "ix_model_usage_minute_bucket_start_utc" in indexes
+                validity = dict(
+                    connection.execute(
+                        text(
+                            "SELECT c.relname, i.indisvalid "
+                            "FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+                            "WHERE c.relname IN "
+                            "('ix_model_usage_events_started_at', "
+                            "'ix_model_usage_minute_bucket_start_utc')"
+                        )
+                    ).all()
+                )
+                assert validity == {
+                    "ix_model_usage_events_started_at": True,
+                    "ix_model_usage_minute_bucket_start_utc": True,
+                }
+                definitions = dict(
+                    connection.execute(
+                        text(
+                            "SELECT c.relname, pg_get_indexdef(c.oid) "
+                            "FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+                            "WHERE c.relname IN "
+                            "('ix_model_usage_events_started_at', "
+                            "'ix_model_usage_minute_bucket_start_utc')"
+                        )
+                    ).all()
+                )
+                assert "(started_at)" in definitions["ix_model_usage_events_started_at"]
+                assert "(bucket_start_utc)" in definitions["ix_model_usage_minute_bucket_start_utc"]
                 connection.execute(text("SET LOCAL enable_seqscan = off"))
                 event_plan = "\n".join(
                     row[0]

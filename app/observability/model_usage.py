@@ -21,11 +21,19 @@ import hmac
 import time
 from collections import deque
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, generate_latest
+
+from app.observability.model_usage_failure_store import (
+    FailureStoreSnapshot,
+    ModelUsageFailureStore,
+    UnavailableModelUsageFailureStore,
+    create_redis_failure_store,
+)
 
 _PROVIDERS = {"openai", "gemini", "anthropic"}
 _OPERATIONS = {
@@ -43,6 +51,15 @@ _OPERATIONS = {
     "suggestion",
     "title",
     "unknown",
+    "workflow",
+    "vision",
+    "image_user_response",
+    "form_fill",
+    "suggestions",
+    "title_generation",
+    "image_caption",
+    "conversation_compaction",
+    "document_index",
 }
 _STATUSES = {"success", "error", "cancelled", "timeout"}
 _SOURCES = {
@@ -63,6 +80,7 @@ class ModelUsageMetrics:
         registry: CollectorRegistry | None = None,
         *,
         monotonic: Callable[[], float] = time.monotonic,
+        failure_store: ModelUsageFailureStore | None = None,
     ) -> None:
         self.registry = registry or CollectorRegistry(auto_describe=True)
         self.attempts = Counter(
@@ -102,10 +120,26 @@ class ModelUsageMetrics:
             "Whether this process-local bounded persistence-failure buffer saturated.",
             registry=self.registry,
         )
+        self.health_failure_store_available = Gauge(
+            "model_usage_health_failure_store_available",
+            "Whether the deployment-scoped persistence-failure store was readable.",
+            registry=self.registry,
+        )
+        self.health_shared_persistence_failures = Gauge(
+            "model_usage_health_shared_persistence_failures",
+            "Deployment-scoped recent model-usage persistence failures.",
+            registry=self.registry,
+        )
+        self.health_snapshot_timestamp = Gauge(
+            "model_usage_health_snapshot_timestamp_seconds",
+            "Unix timestamp of the latest successful durable health snapshot refresh.",
+            registry=self.registry,
+        )
         self._monotonic = monotonic
         self._failure_times: deque[float] = deque(maxlen=_RECENT_FAILURE_BUFFER_MAX)
         self._failure_buffer_saturated = False
         self._failure_lock = Lock()
+        self._failure_store = failure_store or UnavailableModelUsageFailureStore()
 
     def record_attempt(self, *, provider: str, operation: str, status: str, source: str) -> None:
         self.attempts.labels(
@@ -126,6 +160,8 @@ class ModelUsageMetrics:
                 if len(self._failure_times) == _RECENT_FAILURE_BUFFER_MAX:
                     self._failure_buffer_saturated = True
                 self._failure_times.append(self._monotonic())
+            with suppress(Exception):
+                self._failure_store.record_failure()
 
     def recent_persistence_failure_count(self, *, window_seconds: float = 300.0) -> int:
         """Return process-local failures in a bounded recent window.
@@ -146,6 +182,12 @@ class ModelUsageMetrics:
         with self._failure_lock:
             return self._failure_buffer_saturated
 
+    def shared_persistence_failure_snapshot(self, *, window_seconds: float) -> FailureStoreSnapshot:
+        try:
+            return self._failure_store.recent_failure_count(window_seconds=window_seconds)
+        except Exception:
+            return FailureStoreSnapshot(count=0, available=False)
+
     def update_health(self, snapshot: dict[str, Any]) -> None:
         self.health_status.set(
             {"healthy": 0, "degraded": 1, "unhealthy": 2}.get(snapshot.get("status"), 2)
@@ -158,9 +200,19 @@ class ModelUsageMetrics:
         self.health_persistence_failure_saturated.set(
             1 if snapshot.get("persistence_failure_count_saturated") else 0
         )
+        store_available = bool(snapshot.get("persistence_failure_store_available"))
+        self.health_failure_store_available.set(1 if store_available else 0)
+        self.health_shared_persistence_failures.set(
+            max(0, int(snapshot.get("persistence_failure_count", 0)))
+        )
+        self.health_snapshot_timestamp.set(time.time())
 
     def render(self) -> bytes:
         return generate_latest(self.registry)
+
+    def mark_health_refresh_failure(self) -> None:
+        """Mark classification unavailable without fabricating snapshot freshness."""
+        self.health_status.set(2)
 
 
 class ModelUsageHealthService:
@@ -234,14 +286,19 @@ class ModelUsageHealthService:
             lag = self.lookback_minutes
         else:
             lag = 0
-        failures = self.metrics.recent_persistence_failure_count(
+        local_failures = self.metrics.recent_persistence_failure_count(
             window_seconds=self.persistence_failure_window_seconds
         )
+        shared_failures = self.metrics.shared_persistence_failure_snapshot(
+            window_seconds=self.persistence_failure_window_seconds
+        )
+        failures = max(local_failures, shared_failures.count)
 
         if gap > 0 or lag > self.rollup_lag_unhealthy_minutes:
             status = "unhealthy"
         elif (
-            failures > 0
+            not shared_failures.available
+            or failures > 0
             or unattributed_rate > self.unattributed_degraded_ratio
             or lag > self.rollup_lag_degraded_minutes
         ):
@@ -257,8 +314,12 @@ class ModelUsageHealthService:
             "unattributed_event_count": unattributed_count,
             "unattributed_rate": round(unattributed_rate, 6),
             "rollup_lag_minutes": lag,
-            "persistence_failure_count": failures,
-            "persistence_failure_scope": "process",
+            "persistence_failure_count": max(0, shared_failures.count),
+            "process_persistence_failure_count": local_failures,
+            "persistence_failure_scope": (
+                "deployment" if shared_failures.available else "unavailable"
+            ),
+            "persistence_failure_store_available": shared_failures.available,
             "authoritative_health_scope": "database",
             "persistence_failure_count_saturated": (
                 self.metrics.persistence_failure_buffer_saturated()
@@ -322,4 +383,14 @@ def usage_user_hash(user_id: str | None) -> str | None:
     return digest.hexdigest()
 
 
-model_usage_metrics = ModelUsageMetrics()
+def _default_failure_store() -> ModelUsageFailureStore:
+    from app.core.config import settings
+
+    return create_redis_failure_store(
+        settings.redis_url,
+        ttl_seconds=settings.model_usage_failure_store_ttl_seconds,
+        timeout_seconds=settings.model_usage_failure_store_timeout_seconds,
+    )
+
+
+model_usage_metrics = ModelUsageMetrics(failure_store=_default_failure_store())

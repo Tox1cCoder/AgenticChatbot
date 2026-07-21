@@ -672,6 +672,16 @@ class Settings(BaseSettings):
         default=300,
         description="Recent process-local persistence-failure health window",
     )
+    model_usage_failure_store_ttl_seconds: int = Field(
+        default=900,
+        ge=60,
+        description="TTL for content-free Redis model-usage failure minute buckets",
+    )
+    model_usage_failure_store_timeout_seconds: float = Field(
+        default=0.25,
+        gt=0,
+        description="Connect/read timeout for best-effort usage failure counters",
+    )
 
     chat_history_max_messages: int = Field(
         default=24,
@@ -1507,6 +1517,7 @@ class Settings(BaseSettings):
         "model_usage_retry_base_seconds",
         "model_usage_health_lookback_minutes",
         "model_usage_health_failure_window_seconds",
+        "model_usage_failure_store_ttl_seconds",
         mode="before",
     )
     @classmethod
@@ -1631,6 +1642,13 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _cross_field_checks(self) -> "Settings":
+        if (
+            self.model_usage_failure_store_ttl_seconds
+            < self.model_usage_health_failure_window_seconds + 60
+        ):
+            raise ValueError(
+                "model usage failure store TTL must cover the health window plus one minute bucket"
+            )
         if (
             self.model_usage_health_rollup_lag_unhealthy_minutes
             < self.model_usage_health_rollup_lag_degraded_minutes
