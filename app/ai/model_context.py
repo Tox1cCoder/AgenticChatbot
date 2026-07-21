@@ -11,11 +11,24 @@ isolation and called from any layer.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from app.usage import NormalizedUsage
 
 ContextSource = Literal["provider_api", "registry", "heuristic", "unknown"]
 DisplayState = Literal["unknown", "ok", "warn", "danger"]
-UsedTokenSource = Literal["actual_total", "actual_input", "estimated_total", "unknown"]
+# How a model's limits are shaped. ``shared_context`` models bound a single
+# combined window; ``separate_io`` models (e.g. Gemini image) publish distinct
+# input and output limits with no combined window; ``unknown`` models (e.g.
+# OpenAI GPT Image) publish no usable denominator at all.
+LimitType = Literal["shared_context", "separate_io", "unknown"]
+UsedTokenSource = Literal[
+    "provider_reported_total",
+    "provider_reported_split",
+    "estimated_total",
+    "unknown",
+]
 
 
 @dataclass
@@ -29,6 +42,7 @@ class ModelContextWindow:
     max_output_tokens: int | None
     source: ContextSource
     known: bool
+    limit_type: LimitType = "unknown"
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-friendly shape defined by the data contract."""
@@ -38,6 +52,7 @@ class ModelContextWindow:
             "context_window_tokens": self.context_window_tokens,
             "max_input_tokens": self.max_input_tokens,
             "max_output_tokens": self.max_output_tokens,
+            "limit_type": self.limit_type,
             "source": self.source,
             "known": self.known,
         }
@@ -90,6 +105,13 @@ _GEMINI_REGISTRY: dict[str, _RegistryEntry] = {
         "context_window_tokens": 1_048_576,
         "max_output_tokens": 65536,
     },
+    # Image models publish separate input/output limits and no combined
+    # window. ``gemini-3-pro-image-preview`` is the deprecated id; its
+    # replacement ``gemini-3-pro-image`` shares the documented limits and the
+    # alias is kept for persisted-history compatibility.
+    "gemini-3-pro-image": {"max_input_tokens": 65536, "max_output_tokens": 32768},
+    "gemini-3-pro-image-preview": {"max_input_tokens": 65536, "max_output_tokens": 32768},
+    "gemini-3.1-flash-image": {"max_input_tokens": 65536, "max_output_tokens": 32768},
 }
 
 _ANTHROPIC_REGISTRY: dict[str, _RegistryEntry] = {
@@ -218,6 +240,7 @@ def normalize_context_window_metadata(
         max_output_tokens=max_output,
         source="provider_api",
         known=True,
+        limit_type="shared_context",
     )
 
 
@@ -258,14 +281,28 @@ def resolve_model_context_window(
     if entry is not None:
         context_window = entry.get("context_window_tokens")
         max_output = entry.get("max_output_tokens")
+        if context_window is not None:
+            # Shared combined window; input limit equals the window.
+            return ModelContextWindow(
+                provider=provider,
+                model=model_id,
+                context_window_tokens=context_window,
+                max_input_tokens=context_window,
+                max_output_tokens=max_output,
+                source="registry",
+                known=True,
+                limit_type="shared_context",
+            )
+        # Separate input/output limits (image models); no combined window.
         return ModelContextWindow(
             provider=provider,
             model=model_id,
-            context_window_tokens=context_window,
-            max_input_tokens=context_window,
+            context_window_tokens=None,
+            max_input_tokens=entry.get("max_input_tokens"),
             max_output_tokens=max_output,
             source="registry",
             known=True,
+            limit_type="separate_io",
         )
 
     return ModelContextWindow(
@@ -276,6 +313,7 @@ def resolve_model_context_window(
         max_output_tokens=None,
         source="unknown",
         known=False,
+        limit_type="unknown",
     )
 
 
@@ -284,27 +322,36 @@ def resolve_model_context_window(
 # ---------------------------------------------------------------------------
 
 
-def _select_used_tokens(
-    token_breakdown: dict[str, Any] | None,
-) -> tuple[int | None, UsedTokenSource]:
-    """Pick the best available token total from a ``TokenBudgetBreakdown`` dict."""
-    if not isinstance(token_breakdown, dict):
+def _nonneg_int(value: Any) -> int | None:
+    """Return ``value`` when it is a non-boolean, non-negative int, else None."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
+
+
+def _used_tokens_from_usage(usage: NormalizedUsage | None) -> tuple[int | None, UsedTokenSource]:
+    """Pick the best available token figure and label how it was derived.
+
+    Precedence: a reported/estimated combined total, then the sum of the known
+    input/output split, then unknown. A reported total never overrides a
+    reported split — both are preserved separately on the payload; this only
+    chooses the single ``used_tokens`` figure for the shared-window ratio.
+    """
+    if usage is None:
         return None, "unknown"
 
-    actual = token_breakdown.get("actual") or {}
-    if isinstance(actual, dict):
-        actual_total = actual.get("total_tokens")
-        if isinstance(actual_total, int) and actual_total >= 0:
-            return actual_total, "actual_total"
-        actual_input = actual.get("input_tokens")
-        if isinstance(actual_input, int) and actual_input >= 0:
-            return actual_input, "actual_input"
+    source = getattr(usage, "source", "unavailable")
+    reported = source == "provider_reported"
 
-    estimated = token_breakdown.get("estimated") or {}
-    if isinstance(estimated, dict):
-        total = estimated.get("total_tokens")
-        if isinstance(total, int) and total > 0:
-            return total, "estimated_total"
+    total = _nonneg_int(getattr(usage, "total_tokens", None))
+    if total is not None:
+        return total, ("provider_reported_total" if reported else "estimated_total")
+
+    input_tokens = _nonneg_int(getattr(usage, "input_tokens", None))
+    output_tokens = _nonneg_int(getattr(usage, "output_tokens", None))
+    if input_tokens is not None or output_tokens is not None:
+        summed = (input_tokens or 0) + (output_tokens or 0)
+        return summed, ("provider_reported_split" if reported else "estimated_total")
 
     return None, "unknown"
 
@@ -319,63 +366,105 @@ def _classify_display_state(usage_ratio: float | None) -> DisplayState:
     return "danger"
 
 
+def _ratio(numerator: int | None, denominator: Any) -> float | None:
+    if numerator is None or not isinstance(denominator, int) or denominator <= 0:
+        return None
+    return numerator / denominator
+
+
 def build_context_window_usage(
     context_window: dict[str, Any] | None,
-    token_breakdown: dict[str, Any] | None,
+    usage: NormalizedUsage | None,
 ) -> dict[str, Any]:
-    """Compute the context-window usage payload used by the demo indicator.
+    """Compute the limit-aware context-window usage payload for the indicator.
 
     ``context_window`` is the dict shape returned by
-    :meth:`ModelContextWindow.to_dict`. ``token_breakdown`` is the dict
-    returned by ``TokenBudgetBreakdown.to_dict()``.
+    :meth:`ModelContextWindow.to_dict` (carrying ``limit_type``). ``usage`` is a
+    :class:`app.usage.NormalizedUsage`. Provider-reported input, output, and
+    total are preserved independently; a reported total never overwrites a
+    reported split. The returned ratio is raw (never clamped) — the drawn gauge
+    is capped only at render time.
 
-    Returns a dict with ``used_tokens``, ``used_token_source``,
-    ``usage_ratio``, and ``display_state``.
+    ``limit_type`` drives the ratio:
+    - ``shared_context``: ``usage_ratio = used_tokens / context_window_tokens``.
+    - ``separate_io``: input and output ratios are computed independently
+      against their own limits and the larger known ratio wins; a combined
+      total is never divided by a single limit.
+    - unknown / ``known=False``: the token counts are retained but no ratio is
+      produced.
     """
-    # Unknown context window: the indicator collapses to a fully unknown
-    # payload — we have no denominator to make the token count meaningful.
+    input_tokens = _nonneg_int(getattr(usage, "input_tokens", None)) if usage else None
+    output_tokens = _nonneg_int(getattr(usage, "output_tokens", None)) if usage else None
+    total_tokens = _nonneg_int(getattr(usage, "total_tokens", None)) if usage else None
+    usage_source = getattr(usage, "source", "unavailable") if usage else "unavailable"
+
+    payload: dict[str, Any] = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "usage_source": usage_source,
+        "used_tokens": None,
+        "used_token_source": "unknown",
+        "input_usage_ratio": None,
+        "output_usage_ratio": None,
+        "usage_ratio": None,
+        "usage_ratio_basis": None,
+        "display_state": "unknown",
+    }
+
+    # No usable denominator: retain the counts but never invent a ratio.
     if not context_window or not context_window.get("known"):
-        return {
-            "used_tokens": None,
-            "used_token_source": "unknown",
-            "usage_ratio": None,
-            "display_state": "unknown",
-        }
+        return payload
 
-    used_tokens, used_source = _select_used_tokens(token_breakdown)
+    limit_type = context_window.get("limit_type") or "shared_context"
 
-    if used_tokens is None:
-        return {
-            "used_tokens": None,
-            "used_token_source": "unknown",
-            "usage_ratio": None,
-            "display_state": "unknown",
-        }
-
-    if used_source == "actual_total":
-        denominator = context_window.get("context_window_tokens") or context_window.get(
-            "max_input_tokens"
+    if limit_type == "separate_io":
+        input_ratio = _ratio(input_tokens, context_window.get("max_input_tokens"))
+        output_ratio = _ratio(output_tokens, context_window.get("max_output_tokens"))
+        known_ratios = [r for r in (input_ratio, output_ratio) if r is not None]
+        usage_ratio = max(known_ratios) if known_ratios else None
+        used_tokens, used_source = _used_tokens_from_usage(usage)
+        payload.update(
+            {
+                "used_tokens": used_tokens,
+                "used_token_source": used_source,
+                "input_usage_ratio": input_ratio,
+                "output_usage_ratio": output_ratio,
+                "usage_ratio": usage_ratio,
+                "usage_ratio_basis": (
+                    "most_constrained_io_limit" if usage_ratio is not None else None
+                ),
+                "display_state": _classify_display_state(usage_ratio),
+            }
         )
-    else:
-        denominator = context_window.get("max_input_tokens") or context_window.get(
-            "context_window_tokens"
-        )
-    if not isinstance(denominator, int) or denominator <= 0:
-        return {
+        return payload
+
+    if limit_type == "unknown":
+        return payload
+
+    # shared_context
+    denominator = context_window.get("context_window_tokens") or context_window.get(
+        "max_input_tokens"
+    )
+    used_tokens, used_source = _used_tokens_from_usage(usage)
+    usage_ratio = _ratio(used_tokens, denominator)
+    if usage_ratio is None:
+        payload["used_tokens"] = used_tokens
+        payload["used_token_source"] = used_source if used_tokens is not None else "unknown"
+        return payload
+
+    payload.update(
+        {
             "used_tokens": used_tokens,
             "used_token_source": used_source,
-            "usage_ratio": None,
-            "display_state": "unknown",
+            "input_usage_ratio": _ratio(input_tokens, denominator),
+            "output_usage_ratio": _ratio(output_tokens, denominator),
+            "usage_ratio": usage_ratio,
+            "usage_ratio_basis": "shared_context_total",
+            "display_state": _classify_display_state(usage_ratio),
         }
-
-    usage_ratio = used_tokens / denominator
-
-    return {
-        "used_tokens": used_tokens,
-        "used_token_source": used_source,
-        "usage_ratio": usage_ratio,
-        "display_state": _classify_display_state(usage_ratio),
-    }
+    )
+    return payload
 
 
 __all__ = [

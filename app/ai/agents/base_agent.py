@@ -24,6 +24,7 @@ from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ...observability.conversation_compaction import conversation_compaction_metrics
 from ...observability.model_usage import usage_user_hash
 from ...usage import (
+    NormalizedUsage,
     UsageOperation,
     begin_usage_operation,
     bind_usage_context,
@@ -54,7 +55,11 @@ from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..skills_tool import create_activate_skill_tool, get_available_skill_summaries
 from ..time_context import build_runtime_time_context_block
 from ..token_counter import TokenCounter
-from ..token_instrumentation import compute_token_breakdown, extract_actual_usage
+from ..token_instrumentation import (
+    compute_token_breakdown,
+    estimate_output_tokens,
+    extract_actual_usage,
+)
 from ..tool_execution import _WIDGET_SESSION_BOUND_TOOLS, _bind_widget_session_args
 from ..tool_scope import is_client_only_scope
 from ..user_memory_tools import create_user_memory_tools
@@ -205,6 +210,61 @@ def _bind_widget_session_tools(
         else:
             bound_tools.append(tool)
     return bound_tools
+
+
+def _breakdown_int(value: Any) -> int | None:
+    """Non-boolean, non-negative int from a token-breakdown field, else None."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
+
+
+def _normalized_usage_from_token_breakdown(
+    token_breakdown: dict[str, Any] | None,
+    *,
+    output_estimate: int | None = None,
+    source_override: str | None = None,
+) -> NormalizedUsage:
+    """Convert a legacy ``TokenBudgetBreakdown`` dict into a ``NormalizedUsage``.
+
+    Prefers the provider-reported ``actual`` block; falls back to the estimated
+    total. Keeps older persisted metadata readable by the limit-aware gauge
+    without forcing ``total == input + output``.
+
+    ``output_estimate``/``source_override`` fill an absent output count from a
+    local estimate (Task 8 Step 4) and relabel the source accordingly; a
+    provider-reported output is never overwritten.
+    """
+    if isinstance(token_breakdown, dict):
+        actual = token_breakdown.get("actual") or {}
+        if isinstance(actual, dict):
+            input_tokens = _breakdown_int(actual.get("input_tokens"))
+            output_tokens = _breakdown_int(actual.get("output_tokens"))
+            total_tokens = _breakdown_int(actual.get("total_tokens"))
+            reasoning_tokens = _breakdown_int(actual.get("reasoning_tokens"))
+            if any(
+                value is not None
+                for value in (input_tokens, output_tokens, total_tokens, reasoning_tokens)
+            ):
+                source = "provider_reported"
+                if output_tokens is None and output_estimate is not None:
+                    output_tokens = _breakdown_int(output_estimate)
+                    source = source_override or "mixed_reported_estimated"
+                return NormalizedUsage(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    total_tokens=total_tokens,
+                    reasoning_tokens=reasoning_tokens,
+                    source=source,
+                )
+
+        estimated = token_breakdown.get("estimated") or {}
+        if isinstance(estimated, dict):
+            estimated_total = _breakdown_int(estimated.get("total_tokens"))
+            if estimated_total is not None and estimated_total > 0:
+                return NormalizedUsage(total_tokens=estimated_total, source="locally_estimated")
+
+    return NormalizedUsage(source="unavailable")
 
 
 class BaseAgent(ABC):
@@ -782,6 +842,9 @@ class BaseAgent(ABC):
         self,
         metadata: dict[str, Any],
         token_breakdown: dict[str, Any] | None,
+        *,
+        output_estimate: int | None = None,
+        usage_source: str | None = None,
     ) -> None:
         """Merge token-usage fields into ``metadata['context_window']``.
 
@@ -800,8 +863,13 @@ class BaseAgent(ABC):
         if not context_window:
             return
 
+        usage = _normalized_usage_from_token_breakdown(
+            token_breakdown,
+            output_estimate=output_estimate,
+            source_override=usage_source,
+        )
         merged = dict(context_window)
-        merged.update(build_context_window_usage(context_window, token_breakdown))
+        merged.update(build_context_window_usage(context_window, usage))
         metadata["context_window"] = merged
 
     async def _preflight_model_request(
@@ -1470,6 +1538,24 @@ class BaseAgent(ABC):
                 if extracted_reasoning_tokens is not None:
                     reasoning_tokens = extracted_reasoning_tokens
 
+            # When the provider reported usage but omitted the output count,
+            # estimate it from the response text so the gauge can show an
+            # output figure. Never overwrite a reported output; the context
+            # source is relabelled ``mixed_reported_estimated`` downstream.
+            output_estimate: int | None = None
+            usage_source_override: str | None = None
+            if (
+                any(value is not None for value in actual_usage.values())
+                and actual_usage.get("output_tokens") is None
+            ):
+                output_estimate = estimate_output_tokens(
+                    response_text,
+                    provider=runtime_config.provider,
+                    model=runtime_config.model,
+                )
+                if output_estimate is not None:
+                    usage_source_override = "mixed_reported_estimated"
+
             token_breakdown_dict = token_breakdown.to_dict()
             metadata = {
                 "conversation_id": conversation_id,
@@ -1481,7 +1567,12 @@ class BaseAgent(ABC):
             if request_budget_metadata is not None:
                 metadata["request_budget"] = request_budget_metadata
             self._apply_runtime_metadata(metadata, runtime_config)
-            self._merge_context_window_usage(metadata, token_breakdown_dict)
+            self._merge_context_window_usage(
+                metadata,
+                token_breakdown_dict,
+                output_estimate=output_estimate,
+                usage_source=usage_source_override,
+            )
 
             if thinking:
                 metadata["thinking"] = thinking

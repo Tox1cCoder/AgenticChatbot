@@ -890,7 +890,7 @@ def test_invoke_agentic_rag_model_merges_context_window_usage_from_total_tokens(
 
     context_window = response.metadata["context_window"]
     assert context_window["used_tokens"] == 140
-    assert context_window["used_token_source"] == "actual_total"
+    assert context_window["used_token_source"] == "provider_reported_total"
     assert context_window["usage_ratio"] == 140 / 128000
     assert context_window["display_state"] == "ok"
 

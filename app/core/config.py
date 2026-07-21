@@ -444,7 +444,7 @@ class Settings(BaseSettings):
         description="Toggle for enabling or disabling the image generator agent",
     )
     image_generator_model: str = Field(
-        default="gemini-3-pro-image-preview",
+        default="gemini-3-pro-image",
         description="Gemini model identifier used for image generation",
     )
     image_generator_default_aspect_ratio: str = Field(

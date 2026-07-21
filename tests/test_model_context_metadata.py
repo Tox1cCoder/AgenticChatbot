@@ -19,6 +19,7 @@ from app.ai.model_context import (
     normalize_context_window_metadata,
     resolve_model_context_window,
 )
+from app.usage import NormalizedUsage
 
 # ---------------------------------------------------------------------------
 # Registry lookup
@@ -248,6 +249,7 @@ def test_model_context_window_to_dict_shape():
         "context_window_tokens": 128000,
         "max_input_tokens": 128000,
         "max_output_tokens": 16384,
+        "limit_type": "shared_context",
         "source": "registry",
         "known": True,
     }
@@ -268,221 +270,254 @@ def test_unknown_window_to_dict_has_none_numeric_fields():
 # ---------------------------------------------------------------------------
 
 
-def _breakdown(
-    *,
-    estimated_total: int = 0,
-    actual_input: int | None = None,
-    actual_output: int | None = None,
-    actual_total: int | None = None,
-    reasoning_tokens: int | None = None,
-) -> dict:
+def _shared_cw(*, context_window_tokens: int = 128_000, max_output_tokens: int = 16_384) -> dict:
     return {
-        "estimated": {
-            "system_prompt_tokens": 0,
-            "history_tokens": 0,
-            "current_turn_tokens": 0,
-            "tool_message_tokens": 0,
-            "tool_schema_tokens": 0,
-            "total_tokens": estimated_total,
-        },
-        "actual": {
-            "input_tokens": actual_input,
-            "output_tokens": actual_output,
-            "total_tokens": actual_total,
-            "reasoning_tokens": reasoning_tokens,
-        },
-        "counts": {"history_messages": 0, "tool_messages": 0, "bound_tools": 0},
-        "bound_tool_names": [],
+        "provider": "openai",
+        "model": "gpt-4o",
+        "context_window_tokens": context_window_tokens,
+        "max_input_tokens": context_window_tokens,
+        "max_output_tokens": max_output_tokens,
+        "limit_type": "shared_context",
+        "source": "registry",
+        "known": True,
     }
 
 
-def test_build_usage_prefers_actual_total_over_actual_input():
-    """Provider-reported total usage includes completion plus reasoning/thinking
-    tokens, so it is the best post-completion denominator for the indicator."""
+def test_build_usage_shared_context_prefers_reported_total():
+    """A provider-reported total is the ratio numerator for a shared window."""
     cw = resolve_model_context_window("openai", "gpt-4o").to_dict()
     usage = build_context_window_usage(
         cw,
-        _breakdown(
-            estimated_total=20_000,
-            actual_input=12_000,
-            actual_output=2_000,
-            actual_total=15_000,
+        NormalizedUsage(
+            input_tokens=12_000,
+            output_tokens=2_000,
+            total_tokens=15_000,
             reasoning_tokens=1_000,
+            source="provider_reported",
         ),
     )
     assert usage["used_tokens"] == 15_000
-    assert usage["used_token_source"] == "actual_total"
+    assert usage["used_token_source"] == "provider_reported_total"
     assert usage["usage_ratio"] == pytest.approx(15_000 / 128_000)
+    assert usage["usage_ratio_basis"] == "shared_context_total"
+    assert usage["usage_source"] == "provider_reported"
     assert usage["display_state"] == "ok"
 
 
-def test_build_usage_prefers_actual_input_over_estimated_total():
+def test_build_usage_shared_context_sums_split_when_total_absent():
+    """Without a reported total, the known input/output split is summed."""
     cw = resolve_model_context_window("openai", "gpt-4o").to_dict()
     usage = build_context_window_usage(
         cw,
-        _breakdown(estimated_total=20_000, actual_input=12_000),
+        NormalizedUsage(input_tokens=12_000, output_tokens=None, source="provider_reported"),
     )
     assert usage["used_tokens"] == 12_000
-    assert usage["used_token_source"] == "actual_input"
+    assert usage["used_token_source"] == "provider_reported_split"
     assert usage["usage_ratio"] == pytest.approx(12_000 / 128_000)
     assert usage["display_state"] == "ok"
 
 
 def test_build_usage_falls_back_to_estimated_total():
     cw = resolve_model_context_window("openai", "gpt-4o").to_dict()
-    usage = build_context_window_usage(cw, _breakdown(estimated_total=20_000))
+    usage = build_context_window_usage(
+        cw, NormalizedUsage(total_tokens=20_000, source="locally_estimated")
+    )
     assert usage["used_tokens"] == 20_000
     assert usage["used_token_source"] == "estimated_total"
     assert usage["usage_ratio"] == pytest.approx(20_000 / 128_000)
+    assert usage["usage_source"] == "locally_estimated"
     assert usage["display_state"] == "ok"
 
 
 def test_build_usage_unknown_when_no_tokens():
     cw = resolve_model_context_window("openai", "gpt-4o").to_dict()
-    usage = build_context_window_usage(cw, _breakdown())
+    usage = build_context_window_usage(cw, NormalizedUsage(source="unavailable"))
     assert usage["used_tokens"] is None
     assert usage["used_token_source"] == "unknown"
     assert usage["usage_ratio"] is None
     assert usage["display_state"] == "unknown"
 
 
-def test_build_usage_unknown_window_returns_unknown_state():
+def test_build_usage_unknown_window_retains_counts_without_ratio():
+    """An unknown model keeps its raw token counts but invents no ratio."""
     cw = resolve_model_context_window("openai", "totally-made-up-9999").to_dict()
     usage = build_context_window_usage(
         cw,
-        _breakdown(estimated_total=10_000, actual_input=8_000),
+        NormalizedUsage(input_tokens=8_000, output_tokens=100, source="provider_reported"),
     )
+    assert usage["input_tokens"] == 8_000
+    assert usage["output_tokens"] == 100
     assert usage["display_state"] == "unknown"
     assert usage["usage_ratio"] is None
+    assert usage["used_tokens"] is None
 
 
 def test_build_usage_none_context_window_returns_unknown():
-    usage = build_context_window_usage(None, _breakdown(actual_input=8_000))
+    usage = build_context_window_usage(
+        None, NormalizedUsage(input_tokens=8_000, source="provider_reported")
+    )
     assert usage["display_state"] == "unknown"
     assert usage["usage_ratio"] is None
     assert usage["used_tokens"] is None
     assert usage["used_token_source"] == "unknown"
+    # Raw counts are still surfaced even without a denominator.
+    assert usage["input_tokens"] == 8_000
 
 
 def test_build_usage_display_state_ok_below_70_percent():
-    # 0.69 -> ok
-    cw = {
-        "provider": "openai",
-        "model": "gpt-4o",
-        "context_window_tokens": 100,
-        "max_input_tokens": 100,
-        "max_output_tokens": 16,
-        "source": "registry",
-        "known": True,
-    }
-    usage = build_context_window_usage(cw, _breakdown(actual_input=69))
+    usage = build_context_window_usage(
+        _shared_cw(context_window_tokens=100),
+        NormalizedUsage(total_tokens=69, source="provider_reported"),
+    )
     assert usage["usage_ratio"] == pytest.approx(0.69)
     assert usage["display_state"] == "ok"
 
 
 def test_build_usage_display_state_warn_at_70_percent():
-    cw = {
-        "provider": "openai",
-        "model": "gpt-4o",
-        "context_window_tokens": 100,
-        "max_input_tokens": 100,
-        "max_output_tokens": 16,
-        "source": "registry",
-        "known": True,
-    }
-    usage = build_context_window_usage(cw, _breakdown(actual_input=70))
+    usage = build_context_window_usage(
+        _shared_cw(context_window_tokens=100),
+        NormalizedUsage(total_tokens=70, source="provider_reported"),
+    )
     assert usage["display_state"] == "warn"
 
 
 def test_build_usage_display_state_warn_at_89_percent():
-    cw = {
-        "provider": "openai",
-        "model": "gpt-4o",
-        "context_window_tokens": 100,
-        "max_input_tokens": 100,
-        "max_output_tokens": 16,
-        "source": "registry",
-        "known": True,
-    }
-    usage = build_context_window_usage(cw, _breakdown(actual_input=89))
+    usage = build_context_window_usage(
+        _shared_cw(context_window_tokens=100),
+        NormalizedUsage(total_tokens=89, source="provider_reported"),
+    )
     assert usage["display_state"] == "warn"
 
 
 def test_build_usage_display_state_danger_at_90_percent():
-    cw = {
-        "provider": "openai",
-        "model": "gpt-4o",
-        "context_window_tokens": 100,
-        "max_input_tokens": 100,
-        "max_output_tokens": 16,
-        "source": "registry",
-        "known": True,
-    }
-    usage = build_context_window_usage(cw, _breakdown(actual_input=90))
+    usage = build_context_window_usage(
+        _shared_cw(context_window_tokens=100),
+        NormalizedUsage(total_tokens=90, source="provider_reported"),
+    )
     assert usage["display_state"] == "danger"
 
 
-def test_build_usage_uses_max_input_tokens_for_ratio():
-    """When max_input_tokens differs from context_window_tokens, prefer max_input_tokens."""
+def test_build_usage_shared_context_uses_context_window_denominator():
+    """A shared window measures the used total against context_window_tokens."""
+    usage = build_context_window_usage(
+        _shared_cw(context_window_tokens=200, max_output_tokens=50),
+        NormalizedUsage(
+            input_tokens=80, output_tokens=20, total_tokens=120, source="provider_reported"
+        ),
+    )
+    assert usage["used_tokens"] == 120
+    assert usage["used_token_source"] == "provider_reported_total"
+    assert usage["usage_ratio"] == pytest.approx(0.6)
+
+
+def test_build_usage_falls_back_to_max_input_when_no_context_window():
     cw = {
         "provider": "openai",
         "model": "fake",
-        "context_window_tokens": 200,
-        "max_input_tokens": 100,
-        "max_output_tokens": 16,
-        "source": "registry",
-        "known": True,
-    }
-    usage = build_context_window_usage(cw, _breakdown(actual_input=50))
-    assert usage["usage_ratio"] == pytest.approx(0.5)
-
-
-def test_build_usage_uses_context_window_for_actual_total_ratio():
-    """When total usage includes output/reasoning tokens, compare it against
-    the full context window rather than a narrower input-only limit."""
-    cw = {
-        "provider": "openai",
-        "model": "fake",
-        "context_window_tokens": 200,
-        "max_input_tokens": 100,
-        "max_output_tokens": 50,
+        "context_window_tokens": None,
+        "max_input_tokens": 1000,
+        "max_output_tokens": None,
+        "limit_type": "shared_context",
         "source": "registry",
         "known": True,
     }
     usage = build_context_window_usage(
-        cw,
-        _breakdown(actual_input=80, actual_output=20, actual_total=120),
+        cw, NormalizedUsage(input_tokens=100, source="provider_reported")
     )
-    assert usage["used_tokens"] == 120
-    assert usage["used_token_source"] == "actual_total"
-    assert usage["usage_ratio"] == pytest.approx(0.6)
-
-
-def test_build_usage_falls_back_to_context_window_when_no_max_input():
-    cw = {
-        "provider": "openai",
-        "model": "fake",
-        "context_window_tokens": 1000,
-        "max_input_tokens": None,
-        "max_output_tokens": None,
-        "source": "registry",
-        "known": True,
-    }
-    usage = build_context_window_usage(cw, _breakdown(actual_input=100))
     assert usage["usage_ratio"] == pytest.approx(0.1)
 
 
-def test_build_usage_negative_actual_input_falls_back_to_unknown():
-    cw = {
-        "provider": "openai",
-        "model": "fake",
-        "context_window_tokens": 100,
-        "max_input_tokens": 100,
-        "max_output_tokens": 16,
-        "source": "registry",
-        "known": True,
-    }
-    usage = build_context_window_usage(cw, _breakdown(actual_input=-5))
-    assert usage["used_tokens"] is None
-    assert usage["used_token_source"] == "unknown"
-    assert usage["display_state"] == "unknown"
+def test_normalized_usage_rejects_negative_counts():
+    """Negative counts are rejected upstream (Task 1), so they never reach the
+    gauge — the estimator/normalizer maps them to None before this point."""
+    with pytest.raises((ValueError, TypeError)):
+        NormalizedUsage(input_tokens=-5)
+
+
+# ---------------------------------------------------------------------------
+# Limit-aware gauge (Task 8): separate-I/O, shared-context, unknown, no clamp
+# ---------------------------------------------------------------------------
+
+
+def test_separate_io_context_uses_most_constrained_limit():
+    result = build_context_window_usage(
+        {
+            "provider": "gemini",
+            "model": "gemini-3-pro-image",
+            "context_window_tokens": None,
+            "max_input_tokens": 65_536,
+            "max_output_tokens": 32_768,
+            "limit_type": "separate_io",
+            "known": True,
+            "source": "registry",
+        },
+        NormalizedUsage(
+            input_tokens=20_000,
+            output_tokens=5_000,
+            total_tokens=25_000,
+            source="provider_reported",
+        ),
+    )
+    assert result["input_tokens"] == 20_000
+    assert result["output_tokens"] == 5_000
+    assert result["used_tokens"] == 25_000
+    assert result["input_usage_ratio"] == pytest.approx(20_000 / 65_536)
+    assert result["output_usage_ratio"] == pytest.approx(5_000 / 32_768)
+    assert result["usage_ratio"] == pytest.approx(20_000 / 65_536)
+    assert result["usage_ratio_basis"] == "most_constrained_io_limit"
+
+
+def test_shared_context_model_uses_reported_total():
+    result = build_context_window_usage(
+        resolve_model_context_window("gemini", "gemini-2.5-flash").to_dict(),
+        NormalizedUsage(
+            input_tokens=400, output_tokens=100, total_tokens=500, source="provider_reported"
+        ),
+    )
+    assert result["used_tokens"] == 500
+    assert result["used_token_source"] == "provider_reported_total"
+    assert result["usage_ratio"] == pytest.approx(500 / 1_048_576)
+    assert result["usage_ratio_basis"] == "shared_context_total"
+
+
+def test_openai_image_usage_has_tokens_but_unknown_window():
+    cw = resolve_model_context_window("openai", "gpt-image-2").to_dict()
+    assert cw["known"] is False
+    assert cw["limit_type"] == "unknown"
+    result = build_context_window_usage(
+        cw,
+        NormalizedUsage(
+            input_tokens=100, output_tokens=2_000, total_tokens=2_100, source="provider_reported"
+        ),
+    )
+    # Tokens are retained, but there is no denominator to make a ratio.
+    assert result["input_tokens"] == 100
+    assert result["output_tokens"] == 2_000
+    assert result["total_tokens"] == 2_100
+    assert result["usage_ratio"] is None
+    assert result["display_state"] == "unknown"
+
+
+def test_gemini_3_pro_image_has_65536_input_and_32768_output_limits():
+    cw = resolve_model_context_window("gemini", "gemini-3-pro-image")
+    assert cw.known is True
+    assert cw.limit_type == "separate_io"
+    assert cw.context_window_tokens is None
+    assert cw.max_input_tokens == 65_536
+    assert cw.max_output_tokens == 32_768
+    # The deprecated preview alias resolves identically for persisted history.
+    alias = resolve_model_context_window("gemini", "gemini-3-pro-image-preview")
+    assert alias.limit_type == "separate_io"
+    assert alias.max_input_tokens == 65_536
+    assert alias.max_output_tokens == 32_768
+
+
+def test_ratio_is_not_clamped_in_backend():
+    """An over-limit usage yields a ratio > 1.0 — the backend never clamps;
+    only the drawn gauge is capped at render time."""
+    usage = build_context_window_usage(
+        _shared_cw(context_window_tokens=100),
+        NormalizedUsage(total_tokens=150, source="provider_reported"),
+    )
+    assert usage["usage_ratio"] == pytest.approx(1.5)
+    assert usage["display_state"] == "danger"

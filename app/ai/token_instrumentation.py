@@ -251,6 +251,18 @@ def extract_actual_usage(response: Any) -> dict[str, int | None]:
     }
 
 
+def estimate_output_tokens(text: str, *, provider: str, model: str) -> int | None:
+    """Estimate output tokens for a completion when the provider reports none.
+
+    Used only to fill an absent output count so the context gauge can show a
+    figure; the caller labels the resulting source ``mixed_reported_estimated``
+    or ``locally_estimated`` and must never overwrite a provider-reported count.
+    """
+    if not text:
+        return None
+    return _TOKEN_COUNTER.count_text(provider=provider, model=model, text=text).tokens
+
+
 def trim_history_to_budget(
     history: list[Any],
     max_messages: int = 0,

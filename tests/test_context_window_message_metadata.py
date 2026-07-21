@@ -183,8 +183,9 @@ def test_context_window_usage_merged_in_invoke():
     assert cw["known"] is True
     # Usage fields populated.
     assert cw["used_tokens"] == 12500
-    assert cw["used_token_source"] == "actual_total"
+    assert cw["used_token_source"] == "provider_reported_total"
     assert cw["usage_ratio"] == 12500 / 128000
+    assert cw["usage_source"] == "provider_reported"
     assert cw["display_state"] == "ok"
 
 
@@ -210,6 +211,63 @@ def test_context_window_usage_uses_estimated_when_actual_missing():
     assert cw["used_tokens"] == 1000
     assert cw["used_token_source"] == "estimated_total"
     assert cw["display_state"] == "ok"
+
+
+def test_context_window_usage_estimates_output_when_absent():
+    """When the provider reports input but no output, a supplied output
+    estimate fills the gap and the source is relabelled
+    ``mixed_reported_estimated`` — the reported input is never overwritten."""
+    from app.ai.agents import base_agent as base_module
+
+    agent = _FakeAgent()
+    runtime = _runtime_config(context_window=_known_context_window())
+    metadata: dict[str, Any] = {}
+    base_module.BaseAgent._apply_runtime_metadata(agent, metadata, runtime)
+
+    breakdown = TokenBudgetBreakdown(
+        total_tokens=1000,
+        actual_input_tokens=12000,
+        # No actual_output_tokens reported by the provider.
+    )
+    base_module.BaseAgent._merge_context_window_usage(
+        agent,
+        metadata,
+        breakdown.to_dict(),
+        output_estimate=200,
+        usage_source="mixed_reported_estimated",
+    )
+
+    cw = metadata["context_window"]
+    assert cw["input_tokens"] == 12000
+    assert cw["output_tokens"] == 200
+    assert cw["usage_source"] == "mixed_reported_estimated"
+
+
+def test_context_window_usage_estimate_never_overwrites_reported_output():
+    """A supplied output estimate must not replace a provider-reported output."""
+    from app.ai.agents import base_agent as base_module
+
+    agent = _FakeAgent()
+    runtime = _runtime_config(context_window=_known_context_window())
+    metadata: dict[str, Any] = {}
+    base_module.BaseAgent._apply_runtime_metadata(agent, metadata, runtime)
+
+    breakdown = TokenBudgetBreakdown(
+        total_tokens=1000,
+        actual_input_tokens=12000,
+        actual_output_tokens=345,
+    )
+    base_module.BaseAgent._merge_context_window_usage(
+        agent,
+        metadata,
+        breakdown.to_dict(),
+        output_estimate=999,
+        usage_source="mixed_reported_estimated",
+    )
+
+    cw = metadata["context_window"]
+    assert cw["output_tokens"] == 345
+    assert cw["usage_source"] == "provider_reported"
 
 
 def test_context_window_usage_unknown_model_no_misleading_ratio():
