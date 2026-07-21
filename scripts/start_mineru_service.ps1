@@ -39,7 +39,8 @@
     2. Register the service:
        nssm install MinerUService "C:\path\to\Scripts\mineru-api.exe" "--host 0.0.0.0 --port 8765"
     3. Set the working directory (optional):
-       nssm set MinerUService AppDirectory "C:\Users\ADMIN\Documents\Code Practice\Sample Chatbot"
+       $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+       nssm set MinerUService AppDirectory $projectRoot
     4. Start the service:
        nssm start MinerUService
     5. Check status:

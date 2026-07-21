@@ -9,8 +9,6 @@ from pathlib import Path
 
 from client_backend.core.config import client_settings
 
-_logging_configured = False
-
 
 def setup_logging() -> logging.Logger:
     """
@@ -19,7 +17,6 @@ def setup_logging() -> logging.Logger:
     Returns:
         The root logger configured for the client backend.
     """
-    global _logging_configured
     log_level = getattr(logging, client_settings.log_level, logging.INFO)
 
     # Create formatter
@@ -32,8 +29,11 @@ def setup_logging() -> logging.Logger:
     root_logger = logging.getLogger("client_backend")
     root_logger.setLevel(log_level)
 
-    # Clear existing handlers to avoid duplicates
-    root_logger.handlers.clear()
+    # Close replaced file streams as well as removing handlers. Repeated app
+    # lifespans (including tests) otherwise leak descriptors.
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+        handler.close()
 
     # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
@@ -55,7 +55,6 @@ def setup_logging() -> logging.Logger:
 
         root_logger.info(f"Logging to file: {log_file}")
 
-    _logging_configured = True
     return root_logger
 
 

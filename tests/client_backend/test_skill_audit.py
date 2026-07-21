@@ -81,7 +81,7 @@ async def test_successful_command_writes_device_bound_audit_record(tmp_path, aud
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    assert envelope["ok"] is True
+    assert envelope["ok"] is True, envelope
     assert records[0]["qualified_id"] == "skill::demo::run_skill_command"
     assert records[0]["capability"] == "run_skill_command"
     assert records[0]["device_id"] == "device-a"

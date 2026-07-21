@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from client_backend.core import logging as logging_module
@@ -32,3 +33,27 @@ def test_setup_logging_defers_log_directory_creation_until_called(tmp_path, monk
     logging_module.setup_logging()
 
     assert (Path(profile_root) / "logs").is_dir()
+
+
+def test_setup_logging_closes_replaced_handlers(monkeypatch):
+    class TrackingHandler(logging.Handler):
+        explicitly_closed = False
+
+        def close(self) -> None:
+            self.explicitly_closed = True
+            super().close()
+
+    logger = logging.getLogger("client_backend")
+    original_handlers = list(logger.handlers)
+    replaced = TrackingHandler()
+    logger.handlers = [replaced]
+    monkeypatch.setattr(logging_module.client_settings, "log_to_file", False)
+    monkeypatch.setattr(logging_module.client_settings, "log_level", "INFO")
+
+    try:
+        logging_module.setup_logging()
+        assert replaced.explicitly_closed is True
+    finally:
+        for handler in logger.handlers:
+            handler.close()
+        logger.handlers = original_handlers

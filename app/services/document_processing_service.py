@@ -17,7 +17,6 @@ from uuid import UUID
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
-from langchain_community.document_loaders import TextLoader
 from PIL import Image
 
 from app.core.config import Settings
@@ -27,6 +26,7 @@ from app.schemas.document_image import DocumentImageCreate
 from app.services.document_chunk_builder import DocumentChunkBuilder, NormalizedBlock
 from app.services.document_parse_service import DocumentParseService
 from app.services.gemini_retry import is_rate_limit_error, parse_retry_delay
+from app.services.plain_text_loader import load_utf8_text_document
 from app.usage import begin_usage_operation, bind_usage_context, current_usage_context
 from app.usage.types import UsageOperation
 
@@ -307,8 +307,7 @@ class DocumentProcessingService:
         #   with page/section metadata.
         ext = os.path.splitext(filename)[1].lower()
         if ext == ".txt":
-            loader = TextLoader(file_path, encoding="utf-8")
-            documents = loader.load()
+            documents = [load_utf8_text_document(file_path)]
             chunks = self._create_chunks(documents)
             chunks_with_metadata = [{"text": chunk} for chunk in chunks]
 

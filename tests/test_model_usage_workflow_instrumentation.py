@@ -29,6 +29,7 @@ from app.ai.schemas import AgentMessage, AgentType, MessageRole
 from app.core.config import settings
 from app.core.runtime_modeling import ResolvedRuntimeModelConfig, RuntimeFallbackConfig
 from app.observability.model_usage import ModelUsageMetrics
+from app.repositories.model_usage import RecordEventCommand, RecordResult
 from app.usage import (
     UsageContext,
     bind_usage_context,
@@ -45,11 +46,11 @@ class SpyRepository:
     """In-memory double capturing every recorded command."""
 
     def __init__(self) -> None:
-        self.commands: list = []
+        self.commands: list[RecordEventCommand] = []
 
-    def record_event(self, command):
+    def record_event(self, command: RecordEventCommand) -> RecordResult:
         self.commands.append(command)
-        return None
+        return RecordResult(inserted=True, event_id=uuid4())
 
 
 def make_recorder() -> tuple[ModelUsageRecorder, SpyRepository]:

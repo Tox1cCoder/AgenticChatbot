@@ -172,7 +172,7 @@ def live_client_backend(tmp_path):
     client_settings.workspace_roots = [str(Path.cwd())]
     client_settings.skills_roots = []
     client_settings.mcp_config_path = ""
-    client_settings.local_session_secret = "integration-test-local-secret"
+    client_settings.local_session_secret = "integration-test-local-secret-32-bytes"
     client_settings.max_reconnect_attempts = 1
     client_settings.reconnect_delay_seconds = 0
 

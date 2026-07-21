@@ -360,6 +360,26 @@ class Settings(BaseSettings):
         default="gemini-3-flash-preview",
         description="Gemini model identifier used by the form-filler MCP tool",
     )
+    router_model: str = Field(
+        default="gemini-3-flash-preview",
+        description="Gemini model identifier used for request routing",
+    )
+    image_generator_tool_model: str = Field(
+        default="gemini-3-flash-preview",
+        description="Gemini model identifier used for image-agent tool calling",
+    )
+    canvas_agent_model: str = Field(
+        default="gemini-3.1-pro-preview",
+        description="Default model identifier used by the canvas agent",
+    )
+    suggestion_model: str = Field(
+        default="gemini-3-flash-preview",
+        description="Gemini model identifier used to generate follow-up suggestions",
+    )
+    title_generator_model: str = Field(
+        default="gemini-3-flash-preview",
+        description="Gemini model identifier used to generate conversation titles",
+    )
 
     # RAG Embedding / Reranker / Chunking
     rag_embedding_provider: str = Field(
@@ -535,9 +555,7 @@ class Settings(BaseSettings):
     )
 
     # Production conversation compaction. These settings are intentionally
-    # provider-specific and are the only namespace used by the replacement
-    # pipeline. Legacy settings remain temporarily until their callers are
-    # migrated in the scoped cleanup task.
+    # provider-specific and form the single namespace used by the pipeline.
     conversation_summary_enabled: bool = Field(
         default=True,
         description="Enable durable background conversation compaction",

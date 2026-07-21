@@ -8,7 +8,7 @@ from google.genai import types
 
 from ...core.config import settings
 from ...usage import begin_usage_operation, bind_usage_context, current_usage_context
-from ..agent_config import build_gemini_generate_config
+from ..agent_config import AGENT_CONFIG, build_gemini_generate_config
 from ..prompts import ROUTER_SYSTEM_PROMPT
 from ..schemas import AgentMessage
 from ..skills_tool import get_available_skill_summaries
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 class Router:
     def __init__(self, recorder: "ModelUsageRecorder | None" = None):
-        self.model_name = "gemini-3-flash-preview"
+        self.model_name = str(AGENT_CONFIG["router"]["model"])
         self.gemini_client = None
         self.recorder = recorder
         self._init_gemini()
@@ -135,9 +135,7 @@ class Router:
             if self.recorder is not None:
                 # Only the real provider call is recorded; the deterministic
                 # short-circuits above never reach here, so they record nothing.
-                context = current_usage_context().child(
-                    operation="router", agent_id="router"
-                )
+                context = current_usage_context().child(operation="router", agent_id="router")
                 with bind_usage_context(context), begin_usage_operation() as operation:
                     response = await self.recorder.record_one_async_attempt(
                         call=_generate,

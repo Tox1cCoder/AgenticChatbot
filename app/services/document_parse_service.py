@@ -29,13 +29,13 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from app.core.config import Settings
 from app.models.document_parse_artifact import DocumentParseArtifact
 from app.repositories.document_parse_artifact import DocumentParseArtifactRepository
 from app.services.document_chunk_builder import DocumentChunkBuilder
+from app.services.plain_text_loader import load_utf8_text_document
 
 logger = logging.getLogger(__name__)
 
@@ -239,8 +239,7 @@ class DocumentParseService:
         ext = os.path.splitext(filename)[1].lower()
 
         if ext == ".txt":
-            loader = TextLoader(file_path, encoding="utf-8")
-            documents = loader.load()
+            documents = [load_utf8_text_document(file_path)]
             chunks = self._create_chunks(documents)
             chunks_with_metadata = [{"text": chunk} for chunk in chunks]
             images_data: list[dict[str, Any]] = []

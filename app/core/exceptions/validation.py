@@ -12,7 +12,7 @@ class ValidationException(CustomHTTPException):
 
     def __init__(self, detail: str = "Validation failed", error_code: str = "VALIDATION_ERROR"):
         super().__init__(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=detail,
             error_code=error_code,
         )

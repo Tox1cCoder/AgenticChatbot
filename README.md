@@ -279,7 +279,13 @@ The full schema lives in [`app/core/config.py`](app/core/config.py). Selected hi
 | `RAG_AGENT_MODEL` | `gemini-3.1-pro-preview` | |
 | `CHAT_AGENT_MODEL` | `gemini-3-flash-preview` | |
 | `SEARCH_AGENT_MODEL` | `gemini-3-flash-preview` | |
-| `IMAGE_GENERATOR_MODEL` | `gemini-3-pro-image-preview` | |
+| `FORM_FILLER_MODEL` | `gemini-3-flash-preview` | Form-filler MCP tool |
+| `ROUTER_MODEL` | `gemini-3-flash-preview` | Request routing |
+| `IMAGE_GENERATOR_TOOL_MODEL` | `gemini-3-flash-preview` | Image-agent tool calling |
+| `CANVAS_AGENT_MODEL` | `gemini-3.1-pro-preview` | Canvas agent default |
+| `SUGGESTION_MODEL` | `gemini-3-flash-preview` | Follow-up suggestions |
+| `TITLE_GENERATOR_MODEL` | `gemini-3-flash-preview` | Conversation titles |
+| `IMAGE_GENERATOR_MODEL` | `gemini-3-pro-image` | Image generation |
 | `IMAGE_CAPTION_MODEL` | `gemini-3-flash-preview` | |
 | `MEDIA_RESOLUTION` | `high` | `low` / `medium` / `high` (Gemini 3 per-part) |
 | `ENABLE_THINKING` | `true` | |
@@ -1348,7 +1354,8 @@ To register as a Windows service (persistent across reboots), use NSSM:
 
 ```powershell
 nssm install MinerUService "C:\path\to\Scripts\mineru-api.exe" "--host 0.0.0.0 --port 8765"
-nssm set MinerUService AppDirectory "C:\Users\ADMIN\Documents\Code Practice\Sample Chatbot"
+$projectRoot = (Resolve-Path ".").Path
+nssm set MinerUService AppDirectory $projectRoot
 nssm start MinerUService
 ```
 

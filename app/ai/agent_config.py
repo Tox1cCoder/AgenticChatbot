@@ -19,9 +19,13 @@ from ..core.config import settings
 logger = logging.getLogger(__name__)
 
 
-# Unified agent configuration
-# Models are sourced from settings but can be overridden here
+# Unified agent configuration. Runtime model defaults are sourced from Settings;
+# request- and user-level overrides are resolved by their existing call sites.
 AGENT_CONFIG = {
+    "router": {
+        "model": settings.router_model,
+        "temperature": 1.0,
+    },
     "chat": {
         "model": settings.chat_agent_model,
         "temperature": 1.0,
@@ -42,10 +46,10 @@ AGENT_CONFIG = {
     "image_generator": {
         "model": settings.image_generator_model,
         "temperature": 1.0,
-        "langchain_model": "gemini-3-flash-preview",  # For tool calling
+        "langchain_model": settings.image_generator_tool_model,
     },
     "canvas": {
-        "model": "gemini-3.1-pro-preview",
+        "model": settings.canvas_agent_model,
         "temperature": 1.0,
     },
     # Generic entry for custom agents. Per-agent provider/model/temperature come
@@ -56,12 +60,12 @@ AGENT_CONFIG = {
         "temperature": 1.0,
     },
     "suggestion": {
-        "model": "gemini-3-flash-preview",
+        "model": settings.suggestion_model,
         "temperature": 1.0,
         "max_output_tokens": 512,
     },
     "title_generator": {
-        "model": "gemini-3-flash-preview",
+        "model": settings.title_generator_model,
         "temperature": 1.0,
     },
 }
