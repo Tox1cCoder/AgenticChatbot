@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 from datetime import time as datetime_time
 from functools import lru_cache
 from html.parser import HTMLParser
-from math import isfinite
+from math import isclose, isfinite
 from typing import Any
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
@@ -6690,11 +6690,13 @@ def _format_tokens(value: Any) -> str:
     """Format an integer token count as a compact short string (e.g. '12.0k')."""
     if value is None:
         return "?"
+    if isinstance(value, bool):
+        return "?"
     try:
         n = int(value)
     except (TypeError, ValueError, OverflowError):
         return "?"
-    if n < 0:
+    if n < 0 or n > _MAX_PRESENTATION_INTEGER:
         return "?"
     if n >= 1_000_000:
         return f"{n / 1_000_000:.1f}M".replace(".0M", "M")
@@ -6721,13 +6723,15 @@ def _format_context_window_label(context_window: dict[str, Any]) -> str:
 
 
 def _format_context_tokens(value: Any) -> str:
+    if isinstance(value, bool):
+        return "?"
     if value is None:
         return "?"
     try:
         number = int(value)
     except (TypeError, ValueError, OverflowError):
         return "?"
-    if number < 0:
+    if number < 0 or number > _MAX_PRESENTATION_INTEGER:
         return "?"
     if number >= 1_000_000:
         return f"{number / 1_000_000:.1f}M"
@@ -6766,21 +6770,24 @@ def _context_usage_source(context_window: dict[str, Any]) -> tuple[str, str]:
     return badge, badge.lower()
 
 
+_MAX_PRESENTATION_INTEGER = 10**18
+_MAX_PRESENTATION_RATIO = 1_000_000
+
+
 def _valid_ratio(value: Any) -> float | None:
-    if (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and isfinite(value)
-        and value >= 0
-    ):
-        return float(value)
-    return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value < 0 or value > _MAX_PRESENTATION_RATIO:
+        return None
+    if isinstance(value, float) and not isfinite(value):
+        return None
+    return float(value)
 
 
 def _nonnegative_int(value: Any, *, positive: bool = False) -> int | None:
     if not isinstance(value, int) or isinstance(value, bool):
         return None
-    if value < (1 if positive else 0):
+    if value < (1 if positive else 0) or value > _MAX_PRESENTATION_INTEGER:
         return None
     return value
 
@@ -6802,7 +6809,9 @@ def _context_window_presentation(context_window: dict[str, Any]) -> dict[str, An
     total_tokens = _nonnegative_int(context_window.get("total_tokens"))
     used_tokens = _nonnegative_int(context_window.get("used_tokens"))
     limit_type = str(context_window.get("limit_type") or "unknown")
-    raw_ratio = _valid_ratio(context_window.get("usage_ratio"))
+    supplied_ratio_value = context_window.get("usage_ratio")
+    raw_ratio = _valid_ratio(supplied_ratio_value)
+    ratio_was_corrected = False
 
     shared_limit = _nonnegative_int(context_window.get("context_window_tokens"), positive=True)
     if limit_type == "shared_context" and shared_limit is not None:
@@ -6831,7 +6840,11 @@ def _context_window_presentation(context_window: dict[str, Any]) -> dict[str, An
             output_ratio = output_tokens / output_limit
         known_ratios = [ratio for ratio in (input_ratio, output_ratio) if ratio is not None]
         if known_ratios:
-            raw_ratio = max(known_ratios)
+            finalized_ratio = max(known_ratios)
+            ratio_was_corrected = supplied_ratio_value is not None and (
+                raw_ratio is None or not isclose(raw_ratio, finalized_ratio)
+            )
+            raw_ratio = finalized_ratio
         tooltip = (
             f"{_format_usage_percentage(raw_ratio)} limiting · "
             f"input {_format_context_tokens(input_tokens)} / "
@@ -6851,7 +6864,7 @@ def _context_window_presentation(context_window: dict[str, Any]) -> dict[str, An
         )
 
     display_state = str(context_window.get("display_state") or "").lower()
-    if display_state not in {"ok", "warn", "danger", "unknown"}:
+    if ratio_was_corrected or display_state not in {"ok", "warn", "danger", "unknown"}:
         if raw_ratio is None:
             display_state = "unknown"
         elif raw_ratio >= 0.9:

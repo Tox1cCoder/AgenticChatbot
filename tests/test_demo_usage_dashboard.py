@@ -469,11 +469,29 @@ def test_separate_io_ignores_inconsistent_supplied_combined_ratio(monkeypatch):
             "output_usage_ratio": 0.8,
             "usage_ratio": 0.01,
             "usage_source": "provider_reported",
+            "display_state": "ok",
         }
     )
 
     assert presentation["raw_ratio"] == 0.8
     assert presentation["tooltip"].startswith("80% limiting")
+    assert presentation["state"] == "warn"
+
+
+def test_separate_io_preserves_valid_backend_state_when_ratio_is_not_corrected(monkeypatch):
+    demo, _ = _import_demo(monkeypatch)
+    presentation = demo._context_window_presentation(
+        {
+            "limit_type": "separate_io",
+            "input_usage_ratio": 0.2,
+            "output_usage_ratio": 0.8,
+            "usage_ratio": 0.8,
+            "display_state": "danger",
+        }
+    )
+
+    assert presentation["raw_ratio"] == 0.8
+    assert presentation["state"] == "danger"
 
 
 def test_malformed_context_numbers_never_raise(monkeypatch):
@@ -490,6 +508,35 @@ def test_malformed_context_numbers_never_raise(monkeypatch):
 
     assert presentation["state"] == "unknown"
     assert presentation["raw_ratio"] is None
+
+
+@pytest.mark.parametrize(
+    "hostile_value",
+    [10**10_000, -(10**10_000), float("nan"), float("inf"), True],
+    ids=["huge-positive-int", "huge-negative-int", "nan", "infinity", "boolean"],
+)
+def test_hostile_unbounded_context_numbers_never_raise(monkeypatch, hostile_value):
+    demo, _ = _import_demo(monkeypatch)
+    payload = {
+        "limit_type": "separate_io",
+        "input_tokens": hostile_value,
+        "output_tokens": hostile_value,
+        "total_tokens": hostile_value,
+        "used_tokens": hostile_value,
+        "max_input_tokens": hostile_value,
+        "max_output_tokens": hostile_value,
+        "input_usage_ratio": hostile_value,
+        "output_usage_ratio": hostile_value,
+        "usage_ratio": hostile_value,
+    }
+
+    presentation = demo._context_window_presentation(payload)
+
+    assert presentation["raw_ratio"] is None
+    assert presentation["visual_ratio"] == 0.0
+    assert presentation["state"] == "unknown"
+    assert demo._format_tokens(hostile_value) == "?"
+    assert demo._format_context_tokens(hostile_value) == "?"
 
 
 def test_unknown_denominator_shows_counts_without_percentage(monkeypatch):
