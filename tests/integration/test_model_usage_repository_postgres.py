@@ -668,6 +668,34 @@ def test_cleanup_deletes_raw_older_than_90_days_and_rollups_older_than_2_years(
         assert session.get(ModelUsageMinute, recent_rollup_key) is not None
 
 
+def test_health_snapshot_uses_complete_minutes_and_content_free_aggregates(
+    repository, tenant_factory
+) -> None:
+    user_id, conversation_id, _ = tenant_factory()
+    complete_minute = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    event_minute = complete_minute - timedelta(minutes=1)
+    repository.record_event(
+        _command(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            started_at=event_minute,
+        )
+    )
+
+    result = repository.get_model_usage_health_snapshot(
+        now=complete_minute + timedelta(seconds=45),
+        lookback_minutes=10,
+    )
+
+    assert result == {
+        "raw_event_count": 1,
+        "unattributed_event_count": 0,
+        "rollup_request_count": 1,
+        "latest_event_minute": event_minute,
+        "latest_rollup_minute": event_minute,
+    }
+
+
 def test_record_event_rejects_unpersisted_request_message_id(
     repository, tenant_factory, session_factory
 ) -> None:

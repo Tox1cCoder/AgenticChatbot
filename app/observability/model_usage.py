@@ -18,9 +18,14 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import time
+from collections import deque
+from collections.abc import Callable
+from datetime import datetime, timezone
+from threading import Lock
 from typing import Any
 
-from prometheus_client import CollectorRegistry, Counter, generate_latest
+from prometheus_client import CollectorRegistry, Counter, Gauge, generate_latest
 
 _PROVIDERS = {"openai", "gemini", "anthropic"}
 _OPERATIONS = {
@@ -47,12 +52,18 @@ _SOURCES = {
     "unavailable",
 }
 _PERSIST_OUTCOMES = {"stored", "duplicate", "retry_enqueued", "dropped"}
+_RECENT_FAILURE_BUFFER_MAX = 10_000
 
 
 class ModelUsageMetrics:
     """Prometheus collectors whose labels never contain tenant content or IDs."""
 
-    def __init__(self, registry: CollectorRegistry | None = None) -> None:
+    def __init__(
+        self,
+        registry: CollectorRegistry | None = None,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.registry = registry or CollectorRegistry(auto_describe=True)
         self.attempts = Counter(
             "model_usage_attempts_total",
@@ -66,6 +77,35 @@ class ModelUsageMetrics:
             ("outcome", "failure_class"),
             registry=self.registry,
         )
+        self.health_status = Gauge(
+            "model_usage_health_status",
+            "Current model-usage health classification (healthy=0, degraded=1, unhealthy=2).",
+            registry=self.registry,
+        )
+        self.health_rollup_lag = Gauge(
+            "model_usage_health_rollup_lag_minutes",
+            "Lag of the newest rollup in complete UTC minutes.",
+            registry=self.registry,
+        )
+        self.health_rollup_gap = Gauge(
+            "model_usage_health_rollup_gap_count",
+            "Absolute recent difference between durable raw attempts and rollup requests.",
+            registry=self.registry,
+        )
+        self.health_unattributed_rate = Gauge(
+            "model_usage_health_unattributed_rate",
+            "Recent fraction of durable attempts without a verified owner.",
+            registry=self.registry,
+        )
+        self.health_persistence_failure_saturated = Gauge(
+            "model_usage_health_persistence_failure_saturated",
+            "Whether the bounded recent persistence-failure buffer saturated.",
+            registry=self.registry,
+        )
+        self._monotonic = monotonic
+        self._failure_times: deque[float] = deque(maxlen=_RECENT_FAILURE_BUFFER_MAX)
+        self._failure_buffer_saturated = False
+        self._failure_lock = Lock()
 
     def record_attempt(self, *, provider: str, operation: str, status: str, source: str) -> None:
         self.attempts.labels(
@@ -76,13 +116,154 @@ class ModelUsageMetrics:
         ).inc()
 
     def record_persistence(self, outcome: str, *, failure_class: str | None = None) -> None:
+        bounded_outcome = _bounded(outcome, _PERSIST_OUTCOMES)
         self.persistence.labels(
-            outcome=_bounded(outcome, _PERSIST_OUTCOMES),
+            outcome=bounded_outcome,
             failure_class=_failure_class(failure_class),
         ).inc()
+        if bounded_outcome in {"retry_enqueued", "dropped"}:
+            with self._failure_lock:
+                if len(self._failure_times) == _RECENT_FAILURE_BUFFER_MAX:
+                    self._failure_buffer_saturated = True
+                self._failure_times.append(self._monotonic())
+
+    def recent_persistence_failure_count(self, *, window_seconds: float = 300.0) -> int:
+        """Return process-local failures in a bounded recent window.
+
+        Durable raw/rollup comparison remains the authoritative cross-process
+        signal. This short-lived counter adds immediate recorder feedback in
+        the process serving the health endpoint without leaking error content.
+        """
+        cutoff = self._monotonic() - max(1.0, float(window_seconds))
+        with self._failure_lock:
+            while self._failure_times and self._failure_times[0] < cutoff:
+                self._failure_times.popleft()
+            if len(self._failure_times) < _RECENT_FAILURE_BUFFER_MAX:
+                self._failure_buffer_saturated = False
+            return len(self._failure_times)
+
+    def persistence_failure_buffer_saturated(self) -> bool:
+        with self._failure_lock:
+            return self._failure_buffer_saturated
+
+    def update_health(self, snapshot: dict[str, Any]) -> None:
+        self.health_status.set(
+            {"healthy": 0, "degraded": 1, "unhealthy": 2}.get(snapshot.get("status"), 2)
+        )
+        self.health_rollup_lag.set(max(0, int(snapshot.get("rollup_lag_minutes", 0))))
+        self.health_rollup_gap.set(max(0, int(snapshot.get("rollup_gap_count", 0))))
+        self.health_unattributed_rate.set(
+            min(1.0, max(0.0, float(snapshot.get("unattributed_rate", 0.0))))
+        )
+        self.health_persistence_failure_saturated.set(
+            1 if snapshot.get("persistence_failure_count_saturated") else 0
+        )
 
     def render(self) -> bytes:
         return generate_latest(self.registry)
+
+
+class ModelUsageHealthService:
+    """Classify durable aggregate usage health without tenant dimensions.
+
+    Thresholds are explicit constructor inputs. A durable raw/rollup count gap
+    is unhealthy, an unattributed rate above its threshold is degraded, and
+    rollup lag is degraded/unhealthy above the configured minute thresholds.
+    Recent process-local persistence failures degrade immediately; durable
+    count reconciliation remains the cross-worker source of truth.
+    """
+
+    def __init__(
+        self,
+        repository: Any,
+        *,
+        metrics: ModelUsageMetrics,
+        lookback_minutes: int = 60,
+        unattributed_degraded_ratio: float = 0.10,
+        rollup_lag_degraded_minutes: int = 2,
+        rollup_lag_unhealthy_minutes: int = 5,
+        persistence_failure_window_seconds: float = 300.0,
+        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    ) -> None:
+        self.repository = repository
+        self.metrics = metrics
+        self.lookback_minutes = max(1, int(lookback_minutes))
+        self.unattributed_degraded_ratio = min(1.0, max(0.0, float(unattributed_degraded_ratio)))
+        self.rollup_lag_degraded_minutes = max(0, int(rollup_lag_degraded_minutes))
+        self.rollup_lag_unhealthy_minutes = max(
+            self.rollup_lag_degraded_minutes,
+            int(rollup_lag_unhealthy_minutes),
+        )
+        self.persistence_failure_window_seconds = max(
+            1.0, float(persistence_failure_window_seconds)
+        )
+        self.clock = clock
+
+    def get_health(self) -> dict[str, Any]:
+        now = self.clock().astimezone(timezone.utc)
+        raw = self.repository.get_model_usage_health_snapshot(
+            now=now,
+            lookback_minutes=self.lookback_minutes,
+        )
+        event_count = max(0, int(raw.get("raw_event_count", 0)))
+        rollup_count = max(0, int(raw.get("rollup_request_count", 0)))
+        unattributed_count = min(
+            event_count,
+            max(0, int(raw.get("unattributed_event_count", 0))),
+        )
+        unattributed_rate = unattributed_count / event_count if event_count else 0.0
+        gap = abs(event_count - rollup_count)
+        latest_event = raw.get("latest_event_minute")
+        latest_rollup = raw.get("latest_rollup_minute")
+        if (
+            event_count
+            and isinstance(latest_event, datetime)
+            and isinstance(latest_rollup, datetime)
+        ):
+            lag = max(
+                0,
+                int(
+                    (
+                        latest_event.astimezone(timezone.utc)
+                        - latest_rollup.astimezone(timezone.utc)
+                    ).total_seconds()
+                    // 60
+                ),
+            )
+        elif event_count:
+            lag = self.lookback_minutes
+        else:
+            lag = 0
+        failures = self.metrics.recent_persistence_failure_count(
+            window_seconds=self.persistence_failure_window_seconds
+        )
+
+        if gap > 0 or lag > self.rollup_lag_unhealthy_minutes:
+            status = "unhealthy"
+        elif (
+            failures > 0
+            or unattributed_rate > self.unattributed_degraded_ratio
+            or lag > self.rollup_lag_degraded_minutes
+        ):
+            status = "degraded"
+        else:
+            status = "healthy"
+        result = {
+            "status": status,
+            "lookback_minutes": self.lookback_minutes,
+            "raw_event_count": event_count,
+            "rollup_request_count": rollup_count,
+            "rollup_gap_count": gap,
+            "unattributed_event_count": unattributed_count,
+            "unattributed_rate": round(unattributed_rate, 6),
+            "rollup_lag_minutes": lag,
+            "persistence_failure_count": failures,
+            "persistence_failure_count_saturated": (
+                self.metrics.persistence_failure_buffer_saturated()
+            ),
+        }
+        self.metrics.update_health(result)
+        return result
 
 
 def _bounded(value: Any, allowed: set[str]) -> str:

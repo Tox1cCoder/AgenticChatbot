@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 
 from app.core.config import get_settings
 
@@ -65,7 +66,7 @@ celery_app.conf.task_routes = {
     "app.workers.model_usage.cleanup_model_usage_task": {"queue": "summary"},
 }
 
-celery_app.conf.beat_schedule = {
+CELERY_BEAT_SCHEDULE = {
     "reconcile-conversation-summaries": {
         "task": "app.workers.conversation_compaction.reconcile_conversation_summaries_task",
         "schedule": settings.conversation_summary_reconcile_seconds,
@@ -76,4 +77,15 @@ celery_app.conf.beat_schedule = {
         "schedule": 3600,
         "options": {"queue": "summary"},
     },
+    "reconcile-model-usage": {
+        "task": "app.workers.model_usage.reconcile_model_usage_task",
+        "schedule": crontab(minute=15),
+        "options": {"queue": "summary"},
+    },
+    "cleanup-model-usage": {
+        "task": "app.workers.model_usage.cleanup_model_usage_task",
+        "schedule": crontab(minute=40, hour=3),
+        "options": {"queue": "summary"},
+    },
 }
+celery_app.conf.beat_schedule.update(CELERY_BEAT_SCHEDULE)

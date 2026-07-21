@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+from app.core.config import settings
 from app.observability.model_usage import ModelUsageMetrics, model_usage_metrics
 from app.repositories.model_usage import RecordEventCommand
 from app.usage.context import current_usage_context
@@ -113,6 +114,8 @@ class ModelUsageRecorder:
         estimate: EstimateCallback | None = None,
     ) -> Any:
         """Execute ``call`` once, record its outcome off the event loop, return it."""
+        if not settings.model_usage_tracking_enabled:
+            return await call()
         context = self._context_provider()
         attempt = operation.allocate_attempt()
         started_at = self._clock()
@@ -185,6 +188,8 @@ class ModelUsageRecorder:
         ``record_event`` directly (no :func:`asyncio.to_thread`). Semantics are
         identical: one call, no provider retry, same classification and fallback.
         """
+        if not settings.model_usage_tracking_enabled:
+            return call()
         context = self._context_provider()
         attempt = operation.allocate_attempt()
         started_at = self._clock()
@@ -295,6 +300,8 @@ class ModelUsageRecorder:
         but persists **exactly one** event only when :meth:`finalize` is called
         with the terminal status -- never at stream start.
         """
+        if not settings.model_usage_tracking_enabled:
+            return DisabledStreamingAttemptHandle()
         context = self._context_provider()
         attempt = operation.allocate_attempt()
         return StreamingAttemptHandle(
@@ -311,7 +318,7 @@ class ModelUsageRecorder:
     def _persist(self, command: RecordEventCommand) -> None:
         """Write ``command`` to the ledger; never propagate a persistence failure."""
         try:
-            self._repository.record_event(command)
+            result = self._repository.record_event(command)
         except Exception as exc:
             self._handle_persist_failure(command, exc)
             return
@@ -321,7 +328,7 @@ class ModelUsageRecorder:
             status=command.status,
             source=command.usage.source,
         )
-        self._metrics.record_persistence("stored")
+        self._metrics.record_persistence("stored" if result.inserted else "duplicate")
 
     def _handle_persist_failure(self, command: RecordEventCommand, exc: Exception) -> None:
         failure_class = type(exc).__name__
@@ -416,6 +423,19 @@ class StreamingAttemptHandle:
                 provider_request_id=self._provider_request_id,
             ),
         )
+
+
+class DisabledStreamingAttemptHandle:
+    """Drop-in streaming handle used when usage tracking is disabled."""
+
+    def set_usage(self, usage: NormalizedUsage, *, provider_request_id: str | None = None) -> None:
+        return None
+
+    def note_generated_image(self) -> None:
+        return None
+
+    async def finalize(self, status: UsageStatus, *, error_code: str | None = None) -> None:
+        return None
 
 
 # --- content-free (de)serialization for the failed-write retry payload -----

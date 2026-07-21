@@ -1,15 +1,22 @@
-"""Aggregate conversation-compaction health and metrics endpoints."""
+"""Aggregate, content-free internal health and metrics endpoints."""
 
 from __future__ import annotations
 
 from fastapi import APIRouter
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
 from app.core.config import settings
 from app.observability.conversation_compaction import (
     ConversationCompactionHealthService,
     ConversationCompactionMetrics,
     conversation_compaction_metrics,
+)
+from app.observability.model_usage import (
+    ModelUsageHealthService,
+    ModelUsageMetrics,
+)
+from app.observability.model_usage import (
+    model_usage_metrics as model_usage_metrics_singleton,
 )
 
 
@@ -26,13 +33,30 @@ def _default_service() -> ConversationCompactionHealthService:
     )
 
 
+def _default_model_usage_service() -> ModelUsageHealthService:
+    from app.core.container import get_container
+
+    return ModelUsageHealthService(
+        get_container().model_usage_repository(),
+        metrics=model_usage_metrics_singleton,
+        lookback_minutes=settings.model_usage_health_lookback_minutes,
+        unattributed_degraded_ratio=(settings.model_usage_health_unattributed_degraded_ratio),
+        rollup_lag_degraded_minutes=(settings.model_usage_health_rollup_lag_degraded_minutes),
+        rollup_lag_unhealthy_minutes=(settings.model_usage_health_rollup_lag_unhealthy_minutes),
+        persistence_failure_window_seconds=(settings.model_usage_health_failure_window_seconds),
+    )
+
+
 def create_health_router(
     *,
     service: ConversationCompactionHealthService | None = None,
     metrics: ConversationCompactionMetrics | None = None,
+    model_usage_service: ModelUsageHealthService | None = None,
+    model_usage_metrics: ModelUsageMetrics | None = None,
 ) -> APIRouter:
     router = APIRouter(tags=["health"])
     selected_metrics = metrics or conversation_compaction_metrics
+    selected_usage_metrics = model_usage_metrics or model_usage_metrics_singleton
 
     @router.get("/health/conversation-compaction")
     def conversation_compaction_health():
@@ -44,6 +68,23 @@ def create_health_router(
     def conversation_compaction_metrics_endpoint():
         return Response(
             content=selected_metrics.render(),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
+
+    @router.get("/health/model-usage")
+    def model_usage_health():
+        try:
+            return (model_usage_service or _default_model_usage_service()).get_health()
+        except Exception:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "unhealthy", "data_available": False},
+            )
+
+    @router.get("/metrics/model-usage")
+    def model_usage_metrics_endpoint():
+        return Response(
+            content=selected_usage_metrics.render(),
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
 

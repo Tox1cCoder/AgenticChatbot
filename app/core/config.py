@@ -644,6 +644,30 @@ class Settings(BaseSettings):
         default="",
         description="Secret keying the per-user hash for model-usage identity",
     )
+    model_usage_health_lookback_minutes: int = Field(
+        default=60,
+        description="Complete-minute lookback used by model-usage operational health",
+    )
+    model_usage_health_unattributed_degraded_ratio: float = Field(
+        default=0.10,
+        ge=0,
+        le=1,
+        description="Unattributed-attempt ratio above which usage health is degraded",
+    )
+    model_usage_health_rollup_lag_degraded_minutes: int = Field(
+        default=2,
+        ge=0,
+        description="Durable event-to-rollup lag above which usage health is degraded",
+    )
+    model_usage_health_rollup_lag_unhealthy_minutes: int = Field(
+        default=5,
+        ge=0,
+        description="Durable event-to-rollup lag above which usage health is unhealthy",
+    )
+    model_usage_health_failure_window_seconds: int = Field(
+        default=300,
+        description="Recent process-local persistence-failure health window",
+    )
 
     chat_history_max_messages: int = Field(
         default=24,
@@ -1476,6 +1500,8 @@ class Settings(BaseSettings):
         "model_usage_cleanup_batch_size",
         "model_usage_retry_max_attempts",
         "model_usage_retry_base_seconds",
+        "model_usage_health_lookback_minutes",
+        "model_usage_health_failure_window_seconds",
         mode="before",
     )
     @classmethod
@@ -1600,6 +1626,14 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _cross_field_checks(self) -> "Settings":
+        if (
+            self.model_usage_health_rollup_lag_unhealthy_minutes
+            < self.model_usage_health_rollup_lag_degraded_minutes
+        ):
+            raise ValueError(
+                "model usage unhealthy rollup lag must be greater than or equal "
+                "to degraded rollup lag"
+            )
         if (
             self.tool_execution_max_interactive_timeout_seconds
             <= self.tool_execution_cancellation_grace_seconds

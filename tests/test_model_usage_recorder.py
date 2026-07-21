@@ -35,17 +35,21 @@ from app.usage.types import NormalizedUsage, UsageContext, UsageOperation
 class FakeRepository:
     """In-memory double for ``ModelUsageRepository`` (owns no session)."""
 
-    def __init__(self, *, fail_with: Exception | None = None) -> None:
+    def __init__(self, *, fail_with: Exception | None = None, inserted: bool = True) -> None:
         self.commands: list[RecordEventCommand] = []
         self.record_threads: list[int] = []
         self._fail_with = fail_with
+        self._inserted = inserted
 
     def record_event(self, command: RecordEventCommand) -> RecordResult:
         self.record_threads.append(threading.get_ident())
         if self._fail_with is not None:
             raise self._fail_with
         self.commands.append(command)
-        return RecordResult(inserted=True, event_id=uuid4())
+        return RecordResult(
+            inserted=self._inserted,
+            event_id=uuid4() if self._inserted else None,
+        )
 
 
 class CountingCall:
@@ -118,6 +122,90 @@ async def test_success_records_metric():
         provider="openai", operation="chat", status="success", source="provider_reported"
     )._value.get()
     assert value == 1.0
+
+
+async def test_tracking_disabled_executes_provider_without_allocating_or_recording(monkeypatch):
+    from app.core.config import settings
+
+    repo = FakeRepository()
+    metrics = _metrics()
+    recorder = _recorder(repo, metrics=metrics)
+    operation = UsageOperation()
+    call = CountingCall(result={"usage_metadata": {"input_tokens": 1}})
+    monkeypatch.setattr(settings, "model_usage_tracking_enabled", False)
+
+    assert (
+        await recorder.record_one_async_attempt(
+            call=call, provider="gemini", model="any-model", operation=operation
+        )
+        is call.result
+    )
+    assert call.calls == 1
+    assert repo.commands == []
+    assert operation.allocate_attempt() == 1
+    assert metrics.render().decode("utf-8").count("model_usage_attempts_total{") == 0
+
+
+async def test_tracking_disabled_stream_handle_is_a_noop(monkeypatch):
+    from app.core.config import settings
+
+    repo = FakeRepository()
+    recorder = _recorder(repo)
+    operation = UsageOperation()
+    monkeypatch.setattr(settings, "model_usage_tracking_enabled", False)
+
+    handle = recorder.begin_streaming_attempt(
+        provider="openai", model="any-image-model", operation=operation
+    )
+    handle.set_usage(NormalizedUsage(total_tokens=3, source="provider_reported"))
+    handle.note_generated_image()
+    await handle.finalize("success")
+
+    assert repo.commands == []
+    assert operation.allocate_attempt() == 1
+
+
+def test_tracking_disabled_sync_executes_provider_without_recording(monkeypatch):
+    from app.core.config import settings
+
+    repo = FakeRepository()
+    recorder = _recorder(repo)
+    operation = UsageOperation()
+    calls = 0
+    monkeypatch.setattr(settings, "model_usage_tracking_enabled", False)
+
+    def provider_call():
+        nonlocal calls
+        calls += 1
+        return "provider-response"
+
+    assert (
+        recorder.record_one_sync_attempt(
+            call=provider_call,
+            provider="openai",
+            model="any-model",
+            operation=operation,
+        )
+        == "provider-response"
+    )
+    assert calls == 1
+    assert repo.commands == []
+    assert operation.allocate_attempt() == 1
+
+
+async def test_duplicate_write_emits_duplicate_not_stored_metric():
+    metrics = _metrics()
+    recorder = _recorder(FakeRepository(inserted=False), metrics=metrics)
+
+    await recorder.record_one_async_attempt(
+        call=CountingCall(result={}),
+        provider="openai",
+        model="any-model",
+        operation=UsageOperation(),
+    )
+
+    assert metrics.persistence.labels(outcome="duplicate", failure_class="none")._value.get() == 1
+    assert metrics.persistence.labels(outcome="stored", failure_class="none")._value.get() == 0
 
 
 # --- failure classification ---------------------------------------------

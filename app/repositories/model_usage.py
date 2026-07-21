@@ -18,7 +18,7 @@ import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 from uuid import UUID
 
@@ -746,3 +746,53 @@ class ModelUsageRepository:
                 if len(batch_keys) < batch_size:
                     break
         return total_deleted
+
+    def get_model_usage_health_snapshot(
+        self,
+        *,
+        now: datetime,
+        lookback_minutes: int,
+    ) -> dict[str, Any]:
+        """Return bounded, content-free ledger/rollup health aggregates.
+
+        Only complete UTC minutes are inspected.  The result contains counts
+        and timestamps, never tenant, conversation, model, request, or trace
+        dimensions, so it is safe for an unauthenticated operational endpoint.
+        """
+        if lookback_minutes < 1:
+            raise ValueError("lookback_minutes must be >= 1")
+        complete_minute = (
+            _require_aware(now, "now").astimezone(timezone.utc).replace(second=0, microsecond=0)
+        )
+        start = complete_minute - timedelta(minutes=lookback_minutes)
+        raw_statement = select(
+            func.count(ModelUsageEvent.id).label("raw_event_count"),
+            func.count(ModelUsageEvent.id)
+            .filter(ModelUsageEvent.user_id.is_(None))
+            .label("unattributed_event_count"),
+            func.max(func.date_trunc("minute", ModelUsageEvent.started_at)).label(
+                "latest_event_minute"
+            ),
+        ).where(
+            ModelUsageEvent.started_at >= start,
+            ModelUsageEvent.started_at < complete_minute,
+        )
+        rollup_statement = select(
+            func.coalesce(func.sum(ModelUsageMinute.request_count), 0).label(
+                "rollup_request_count"
+            ),
+            func.max(ModelUsageMinute.bucket_start_utc).label("latest_rollup_minute"),
+        ).where(
+            ModelUsageMinute.bucket_start_utc >= start,
+            ModelUsageMinute.bucket_start_utc < complete_minute,
+        )
+        with self.session_factory() as session:
+            raw = session.execute(raw_statement).mappings().one()
+            rollup = session.execute(rollup_statement).mappings().one()
+        return {
+            "raw_event_count": int(raw["raw_event_count"] or 0),
+            "unattributed_event_count": int(raw["unattributed_event_count"] or 0),
+            "rollup_request_count": int(rollup["rollup_request_count"] or 0),
+            "latest_event_minute": raw["latest_event_minute"],
+            "latest_rollup_minute": rollup["latest_rollup_minute"],
+        }
