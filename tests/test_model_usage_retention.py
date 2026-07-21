@@ -63,18 +63,29 @@ def test_model_usage_startup_rejects_impossible_operational_bounds(overrides, me
         )
 
 
-def test_model_usage_startup_accepts_retention_boundary_values():
+def test_model_usage_startup_rejects_equal_reconcile_and_raw_retention_boundary():
+    with pytest.raises(ValidationError, match="strictly shorter"):
+        Settings(
+            _env_file=None,
+            secret_key="test-secret-key-with-at-least-32-bytes",
+            model_usage_raw_retention_days=2,
+            model_usage_rollup_retention_days=2,
+            model_usage_reconcile_minutes=2 * 1_440,
+        )
+
+
+def test_model_usage_startup_accepts_maximum_safe_retention_boundary():
     configured = Settings(
         _env_file=None,
         secret_key="test-secret-key-with-at-least-32-bytes",
         model_usage_raw_retention_days=2,
         model_usage_rollup_retention_days=2,
-        model_usage_reconcile_minutes=2 * 1_440,
+        model_usage_reconcile_minutes=(2 * 1_440) - 1,
         model_usage_health_failure_window_seconds=3_600,
         model_usage_failure_store_ttl_seconds=3_660,
     )
 
-    assert configured.model_usage_reconcile_minutes == 2 * 1_440
+    assert configured.model_usage_reconcile_minutes == (2 * 1_440) - 1
     assert configured.model_usage_rollup_retention_days == 2
 
 

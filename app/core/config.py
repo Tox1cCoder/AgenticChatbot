@@ -671,7 +671,7 @@ class Settings(BaseSettings):
     model_usage_health_failure_window_seconds: int = Field(
         default=300,
         le=3_600,
-        description="Recent process-local persistence-failure health window",
+        description="Recent deployment-shared persistence-failure health window",
     )
     model_usage_failure_store_ttl_seconds: int = Field(
         default=900,
@@ -1644,8 +1644,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _cross_field_checks(self) -> "Settings":
-        if self.model_usage_reconcile_minutes > self.model_usage_raw_retention_days * 1_440:
-            raise ValueError("model usage reconcile window cannot exceed raw-event retention")
+        if self.model_usage_reconcile_minutes >= self.model_usage_raw_retention_days * 1_440:
+            raise ValueError(
+                "model usage reconcile window must be strictly shorter than raw-event retention"
+            )
         if self.model_usage_rollup_retention_days < self.model_usage_raw_retention_days:
             raise ValueError(
                 "model usage rollup retention cannot be shorter than raw-event retention"
