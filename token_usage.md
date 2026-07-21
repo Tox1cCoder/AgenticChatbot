@@ -1188,11 +1188,11 @@ git commit -m "feat: add Streamlit usage analytics"
 - Test: `tests/test_model_usage_retention.py`
 - Test: `tests/test_model_usage_health.py`
 
-- [ ] **Step 1: Write failing maintenance tests**
+- [x] **Step 1: Write failing maintenance tests**
 
 Test reconciliation of the most recent 2,880 complete UTC minutes, exclusion of the active partial minute until safely recomputed, idempotent rebuilds, 5,000-row cleanup batches, 90/730-day cutoffs, both existing schedule dictionaries surviving module import order, and health classification from recorder failures/unattributed rate/rollup lag.
 
-- [ ] **Step 2: Implement periodic tasks**
+- [x] **Step 2: Implement periodic tasks**
 
 ```python
 celery_app.conf.beat_schedule.update({
@@ -1213,17 +1213,17 @@ Cleanup loops in bounded batches and stops when a batch deletes fewer rows than 
 
 Define named schedule dictionaries in both `celery_app.py` and `cleanup_tasks.py` and apply them with `celery_app.conf.beat_schedule.update(...)`; neither module may assign a replacement dictionary. The worker-config test imports the modules in both orders and asserts the union of pre-existing conversation jobs, cleanup jobs, reconciliation, and usage retention jobs.
 
-- [ ] **Step 3: Add internal health and metrics endpoints**
+- [x] **Step 3: Add internal health and metrics endpoints**
 
 Add `/health/model-usage` and `/metrics/model-usage`, following the existing conversation-compaction pattern. Health responses expose aggregate counts/lag only and no tenant identifiers.
 
-- [ ] **Step 4: Run maintenance tests**
+- [x] **Step 4: Run maintenance tests**
 
 Run: `python -m pytest tests/test_model_usage_retention.py tests/test_model_usage_health.py tests/test_celery_worker_config.py -q`
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/workers/model_usage.py app/workers/celery_app.py app/workers/cleanup_tasks.py app/api/health.py app/observability/model_usage.py tests/test_model_usage_retention.py tests/test_model_usage_health.py tests/test_celery_worker_config.py
@@ -1448,3 +1448,5 @@ Implementation progress and decisions made during execution. Updated after each 
 - **Task 15 — complete (2026-07-21).** Commits `4bb88c6`, `6fad91c`, and `83b9c2e`. Defined the executable frontend contract for authenticated usage endpoints and additive AI SDK context metadata without adding a stream event or changing terminal framing. Exact JSON examples round-trip through real `ApiResponse`/usage schemas, include the full envelope, and enforce aggregate invariants; the contract covers ranges/defaults, TypeScript shapes, chart mapping, refresh behavior, gauge semantics, and resilient UI states. Added shared typed `ContextWindowMetadata` with required static limits, optional post-call usage fields, snake_case nesting, and forward-compatible unknown-field handling; `ConversationUsage.latest_context_window` now uses it. Public range constants replace private test coupling, and generated Pydantic schema is structurally compared with TypeScript required/optional fields, including a real static-only producer payload. Final evidence: 138 combined Task 12/API/Task 15 regressions passed, final focused review suites passed 74 tests, Ruff/format/diff checks were clean, and both spec and quality reviews approved with no remaining findings.
 
 - **Task 16 — complete (2026-07-21).** Commits `b2d702b`, `30a8230`, `f1594e0`, `f5edf94`, and `337f3b2`. Added a tenant-safe, token-fingerprint-partitioned 30-second usage cache; portable timezone discovery; DST-aware day/hour query construction; bounded dashboard charts/tables/cards; a resilient retained conversation panel; and corrected accessible shared/separate/unknown context gauges. Review hardening added an authenticated `/usage/capabilities` signal through the canonical API and sidecar so disabled analytics removes both UI surfaces, plus Streamlit 1.55 keyed lazy tabs so inactive workspaces do no API work (dependency manifests synchronized). Nonexistent local hours are rejected before requests, ambiguous folds expose explicit first/second occurrence choices (including Lord Howe half-hour transitions), and hostile legacy numeric metadata degrades safely without breaking chat. Usage cache invalidation occurs only on terminal completion, separate-I/O state follows the actual limiting ratio, and no user identity is placed in queries. Final evidence: 141 combined API/sidecar/UI tests, 196 broad UI regressions, and 130 final focused review tests passed; Ruff/format/compile/diff checks were clean; final spec and quality reviews approved with no findings.
+
+- **Task 17 — complete (2026-07-21).** Commits `ae34511`, `b57c32e`, `78007ec`, `ec75244`, and `478041f`. Added scheduled reconciliation and bounded retention workers without replacing existing beat schedules; reconciliation covers the latest 2,880 complete UTC minutes in configurable chunks, is idempotent, and serializes same-minute writes with ordered transaction advisory locks. Cleanup uses 5,000-row batches and the configured 90/730-day policies, with startup invariants that keep reconciliation strictly inside raw retention and rollups at least as durable as raw events. Aggregate-only health and metrics surfaces now report database lag/unattributed rate plus deployment-shared, content-free Redis failure buckets with bounded timeouts, transactional expiry, capped reads, freshness gauges, and explicit degraded behavior when the shared store is unavailable. The maintenance path reuses the application database lifecycle; standalone timestamp indexes use retry-safe concurrent replacement and recover invalid/wrong same-name artifacts. Final evidence: 221 blast-radius tests plus 17 live PostgreSQL tests passed before the last boundedness fixes; final focused re-reviews passed 39, 27, and 14 tests, Ruff/format/diff checks were clean, Alembic had one head (`a4b5c6d7e8f9`), and both final spec and quality reviews approved with no findings.
