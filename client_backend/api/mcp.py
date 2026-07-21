@@ -160,7 +160,8 @@ def _parse_server_url_payload(payload: dict[str, Any]) -> tuple[str, dict[str, A
     raw_value = str(payload.get("url") or "").strip()
     if not raw_value:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            # Starlette's symbolic name differs across the supported range.
+            status_code=422,
             detail="`url` is required",
         )
 
@@ -180,7 +181,7 @@ def _parse_server_url_payload(payload: dict[str, Any]) -> tuple[str, dict[str, A
     parts = shlex.split(raw_value, posix=sys.platform != "win32")
     if not parts:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=422,
             detail="Unable to parse MCP command string",
         )
 
@@ -250,7 +251,7 @@ async def add_mcp_server(
     name = str(payload.get("name") or "").strip()
     if not name:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=422,
             detail="`name` is required",
         )
 

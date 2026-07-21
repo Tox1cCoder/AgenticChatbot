@@ -9,6 +9,21 @@ import pytest
 from app.ai.mcp_integration import MCPManager
 
 
+def test_default_stdio_servers_resolve_from_outside_repository(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    manager = MCPManager()
+    manager._ensure_config_loaded()
+    server_config = manager._build_server_config()
+
+    assert server_config
+    for config in server_config.values():
+        assert config["command"] == sys.executable
+        script = Path(config["args"][0])
+        assert script.is_absolute()
+        assert script.is_file()
+
+
 @pytest.mark.asyncio
 async def test_server_mcp_manager_cleans_up_stdio_session_without_cancel_scope_error(
     tmp_path,

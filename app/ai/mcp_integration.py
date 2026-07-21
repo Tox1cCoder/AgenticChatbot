@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -118,20 +119,25 @@ class MCPManager:
             transport = normalize_mcp_transport(server_info.get("transport"))
 
             if transport == "stdio":
-                # Convert relative paths to absolute
+                # Bundled config paths are repository-root-relative, independent
+                # of the process working directory used by the ASGI launcher.
+                project_root = Path(__file__).resolve().parents[2]
                 args = server_info.get("args", [])
                 abs_args = []
                 for arg in args:
-                    if arg.endswith(".py") and not os.path.isabs(arg):
-                        # Make path absolute relative to project root
-                        abs_path = os.path.abspath(arg)
-                        abs_args.append(abs_path)
+                    path = Path(arg)
+                    if arg.endswith(".py") and not path.is_absolute():
+                        abs_args.append(str((project_root / path).resolve()))
                     else:
                         abs_args.append(arg)
 
+                command = str(server_info.get("command") or "python")
+                if command.lower() in {"python", "python3"}:
+                    command = sys.executable
+
                 entry = build_mcp_server_entry(
                     transport=transport,
-                    command=server_info.get("command", "python"),
+                    command=command,
                     args=abs_args,
                     cwd=server_info.get("cwd"),
                     env=server_info.get("env"),

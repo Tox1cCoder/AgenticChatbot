@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import ast
+import json
 import re
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
+    import tomli as tomllib
 
 from app.ai import agent_config
 from app.ai.agents.router import Router
@@ -33,6 +39,21 @@ def _tracked_audit_files() -> list[Path]:
         capture_output=True,
     )
     return [ROOT / item.decode() for item in completed.stdout.split(b"\0") if item]
+
+
+def _env_example_values() -> dict[str, str]:
+    values = {}
+    for line in (ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
+        if line and not line.startswith("#") and "=" in line:
+            name, value = line.split("=", 1)
+            values[name] = value
+    return values
+
+
+def _env_default(value: object) -> str:
+    if isinstance(value, bool):
+        return str(value).lower()
+    return str(value)
 
 
 def test_tracked_runtime_and_docs_do_not_embed_developer_home_paths() -> None:
@@ -117,11 +138,7 @@ def test_runtime_model_defaults_are_settings_backed() -> None:
 
 
 def test_model_env_example_matches_runtime_defaults() -> None:
-    example_values = {}
-    for line in (ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
-        if line and not line.startswith("#") and "=" in line:
-            name, value = line.split("=", 1)
-            example_values[name] = value
+    example_values = _env_example_values()
 
     setting_names = (
         "rag_agent_model",
@@ -141,6 +158,51 @@ def test_model_env_example_matches_runtime_defaults() -> None:
         assert example_values.get(env_name) == Settings.model_fields[setting_name].default
 
 
+def test_every_model_usage_setting_is_discoverable_with_accurate_default() -> None:
+    usage_fields = {
+        name: field
+        for name, field in Settings.model_fields.items()
+        if name.startswith("model_usage_")
+    }
+    example_values = _env_example_values()
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert len(usage_fields) == 17
+    for name, field in usage_fields.items():
+        env_name = name.upper()
+        expected = _env_default(field.default)
+        assert example_values.get(env_name) == expected
+        assert f"| `{env_name}` | `{expected or 'blank'}` |" in readme
+
+    assert example_values["MODEL_USAGE_USER_HASH_SECRET"] == ""
+    assert "app/core/config.py::Settings" in readme
+
+
+def test_model_usage_operator_constraints_are_documented() -> None:
+    env_text = " ".join(
+        (ROOT / ".env.example").read_text(encoding="utf-8").replace("#", "").split()
+    )
+    readme = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
+
+    required_guidance = (
+        "reconcile window must be shorter than raw retention",
+        "rollup retention must be at least raw retention",
+        "failure-store TTL must cover the health window plus 60 seconds",
+        "unhealthy rollup lag must be at least degraded rollup lag",
+        "MODEL_USAGE_USER_HASH_SECRET must be set in production when LangSmith tracing is enabled",
+        "retention, reconciliation, cleanup, retry, lookback, failure-window, "
+        "and TTL integers must be positive",
+        "unattributed ratio must be between 0 and 1",
+        "rollup lag thresholds must be nonnegative",
+        "failure window cannot exceed 3600 seconds",
+        "failure-store TTL must be between 60 and 86400 seconds",
+        "failure-store timeout must be positive",
+    )
+    for guidance in required_guidance:
+        assert guidance in env_text
+        assert guidance in readme
+
+
 def test_router_uses_agent_config_model(monkeypatch) -> None:
     monkeypatch.setitem(agent_config.AGENT_CONFIG, "router", {"model": "configured-router"})
     monkeypatch.setattr(Router, "_init_gemini", lambda self: None)
@@ -148,14 +210,53 @@ def test_router_uses_agent_config_model(monkeypatch) -> None:
     assert Router().model_name == "configured-router"
 
 
-def test_production_code_avoids_deprecated_fastapi_422_name() -> None:
-    violations: list[str] = []
-    for root_name in ("app", "client_backend"):
-        for path in (ROOT / root_name).rglob("*.py"):
-            if "HTTP_422_UNPROCESSABLE_ENTITY" in path.read_text(encoding="utf-8"):
-                violations.append(path.relative_to(ROOT).as_posix())
+def test_validation_error_paths_do_not_depend_on_starlette_422_names() -> None:
+    script = """
+import asyncio
 
-    assert not violations, f"deprecated HTTP 422 constant used in: {violations}"
+from fastapi import HTTPException, status
+
+for name in ("HTTP_422_UNPROCESSABLE_CONTENT", "HTTP_422_UNPROCESSABLE_ENTITY"):
+    status.__dict__.pop(name, None)
+
+from app.core.exceptions.validation import ValidationException
+from client_backend.api import auth, mcp
+
+assert ValidationException().status_code == 422
+
+calls = (
+    lambda: mcp._parse_server_url_payload({}),
+    lambda: asyncio.run(mcp.add_mcp_server({}, None)),
+)
+for call in calls:
+    try:
+        call()
+    except HTTPException as exc:
+        assert exc.status_code == 422
+    else:
+        raise AssertionError("expected HTTP 422")
+
+class InvalidRequest:
+    password = "unused"
+    def resolved_email(self):
+        raise ValueError("invalid login")
+
+auth.get_upstream_auth_service = lambda: object()
+try:
+    asyncio.run(auth.login(InvalidRequest()))
+except HTTPException as exc:
+    assert exc.status_code == 422
+else:
+    raise AssertionError("expected HTTP 422")
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_production_no_longer_depends_on_sunset_langchain_community() -> None:
@@ -172,6 +273,96 @@ def test_production_no_longer_depends_on_sunset_langchain_community() -> None:
 
     assert not source_violations, f"sunset imports remain in: {source_violations}"
     assert not manifest_violations, f"sunset direct dependencies remain in: {manifest_violations}"
+
+
+def test_default_stdio_mcp_servers_only_launch_tracked_portable_scripts() -> None:
+    config = json.loads((ROOT / "app" / "ai" / "mcp_config.json").read_text(encoding="utf-8"))
+    tracked = {
+        path.replace("\\", "/")
+        for path in subprocess.run(
+            ["git", "ls-files", "--", "app/ai/mcp_servers"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+    }
+
+    for name, server in config["mcp_servers"].items():
+        if server.get("transport") != "stdio":
+            continue
+        command = str(server.get("command") or "")
+        args = [str(value) for value in server.get("args", [])]
+        launcher_tokens = {command.lower(), *(value.lower() for value in args)}
+        assert command
+        assert not PurePosixPath(command).is_absolute()
+        assert not PureWindowsPath(command).is_absolute()
+        assert not {"cmd", "conda", "powershell", "pwsh", "/c"}.intersection(launcher_tokens), (
+            f"{name} contains a developer launcher chain: {args!r}"
+        )
+
+        script_args = [value for value in args if Path(value).suffix in {".js", ".mjs", ".py"}]
+        assert len(script_args) == 1, f"{name} must identify one server script"
+        script = Path(script_args[0])
+        assert not PurePosixPath(script_args[0]).is_absolute()
+        assert not PureWindowsPath(script_args[0]).is_absolute()
+        normalized = script.as_posix()
+        assert normalized in tracked, f"{name} references an untracked server: {normalized}"
+        assert (ROOT / script).is_file(), f"{name} references a missing server: {normalized}"
+
+
+def test_readme_only_claims_tracked_mcp_assets_are_bundled() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "boring_reader" not in readme
+    assert "ships its own Tesseract" not in readme
+    assert "YOLO artifacts" not in readme
+
+
+def test_httpx2_testclient_dependency_is_declared_in_every_manifest() -> None:
+    dependencies = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"][
+        "dependencies"
+    ]
+    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+    environment = (ROOT / "environment.yml").read_text(encoding="utf-8").splitlines()
+
+    assert "httpx2>=2.0.0,<3.0.0" in dependencies
+    assert "httpx>=0.25.0" in dependencies
+    assert "httpx2==2.0.0" in requirements
+    assert "httpx==0.28.1" in requirements
+    assert "      - httpx2==2.0.0" in environment
+    assert any(line.strip().startswith("- httpx=") for line in environment)
+
+
+def test_fastapi_testclient_uses_httpx2_without_deprecation_warning() -> None:
+    script = """
+import warnings
+
+warnings.simplefilter("error", DeprecationWarning)
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+app = FastAPI()
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+with TestClient(app) as client:
+    response = client.get("/health")
+
+assert response.status_code == 200
+assert response.json() == {"status": "ok"}
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_plain_text_loader_returns_langchain_document_with_source(tmp_path: Path) -> None:

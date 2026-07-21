@@ -44,22 +44,6 @@
         "app/ai/mcp_servers/form_filler_server.py"
       ],
       "description": "Natural language incident report form filler - extracts structured data from Vietnamese/English descriptions"
-    },
-    "boring": {
-      "enabled": false,
-      "transport": "stdio",
-      "command": "cmd",
-      "args": [
-        "/c",
-        "conda",
-        "run",
-        "-n",
-        "chatbot",
-        "--no-capture-output",
-        "python",
-        "app/ai/mcp_servers/boring_servers/boring_reader_server.py"
-      ],
-      "description": "Borehole PDF data extractor - extracts structured borehole log data from PDF files"
     }
   }
 }

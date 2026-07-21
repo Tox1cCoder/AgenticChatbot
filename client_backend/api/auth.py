@@ -183,7 +183,8 @@ async def login(request: LoginRequest) -> dict[str, Any]:
     except HTTPException:
         raise
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(e)) from e
+        # Starlette's symbolic name differs across the supported range.
+        raise HTTPException(status_code=422, detail=str(e)) from e
     except Exception as exc:
         raise_server_error(exc)
 

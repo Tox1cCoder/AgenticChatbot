@@ -117,7 +117,7 @@ Both services speak the same schemas (`app/schemas/`). The **client backend** ex
 ├── app/                              Canonical server backend (FastAPI)
 │   ├── ai/                           LangGraph workflow, agents, MCP, skills, tools
 │   │   ├── agents/                   chat / rag / search / image / planning / canvas / router
-│   │   ├── mcp_servers/              Built-in MCP servers (calculator, tavily, brave_image_search, time, widgets, form_filler, boring_reader)
+│   │   ├── mcp_servers/              Built-in MCP servers (calculator, tavily, brave_image_search, time, widgets, form_filler)
 │   │   ├── graph.py                  MultiAgentWorkflow + streaming + HITL
 │   │   ├── history.py                Canonical compacted-memory + transcript assembly
 │   │   ├── conversation_compactor.py Durable compaction orchestration
@@ -292,6 +292,44 @@ The full schema lives in [`app/core/config.py`](app/core/config.py). Selected hi
 | `THINKING_LEVEL` | `high` | `minimal` / `low` / `medium` / `high` (Gemini 3) |
 | `THINKING_BUDGET` | `-1` | Token budget for Gemini 2.5 (-1 dynamic, 0 off) |
 | `ENABLE_GEMINI_CODE_EXECUTION` | `true` | Native code-execution tool |
+
+### Model usage analytics
+
+These variables are discovered by `app/core/config.py::Settings`. The values
+below are safe development defaults; deployment-specific guidance will live in
+the operations runbook.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MODEL_USAGE_TRACKING_ENABLED` | `true` | Record provider attempts and rollups |
+| `MODEL_USAGE_UI_ENABLED` | `true` | Expose usage analytics endpoints and UI |
+| `MODEL_USAGE_RAW_RETENTION_DAYS` | `90` | Raw-event retention |
+| `MODEL_USAGE_ROLLUP_RETENTION_DAYS` | `730` | Minute-rollup retention |
+| `MODEL_USAGE_RECONCILE_MINUTES` | `2880` | Trailing reconciliation window |
+| `MODEL_USAGE_RECONCILE_CHUNK_MINUTES` | `60` | Maximum transaction span |
+| `MODEL_USAGE_CLEANUP_BATCH_SIZE` | `5000` | Rows deleted per cleanup batch |
+| `MODEL_USAGE_RETRY_MAX_ATTEMPTS` | `5` | Failed-write retry limit |
+| `MODEL_USAGE_RETRY_BASE_SECONDS` | `10` | Exponential retry base delay |
+| `MODEL_USAGE_USER_HASH_SECRET` | `blank` | User-hash key; development may leave blank |
+| `MODEL_USAGE_HEALTH_LOOKBACK_MINUTES` | `60` | Health snapshot lookback |
+| `MODEL_USAGE_HEALTH_UNATTRIBUTED_DEGRADED_RATIO` | `0.1` | Degraded unattributed-attempt threshold |
+| `MODEL_USAGE_HEALTH_ROLLUP_LAG_DEGRADED_MINUTES` | `2` | Degraded rollup-lag threshold |
+| `MODEL_USAGE_HEALTH_ROLLUP_LAG_UNHEALTHY_MINUTES` | `5` | Unhealthy rollup-lag threshold |
+| `MODEL_USAGE_HEALTH_FAILURE_WINDOW_SECONDS` | `300` | Shared failure-health window |
+| `MODEL_USAGE_FAILURE_STORE_TTL_SECONDS` | `900` | Redis failure-bucket TTL |
+| `MODEL_USAGE_FAILURE_STORE_TIMEOUT_SECONDS` | `0.25` | Best-effort Redis timeout |
+
+Cross-field constraints: reconcile window must be shorter than raw retention;
+rollup retention must be at least raw retention; failure-store TTL must cover
+the health window plus 60 seconds; unhealthy rollup lag must be at least
+degraded rollup lag. MODEL_USAGE_USER_HASH_SECRET must be set in production
+when LangSmith tracing is enabled.
+
+Per-field ranges: retention, reconciliation, cleanup, retry, lookback,
+failure-window, and TTL integers must be positive; unattributed ratio must be
+between 0 and 1; rollup lag thresholds must be nonnegative; failure window
+cannot exceed 3600 seconds; failure-store TTL must be between 60 and 86400
+seconds; failure-store timeout must be positive.
 
 ### Vector store / RAG
 
@@ -690,7 +728,6 @@ The bundled in-process MCP servers are under [`app/ai/mcp_servers/`](app/ai/mcp_
 | `brave_image_search_server.py` | Brave Image Search adapter — normalized inline image candidates |
 | `widgets_server.py` | Emits interactive widget state + mints tokens |
 | `form_filler_server.py` | Structured-form population |
-| `boring_servers/boring_reader_server.py` | Local PDF/image/OCR exploration (ships its own Tesseract + YOLO artifacts under `boring_servers/`) |
 
 The same endpoints are exposed by `client_backend` at `/mcp/*` so a desktop UI can configure MCP both globally (server) and per-device (client).
 

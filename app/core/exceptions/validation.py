@@ -12,7 +12,8 @@ class ValidationException(CustomHTTPException):
 
     def __init__(self, detail: str = "Validation failed", error_code: str = "VALIDATION_ERROR"):
         super().__init__(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            # Starlette's symbolic name differs across the supported range.
+            status_code=422,
             detail=detail,
             error_code=error_code,
         )
