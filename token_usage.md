@@ -703,7 +703,7 @@ git commit -m "feat: attribute workflow model usage"
 - Test: `tests/test_model_context_metadata.py`
 - Test: `tests/test_context_window_message_metadata.py`
 
-- [ ] **Step 1: Write failing limit-aware gauge tests**
+- [x] **Step 1: Write failing limit-aware gauge tests**
 
 ```python
 def test_separate_io_context_uses_most_constrained_limit():
@@ -737,25 +737,25 @@ def test_separate_io_context_uses_most_constrained_limit():
 
 Add four more concrete tests named `test_shared_context_model_uses_reported_total`, `test_openai_image_usage_has_tokens_but_unknown_window`, `test_gemini_3_pro_image_has_65536_input_and_32768_output_limits`, and `test_ratio_is_not_clamped_in_backend`.
 
-- [ ] **Step 2: Update the usage algorithm and its callers**
+- [x] **Step 2: Update the usage algorithm and its callers**
 
 Change `build_context_window_usage()` to accept `NormalizedUsage`. Replace `_select_used_tokens()` with a function returning input, output, total, and source without forcing `total == input + output`. For `limit_type="shared_context"`, prefer a provider total only for the ratio and otherwise sum known split values or explicit estimates. For `limit_type="separate_io"`, compute input and output ratios independently and choose the larger known ratio. For `limit_type="unknown"`, retain counts but return `usage_ratio=None`. `BaseAgent._merge_context_window_usage()` converts existing `token_breakdown.actual` values to `NormalizedUsage`, so legacy persisted metadata remains readable. Attach `limit_type`, both split ratios, `usage_ratio`, and `usage_ratio_basis` to the context payload.
 
-- [ ] **Step 3: Update the registry and default model**
+- [x] **Step 3: Update the registry and default model**
 
 Add exact/family entries for `gemini-3-pro-image`, its preview alias for persisted-history compatibility, and `gemini-3.1-flash-image`. Mark Gemini image entries `separate_io` with their documented input/output limits and no synthetic shared-context denominator. Change `image_generator_model` default and `.env.example` from `gemini-3-pro-image-preview` to `gemini-3-pro-image`. Mark `gpt-image-*` and `dall-e-*` limits `unknown`; do not add guessed denominators.
 
-- [ ] **Step 4: Estimate response output only when reported output is absent**
+- [x] **Step 4: Estimate response output only when reported output is absent**
 
 Use `TokenCounter.count_text(provider, model, coerce_response_text(response.content))`; label the resulting context source `mixed_reported_estimated` or `locally_estimated`. Never overwrite provider-reported counts.
 
-- [ ] **Step 5: Run context tests**
+- [x] **Step 5: Run context tests**
 
 Run: `python -m pytest tests/test_model_context_metadata.py tests/test_context_window_message_metadata.py tests/test_ai_sdk_context_window.py -q`
 
 Expected: all tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/ai/model_context.py app/ai/token_instrumentation.py app/core/config.py .env.example tests/test_model_context_metadata.py tests/test_context_window_message_metadata.py
@@ -1412,3 +1412,10 @@ Implementation progress and decisions made during execution. Updated after each 
 - **Task 7 — complete (2026-07-21).** Commit `41a8278`. Records every real provider attempt with per-user attribution. `bind_usage_context` at the AI service execute/stream/resume boundaries; ONE `begin_usage_operation()` in `BaseAgent.invoke_model_with_history` spanning generic retries + context-overflow retry + provider fallback, with `_ainvoke_with_retries` wrapping the single `ainvoke` in `record_one_async_attempt` (provider/model read from the CURRENT `runtime_config`, so a fallback attempt records the fallback provider); router, title (`AIService.generate_conversation_title`), and suggestion (`SuggestionGenerator`, sync-recorded via `to_thread` context copy) instrumented; deterministic short-circuits + cache hits record zero. LangSmith correlation (operation id + keyed `usage_user_hash`) added to the existing runnable config only. `usage_user_hash` helper added to `app/observability/model_usage.py`. D9: AIService reaches the recorder via the workflow's new public `model_usage_recorder` property (container.py untouched). New 20-test file (spy-repository seam). 44/44 on Step-7 command, full suite 2122 passed / 0 failures. Implementer opus, reviewer opus — **Spec ✅, Approved, 0 Critical/Important.**
   - Minor findings (final-review triage): (1) `AIService.generate_conversation_title` (ai_service.py:510) and `MessageService._generate_title_async` (message_service.py:674) keep `user_id=None` optional vs. the governing required `*, user_id` — both real callers pass it, so no present data loss, but the fail-fast attribution guard is lost; (2) the usage context/operation CMs are `__enter__`-ed just OUTSIDE the `try/finally` that tears them down (base_agent.py:1225 / finally :1416) — realistically unreachable contextvar leak if `_augment_run_config_with_usage` raised; recommend moving inside the try or using AsyncExitStack.
   - Step-6 scope note (accepted, not a gap): LangSmith correlation augments only an EXISTING `run_config` (subagent calls); top-level `ainvoke` calls carry no config and are left untouched — matches the plan's "add to the existing runnable config".
+
+- **Task 8 — complete (2026-07-21). IMPLEMENTED + REVIEWED INLINE by the controller** — the org monthly spend limit was re-hit mid-dispatch of the Task 8 implementer subagent (it worked for Tasks 6–7, now exhausted), so subagent delegation is blocked again; controller fell back to inline TDD per the user's "continue" and the Task 5 precedent. Commit `8d3250d`. `ModelContextWindow` gains `limit_type` (shared_context/separate_io/unknown); `build_context_window_usage(context_window, NormalizedUsage)` computes shared-total ratio, most-constrained separate-I/O ratio (`most_constrained_io_limit`, never total÷one-side), or retains counts with no ratio when unknown, returning the RAW uncapped ratio + both split ratios + `usage_ratio_basis`. Registry: `gemini-3-pro-image` + `gemini-3-pro-image-preview` alias + `gemini-3.1-flash-image` = separate_io 65536/32768; GPT-Image/DALL-E resolve to unknown (no invented denominator). Output estimated only when provider reports none (`mixed_reported_estimated`, never overwrites reported). `image_generator_model` default → `gemini-3-pro-image`. 135 tests green across the 5 affected files (Step-5 command + rag/provider blast radius); ruff clean.
+  - **D10:** `app/ai/agents/base_agent.py` was folded into scope (brief omitted it): `_merge_context_window_usage` now converts the legacy `token_breakdown` → `NormalizedUsage` internally (new `_normalized_usage_from_token_breakdown` helper) and gained keyword `output_estimate`/`usage_source`. `rag_agent.py:915`'s 2-arg call is unchanged (conversion is internal). `used_token_source` vocabulary changed (`actual_total`→`provider_reported_total`, `actual_input`→`provider_reported_split`); migrated the one rag_agent assertion + the message-metadata + model_context tests.
+  - **D11:** clean signature change (no union/back-compat path) per the plan's "Replace `_select_used_tokens()`"; existing `build_context_window_usage` tests were migrated to `NormalizedUsage`. The old `test_build_usage_uses_max_input_tokens_for_ratio` (which encoded input-vs-total denominator selection) was replaced by `..._shared_context_uses_context_window_denominator` reflecting the new shared-window semantics; the negative-input test became `test_normalized_usage_rejects_negative_counts` (negatives are rejected upstream in Task 1, so they never reach the gauge).
+  - **D12 (Step 4):** output estimate is threaded via optional params and NOT written into the breakdown's `actual` block (avoids mislabeling an estimate as "actual"); only the context payload's `usage_source` becomes `mixed_reported_estimated`.
+  - **`.env.example` manual handoff (D2 — global-guard blocks the file):** change `IMAGE_GENERATOR_MODEL=gemini-3-pro-image-preview` → `IMAGE_GENERATOR_MODEL=gemini-3-pro-image`.
+  - Follow-on note for Task 15/16 (expected, not a regression): demo.py gauge tooltip + ai_sdk projection still read the pre-Task-8 payload shape; Tasks 15/16 update them to the new `limit_type`/split-ratio/`usage_source` fields. No existing demo/ai_sdk test broke (wider sweep 745 passed).
