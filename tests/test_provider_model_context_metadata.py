@@ -253,8 +253,9 @@ def _install_fake_genai(
     """
     captured: dict[str, Any] = {}
 
-    def _client_factory(*, api_key: str) -> _FakeGeminiClient:
+    def _client_factory(*, api_key: str, http_options: Any = None) -> _FakeGeminiClient:
         captured["api_key"] = api_key
+        captured["http_options"] = http_options
         return _FakeGeminiClient(models)
 
     fake_module = ModuleType("google.genai")
