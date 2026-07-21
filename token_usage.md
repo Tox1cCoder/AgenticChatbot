@@ -864,29 +864,29 @@ git commit -m "feat: track document and embedding usage"
 - Test: `tests/test_model_usage_callsite_inventory.py`
 - Create: `tests/fixtures/model_usage_callsite_manifest.json`
 
-- [ ] **Step 1: Write failing compaction attribution tests**
+- [x] **Step 1: Write failing compaction attribution tests**
 
 Verify owner/conversation attribution for background and emergency compaction, provider-reported usage, timeout/error attempts, and user-credential versus server-credential calls. Credential source is not exposed in analytics.
 
-- [ ] **Step 2: Pass conversation identity to the compaction generator**
+- [x] **Step 2: Pass conversation identity to the compaction generator**
 
 Extend `ConversationCompactor.compact()` and its generator call with verified `user_id` and `conversation_id`; bind operation `conversation_compaction` around `_langchain_generate()` and wrap the one provider attempt.
 
-- [ ] **Step 3: Instrument form filler as unattributed when process context is unavailable**
+- [x] **Step 3: Instrument form filler as unattributed when process context is unavailable**
 
 Wrap its Gemini call with operation `form_fill`. If the MCP transport does not carry verified user identity, record `user_id = NULL`; do not add user-controlled identity fields to tool arguments.
 
-- [ ] **Step 4: Pin the model-call inventory**
+- [x] **Step 4: Pin the model-call inventory**
 
 Create an AST-based source contract test over `app/` and `client_backend/` that recognizes provider terminal calls by attribute chain, including `generate_content`, `generate_content_stream`, `embed_content`, `ainvoke`, `invoke`, `astream`, `stream`, `agenerate`, `generate`, `responses.create`, `chat.completions.create`, `images.generate`, and `images.edit`. Also inventory `ChatGoogleGenerativeAI`, `ChatOpenAI`, `genai.Client`, `OpenAI`, and `AsyncOpenAI` constructors so new clients cannot silently re-enable internal retries. Compare discovered file/function/call-chain entries with a reviewed JSON manifest whose disposition is `instrumented`, `local_model`, `non_provider_tool_dispatch`, `workflow_stream`, or `startup_validation`; this explicitly excludes current `tool.ainvoke(...)` and `graph.astream(...)` sites without mistaking them for provider calls. Fail on any new, removed, or moved callsite until the manifest and instrumentation are reviewed together. Do not treat proximity to a wrapper as proof—tests for each `instrumented` entry must name the operation and exercise the wrapper.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `python -m pytest tests/test_model_usage_compaction.py tests/test_model_usage_callsite_inventory.py tests/test_conversation_compactor.py tests/test_conversation_compaction_tasks.py -q`
 
 Expected: all tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/ai/conversation_compactor.py app/workers/conversation_compaction.py app/ai/mcp_servers/form_filler_server.py tests/test_model_usage_compaction.py tests/test_model_usage_callsite_inventory.py tests/fixtures/model_usage_callsite_manifest.json
@@ -1436,3 +1436,5 @@ Implementation progress and decisions made during execution. Updated after each 
   - **D22 — worker binds AND passes.** `index_document_task` builds `UsageContext(user_id=verified owner, conversation_id, document_id, operation="document_index")`, binds it around the in-thread caption stage, and ALSO passes it explicitly to `index_document(usage_context=...)` for the executor-threaded embeddings. Ownership is derived from the verified conversation owner, never from the Celery payload. `reindex_document` (maintenance) passes no context → `user_id = NULL`.
   - **Test-fixture fixes (necessary, non-behavioral):** `_EmbeddingStub` in `test_document_index_service.py` now accepts `usage_context` (and captures it as `last_usage_context`) since `_embed_and_upsert` forwards the kwarg; added `test_index_document_threads_usage_context_to_embeddings`.
   - **Deferred to Task 11 (unchanged from Task 9 note):** `ImageGeneratorAgent._generate_user_facing_response`'s direct `langchain_model.ainvoke` remains uninstrumented; the AST callsite inventory will flag it. The full `index_document_task` Celery path is covered by attribution unit tests (embedding-level owner/NULL) + Task 18 manual smoke rather than a mocked end-to-end worker test.
+
+- **Task 11 — complete (2026-07-21).** Commits `fc1d51e`, `39955f8`, `032027f`, and `310464f`. Conversation compaction now records verified owner/conversation attribution and classifies provider timeouts correctly; form filling records unattributed usage with a configurable model and bounded initialization warnings; the image acknowledgement call records the actual auxiliary provider/model; dead image-agent legacy entrypoints were removed. A tracked-file AST inventory pins provider terminals and client constructors, including aliases, safe `getattr` indirection, executor callables, and `functools.partial`; every instrumented manifest entry has an operation-bound exercising proof. Concrete Gemini stream and OpenAI generate/edit paths are tested through the real `ImageGeneratorAgent` recorder boundary. Required suite 59 passed under `-W error`; expanded strict review suite 85 passed; referenced instrumentation tests 56 passed; Ruff check/format and detached clean-checkout inventory passed. Spec review approved; final quality review approved with 0 Critical/Important/Minor findings.
