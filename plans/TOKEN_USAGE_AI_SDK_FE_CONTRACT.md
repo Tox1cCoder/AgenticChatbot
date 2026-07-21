@@ -40,7 +40,10 @@ use the existing API error envelope.
   "message": "Usage dashboard retrieved",
   "data": {
     "totals": {"inputTokens": 1200, "outputTokens": 300, "totalTokens": 1500, "reasoningTokens": 25, "cachedInputTokens": 100, "generatedImages": 1, "requestCount": 3},
-    "outcomes": [{"key": "success", "totals": {"inputTokens": 1000, "outputTokens": 250, "totalTokens": 1250, "reasoningTokens": 25, "cachedInputTokens": 100, "generatedImages": 1, "requestCount": 2}}],
+    "outcomes": [
+      {"key": "success", "totals": {"inputTokens": 1000, "outputTokens": 250, "totalTokens": 1250, "reasoningTokens": 25, "cachedInputTokens": 100, "generatedImages": 1, "requestCount": 2}},
+      {"key": "error", "totals": {"inputTokens": 200, "outputTokens": 50, "totalTokens": 250, "reasoningTokens": 0, "cachedInputTokens": 0, "generatedImages": 0, "requestCount": 1}}
+    ],
     "series": [{"start": "2026-07-01T00:00:00Z", "end": "2026-07-02T00:00:00Z", "totals": {"inputTokens": 1200, "outputTokens": 300, "totalTokens": 1500, "reasoningTokens": 25, "cachedInputTokens": 100, "generatedImages": 1, "requestCount": 3}}],
     "byProvider": [{"key": "provider-a", "totals": {"inputTokens": 1200, "outputTokens": 300, "totalTokens": 1500, "reasoningTokens": 25, "cachedInputTokens": 100, "generatedImages": 1, "requestCount": 3}}],
     "byModel": [{"key": "model-a", "totals": {"inputTokens": 1200, "outputTokens": 300, "totalTokens": 1500, "reasoningTokens": 25, "cachedInputTokens": 100, "generatedImages": 1, "requestCount": 3}}],
@@ -119,13 +122,13 @@ type ContextWindowMetadata = {
   context_window_tokens: number | null; max_input_tokens: number | null; max_output_tokens: number | null;
   limit_type: "shared_context" | "separate_io" | "unknown";
   source: "provider_api" | "registry" | "heuristic" | "unknown"; known: boolean;
-  input_tokens: number | null; output_tokens: number | null; total_tokens: number | null;
-  usage_source: "provider_reported" | "mixed_reported_estimated" | "locally_estimated" | "unavailable";
-  used_tokens: number | null;
-  used_token_source: "provider_reported_total" | "provider_reported_split" | "estimated_total" | "unknown";
-  input_usage_ratio: number | null; output_usage_ratio: number | null; usage_ratio: number | null;
-  usage_ratio_basis: "shared_context_total" | "most_constrained_io_limit" | null;
-  display_state: "unknown" | "ok" | "warn" | "danger";
+  input_tokens?: number | null; output_tokens?: number | null; total_tokens?: number | null;
+  usage_source?: "provider_reported" | "mixed_reported_estimated" | "locally_estimated" | "unavailable" | null;
+  used_tokens?: number | null;
+  used_token_source?: "provider_reported_total" | "provider_reported_split" | "estimated_total" | "unknown" | null;
+  input_usage_ratio?: number | null; output_usage_ratio?: number | null; usage_ratio?: number | null;
+  usage_ratio_basis?: "shared_context_total" | "most_constrained_io_limit" | null;
+  display_state?: "unknown" | "ok" | "warn" | "danger" | null;
 };
 
 type UsageDashboard = {

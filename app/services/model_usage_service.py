@@ -14,6 +14,7 @@ from app.interfaces.model_usage_service_interface import IModelUsageService
 from app.repositories.model_usage import DimensionUsageTotals
 from app.repositories.model_usage import UsageTotals as RepositoryUsageTotals
 from app.schemas.model_usage import (
+    ContextWindowMetadata,
     ConversationUsage,
     ConversationUsageItem,
     ConversationUsageQuery,
@@ -29,8 +30,10 @@ from app.schemas.model_usage import (
 from app.usage.types import NormalizedUsage
 
 _UTC = timezone.utc
-_DASHBOARD_DAYS = 30
-_RETENTION_DAYS = 730
+USAGE_DASHBOARD_DEFAULT_DAYS = 30
+USAGE_CONVERSATION_DEFAULT_DAYS = 730
+USAGE_MAX_RANGE_DAYS = 730
+USAGE_MAX_HOURLY_RANGE_DAYS = 31
 
 
 class ModelUsageService(IModelUsageService):
@@ -51,7 +54,9 @@ class ModelUsageService(IModelUsageService):
     def get_dashboard(self, *, user_id: UUID, query: UsageDashboardQuery) -> UsageDashboard:
         if query.conversation_id is not None:
             self._require_owned_conversation(user_id, query.conversation_id)
-        usage_range, start_utc, end_utc = self._resolve_range(query, default_days=_DASHBOARD_DAYS)
+        usage_range, start_utc, end_utc = self._resolve_range(
+            query, default_days=USAGE_DASHBOARD_DEFAULT_DAYS
+        )
         scope = self._query_scope(user_id, start_utc, end_utc, query.conversation_id)
         totals = self._public_totals(self.repository.get_summary_totals(**scope))
         intervals = self._build_bucket_intervals(usage_range, start_utc, end_utc)
@@ -87,7 +92,9 @@ class ModelUsageService(IModelUsageService):
         query: ConversationUsageQuery,
     ) -> ConversationUsage:
         self._require_owned_conversation(user_id, conversation_id)
-        usage_range, start_utc, end_utc = self._resolve_range(query, default_days=_RETENTION_DAYS)
+        usage_range, start_utc, end_utc = self._resolve_range(
+            query, default_days=USAGE_CONVERSATION_DEFAULT_DAYS
+        )
         scope = self._query_scope(user_id, start_utc, end_utc, conversation_id)
         latest = self.repository.get_latest_conversation_event(
             user_id=user_id, conversation_id=conversation_id
@@ -190,15 +197,17 @@ class ModelUsageService(IModelUsageService):
                 error_code="INVALID_USAGE_RANGE",
             )
         wall_duration = end_local.replace(tzinfo=None) - start_local.replace(tzinfo=None)
-        if wall_duration > timedelta(days=_RETENTION_DAYS):
+        if wall_duration > timedelta(days=USAGE_MAX_RANGE_DAYS):
             raise ValidationException(
-                detail="Usage range cannot exceed two years (730 days)",
+                detail=(f"Usage range cannot exceed two years ({USAGE_MAX_RANGE_DAYS} days)"),
                 error_code="USAGE_RANGE_TOO_LARGE",
             )
         if query.bucket == "hour":
-            if wall_duration > timedelta(days=31):
+            if wall_duration > timedelta(days=USAGE_MAX_HOURLY_RANGE_DAYS):
                 raise ValidationException(
-                    detail="Hourly usage ranges cannot exceed 31 days",
+                    detail=(
+                        f"Hourly usage ranges cannot exceed {USAGE_MAX_HOURLY_RANGE_DAYS} days"
+                    ),
                     error_code="USAGE_HOURLY_RANGE_TOO_LARGE",
                 )
             if any(
@@ -363,7 +372,7 @@ class ModelUsageService(IModelUsageService):
         ]
 
     @staticmethod
-    def _latest_context_window(event: Any | None) -> dict[str, Any] | None:
+    def _latest_context_window(event: Any | None) -> ContextWindowMetadata | None:
         if event is None:
             return None
         context = resolve_model_context_window(event.provider, event.model).to_dict()
@@ -377,7 +386,13 @@ class ModelUsageService(IModelUsageService):
             source=event.usage_source,
         )
         context.update(build_context_window_usage(context, usage))
-        return context
+        return ContextWindowMetadata.model_validate(context)
 
 
-__all__ = ["ModelUsageService"]
+__all__ = [
+    "ModelUsageService",
+    "USAGE_CONVERSATION_DEFAULT_DAYS",
+    "USAGE_DASHBOARD_DEFAULT_DAYS",
+    "USAGE_MAX_HOURLY_RANGE_DAYS",
+    "USAGE_MAX_RANGE_DAYS",
+]

@@ -2,7 +2,7 @@
 
 import re
 from datetime import datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import Query
@@ -11,12 +11,58 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.utils.case_conversion import to_camel_case
 
 UsageBucket = Literal["hour", "day"]
+ContextSource = Literal["provider_api", "registry", "heuristic", "unknown"]
+ContextLimitType = Literal["shared_context", "separate_io", "unknown"]
+ContextUsageSource = Literal[
+    "provider_reported",
+    "mixed_reported_estimated",
+    "locally_estimated",
+    "unavailable",
+]
+ContextUsedTokenSource = Literal[
+    "provider_reported_total",
+    "provider_reported_split",
+    "estimated_total",
+    "unknown",
+]
+ContextUsageRatioBasis = Literal["shared_context_total", "most_constrained_io_limit"]
+ContextDisplayState = Literal["unknown", "ok", "warn", "danger"]
 
 
 class UsageModel(BaseModel):
     """Base model using the API's camelCase serialization convention."""
 
     model_config = ConfigDict(alias_generator=to_camel_case, populate_by_name=True)
+
+
+class ContextWindowMetadata(BaseModel):
+    """Static model limits plus optional usage added after a model call.
+
+    Keys intentionally remain snake_case because this shape is persisted in
+    AI SDK message metadata. Unknown future keys are ignored by typed readers.
+    """
+
+    provider: str
+    model: str
+    context_window_tokens: int | None = Field(ge=1)
+    max_input_tokens: int | None = Field(ge=1)
+    max_output_tokens: int | None = Field(ge=1)
+    limit_type: ContextLimitType
+    source: ContextSource
+    known: bool
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+    usage_source: ContextUsageSource | None = None
+    used_tokens: int | None = Field(default=None, ge=0)
+    used_token_source: ContextUsedTokenSource | None = None
+    input_usage_ratio: float | None = Field(default=None, ge=0)
+    output_usage_ratio: float | None = Field(default=None, ge=0)
+    usage_ratio: float | None = Field(default=None, ge=0)
+    usage_ratio_basis: ContextUsageRatioBasis | None = None
+    display_state: ContextDisplayState | None = None
+
+    model_config = ConfigDict(extra="ignore")
 
 
 class UsageTotals(UsageModel):
@@ -82,7 +128,7 @@ class ConversationUsage(UsageModel):
     by_provider: list[UsageBreakdownItem]
     by_model: list[UsageBreakdownItem]
     coverage: UsageCoverage
-    latest_context_window: dict[str, Any] | None
+    latest_context_window: ContextWindowMetadata | None
     range: UsageRange
     generated_at: datetime
 
@@ -132,6 +178,7 @@ ConversationUsageQueryParams = Annotated[ConversationUsageQuery, Query()]
 
 
 __all__ = [
+    "ContextWindowMetadata",
     "ConversationUsage",
     "ConversationUsageItem",
     "ConversationUsageQuery",

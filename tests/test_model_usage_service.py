@@ -18,6 +18,7 @@ from app.repositories.model_usage import (
     UsageTotals as RepositoryUsageTotals,
 )
 from app.schemas.model_usage import (
+    ContextWindowMetadata,
     ConversationUsage,
     ConversationUsageItem,
     ConversationUsageQuery,
@@ -157,13 +158,28 @@ def test_usage_response_models_share_typed_nested_shapes() -> None:
         by_provider=[breakdown],
         by_model=[],
         coverage=coverage,
-        latest_context_window={"known": False},
+        latest_context_window=ContextWindowMetadata(
+            provider="custom",
+            model="unknown-model",
+            context_window_tokens=None,
+            max_input_tokens=None,
+            max_output_tokens=None,
+            limit_type="unknown",
+            source="unknown",
+            known=False,
+        ),
         range=usage_range,
         generated_at=generated_at,
     )
 
     assert dashboard.model_dump(by_alias=True)["topConversations"][0]["conversationId"]
-    assert detail.model_dump(by_alias=True)["latestContextWindow"] == {"known": False}
+    assert detail.model_dump(by_alias=True, exclude_none=True)["latestContextWindow"] == {
+        "provider": "custom",
+        "model": "unknown-model",
+        "limit_type": "unknown",
+        "source": "unknown",
+        "known": False,
+    }
 
 
 @pytest.mark.parametrize(
@@ -790,9 +806,9 @@ def test_conversation_latest_event_builds_context_gauge_without_message_scan() -
     )
 
     assert result.latest_context_window is not None
-    assert result.latest_context_window["context_window_tokens"] == 128_000
-    assert result.latest_context_window["used_tokens"] == 64_000
-    assert result.latest_context_window["usage_ratio"] == 0.5
+    assert result.latest_context_window.context_window_tokens == 128_000
+    assert result.latest_context_window.used_tokens == 64_000
+    assert result.latest_context_window.usage_ratio == 0.5
     assert not any(name == "message" for name, _ in repository.calls)
 
 
