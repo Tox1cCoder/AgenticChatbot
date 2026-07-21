@@ -230,14 +230,15 @@ Do not output anything else, just the prompt."""
             if self.recorder is None:
                 result = await _call()
             else:
+                provider, model = self._auxiliary_model_dimensions(llm)
                 context = current_usage_context().child(
                     operation="image_user_response", agent_id=self.agent_id
                 )
                 with bind_usage_context(context), begin_usage_operation() as operation:
                     result = await self.recorder.record_one_async_attempt(
                         call=_call,
-                        provider="gemini",
-                        model=AGENT_CONFIG["image_generator"]["langchain_model"],
+                        provider=provider,
+                        model=model,
                         operation=operation,
                     )
             text = coerce_response_text(result.content).strip()
@@ -245,6 +246,31 @@ Do not output anything else, just the prompt."""
         except Exception as e:
             logger.warning("Failed to generate user-facing response: %s", e)
             return "Your image has been generated!"
+
+    @staticmethod
+    def _auxiliary_model_dimensions(llm: Any) -> tuple[str, str]:
+        """Read ledger dimensions from the auxiliary LangChain model instance."""
+
+        def _string_attribute(*names: str) -> str:
+            for name in names:
+                try:
+                    value = getattr(llm, name, None)
+                except Exception:
+                    continue
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            return ""
+
+        fallback_model = str(AGENT_CONFIG["image_generator"]["langchain_model"])
+        model = _string_attribute("model_name", "model") or fallback_model
+        provider = _string_attribute("model_provider", "provider").lower()
+        if not provider:
+            llm_type = _string_attribute("_llm_type").lower()
+            if "openai" in llm_type:
+                provider = "openai"
+            elif any(marker in llm_type for marker in ("google", "genai", "gemini")):
+                provider = "gemini"
+        return (provider or "gemini")[:32], model[:255]
 
     async def _generate_images(
         self,

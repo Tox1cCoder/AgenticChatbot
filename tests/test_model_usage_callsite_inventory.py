@@ -65,20 +65,46 @@ def _is_terminal_call(chain: str) -> bool:
     )
 
 
-def _thread_dispatch_callable(node: ast.Call, chain: str) -> str | None:
-    """Return a provider callable handed to a standard thread dispatcher."""
-    if chain in {"asyncio.to_thread", "to_thread"} and node.args:
-        return _call_chain(node.args[0])
-    if chain.endswith(".run_in_executor") and len(node.args) >= 2:
-        return _call_chain(node.args[1])
-    return None
-
-
 class _CallsiteVisitor(ast.NodeVisitor):
     def __init__(self, relative_path: str) -> None:
         self.relative_path = relative_path
         self.scope: list[str] = []
         self.callsites: list[dict[str, str]] = []
+        self.aliases: dict[str, str] = {}
+
+    @staticmethod
+    def _canonical_chain(chain: str) -> str:
+        aliases = {
+            "google.genai.Client": "genai.Client",
+            "langchain_google_genai.ChatGoogleGenerativeAI": "ChatGoogleGenerativeAI",
+            "langchain_openai.ChatOpenAI": "ChatOpenAI",
+        }
+        return aliases.get(chain, chain)
+
+    def _resolve_chain(self, node: ast.AST) -> str | None:
+        chain = _call_chain(node)
+        if not chain:
+            return None
+        root, separator, remainder = chain.partition(".")
+        resolved_root = self.aliases.get(root, root)
+        resolved = f"{resolved_root}.{remainder}" if separator else resolved_root
+        return self._canonical_chain(resolved)
+
+    def _thread_dispatch_callable(self, node: ast.Call, chain: str) -> str | None:
+        """Return a provider callable handed to a standard thread dispatcher."""
+        callable_node: ast.AST | None = None
+        if chain in {"asyncio.to_thread", "to_thread"} and node.args:
+            callable_node = node.args[0]
+        elif chain.endswith(".run_in_executor") and len(node.args) >= 2:
+            callable_node = node.args[1]
+        if callable_node is None:
+            return None
+
+        if isinstance(callable_node, ast.Call):
+            wrapper = self._resolve_chain(callable_node.func)
+            if wrapper == "functools.partial" and callable_node.args:
+                callable_node = callable_node.args[0]
+        return self._resolve_chain(callable_node)
 
     def _visit_scope(self, node: ast.AST, name: str) -> None:
         self.scope.append(name)
@@ -94,8 +120,44 @@ class _CallsiteVisitor(ast.NodeVisitor):
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         self._visit_scope(node, node.name)
 
+    def visit_Import(self, node: ast.Import) -> None:
+        for imported in node.names:
+            local_name = imported.asname or imported.name.split(".", 1)[0]
+            self.aliases[local_name] = imported.name if imported.asname else local_name
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module is None:
+            return
+        for imported in node.names:
+            local_name = imported.asname or imported.name
+            self.aliases[local_name] = self._canonical_chain(f"{node.module}.{imported.name}")
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        resolved: str | None = None
+        if isinstance(node.value, ast.Call) and self._resolve_chain(node.value.func) == "getattr":
+            if (
+                len(node.value.args) >= 2
+                and isinstance(node.value.args[1], ast.Constant)
+                and isinstance(node.value.args[1].value, str)
+            ):
+                owner = self._resolve_chain(node.value.args[0])
+                if owner:
+                    candidate = self._canonical_chain(f"{owner}.{node.value.args[1].value}")
+                    if _is_terminal_call(candidate):
+                        resolved = candidate
+        elif isinstance(node.value, (ast.Name, ast.Attribute)):
+            candidate = self._resolve_chain(node.value)
+            if candidate and _is_terminal_call(candidate):
+                resolved = candidate
+
+        if resolved:
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    self.aliases[target.id] = resolved
+        self.generic_visit(node)
+
     def visit_Call(self, node: ast.Call) -> None:
-        chain = _call_chain(node.func)
+        chain = self._resolve_chain(node.func)
         if chain and _is_terminal_call(chain):
             self.callsites.append(
                 {
@@ -105,7 +167,7 @@ class _CallsiteVisitor(ast.NodeVisitor):
                 }
             )
         elif chain:
-            dispatched = _thread_dispatch_callable(node, chain)
+            dispatched = self._thread_dispatch_callable(node, chain)
             if dispatched and _is_terminal_call(dispatched):
                 self.callsites.append(
                     {
@@ -139,6 +201,12 @@ def _discover_callsites() -> list[dict[str, str]]:
     return sorted(discovered, key=lambda entry: tuple(entry.values()))
 
 
+def _discover_source(source: str) -> list[dict[str, str]]:
+    visitor = _CallsiteVisitor("sample.py")
+    visitor.visit(ast.parse(source))
+    return visitor.callsites
+
+
 def _test_functions(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     return {
@@ -157,6 +225,11 @@ def _test_function_symbols(path: Path, function_name: str) -> set[str]:
     )
     symbols = {node.id for node in ast.walk(function) if isinstance(node, ast.Name)}
     symbols.update(node.attr for node in ast.walk(function) if isinstance(node, ast.Attribute))
+    symbols.update(
+        node.value
+        for node in ast.walk(function)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    )
     return symbols
 
 
@@ -195,6 +268,75 @@ def test_inventory_detects_provider_callable_passed_to_asyncio_to_thread():
     } in _discover_callsites()
 
 
+def test_inventory_resolves_imported_constructor_aliases():
+    discovered = _discover_source(
+        """
+from google.genai import Client as GeminiClient
+
+def build():
+    return GeminiClient(api_key="secret")
+"""
+    )
+
+    assert discovered == [
+        {
+            "file": "sample.py",
+            "function": "build",
+            "call_chain": "genai.Client",
+        }
+    ]
+
+
+def test_inventory_resolves_safe_getattr_constructor_indirection():
+    discovered = _discover_source(
+        """
+import openai
+
+def build():
+    cls = getattr(openai, "AsyncOpenAI")
+    return cls(api_key="secret")
+"""
+    )
+
+    assert discovered == [
+        {
+            "file": "sample.py",
+            "function": "build",
+            "call_chain": "openai.AsyncOpenAI",
+        }
+    ]
+
+
+def test_inventory_unwraps_partial_passed_to_executor():
+    discovered = _discover_source(
+        """
+from functools import partial as bind
+
+async def call(loop, client):
+    await loop.run_in_executor(
+        None,
+        bind(client.models.generate_content, model="gemini-test"),
+    )
+"""
+    )
+
+    assert discovered == [
+        {
+            "file": "sample.py",
+            "function": "call",
+            "call_chain": "client.models.generate_content",
+        }
+    ]
+
+
+def test_inventory_contains_dynamic_async_openai_constructor():
+    assert {
+        "file": "app/services/provider_service.py",
+        "function": "ProviderService._fetch_openai_models",
+        "call_chain": "openai.AsyncOpenAI",
+    } in _discover_callsites()
+
+
 def test_startup_validation_disposition_is_never_used_for_generation_calls():
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     constructor_leaves = {
@@ -224,5 +366,5 @@ def test_each_instrumented_callsite_names_an_operation_and_exercising_test():
         assert test_path.is_file(), entry
         assert function in _test_functions(test_path), entry
         exercise_symbol = entry.get("exercise_symbol")
-        if exercise_symbol is not None:
-            assert exercise_symbol in _test_function_symbols(test_path, function), entry
+        assert isinstance(exercise_symbol, str) and exercise_symbol, entry
+        assert exercise_symbol in _test_function_symbols(test_path, function), entry

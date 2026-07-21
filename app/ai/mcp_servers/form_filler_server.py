@@ -1,4 +1,5 @@
 import json
+import logging
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,7 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 from app.core.config import settings  # noqa: E402
 
 mcp = FastMCP("FormFiller")
+logger = logging.getLogger(__name__)
 
 
 def _build_form_fill_recorder():
@@ -28,7 +30,11 @@ def _build_form_fill_recorder():
         from app.core.container import get_container
 
         return get_container().model_usage_recorder()
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "Form-fill usage recorder unavailable error=%s",
+            type(exc).__name__,
+        )
         return None
 
 

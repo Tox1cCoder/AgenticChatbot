@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 from dataclasses import asdict
 from types import SimpleNamespace
 from uuid import uuid4
@@ -356,6 +357,23 @@ def test_form_fill_accepts_no_user_controlled_identity_fields():
     assert tuple(inspect.signature(fill_form).parameters) == ("natural_language_input",)
 
 
+def test_form_fill_recorder_failure_warns_with_exception_class_only(monkeypatch, caplog):
+    from app.ai.mcp_servers import form_filler_server
+    from app.core import container
+
+    def _raise():
+        raise RuntimeError("database secret must not be logged")
+
+    monkeypatch.setattr(container, "get_container", _raise)
+
+    with caplog.at_level(logging.WARNING, logger=form_filler_server.__name__):
+        assert form_filler_server._build_form_fill_recorder() is None
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == ["Form-fill usage recorder unavailable error=RuntimeError"]
+    assert "database secret" not in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_image_user_response_records_one_attributed_attempt():
     from app.ai.agent_config import AGENT_CONFIG
@@ -389,6 +407,30 @@ async def test_image_user_response_records_one_attributed_attempt():
     assert command.context.conversation_id == conversation_id
     assert command.usage.input_tokens == 200
     assert command.usage.output_tokens == 50
+
+
+@pytest.mark.asyncio
+async def test_image_user_response_records_actual_auxiliary_model_dimensions():
+    from app.ai.agents.image_generator_agent import ImageGeneratorAgent
+
+    repo = _FakeRepo()
+
+    class _OpenAILLM:
+        model_name = "gpt-4.1-mini"
+        _llm_type = "openai-chat"
+
+        async def ainvoke(self, _messages):
+            return SimpleNamespace(content="Your image is ready!")
+
+    agent = ImageGeneratorAgent.__new__(ImageGeneratorAgent)
+    agent.recorder = _recorder(repo)
+    agent.langchain_model = _OpenAILLM()
+
+    await agent._generate_user_facing_response("a city skyline")
+
+    assert len(repo.commands) == 1
+    assert repo.commands[0].provider == "openai"
+    assert repo.commands[0].model == "gpt-4.1-mini"
 
 
 def test_image_generator_has_no_dangling_legacy_entrypoints():

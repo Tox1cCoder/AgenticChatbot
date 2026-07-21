@@ -48,8 +48,10 @@ def _text_part(text: str) -> SimpleNamespace:
     return SimpleNamespace(inline_data=None, text=text)
 
 
-def _gemini_client(chunks: list) -> SimpleNamespace:
+def _gemini_client(chunks: list, *, calls: dict | None = None) -> SimpleNamespace:
     async def _stream(**_kwargs):
+        if calls is not None:
+            calls["generate_content_stream"] = calls.get("generate_content_stream", 0) + 1
         for chunk in chunks:
             yield chunk
 
@@ -66,11 +68,13 @@ def _usage_metadata(**fields) -> SimpleNamespace:
 
 @pytest.mark.asyncio
 async def test_gemini_yields_finals_and_narrative_then_terminal_usage():
+    calls: dict = {}
     client = _gemini_client(
         [
             _gemini_chunk(_text_part("Here is "), _image_part(b"png-bytes")),
             _gemini_chunk(_text_part("your fox.")),
-        ]
+        ],
+        calls=calls,
     )
     provider = GeminiImageProvider(client)
 
@@ -88,6 +92,7 @@ async def test_gemini_yields_finals_and_narrative_then_terminal_usage():
         NarrativeDelta(text="your fox."),
         ImageUsage(usage=NormalizedUsage(source="unavailable"), provider_request_id=None),
     ]
+    assert calls["generate_content_stream"] == 1
 
 
 @pytest.mark.asyncio
