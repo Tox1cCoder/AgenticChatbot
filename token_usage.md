@@ -903,11 +903,11 @@ git commit -m "feat: complete provider usage coverage"
 - Create: `app/services/model_usage_service.py`
 - Test: `tests/test_model_usage_service.py`
 
-- [ ] **Step 1: Write failing range, ownership, and timezone tests**
+- [x] **Step 1: Write failing range, ownership, and timezone tests**
 
 Cover default 30 days, exclusive `to`, two-year bound, 31-day hourly bound, invalid/reversed ranges, missing offsets, non-zero seconds, hour requests not aligned to local top-of-hour, day requests not aligned to local midnight, valid and invalid IANA zones, `Asia/Kathmandu` quarter-hour boundaries, Bangkok local days, New York DST spring/fall days, a synthetic sub-minute historical boundary rejected with 422, empty results, estimate coverage, and foreign conversation IDs.
 
-- [ ] **Step 2: Define response models**
+- [x] **Step 2: Define response models**
 
 ```python
 class UsageModel(BaseModel):
@@ -967,17 +967,17 @@ class UsageDashboard(UsageModel):
 
 Define the conversation response with `totals`, provider/model breakdowns, `coverage`, `latest_context_window`, `range`, and `generated_at` using these same types. `total_tokens` is the sum of known event totals only; it is never synthesized from zero for unknown events. `known_total_ratio = requests_with_known_total / total_requests`, or `0.0` for an empty result. The four source counts are mutually exclusive and sum to `total_requests`. All schemas use `to_camel_case`, matching existing schema modules.
 
-- [ ] **Step 3: Implement validation and service assembly**
+- [x] **Step 3: Implement validation and service assembly**
 
 Use `ZoneInfo(timezone_name)`. Interpret `from` and `to` as aware instants, convert them to the requested zone, validate local bucket alignment, resolve each local boundary back to UTC, and reject nonexistent/ambiguous user-supplied boundaries unless their numeric offset selects one unambiguously. Validate that every UTC boundary is minute-aligned. Query half-open UTC-minute rows, then regroup each minute by its local hour/day. Fill missing series buckets with zeroes, bound breakdowns to 20 rows, and return deterministic ordering (`total_tokens DESC`, then key ASC).
 
-- [ ] **Step 4: Run service tests**
+- [x] **Step 4: Run service tests**
 
 Run: `python -m pytest tests/test_model_usage_service.py -q`
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/interfaces app/schemas/model_usage.py app/schemas/__init__.py app/services/model_usage_service.py tests/test_model_usage_service.py
@@ -1438,3 +1438,5 @@ Implementation progress and decisions made during execution. Updated after each 
   - **Deferred to Task 11 (unchanged from Task 9 note):** `ImageGeneratorAgent._generate_user_facing_response`'s direct `langchain_model.ainvoke` remains uninstrumented; the AST callsite inventory will flag it. The full `index_document_task` Celery path is covered by attribution unit tests (embedding-level owner/NULL) + Task 18 manual smoke rather than a mocked end-to-end worker test.
 
 - **Task 11 — complete (2026-07-21).** Commits `fc1d51e`, `39955f8`, `032027f`, and `310464f`. Conversation compaction now records verified owner/conversation attribution and classifies provider timeouts correctly; form filling records unattributed usage with a configurable model and bounded initialization warnings; the image acknowledgement call records the actual auxiliary provider/model; dead image-agent legacy entrypoints were removed. A tracked-file AST inventory pins provider terminals and client constructors, including aliases, safe `getattr` indirection, executor callables, and `functools.partial`; every instrumented manifest entry has an operation-bound exercising proof. Concrete Gemini stream and OpenAI generate/edit paths are tested through the real `ImageGeneratorAgent` recorder boundary. Required suite 59 passed under `-W error`; expanded strict review suite 85 passed; referenced instrumentation tests 56 passed; Ruff check/format and detached clean-checkout inventory passed. Spec review approved; final quality review approved with 0 Critical/Important/Minor findings.
+
+- **Task 12 — complete (2026-07-21).** Commits `2597bdb`, `ab99949`, and `9cbf87c`. Added camelCase analytics/query schemas, `IModelUsageService`, user-scoped service assembly, deferred DI wiring, deterministic breakdowns/top conversations, latest context-gauge metadata, and exact timezone/range validation. Series data is aggregated in one bounded, parameterized PostgreSQL `VALUES`-CTE query (never by loading dimension-cardinality minute rows), scoped by user/conversation and zero-filled by the service. Local wall-clock interval generation covers Bangkok/Kathmandu, New York folds/gaps, ambiguous midnights, and Lord Howe 30-minute DST transitions. Dependency floors now match the required APIs (`fastapi>=0.115.0,<1.0.0`, `sqlalchemy>=2.0.42,<3.0.0`), and latest-event selection has a stable ID tie-breaker. Final review evidence: 44 service/dependency tests and 10 live PostgreSQL tests passed; Ruff/diff checks clean; spec and quality reviews approved with no findings.
