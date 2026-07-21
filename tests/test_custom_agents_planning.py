@@ -24,6 +24,7 @@ def _workflow():
     wf = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
     wf.agents = dict(_BASE_AGENTS)
     wf._runtime_model_resolver = None
+    wf._model_usage_recorder = None
     return wf
 
 

@@ -25,6 +25,7 @@ from app.interfaces import (
 )
 from app.interfaces.planning_runtime_interface import IPlanningRuntimeService
 from app.interfaces.task_plan_service_interface import ITaskPlanService
+from app.observability.model_usage import model_usage_metrics as model_usage_metrics_singleton
 from app.repositories.agent_model_config import AgentModelConfigRepository
 from app.repositories.conversation import ConversationRepository
 from app.repositories.conversation_compaction import ConversationCompactionRepository
@@ -37,6 +38,7 @@ from app.repositories.feedback import FeedbackRepository
 from app.repositories.hitl_interrupt import HITLInterruptRepository
 from app.repositories.message import MessageRepository
 from app.repositories.model_provider import ModelProviderRepository
+from app.repositories.model_usage import ModelUsageRepository
 from app.repositories.task_plan import TaskPlanRepository
 from app.repositories.tool_approval import ToolApprovalRepository
 from app.repositories.tool_approval_setting import ToolApprovalSettingRepository
@@ -67,6 +69,7 @@ from app.services.rag_embedding_service import (
 from app.services.task_plan_service import TaskPlanService
 from app.services.tool_result_blob_service import ToolResultBlobService
 from app.services.user_service import UserService
+from app.usage.recorder import ModelUsageRecorder
 from app.utils.validation.conversation_validation import ConversationValidationUtils
 from app.utils.validation.document_validation import DocumentValidationUtils
 from app.utils.validation.feedback_validation import FeedbackValidationUtils
@@ -249,6 +252,21 @@ class Container(containers.DeclarativeContainer):
         session_factory=db.provided.session,
     )
 
+    model_usage_repository = providers.Factory(
+        ModelUsageRepository,
+        session_factory=db.provided.session,
+    )
+
+    # Reuse the module-level Prometheus singleton (D7) instead of building a
+    # second ModelUsageMetrics(), which would split the metrics registry.
+    model_usage_metrics = providers.Object(model_usage_metrics_singleton)
+
+    model_usage_recorder = providers.Singleton(
+        ModelUsageRecorder,
+        repository=model_usage_repository,
+        metrics=model_usage_metrics,
+    )
+
     agent_model_config_repository = providers.Factory(
         AgentModelConfigRepository,
         session_factory=db.provided.session,
@@ -357,6 +375,7 @@ class Container(containers.DeclarativeContainer):
             document_repository=container.document_repository(),
             runtime_model_resolver=container.model_config_service(),
             history_provider=container.history_provider(),
+            model_usage_recorder=container.model_usage_recorder(),
         )
 
         return AIService(

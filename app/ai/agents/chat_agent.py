@@ -1,6 +1,6 @@
 import base64
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from google.genai import types
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -15,12 +15,20 @@ from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from ...usage.recorder import ModelUsageRecorder
+
 
 class ChatAgent(BaseAgent):
-    def __init__(self, runtime_model_resolver: IRuntimeModelResolver | None = None):
+    def __init__(
+        self,
+        runtime_model_resolver: IRuntimeModelResolver | None = None,
+        recorder: "ModelUsageRecorder | None" = None,
+    ):
         super().__init__(
             agent_config_key="chat",
             runtime_model_resolver=runtime_model_resolver,
+            recorder=recorder,
         )
 
     @property

@@ -217,7 +217,11 @@ class CustomAgentsMixin:
                 state, runtime_agent_id
             ),
         )
-        return CustomAgent(spec, runtime_model_resolver=self._runtime_model_resolver)
+        return CustomAgent(
+            spec,
+            runtime_model_resolver=self._runtime_model_resolver,
+            recorder=self._model_usage_recorder,
+        )
 
     def _is_attached_custom_agent(self, state: GraphState, runtime_agent_id: str | None) -> bool:
         """True when ``runtime_agent_id`` is an attached custom agent in state."""

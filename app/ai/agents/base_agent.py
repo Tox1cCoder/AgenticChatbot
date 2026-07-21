@@ -2,7 +2,7 @@ import asyncio
 import contextlib
 import logging
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from langchain_core.messages import (
@@ -59,6 +59,9 @@ from ..utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from ...usage.recorder import ModelUsageRecorder
 
 # Canvas and image_generator are accepted by the runtime resolver so the
 # Planning Agent's subagent dispatch can target them with a per-task model
@@ -208,6 +211,7 @@ class BaseAgent(ABC):
         model_name: str | None = None,
         agent_config_key: str = "chat",
         runtime_model_resolver: IRuntimeModelResolver | None = None,
+        recorder: "ModelUsageRecorder | None" = None,
     ):
         self.agent_config_key = agent_config_key
         # Key used for deferred/loaded tool state. Defaults to the model config
@@ -216,6 +220,7 @@ class BaseAgent(ABC):
         self.tool_state_key = agent_config_key
         self.model_name = model_name or AGENT_CONFIG[agent_config_key]["model"]
         self.runtime_model_resolver = runtime_model_resolver
+        self.recorder = recorder
         self.gemini_client = None
         self.langchain_model = None
         self.mcp_manager = None

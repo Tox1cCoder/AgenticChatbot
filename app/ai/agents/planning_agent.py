@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterable
 from textwrap import dedent
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
@@ -37,6 +37,9 @@ from ..todo_actions import apply_write_todos_action
 from ..utils import coerce_response_text, normalize_tool_call
 from .base_agent import BaseAgent
 
+if TYPE_CHECKING:
+    from ...usage.recorder import ModelUsageRecorder
+
 
 class PlanningAgent(BaseAgent):
     """Planning agent that manages task plans using ReAct-style tool-calling."""
@@ -45,12 +48,14 @@ class PlanningAgent(BaseAgent):
         self,
         model_name: str | None = None,
         runtime_model_resolver: IRuntimeModelResolver | None = None,
+        recorder: ModelUsageRecorder | None = None,
     ):
         """Initialize Planning Agent with 'planning' config key."""
         super().__init__(
             model_name=model_name,
             agent_config_key="planning",
             runtime_model_resolver=runtime_model_resolver,
+            recorder=recorder,
         )
 
     @property

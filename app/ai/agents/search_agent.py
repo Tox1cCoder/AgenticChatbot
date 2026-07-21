@@ -1,4 +1,5 @@
 import logging
+from typing import TYPE_CHECKING
 
 from langchain_core.messages import HumanMessage
 
@@ -9,12 +10,20 @@ from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from ...usage.recorder import ModelUsageRecorder
+
 
 class SearchAgent(BaseAgent):
-    def __init__(self, runtime_model_resolver: IRuntimeModelResolver | None = None):
+    def __init__(
+        self,
+        runtime_model_resolver: IRuntimeModelResolver | None = None,
+        recorder: "ModelUsageRecorder | None" = None,
+    ):
         super().__init__(
             agent_config_key="search",
             runtime_model_resolver=runtime_model_resolver,
+            recorder=recorder,
         )
 
     @property

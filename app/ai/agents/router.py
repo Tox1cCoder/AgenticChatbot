@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+from typing import TYPE_CHECKING
 
 from google import genai
 from google.genai import types
@@ -15,11 +16,15 @@ from ..time_context import build_runtime_time_context_block
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from ...usage.recorder import ModelUsageRecorder
+
 
 class Router:
-    def __init__(self):
+    def __init__(self, recorder: "ModelUsageRecorder | None" = None):
         self.model_name = "gemini-3-flash-preview"
         self.gemini_client = None
+        self.recorder = recorder
         self._init_gemini()
 
     def _init_gemini(self):

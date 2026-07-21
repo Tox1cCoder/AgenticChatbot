@@ -9,7 +9,7 @@ model resolution. The per-agent provider/model/temperature come from the spec's
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.tools import BaseTool
 
@@ -33,6 +33,9 @@ from ..tool_scope import is_client_only_scope
 from ..tool_search_tool import create_tool_search_tool_for_custom_agent
 from .base_agent import BaseAgent
 
+if TYPE_CHECKING:
+    from ...usage.recorder import ModelUsageRecorder
+
 CUSTOM_MODEL_AGENT_KEY = "custom"
 
 
@@ -43,12 +46,14 @@ class CustomAgent(BaseAgent):
         self,
         spec: AgentRuntimeSpec,
         runtime_model_resolver: IRuntimeModelResolver | None = None,
+        recorder: ModelUsageRecorder | None = None,
     ):
         model_request = spec.model_request or {}
         super().__init__(
             model_name=model_request.get("model"),
             agent_config_key=CUSTOM_MODEL_AGENT_KEY,
             runtime_model_resolver=runtime_model_resolver,
+            recorder=recorder,
         )
         self._spec = spec
         # Deferred/loaded tool state is keyed by the runtime id so two custom

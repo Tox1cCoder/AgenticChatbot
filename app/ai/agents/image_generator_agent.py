@@ -1,6 +1,6 @@
 import logging
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import BaseMessage
 from langchain_core.messages import HumanMessage as LCHumanMessage
@@ -23,15 +23,23 @@ from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from ...usage.recorder import ModelUsageRecorder
+
 
 class ImageGeneratorAgent(BaseAgent):
-    def __init__(self, runtime_model_resolver: IRuntimeModelResolver | None = None):
+    def __init__(
+        self,
+        runtime_model_resolver: IRuntimeModelResolver | None = None,
+        recorder: "ModelUsageRecorder | None" = None,
+    ):
         self.default_aspect_ratio = settings.image_generator_default_aspect_ratio
         self.max_images = max(1, settings.image_generator_max_images)
         self.enabled = settings.enable_image_generation
         super().__init__(
             agent_config_key="image_generator",
             runtime_model_resolver=runtime_model_resolver,
+            recorder=recorder,
         )
 
     def _init_gemini(self) -> None:

@@ -89,6 +89,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..repositories.document import DocumentRepository
+    from ..usage.recorder import ModelUsageRecorder
     from .planning_subagents import SubagentModelOverride
 
 _apply_decisions = apply_hitl_decisions
@@ -142,26 +143,41 @@ class MultiAgentWorkflow(
         document_repository: Optional["DocumentRepository"] = None,
         runtime_model_resolver: IRuntimeModelResolver | None = None,
         history_provider: ConversationHistoryProvider | None = None,
+        model_usage_recorder: "ModelUsageRecorder | None" = None,
     ):
         self.qdrant_client = qdrant_client
         # Canonical prompt-history source. Workflows without it intentionally
         # run without persisted history rather than using a second source.
         self.history_provider = history_provider
-        self.router = Router()
-        self.chat_agent = ChatAgent(runtime_model_resolver=runtime_model_resolver)
+        self.router = Router(recorder=model_usage_recorder)
+        self.chat_agent = ChatAgent(
+            runtime_model_resolver=runtime_model_resolver,
+            recorder=model_usage_recorder,
+        )
         self.rag_agent = RAGAgent(
             settings=settings,
             qdrant_client=qdrant_client,
             embedding_service=embedding_service,
             collection_name=settings.qdrant_collection_name,
             runtime_model_resolver=runtime_model_resolver,
+            recorder=model_usage_recorder,
         )
-        self.search_agent = SearchAgent(runtime_model_resolver=runtime_model_resolver)
+        self.search_agent = SearchAgent(
+            runtime_model_resolver=runtime_model_resolver,
+            recorder=model_usage_recorder,
+        )
         self.image_generator_agent = ImageGeneratorAgent(
-            runtime_model_resolver=runtime_model_resolver
+            runtime_model_resolver=runtime_model_resolver,
+            recorder=model_usage_recorder,
         )
-        self.planning_agent = PlanningAgent(runtime_model_resolver=runtime_model_resolver)
-        self.canvas_agent = CanvasAgent(runtime_model_resolver=runtime_model_resolver)
+        self.planning_agent = PlanningAgent(
+            runtime_model_resolver=runtime_model_resolver,
+            recorder=model_usage_recorder,
+        )
+        self.canvas_agent = CanvasAgent(
+            runtime_model_resolver=runtime_model_resolver,
+            recorder=model_usage_recorder,
+        )
         self.agents = {
             "chat_agent": self.chat_agent,
             "rag_agent": self.rag_agent,
@@ -176,6 +192,7 @@ class MultiAgentWorkflow(
         # Stored so per-turn CustomAgent instances resolve models the same way
         # base agents do. Custom agents are built on demand from workflow state.
         self._runtime_model_resolver = runtime_model_resolver
+        self._model_usage_recorder = model_usage_recorder
 
         self.graph = self._build_graph()
         self._cleanup_agents = [
@@ -2826,6 +2843,7 @@ def create_workflow(
     document_repository: Optional["DocumentRepository"] = None,
     runtime_model_resolver: IRuntimeModelResolver | None = None,
     history_provider: ConversationHistoryProvider | None = None,
+    model_usage_recorder: "ModelUsageRecorder | None" = None,
 ) -> MultiAgentWorkflow:
     """
     Create multi-agent workflow with required shared dependencies.
@@ -2837,4 +2855,5 @@ def create_workflow(
         document_repository=document_repository,
         runtime_model_resolver=runtime_model_resolver,
         history_provider=history_provider,
+        model_usage_recorder=model_usage_recorder,
     )

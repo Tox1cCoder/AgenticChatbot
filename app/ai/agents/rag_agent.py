@@ -3,7 +3,7 @@ import logging
 import re
 import threading
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -45,6 +45,9 @@ from .base_agent import BaseAgent
 logger = logging.getLogger(__name__)
 _RERANKER_INIT_LOCK = threading.Lock()
 
+if TYPE_CHECKING:
+    from ...usage.recorder import ModelUsageRecorder
+
 
 def _load_cross_encoder(model_name: str) -> CrossEncoder:
     """Load a cross-encoder, preferring the local cache over the network.
@@ -76,12 +79,14 @@ class RAGAgent(BaseAgent):
         embedding_service: Any,
         collection_name: str = "documents_gemini_embedding_2_3072",
         runtime_model_resolver: IRuntimeModelResolver | None = None,
+        recorder: "ModelUsageRecorder | None" = None,
     ):
         # Initialise BaseAgent (sets model_name, gemini_client, langchain_model,
         # mcp_manager, tools, skills tracking, etc.)
         super().__init__(
             agent_config_key="rag",
             runtime_model_resolver=runtime_model_resolver,
+            recorder=recorder,
         )
 
         # RAG-specific fields
