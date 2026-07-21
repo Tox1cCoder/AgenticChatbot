@@ -506,11 +506,11 @@ git commit -m "feat: normalize provider usage metadata"
 - Test: `tests/test_model_usage_worker_config.py`
 - Test: `tests/test_model_usage_client_retry_config.py`
 
-- [ ] **Step 1: Add failing recorder tests**
+- [x] **Step 1: Add failing recorder tests**
 
 Verify success, timeout, cancellation, error re-raise, operation-scoped monotonic attempt numbers, local-estimate fallback, repository failure enqueue, broker failure logging, prompt/response exclusion from retry payloads, and non-blocking persistence from async call paths. Assert recorder wrappers execute exactly one supplied call and never add a provider retry loop.
 
-- [ ] **Step 2: Add explicit settings**
+- [x] **Step 2: Add explicit settings**
 
 ```python
 model_usage_tracking_enabled: bool = True
@@ -526,7 +526,7 @@ model_usage_user_hash_secret: str = ""
 
 Validate positive retention/batch/retry values and require `MODEL_USAGE_USER_HASH_SECRET` in production when LangSmith tracing is enabled.
 
-- [ ] **Step 3: Disable client retries and implement one-attempt wrappers**
+- [x] **Step 3: Disable client retries and implement one-attempt wrappers**
 
 ```python
 async def record_one_async_attempt(
@@ -559,21 +559,21 @@ Set `max_retries=0` in every supported `ChatGoogleGenerativeAI`, `ChatOpenAI`, `
 
 The async persistence path calls a repository method that creates and closes its own SQLAlchemy session inside `asyncio.to_thread()`; never share a request-thread `Session` with that worker thread and never block the event loop on synchronous database I/O.
 
-- [ ] **Step 4: Implement failure fallback and metrics**
+- [x] **Step 4: Implement failure fallback and metrics**
 
 The failed-write retry payload contains only the normalized event command. Celery retry uses exponential backoff and the same `event_key`; `model_usage_retry_*` settings govern ledger-write delivery, not provider calls. Metrics use bounded labels only: provider family, operation family, status, source, and failure class. Never label with user, conversation, trace, or model IDs.
 
-- [ ] **Step 5: Register worker imports/routes without replacing existing schedules**
+- [x] **Step 5: Register worker imports/routes without replacing existing schedules**
 
 Add `app.workers.model_usage` to `celery_app.conf.imports`, route retry/reconcile/cleanup tasks to the `summary` queue, and change `cleanup_tasks.py` to call `celery_app.conf.beat_schedule.update(cleanup_schedule)` with its existing three named cleanup entries.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 Run: `python -m pytest tests/test_model_usage_recorder.py tests/test_model_usage_worker_config.py tests/test_model_usage_client_retry_config.py tests/test_celery_worker_config.py -q`
 
 Expected: all tests pass and existing conversation-summary beat entries remain present.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add app/usage/recorder.py app/observability/model_usage.py app/workers/model_usage.py app/core/config.py .env.example app/ai/agent_config.py app/ai/model_factory.py app/ai/agents/router.py app/services/rag_embedding_service.py app/services/document_processing_service.py app/services/provider_service.py app/ai/mcp_servers/form_filler_server.py app/ai/image_generation/gemini.py app/ai/image_generation/openai_provider.py app/workers/celery_app.py app/workers/cleanup_tasks.py tests/test_model_usage_recorder.py tests/test_model_usage_worker_config.py tests/test_model_usage_client_retry_config.py tests/test_celery_worker_config.py
@@ -1376,3 +1376,24 @@ Implementation progress and decisions made during execution. Updated after each 
   - Decision: both functions share ONE canonical set of envelope-chain + alias/nested-path constants (`_USAGE_*`, `_iter_usage_envelopes`, `_extract_cached_input_tokens` in `token_counter.py`) so they cannot drift — introduced in fix round 1 to close two Important review findings (OpenAI `output_tokens_details.image_tokens` unreachable; cache-token fallback drift) and the ⚠️ (normalizer now searches `response_metadata` because the Task 5 recorder hands it raw LangChain responses).
   - Decision: total-synthesis, modality-array summation, and the normalizer-only 4th reasoning path (`output_tokens_details.reasoning_tokens`, plural) are kept PER-FUNCTION, not shared. Fix round 2 restored `_USAGE_REASONING_NESTED_PATHS` to `extract_reported_usage`'s original 3 entries after round 1's unification silently widened its reasoning recognition (Important, refactor-introduced) — pinned by a two-sided regression test.
   - Minor finding (for final-review triage): `normalize_provider_usage` reaches into `TokenCounter`'s underscore-prefixed classmethods across modules; consider a small public helper surface if this coupling grows in Task 5+.
+
+- **Task 5 — complete (2026-07-21).** Commit `dfcf86f`. Recorder (`app/usage/recorder.py`: async+sync one-attempt wrappers, non-blocking persistence via `asyncio.to_thread`, content-free Celery failed-write fallback, bounded classify_status/error), metrics (`app/observability/model_usage.py`, prometheus, bounded labels only), worker module (`app/workers/model_usage.py`: retry/reconcile/cleanup tasks → `summary` queue), 9 config settings + validators, SDK-retry-disable at 10 client-construction sites, and the cleanup_tasks finding-#7 fix (`.update()` not reassign). 50 tests green on the exact Step-6 command; recorder 21 green under `-W error`. Implementer opus.
+  - **Review performed INLINE by the controller** (the opus task-reviewer subagent died on an org-monthly-spend-limit API error before finishing). Verdict: Approved, 0 Critical/Important. Verified all retry-disable sites, recorder threading/failure-fallback, content-free retry payload (tests assert prompt/response text and forbidden keys are absent), config validators, finding-#7 fix, and both documented deviations.
+  - Deviation (valid): `app/ai/image_generation/gemini.py` unchanged — it constructs no client (grep confirms no `genai.Client`); its client is injected from `create_gemini_client` (agent_config.py), which IS retry-disabled. `document_processing_service.py:189` `max_retries:3` left as-is — it is a Celery broker retry_policy, not an SDK client arg; the file's genai.Client (~:75) IS retry-disabled.
+  - Decision: `.env.example` is global-guard-blocked (D2) — additions are recorded here for MANUAL APPLICATION by the user (see the fenced block below); the commit excludes `.env.example`. Config fields default so the app runs without it, but production + `LANGSMITH_TRACING=true` fails startup until `MODEL_USAGE_USER_HASH_SECRET` is set.
+  - Minor findings (for final-review triage): (1) worker `_build_repository()` builds a fresh `Database()`/engine per task invocation and is monkeypatched in every test (real path untested) — switch to the container's singleton `model_usage_repository` in Task 6/17 (Task 6's file list does NOT currently include `app/workers/model_usage.py`, so flag it there); (2) metrics `"duplicate"` persist-outcome label is defined but never emitted (`_persist` ignores `RecordResult.inserted`).
+
+  **Required `.env.example` additions (MANUAL — user must apply; global-guard blocks the file):**
+
+  ```
+  # Per-user model-usage analytics
+  MODEL_USAGE_TRACKING_ENABLED=true          # Record per-user model-call usage events and minute rollups
+  MODEL_USAGE_UI_ENABLED=true                # Expose the model-usage analytics UI/read endpoints
+  MODEL_USAGE_RAW_RETENTION_DAYS=90          # Days of raw model-usage events retained before cleanup
+  MODEL_USAGE_ROLLUP_RETENTION_DAYS=730      # Days of model-usage minute rollups retained before cleanup
+  MODEL_USAGE_RECONCILE_MINUTES=2880         # Trailing window (minutes) rebuilt by the reconcile task
+  MODEL_USAGE_CLEANUP_BATCH_SIZE=5000        # Batch size for model-usage retention deletes
+  MODEL_USAGE_RETRY_MAX_ATTEMPTS=5           # Maximum failed-write retry attempts for a ledger event
+  MODEL_USAGE_RETRY_BASE_SECONDS=10          # Base delay (s) for exponential failed-write retry backoff
+  MODEL_USAGE_USER_HASH_SECRET=              # Secret keying the per-user hash; REQUIRED in production when LANGSMITH_TRACING=true
+  ```
