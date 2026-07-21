@@ -110,6 +110,7 @@ class ModelUsageEvent(Base):
             "started_at",
         ),
         Index("ix_model_usage_events_operation_started", "operation", "started_at"),
+        Index("ix_model_usage_events_started_at", "started_at"),
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -214,6 +215,7 @@ class ModelUsageMinute(Base):
             "conversation_id",
             "bucket_start_utc",
         ),
+        Index("ix_model_usage_minute_bucket_start_utc", "bucket_start_utc"),
     )
 
     rollup_key = Column(String(64), primary_key=True)

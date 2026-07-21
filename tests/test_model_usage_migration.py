@@ -30,7 +30,7 @@ def _migration_module():
     return importlib.import_module("app.alembic.versions.y2z3a4b5c6d7_add_model_usage_ledger")
 
 
-def test_model_usage_ledger_migration_is_the_single_new_head():
+def test_model_usage_ledger_migration_revision_contract():
     migration = _migration_module()
 
     assert migration.revision == "y2z3a4b5c6d7"

@@ -149,6 +149,13 @@ def _command(
     input_tokens: int | None = 100,
     output_tokens: int | None = 50,
     total_tokens: int | None = 150,
+    reasoning_tokens: int | None = None,
+    cached_input_tokens: int | None = None,
+    input_text_tokens: int | None = None,
+    input_image_tokens: int | None = None,
+    output_text_tokens: int | None = None,
+    output_image_tokens: int | None = None,
+    generated_images: int = 0,
     latency_ms: int = 250,
     started_at: datetime | None = None,
 ) -> RecordEventCommand:
@@ -167,6 +174,13 @@ def _command(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=total_tokens,
+            reasoning_tokens=reasoning_tokens,
+            cached_input_tokens=cached_input_tokens,
+            input_text_tokens=input_text_tokens,
+            input_image_tokens=input_image_tokens,
+            output_text_tokens=output_text_tokens,
+            output_image_tokens=output_image_tokens,
+            generated_images=generated_images,
             source=usage_source,
         ),
         provider=provider,
@@ -543,6 +557,115 @@ def test_reconcile_minute_rebuilds_exactly_from_raw_events(
         assert minute.output_tokens_sum == 8
         assert minute.latency_ms_sum == 123
         assert session.get(ModelUsageMinute, phantom_rollup_key) is None
+
+
+def test_reconcile_twice_is_exactly_idempotent_across_chunks_and_small_batches(
+    repository, tenant_factory, session_factory
+) -> None:
+    user_id, conversation_id, _ = tenant_factory()
+    start = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(minutes=5)
+    for minute_offset in (0, 1, 2, 3):
+        repository.record_event(
+            _command(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                operation_id=uuid4(),
+                started_at=start + timedelta(minutes=minute_offset),
+                input_tokens=10 + minute_offset,
+            )
+        )
+
+    def state():
+        with session_factory() as session:
+            rows = session.execute(
+                select(ModelUsageMinute)
+                .where(ModelUsageMinute.user_id == user_id)
+                .order_by(ModelUsageMinute.rollup_key)
+            ).scalars()
+            return [
+                (
+                    row.rollup_key,
+                    row.bucket_start_utc,
+                    row.request_count,
+                    row.input_tokens_sum,
+                    row.input_tokens_known_count,
+                )
+                for row in rows
+            ]
+
+    first_count = repository.reconcile_minute_range(
+        start_inclusive=start,
+        end_exclusive=start + timedelta(minutes=5),
+        chunk_minutes=2,
+        insert_batch_size=1,
+    )
+    first_state = state()
+    second_count = repository.reconcile_minute_range(
+        start_inclusive=start,
+        end_exclusive=start + timedelta(minutes=5),
+        chunk_minutes=2,
+        insert_batch_size=1,
+    )
+
+    assert first_count == second_count == 4
+    assert state() == first_state
+
+
+def test_reconcile_server_aggregation_preserves_all_sums_and_known_counts(
+    repository, tenant_factory, session_factory
+) -> None:
+    user_id, conversation_id, _ = tenant_factory()
+    minute = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    repository.record_event(
+        _command(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            started_at=minute,
+            reasoning_tokens=7,
+            cached_input_tokens=3,
+            input_text_tokens=70,
+            input_image_tokens=30,
+            output_text_tokens=40,
+            output_image_tokens=10,
+            generated_images=2,
+        )
+    )
+    repository.record_event(
+        _command(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            started_at=minute + timedelta(seconds=1),
+            reasoning_tokens=None,
+            cached_input_tokens=4,
+            input_text_tokens=None,
+            input_image_tokens=20,
+            output_text_tokens=50,
+            output_image_tokens=None,
+            generated_images=1,
+        )
+    )
+
+    assert (
+        repository.reconcile_minute_range(
+            start_inclusive=minute,
+            end_exclusive=minute + timedelta(minutes=1),
+            chunk_minutes=1,
+            insert_batch_size=1,
+        )
+        == 1
+    )
+
+    with session_factory() as session:
+        row = session.execute(
+            select(ModelUsageMinute).where(ModelUsageMinute.user_id == user_id)
+        ).scalar_one()
+        assert (row.reasoning_tokens_sum, row.reasoning_tokens_known_count) == (7, 1)
+        assert (row.cached_input_tokens_sum, row.cached_input_tokens_known_count) == (7, 2)
+        assert (row.input_text_tokens_sum, row.input_text_tokens_known_count) == (70, 1)
+        assert (row.input_image_tokens_sum, row.input_image_tokens_known_count) == (50, 2)
+        assert (row.output_text_tokens_sum, row.output_text_tokens_known_count) == (90, 2)
+        assert (row.output_image_tokens_sum, row.output_image_tokens_known_count) == (10, 1)
+        assert row.generated_images_sum == 3
 
 
 def test_rollup_fk_deletes_do_not_mutate_hashed_dimensions(

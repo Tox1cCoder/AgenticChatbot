@@ -79,6 +79,8 @@ def test_health_classifies_local_recorder_persistence_failure():
     result = service(SnapshotRepository(snapshot()), metrics).get_health()
     assert result["status"] == "degraded"
     assert result["persistence_failure_count"] == 1
+    assert result["persistence_failure_scope"] == "process"
+    assert result["authoritative_health_scope"] == "database"
 
 
 def test_recent_failure_buffer_is_bounded_and_reports_saturation():
@@ -91,6 +93,11 @@ def test_recent_failure_buffer_is_bounded_and_reports_saturation():
     result = service(SnapshotRepository(snapshot()), metrics).get_health()
     assert result["persistence_failure_count"] == _RECENT_FAILURE_BUFFER_MAX
     assert result["persistence_failure_count_saturated"] is True
+    rendered = metrics.render().decode("utf-8")
+    assert (
+        "# HELP model_usage_persistence_total Process-local ledger-write persistence outcomes"
+        in rendered
+    )
 
 
 def test_health_and_metrics_are_content_free_and_fail_closed():

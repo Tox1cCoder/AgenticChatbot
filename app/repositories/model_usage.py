@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 from uuid import UUID
 
 from sqlalchemy import DateTime, Integer, and_, column, delete, desc, func, select, values
@@ -48,8 +48,7 @@ _DIMENSION_COLUMNS: dict[str, Any] = {
 }
 
 # Column names summed/counted by every bounded totals query, in a fixed
-# order shared by SQL aggregation (`_sum_expressions`) and in-Python
-# reconciliation (`_zero_minute_row` / `_accumulate_minute_row`).
+# order shared by SQL aggregation and reconciliation.
 _TOTALS_FIELD_NAMES: tuple[str, ...] = (
     "request_count",
     "latency_ms_sum",
@@ -234,37 +233,21 @@ def _totals_from_mapping(mapping: Mapping[str, Any]) -> UsageTotals:
     return UsageTotals(**{name: int(mapping[name]) for name in _TOTALS_FIELD_NAMES})
 
 
-def _zero_minute_row(rollup_key: str, bucket_start_utc: datetime, event: ModelUsageEvent) -> Any:
-    row: dict[str, Any] = {
-        "rollup_key": rollup_key,
-        "bucket_start_utc": bucket_start_utc,
-        "user_id": event.user_id,
-        "conversation_id": event.conversation_id,
-        "provider": event.provider,
-        "model": event.model,
-        "operation": event.operation,
-        "agent_id": event.agent_id,
-        "status": event.status,
-        "usage_source": event.usage_source,
-        "request_count": 0,
-        "latency_ms_sum": 0,
-        "generated_images_sum": 0,
-    }
-    for field in NULLABLE_TOKEN_FIELDS:
-        row[f"{field}_sum"] = 0
-        row[f"{field}_known_count"] = 0
-    return row
+_T = TypeVar("_T")
 
 
-def _accumulate_minute_row(row: dict[str, Any], event: ModelUsageEvent) -> None:
-    row["request_count"] += 1
-    row["latency_ms_sum"] += int(event.latency_ms)
-    row["generated_images_sum"] += int(event.generated_images)
-    for field in NULLABLE_TOKEN_FIELDS:
-        value = getattr(event, field)
-        if value is not None:
-            row[f"{field}_sum"] += int(value)
-            row[f"{field}_known_count"] += 1
+def _partition_rows(rows: Iterable[_T], *, batch_size: int) -> Iterator[list[_T]]:
+    """Yield bounded insertion partitions without materializing ``rows``."""
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+    batch: list[_T] = []
+    for row in rows:
+        batch.append(row)
+        if len(batch) == batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
 
 
 class ModelUsageRepository:
@@ -644,7 +627,14 @@ class ModelUsageRepository:
 
     # -- Maintenance (not user-scoped: whole-table reconciliation/cleanup) --
 
-    def reconcile_minute_range(self, *, start_inclusive: datetime, end_exclusive: datetime) -> int:
+    def reconcile_minute_range(
+        self,
+        *,
+        start_inclusive: datetime,
+        end_exclusive: datetime,
+        chunk_minutes: int = 60,
+        insert_batch_size: int = 1_000,
+    ) -> int:
         """Rebuild every rollup whose bucket falls in the range from raw events.
 
         Discards whatever rollup state currently exists for
@@ -654,46 +644,103 @@ class ModelUsageRepository:
         corrected. Bounds must already be minute-aligned UTC instants.
         Returns the number of rollup rows written.
         """
-        start = _require_minute_aligned_utc(start_inclusive, "start_inclusive")
+        if chunk_minutes < 1:
+            raise ValueError("chunk_minutes must be >= 1")
+        if insert_batch_size < 1:
+            raise ValueError("insert_batch_size must be >= 1")
+        chunk_start = _require_minute_aligned_utc(start_inclusive, "start_inclusive")
         end = _require_minute_aligned_utc(end_exclusive, "end_exclusive")
-        with self.session_factory() as session:
-            events = session.execute(
-                select(ModelUsageEvent).where(
-                    ModelUsageEvent.started_at >= start,
-                    ModelUsageEvent.started_at < end,
-                )
-            ).scalars()
+        if end < chunk_start:
+            raise ValueError("end_exclusive must not precede start_inclusive")
+        written = 0
+        while chunk_start < end:
+            chunk_end = min(end, chunk_start + timedelta(minutes=chunk_minutes))
+            written += self._reconcile_minute_chunk(
+                start_inclusive=chunk_start,
+                end_exclusive=chunk_end,
+                insert_batch_size=insert_batch_size,
+            )
+            chunk_start = chunk_end
+        return written
 
-            rebuilt: dict[str, dict[str, Any]] = {}
-            for event in events:
-                bucket = event.started_at.astimezone(timezone.utc).replace(second=0, microsecond=0)
-                rollup_key = compute_rollup_key(
-                    bucket_start_utc=bucket,
-                    user_id=event.user_id,
-                    conversation_id=event.conversation_id,
-                    provider=event.provider,
-                    model=event.model,
-                    operation=event.operation,
-                    agent_id=event.agent_id,
-                    status=event.status,
-                    usage_source=event.usage_source,
-                )
-                row = rebuilt.get(rollup_key)
-                if row is None:
-                    row = _zero_minute_row(rollup_key, bucket, event)
-                    rebuilt[rollup_key] = row
-                _accumulate_minute_row(row, event)
-
-            session.execute(
-                delete(ModelUsageMinute).where(
-                    ModelUsageMinute.bucket_start_utc >= start,
-                    ModelUsageMinute.bucket_start_utc < end,
+    def _reconcile_minute_chunk(
+        self,
+        *,
+        start_inclusive: datetime,
+        end_exclusive: datetime,
+        insert_batch_size: int,
+    ) -> int:
+        """Atomically replace one bounded time chunk from server aggregates."""
+        bucket = func.date_trunc("minute", ModelUsageEvent.started_at, "UTC").label(
+            "bucket_start_utc"
+        )
+        dimensions = (
+            ModelUsageEvent.user_id,
+            ModelUsageEvent.conversation_id,
+            ModelUsageEvent.provider,
+            ModelUsageEvent.model,
+            ModelUsageEvent.operation,
+            ModelUsageEvent.agent_id,
+            ModelUsageEvent.status,
+            ModelUsageEvent.usage_source,
+        )
+        aggregate_expressions = [
+            func.count(ModelUsageEvent.id).label("request_count"),
+            func.coalesce(func.sum(ModelUsageEvent.latency_ms), 0).label("latency_ms_sum"),
+            func.coalesce(func.sum(ModelUsageEvent.generated_images), 0).label(
+                "generated_images_sum"
+            ),
+        ]
+        for field in NULLABLE_TOKEN_FIELDS:
+            event_column = getattr(ModelUsageEvent, field)
+            aggregate_expressions.extend(
+                (
+                    func.coalesce(func.sum(event_column), 0).label(f"{field}_sum"),
+                    func.count(event_column).label(f"{field}_known_count"),
                 )
             )
-            if rebuilt:
-                session.execute(insert(ModelUsageMinute), list(rebuilt.values()))
+        aggregate_statement = (
+            select(bucket, *dimensions, *aggregate_expressions)
+            .where(
+                ModelUsageEvent.started_at >= start_inclusive,
+                ModelUsageEvent.started_at < end_exclusive,
+            )
+            .group_by(bucket, *dimensions)
+            .order_by(bucket)
+            .execution_options(stream_results=True, yield_per=insert_batch_size)
+        )
+
+        with self.session_factory() as session:
+            session.execute(
+                delete(ModelUsageMinute).where(
+                    ModelUsageMinute.bucket_start_utc >= start_inclusive,
+                    ModelUsageMinute.bucket_start_utc < end_exclusive,
+                )
+            )
+            aggregates = session.execute(aggregate_statement).mappings()
+
+            def rebuilt_rows() -> Iterator[dict[str, Any]]:
+                for aggregate in aggregates:
+                    row = dict(aggregate)
+                    row["rollup_key"] = compute_rollup_key(
+                        bucket_start_utc=row["bucket_start_utc"],
+                        user_id=row["user_id"],
+                        conversation_id=row["conversation_id"],
+                        provider=row["provider"],
+                        model=row["model"],
+                        operation=row["operation"],
+                        agent_id=row["agent_id"],
+                        status=row["status"],
+                        usage_source=row["usage_source"],
+                    )
+                    yield row
+
+            written = 0
+            for batch in _partition_rows(rebuilt_rows(), batch_size=insert_batch_size):
+                session.execute(insert(ModelUsageMinute), batch)
+                written += len(batch)
             session.commit()
-            return len(rebuilt)
+            return written
 
     def delete_raw_events_older_than(self, cutoff: datetime, *, batch_size: int = 500) -> int:
         """Delete ``model_usage_events`` rows started before ``cutoff``, in batches."""

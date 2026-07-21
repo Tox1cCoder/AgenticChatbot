@@ -628,6 +628,10 @@ class Settings(BaseSettings):
         default=2880,
         description="Trailing window (minutes) rebuilt by the reconcile task",
     )
+    model_usage_reconcile_chunk_minutes: int = Field(
+        default=60,
+        description="Maximum UTC-minute span reconciled in one database transaction",
+    )
     model_usage_cleanup_batch_size: int = Field(
         default=5000,
         description="Batch size for model-usage retention deletes",
@@ -1497,6 +1501,7 @@ class Settings(BaseSettings):
         "model_usage_raw_retention_days",
         "model_usage_rollup_retention_days",
         "model_usage_reconcile_minutes",
+        "model_usage_reconcile_chunk_minutes",
         "model_usage_cleanup_batch_size",
         "model_usage_retry_max_attempts",
         "model_usage_retry_base_seconds",

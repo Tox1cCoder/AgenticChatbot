@@ -73,7 +73,7 @@ class ModelUsageMetrics:
         )
         self.persistence = Counter(
             "model_usage_persistence_total",
-            "Ledger-write persistence outcomes for recorded attempts.",
+            "Process-local ledger-write persistence outcomes for recorded attempts.",
             ("outcome", "failure_class"),
             registry=self.registry,
         )
@@ -99,7 +99,7 @@ class ModelUsageMetrics:
         )
         self.health_persistence_failure_saturated = Gauge(
             "model_usage_health_persistence_failure_saturated",
-            "Whether the bounded recent persistence-failure buffer saturated.",
+            "Whether this process-local bounded persistence-failure buffer saturated.",
             registry=self.registry,
         )
         self._monotonic = monotonic
@@ -258,6 +258,8 @@ class ModelUsageHealthService:
             "unattributed_rate": round(unattributed_rate, 6),
             "rollup_lag_minutes": lag,
             "persistence_failure_count": failures,
+            "persistence_failure_scope": "process",
+            "authoritative_health_scope": "database",
             "persistence_failure_count_saturated": (
                 self.metrics.persistence_failure_buffer_saturated()
             ),

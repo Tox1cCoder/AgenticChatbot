@@ -6,10 +6,7 @@ from datetime import datetime, timezone
 import redis
 from celery.schedules import crontab
 
-from app.ai.agents.rag_agent import RAGAgent
 from app.core.config import settings
-from app.core.container import get_container
-from app.services.checkpoint_retention_service import CheckpointRetentionService
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -37,6 +34,8 @@ celery_app.conf.beat_schedule.update(CLEANUP_BEAT_SCHEDULE)
 @celery_app.task(name="app.workers.cleanup_tasks.cleanup_temp_files_task")
 def cleanup_temp_files_task(older_than_hours: int = 24):
     try:
+        from app.core.container import get_container
+
         container = get_container()
         processing_service = container.document_processing_service()
 
@@ -64,6 +63,9 @@ def cleanup_temp_files_task(older_than_hours: int = 24):
 @celery_app.task(name="app.workers.cleanup_tasks.health_check_task")
 def health_check_task():
     try:
+        from app.ai.agents.rag_agent import RAGAgent
+        from app.core.container import get_container
+
         container = get_container()
         settings = container.config()
         qdrant_client = container.qdrant_client()
@@ -127,6 +129,8 @@ def cleanup_abandoned_interrupts():
         }
         redis_checkpoints_cleaned = 0
         try:
+            from app.core.container import get_container
+
             container = get_container()
             hitl_repo = container.hitl_interrupt_repository()
             conversation_repo = container.conversation_repository()
@@ -276,6 +280,7 @@ async def _run_checkpoint_retention_cleanup(
     # Imported lazily to avoid loading langgraph/psycopg_pool at worker startup
     # for a task that may never run in a given process.
     from app.ai.checkpoint import CheckpointManager
+    from app.services.checkpoint_retention_service import CheckpointRetentionService
 
     checkpoint_manager = CheckpointManager(db_url=settings.database_url, settings=settings)
     await checkpoint_manager.setup()

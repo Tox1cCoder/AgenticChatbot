@@ -2,7 +2,64 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from app.core.config import settings
+import pytest
+from pydantic import ValidationError
+
+from app.core.config import Settings, settings
+
+
+def test_reconcile_chunk_setting_is_positive_and_configurable():
+    configured = Settings(
+        _env_file=None,
+        secret_key="test-secret-key-with-at-least-32-bytes",
+        model_usage_reconcile_chunk_minutes=17,
+    )
+    assert configured.model_usage_reconcile_chunk_minutes == 17
+    with pytest.raises(ValidationError, match="positive"):
+        Settings(
+            _env_file=None,
+            secret_key="test-secret-key-with-at-least-32-bytes",
+            model_usage_reconcile_chunk_minutes=0,
+        )
+
+
+def test_reconcile_partitions_full_window_into_bounded_chunks(monkeypatch):
+    from app.repositories.model_usage import ModelUsageRepository
+
+    repository = ModelUsageRepository(lambda: None)
+    chunks = []
+
+    def reconcile_chunk(*, start_inclusive, end_exclusive, insert_batch_size):
+        chunks.append((start_inclusive, end_exclusive, insert_batch_size))
+        return 1
+
+    monkeypatch.setattr(repository, "_reconcile_minute_chunk", reconcile_chunk)
+    start = datetime(2026, 7, 20, 0, 0, tzinfo=timezone.utc)
+    end = start + timedelta(minutes=125)
+
+    assert (
+        repository.reconcile_minute_range(
+            start_inclusive=start,
+            end_exclusive=end,
+            chunk_minutes=60,
+            insert_batch_size=17,
+        )
+        == 3
+    )
+    assert chunks == [
+        (start, start + timedelta(minutes=60), 17),
+        (start + timedelta(minutes=60), start + timedelta(minutes=120), 17),
+        (start + timedelta(minutes=120), end, 17),
+    ]
+
+
+def test_reconcile_partition_helper_never_exceeds_insert_batch_size():
+    from app.repositories.model_usage import _partition_rows
+
+    partitions = list(_partition_rows(iter(range(11)), batch_size=4))
+
+    assert partitions == [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10]]
+    assert max(map(len, partitions)) == 4
 
 
 def test_reconcile_uses_exact_complete_minute_window(monkeypatch):
@@ -11,8 +68,12 @@ def test_reconcile_uses_exact_complete_minute_window(monkeypatch):
     captured = {}
 
     class Repository:
-        def reconcile_minute_range(self, *, start_inclusive, end_exclusive):
-            captured.update(start=start_inclusive, end=end_exclusive)
+        def reconcile_minute_range(self, *, start_inclusive, end_exclusive, chunk_minutes):
+            captured.update(
+                start=start_inclusive,
+                end=end_exclusive,
+                chunk_minutes=chunk_minutes,
+            )
             return 4
 
     now = datetime(2026, 7, 21, 12, 34, 56, 123456, tzinfo=timezone.utc)
@@ -24,6 +85,7 @@ def test_reconcile_uses_exact_complete_minute_window(monkeypatch):
     assert captured["start"] == captured["end"] - timedelta(
         minutes=settings.model_usage_reconcile_minutes
     )
+    assert captured["chunk_minutes"] == settings.model_usage_reconcile_chunk_minutes
 
 
 def test_maintenance_short_circuits_without_database_when_tracking_disabled(monkeypatch):

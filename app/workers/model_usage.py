@@ -98,6 +98,7 @@ def reconcile_model_usage(*, now: datetime | None = None) -> int:
     return _build_repository().reconcile_minute_range(
         start_inclusive=start,
         end_exclusive=complete_minute,
+        chunk_minutes=settings.model_usage_reconcile_chunk_minutes,
     )
 
 

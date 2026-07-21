@@ -12,8 +12,13 @@ maintenance methods with the configured retention/reconcile settings.
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
+import pytest
 from celery.schedules import crontab
 
 from app.workers.celery_app import celery_app
@@ -63,9 +68,10 @@ def test_reconcile_task_delegates_to_repository(monkeypatch):
     captured: dict[str, object] = {}
 
     class FakeRepo:
-        def reconcile_minute_range(self, *, start_inclusive, end_exclusive):
+        def reconcile_minute_range(self, *, start_inclusive, end_exclusive, chunk_minutes):
             captured["start"] = start_inclusive
             captured["end"] = end_exclusive
+            captured["chunk_minutes"] = chunk_minutes
             return 7
 
     monkeypatch.setattr(worker, "_build_repository", lambda: FakeRepo())
@@ -78,6 +84,7 @@ def test_reconcile_task_delegates_to_repository(monkeypatch):
     assert span_minutes == settings.model_usage_reconcile_minutes
     assert captured["start"].tzinfo is not None
     assert captured["end"].second == 0 and captured["end"].microsecond == 0
+    assert captured["chunk_minutes"] == settings.model_usage_reconcile_chunk_minutes
 
 
 def test_cleanup_task_delegates_to_repository(monkeypatch):
@@ -131,19 +138,33 @@ def test_usage_beat_entries_have_required_cron_and_summary_queue():
     assert cleanup["options"] == {"queue": "summary"}
 
 
-def test_named_schedule_dictionaries_merge_to_same_union_in_both_orders():
-    from app.workers.celery_app import CELERY_BEAT_SCHEDULE
-    from app.workers.cleanup_tasks import CLEANUP_BEAT_SCHEDULE
+@pytest.mark.parametrize(
+    "modules",
+    [
+        ("app.workers.celery_app", "app.workers.cleanup_tasks"),
+        ("app.workers.cleanup_tasks", "app.workers.celery_app"),
+    ],
+)
+def test_real_isolated_module_import_orders_preserve_schedule_union(modules):
+    script = (
+        "import importlib,json;"
+        f"[importlib.import_module(name) for name in {modules!r}];"
+        "from app.workers.celery_app import celery_app;"
+        "print('SCHEDULE=' + json.dumps(sorted(celery_app.conf.beat_schedule)))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    schedule_line = next(
+        line for line in result.stdout.splitlines() if line.startswith("SCHEDULE=")
+    )
 
-    first = {}
-    first.update(CELERY_BEAT_SCHEDULE)
-    first.update(CLEANUP_BEAT_SCHEDULE)
-    second = {}
-    second.update(CLEANUP_BEAT_SCHEDULE)
-    second.update(CELERY_BEAT_SCHEDULE)
-
-    assert first == second
-    assert set(first) == {
+    assert set(json.loads(schedule_line.removeprefix("SCHEDULE="))) == {
         "reconcile-conversation-summaries",
         "backfill-conversation-summaries",
         "reconcile-model-usage",
