@@ -2,6 +2,8 @@
 Compatibility proxy routes for server-owned API surfaces.
 """
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
 
@@ -23,6 +25,26 @@ def _params_with_active_device(request: Request):
     if device_id:
         params.append(("deviceId", device_id))
     return params
+
+
+@router.get("/usage/dashboard")
+async def proxy_usage_dashboard(
+    request: Request,
+    _session: LocalSessionPayload = Depends(require_local_session),
+) -> Response:
+    return await proxy_server_request(request, upstream_path="/usage/dashboard")
+
+
+@router.get("/usage/conversations/{conversation_id}")
+async def proxy_conversation_usage(
+    conversation_id: UUID,
+    request: Request,
+    _session: LocalSessionPayload = Depends(require_local_session),
+) -> Response:
+    return await proxy_server_request(
+        request,
+        upstream_path=f"/usage/conversations/{conversation_id}",
+    )
 
 
 @router.get("/users/{user_id}")
