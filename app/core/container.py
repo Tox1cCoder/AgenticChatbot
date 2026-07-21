@@ -21,6 +21,7 @@ from app.interfaces import (
     IDocumentService,
     IFeedbackService,
     IMessageService,
+    IModelUsageService,
     IUserService,
 )
 from app.interfaces.planning_runtime_interface import IPlanningRuntimeService
@@ -61,6 +62,7 @@ from app.services.jwt_service import JwtService
 from app.services.mcp_service import MCPService
 from app.services.message_service import MessageService
 from app.services.model_config_service import ModelConfigService
+from app.services.model_usage_service import ModelUsageService
 from app.services.provider_service import ProviderService
 from app.services.rag_embedding_service import (
     GeminiRAGEmbeddingService,
@@ -215,6 +217,13 @@ class Container(containers.DeclarativeContainer):
     conversation_repository = providers.Factory(
         ConversationRepository,
         session_factory=db.provided.session,
+    )
+
+    model_usage_service: providers.Provider[IModelUsageService] = providers.Factory(
+        ModelUsageService,
+        repository=model_usage_repository,
+        conversation_repository=conversation_repository,
+        settings=providers.Object(settings),
     )
 
     custom_agent_repository = providers.Factory(

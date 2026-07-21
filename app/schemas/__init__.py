@@ -23,6 +23,21 @@ from app.schemas.message import (
     MessageRead,
     MessageUpdate,
 )
+from app.schemas.model_usage import (
+    ConversationUsage,
+    ConversationUsageItem,
+    ConversationUsageQuery,
+    ConversationUsageQueryParams,
+    ConversationUsageResponse,
+    UsageBreakdownItem,
+    UsageCoverage,
+    UsageDashboard,
+    UsageDashboardQuery,
+    UsageDashboardQueryParams,
+    UsageRange,
+    UsageSeriesPoint,
+    UsageTotals,
+)
 from app.schemas.task_plan import (
     PlanningStatusResponse,
     TaskPlanCreate,
@@ -74,4 +89,18 @@ __all__ = [
     "TaskPlanGenerateRequest",
     "TaskPlanManualCreateRequest",
     "PlanningStatusResponse",
+    # Model usage schemas
+    "ConversationUsage",
+    "ConversationUsageItem",
+    "ConversationUsageQuery",
+    "ConversationUsageQueryParams",
+    "ConversationUsageResponse",
+    "UsageBreakdownItem",
+    "UsageCoverage",
+    "UsageDashboard",
+    "UsageDashboardQuery",
+    "UsageDashboardQueryParams",
+    "UsageRange",
+    "UsageSeriesPoint",
+    "UsageTotals",
 ]

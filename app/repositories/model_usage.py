@@ -22,11 +22,12 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, desc, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.models.conversation import Conversation
 from app.models.model_usage import NULLABLE_TOKEN_FIELDS, ModelUsageEvent, ModelUsageMinute
 from app.usage.types import NormalizedUsage, UsageContext, UsageStatus
 
@@ -190,6 +191,15 @@ class DimensionUsageTotals:
     """One grouped row from ``get_dimension_breakdown``."""
 
     dimension_value: str | None
+    totals: UsageTotals
+
+
+@dataclass(frozen=True)
+class ConversationUsageTotals:
+    """One bounded conversation aggregate joined to its display title."""
+
+    conversation_id: UUID
+    title: str | None
     totals: UsageTotals
 
 
@@ -434,32 +444,92 @@ class ModelUsageRepository:
         end_exclusive: datetime,
         dimension: UsageDimension,
         conversation_id: UUID | None = None,
+        limit: int | None = None,
     ) -> list[DimensionUsageTotals]:
         """Return totals grouped by one dimension column within the window."""
         if user_id is None:
             raise ValueError("get_dimension_breakdown requires a non-null user_id")
         if dimension not in _DIMENSION_COLUMNS:
             raise ValueError(f"Unsupported usage dimension: {dimension!r}")
+        if limit is not None and not 1 <= limit <= 20:
+            raise ValueError("get_dimension_breakdown limit must be between 1 and 20")
         start = _require_aware(start_inclusive, "start_inclusive")
         end = _require_aware(end_exclusive, "end_exclusive")
         raw_column = _DIMENSION_COLUMNS[dimension]
+        public_column = func.coalesce(raw_column, "unknown")
         statement = (
-            select(raw_column.label("dimension_value"), *_sum_expressions())
+            select(public_column.label("dimension_value"), *_sum_expressions())
             .where(
                 ModelUsageMinute.user_id == user_id,
                 ModelUsageMinute.bucket_start_utc >= start,
                 ModelUsageMinute.bucket_start_utc < end,
             )
-            .group_by(raw_column)
-            .order_by(raw_column)
+            .group_by(public_column)
+        )
+        if conversation_id is not None:
+            statement = statement.where(ModelUsageMinute.conversation_id == conversation_id)
+        if limit is None:
+            statement = statement.order_by(public_column)
+        else:
+            statement = statement.order_by(desc("total_tokens_sum"), public_column.asc()).limit(
+                limit
+            )
+        with self.session_factory() as session:
+            rows = session.execute(statement).mappings().all()
+        return [
+            DimensionUsageTotals(
+                dimension_value=row["dimension_value"],
+                totals=_totals_from_mapping(row),
+            )
+            for row in rows
+        ]
+
+    def get_top_conversations(
+        self,
+        *,
+        user_id: UUID,
+        start_inclusive: datetime,
+        end_exclusive: datetime,
+        conversation_id: UUID | None = None,
+        limit: int = 20,
+    ) -> list[ConversationUsageTotals]:
+        """Return the highest known-token conversation totals, bounded in SQL."""
+        if user_id is None:
+            raise ValueError("get_top_conversations requires a non-null user_id")
+        if not 1 <= limit <= 20:
+            raise ValueError("get_top_conversations limit must be between 1 and 20")
+        start = _require_aware(start_inclusive, "start_inclusive")
+        end = _require_aware(end_exclusive, "end_exclusive")
+        statement = (
+            select(
+                ModelUsageMinute.conversation_id.label("conversation_id"),
+                Conversation.title.label("title"),
+                *_sum_expressions(),
+            )
+            .join(Conversation, Conversation.id == ModelUsageMinute.conversation_id)
+            .where(
+                ModelUsageMinute.user_id == user_id,
+                Conversation.owner_id == user_id,
+                Conversation.deleted_at.is_(None),
+                ModelUsageMinute.conversation_id.is_not(None),
+                ModelUsageMinute.bucket_start_utc >= start,
+                ModelUsageMinute.bucket_start_utc < end,
+            )
+            .group_by(ModelUsageMinute.conversation_id, Conversation.title)
+            .order_by(
+                desc("total_tokens_sum"),
+                ModelUsageMinute.conversation_id.asc(),
+            )
+            .limit(limit)
         )
         if conversation_id is not None:
             statement = statement.where(ModelUsageMinute.conversation_id == conversation_id)
         with self.session_factory() as session:
             rows = session.execute(statement).mappings().all()
         return [
-            DimensionUsageTotals(
-                dimension_value=row["dimension_value"],
+            ConversationUsageTotals(
+                conversation_id=row["conversation_id"],
+                title=row["title"],
                 totals=_totals_from_mapping(row),
             )
             for row in rows

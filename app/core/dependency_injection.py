@@ -15,6 +15,7 @@ from app.interfaces import (
     IDocumentService,
     IFeedbackService,
     IMessageService,
+    IModelUsageService,
     IUserService,
 )
 from app.interfaces.task_plan_service_interface import ITaskPlanService
@@ -23,6 +24,7 @@ from app.repositories.document import DocumentRepository
 from app.repositories.feedback import FeedbackRepository
 from app.repositories.hitl_interrupt import HITLInterruptRepository
 from app.repositories.message import MessageRepository
+from app.repositories.model_usage import ModelUsageRepository
 from app.repositories.task_plan import TaskPlanRepository
 from app.repositories.user import UserRepository
 from app.services.ai_service import AIService
@@ -128,6 +130,7 @@ class AppAutoInjector(AutoInjector):
             IAuthService: container_ref.auth_service,
             IDocumentService: container_ref.document_service,
             ITaskPlanService: container_ref.task_plan_service,
+            IModelUsageService: container_ref.model_usage_service,
             DocumentProcessingService: container_ref.document_processing_service,
             MCPService: container_ref.mcp_service,
             JwtService: container_ref.jwt_service,
@@ -234,6 +237,7 @@ class AppContainerInjector(ContainerInjector):
             IAuthService: container_ref.auth_service,
             IDocumentService: container_ref.document_service,
             ITaskPlanService: container_ref.task_plan_service,
+            IModelUsageService: container_ref.model_usage_service,
             DocumentProcessingService: container_ref.document_processing_service,
             JwtService: container_ref.jwt_service,
             AIService: container_ref.ai_service,
@@ -244,6 +248,7 @@ class AppContainerInjector(ContainerInjector):
             FeedbackRepository: container_ref.feedback_repository,
             DocumentRepository: container_ref.document_repository,
             TaskPlanRepository: container_ref.task_plan_repository,
+            ModelUsageRepository: container_ref.model_usage_repository,
             # Validation utilities
             UserValidationUtils: container_ref.user_validation_utils,
             ConversationValidationUtils: container_ref.conversation_validation_utils,
