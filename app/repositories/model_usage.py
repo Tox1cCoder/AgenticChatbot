@@ -16,13 +16,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import UUID
 
-from sqlalchemy import delete, desc, func, select
+from sqlalchemy import DateTime, Integer, and_, column, delete, desc, func, select, values
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -200,6 +200,15 @@ class ConversationUsageTotals:
 
     conversation_id: UUID
     title: str | None
+    totals: UsageTotals
+
+
+@dataclass(frozen=True)
+class BucketUsageTotals:
+    """One SQL-aggregated response bucket, bounded by caller-supplied UTC instants."""
+
+    bucket_start_utc: datetime
+    bucket_end_utc: datetime
     totals: UsageTotals
 
 
@@ -435,6 +444,79 @@ class ModelUsageRepository:
             for row in rows:
                 session.expunge(row)
             return rows
+
+    def get_bucket_series(
+        self,
+        *,
+        user_id: UUID,
+        bucket_intervals: Sequence[tuple[datetime, datetime]],
+        conversation_id: UUID | None = None,
+    ) -> list[BucketUsageTotals]:
+        """Aggregate usage into ordered UTC intervals in one bounded SQL query."""
+        if user_id is None:
+            raise ValueError("get_bucket_series requires a non-null user_id")
+        if not bucket_intervals:
+            return []
+        if len(bucket_intervals) > 1500:
+            raise ValueError("get_bucket_series accepts at most 1500 intervals")
+
+        normalized: list[tuple[int, datetime, datetime]] = []
+        previous_end: datetime | None = None
+        for index, (raw_start, raw_end) in enumerate(bucket_intervals):
+            start = _require_minute_aligned_utc(raw_start, "bucket interval start")
+            end = _require_minute_aligned_utc(raw_end, "bucket interval end")
+            if end <= start:
+                raise ValueError("bucket intervals must have end after start")
+            if previous_end is not None and start < previous_end:
+                raise ValueError("bucket intervals must be ordered and non-overlapping")
+            normalized.append((index, start, end))
+            previous_end = end
+
+        interval_values = (
+            values(
+                column("bucket_index", Integer),
+                column("bucket_start_utc", DateTime(timezone=True)),
+                column("bucket_end_utc", DateTime(timezone=True)),
+                name="usage_bucket_values",
+            )
+            .data(normalized)
+            .cte("usage_buckets")
+        )
+        statement = (
+            select(
+                interval_values.c.bucket_start_utc,
+                interval_values.c.bucket_end_utc,
+                *_sum_expressions(),
+            )
+            .select_from(
+                interval_values.join(
+                    ModelUsageMinute,
+                    and_(
+                        ModelUsageMinute.bucket_start_utc >= interval_values.c.bucket_start_utc,
+                        ModelUsageMinute.bucket_start_utc < interval_values.c.bucket_end_utc,
+                    ),
+                )
+            )
+            .where(ModelUsageMinute.user_id == user_id)
+            .group_by(
+                interval_values.c.bucket_index,
+                interval_values.c.bucket_start_utc,
+                interval_values.c.bucket_end_utc,
+            )
+            .order_by(interval_values.c.bucket_index)
+        )
+        if conversation_id is not None:
+            statement = statement.where(ModelUsageMinute.conversation_id == conversation_id)
+        with self.session_factory() as session:
+            rows = session.execute(statement).mappings().all()
+        return [
+            BucketUsageTotals(
+                bucket_start_utc=row["bucket_start_utc"],
+                bucket_end_utc=row["bucket_end_utc"],
+                totals=_totals_from_mapping(row),
+            )
+            for row in rows
+        ]
 
     def get_dimension_breakdown(
         self,

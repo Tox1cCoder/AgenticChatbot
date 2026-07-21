@@ -200,6 +200,10 @@ class EmptyUsageRepository:
         self.calls.append(("series", kwargs))
         return []
 
+    def get_bucket_series(self, **kwargs):
+        self.calls.append(("bucket_series", kwargs))
+        return []
+
     def get_dimension_breakdown(self, **kwargs):
         self.calls.append(("dimension", kwargs))
         return []
@@ -221,6 +225,15 @@ class OwningConversationRepository:
 class ForeignConversationRepository:
     def user_owns_conversation(self, owner_id, conversation_id) -> bool:
         return False
+
+
+class BoundedSeriesSpyRepository(EmptyUsageRepository):
+    def get_minute_series(self, **kwargs):
+        raise AssertionError("dashboard must not load raw dimension-level minute rows")
+
+    def get_bucket_series(self, **kwargs):
+        self.calls.append(("bucket_series", kwargs))
+        return []
 
 
 def repository_totals(**values: int) -> RepositoryUsageTotals:
@@ -245,6 +258,26 @@ class PopulatedUsageRepository(EmptyUsageRepository):
     def get_minute_series(self, **kwargs):
         self.calls.append(("series", kwargs))
         return self.minute_rows
+
+    def get_bucket_series(self, *, bucket_intervals, **kwargs):
+        self.calls.append(("bucket_series", {"bucket_intervals": bucket_intervals, **kwargs}))
+        rows = []
+        for start, end in bucket_intervals:
+            matching = [row for row in self.minute_rows if start <= row.bucket_start_utc < end]
+            if not matching:
+                continue
+            summed = {
+                field.name: sum(getattr(row, field.name) for row in matching)
+                for field in fields(RepositoryUsageTotals)
+            }
+            rows.append(
+                SimpleNamespace(
+                    bucket_start_utc=start,
+                    bucket_end_utc=end,
+                    totals=repository_totals(**summed),
+                )
+            )
+        return rows
 
     def get_dimension_breakdown(self, *, dimension, **kwargs):
         self.calls.append(("dimension", {"dimension": dimension, **kwargs}))
@@ -289,6 +322,22 @@ def test_dashboard_defaults_to_last_30_local_days_and_returns_empty_buckets() ->
     assert len(result.series) == 30
     assert result.totals == UsageTotals()
     assert result.coverage == UsageCoverage()
+
+
+def test_dashboard_uses_one_bounded_bucket_query_and_never_raw_minute_rows() -> None:
+    repository = BoundedSeriesSpyRepository()
+    service = ModelUsageService(
+        repository=repository,
+        conversation_repository=OwningConversationRepository(),
+        clock=lambda: datetime(2026, 7, 21, 12, 34, tzinfo=timezone.utc),
+    )
+
+    result = service.get_dashboard(user_id=uuid4(), query=UsageDashboardQuery())
+
+    calls = [kwargs for name, kwargs in repository.calls if name == "bucket_series"]
+    assert len(calls) == 1
+    assert len(calls[0]["bucket_intervals"]) == 30
+    assert len(result.series) == 30
 
 
 def test_conversation_defaults_to_all_730_retained_days() -> None:
@@ -578,6 +627,63 @@ def test_new_york_local_day_series_has_dst_aware_duration(
         timezone.utc
     )
     assert elapsed == timedelta(hours=expected_hours)
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "expected_starts", "expected_durations"),
+    [
+        (
+            "2024-04-07T00:00:00+11:00",
+            "2024-04-07T04:00:00+10:30",
+            [
+                "2024-04-07T00:00:00+11:00",
+                "2024-04-07T01:00:00+11:00",
+                "2024-04-07T02:00:00+10:30",
+                "2024-04-07T03:00:00+10:30",
+            ],
+            [60, 90, 60, 60],
+        ),
+        (
+            "2024-10-06T00:00:00+10:30",
+            "2024-10-06T04:00:00+11:00",
+            [
+                "2024-10-06T00:00:00+10:30",
+                "2024-10-06T01:00:00+10:30",
+                "2024-10-06T03:00:00+11:00",
+            ],
+            [60, 90, 60],
+        ),
+    ],
+)
+def test_lord_howe_hour_series_uses_local_wall_hour_boundaries(
+    start: str,
+    end: str,
+    expected_starts: list[str],
+    expected_durations: list[int],
+) -> None:
+    service, _ = make_empty_service()
+    query = UsageDashboardQuery.model_validate(
+        {
+            "from": start,
+            "to": end,
+            "bucket": "hour",
+            "timezone": "Australia/Lord_Howe",
+        }
+    )
+
+    result = service.get_dashboard(user_id=uuid4(), query=query)
+
+    assert [point.start.isoformat() for point in result.series] == expected_starts
+    assert all(point.start.minute == 0 and point.end.minute == 0 for point in result.series)
+    assert [
+        int(
+            (
+                point.end.astimezone(timezone.utc) - point.start.astimezone(timezone.utc)
+            ).total_seconds()
+            // 60
+        )
+        for point in result.series
+    ] == expected_durations
 
 
 def test_ambiguous_local_midnight_fold_keeps_daily_usage_in_selected_interval() -> None:

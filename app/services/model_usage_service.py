@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from bisect import bisect_right
 from collections.abc import Callable
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
@@ -55,8 +54,15 @@ class ModelUsageService(IModelUsageService):
         usage_range, start_utc, end_utc = self._resolve_range(query, default_days=_DASHBOARD_DAYS)
         scope = self._query_scope(user_id, start_utc, end_utc, query.conversation_id)
         totals = self._public_totals(self.repository.get_summary_totals(**scope))
+        intervals = self._build_bucket_intervals(usage_range, start_utc, end_utc)
         series = self._build_series(
-            self.repository.get_minute_series(**scope), usage_range, start_utc, end_utc
+            self.repository.get_bucket_series(
+                user_id=user_id,
+                bucket_intervals=intervals,
+                conversation_id=query.conversation_id,
+            ),
+            usage_range,
+            intervals,
         )
         coverage = self._coverage(scope)
         return UsageDashboard(
@@ -288,42 +294,64 @@ class ModelUsageService(IModelUsageService):
             key=lambda item: (-item.totals.total_tokens, str(item.conversation_id)),
         )[:20]
 
+    @staticmethod
+    def _build_bucket_intervals(
+        usage_range: UsageRange,
+        start_utc: datetime,
+        end_utc: datetime,
+    ) -> list[tuple[datetime, datetime]]:
+        zone = ZoneInfo(usage_range.timezone)
+        if usage_range.bucket == "hour":
+            start_wall = start_utc.astimezone(zone).replace(tzinfo=None)
+            end_wall = end_utc.astimezone(zone).replace(tzinfo=None)
+            boundaries = {start_utc, end_utc}
+            wall_cursor = start_wall
+            while wall_cursor <= end_wall:
+                for candidate in ModelUsageService._valid_wall_instants(wall_cursor, zone):
+                    if start_utc <= candidate <= end_utc:
+                        if candidate.second != 0 or candidate.microsecond != 0:
+                            raise ValidationException(
+                                detail=(
+                                    "Hourly boundary must resolve to a minute-aligned UTC instant"
+                                ),
+                                error_code="INVALID_USAGE_BOUNDARY",
+                            )
+                        boundaries.add(candidate)
+                wall_cursor += timedelta(hours=1)
+            ordered = sorted(boundaries)
+            return list(zip(ordered, ordered[1:], strict=False))
+
+        intervals: list[tuple[datetime, datetime]] = []
+        cursor = start_utc
+        while cursor < end_utc:
+            local = cursor.astimezone(zone)
+            next_local = datetime.combine(local.date() + timedelta(days=1), time.min, zone)
+            next_cursor = min(next_local.astimezone(_UTC), end_utc)
+            intervals.append((cursor, next_cursor))
+            cursor = next_cursor
+        return intervals
+
+    @staticmethod
+    def _valid_wall_instants(wall: datetime, zone: ZoneInfo) -> list[datetime]:
+        """Resolve a naive wall time to every real UTC fold, skipping gaps."""
+        candidates: set[datetime] = set()
+        for fold in (0, 1):
+            local = wall.replace(tzinfo=zone, fold=fold)
+            utc_value = local.astimezone(_UTC)
+            if utc_value.astimezone(zone).replace(tzinfo=None) == wall:
+                candidates.add(utc_value)
+        return sorted(candidates)
+
     def _build_series(
         self,
         rows: list[Any],
         usage_range: UsageRange,
-        start_utc: datetime,
-        end_utc: datetime,
+        intervals: list[tuple[datetime, datetime]],
     ) -> list[UsageSeriesPoint]:
         zone = ZoneInfo(usage_range.timezone)
-        intervals: list[tuple[datetime, datetime]] = []
-        cursor = start_utc
-        while cursor < end_utc:
-            if usage_range.bucket == "hour":
-                next_cursor = min(cursor + timedelta(hours=1), end_utc)
-            else:
-                local = cursor.astimezone(zone)
-                next_local = datetime.combine(local.date() + timedelta(days=1), time.min, zone)
-                next_cursor = min(next_local.astimezone(_UTC), end_utc)
-            intervals.append((cursor, next_cursor))
-            cursor = next_cursor
-
-        starts = [start for start, _ in intervals]
-        bucket_totals: dict[datetime, UsageTotals] = {}
-        for row in rows:
-            instant = row.bucket_start_utc.astimezone(_UTC)
-            index = bisect_right(starts, instant) - 1
-            if index < 0 or instant >= intervals[index][1]:
-                continue
-            bucket_start = intervals[index][0]
-            totals = bucket_totals.setdefault(bucket_start, UsageTotals())
-            totals.input_tokens += row.input_tokens_sum
-            totals.output_tokens += row.output_tokens_sum
-            totals.total_tokens += row.total_tokens_sum
-            totals.reasoning_tokens += row.reasoning_tokens_sum
-            totals.cached_input_tokens += row.cached_input_tokens_sum
-            totals.generated_images += row.generated_images_sum
-            totals.request_count += row.request_count
+        bucket_totals = {
+            row.bucket_start_utc.astimezone(_UTC): self._public_totals(row.totals) for row in rows
+        }
 
         return [
             UsageSeriesPoint(

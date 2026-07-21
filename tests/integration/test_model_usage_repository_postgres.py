@@ -374,6 +374,76 @@ def test_user_and_conversation_filters_never_cross_tenants(
         )
 
 
+def test_bucket_series_aggregates_intervals_in_sql_and_stays_tenant_bounded(
+    repository, tenant_factory
+) -> None:
+    user_a, conversation_a, _ = tenant_factory()
+    user_b, conversation_b, _ = tenant_factory()
+    start = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(minutes=10)
+    intervals = [
+        (start, start + timedelta(minutes=2)),
+        (start + timedelta(minutes=2), start + timedelta(minutes=4)),
+        (start + timedelta(minutes=4), start + timedelta(minutes=6)),
+    ]
+
+    repository.record_event(
+        _command(
+            user_id=user_a,
+            conversation_id=conversation_a,
+            provider="openai",
+            total_tokens=150,
+            started_at=start,
+        )
+    )
+    repository.record_event(
+        _command(
+            user_id=user_a,
+            conversation_id=conversation_a,
+            provider="gemini",
+            input_tokens=10,
+            output_tokens=10,
+            total_tokens=20,
+            started_at=start + timedelta(minutes=1),
+        )
+    )
+    repository.record_event(
+        _command(
+            user_id=user_a,
+            conversation_id=conversation_a,
+            total_tokens=30,
+            started_at=start + timedelta(minutes=2),
+        )
+    )
+    repository.record_event(
+        _command(
+            user_id=user_b,
+            conversation_id=conversation_b,
+            total_tokens=999,
+            started_at=start,
+        )
+    )
+
+    rows = repository.get_bucket_series(
+        user_id=user_a,
+        bucket_intervals=intervals,
+        conversation_id=conversation_a,
+    )
+
+    assert len(rows) == 2
+    assert len(rows) <= len(intervals)
+    assert [row.bucket_start_utc for row in rows] == [intervals[0][0], intervals[1][0]]
+    assert [row.totals.request_count for row in rows] == [2, 1]
+    assert [row.totals.total_tokens_sum for row in rows] == [170, 30]
+    assert [row.totals.total_tokens_known_count for row in rows] == [2, 1]
+
+    cross_tenant = repository.get_bucket_series(
+        user_id=user_a,
+        bucket_intervals=intervals,
+        conversation_id=conversation_b,
+    )
+    assert cross_tenant == []
+
+
 def test_reconcile_minute_rebuilds_exactly_from_raw_events(
     repository, tenant_factory, session_factory
 ) -> None:
