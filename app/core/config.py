@@ -670,11 +670,13 @@ class Settings(BaseSettings):
     )
     model_usage_health_failure_window_seconds: int = Field(
         default=300,
+        le=3_600,
         description="Recent process-local persistence-failure health window",
     )
     model_usage_failure_store_ttl_seconds: int = Field(
         default=900,
         ge=60,
+        le=86_400,
         description="TTL for content-free Redis model-usage failure minute buckets",
     )
     model_usage_failure_store_timeout_seconds: float = Field(
@@ -1642,6 +1644,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _cross_field_checks(self) -> "Settings":
+        if self.model_usage_reconcile_minutes > self.model_usage_raw_retention_days * 1_440:
+            raise ValueError("model usage reconcile window cannot exceed raw-event retention")
+        if self.model_usage_rollup_retention_days < self.model_usage_raw_retention_days:
+            raise ValueError(
+                "model usage rollup retention cannot be shorter than raw-event retention"
+            )
         if (
             self.model_usage_failure_store_ttl_seconds
             < self.model_usage_health_failure_window_seconds + 60

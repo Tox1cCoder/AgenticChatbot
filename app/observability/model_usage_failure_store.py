@@ -35,6 +35,7 @@ class RedisModelUsageFailureStore:
     """Redis UTC-minute counters with fixed content-free keys and bounded TTL."""
 
     _KEY_PREFIX = "model_usage:persistence_failures:v1"
+    _MAX_READ_BUCKETS = 61
 
     def __init__(
         self,
@@ -59,7 +60,7 @@ class RedisModelUsageFailureStore:
     def record_failure(self) -> bool:
         try:
             key = self._key(self._minute_number())
-            pipeline = self._client.pipeline(transaction=False)
+            pipeline = self._client.pipeline(transaction=True)
             pipeline.incr(key)
             pipeline.expire(key, self._ttl_seconds)
             pipeline.execute()
@@ -70,14 +71,16 @@ class RedisModelUsageFailureStore:
     def recent_failure_count(self, *, window_seconds: float) -> FailureStoreSnapshot:
         window = max(1.0, float(window_seconds))
         max_buckets = max(1, math.ceil(self._ttl_seconds / 60))
-        bucket_count = min(max_buckets, math.ceil(window / 60) + 1)
+        requested_buckets = min(max_buckets, math.ceil(window / 60) + 1)
+        bucket_count = min(requested_buckets, self._MAX_READ_BUCKETS)
+        complete = requested_buckets <= self._MAX_READ_BUCKETS
         current = self._minute_number()
         keys = [self._key(current - offset) for offset in range(bucket_count)]
         try:
             values = self._client.mget(keys)
             return FailureStoreSnapshot(
                 count=sum(int(value or 0) for value in values),
-                available=True,
+                available=complete,
             )
         except Exception:
             return FailureStoreSnapshot(count=0, available=False)

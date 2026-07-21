@@ -33,6 +33,51 @@ def test_shared_failure_ttl_covers_health_window_and_boundary_bucket():
         )
 
 
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        (
+            {
+                "model_usage_raw_retention_days": 1,
+                "model_usage_reconcile_minutes": 1_441,
+            },
+            "reconcile window",
+        ),
+        (
+            {
+                "model_usage_raw_retention_days": 91,
+                "model_usage_rollup_retention_days": 90,
+            },
+            "rollup retention",
+        ),
+        ({"model_usage_health_failure_window_seconds": 3_601}, "less than or equal"),
+        ({"model_usage_failure_store_ttl_seconds": 86_401}, "less than or equal"),
+    ],
+)
+def test_model_usage_startup_rejects_impossible_operational_bounds(overrides, message):
+    with pytest.raises(ValidationError, match=message):
+        Settings(
+            _env_file=None,
+            secret_key="test-secret-key-with-at-least-32-bytes",
+            **overrides,
+        )
+
+
+def test_model_usage_startup_accepts_retention_boundary_values():
+    configured = Settings(
+        _env_file=None,
+        secret_key="test-secret-key-with-at-least-32-bytes",
+        model_usage_raw_retention_days=2,
+        model_usage_rollup_retention_days=2,
+        model_usage_reconcile_minutes=2 * 1_440,
+        model_usage_health_failure_window_seconds=3_600,
+        model_usage_failure_store_ttl_seconds=3_660,
+    )
+
+    assert configured.model_usage_reconcile_minutes == 2 * 1_440
+    assert configured.model_usage_rollup_retention_days == 2
+
+
 def test_reconcile_partitions_full_window_into_bounded_chunks(monkeypatch):
     from app.repositories.model_usage import ModelUsageRepository
 

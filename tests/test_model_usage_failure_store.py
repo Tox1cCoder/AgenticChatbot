@@ -77,6 +77,7 @@ def test_shared_store_failure_is_best_effort_and_never_escapes_recorder_metric()
 
 def test_redis_store_uses_content_free_minute_bucket_and_ttl():
     values = {}
+    transaction_modes = []
 
     class Pipeline:
         def incr(self, key):
@@ -90,7 +91,7 @@ def test_redis_store_uses_content_free_minute_bucket_and_ttl():
 
     class Redis:
         def pipeline(self, *, transaction):
-            assert transaction is False
+            transaction_modes.append(transaction)
             return Pipeline()
 
         def mget(self, keys):
@@ -103,6 +104,27 @@ def test_redis_store_uses_content_free_minute_bucket_and_ttl():
     result = store.recent_failure_count(window_seconds=300)
 
     assert result == FailureStoreSnapshot(count=1, available=True)
+    assert transaction_modes == [True]
     bucket_keys = [key for key in values if not key.startswith("ttl:")]
     assert bucket_keys == [f"model_usage:persistence_failures:v1:{int(now.timestamp() // 60)}"]
     assert values[f"ttl:{bucket_keys[0]}"] == 900
+
+
+def test_redis_store_caps_direct_large_window_reads_and_marks_them_incomplete():
+    captured_keys = []
+
+    class Redis:
+        def mget(self, keys):
+            captured_keys.extend(keys)
+            return [0] * len(keys)
+
+    store = RedisModelUsageFailureStore(
+        Redis(),
+        ttl_seconds=86_400,
+        clock=lambda: datetime(2026, 7, 21, 12, 34, tzinfo=timezone.utc),
+    )
+
+    result = store.recent_failure_count(window_seconds=10_000_000)
+
+    assert len(captured_keys) == 61
+    assert result.available is False
