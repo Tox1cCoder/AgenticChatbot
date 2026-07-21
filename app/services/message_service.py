@@ -1330,7 +1330,8 @@ class MessageService(IMessageService):
 
         if not interrupt_id:
             raise CustomHTTPException(
-                status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+                # Starlette's symbolic name differs across the supported range.
+                status_code=422,
                 detail="interruptId is required to resume a durable approval request.",
                 error_code="INTERRUPT_ID_REQUIRED",
             )

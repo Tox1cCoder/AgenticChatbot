@@ -111,6 +111,12 @@ class MCPManager:
     def _build_server_config(self) -> dict[str, dict[str, Any]]:
         mcp_servers = self.config.get("mcp_servers", {})
         server_config: dict[str, dict[str, Any]] = {}
+        default_config = Path(self._get_default_config_path()).resolve()
+        configured_path = Path(self.config_path).resolve()
+        uses_bundled_config = configured_path == default_config
+        script_base = (
+            Path(__file__).resolve().parents[2] if uses_bundled_config else configured_path.parent
+        )
 
         for server_name, server_info in mcp_servers.items():
             if not server_info.get("enabled", True):
@@ -119,20 +125,19 @@ class MCPManager:
             transport = normalize_mcp_transport(server_info.get("transport"))
 
             if transport == "stdio":
-                # Bundled config paths are repository-root-relative, independent
-                # of the process working directory used by the ASGI launcher.
-                project_root = Path(__file__).resolve().parents[2]
+                # Resolve scripts against the selected bundled/custom base,
+                # independent of the process working directory.
                 args = server_info.get("args", [])
                 abs_args = []
                 for arg in args:
                     path = Path(arg)
                     if arg.endswith(".py") and not path.is_absolute():
-                        abs_args.append(str((project_root / path).resolve()))
+                        abs_args.append(str((script_base / path).resolve()))
                     else:
                         abs_args.append(arg)
 
                 command = str(server_info.get("command") or "python")
-                if command.lower() in {"python", "python3"}:
+                if uses_bundled_config and command.lower() in {"python", "python3"}:
                     command = sys.executable
 
                 entry = build_mcp_server_entry(

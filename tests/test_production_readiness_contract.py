@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from urllib.parse import unquote
 
 import pytest
 
@@ -259,6 +260,24 @@ else:
     assert completed.returncode == 0, completed.stderr
 
 
+def test_production_never_uses_version_specific_starlette_422_symbols() -> None:
+    forbidden = {"HTTP_422_UNPROCESSABLE_CONTENT", "HTTP_422_UNPROCESSABLE_ENTITY"}
+    violations: list[str] = []
+
+    for root_name in ("app", "client_backend"):
+        for path in (ROOT / root_name).rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            if any(
+                (isinstance(node, ast.Attribute) and node.attr in forbidden)
+                or (isinstance(node, ast.Name) and node.id in forbidden)
+                or (isinstance(node, ast.alias) and node.name in forbidden)
+                for node in ast.walk(tree)
+            ):
+                violations.append(path.relative_to(ROOT).as_posix())
+
+    assert not violations, f"version-specific HTTP 422 symbols used in: {violations}"
+
+
 def test_production_no_longer_depends_on_sunset_langchain_community() -> None:
     source_violations: list[str] = []
     for path in (ROOT / "app").rglob("*.py"):
@@ -317,6 +336,30 @@ def test_readme_only_claims_tracked_mcp_assets_are_bundled() -> None:
     assert "boring_reader" not in readme
     assert "ships its own Tesseract" not in readme
     assert "YOLO artifacts" not in readme
+
+
+def test_readme_local_links_only_target_tracked_distributable_assets() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    local_targets = {
+        unquote(target.split("#", 1)[0]).rstrip("/")
+        for target in re.findall(r"\[[^]]*\]\(([^)]+)\)", readme)
+        if target and not target.startswith(("#", "http://", "https://", "mailto:"))
+    }
+    untracked = []
+    for target in sorted(local_targets):
+        tracked = subprocess.run(
+            ["git", "ls-files", "--", target],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if not tracked:
+            untracked.append(target)
+
+    assert not untracked, f"README links to untracked local assets: {untracked}"
+    assert "Bundled skills (playwright-cli, take100)" not in readme
+    assert "Bundled examples:" not in readme
 
 
 def test_httpx2_testclient_dependency_is_declared_in_every_manifest() -> None:

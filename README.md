@@ -149,10 +149,10 @@ Both services speak the same schemas (`app/schemas/`). The **client backend** ex
 │   ├── cli.py                        codex-client-backend entrypoint (run / doctor)
 │   └── main.py                       FastAPI app factory
 ├── shared/skills/                    Shared skill parsing helpers (front matter)
-├── skills/                           Bundled skills (playwright-cli, take100)
+├── skills/                           Optional user-local skills (ignored, not distributed)
 ├── tests/                            Unit + integration tests (server and client_backend)
 ├── scripts/build-client-backend-bundle.ps1   Client bundle builder
-├── dist/client-backend-bundle/       Pre-built client distribution
+├── dist/client-backend-bundle/       Generated client bundle output (not tracked)
 ├── docker-compose.redis.yml          Local Redis with persistence + auth
 ├── alembic.ini                       Alembic runtime config
 ├── demo.py                           Streamlit demo UI
@@ -778,10 +778,10 @@ Skills are markdown files with YAML frontmatter describing a capability (name, d
 - **Client (only source of skills)** — [`LocalSkillsRegistry`](client_backend/services/local_skills_registry.py), scanning `CLIENT_SKILLS_ROOTS`; synced per-device to the server and resolved at chat time by [`skill_resolver.py`](app/ai/skill_resolver.py) strictly for the originating device.
 - To serve this repo's `skills/` folder during development, add its absolute path to the local sidecar's `CLIENT_SKILLS_ROOTS`.
 
-Frontmatter parsing is shared in [`shared/skills/front_matter.py`](shared/skills/front_matter.py). Bundled examples:
-
-- [`skills/playwright-cli/`](skills/playwright-cli/) — Playwright CLI browser automation
-- [`skills/take100/`](skills/take100/) — HTTP-based timesheet automation
+Frontmatter parsing is shared in [`shared/skills/front_matter.py`](shared/skills/front_matter.py).
+Optional user-local examples such as `skills/playwright-cli/` and
+`skills/take100/` may be added under the ignored `skills/` directory; they are
+not part of the distributed repository.
 
 API (sidecar only — the server has no skills endpoints of its own):
 
@@ -1357,7 +1357,8 @@ The client backend can be bundled for desktop distribution:
 pwsh -File scripts/build-client-backend-bundle.ps1
 ```
 
-Pre-built artifacts are kept under [`dist/client-backend-bundle/`](dist/client-backend-bundle/). `pyproject.toml` defines the console script:
+The bundle scripts generate artifacts under the ignored
+`dist/client-backend-bundle/` directory. `pyproject.toml` defines the console script:
 
 ```toml
 [project.scripts]

@@ -108,11 +108,14 @@ def test_local_mcp_manager_seeds_dev_profile_config_from_repo_default(tmp_path, 
     repo_root = tmp_path / "repo"
     seed_config_path = repo_root / "app" / "ai" / "mcp_config.json"
     seed_config_path.parent.mkdir(parents=True, exist_ok=True)
+    server_script = repo_root / "app" / "ai" / "mcp_servers" / "time_server.py"
+    server_script.parent.mkdir(parents=True, exist_ok=True)
+    server_script.write_text("print('ok')", encoding="utf-8")
     seed_payload = {
         "mcp_servers": {
             "time": {
                 "transport": "stdio",
-                "command": sys.executable,
+                "command": "python",
                 "args": ["app/ai/mcp_servers/time_server.py"],
                 "enabled": True,
             }
@@ -128,7 +131,14 @@ def test_local_mcp_manager_seeds_dev_profile_config_from_repo_default(tmp_path, 
     client_settings.profile_root = str(repo_root / "profiles")
     client_settings.environment = "development"
 
-    monkeypatch.chdir(repo_root)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(
+        local_mcp_manager_module,
+        "__file__",
+        str(repo_root / "client_backend" / "services" / "local_mcp_manager.py"),
+    )
     monkeypatch.setattr(
         local_mcp_manager_module,
         "get_upstream_auth_service",
@@ -138,7 +148,47 @@ def test_local_mcp_manager_seeds_dev_profile_config_from_repo_default(tmp_path, 
     manager = LocalMCPManager()
     try:
         manager._ensure_default_config_exists()
-        assert json.loads(manager.config_path.read_text(encoding="utf-8")) == seed_payload
+        seeded = json.loads(manager.config_path.read_text(encoding="utf-8"))
+        time_config = seeded["mcp_servers"]["time"]
+        assert time_config["command"] == sys.executable
+        assert time_config["args"] == [str(server_script.resolve())]
+    finally:
+        client_settings.mcp_config_path = original_mcp_config_path
+        client_settings.profile_root = original_profile_root
+        client_settings.environment = original_environment
+
+
+def test_local_mcp_seed_makes_every_enabled_bundled_server_cwd_independent(tmp_path, monkeypatch):
+    repo_root = Path(__file__).resolve().parents[2]
+    source = json.loads((repo_root / "app" / "ai" / "mcp_config.json").read_text(encoding="utf-8"))
+    expected_enabled = {
+        name for name, config in source["mcp_servers"].items() if config.get("enabled", True)
+    }
+    original_mcp_config_path = client_settings.mcp_config_path
+    original_profile_root = client_settings.profile_root
+    original_environment = client_settings.environment
+    client_settings.mcp_config_path = ""
+    client_settings.profile_root = str(tmp_path / "profiles")
+    client_settings.environment = "development"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        local_mcp_manager_module,
+        "get_upstream_auth_service",
+        lambda: SimpleNamespace(get_current_user_id=lambda: None),
+    )
+
+    manager = LocalMCPManager()
+    try:
+        manager._ensure_default_config_exists()
+        seeded = json.loads(manager.config_path.read_text(encoding="utf-8"))["mcp_servers"]
+        assert {
+            name for name, config in seeded.items() if config.get("enabled", True)
+        } == expected_enabled
+        for name in expected_enabled:
+            assert seeded[name]["command"] == sys.executable
+            script = Path(seeded[name]["args"][0])
+            assert script.is_absolute()
+            assert script.is_file()
     finally:
         client_settings.mcp_config_path = original_mcp_config_path
         client_settings.profile_root = original_profile_root

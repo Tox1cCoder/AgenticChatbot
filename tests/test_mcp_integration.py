@@ -24,6 +24,38 @@ def test_default_stdio_servers_resolve_from_outside_repository(tmp_path, monkeyp
         assert script.is_file()
 
 
+def test_explicit_stdio_script_resolves_relative_to_config_file(tmp_path, monkeypatch):
+    config_dir = tmp_path / "custom"
+    config_dir.mkdir()
+    server_script = config_dir / "server.py"
+    server_script.write_text("print('ok')", encoding="utf-8")
+    config_path = config_dir / "mcp_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcp_servers": {
+                    "custom": {
+                        "enabled": True,
+                        "transport": "stdio",
+                        "command": sys.executable,
+                        "args": ["server.py"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    manager = MCPManager(config_path=str(config_path))
+    manager._ensure_config_loaded()
+
+    resolved = manager._build_server_config()["custom"]
+
+    assert resolved["args"] == [str(server_script.resolve())]
+
+
 @pytest.mark.asyncio
 async def test_server_mcp_manager_cleans_up_stdio_session_without_cancel_scope_error(
     tmp_path,

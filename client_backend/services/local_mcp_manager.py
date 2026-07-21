@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -392,6 +393,22 @@ class LocalMCPManager:
             except Exception:
                 continue
             if self._has_configured_servers(payload):
+                servers = payload.get("mcpServers") or payload.get("mcp_servers") or {}
+                repo_root = resolved_candidate.parents[2]
+                for server in servers.values():
+                    if not isinstance(server, dict) or server.get("transport") != "stdio":
+                        continue
+                    command = str(server.get("command") or "")
+                    if command.lower() in {"python", "python3"}:
+                        server["command"] = sys.executable
+                    server["args"] = [
+                        str((repo_root / arg).resolve())
+                        if isinstance(arg, str)
+                        and arg.endswith(".py")
+                        and not Path(arg).is_absolute()
+                        else arg
+                        for arg in server.get("args", [])
+                    ]
                 return payload
         return None
 
