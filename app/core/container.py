@@ -115,11 +115,29 @@ class Container(containers.DeclarativeContainer):
         url=settings.qdrant_url,
     )
 
+    # Model-usage ledger providers are defined here (ahead of their original
+    # position) so the RAG embedding builder below can receive the recorder;
+    # the embedding batches run in worker threads and record per-batch events.
+    model_usage_repository = providers.Factory(
+        ModelUsageRepository,
+        session_factory=db.provided.session,
+    )
+
+    # Reuse the module-level Prometheus singleton (D7) instead of building a
+    # second ModelUsageMetrics(), which would split the metrics registry.
+    model_usage_metrics = providers.Object(model_usage_metrics_singleton)
+
+    model_usage_recorder = providers.Singleton(
+        ModelUsageRecorder,
+        repository=model_usage_repository,
+        metrics=model_usage_metrics,
+    )
+
     # Active RAG embedding adapter. Selected at container-build time based on
     # ``rag_embedding_provider``. The Gemini path requires GEMINI_API_KEY and
     # uses ``gemini-embedding-2`` at the configured ``rag_embedding_dimension``.
     # The sentence_transformers fallback is for offline development only.
-    def _build_rag_embedding_service():
+    def _build_rag_embedding_service(recorder=None):
         provider = (settings.rag_embedding_provider or "gemini").lower()
         if provider == "gemini":
             api_key = settings.gemini_api_key
@@ -136,6 +154,7 @@ class Container(containers.DeclarativeContainer):
                 query_task=settings.rag_embedding_query_task,
                 embedding_batch_size=settings.rag_embedding_batch_size,
                 embedding_max_concurrency=settings.rag_embedding_max_concurrency,
+                recorder=recorder,
             )
         if provider == "sentence_transformers":
             from sentence_transformers import SentenceTransformer
@@ -164,7 +183,10 @@ class Container(containers.DeclarativeContainer):
             )
         raise ValueError(f"Unknown rag_embedding_provider: {settings.rag_embedding_provider}")
 
-    rag_embedding_service = providers.Singleton(_build_rag_embedding_service)
+    rag_embedding_service = providers.Singleton(
+        _build_rag_embedding_service,
+        recorder=model_usage_recorder,
+    )
 
     # JWT Service
     jwt_service = providers.Factory(
@@ -250,21 +272,6 @@ class Container(containers.DeclarativeContainer):
     model_provider_repository = providers.Factory(
         ModelProviderRepository,
         session_factory=db.provided.session,
-    )
-
-    model_usage_repository = providers.Factory(
-        ModelUsageRepository,
-        session_factory=db.provided.session,
-    )
-
-    # Reuse the module-level Prometheus singleton (D7) instead of building a
-    # second ModelUsageMetrics(), which would split the metrics registry.
-    model_usage_metrics = providers.Object(model_usage_metrics_singleton)
-
-    model_usage_recorder = providers.Singleton(
-        ModelUsageRecorder,
-        repository=model_usage_repository,
-        metrics=model_usage_metrics,
     )
 
     agent_model_config_repository = providers.Factory(
@@ -488,6 +495,7 @@ class Container(containers.DeclarativeContainer):
         document_chunk_builder=document_chunk_builder,
         document_parse_artifact_repository=document_parse_artifact_repository,
         document_parse_service=document_parse_service,
+        recorder=model_usage_recorder,
     )
 
     document_service: providers.Provider[IDocumentService] = providers.Factory(

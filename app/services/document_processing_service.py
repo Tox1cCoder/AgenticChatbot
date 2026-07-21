@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import io
 import logging
 import os
@@ -26,6 +27,8 @@ from app.schemas.document_image import DocumentImageCreate
 from app.services.document_chunk_builder import DocumentChunkBuilder, NormalizedBlock
 from app.services.document_parse_service import DocumentParseService
 from app.services.gemini_retry import is_rate_limit_error, parse_retry_delay
+from app.usage import begin_usage_operation, bind_usage_context, current_usage_context
+from app.usage.types import UsageOperation
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +43,9 @@ class DocumentProcessingService:
         document_chunk_builder: DocumentChunkBuilder | None = None,
         document_parse_artifact_repository: Any | None = None,
         document_parse_service: DocumentParseService | None = None,
+        recorder: Any | None = None,
     ):
+        self.recorder = recorder
         self.settings = settings
         self.celery_app = celery_app
         self.document_image_repository = document_image_repository
@@ -772,11 +777,34 @@ class DocumentProcessingService:
             return None
 
         max_attempts = max(1, getattr(self.settings, "image_caption_max_retry_attempts", 1))
+
+        with self._caption_usage_scope() as operation:
+            return await self._caption_with_retries(
+                image_bytes, image_name, max_attempts, operation
+            )
+
+    @contextlib.contextmanager
+    def _caption_usage_scope(self):
+        """Bind an ``image_caption`` operation spanning a caption's retries."""
+        if self.recorder is None:
+            yield None
+            return
+        context = current_usage_context().child(operation="image_caption")
+        with bind_usage_context(context), begin_usage_operation() as operation:
+            yield operation
+
+    async def _caption_with_retries(
+        self,
+        image_bytes: bytes,
+        image_name: str,
+        max_attempts: int,
+        operation: UsageOperation | None,
+    ) -> str | None:
         last_error: Exception | None = None
 
         for attempt in range(1, max_attempts + 1):
             try:
-                return self._request_image_caption(image_bytes, image_name)
+                return self._request_image_caption(image_bytes, image_name, operation=operation)
             except genai_errors.ClientError as e:
                 last_error = e
                 if is_rate_limit_error(e):
@@ -812,17 +840,35 @@ class DocumentProcessingService:
             )
         return None
 
-    def _request_image_caption(self, image_bytes: bytes, image_name: str) -> str | None:
+    def _request_image_caption(
+        self,
+        image_bytes: bytes,
+        image_name: str,
+        *,
+        operation: UsageOperation | None = None,
+    ) -> str | None:
         prompt_parts = [
             types.Part.from_text(text="Describe this image concisely in one sentence."),
             types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
         ]
 
         model_name = self.settings.image_caption_model
-        response = self.gemini_client.models.generate_content(
-            model=model_name,
-            contents=prompt_parts,
-        )
+
+        def _call() -> Any:
+            return self.gemini_client.models.generate_content(
+                model=model_name,
+                contents=prompt_parts,
+            )
+
+        if self.recorder is None or operation is None:
+            response = _call()
+        else:
+            response = self.recorder.record_one_sync_attempt(
+                call=_call,
+                provider="gemini",
+                model=model_name,
+                operation=operation,
+            )
 
         if hasattr(response, "text") and response.text:
             return response.text.strip()

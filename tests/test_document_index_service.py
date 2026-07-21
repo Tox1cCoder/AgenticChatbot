@@ -111,13 +111,14 @@ class _EmbeddingStub:
         self.doc_calls: list[tuple[list[str], list[str | None]]] = []
         self.query_calls: list[str] = []
 
-    def embed_documents(self, texts, *, titles=None):
+    def embed_documents(self, texts, *, titles=None, usage_context=None):
         texts_list = list(texts)
         title_list = list(titles) if titles is not None else [None] * len(texts_list)
         self.doc_calls.append((texts_list, title_list))
+        self.last_usage_context = usage_context
         return [[0.0] * self.dim for _ in texts_list]
 
-    def embed_query(self, query: str):
+    def embed_query(self, query: str, *, usage_context=None):
         self.query_calls.append(query)
         return [0.0] * self.dim
 
@@ -174,6 +175,31 @@ def test_index_document_replaces_sql_chunks_first():
     assert (
         replace_call.kwargs.get("document_id") == document.id or replace_call.args[0] == document.id
     )
+
+
+def test_index_document_threads_usage_context_to_embeddings():
+    """Owner attribution flows to the embedding service (Task 10)."""
+    from uuid import uuid4
+
+    from app.usage.types import UsageContext
+
+    document = _make_document()
+    persisted = [_persisted_chunk(document.id, 0)]
+    repo = MagicMock()
+    repo.replace_document_chunks.return_value = persisted
+    stub = _EmbeddingStub(dim=8)
+
+    service = _build_service(chunk_repo=repo, qdrant_client=MagicMock(), embedding_service=stub)
+    owner_id = uuid4()
+    service.index_document(
+        document=document,
+        built_chunks=[_make_built_chunk(0, "hello")],
+        parse_artifact_id=None,
+        usage_context=UsageContext(user_id=owner_id, operation="document_index"),
+    )
+
+    assert stub.last_usage_context is not None
+    assert stub.last_usage_context.user_id == owner_id
 
 
 def test_index_document_writes_authorization_metadata_to_qdrant_payload():

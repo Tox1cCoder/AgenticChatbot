@@ -1,11 +1,15 @@
 import base64
+import contextlib
 import logging
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 from google.genai import types
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
+from ...usage import begin_usage_operation, bind_usage_context, current_usage_context
+from ...usage.types import UsageOperation
 from ..agent_config import build_gemini_generate_config
 from ..image_context import build_multimodal_content, normalize_image_attachment
 from ..prompts import CHAT_SYSTEM_PROMPT, build_chat_prompt
@@ -174,100 +178,164 @@ class ChatAgent(BaseAgent):
         attempted_providers: set[str] = set()
         last_error: Exception | None = None
 
-        for _attempt in range(self._MAX_VISION_FALLBACK_ATTEMPTS):
-            try:
-                if runtime_config.provider == "openai":
-                    llm, _ = self._create_langchain_model_from_runtime(
-                        runtime_config,
-                        user_id=user_id,
-                        enable_reasoning_summary=False,
-                    )
+        # One usage operation spans the whole fallback loop, so retries and
+        # provider fallbacks for this single vision request share an operation
+        # id while each real provider attempt is a distinct recorded attempt.
+        with self._begin_vision_usage() as operation:
+            for _attempt in range(self._MAX_VISION_FALLBACK_ATTEMPTS):
+                try:
+                    if runtime_config.provider == "openai":
+                        llm, _ = self._create_langchain_model_from_runtime(
+                            runtime_config,
+                            user_id=user_id,
+                            enable_reasoning_summary=False,
+                        )
 
-                    content = build_multimodal_content(prompt, attachments)
+                        content = build_multimodal_content(prompt, attachments)
 
-                    response = await self._ainvoke_with_retries(
-                        llm,
-                        [
-                            SystemMessage(
-                                content=self._get_full_system_prompt(
-                                    user_id=user_id,
-                                    device_id=device_id,
+                        response = await self._ainvoke_with_retries(
+                            llm,
+                            [
+                                SystemMessage(
+                                    content=self._get_full_system_prompt(
+                                        user_id=user_id,
+                                        device_id=device_id,
+                                    )
+                                ),
+                                HumanMessage(content=content),
+                            ],
+                            operation=operation,
+                            provider=runtime_config.provider,
+                            model=runtime_config.model,
+                        )
+                        metadata = {"conversation_id": conversation_id}
+                        self._apply_runtime_metadata(metadata, runtime_config)
+                        return coerce_response_text(response.content), metadata
+
+                    parts = [types.Part(text=prompt)]
+                    for attachment in attachments:
+                        try:
+                            normalized = normalize_image_attachment(attachment)
+                            if normalized is None:
+                                continue
+                            image_url = normalized["url"]
+                            if not image_url.startswith("data:"):
+                                continue
+                            raw_data = image_url.partition(",")[2]
+                            if not raw_data:
+                                continue
+
+                            image_data = base64.b64decode(raw_data)
+                            parts.append(
+                                types.Part.from_bytes(
+                                    data=image_data,
+                                    mime_type=normalized["mime"],
                                 )
-                            ),
-                            HumanMessage(content=content),
-                        ],
+                            )
+                        except Exception as img_err:
+                            logger.error("Failed to process image attachment: %s", img_err)
+
+                    gemini_client = self._create_gemini_client_from_runtime(runtime_config)
+                    if gemini_client is None:
+                        raise RuntimeError(
+                            "Gemini client is not available for multimodal generation"
+                        )
+
+                    system_prompt = self._get_full_system_prompt(
+                        user_id=user_id,
+                        device_id=device_id,
                     )
+                    generation_config = build_gemini_generate_config(
+                        model_name=runtime_config.model,
+                        include_thinking=True,
+                        system_instruction=system_prompt,
+                    )
+                    response = await self._invoke_vision_gemini(
+                        gemini_client,
+                        model=runtime_config.model,
+                        parts=parts,
+                        config=generation_config,
+                        operation=operation,
+                    )
+
                     metadata = {"conversation_id": conversation_id}
                     self._apply_runtime_metadata(metadata, runtime_config)
-                    return coerce_response_text(response.content), metadata
+                    return (
+                        response.text if hasattr(response, "text") else str(response),
+                        metadata,
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    attempted_providers.add(runtime_config.provider)
 
-                parts = [types.Part(text=prompt)]
-                for attachment in attachments:
-                    try:
-                        normalized = normalize_image_attachment(attachment)
-                        if normalized is None:
-                            continue
-                        image_url = normalized["url"]
-                        if not image_url.startswith("data:"):
-                            continue
-                        raw_data = image_url.partition(",")[2]
-                        if not raw_data:
-                            continue
-
-                        image_data = base64.b64decode(raw_data)
-                        parts.append(
-                            types.Part.from_bytes(
-                                data=image_data,
-                                mime_type=normalized["mime"],
-                            )
-                        )
-                    except Exception as img_err:
-                        logger.error("Failed to process image attachment: %s", img_err)
-
-                gemini_client = self._create_gemini_client_from_runtime(runtime_config)
-                if gemini_client is None:
-                    raise RuntimeError("Gemini client is not available for multimodal generation")
-
-                system_prompt = self._get_full_system_prompt(
-                    user_id=user_id,
-                    device_id=device_id,
-                )
-                generation_config = build_gemini_generate_config(
-                    model_name=runtime_config.model,
-                    include_thinking=True,
-                    system_instruction=system_prompt,
-                )
-                response = gemini_client.models.generate_content(
-                    model=runtime_config.model,
-                    contents=parts,
-                    config=generation_config,
-                )
-
-                metadata = {"conversation_id": conversation_id}
-                self._apply_runtime_metadata(metadata, runtime_config)
-                return response.text if hasattr(response, "text") else str(response), metadata
-            except Exception as exc:
-                last_error = exc
-                attempted_providers.add(runtime_config.provider)
-
-                fallback_runtime = self._create_fallback_runtime_config(
-                    runtime_config.fallback_config,
-                    reason="provider_error",
-                    from_provider=runtime_config.provider,
-                    inherited_warnings=runtime_config.warnings,
-                )
-                if (
-                    not fallback_runtime
-                    or fallback_runtime.provider == runtime_config.provider
-                    or fallback_runtime.provider in attempted_providers
-                ):
-                    raise
-                runtime_config = fallback_runtime
+                    fallback_runtime = self._create_fallback_runtime_config(
+                        runtime_config.fallback_config,
+                        reason="provider_error",
+                        from_provider=runtime_config.provider,
+                        inherited_warnings=runtime_config.warnings,
+                    )
+                    if (
+                        not fallback_runtime
+                        or fallback_runtime.provider == runtime_config.provider
+                        or fallback_runtime.provider in attempted_providers
+                    ):
+                        raise
+                    runtime_config = fallback_runtime
 
         # Exhausted all fallback attempts
         if last_error:
             raise last_error
         raise RuntimeError("Vision generation failed after exhausting all fallback attempts")
+
+    @contextlib.contextmanager
+    def _begin_vision_usage(self) -> Iterator[UsageOperation | None]:
+        """Bind a ``vision`` operation for one vision request (spans fallbacks).
+
+        Yields ``None`` (binding nothing) when no recorder is configured so the
+        recorder-less path is byte-for-byte unchanged.
+        """
+        if self.recorder is None:
+            yield None
+            return
+        context = current_usage_context().child(operation="vision", agent_id=self.agent_id)
+        with bind_usage_context(context), begin_usage_operation() as operation:
+            yield operation
+
+    async def _invoke_vision_gemini(
+        self,
+        gemini_client: Any,
+        *,
+        model: str,
+        parts: list[Any],
+        config: Any,
+        operation: UsageOperation | None,
+    ) -> Any:
+        """Invoke the Gemini vision call once, recording the attempt when enabled.
+
+        The SDK call is synchronous; the existing behavior (blocking on the
+        event loop) is retained, only wrapped so the attempt is recorded. The
+        async recorder persists off the loop via ``asyncio.to_thread``.
+        """
+
+        def _call() -> Any:
+            return gemini_client.models.generate_content(
+                model=model,
+                contents=parts,
+                config=config,
+            )
+
+        if self.recorder is None or operation is None:
+            return _call()
+
+        async def _acall() -> Any:
+            return _call()
+
+        return await self.recorder.record_one_async_attempt(
+            call=_acall,
+            provider="gemini",
+            model=model,
+            operation=operation,
+        )
 
     async def cleanup(self):
         await super().cleanup()

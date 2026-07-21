@@ -39,6 +39,7 @@ from qdrant_client.models import (
 from app.models.document_chunk import DocumentChunk
 from app.repositories.document_chunk import DocumentChunkRepository
 from app.services.document_chunk_builder import BuiltChunk
+from app.usage.types import UsageContext
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,7 @@ class DocumentIndexService:
         built_chunks: list[BuiltChunk],
         parse_artifact_id: UUID | None,
         timing_sink: dict | None = None,
+        usage_context: UsageContext | None = None,
     ) -> list[DocumentChunk]:
         """Replace chunks for ``document`` with ``built_chunks`` and index them."""
         document_id = self._coerce_uuid(document.id)
@@ -152,6 +154,7 @@ class DocumentIndexService:
                 document=document,
                 persisted_chunks=persisted,
                 timing_sink=timing_sink,
+                usage_context=usage_context,
             )
         except Exception as exc:
             for chunk in persisted:
@@ -234,6 +237,7 @@ class DocumentIndexService:
         document: Any,
         persisted_chunks: Iterable[DocumentChunk],
         timing_sink: dict | None = None,
+        usage_context: UsageContext | None = None,
     ) -> None:
         persisted = list(persisted_chunks)
         if not persisted:
@@ -242,12 +246,16 @@ class DocumentIndexService:
         title = self._title_for_document(document, persisted)
 
         # Single embed_documents call for all chunks — batching is internal
-        # to the embedding service (rag_embedding_batch_size).
+        # to the embedding service (rag_embedding_batch_size). usage_context is
+        # passed explicitly because the embedding batches run in a
+        # ThreadPoolExecutor that does not inherit the bound request context.
         texts = [chunk.content for chunk in persisted]
         titles = [title] * len(texts)
 
         embed_t0 = _time.monotonic()
-        vectors = self.embedding_service.embed_documents(texts, titles=titles)
+        vectors = self.embedding_service.embed_documents(
+            texts, titles=titles, usage_context=usage_context
+        )
         embed_s = _time.monotonic() - embed_t0
 
         # Build points for all chunks.

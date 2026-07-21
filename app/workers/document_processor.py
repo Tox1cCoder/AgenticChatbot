@@ -20,6 +20,8 @@ from app.models.conversation import Conversation
 from app.models.document import Document
 from app.repositories.document import DocumentRepository
 from app.schemas.document import DocumentStatus, DocumentUpdate
+from app.usage import bind_usage_context
+from app.usage.types import UsageContext
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -331,15 +333,28 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
             filename=filename,
         )
 
+        # Ownership for usage attribution is derived here from the verified
+        # conversation owner — never trusted from the Celery payload. Bound for
+        # in-thread captioning; passed explicitly to index_document because the
+        # embedding batches run in a ThreadPoolExecutor that would not inherit
+        # a bound ContextVar.
+        usage_context = UsageContext(
+            user_id=(UUID(owner_id) if owner_id else None),
+            conversation_id=document.conversation_id,
+            document_id=UUID(document_id),
+            operation="document_index",
+        )
+
         # Caption images + attach to chunks (async)
         caption_t0 = time.monotonic()
         if parse_result.images_data:
-            prepared_images = _run_async(
-                processing_service._prepare_images_for_indexing(
-                    parse_result.images_data,
-                    document_id,
+            with bind_usage_context(usage_context):
+                prepared_images = _run_async(
+                    processing_service._prepare_images_for_indexing(
+                        parse_result.images_data,
+                        document_id,
+                    )
                 )
-            )
             processing_service._attach_prepared_images_to_chunks(
                 parse_result.chunks_with_metadata,
                 prepared_images,
@@ -359,6 +374,7 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
             built_chunks=built_chunks,
             parse_artifact_id=artifact.id,
             timing_sink=index_timings,
+            usage_context=usage_context,
         )
 
         # Store image records (async)

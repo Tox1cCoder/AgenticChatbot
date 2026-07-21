@@ -310,3 +310,126 @@ def test_embed_documents_concurrency_cap_respected(monkeypatch):
     assert executor_init_kwargs[0].get("max_workers") == 2, (
         f"max_workers must equal embedding_max_concurrency=2; got {executor_init_kwargs[0]}"
     )
+
+
+# ------------------------------------------------------------------
+# Task 10: per-batch usage recording
+# ------------------------------------------------------------------
+
+from uuid import uuid4  # noqa: E402
+
+from prometheus_client import CollectorRegistry  # noqa: E402
+
+from app.observability.model_usage import ModelUsageMetrics  # noqa: E402
+from app.repositories.model_usage import RecordEventCommand, RecordResult  # noqa: E402
+from app.usage.context import bind_usage_context  # noqa: E402
+from app.usage.recorder import ModelUsageRecorder  # noqa: E402
+from app.usage.types import UsageContext  # noqa: E402
+
+
+class _FakeUsageRepo:
+    def __init__(self) -> None:
+        self.commands: list[RecordEventCommand] = []
+
+    def record_event(self, command: RecordEventCommand) -> RecordResult:
+        self.commands.append(command)
+        return RecordResult(inserted=True, event_id=uuid4())
+
+
+def _build_recording_service(monkeypatch, **kwargs):
+    service, client = _build_service(monkeypatch, **kwargs)
+    repo = _FakeUsageRepo()
+    service.recorder = ModelUsageRecorder(
+        repository=repo,
+        enqueue_failed_write=lambda payload: None,
+        metrics=ModelUsageMetrics(registry=CollectorRegistry()),
+    )
+    return service, client, repo
+
+
+def test_embed_documents_records_one_event_per_batch(monkeypatch):
+    service, client, repo = _build_recording_service(monkeypatch, embedding_batch_size=1)
+    client.models.embed_content.side_effect = [
+        _make_response([0.1, 0.2]),
+        _make_response([0.3, 0.4]),
+    ]
+    user_id = uuid4()
+
+    service.embed_documents(
+        ["a", "b"],
+        titles=["t1", "t2"],
+        usage_context=UsageContext(user_id=user_id, operation="document_index"),
+    )
+
+    assert len(repo.commands) == 2
+    for command in repo.commands:
+        assert command.status == "success"
+        assert command.provider == "gemini"
+        assert command.model == "gemini-embedding-2"
+        assert command.context.operation == "embedding"
+        assert command.context.user_id == user_id
+
+
+def test_embed_batch_locally_estimates_input_when_no_usage(monkeypatch):
+    service, client, repo = _build_recording_service(monkeypatch, embedding_batch_size=32)
+    client.models.embed_content.side_effect = [_make_response([0.1, 0.2])]
+
+    service.embed_documents(
+        ["some document body"],
+        titles=["doc.pdf"],
+        usage_context=UsageContext(user_id=uuid4(), operation="document_index"),
+    )
+
+    command = repo.commands[0]
+    assert command.usage.source == "locally_estimated"
+    assert command.usage.input_tokens is not None and command.usage.input_tokens > 0
+
+
+def test_embed_batch_records_one_event_per_retry_attempt(monkeypatch):
+    from google.genai import errors as genai_errors
+
+    service, client, repo = _build_recording_service(
+        monkeypatch, embedding_batch_size=1, embedding_max_concurrency=1
+    )
+    monkeypatch.setattr("app.services.rag_embedding_service.time.sleep", lambda _s: None)
+    rate_limit_err = genai_errors.ClientError(
+        429,
+        {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "details": [{"retryDelay": "1s"}]}},
+    )
+    client.models.embed_content.side_effect = [rate_limit_err, _make_response([0.5, 0.6])]
+
+    service.embed_documents(
+        ["hello"],
+        titles=["doc.pdf"],
+        usage_context=UsageContext(user_id=uuid4(), operation="document_index"),
+    )
+
+    assert len(repo.commands) == 2
+    assert [c.attempt for c in repo.commands] == [1, 2]
+    assert repo.commands[0].status == "error"
+    assert repo.commands[1].status == "success"
+
+
+def test_embed_query_records_with_bound_chat_context(monkeypatch):
+    service, client, repo = _build_recording_service(monkeypatch)
+    client.models.embed_content.side_effect = [_make_response([0.7, 0.8])]
+    user_id, conversation_id = uuid4(), uuid4()
+
+    with bind_usage_context(
+        UsageContext(user_id=user_id, conversation_id=conversation_id, operation="workflow")
+    ):
+        service.embed_query("what changed?")
+
+    command = repo.commands[0]
+    assert command.context.operation == "embedding"
+    assert command.context.user_id == user_id
+    assert command.context.conversation_id == conversation_id
+
+
+def test_embed_documents_without_recorder_records_nothing(monkeypatch):
+    service, client = _build_service(monkeypatch, embedding_batch_size=1)
+    client.models.embed_content.side_effect = [_make_response([0.1, 0.2])]
+
+    # No recorder configured -> no recording, behavior unchanged.
+    vectors = service.embed_documents(["a"], titles=["t1"])
+    assert vectors == [[0.1, 0.2]]
