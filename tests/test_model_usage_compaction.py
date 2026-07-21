@@ -30,6 +30,7 @@ from app.repositories.model_usage import RecordEventCommand, RecordResult
 from app.usage import bind_usage_context
 from app.usage.recorder import ModelUsageRecorder
 from app.usage.types import UsageContext
+from app.workers.conversation_compaction import _langchain_generate
 
 
 class _FakeRepo:
@@ -235,6 +236,62 @@ async def test_compaction_without_recorder_records_nothing():
 
     # No recorder -> no events; compaction itself still succeeds.
     assert result.success is True
+
+
+@pytest.mark.asyncio
+async def test_langchain_generate_callsite_records_compaction_operation(monkeypatch):
+    repo = _FakeRepo()
+    provider_calls = []
+
+    class _LLM:
+        async def ainvoke(self, prompt):
+            provider_calls.append(prompt)
+            return _gemini_generated(_valid_output())
+
+    def _create_model(**kwargs):
+        assert kwargs["provider"] == "gemini"
+        assert kwargs["model"] == "gemini-2.5-flash"
+        assert kwargs["api_key"] == "server-secret"
+        return _LLM()
+
+    monkeypatch.setattr(
+        "app.workers.conversation_compaction.ModelFactory.create_model",
+        _create_model,
+    )
+    compactor = ConversationCompactor(
+        token_counter=TokenCounter(),
+        generator=_langchain_generate,
+        provider="gemini",
+        model="gemini-2.5-flash",
+        trigger_messages=1,
+        trigger_tokens=0,
+        keep_recent_turns=0,
+        max_summary_tokens=100_000,
+        credential_resolver=CompactionCredentialResolver(
+            provider="gemini",
+            server_credentials={"gemini": "server-secret"},
+        ),
+        recorder=_recorder(repo),
+    )
+    user_id, conversation_id = uuid4(), uuid4()
+
+    result = await compactor.compact(
+        _TURN,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        force=True,
+    )
+
+    assert result.success is True
+    assert len(provider_calls) == 1
+    assert len(repo.commands) == 1
+    command = repo.commands[0]
+    assert command.context.operation == "conversation_compaction"
+    assert command.context.user_id == user_id
+    assert command.context.conversation_id == conversation_id
+    assert command.status == "success"
+    assert command.usage.input_tokens == 200
+    assert command.usage.output_tokens == 50
 
 
 # ---------------------------------------------------------------------------

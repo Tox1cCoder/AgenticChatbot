@@ -51,6 +51,15 @@
   },
   {
     "file": "app/ai/agents/router.py",
+    "function": "Router._call_llm._generate",
+    "call_chain": "self.gemini_client.models.generate_content",
+    "disposition": "instrumented",
+    "operation": "router",
+    "exercising_test": "tests/test_model_usage_workflow_instrumentation.py::test_router_records_one_success_attempt",
+    "exercise_symbol": "route_message"
+  },
+  {
+    "file": "app/ai/agents/router.py",
     "function": "Router._init_gemini",
     "call_chain": "genai.Client",
     "disposition": "startup_validation"
@@ -128,30 +137,6 @@
     "disposition": "non_provider_tool_dispatch"
   },
   {
-    "file": "app/ai/mcp_servers/boring_servers/core/batch_converter.py",
-    "function": "collect_boring_batches_results",
-    "call_chain": "genai.Client",
-    "disposition": "startup_validation"
-  },
-  {
-    "file": "app/ai/mcp_servers/boring_servers/core/batch_converter.py",
-    "function": "create_boring_batches_for_images",
-    "call_chain": "genai.Client",
-    "disposition": "startup_validation"
-  },
-  {
-    "file": "app/ai/mcp_servers/boring_servers/core/converter.py",
-    "function": "_call_model_once",
-    "call_chain": "client.models.generate_content",
-    "disposition": "startup_validation"
-  },
-  {
-    "file": "app/ai/mcp_servers/boring_servers/core/converter.py",
-    "function": "_get_client",
-    "call_chain": "genai.Client",
-    "disposition": "startup_validation"
-  },
-  {
     "file": "app/ai/mcp_servers/form_filler_server.py",
     "function": "_generate_form_content._call",
     "call_chain": "client.models.generate_content",
@@ -195,6 +180,12 @@
     "file": "app/ai/tool_execution.py",
     "function": "invoke_tool",
     "call_chain": "ainvoke",
+    "disposition": "non_provider_tool_dispatch"
+  },
+  {
+    "file": "app/ai/tool_execution.py",
+    "function": "invoke_tool",
+    "call_chain": "invoke",
     "disposition": "non_provider_tool_dispatch"
   },
   {
@@ -277,7 +268,8 @@
     "call_chain": "client.ainvoke",
     "disposition": "instrumented",
     "operation": "conversation_compaction",
-    "exercising_test": "tests/test_model_usage_compaction.py::test_compaction_records_provider_usage_attributed_to_owner"
+    "exercising_test": "tests/test_model_usage_compaction.py::test_langchain_generate_callsite_records_compaction_operation",
+    "exercise_symbol": "_langchain_generate"
   },
   {
     "file": "client_backend/services/local_mcp_manager.py",
