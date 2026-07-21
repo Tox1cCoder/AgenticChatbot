@@ -34,9 +34,26 @@ from ..schemas.workflow import (
     WorkflowResponse,
     WorkflowResponseMessage,
 )
+from ..usage import (
+    UsageContext,
+    begin_usage_operation,
+    bind_usage_context,
+)
 from ..utils.text_processing import sanitize_persona
 from .event_streaming.compat import coerce_legacy_event_to_v3, infer_tool_state
 from .event_streaming.events import V3StreamEvent, make_event
+
+
+def _parse_uuid(value: Any) -> UUID | None:
+    """Best-effort UUID parse that never raises on malformed identifiers."""
+    if value is None:
+        return None
+    if isinstance(value, UUID):
+        return value
+    try:
+        return UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        return None
 
 
 class AIService:
@@ -52,6 +69,13 @@ class AIService:
 
     async def initialize(self) -> None:
         await self.workflow.initialize()
+
+    @property
+    def model_usage_recorder(self):
+        """The workflow's usage recorder (or ``None``), so callers like
+        ``MessageService`` can attribute title/suggestion calls without a
+        container lookup."""
+        return getattr(self.workflow, "model_usage_recorder", None)
 
     def invalidate_history_cache(self, conversation_id: str) -> None:
         self.workflow.invalidate_history_cache(conversation_id)
@@ -184,9 +208,25 @@ class AIService:
             suggested_questions=getattr(response, "suggested_questions", None),
         )
 
+    @staticmethod
+    def _workflow_usage_context(request: WorkflowExecutionRequest) -> UsageContext:
+        """Attribution for a workflow turn.
+
+        ``user_message_id`` is the row persisted before execution; the reserved
+        ``assistant_message_id`` is never used as a request-message FK.
+        """
+        return UsageContext(
+            user_id=_parse_uuid(request.user_id),
+            conversation_id=_parse_uuid(request.conversation_id),
+            request_message_id=_parse_uuid(request.user_message_id),
+            correlation_id=request.thread_id,
+            operation="workflow",
+        )
+
     async def execute_request(self, request: WorkflowExecutionRequest) -> WorkflowResponse:
         prepared_request = self._prepare_request(request)
-        response = await self.workflow.execute_request(self._to_ai_request(prepared_request))
+        with bind_usage_context(self._workflow_usage_context(prepared_request)):
+            response = await self.workflow.execute_request(self._to_ai_request(prepared_request))
         if response:
             normalized_response = self._to_service_response(response)
             if normalized_response:
@@ -195,14 +235,15 @@ class AIService:
 
     async def execute_request_stream(self, request: WorkflowExecutionRequest):
         prepared_request = self._prepare_request(request)
-        async for mapped_event in self._map_workflow_stream(
-            self.workflow.execute_request_stream(self._to_ai_request(prepared_request)),
-            emit_rich_items=bool(
-                getattr(settings, "inline_rich_response_enabled", False)
-                and getattr(prepared_request, "inline_rich_response_v1", False)
-            ),
-        ):
-            yield mapped_event
+        with bind_usage_context(self._workflow_usage_context(prepared_request)):
+            async for mapped_event in self._map_workflow_stream(
+                self.workflow.execute_request_stream(self._to_ai_request(prepared_request)),
+                emit_rich_items=bool(
+                    getattr(settings, "inline_rich_response_enabled", False)
+                    and getattr(prepared_request, "inline_rich_response_v1", False)
+                ),
+            ):
+                yield mapped_event
 
     async def resume_workflow(
         self,
@@ -217,10 +258,19 @@ class AIService:
                 "Cannot resume: Checkpointing not enabled or conversation ID missing"
             )
 
-        response = await self.workflow.resume(
-            thread_id=thread_id,
-            user_input=user_input,
+        # Ownership is rebuilt from the authenticated arguments, never from
+        # checkpoint state.
+        resume_context = UsageContext(
+            user_id=_parse_uuid(user_id),
+            conversation_id=_parse_uuid(conversation_id),
+            correlation_id=thread_id,
+            operation="workflow",
         )
+        with bind_usage_context(resume_context):
+            response = await self.workflow.resume(
+                thread_id=thread_id,
+                user_input=user_input,
+            )
 
         if response:
             normalized_response = self._to_service_response(response)
@@ -407,6 +457,8 @@ class AIService:
         decisions: list[InterruptDecision],
         *,
         inline_rich_response_v1: bool = False,
+        user_id: UUID | None = None,
+        conversation_id: UUID | None = None,
     ):
         if not self.checkpointer:
             yield make_event(
@@ -416,16 +468,26 @@ class AIService:
             )
             return
 
-        async for mapped_event in self._map_workflow_stream(
-            self.workflow.resume_with_decisions_stream(
-                thread_id=thread_id,
-                decisions=self._to_ai_decisions(decisions),
-            ),
-            emit_rich_items=bool(
-                getattr(settings, "inline_rich_response_enabled", False) and inline_rich_response_v1
-            ),
-        ):
-            yield mapped_event
+        # Ownership comes from the authenticated caller arguments; the thread id
+        # is the conversation id when a distinct one was not supplied.
+        resume_context = UsageContext(
+            user_id=_parse_uuid(user_id),
+            conversation_id=_parse_uuid(conversation_id) or _parse_uuid(thread_id),
+            correlation_id=thread_id,
+            operation="workflow",
+        )
+        with bind_usage_context(resume_context):
+            async for mapped_event in self._map_workflow_stream(
+                self.workflow.resume_with_decisions_stream(
+                    thread_id=thread_id,
+                    decisions=self._to_ai_decisions(decisions),
+                ),
+                emit_rich_items=bool(
+                    getattr(settings, "inline_rich_response_enabled", False)
+                    and inline_rich_response_v1
+                ),
+            ):
+                yield mapped_event
 
     def get_bot_response_sync(
         self,
@@ -441,18 +503,26 @@ class AIService:
         )
         return asyncio.run(self.execute_request(request))
 
-    async def generate_conversation_title(self, user_message: str) -> str:
+    async def generate_conversation_title(
+        self,
+        user_message: str,
+        *,
+        user_id: UUID | str | None = None,
+        conversation_id: UUID | str | None = None,
+    ) -> str:
         """
         Generate a concise, descriptive title for a conversation based on the first user message.
 
         Args:
             user_message: The first message from the user
+            user_id: Authenticated user the title call is attributed to
+            conversation_id: Conversation the title belongs to, if known
 
         Returns:
             A short, descriptive title (max 50 characters)
         """
         try:
-            from ..ai.agent_config import create_langchain_model
+            from ..ai.agent_config import AGENT_CONFIG, create_langchain_model
 
             llm = create_langchain_model(
                 agent_type="title_generator",
@@ -461,7 +531,25 @@ class AIService:
 
             prompt = TITLE_GENERATION_PROMPT.format(user_message=user_message)
 
-            response = await llm.ainvoke(prompt)
+            recorder = getattr(self.workflow, "model_usage_recorder", None)
+            if recorder is not None:
+                title_context = UsageContext(
+                    user_id=_parse_uuid(user_id),
+                    conversation_id=_parse_uuid(conversation_id),
+                    operation="title_generation",
+                    agent_id="title_generator",
+                )
+                # ``record_one_async_attempt`` re-raises on failure; the existing
+                # except below still falls back to a truncated title.
+                with bind_usage_context(title_context), begin_usage_operation() as operation:
+                    response = await recorder.record_one_async_attempt(
+                        call=lambda: llm.ainvoke(prompt),
+                        provider="gemini",
+                        model=AGENT_CONFIG["title_generator"]["model"],
+                        operation=operation,
+                    )
+            else:
+                response = await llm.ainvoke(prompt)
             raw_title = response.content
 
             if isinstance(raw_title, list):

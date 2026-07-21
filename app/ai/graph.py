@@ -205,6 +205,13 @@ class MultiAgentWorkflow(
         ]
         self._initialized = False
 
+    @property
+    def model_usage_recorder(self) -> "ModelUsageRecorder | None":
+        """The workflow's usage recorder, so callers holding the workflow (e.g.
+        ``AIService`` for title/suggestion generation) can record attempts
+        without a container lookup. ``None`` when usage tracking is disabled."""
+        return self._model_usage_recorder
+
     def _get_current_turn_messages(self, messages: list) -> list:
         if not messages:
             return messages

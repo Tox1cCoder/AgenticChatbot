@@ -7,6 +7,7 @@ from google import genai
 from google.genai import types
 
 from ...core.config import settings
+from ...usage import begin_usage_operation, bind_usage_context, current_usage_context
 from ..agent_config import build_gemini_generate_config
 from ..prompts import ROUTER_SYSTEM_PROMPT
 from ..schemas import AgentMessage
@@ -119,8 +120,8 @@ class Router:
             logger.warning("Router fallback: Gemini client unavailable, defaulting to chat_agent")
             return None
 
-        try:
-            response = await asyncio.to_thread(
+        def _generate() -> object:
+            return asyncio.to_thread(
                 self.gemini_client.models.generate_content,
                 model=self.model_name,
                 contents=prompt,
@@ -129,6 +130,23 @@ class Router:
                     include_thinking=False,
                 ),
             )
+
+        try:
+            if self.recorder is not None:
+                # Only the real provider call is recorded; the deterministic
+                # short-circuits above never reach here, so they record nothing.
+                context = current_usage_context().child(
+                    operation="router", agent_id="router"
+                )
+                with bind_usage_context(context), begin_usage_operation() as operation:
+                    response = await self.recorder.record_one_async_attempt(
+                        call=_generate,
+                        provider="gemini",
+                        model=self.model_name,
+                        operation=operation,
+                    )
+            else:
+                response = await _generate()
             response_text = response.text if hasattr(response, "text") else str(response)
             return self._extract_agent_name(response_text, available_agents)
         except Exception as exc:

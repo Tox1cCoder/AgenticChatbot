@@ -16,6 +16,8 @@ ledger's raw event rows remain the sole place model identity is stored.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 from typing import Any
 
 from prometheus_client import CollectorRegistry, Counter, generate_latest
@@ -117,6 +119,24 @@ def _failure_class(value: Any) -> str:
         "operational": "connection",
     }
     return next((label for marker, label in markers.items() if marker in normalized), "other")
+
+
+def usage_user_hash(user_id: str | None) -> str | None:
+    """Return a keyed HMAC-SHA256 of ``user_id`` for LangSmith correlation.
+
+    Returns ``None`` when there is no user or no configured secret, so raw user
+    ids never leak into trace metadata. The secret keys the hash so the value
+    cannot be reversed by dictionary attack across tenants.
+    """
+    from app.core.config import settings
+
+    if not user_id:
+        return None
+    secret = settings.model_usage_user_hash_secret or ""
+    if not secret:
+        return None
+    digest = hmac.new(secret.encode("utf-8"), str(user_id).encode("utf-8"), hashlib.sha256)
+    return digest.hexdigest()
 
 
 model_usage_metrics = ModelUsageMetrics()

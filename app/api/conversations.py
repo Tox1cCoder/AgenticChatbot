@@ -37,7 +37,7 @@ async def generate_conversation_title(
     user_id: UUID,
 ) -> ApiResponse[GenerateTitleResponse]:
     """Generate a concise title for a conversation based on the first message"""
-    title = await ai_service.generate_conversation_title(request.message)
+    title = await ai_service.generate_conversation_title(request.message, user_id=user_id)
     return ApiResponse(
         success=True,
         message="Title generated successfully",

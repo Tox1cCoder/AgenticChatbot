@@ -49,6 +49,7 @@ from app.services.ai_service import AIService
 from app.services.client_device_service import ClientDeviceService
 from app.services.event_streaming.events import V3StreamEvent, make_event
 from app.services.generation_registry import get_generation_registry
+from app.usage import UsageContext
 from app.utils.text_processing import fix_markdown_code_blocks, sanitize_persona
 from app.utils.validation.conversation_validation import ConversationValidationUtils
 from app.utils.validation.message_validation import MessageValidationUtils
@@ -623,13 +624,32 @@ class MessageService(IMessageService):
         return False
 
     async def _generate_and_add_suggestions(
-        self, user_query: str, response_content: str, metadata: dict[str, Any]
+        self,
+        user_query: str,
+        response_content: str,
+        metadata: dict[str, Any],
+        *,
+        user_id: UUID | None = None,
+        conversation_id: UUID | None = None,
+        request_message_id: UUID | None = None,
     ) -> None:
         """Generate follow-up suggestions and add to metadata."""
         try:
+            usage_context = None
+            recorder = getattr(self.ai_service, "model_usage_recorder", None)
+            if recorder is not None:
+                usage_context = UsageContext(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    request_message_id=request_message_id,
+                    operation="suggestions",
+                    agent_id="suggestion_generator",
+                )
             suggestions = await generate_follow_up_suggestions(
                 user_query=user_query,
                 response_content=response_content,
+                usage_context=usage_context,
+                recorder=recorder,
             )
             if suggestions:
                 metadata["suggested_questions"] = suggestions
@@ -655,6 +675,7 @@ class MessageService(IMessageService):
         self,
         conversation_id: UUID,
         user_message: str,
+        user_id: UUID | None = None,
     ) -> str | None:
         """
         Generate and update conversation title asynchronously.
@@ -663,7 +684,11 @@ class MessageService(IMessageService):
             The generated title if successful, None otherwise.
         """
         try:
-            title = await self.ai_service.generate_conversation_title(user_message)
+            title = await self.ai_service.generate_conversation_title(
+                user_message,
+                user_id=user_id,
+                conversation_id=conversation_id,
+            )
             if title:
                 # Update conversation with generated title
                 from app.schemas.conversation import ConversationUpdate
@@ -977,7 +1002,9 @@ class MessageService(IMessageService):
             if needs_title:
                 title_task = asyncio.create_task(
                     self._generate_title_async(
-                        message_create_data.conversation_id, message_create_data.content
+                        message_create_data.conversation_id,
+                        message_create_data.content,
+                        user_id=user_id,
                     )
                 )
 
@@ -1707,6 +1734,8 @@ class MessageService(IMessageService):
                 thread_id=thread_id,
                 decisions=decisions,
                 inline_rich_response_v1=inline_rich_response_v1,
+                user_id=user_id,
+                conversation_id=conversation_id,
             ):
                 event = _service_event_from_ai_event(raw_event, sequence=_next_sequence())
                 event_type = event.type
@@ -2562,6 +2591,9 @@ class MessageService(IMessageService):
                 suggestion_source_message,
                 bot_response_content,
                 bot_metadata,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                request_message_id=reply_to_user_message_id,
             )
 
         bot_message = self._create_bot_response_message(

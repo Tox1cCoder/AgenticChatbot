@@ -22,6 +22,13 @@ from ...core.runtime_modeling import (
 )
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ...observability.conversation_compaction import conversation_compaction_metrics
+from ...observability.model_usage import usage_user_hash
+from ...usage import (
+    UsageOperation,
+    begin_usage_operation,
+    bind_usage_context,
+    current_usage_context,
+)
 from ..agent_config import AGENT_CONFIG, create_gemini_client, create_langchain_model
 from ..client_runtime_tools import (
     get_active_client_runtime_session,
@@ -961,6 +968,10 @@ class BaseAgent(ABC):
         llm_with_tools: Any,
         messages: list[BaseMessage],
         run_config: RunnableConfig | None = None,
+        *,
+        operation: UsageOperation | None = None,
+        provider: str | None = None,
+        model: str | None = None,
     ) -> Any:
         attempts = getattr(settings, "provider_retry_attempts", 3) or 3
         delay = getattr(settings, "provider_retry_delay_seconds", 1.0) or 1.0
@@ -979,12 +990,25 @@ class BaseAgent(ABC):
         if delay < 0:
             delay = 0.0
 
+        def _ainvoke() -> Any:
+            if run_config is not None:
+                return llm_with_tools.ainvoke(messages, run_config)
+            return llm_with_tools.ainvoke(messages)
+
         last_exc: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
-                if run_config is not None:
-                    return await llm_with_tools.ainvoke(messages, run_config)
-                return await llm_with_tools.ainvoke(messages)
+                # Record exactly one attempt per generic-retry iteration when a
+                # usage operation is in flight; otherwise call the provider
+                # directly so recorder-less construction is byte-for-byte today.
+                if self.recorder is not None and operation is not None:
+                    return await self.recorder.record_one_async_attempt(
+                        call=_ainvoke,
+                        provider=provider or "unknown",
+                        model=model or "unknown",
+                        operation=operation,
+                    )
+                return await _ainvoke()
             except Exception as exc:
                 last_exc = exc
 
@@ -1001,6 +1025,39 @@ class BaseAgent(ABC):
                     await asyncio.sleep(sleep_for)
 
         raise last_exc or RuntimeError("Provider call failed")
+
+    def _augment_run_config_with_usage(
+        self,
+        run_config: RunnableConfig | None,
+        operation: UsageOperation | None,
+        user_id: str | None,
+    ) -> RunnableConfig | None:
+        """Correlate LangSmith with the usage operation without leaking identity.
+
+        Merges the usage operation id and a keyed user hash (never the raw user
+        id, email, or username) into an existing runnable config's metadata and
+        tags. Returns ``run_config`` unchanged when there is nothing to add, so
+        the main path that carries no config keeps calling ``ainvoke`` without
+        one (byte-for-byte today).
+        """
+        if run_config is None or operation is None:
+            return run_config
+
+        metadata = dict(run_config.get("metadata") or {})
+        metadata["usage_operation_id"] = str(operation.operation_id)
+        user_hash = usage_user_hash(user_id)
+        if user_hash is not None:
+            metadata["usage_user_hash"] = user_hash
+
+        usage_tag = f"usage_op:{operation.operation_id}"
+        tags = list(run_config.get("tags") or [])
+        if usage_tag not in tags:
+            tags = [*tags, usage_tag]
+
+        merged: RunnableConfig = dict(run_config)  # type: ignore[assignment]
+        merged["metadata"] = metadata
+        merged["tags"] = tags
+        return merged
 
     def _convert_history_to_langchain_messages(
         self, conversation_history: list[Any]
@@ -1157,17 +1214,48 @@ class BaseAgent(ABC):
 
             context_overflow_retried = False
 
+            # One usage operation spans the generic retries, the context-overflow
+            # retry, and the provider fallback below — a later tool-loop
+            # invocation (a new call to this method) starts a fresh operation.
+            # Attribution flows through the bound UsageContext; here we only add
+            # the acting agent id so per-agent rollups are correct.
+            usage_operation: UsageOperation | None = None
+            usage_context_cm = None
+            usage_operation_cm = None
+            if self.recorder is not None:
+                usage_context_cm = bind_usage_context(
+                    current_usage_context().child(agent_id=self.agent_id)
+                )
+                usage_context_cm.__enter__()
+                usage_operation_cm = begin_usage_operation()
+                usage_operation = usage_operation_cm.__enter__()
+
+            usage_run_config = self._augment_run_config_with_usage(
+                run_config, usage_operation, user_id
+            )
+
             async def _invoke_with_optional_config(
                 model: Any,
                 model_messages: list[BaseMessage],
             ) -> Any:
-                if run_config is not None:
+                # ``runtime_config`` is read at call time so each fallback branch
+                # records under its own provider/model.
+                if usage_run_config is not None:
                     return await self._ainvoke_with_retries(
                         model,
                         model_messages,
-                        run_config=run_config,
+                        run_config=usage_run_config,
+                        operation=usage_operation,
+                        provider=runtime_config.provider,
+                        model=runtime_config.model,
                     )
-                return await self._ainvoke_with_retries(model, model_messages)
+                return await self._ainvoke_with_retries(
+                    model,
+                    model_messages,
+                    operation=usage_operation,
+                    provider=runtime_config.provider,
+                    model=runtime_config.model,
+                )
 
             try:
                 try:
@@ -1325,6 +1413,11 @@ class BaseAgent(ABC):
                         llm_with_tools,
                         langchain_messages,
                     )
+            finally:
+                if usage_operation_cm is not None:
+                    usage_operation_cm.__exit__(None, None, None)
+                if usage_context_cm is not None:
+                    usage_context_cm.__exit__(None, None, None)
 
             actual_usage = extract_actual_usage(response)
             if any(value is not None for value in actual_usage.values()):
