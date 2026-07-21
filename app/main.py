@@ -28,6 +28,7 @@ from app.api import (
     mcp_router,
     messages_router,
     model_config_router,
+    model_usage_router,
     providers_router,
     task_plans_router,
     tool_result_blobs_router,
@@ -209,6 +210,7 @@ def create_app() -> FastAPI:
             "app.api.ai_sdk",
             "app.api.providers",
             "app.api.model_config",
+            "app.api.model_usage",
             "app.api.client_devices",
             "app.api.device_runtime",
             "app.api.widgets",
@@ -271,6 +273,7 @@ def create_app() -> FastAPI:
     app.include_router(ai_sdk_router)
     app.include_router(providers_router)
     app.include_router(model_config_router)
+    app.include_router(model_usage_router)
     app.include_router(client_devices_router)
     app.include_router(device_runtime_router)
     app.include_router(tool_result_blobs_router)
