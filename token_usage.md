@@ -644,11 +644,11 @@ git commit -m "feat: wire model usage services"
 - Modify: `app/ai/suggestion_generator.py`
 - Test: `tests/test_model_usage_workflow_instrumentation.py`
 
-- [ ] **Step 1: Write failing attribution and attempt tests**
+- [x] **Step 1: Write failing attribution and attempt tests**
 
 Cover non-stream, stream, resume, router fallback, three generic provider retries, context-overflow retry, provider fallback, title generation from both API and automatic task, suggestions, concurrent users, and cancelled streams. Assert every attempt has the correct `user_id`, conversation/request-message IDs, operation ID, monotonically increasing attempt number, agent, provider, and model. Assert all retries/fallbacks for one logical invocation share one `operation_id`, while a later tool-loop invocation starts a new one.
 
-- [ ] **Step 2: Bind usage context at AI service boundaries**
+- [x] **Step 2: Bind usage context at AI service boundaries**
 
 ```python
 context = UsageContext(
@@ -664,29 +664,29 @@ with bind_usage_context(context):
 
 For async generators, keep the context manager active for the complete `async for` body. `request.user_message_id` refers to the row persisted before workflow execution; never use the reserved `assistant_message_id` as a foreign key during generation. Resume paths rebuild ownership from authenticated arguments rather than checkpoint state.
 
-- [ ] **Step 3: Wrap each real provider attempt in `BaseAgent._ainvoke_with_retries()`**
+- [x] **Step 3: Wrap each real provider attempt in `BaseAgent._ainvoke_with_retries()`**
 
 Create `begin_usage_operation()` before entering the existing generic retry/context-overflow/provider-fallback loops. Pass the resulting operation object through every branch and call `recorder.record_one_async_attempt()` immediately around each model invocation. Allocate attempts only when a provider call will occur. Keep current retry delays and fallback behavior; do not add a second retry loop or create a new operation ID inside a branch.
 
-- [ ] **Step 4: Instrument direct text helpers and propagate identity**
+- [x] **Step 4: Instrument direct text helpers and propagate identity**
 
 Change title signatures to `generate_conversation_title(user_message, *, user_id, conversation_id=None)` and suggestion signatures to accept `UsageContext`. The public title route passes its authenticated UUID. `MessageService._generate_title_async()` and `_generate_and_add_suggestions()` pass the already verified user/conversation/message IDs.
 
-- [ ] **Step 5: Instrument the router**
+- [x] **Step 5: Instrument the router**
 
 Wrap the existing `asyncio.to_thread()` Gemini `generate_content` call with operation `router` and agent `router`. Preserve deterministic short-circuits as zero provider events because no call occurred.
 
-- [ ] **Step 6: Correlate LangSmith without exposing raw user IDs**
+- [x] **Step 6: Correlate LangSmith without exposing raw user IDs**
 
 Add `metadata={"usage_operation_id": str(operation.operation_id), "usage_user_hash": hmac_sha256(secret, user_id)}` and bounded tags to the existing runnable config. Do not add email, username, conversation content, or raw UUID user tags.
 
-- [ ] **Step 7: Run focused tests**
+- [x] **Step 7: Run focused tests**
 
 Run: `python -m pytest tests/test_model_usage_workflow_instrumentation.py tests/test_router.py tests/test_ai_service_initialization.py tests/test_context_overflow_retry.py tests/test_message_service_event_streaming.py -q`
 
 Expected: all tests pass.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add app/services/ai_service.py app/services/message_service.py app/api/conversations.py app/ai/graph.py app/ai/agents/base_agent.py app/ai/agents/router.py app/ai/suggestion_generator.py tests/test_model_usage_workflow_instrumentation.py
@@ -1408,3 +1408,7 @@ Implementation progress and decisions made during execution. Updated after each 
   - Deviation from brief (valid, reviewer-confirmed): the brief's `ModelUsageRecorder(settings=...)` kwarg does not exist on that constructor (only `repository`/`enqueue_failed_write`/`metrics`/`context_provider`/`clock`); wired `metrics=model_usage_metrics` instead. `app/core/dependency_injection.py` and `app/main.py` in the brief's `git add` list were NOT modified (D6 deferral). Staged the actual changed set (adds the 5 extra agent files + 2 regression-fix tests the brief's list omitted).
   - Regression caught during Task 6 verification (NOT a Task 6 defect): `tests/test_provider_model_context_metadata.py` had 2 failures from Task 5 adding `http_options=` to `provider_service`'s `genai.Client(...)`; the fake client factory rejected the kwarg. Fixed the fake to accept+capture it (commit `eee3de0`). Task 5's Step-6 command hadn't included this file, so it slipped through.
   - Minor findings (final-review triage): (1) `MultiAgentWorkflow.__init__` now has 7 params (>5 guideline) — pre-existing debt, brief-directed, grown by one; (2) `app/ai/workflow/custom_agents.py:3` docstring ("relocated verbatim; behavior identical") is now slightly stale re: `_build_custom_agent`'s new `recorder=` arg — cosmetic; (3) **carry-forward D8**: worker `_build_repository()` still builds a fresh `Database()` per call — fold into Task 17.
+
+- **Task 7 — complete (2026-07-21).** Commit `41a8278`. Records every real provider attempt with per-user attribution. `bind_usage_context` at the AI service execute/stream/resume boundaries; ONE `begin_usage_operation()` in `BaseAgent.invoke_model_with_history` spanning generic retries + context-overflow retry + provider fallback, with `_ainvoke_with_retries` wrapping the single `ainvoke` in `record_one_async_attempt` (provider/model read from the CURRENT `runtime_config`, so a fallback attempt records the fallback provider); router, title (`AIService.generate_conversation_title`), and suggestion (`SuggestionGenerator`, sync-recorded via `to_thread` context copy) instrumented; deterministic short-circuits + cache hits record zero. LangSmith correlation (operation id + keyed `usage_user_hash`) added to the existing runnable config only. `usage_user_hash` helper added to `app/observability/model_usage.py`. D9: AIService reaches the recorder via the workflow's new public `model_usage_recorder` property (container.py untouched). New 20-test file (spy-repository seam). 44/44 on Step-7 command, full suite 2122 passed / 0 failures. Implementer opus, reviewer opus — **Spec ✅, Approved, 0 Critical/Important.**
+  - Minor findings (final-review triage): (1) `AIService.generate_conversation_title` (ai_service.py:510) and `MessageService._generate_title_async` (message_service.py:674) keep `user_id=None` optional vs. the governing required `*, user_id` — both real callers pass it, so no present data loss, but the fail-fast attribution guard is lost; (2) the usage context/operation CMs are `__enter__`-ed just OUTSIDE the `try/finally` that tears them down (base_agent.py:1225 / finally :1416) — realistically unreachable contextvar leak if `_augment_run_config_with_usage` raised; recommend moving inside the try or using AsyncExitStack.
+  - Step-6 scope note (accepted, not a gap): LangSmith correlation augments only an EXISTING `run_config` (subagent calls); top-level `ainvoke` calls carry no config and are left untouched — matches the plan's "add to the existing runnable config".
