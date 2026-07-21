@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
@@ -7,6 +8,8 @@ from langchain_core.messages import HumanMessage as LCHumanMessage
 
 from ...core.config import settings
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
+from ...usage import begin_usage_operation, bind_usage_context, current_usage_context
+from ...usage.recorder import classify_error, classify_status
 from ..agent_config import AGENT_CONFIG, create_gemini_client, create_langchain_model
 from ..image_context import build_multimodal_content
 from ..image_generation import (
@@ -14,7 +17,9 @@ from ..image_generation import (
     ImageGenerationRequest,
     ImagePartial,
     ImagePreviewPublisher,
+    ImageUsage,
     NarrativeDelta,
+    image_provider_family,
     resolve_image_provider,
 )
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
@@ -387,6 +392,48 @@ Do not output anything else, just the prompt."""
             aspect_ratio=self.default_aspect_ratio,
             source_images=list(source_images or []),
         )
+
+        if self.recorder is None:
+            return await self._consume_image_stream(provider, request, original_prompt, handle=None)
+
+        # Image generation is its own operation, distinct from the
+        # prompt-enhancement and acknowledgement calls the base agent records.
+        context = current_usage_context().child(
+            operation="image_generation", agent_id=self.agent_id
+        )
+        with bind_usage_context(context), begin_usage_operation() as operation:
+            handle = self.recorder.begin_streaming_attempt(
+                provider=image_provider_family(self.model_name),
+                model=self.model_name,
+                operation=operation,
+            )
+            try:
+                result = await self._consume_image_stream(
+                    provider, request, original_prompt, handle=handle
+                )
+            except asyncio.CancelledError:
+                await handle.finalize("cancelled")
+                raise
+            except Exception as exc:
+                await handle.finalize(classify_status(exc), error_code=classify_error(exc))
+                raise
+            await handle.finalize("success")
+            return result
+
+    async def _consume_image_stream(
+        self,
+        provider: Any,
+        request: ImageGenerationRequest,
+        original_prompt: str,
+        *,
+        handle: Any | None,
+    ) -> tuple[list[dict], str]:
+        """Drain the provider stream, publishing previews and feeding the handle.
+
+        Consumes the stream to exhaustion (never breaking at ``max_images``) so
+        the terminal ``ImageUsage`` event is always seen; the provider caps
+        image emission internally.
+        """
         publisher = ImagePreviewPublisher(
             enabled=settings.enable_image_streaming,
             max_b64_chars=settings.image_stream_preview_max_b64_chars,
@@ -406,14 +453,14 @@ Do not output anything else, just the prompt."""
                         "aspect_ratio": self.default_aspect_ratio,
                     }
                 )
+                if handle is not None:
+                    handle.note_generated_image()
                 publisher.publish(
                     image_index=event.index,
                     status="final",
                     mime=event.mime,
                     data_b64=event.data_b64,
                 )
-                if len(images) >= self.max_images:
-                    break
             elif isinstance(event, ImagePartial):
                 publisher.publish(
                     image_index=event.index,
@@ -422,6 +469,9 @@ Do not output anything else, just the prompt."""
                     data_b64=event.data_b64,
                     seq=event.seq,
                 )
+            elif isinstance(event, ImageUsage):
+                if handle is not None:
+                    handle.set_usage(event.usage, provider_request_id=event.provider_request_id)
             elif isinstance(event, NarrativeDelta) and event.text:
                 narrative_parts.append(event.text)
 

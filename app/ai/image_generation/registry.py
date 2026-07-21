@@ -20,6 +20,19 @@ logger = logging.getLogger(__name__)
 _OPENAI_PREFIXES = ("gpt-image", "dall-e")
 
 
+def image_provider_family(model: str) -> str:
+    """Return the provider family (``"openai"`` or ``"gemini"``) for ``model``.
+
+    Single source of truth for the provider-name → family mapping, shared by
+    ``resolve_image_provider`` (routing) and the usage recorder (the
+    ``provider`` dimension of an ``image_generation`` ledger event). Any name
+    that is not an OpenAI image model resolves to Gemini, matching the default
+    routing behavior below.
+    """
+    normalized = str(model or "").strip().lower()
+    return "openai" if normalized.startswith(_OPENAI_PREFIXES) else "gemini"
+
+
 def resolve_image_provider(
     model: str,
     *,
@@ -32,8 +45,7 @@ def resolve_image_provider(
     parity with the pre-provider implementation, which always used the
     configured Gemini client).
     """
-    normalized = str(model or "").strip().lower()
-    if normalized.startswith(_OPENAI_PREFIXES):
+    if image_provider_family(model) == "openai":
         try:
             return OpenAIImageProvider(api_key=openai_api_key)
         except Exception as err:

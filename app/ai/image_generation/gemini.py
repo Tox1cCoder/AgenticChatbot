@@ -17,7 +17,14 @@ from typing import Any
 
 from google.genai import types
 
-from .models import ImageFinal, ImageGenerationRequest, ImageStreamEvent, NarrativeDelta
+from ...usage.normalizers import normalize_provider_usage
+from .models import (
+    ImageFinal,
+    ImageGenerationRequest,
+    ImageStreamEvent,
+    ImageUsage,
+    NarrativeDelta,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +88,15 @@ class GeminiImageProvider:
             stream = await stream
 
         image_index = 0
+        latest_usage_metadata: Any = None
+        latest_response_id: str | None = None
         async for chunk in stream:
+            usage_metadata = getattr(chunk, "usage_metadata", None)
+            if usage_metadata is not None:
+                latest_usage_metadata = usage_metadata
+            response_id = getattr(chunk, "response_id", None)
+            if response_id:
+                latest_response_id = response_id
             for candidate in getattr(chunk, "candidates", None) or []:
                 content = getattr(candidate, "content", None)
                 if content is None:
@@ -89,16 +104,29 @@ class GeminiImageProvider:
                 for part in getattr(content, "parts", None) or []:
                     inline_data = getattr(part, "inline_data", None)
                     if inline_data is not None and getattr(inline_data, "data", None):
-                        encoded = _encode_inline_data(inline_data.data)
-                        if encoded:
-                            yield ImageFinal(
-                                index=image_index,
-                                data_b64=encoded,
-                                mime=getattr(inline_data, "mime_type", None) or "image/png",
-                            )
-                            image_index += 1
-                            if image_index >= request.max_images:
-                                return
+                        # Cap emission at max_images but keep consuming the
+                        # stream: the terminal usage_metadata chunk arrives
+                        # after the images, so returning early would discard it.
+                        if image_index < request.max_images:
+                            encoded = _encode_inline_data(inline_data.data)
+                            if encoded:
+                                yield ImageFinal(
+                                    index=image_index,
+                                    data_b64=encoded,
+                                    mime=getattr(inline_data, "mime_type", None) or "image/png",
+                                )
+                                image_index += 1
+                        continue
                     text_segment = getattr(part, "text", None)
                     if text_segment:
                         yield NarrativeDelta(text=text_segment)
+
+        # Exactly one terminal usage event after the stream is exhausted, even
+        # when the provider reported no usage_metadata (source="unavailable").
+        yield ImageUsage(
+            usage=normalize_provider_usage(
+                provider="gemini",
+                payload={"usage_metadata": latest_usage_metadata},
+            ),
+            provider_request_id=latest_response_id,
+        )

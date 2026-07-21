@@ -15,7 +15,14 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from .models import ImageFinal, ImageGenerationRequest, ImagePartial, ImageStreamEvent
+from ...usage.normalizers import normalize_provider_usage
+from .models import (
+    ImageFinal,
+    ImageGenerationRequest,
+    ImagePartial,
+    ImageStreamEvent,
+    ImageUsage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,11 +89,16 @@ class OpenAIImageProvider:
         async for event in stream:
             event_type = getattr(event, "type", None)
             data_b64 = getattr(event, "b64_json", None)
-            if not data_b64:
-                continue
             mime = f"image/{getattr(event, 'output_format', None) or 'png'}"
             if event_type in ("image_generation.partial_image", "image_edit.partial_image"):
-                seq += 1
-                yield ImagePartial(index=0, data_b64=data_b64, mime=mime, seq=seq)
+                # Partial previews never carry usage accounting.
+                if data_b64:
+                    seq += 1
+                    yield ImagePartial(index=0, data_b64=data_b64, mime=mime, seq=seq)
             elif event_type in ("image_generation.completed", "image_edit.completed"):
-                yield ImageFinal(index=0, data_b64=data_b64, mime=mime)
+                if data_b64:
+                    yield ImageFinal(index=0, data_b64=data_b64, mime=mime)
+                # The completed event carries the whole request's token usage;
+                # emit it as the terminal accounting event (unavailable when the
+                # provider omitted it).
+                yield ImageUsage(usage=normalize_provider_usage(provider="openai", payload=event))

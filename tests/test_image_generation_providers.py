@@ -11,11 +11,13 @@ from app.ai.image_generation import (
     ImageFinal,
     ImageGenerationRequest,
     ImagePartial,
+    ImageUsage,
     NarrativeDelta,
     resolve_image_provider,
 )
 from app.ai.image_generation.gemini import GeminiImageProvider
 from app.ai.image_generation.openai_provider import OpenAIImageProvider
+from app.usage.types import NormalizedUsage
 
 
 def _request(**overrides) -> ImageGenerationRequest:
@@ -35,9 +37,7 @@ def _request(**overrides) -> ImageGenerationRequest:
 
 
 def _gemini_chunk(*parts) -> SimpleNamespace:
-    return SimpleNamespace(
-        candidates=[SimpleNamespace(content=SimpleNamespace(parts=list(parts)))]
-    )
+    return SimpleNamespace(candidates=[SimpleNamespace(content=SimpleNamespace(parts=list(parts)))])
 
 
 def _image_part(data: bytes, mime: str = "image/png") -> SimpleNamespace:
@@ -60,8 +60,12 @@ def _gemini_client(chunks: list) -> SimpleNamespace:
     )
 
 
+def _usage_metadata(**fields) -> SimpleNamespace:
+    return SimpleNamespace(**fields)
+
+
 @pytest.mark.asyncio
-async def test_gemini_yields_finals_and_narrative_in_stream_order():
+async def test_gemini_yields_finals_and_narrative_then_terminal_usage():
     client = _gemini_client(
         [
             _gemini_chunk(_text_part("Here is "), _image_part(b"png-bytes")),
@@ -72,6 +76,8 @@ async def test_gemini_yields_finals_and_narrative_in_stream_order():
 
     events = [event async for event in provider.stream_generate(_request())]
 
+    # No usage_metadata on any chunk -> exactly one terminal ImageUsage that is
+    # unavailable, always emitted after the stream is exhausted.
     assert events == [
         NarrativeDelta(text="Here is "),
         ImageFinal(
@@ -80,20 +86,64 @@ async def test_gemini_yields_finals_and_narrative_in_stream_order():
             mime="image/png",
         ),
         NarrativeDelta(text="your fox."),
+        ImageUsage(usage=NormalizedUsage(source="unavailable"), provider_request_id=None),
     ]
 
 
 @pytest.mark.asyncio
-async def test_gemini_caps_at_max_images():
+async def test_gemini_consumes_terminal_usage_chunk_after_max_images():
+    # The usage chunk arrives AFTER the image chunk; capping emission at
+    # max_images must not truncate the stream before the provider's accounting.
     client = _gemini_client(
-        [_gemini_chunk(_image_part(b"a"), _image_part(b"b"), _image_part(b"c"))]
+        [
+            _gemini_chunk(_image_part(b"a")),
+            SimpleNamespace(
+                candidates=[],
+                usage_metadata=_usage_metadata(
+                    prompt_token_count=120,
+                    candidates_token_count=2048,
+                    total_token_count=2168,
+                ),
+                response_id="resp-99",
+            ),
+        ]
+    )
+    provider = GeminiImageProvider(client)
+
+    events = [event async for event in provider.stream_generate(_request(max_images=1))]
+
+    finals = [event for event in events if isinstance(event, ImageFinal)]
+    usages = [event for event in events if isinstance(event, ImageUsage)]
+    assert [event.index for event in finals] == [0]
+    assert len(usages) == 1
+    usage_event = usages[0]
+    assert usage_event.usage.input_tokens == 120
+    assert usage_event.usage.output_tokens == 2048
+    assert usage_event.usage.total_tokens == 2168
+    assert usage_event.usage.source == "provider_reported"
+    assert usage_event.provider_request_id == "resp-99"
+
+
+@pytest.mark.asyncio
+async def test_gemini_caps_emission_but_keeps_consuming_for_usage():
+    client = _gemini_client(
+        [
+            _gemini_chunk(_image_part(b"a"), _image_part(b"b"), _image_part(b"c")),
+            SimpleNamespace(
+                candidates=[],
+                usage_metadata=_usage_metadata(total_token_count=10),
+            ),
+        ]
     )
     provider = GeminiImageProvider(client)
 
     events = [event async for event in provider.stream_generate(_request(max_images=2))]
 
     finals = [event for event in events if isinstance(event, ImageFinal)]
+    usages = [event for event in events if isinstance(event, ImageUsage)]
     assert [event.index for event in finals] == [0, 1]
+    assert len(usages) == 1
+    assert usages[0].usage.total_tokens == 10
 
 
 @pytest.mark.asyncio
@@ -148,31 +198,55 @@ def _openai_client(events: list, calls: dict) -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
-async def test_openai_partials_then_final():
+async def test_openai_partials_then_final_then_usage():
     calls: dict = {}
     client = _openai_client(
         [
             _openai_event("image_generation.partial_image", "UUFB", partial_image_index=0),
             _openai_event("image_generation.partial_image", "UUFC", partial_image_index=1),
-            _openai_event("image_generation.completed", "UUFD"),
+            _openai_event(
+                "image_generation.completed",
+                "UUFD",
+                usage={"input_tokens": 50, "output_tokens": 100, "total_tokens": 150},
+            ),
         ],
         calls,
     )
     provider = OpenAIImageProvider(client=client)
 
-    events = [
-        event
-        async for event in provider.stream_generate(_request(model="gpt-image-1"))
-    ]
+    events = [event async for event in provider.stream_generate(_request(model="gpt-image-1"))]
 
     assert events == [
         ImagePartial(index=0, data_b64="UUFB", mime="image/png", seq=1),
         ImagePartial(index=0, data_b64="UUFC", mime="image/png", seq=2),
         ImageFinal(index=0, data_b64="UUFD", mime="image/png"),
+        ImageUsage(
+            usage=NormalizedUsage(
+                input_tokens=50,
+                output_tokens=100,
+                total_tokens=150,
+                source="provider_reported",
+            ),
+            provider_request_id=None,
+        ),
     ]
     assert calls["generate"]["stream"] is True
     assert calls["generate"]["size"] == "1024x1024"
     assert "edit" not in calls
+
+
+@pytest.mark.asyncio
+async def test_openai_completed_without_usage_still_emits_terminal_usage():
+    calls: dict = {}
+    client = _openai_client([_openai_event("image_generation.completed", "UUFD")], calls)
+    provider = OpenAIImageProvider(client=client)
+
+    events = [event async for event in provider.stream_generate(_request(model="gpt-image-1"))]
+
+    assert events == [
+        ImageFinal(index=0, data_b64="UUFD", mime="image/png"),
+        ImageUsage(usage=NormalizedUsage(source="unavailable"), provider_request_id=None),
+    ]
 
 
 @pytest.mark.asyncio
@@ -189,7 +263,10 @@ async def test_openai_uses_edit_endpoint_for_source_images():
         )
     ]
 
-    assert events == [ImageFinal(index=0, data_b64="RUZH", mime="image/png")]
+    assert events == [
+        ImageFinal(index=0, data_b64="RUZH", mime="image/png"),
+        ImageUsage(usage=NormalizedUsage(source="unavailable"), provider_request_id=None),
+    ]
     assert "generate" not in calls
     assert calls["edit"]["image"].read() == b"src"
 
@@ -235,9 +312,8 @@ async def test_agent_generate_images_collects_finals_and_narrative():
     agent.model_name = "gemini-3-pro-image-preview"
     agent.default_aspect_ratio = "1:1"
     agent.max_images = 2
-    agent.gemini_client = _gemini_client(
-        [_gemini_chunk(_image_part(b"img"), _text_part("A fox."))]
-    )
+    agent.recorder = None
+    agent.gemini_client = _gemini_client([_gemini_chunk(_image_part(b"img"), _text_part("A fox."))])
 
     images, narrative = await agent._generate_images("enhanced prompt", "draw a fox")
 
@@ -261,6 +337,7 @@ async def test_agent_generate_images_returns_empty_without_provider():
     agent.model_name = "gemini-3-pro-image-preview"
     agent.default_aspect_ratio = "1:1"
     agent.max_images = 1
+    agent.recorder = None
     agent.gemini_client = None
 
     assert await agent._generate_images("p", "p") == ([], "")
@@ -275,6 +352,7 @@ async def test_agent_generate_images_publishes_previews():
     agent.model_name = "gemini-3-pro-image-preview"
     agent.default_aspect_ratio = "1:1"
     agent.max_images = 1
+    agent.recorder = None
     agent.gemini_client = _gemini_client([_gemini_chunk(_image_part(b"img"))])
 
     published: list[dict] = []

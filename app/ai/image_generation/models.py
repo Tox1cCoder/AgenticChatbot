@@ -8,11 +8,17 @@ agent and the event pipeline never see provider-specific shapes:
 - ``ImageFinal`` — a completed image. Exactly one per ``index``.
 - ``NarrativeDelta`` — provider-authored text accompanying the generation
   (Gemini image models interleave these with image parts).
+- ``ImageUsage`` — the provider's terminal token accounting for the whole
+  stream. Emitted at most once, after every image has been delivered, so the
+  usage ledger records the image model's real cost without truncating the
+  stream at ``max_images``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+
+from ...usage.types import NormalizedUsage
 
 
 @dataclass(frozen=True)
@@ -45,4 +51,10 @@ class NarrativeDelta:
     text: str
 
 
-ImageStreamEvent = ImagePartial | ImageFinal | NarrativeDelta
+@dataclass(frozen=True)
+class ImageUsage:
+    usage: NormalizedUsage
+    provider_request_id: str | None = None
+
+
+ImageStreamEvent = ImagePartial | ImageFinal | NarrativeDelta | ImageUsage

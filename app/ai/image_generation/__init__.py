@@ -11,9 +11,10 @@ from .models import (
     ImageGenerationRequest,
     ImagePartial,
     ImageStreamEvent,
+    ImageUsage,
     NarrativeDelta,
 )
-from .registry import resolve_image_provider
+from .registry import image_provider_family, resolve_image_provider
 
 __all__ = [
     "ImageFinal",
@@ -22,8 +23,10 @@ __all__ = [
     "ImagePartial",
     "ImagePreviewPublisher",
     "ImageStreamEvent",
+    "ImageUsage",
     "NarrativeDelta",
     "current_image_preview_emitter",
+    "image_provider_family",
     "resolve_image_provider",
     "use_image_preview_emitter",
 ]

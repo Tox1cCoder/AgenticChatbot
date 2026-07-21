@@ -26,6 +26,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -260,6 +261,7 @@ class ModelUsageRecorder:
         started_at: datetime,
         started_monotonic: float,
         error_code: str | None,
+        provider_request_id: str | None = None,
     ) -> RecordEventCommand:
         completed_at = self._clock()
         latency_ms = max(0, round((time.monotonic() - started_monotonic) * 1000))
@@ -274,7 +276,36 @@ class ModelUsageRecorder:
             latency_ms=latency_ms,
             started_at=started_at,
             completed_at=completed_at,
+            provider_request_id=provider_request_id,
             error_code=error_code,
+        )
+
+    def begin_streaming_attempt(
+        self,
+        *,
+        provider: str,
+        model: str,
+        operation: UsageOperation,
+    ) -> StreamingAttemptHandle:
+        """Open a handle for one streaming provider attempt.
+
+        Unlike the one-call wrappers, a streaming provider yields usage only
+        after the stream is exhausted. The handle reserves the operation-scoped
+        attempt number now (so retries stay monotonic) and its start instant,
+        but persists **exactly one** event only when :meth:`finalize` is called
+        with the terminal status -- never at stream start.
+        """
+        context = self._context_provider()
+        attempt = operation.allocate_attempt()
+        return StreamingAttemptHandle(
+            recorder=self,
+            provider=provider,
+            model=model,
+            operation=operation,
+            context=context,
+            attempt=attempt,
+            started_at=self._clock(),
+            started_monotonic=time.monotonic(),
         )
 
     def _persist(self, command: RecordEventCommand) -> None:
@@ -311,6 +342,80 @@ class ModelUsageRecorder:
             )
             return
         self._metrics.record_persistence("retry_enqueued", failure_class=failure_class)
+
+
+class StreamingAttemptHandle:
+    """One streaming provider attempt, finalized exactly once.
+
+    A streaming provider (image generation) yields its token accounting only
+    after every image has been delivered, so the outcome cannot be recorded up
+    front like the one-call wrappers do. The caller feeds terminal usage in via
+    :meth:`set_usage`, counts delivered outputs via :meth:`note_generated_image`,
+    and calls :meth:`finalize` once with the terminal status. Repeat
+    ``finalize`` calls are no-ops, so a stream that raises after partial output
+    still records a single event. Persistence runs off the event loop via
+    :func:`asyncio.to_thread`, exactly like the async wrapper.
+    """
+
+    def __init__(
+        self,
+        *,
+        recorder: ModelUsageRecorder,
+        provider: str,
+        model: str,
+        operation: UsageOperation,
+        context: UsageContext,
+        attempt: int,
+        started_at: datetime,
+        started_monotonic: float,
+    ) -> None:
+        self._recorder = recorder
+        self._provider = provider
+        self._model = model
+        self._operation = operation
+        self._context = context
+        self._attempt = attempt
+        self._started_at = started_at
+        self._started_monotonic = started_monotonic
+        self._usage = NormalizedUsage(source="unavailable")
+        self._provider_request_id: str | None = None
+        self._generated_images = 0
+        self._finalized = False
+
+    def set_usage(self, usage: NormalizedUsage, *, provider_request_id: str | None = None) -> None:
+        """Record the provider's terminal usage for this attempt."""
+        self._usage = usage
+        if provider_request_id is not None:
+            self._provider_request_id = provider_request_id
+
+    def note_generated_image(self) -> None:
+        """Count one delivered image; the ledger's ``generated_images`` field."""
+        self._generated_images += 1
+
+    async def finalize(self, status: UsageStatus, *, error_code: str | None = None) -> None:
+        """Persist this attempt's single event with ``status`` (idempotent)."""
+        if self._finalized:
+            return
+        self._finalized = True
+        usage = self._usage
+        if self._generated_images:
+            usage = replace(usage, generated_images=self._generated_images)
+        await asyncio.to_thread(
+            self._recorder._persist,
+            self._recorder._build_command(
+                operation=self._operation,
+                attempt=self._attempt,
+                context=self._context,
+                provider=self._provider,
+                model=self._model,
+                status=status,
+                usage=usage,
+                started_at=self._started_at,
+                started_monotonic=self._started_monotonic,
+                error_code=error_code,
+                provider_request_id=self._provider_request_id,
+            ),
+        )
 
 
 # --- content-free (de)serialization for the failed-write retry payload -----
