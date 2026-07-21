@@ -135,6 +135,46 @@ def test_hour_bucket_date_picker_end_includes_the_selected_local_day(monkeypatch
     assert end.isoformat() == "2026-10-05T00:00:00+11:00"
 
 
+@pytest.mark.parametrize(
+    ("zone_name", "selected_date", "expected"),
+    [
+        ("America/New_York", date(2026, 3, 8), "2026-03-09T00:00:00-04:00"),
+        ("Australia/Lord_Howe", date(2026, 10, 4), "2026-10-05T00:00:00+11:00"),
+    ],
+)
+def test_render_hour_boundaries_advance_inclusive_midnight_end_across_dst(
+    monkeypatch, zone_name, selected_date, expected
+):
+    demo, _ = _import_demo(monkeypatch)
+
+    _, end = demo._build_usage_query_boundaries(
+        start_date=selected_date,
+        end_date=selected_date,
+        bucket="hour",
+        zone=ZoneInfo(zone_name),
+        start_hour=datetime.min.time(),
+        end_hour=datetime.min.time(),
+    )
+
+    assert end.isoformat() == expected
+
+
+def test_render_hour_boundaries_do_not_advance_non_midnight_explicit_end(monkeypatch):
+    demo, _ = _import_demo(monkeypatch)
+    zone = ZoneInfo("America/New_York")
+
+    _, end = demo._build_usage_query_boundaries(
+        start_date=date(2026, 3, 8),
+        end_date=date(2026, 3, 8),
+        bucket="hour",
+        zone=zone,
+        start_hour=datetime.min.time(),
+        end_hour=datetime(2026, 1, 1, 23).time(),
+    )
+
+    assert end.isoformat() == "2026-03-08T23:00:00-04:00"
+
+
 def test_dashboard_query_is_encoded_and_has_no_user_identity(monkeypatch):
     demo, stub = _import_demo(monkeypatch)
     stub.session_state.auth_token = "secret-token"

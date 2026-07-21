@@ -3004,6 +3004,32 @@ def align_usage_boundary(
     return localized.replace(minute=0, second=0, microsecond=0)
 
 
+def _build_usage_query_boundaries(
+    *,
+    start_date: date,
+    end_date: date,
+    bucket: str,
+    zone: ZoneInfo,
+    start_hour: datetime_time | None = None,
+    end_hour: datetime_time | None = None,
+) -> tuple[date | datetime, date | datetime]:
+    """Convert inclusive date-picker values into API query boundaries."""
+    if bucket == "day":
+        return start_date, end_date
+    if bucket != "hour":
+        raise ValueError("bucket must be 'hour' or 'day'")
+    if start_hour is None or end_hour is None:
+        raise ValueError("hour boundaries require start_hour and end_hour")
+
+    exclusive_end_date = end_date
+    if end_hour.replace(tzinfo=None) == datetime_time.min:
+        exclusive_end_date += timedelta(days=1)
+    return (
+        datetime.combine(start_date, start_hour, tzinfo=zone),
+        datetime.combine(exclusive_end_date, end_hour, tzinfo=zone),
+    )
+
+
 def _usage_cache_identity() -> str:
     """Build a non-secret cache partition for the active authenticated user."""
     user_id = str(st.session_state.get("current_user_id") or "anonymous")
@@ -10853,10 +10879,11 @@ def render_usage_view() -> None:
         st.info("Choose a start and end date.")
         return
 
-    query_start: date | datetime = selected_range[0]
-    query_end: date | datetime = selected_range[1]
+    start_hour: datetime_time | None = None
+    end_hour: datetime_time | None = None
+    selected_zone = ZoneInfo(str(timezone_name))
     if bucket == "hour":
-        local_now = datetime.now(ZoneInfo(str(timezone_name)))
+        local_now = datetime.now(selected_zone)
         next_hour = (local_now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
         hour_columns = st.columns(2)
         with hour_columns[0]:
@@ -10873,8 +10900,14 @@ def render_usage_view() -> None:
                 step=timedelta(hours=1),
                 key="usage_end_hour",
             )
-        query_start = datetime.combine(selected_range[0], start_hour)
-        query_end = datetime.combine(selected_range[1], end_hour)
+    query_start, query_end = _build_usage_query_boundaries(
+        start_date=selected_range[0],
+        end_date=selected_range[1],
+        bucket=str(bucket),
+        zone=selected_zone,
+        start_hour=start_hour,
+        end_hour=end_hour,
+    )
 
     with st.spinner("Loading usage..."):
         usage = get_usage_dashboard(
