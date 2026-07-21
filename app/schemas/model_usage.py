@@ -75,6 +75,10 @@ class UsageTotals(UsageModel):
     request_count: int = 0
 
 
+class UsageCapabilities(UsageModel):
+    enabled: bool
+
+
 class UsageBreakdownItem(UsageModel):
     key: str
     totals: UsageTotals
@@ -186,6 +190,7 @@ __all__ = [
     "ConversationUsageResponse",
     "UsageBreakdownItem",
     "UsageBucket",
+    "UsageCapabilities",
     "UsageCoverage",
     "UsageDashboard",
     "UsageDashboardQuery",

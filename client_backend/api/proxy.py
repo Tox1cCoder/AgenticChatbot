@@ -27,6 +27,14 @@ def _params_with_active_device(request: Request):
     return params
 
 
+@router.get("/usage/capabilities")
+async def proxy_usage_capabilities(
+    request: Request,
+    _session: LocalSessionPayload = Depends(require_local_session),
+) -> Response:
+    return await proxy_server_request(request, upstream_path="/usage/capabilities")
+
+
 @router.get("/usage/dashboard")
 async def proxy_usage_dashboard(
     request: Request,

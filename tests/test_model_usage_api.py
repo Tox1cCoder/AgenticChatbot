@@ -147,8 +147,40 @@ def test_usage_route_endpoints_are_synchronous_for_threadpool_execution() -> Non
         route.endpoint for route in model_usage_router.routes if isinstance(route, APIRoute)
     ]
 
-    assert len(endpoints) == 2
+    assert len(endpoints) == 3
     assert all(not inspect.iscoroutinefunction(endpoint) for endpoint in endpoints)
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_usage_capability_is_authenticated_and_available_when_ui_disabled(
+    enabled: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "model_usage_ui_enabled", enabled)
+
+    response = TestClient(app).get(
+        "/usage/capabilities",
+        headers=_authorization(_USER_A),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "success": True,
+        "message": "Usage capabilities retrieved",
+        "data": {"enabled": enabled},
+        "error": None,
+    }
+
+
+def test_usage_capability_requires_authentication() -> None:
+    response = TestClient(app).get("/usage/capabilities")
+
+    assert response.status_code == 401
+    assert response.json() == {
+        "success": False,
+        "code": "http_error",
+        "message": "Not authenticated",
+    }
 
 
 @pytest.mark.parametrize(
@@ -420,8 +452,11 @@ def test_usage_router_contract_has_no_ai_alias_or_identity_filter() -> None:
     schema = app.openapi()
 
     dashboard_operation = schema["paths"]["/usage/dashboard"]["get"]
+    capability_operation = schema["paths"]["/usage/capabilities"]["get"]
     conversation_operation = schema["paths"]["/usage/conversations/{conversation_id}"]["get"]
     assert dashboard_operation["tags"] == ["usage"]
+    assert capability_operation["tags"] == ["usage"]
+    assert capability_operation.get("parameters", []) == []
     assert conversation_operation["tags"] == ["usage"]
     assert {
         parameter["name"]

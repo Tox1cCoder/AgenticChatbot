@@ -11,6 +11,7 @@ from app.interfaces.model_usage_service_interface import IModelUsageService
 from app.schemas.model_usage import (
     ConversationUsageQueryParams,
     ConversationUsageResponse,
+    UsageCapabilities,
     UsageDashboard,
     UsageDashboardQueryParams,
 )
@@ -25,11 +26,26 @@ def _require_usage_ui_enabled() -> None:
 router = APIRouter(
     prefix="/usage",
     tags=["usage"],
-    dependencies=[Depends(_require_usage_ui_enabled)],
 )
 
 
-@router.get("/dashboard", response_model=ApiResponse[UsageDashboard])
+@router.get("/capabilities", response_model=ApiResponse[UsageCapabilities])
+@AppAutoInjector.auto_inject()
+def get_usage_capabilities(user_id: UUID) -> ApiResponse[UsageCapabilities]:
+    """Disclose only whether authenticated usage analytics are available."""
+    del user_id
+    return ApiResponse(
+        success=True,
+        message="Usage capabilities retrieved",
+        data=UsageCapabilities(enabled=settings.model_usage_ui_enabled),
+    )
+
+
+@router.get(
+    "/dashboard",
+    response_model=ApiResponse[UsageDashboard],
+    dependencies=[Depends(_require_usage_ui_enabled)],
+)
 @AppAutoInjector.auto_inject()
 def get_usage_dashboard(
     query: UsageDashboardQueryParams,
@@ -44,6 +60,7 @@ def get_usage_dashboard(
 @router.get(
     "/conversations/{conversation_id}",
     response_model=ApiResponse[ConversationUsageResponse],
+    dependencies=[Depends(_require_usage_ui_enabled)],
 )
 @AppAutoInjector.auto_inject()
 def get_conversation_usage(

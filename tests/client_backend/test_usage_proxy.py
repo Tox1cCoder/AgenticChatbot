@@ -86,6 +86,30 @@ def _build_clients(monkeypatch, handler: Callable[[httpx.Request], httpx.Respons
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mount", ["", "/api"])
+async def test_capability_proxy_preserves_body_and_upstream_bearer(monkeypatch, mount):
+    captured: list[httpx.Request] = []
+    payload = {"success": True, "data": {"enabled": False}}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _upstream_response(payload)(request)
+
+    sidecar, server, access_token = _build_clients(monkeypatch, _handler)
+    try:
+        response = await sidecar.get(f"{mount}/usage/capabilities")
+    finally:
+        await sidecar.aclose()
+        await server.close()
+
+    assert response.status_code == 200
+    assert response.json() == payload
+    assert len(captured) == 1
+    assert captured[0].url.path == "/usage/capabilities"
+    assert captured[0].headers["authorization"] == f"Bearer {access_token}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mount", ["", "/api"])
 async def test_dashboard_proxy_preserves_query_identity_and_upstream_bearer(
     monkeypatch,
     mount,
@@ -165,7 +189,8 @@ async def test_conversation_proxy_preserves_canonical_status_and_body(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mount", ["", "/api"])
-async def test_usage_routes_require_a_local_session(monkeypatch, mount):
+@pytest.mark.parametrize("path", ["/usage/capabilities", "/usage/dashboard"])
+async def test_usage_routes_require_a_local_session(monkeypatch, mount, path):
     requests: list[httpx.Request] = []
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -175,7 +200,7 @@ async def test_usage_routes_require_a_local_session(monkeypatch, mount):
     sidecar, server, _ = _build_clients(monkeypatch, _handler)
     sidecar.headers.pop("Authorization")
     try:
-        response = await sidecar.get(f"{mount}/usage/dashboard")
+        response = await sidecar.get(f"{mount}{path}")
     finally:
         await sidecar.aclose()
         await server.close()
