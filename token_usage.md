@@ -593,11 +593,11 @@ git commit -m "feat: record model attempts reliably"
 - Test: `tests/test_model_usage_container.py`
 - Test: `tests/test_model_usage_workflow_wiring.py`
 
-- [ ] **Step 1: Write a failing container contract test**
+- [x] **Step 1: Write a failing container contract test**
 
 Assert `model_usage_repository` is a factory, `model_usage_recorder` and metrics are singletons, and `model_usage_service` is injectable through its interface. Construct the real workflow and assert the same recorder reaches `Router`, every built-in `BaseAgent`, and a lazily created `CustomAgent`.
 
-- [ ] **Step 2: Add providers and wiring**
+- [x] **Step 2: Add providers and wiring**
 
 ```python
 model_usage_repository = providers.Factory(
@@ -619,13 +619,13 @@ model_usage_service: providers.Provider[IModelUsageService] = providers.Factory(
 
 Add the interface mapping to `AppAutoInjector` and wire `app.api.model_usage` in `create_app()`. Add `model_usage_recorder` to `create_workflow(...)` and `MultiAgentWorkflow.__init__(...)`, then pass it explicitly to `Router`, every built-in agent constructor, and the on-demand `CustomAgent` construction path. Store it on `BaseAgent`; do not resolve the container from agent modules or introduce a mutable global recorder.
 
-- [ ] **Step 3: Run the container test**
+- [x] **Step 3: Run the container test**
 
 Run: `python -m pytest tests/test_model_usage_container.py tests/test_model_usage_workflow_wiring.py tests/test_container_import.py tests/test_graph_refactor_contract.py -q`
 
 Expected: all tests pass.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add app/core/container.py app/core/dependency_injection.py app/main.py app/ai/graph.py app/ai/agents/base_agent.py app/ai/agents/router.py app/ai/agents/custom_agent.py tests/test_model_usage_container.py tests/test_model_usage_workflow_wiring.py
@@ -1397,3 +1397,14 @@ Implementation progress and decisions made during execution. Updated after each 
   MODEL_USAGE_RETRY_BASE_SECONDS=10          # Base delay (s) for exponential failed-write retry backoff
   MODEL_USAGE_USER_HASH_SECRET=              # Secret keying the per-user hash; REQUIRED in production when LANGSMITH_TRACING=true
   ```
+
+### Task 6 pre-flight decisions (2026-07-21)
+
+- **D6 — forward-dependency conflict resolved by deferral.** Task 6 Step 2 as written wires a `model_usage_service` provider (referencing `ModelUsageService` + `IModelUsageService`), adds the `AppAutoInjector` interface mapping, and wires the `app.api.model_usage` module in `create_app()`. None of those files exist yet — `app/services/model_usage_service.py` and `app/interfaces/model_usage_service_interface.py` are born in **Task 12**, and `app/api/model_usage.py` in **Task 13**. Importing a non-existent class in the container would break `tests/test_container_import.py`, which Task 6 Step 3 requires to pass, so the plan is internally inconsistent and the passing-tests constraint governs. Resolution: Task 6 wires only what exists now — `model_usage_repository` (Factory), `model_usage_metrics` + `model_usage_recorder` (Singletons) — plus the recorder threading. The `model_usage_service` provider + `AppAutoInjector` mapping fold into **Task 12** (service birth); the `app.api.model_usage` router wiring stays in **Task 13** (its file list already includes `app/main.py`). The Task 6 container test therefore asserts repository/metrics/recorder providers and defers the service-injectability assertion to Task 12.
+- **D7 — container `model_usage_metrics` reuses the module-level singleton.** `app/observability/model_usage.py` already defines a process-level `model_usage_metrics = ModelUsageMetrics()` that both `ModelUsageRecorder` (its `metrics` default) and the worker path use. To avoid a split-brain Prometheus registry, the container provider hands out that same instance (`providers.Object(model_usage_metrics)`) rather than constructing a second one; the recorder Singleton is injected with `repository=model_usage_repository` and `metrics=model_usage_metrics`. `enqueue_failed_write` is left to the recorder default (lazy Celery import), which already works. "Singleton" in Step 1 is verified by same-instance identity on repeated resolution, not by provider class.
+- **D8 — Task 5 minor finding (worker `_build_repository()` fresh `Database()`/engine per invocation) deferred to Task 17,** not folded into Task 6. Task 17 explicitly modifies `app/workers/model_usage.py` and owns the reconcile/cleanup tasks that consume the repository; folding it into Task 6 would expand Task 6 beyond its stated files and DI-wiring theme. Kept on the Minor-findings triage list.
+
+- **Task 6 — complete (2026-07-21).** Commit `618b47f` (code) + `eee3de0` (Task 5 test-regression fix). Container gains `model_usage_repository` (Factory), `model_usage_metrics` (`providers.Object` of the module singleton, D7), `model_usage_recorder` (Singleton); recorder threaded through `create_workflow` → `MultiAgentWorkflow.__init__` → `Router` + all six built-in agents (via `BaseAgent.recorder`) + on-demand `CustomAgent` (mixin). Two whitebox `__new__` test helpers updated to init `_model_usage_recorder`. 15/15 on the Step-3 command; full suite 2100 passed after the regression fix. Implementer sonnet, reviewer sonnet — **Spec ✅, Approved, 0 Critical/Important.**
+  - Deviation from brief (valid, reviewer-confirmed): the brief's `ModelUsageRecorder(settings=...)` kwarg does not exist on that constructor (only `repository`/`enqueue_failed_write`/`metrics`/`context_provider`/`clock`); wired `metrics=model_usage_metrics` instead. `app/core/dependency_injection.py` and `app/main.py` in the brief's `git add` list were NOT modified (D6 deferral). Staged the actual changed set (adds the 5 extra agent files + 2 regression-fix tests the brief's list omitted).
+  - Regression caught during Task 6 verification (NOT a Task 6 defect): `tests/test_provider_model_context_metadata.py` had 2 failures from Task 5 adding `http_options=` to `provider_service`'s `genai.Client(...)`; the fake client factory rejected the kwarg. Fixed the fake to accept+capture it (commit `eee3de0`). Task 5's Step-6 command hadn't included this file, so it slipped through.
+  - Minor findings (final-review triage): (1) `MultiAgentWorkflow.__init__` now has 7 params (>5 guideline) — pre-existing debt, brief-directed, grown by one; (2) `app/ai/workflow/custom_agents.py:3` docstring ("relocated verbatim; behavior identical") is now slightly stale re: `_build_custom_agent`'s new `recorder=` arg — cosmetic; (3) **carry-forward D8**: worker `_build_repository()` still builds a fresh `Database()` per call — fold into Task 17.
