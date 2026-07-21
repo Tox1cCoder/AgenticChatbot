@@ -49,6 +49,11 @@ class _Context:
         return False
 
 
+class _TabContext(_Context):
+    def __init__(self, *, is_open: bool) -> None:
+        self.open = is_open
+
+
 class _StreamlitStub(types.ModuleType):
     def __init__(self) -> None:
         super().__init__("streamlit")
@@ -58,6 +63,7 @@ class _StreamlitStub(types.ModuleType):
         self.cache_resource = _CacheDecorator()
         self.sidebar = _Context()
         self.markdown_calls: list[tuple[str, dict[str, Any]]] = []
+        self.tabs_calls: list[tuple[list[str], dict[str, Any]]] = []
 
     def set_page_config(self, *args: Any, **kwargs: Any) -> None:
         return None
@@ -76,6 +82,12 @@ class _StreamlitStub(types.ModuleType):
 
     def button(self, *args: Any, **kwargs: Any) -> bool:
         return False
+
+    def tabs(self, labels: list[str], *args: Any, **kwargs: Any) -> list[_TabContext]:
+        self.tabs_calls.append((labels, kwargs))
+        key = kwargs.get("key")
+        selected = self.session_state.get(key, labels[0]) if key else labels[0]
+        return [_TabContext(is_open=label == selected) for label in labels]
 
     def __getattr__(self, _name: str):
         def _noop(*_args: Any, **_kwargs: Any):
@@ -175,6 +187,90 @@ def test_render_hour_boundaries_do_not_advance_non_midnight_explicit_end(monkeyp
     assert end.isoformat() == "2026-03-08T23:00:00-04:00"
 
 
+def test_nonexistent_new_york_hour_has_no_candidate(monkeypatch):
+    demo, _ = _import_demo(monkeypatch)
+
+    candidates = demo._local_usage_hour_candidates(
+        date(2026, 3, 8), datetime(2026, 1, 1, 2).time(), ZoneInfo("America/New_York")
+    )
+
+    assert candidates == ()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [datetime(2026, 3, 8, 2), datetime(2026, 11, 1, 1)],
+)
+def test_align_rejects_unvalidated_naive_gap_or_fold(monkeypatch, value):
+    demo, _ = _import_demo(monkeypatch)
+
+    with pytest.raises(ValueError, match="explicit"):
+        demo.align_usage_boundary(value, bucket="hour", zone=ZoneInfo("America/New_York"))
+
+
+def test_ambiguous_new_york_hour_exposes_distinct_fold_instants(monkeypatch):
+    demo, _ = _import_demo(monkeypatch)
+    zone = ZoneInfo("America/New_York")
+
+    first = demo._build_usage_query_boundaries(
+        start_date=date(2026, 11, 1),
+        end_date=date(2026, 11, 1),
+        bucket="hour",
+        zone=zone,
+        start_hour=datetime(2026, 1, 1, 1).time(),
+        end_hour=datetime(2026, 1, 1, 2).time(),
+        start_occurrence="first",
+    )[0]
+    second = demo._build_usage_query_boundaries(
+        start_date=date(2026, 11, 1),
+        end_date=date(2026, 11, 1),
+        bucket="hour",
+        zone=zone,
+        start_hour=datetime(2026, 1, 1, 1).time(),
+        end_hour=datetime(2026, 1, 1, 2).time(),
+        start_occurrence="second",
+    )[0]
+
+    assert first.isoformat() == "2026-11-01T01:00:00-04:00"
+    assert second.isoformat() == "2026-11-01T01:00:00-05:00"
+    assert first.astimezone(ZoneInfo("UTC")) != second.astimezone(ZoneInfo("UTC"))
+
+
+def test_lord_howe_half_hour_fold_candidates_are_distinct(monkeypatch):
+    demo, _ = _import_demo(monkeypatch)
+
+    candidates = demo._local_usage_hour_candidates(
+        date(2026, 4, 5), datetime(2026, 1, 1, 1, 30).time(), ZoneInfo("Australia/Lord_Howe")
+    )
+
+    assert [candidate.isoformat() for candidate in candidates] == [
+        "2026-04-05T01:30:00+11:00",
+        "2026-04-05T01:30:00+10:30",
+    ]
+
+
+def test_gap_validation_prevents_dashboard_request(monkeypatch):
+    demo, _ = _import_demo(monkeypatch)
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(demo, "get_usage_dashboard", lambda **kwargs: calls.append(kwargs))
+
+    data, error = demo._request_usage_dashboard_for_filters(
+        start_date=date(2026, 3, 8),
+        end_date=date(2026, 3, 8),
+        bucket="hour",
+        zone=ZoneInfo("America/New_York"),
+        start_hour=datetime(2026, 1, 1, 2).time(),
+        end_hour=datetime(2026, 1, 1, 3).time(),
+        start_occurrence="first",
+        end_occurrence="first",
+        conversation_id=None,
+    )
+
+    assert data is None
+    assert "does not exist" in error
+    assert calls == []
+
+
 def test_dashboard_query_is_encoded_and_has_no_user_identity(monkeypatch):
     demo, stub = _import_demo(monkeypatch)
     stub.session_state.auth_token = "secret-token"
@@ -244,6 +340,22 @@ def test_usage_cache_miss_uses_authenticated_response_envelope_helper(monkeypatc
 
     assert response == {"success": True, "data": {}}
     assert calls == [("GET", "/usage/dashboard", False, "active-auth-token")]
+
+
+def test_usage_capability_defaults_to_hidden_on_false_or_unavailable(monkeypatch):
+    demo, _ = _import_demo(monkeypatch)
+    responses = iter(
+        [
+            {"success": True, "data": {"enabled": True}},
+            {"success": True, "data": {"enabled": False}},
+            {},
+        ]
+    )
+    monkeypatch.setattr(demo, "_usage_get", lambda _endpoint: next(responses))
+
+    assert demo.get_usage_capability_enabled() is True
+    assert demo.get_usage_capability_enabled() is False
+    assert demo.get_usage_capability_enabled() is False
 
 
 def test_usage_response_normalization_accepts_empty_and_ignores_unknown_fields(monkeypatch):
@@ -344,6 +456,42 @@ def test_separate_io_tooltip_uses_most_constrained_limit(monkeypatch):
     assert presentation["raw_ratio"] == pytest.approx(2_000 / 32_768)
 
 
+def test_separate_io_ignores_inconsistent_supplied_combined_ratio(monkeypatch):
+    demo, _ = _import_demo(monkeypatch)
+    presentation = demo._context_window_presentation(
+        {
+            "limit_type": "separate_io",
+            "max_input_tokens": 100,
+            "max_output_tokens": 100,
+            "input_tokens": 20,
+            "output_tokens": 80,
+            "input_usage_ratio": 0.2,
+            "output_usage_ratio": 0.8,
+            "usage_ratio": 0.01,
+            "usage_source": "provider_reported",
+        }
+    )
+
+    assert presentation["raw_ratio"] == 0.8
+    assert presentation["tooltip"].startswith("80% limiting")
+
+
+def test_malformed_context_numbers_never_raise(monkeypatch):
+    demo, _ = _import_demo(monkeypatch)
+
+    presentation = demo._context_window_presentation(
+        {
+            "limit_type": "shared_context",
+            "context_window_tokens": "not-a-number",
+            "used_tokens": {"bad": True},
+            "usage_ratio": float("nan"),
+        }
+    )
+
+    assert presentation["state"] == "unknown"
+    assert presentation["raw_ratio"] is None
+
+
 def test_unknown_denominator_shows_counts_without_percentage(monkeypatch):
     demo, _ = _import_demo(monkeypatch)
     presentation = demo._context_window_presentation(
@@ -427,19 +575,58 @@ def test_breakdown_chart_frame_uses_only_bounded_api_items(monkeypatch):
     ]
 
 
-def test_usage_tab_is_immediately_after_models_and_cache_clears_only_on_completion():
-    source = (Path(__file__).resolve().parents[1] / "demo.py").read_text(encoding="utf-8")
-    models_index = source.index('":material/smart_toy: Models"')
-    usage_index = source.index('":material/monitoring: Usage"')
-    custom_agents_index = source.index('":material/robot_2: Custom Agents"')
+@pytest.mark.parametrize(
+    ("usage_enabled", "selected_label", "expected_renderer", "has_usage"),
+    [
+        (True, ":material/monitoring: Usage", "render_usage_view", True),
+        (False, ":material/chat: Chat", "render_chat_view", False),
+    ],
+)
+def test_main_tabs_are_keyed_lazy_and_capability_aware(
+    monkeypatch, usage_enabled, selected_label, expected_renderer, has_usage
+):
+    demo, stub = _import_demo(monkeypatch)
+    rendered: list[str] = []
+    renderer_names = [
+        "render_chat_view",
+        "render_planning_tab",
+        "render_documents_tab",
+        "render_settings_view",
+        "render_models_view",
+        "render_usage_view",
+        "render_custom_agents_view",
+        "render_tools_tab",
+        "render_skills_tab",
+    ]
+    for name in renderer_names:
+        monkeypatch.setattr(demo, name, lambda name=name: rendered.append(name))
+    stub.session_state.main_workspace_tab = selected_label
 
-    assert models_index < usage_index < custom_agents_index
-    assert "_clear_usage_cache_after_completed_turn()" in source
-    assert source.count("_clear_usage_cache_after_completed_turn()") == 2  # definition + complete
-    complete_block = source[source.index('elif event_type == "complete":') :]
-    assert complete_block.index("_clear_usage_cache_after_completed_turn()") < complete_block.index(
-        'elif event_type == "error":'
-    )
+    demo._render_main_workspace_tabs(usage_enabled=usage_enabled)
+
+    labels, kwargs = stub.tabs_calls[-1]
+    assert (":material/monitoring: Usage" in labels) is has_usage
+    if has_usage:
+        assert (
+            labels.index(":material/monitoring: Usage")
+            == labels.index(":material/smart_toy: Models") + 1
+        )
+    assert kwargs == {"key": "main_workspace_tab", "on_change": "rerun"}
+    assert rendered == [expected_renderer]
+
+
+@pytest.mark.parametrize(
+    ("event_type", "expected"),
+    [("complete", 1), ("error", 0), ("interrupt", 0), ("token", 0)],
+)
+def test_usage_cache_invalidation_is_terminal_completion_only(monkeypatch, event_type, expected):
+    demo, _ = _import_demo(monkeypatch)
+    calls: list[None] = []
+    monkeypatch.setattr(demo, "_clear_usage_cache_after_completed_turn", lambda: calls.append(None))
+
+    demo._handle_usage_stream_event(event_type)
+
+    assert len(calls) == expected
 
 
 def test_conversation_usage_panel_does_not_fetch_during_generation(monkeypatch):
@@ -455,6 +642,50 @@ def test_conversation_usage_panel_does_not_fetch_during_generation(monkeypatch):
     demo._render_conversation_usage_panel("conversation-a")
 
     assert calls == []
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_conversation_panel_respects_usage_capability(monkeypatch, enabled):
+    demo, _ = _import_demo(monkeypatch)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        demo,
+        "_render_conversation_usage_panel",
+        lambda conversation_id: calls.append(conversation_id),
+    )
+
+    demo._render_conversation_usage_panel_if_enabled("conversation-a", enabled=enabled)
+
+    assert calls == (["conversation-a"] if enabled else [])
+
+
+def test_timezone_options_are_sorted_and_cached(monkeypatch):
+    demo, _ = _import_demo(monkeypatch)
+    calls: list[None] = []
+    demo._usage_timezone_options.cache_clear()
+    monkeypatch.setattr(
+        demo,
+        "available_timezones",
+        lambda: calls.append(None) or {"UTC", "America/New_York", "Asia/Kathmandu"},
+    )
+
+    first = demo._usage_timezone_options()
+    second = demo._usage_timezone_options()
+
+    assert first == ("America/New_York", "Asia/Kathmandu", "UTC")
+    assert second is first
+    assert len(calls) == 1
+
+
+def test_streamlit_dependency_supports_keyed_lazy_tabs():
+    root = Path(__file__).resolve().parents[1]
+    full_requirements = (root / "requirements.txt").read_text(encoding="utf-8")
+    demo_requirements = (root / "demo_requirements.txt").read_text(encoding="utf-8")
+    environment = (root / "environment.yml").read_text(encoding="utf-8")
+
+    assert "streamlit==1.55.0" in full_requirements
+    assert "streamlit>=1.55.0" in demo_requirements
+    assert "streamlit==1.55.0" in environment
 
 
 def test_local_timezone_fallback_is_portable_and_valid(monkeypatch):

@@ -325,7 +325,7 @@ sse-starlette==3.0.4
 starlette==0.52.1
 stdlibs==2025.10.28
 stevedore==5.7.0
-streamlit==1.52.1
+streamlit==1.55.0
 stringzilla==4.6.0
 structlog==25.5.0
 sympy==1.14.0

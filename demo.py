@@ -13,7 +13,9 @@ import uuid
 from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as datetime_time
+from functools import lru_cache
 from html.parser import HTMLParser
+from math import isfinite
 from typing import Any
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
@@ -2231,6 +2233,7 @@ SESSION_STATE_DEFAULTS: dict[str, Callable[[], Any] | Any] = {
     "planning_manual_input": str,
     "api_cache_version": lambda: 0,
     "usage_cache_version": lambda: 0,
+    "usage_capability_enabled": lambda: False,
     "live_widget_mounts": dict,
     # localStorage bridge
     "_ls_op": lambda: None,
@@ -2978,6 +2981,11 @@ def get_local_timezone_name() -> str:
     return _discover_system_zone_name() or "UTC"
 
 
+@lru_cache(maxsize=1)
+def _usage_timezone_options() -> tuple[str, ...]:
+    return tuple(sorted(available_timezones()))
+
+
 def align_usage_boundary(
     value: date | datetime,
     *,
@@ -2991,7 +2999,17 @@ def align_usage_boundary(
 
     value_is_datetime = isinstance(value, datetime)
     if value_is_datetime:
-        localized = value.replace(tzinfo=zone) if value.tzinfo is None else value.astimezone(zone)
+        if value.tzinfo is None and bucket == "hour":
+            candidates = _local_usage_hour_candidates(value.date(), value.time(), zone)
+            if len(candidates) != 1:
+                raise ValueError(
+                    "Naive gap or fold hours require explicit local occurrence selection"
+                )
+            localized = candidates[0]
+        else:
+            localized = (
+                value.replace(tzinfo=zone) if value.tzinfo is None else value.astimezone(zone)
+            )
     else:
         localized = datetime.combine(value, datetime_time.min, tzinfo=zone)
 
@@ -3012,6 +3030,8 @@ def _build_usage_query_boundaries(
     zone: ZoneInfo,
     start_hour: datetime_time | None = None,
     end_hour: datetime_time | None = None,
+    start_occurrence: str = "first",
+    end_occurrence: str = "first",
 ) -> tuple[date | datetime, date | datetime]:
     """Convert inclusive date-picker values into API query boundaries."""
     if bucket == "day":
@@ -3024,9 +3044,98 @@ def _build_usage_query_boundaries(
     exclusive_end_date = end_date
     if end_hour.replace(tzinfo=None) == datetime_time.min:
         exclusive_end_date += timedelta(days=1)
+    return _select_local_usage_hour(
+        start_date,
+        start_hour,
+        zone,
+        occurrence=start_occurrence,
+        boundary_name="start",
+    ), _select_local_usage_hour(
+        exclusive_end_date,
+        end_hour,
+        zone,
+        occurrence=end_occurrence,
+        boundary_name="end",
+    )
+
+
+def _local_usage_hour_candidates(
+    local_date: date,
+    local_time: datetime_time,
+    zone: ZoneInfo,
+) -> tuple[datetime, ...]:
+    """Return real UTC-distinct instants for a local wall-clock hour."""
+    naive = datetime.combine(local_date, local_time.replace(tzinfo=None))
+    candidates: list[datetime] = []
+    instants: set[datetime] = set()
+    for fold in (0, 1):
+        candidate = naive.replace(tzinfo=zone, fold=fold)
+        instant = candidate.astimezone(timezone.utc)
+        round_trip = instant.astimezone(zone)
+        if round_trip.replace(tzinfo=None) != naive or instant in instants:
+            continue
+        instants.add(instant)
+        candidates.append(candidate)
+    candidates.sort(key=lambda value: value.astimezone(timezone.utc))
+    return tuple(candidates)
+
+
+def _select_local_usage_hour(
+    local_date: date,
+    local_time: datetime_time,
+    zone: ZoneInfo,
+    *,
+    occurrence: str,
+    boundary_name: str,
+) -> datetime:
+    candidates = _local_usage_hour_candidates(local_date, local_time, zone)
+    if not candidates:
+        raise ValueError(
+            f"The selected {boundary_name} hour does not exist in {zone.key} "
+            "because of a daylight-saving transition."
+        )
+    if occurrence not in {"first", "second"}:
+        raise ValueError("occurrence must be 'first' or 'second'")
+    if occurrence == "second" and len(candidates) > 1:
+        return candidates[1]
+    return candidates[0]
+
+
+def _request_usage_dashboard_for_filters(
+    *,
+    start_date: date,
+    end_date: date,
+    bucket: str,
+    zone: ZoneInfo,
+    start_hour: datetime_time | None,
+    end_hour: datetime_time | None,
+    start_occurrence: str,
+    end_occurrence: str,
+    conversation_id: str | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate local boundaries before issuing an analytics request."""
+    try:
+        start, end = _build_usage_query_boundaries(
+            start_date=start_date,
+            end_date=end_date,
+            bucket=bucket,
+            zone=zone,
+            start_hour=start_hour,
+            end_hour=end_hour,
+            start_occurrence=start_occurrence,
+            end_occurrence=end_occurrence,
+        )
+    except ValueError as exc:
+        return None, str(exc)
     return (
-        datetime.combine(start_date, start_hour, tzinfo=zone),
-        datetime.combine(exclusive_end_date, end_hour, tzinfo=zone),
+        get_usage_dashboard(
+            start=start,
+            end=end,
+            bucket=bucket,
+            timezone_name=zone.key,
+            conversation_id=conversation_id,
+        ),
+        None,
     )
 
 
@@ -3062,6 +3171,11 @@ def _clear_usage_cache_after_completed_turn() -> None:
     """Invalidate analytics only after the server completes an AI turn."""
     st.session_state.usage_cache_version = int(st.session_state.get("usage_cache_version", 0)) + 1
     _cached_usage_get_request.clear()
+
+
+def _handle_usage_stream_event(event_type: str) -> None:
+    if event_type == "complete":
+        _clear_usage_cache_after_completed_turn()
 
 
 def _empty_usage_totals() -> dict[str, int]:
@@ -3165,6 +3279,14 @@ def get_usage_dashboard(
 def get_conversation_usage(conversation_id: str) -> dict[str, Any] | None:
     """Fetch the retained-range cumulative summary for one owned conversation."""
     return _normalize_conversation_usage(_usage_get(f"/usage/conversations/{conversation_id}"))
+
+
+def get_usage_capability_enabled() -> bool:
+    response = _usage_get("/usage/capabilities")
+    if not isinstance(response, dict) or response.get("success") is not True:
+        return False
+    data = response.get("data")
+    return isinstance(data, dict) and data.get("enabled") is True
 
 
 def _build_usage_trend_frame(series: Any) -> list[dict[str, Any]]:
@@ -6570,7 +6692,7 @@ def _format_tokens(value: Any) -> str:
         return "?"
     try:
         n = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "?"
     if n < 0:
         return "?"
@@ -6603,7 +6725,7 @@ def _format_context_tokens(value: Any) -> str:
         return "?"
     try:
         number = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "?"
     if number < 0:
         return "?"
@@ -6645,9 +6767,22 @@ def _context_usage_source(context_window: dict[str, Any]) -> tuple[str, str]:
 
 
 def _valid_ratio(value: Any) -> float | None:
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and isfinite(value)
+        and value >= 0
+    ):
         return float(value)
     return None
+
+
+def _nonnegative_int(value: Any, *, positive: bool = False) -> int | None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    if value < (1 if positive else 0):
+        return None
+    return value
 
 
 def _context_window_presentation(context_window: dict[str, Any]) -> dict[str, Any]:
@@ -6662,15 +6797,16 @@ def _context_window_presentation(context_window: dict[str, Any]) -> dict[str, An
         }
 
     source_badge, source_label = _context_usage_source(context_window)
-    input_tokens = context_window.get("input_tokens")
-    output_tokens = context_window.get("output_tokens")
-    total_tokens = context_window.get("total_tokens")
-    used_tokens = context_window.get("used_tokens")
+    input_tokens = _nonnegative_int(context_window.get("input_tokens"))
+    output_tokens = _nonnegative_int(context_window.get("output_tokens"))
+    total_tokens = _nonnegative_int(context_window.get("total_tokens"))
+    used_tokens = _nonnegative_int(context_window.get("used_tokens"))
     limit_type = str(context_window.get("limit_type") or "unknown")
     raw_ratio = _valid_ratio(context_window.get("usage_ratio"))
 
-    if limit_type == "shared_context" and context_window.get("context_window_tokens"):
-        limit = context_window["context_window_tokens"]
+    shared_limit = _nonnegative_int(context_window.get("context_window_tokens"), positive=True)
+    if limit_type == "shared_context" and shared_limit is not None:
+        limit = shared_limit
         if used_tokens is None:
             used_tokens = total_tokens
         if raw_ratio is None and isinstance(used_tokens, int):
@@ -6685,16 +6821,16 @@ def _context_window_presentation(context_window: dict[str, Any]) -> dict[str, An
                 f"output {_format_context_tokens(output_tokens)} · {source_label}"
             )
     elif limit_type == "separate_io":
-        input_limit = context_window.get("max_input_tokens")
-        output_limit = context_window.get("max_output_tokens")
+        input_limit = _nonnegative_int(context_window.get("max_input_tokens"), positive=True)
+        output_limit = _nonnegative_int(context_window.get("max_output_tokens"), positive=True)
         input_ratio = _valid_ratio(context_window.get("input_usage_ratio"))
         output_ratio = _valid_ratio(context_window.get("output_usage_ratio"))
-        if input_ratio is None and isinstance(input_tokens, int) and input_limit:
-            input_ratio = input_tokens / int(input_limit)
-        if output_ratio is None and isinstance(output_tokens, int) and output_limit:
-            output_ratio = output_tokens / int(output_limit)
+        if input_ratio is None and input_tokens is not None and input_limit:
+            input_ratio = input_tokens / input_limit
+        if output_ratio is None and output_tokens is not None and output_limit:
+            output_ratio = output_tokens / output_limit
         known_ratios = [ratio for ratio in (input_ratio, output_ratio) if ratio is not None]
-        if raw_ratio is None and known_ratios:
+        if known_ratios:
             raw_ratio = max(known_ratios)
         tooltip = (
             f"{_format_usage_percentage(raw_ratio)} limiting · "
@@ -8933,7 +9069,10 @@ def render_chat_view():
     # this turn before the conversation list is refreshed.
     if conversation_id and conversation_id != "pending_new":
         _render_plan_progress_widget(conversation_id, current_conv=current_conv)
-        _render_conversation_usage_panel(str(conversation_id))
+        _render_conversation_usage_panel_if_enabled(
+            str(conversation_id),
+            enabled=bool(st.session_state.get("usage_capability_enabled")),
+        )
 
     # Load more button
     if (
@@ -9192,6 +9331,8 @@ def render_chat_view():
                     # Stream the response
                     for event in make_streaming_request("/messages/stream", message_data):
                         event_type = event.get("type")
+                        if event_type in {"complete", "error", "interrupt"}:
+                            _handle_usage_stream_event(str(event_type))
 
                         if event_type == "user_message_created":
                             # Store user_message_id for stop endpoint
@@ -9285,7 +9426,6 @@ def render_chat_view():
                         elif event_type == "complete":
                             # Store final message and complete
                             final_message = event.get("message")
-                            _clear_usage_cache_after_completed_turn()
                             image_preview_panel.clear()
                             stream_renderer.finalize(final_message)
                             status.update(label="Message sent!", state="complete")
@@ -10833,13 +10973,22 @@ def _render_conversation_usage_panel(conversation_id: str) -> None:
             st.caption(f"Retained range: {retained_range['from']} to {retained_range['to']}")
 
 
+def _render_conversation_usage_panel_if_enabled(
+    conversation_id: str,
+    *,
+    enabled: bool,
+) -> None:
+    if enabled:
+        _render_conversation_usage_panel(conversation_id)
+
+
 def render_usage_view() -> None:
     """Render authenticated, user-scoped usage analytics returned by the API."""
     st.markdown("# Usage")
     st.caption("Token and image usage for your authenticated account.")
 
     local_zone = get_local_timezone_name()
-    timezone_options = sorted(available_timezones())
+    timezone_options = list(_usage_timezone_options())
     if local_zone not in timezone_options:
         timezone_options.insert(0, local_zone)
     zone_index = timezone_options.index(local_zone)
@@ -10881,6 +11030,8 @@ def render_usage_view() -> None:
 
     start_hour: datetime_time | None = None
     end_hour: datetime_time | None = None
+    start_occurrence = "first"
+    end_occurrence = "first"
     selected_zone = ZoneInfo(str(timezone_name))
     if bucket == "hour":
         local_now = datetime.now(selected_zone)
@@ -10900,23 +11051,51 @@ def render_usage_view() -> None:
                 step=timedelta(hours=1),
                 key="usage_end_hour",
             )
-    query_start, query_end = _build_usage_query_boundaries(
-        start_date=selected_range[0],
-        end_date=selected_range[1],
-        bucket=str(bucket),
-        zone=selected_zone,
-        start_hour=start_hour,
-        end_hour=end_hour,
-    )
+        end_candidate_date = selected_range[1]
+        if end_hour.replace(tzinfo=None) == datetime_time.min:
+            end_candidate_date += timedelta(days=1)
+        start_candidates = _local_usage_hour_candidates(
+            selected_range[0], start_hour, selected_zone
+        )
+        end_candidates = _local_usage_hour_candidates(end_candidate_date, end_hour, selected_zone)
+
+        def occurrence_label(value: str, candidates: tuple[datetime, ...]) -> str:
+            candidate = candidates[0 if value == "first" else 1]
+            return f"{value.title()} occurrence ({candidate.strftime('%z')})"
+
+        occurrence_columns = st.columns(2)
+        if len(start_candidates) > 1:
+            with occurrence_columns[0]:
+                start_occurrence = st.selectbox(
+                    "From occurrence",
+                    ["first", "second"],
+                    format_func=lambda value: occurrence_label(value, start_candidates),
+                    key="usage_start_occurrence",
+                )
+        if len(end_candidates) > 1:
+            with occurrence_columns[1]:
+                end_occurrence = st.selectbox(
+                    "To occurrence",
+                    ["first", "second"],
+                    format_func=lambda value: occurrence_label(value, end_candidates),
+                    key="usage_end_occurrence",
+                )
 
     with st.spinner("Loading usage..."):
-        usage = get_usage_dashboard(
-            start=query_start,
-            end=query_end,
+        usage, validation_error = _request_usage_dashboard_for_filters(
+            start_date=selected_range[0],
+            end_date=selected_range[1],
             bucket=str(bucket),
-            timezone_name=str(timezone_name),
+            zone=selected_zone,
+            start_hour=start_hour,
+            end_hour=end_hour,
+            start_occurrence=start_occurrence,
+            end_occurrence=end_occurrence,
             conversation_id=str(conversation_id) or None,
         )
+    if validation_error:
+        st.warning(validation_error)
+        return
     if usage is None:
         st.warning("Usage is temporarily unavailable.")
         if st.button("Retry dashboard", key="retry_usage_dashboard"):
@@ -10993,6 +11172,46 @@ def render_usage_view() -> None:
         st.caption(f"Generated at {usage['generatedAt']}")
 
 
+def _main_workspace_tab_specs(
+    *,
+    usage_enabled: bool,
+) -> list[tuple[str, Callable[[], None]]]:
+    specs: list[tuple[str, Callable[[], None]]] = [
+        (":material/chat: Chat", render_chat_view),
+        (":material/checklist: Planning", render_planning_tab),
+        (":material/description: Documents", render_documents_tab),
+        (":material/settings: Instructions", render_settings_view),
+        (":material/smart_toy: Models", render_models_view),
+    ]
+    if usage_enabled:
+        specs.append((":material/monitoring: Usage", render_usage_view))
+    specs.extend(
+        [
+            (":material/robot_2: Custom Agents", render_custom_agents_view),
+            (":material/extension: MCP Config", render_tools_tab),
+            (":material/psychology: Skills", render_skills_tab),
+        ]
+    )
+    return specs
+
+
+def _render_main_workspace_tabs(*, usage_enabled: bool) -> None:
+    """Render only the active keyed tab so hidden views do no work."""
+    specs = _main_workspace_tab_specs(usage_enabled=usage_enabled)
+    labels = [label for label, _renderer in specs]
+    if st.session_state.get("main_workspace_tab") not in labels:
+        st.session_state.main_workspace_tab = labels[0]
+    containers = st.tabs(
+        labels,
+        key="main_workspace_tab",
+        on_change="rerun",
+    )
+    for container, (_label, renderer) in zip(containers, specs, strict=True):
+        if container.open:
+            with container:
+                renderer()
+
+
 def main():
     """Main application entry point"""
     if (
@@ -11003,6 +11222,9 @@ def main():
         render_login_page()
         return
 
+    usage_enabled = get_usage_capability_enabled()
+    st.session_state.usage_capability_enabled = usage_enabled
+
     render_sidebar()
 
     # Show manage modal if active
@@ -11011,57 +11233,7 @@ def main():
     # Show chunk preview modal if active
     render_chunk_preview_modal()
 
-    # Tab-based navigation across primary workspaces
-    (
-        tab_chat,
-        tab_planning,
-        tab_docs,
-        tab_instructions,
-        tab_models,
-        tab_usage,
-        tab_custom_agents,
-        tab_mcp,
-        tab_skills,
-    ) = st.tabs(
-        [
-            ":material/chat: Chat",
-            ":material/checklist: Planning",
-            ":material/description: Documents",
-            ":material/settings: Instructions",
-            ":material/smart_toy: Models",
-            ":material/monitoring: Usage",
-            ":material/robot_2: Custom Agents",
-            ":material/extension: MCP Config",
-            ":material/psychology: Skills",
-        ]
-    )
-
-    with tab_chat:
-        render_chat_view()
-
-    with tab_planning:
-        render_planning_tab()
-
-    with tab_docs:
-        render_documents_tab()
-
-    with tab_instructions:
-        render_settings_view()
-
-    with tab_models:
-        render_models_view()
-
-    with tab_usage:
-        render_usage_view()
-
-    with tab_custom_agents:
-        render_custom_agents_view()
-
-    with tab_mcp:
-        render_tools_tab()
-
-    with tab_skills:
-        render_skills_tab()
+    _render_main_workspace_tabs(usage_enabled=usage_enabled)
 
 
 if __name__ == "__main__":
