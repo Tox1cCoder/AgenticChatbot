@@ -444,6 +444,41 @@ def test_bucket_series_aggregates_intervals_in_sql_and_stays_tenant_bounded(
     assert cross_tenant == []
 
 
+def test_latest_conversation_event_breaks_timestamp_attempt_ties_by_id(
+    repository, tenant_factory
+) -> None:
+    user_id, conversation_id, _ = tenant_factory()
+    started = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    first = repository.record_event(
+        _command(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            provider="openai",
+            model="gpt-4o",
+            attempt=1,
+            started_at=started,
+        )
+    )
+    second = repository.record_event(
+        _command(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            provider="gemini",
+            model="gemini-2.5-flash",
+            attempt=1,
+            started_at=started,
+        )
+    )
+    expected_id = max(first.event_id, second.event_id)
+
+    latest = repository.get_latest_conversation_event(
+        user_id=user_id, conversation_id=conversation_id
+    )
+
+    assert latest is not None
+    assert latest.id == expected_id
+
+
 def test_reconcile_minute_rebuilds_exactly_from_raw_events(
     repository, tenant_factory, session_factory
 ) -> None:

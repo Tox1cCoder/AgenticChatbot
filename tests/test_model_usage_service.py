@@ -819,6 +819,17 @@ class CapturingSession:
         return EmptyMappingResult()
 
 
+class EmptyScalarResult:
+    def scalar_one_or_none(self):
+        return None
+
+
+class CapturingLatestSession(CapturingSession):
+    def execute(self, statement):
+        self.statements.append(statement)
+        return EmptyScalarResult()
+
+
 def compile_postgres(statement) -> str:
     return str(
         statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
@@ -885,6 +896,20 @@ def test_top_conversations_is_tenant_scoped_half_open_and_bounded_in_sql() -> No
     assert "total_tokens_sum DESC" in sql
     assert "model_usage_minute.conversation_id ASC" in sql
     assert "LIMIT 20" in sql
+
+
+def test_latest_conversation_event_has_deterministic_id_tie_breaker() -> None:
+    statements: list = []
+    repository = ModelUsageRepository(lambda: CapturingLatestSession(statements))
+
+    assert (
+        repository.get_latest_conversation_event(user_id=uuid4(), conversation_id=uuid4()) is None
+    )
+
+    sql = compile_postgres(statements[0])
+    assert "ORDER BY model_usage_events.started_at DESC" in sql
+    assert "model_usage_events.attempt DESC" in sql
+    assert "model_usage_events.id DESC" in sql
 
 
 def test_model_usage_service_is_a_factory_and_injectable_by_interface() -> None:

@@ -629,7 +629,11 @@ class ModelUsageRepository:
                 ModelUsageEvent.user_id == user_id,
                 ModelUsageEvent.conversation_id == conversation_id,
             )
-            .order_by(ModelUsageEvent.started_at.desc(), ModelUsageEvent.attempt.desc())
+            .order_by(
+                ModelUsageEvent.started_at.desc(),
+                ModelUsageEvent.attempt.desc(),
+                ModelUsageEvent.id.desc(),
+            )
             .limit(1)
         )
         with self.session_factory() as session:
