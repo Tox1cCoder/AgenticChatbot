@@ -825,29 +825,29 @@ git commit -m "fix: retain image generation token usage"
 - Test: `tests/test_model_usage_document_workers.py`
 - Test: `tests/test_rag_embedding_service.py`
 
-- [ ] **Step 1: Write failing direct-SDK tests**
+- [x] **Step 1: Write failing direct-SDK tests**
 
 Assert actual provider counts for vision and caption generation; per-batch embedding events; locally estimated embedding input when the SDK response has no usage; one event per retry attempt; document-owner attribution; query embeddings in chat context; and `user_id = NULL` when a maintenance call has no owner.
 
-- [ ] **Step 2: Wrap synchronous SDK calls without blocking async loops further**
+- [x] **Step 2: Wrap synchronous SDK calls without blocking async loops further**
 
 Use the recorder's sync wrapper inside functions already running in worker threads. For synchronous SDK calls currently made directly from async functions, retain the existing behavior in this task and wrap it; a separate async-client refactor is outside scope.
 
-- [ ] **Step 3: Make embedding ownership explicit**
+- [x] **Step 3: Make embedding ownership explicit**
 
 Extend `RAGEmbeddingService` in `app/services/rag_embedding_service.py` with keyword-only `usage_context: UsageContext | None = None` on document, query, and image embedding methods, and thread the argument through `DocumentIndexService`. `Document` has no `user_id`; document indexing receives a context built only after loading `document.conversation` and verifying `conversation.user_id` in `index_document_task`. Query embedding inherits the bound authenticated chat context. Local sentence-transformer calls do not create provider usage events.
 
-- [ ] **Step 4: Bind worker ownership before caption/embed stages**
+- [x] **Step 4: Bind worker ownership before caption/embed stages**
 
 In `index_document_task`, verify the conversation owner as it already does, build `UsageContext(user_id=owner_id, conversation_id=document.conversation_id, document_id=document.id, operation="document_index")`, then wrap captioning and indexing inside `bind_usage_context(context)`. Never trust an owner passed directly in a Celery payload.
 
-- [ ] **Step 5: Run direct-call tests**
+- [x] **Step 5: Run direct-call tests**
 
 Run: `python -m pytest tests/test_model_usage_direct_sdk.py tests/test_model_usage_document_workers.py tests/test_rag_embedding_service.py tests/test_document_processing_service.py tests/test_document_index_service.py -q`
 
 Expected: all tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/ai/agents/chat_agent.py app/services/document_processing_service.py app/services/rag_embedding_service.py app/services/document_index_service.py app/workers/document_processor.py tests/test_model_usage_direct_sdk.py tests/test_model_usage_document_workers.py tests/test_rag_embedding_service.py
@@ -1426,3 +1426,13 @@ Implementation progress and decisions made during execution. Updated after each 
   - **D15 — provider family from model name, not `isinstance`.** Added a public `image_provider_family(model)` to `registry.py` (single source of truth for the `gpt-image`/`dall-e` prefixes, reused by `resolve_image_provider`) so the recorder's `provider` dimension ("gemini"/"openai") is derived without importing concrete provider classes or duplicating prefix logic. Registry was already in the commit via the `app/ai/image_generation` dir path.
   - **D16 — Gemini & OpenAI always emit one terminal `ImageUsage`, even when usage is unavailable** (keeps "exactly one terminal event per stream" simple). Existing exact-event-list provider tests were updated to expect the trailing `ImageUsage`; three `__new__`-built agent doubles in `test_image_generation_providers.py` now set `agent.recorder = None` (the real agent always has it from `BaseAgent.__init__`; the `test_image_generator_harvest.py` doubles mock `_generate_images`, so they never touch the recorder).
   - **Deferred (not a Task 9 step):** `ImageGeneratorAgent._generate_user_facing_response` calls `self.langchain_model.ainvoke` directly (not through the recorder-wrapped `_ainvoke_with_retries`), so the acknowledgement call is currently uninstrumented. Task 11's AST callsite inventory is designed to catch exactly this — flag it there rather than widening Task 9.
+
+- **Task 10 — complete (2026-07-21). IMPLEMENTED INLINE by the controller** (subagent delegation still blocked; user pre-authorized folding + documented decisions via AskUserQuestion). Commit `86e146f`. Instruments the direct-SDK provider calls the workflow layer never touched: chat **vision** (Gemini `generate_content` in `chat_agent._generate_with_vision`, wrapped by new `_invoke_vision_gemini` + `_begin_vision_usage`; the OpenAI vision branch now passes `operation`/`provider`/`model` into the Task-7 `_ainvoke_with_retries`), image **captioning** (`document_processing_service._request_image_caption`, one op per caption spanning its retries), and RAG **embeddings** (`GeminiRAGEmbeddingService.embed_documents`/`embed_query`/`embed_image`, per-batch events, one event per 429 retry). Step-5 command 52 green; broad container/agent/document/workflow sweep 423 passed / 0 failed; ruff check + format clean.
+  - **D17 — container folded into scope (user-approved).** Recorder wired into `document_processing_service` (captioning) and `GeminiRAGEmbeddingService` (embeddings) via the container. The `model_usage_repository`/`model_usage_metrics`/`model_usage_recorder` provider block was moved up (right after `qdrant_client`) so the RAG-embedding builder — defined earlier than its original position — can reference `model_usage_recorder`; `_build_rag_embedding_service(recorder=None)` now forwards it. `DocumentIndexService` needs no recorder (it only threads `usage_context`).
+  - **D18 — operation vocabulary (user-approved): `vision` / `image_caption` / `embedding`.** Each call site childs the current/passed context to its own operation, so §1's separately-countable operations are distinct in the ledger. The document worker's bound context uses `operation="document_index"` as the base that caption/embed override.
+  - **D19 — ThreadPoolExecutor context propagation.** `embed_documents` accepts explicit `usage_context` and passes it to each `_embed_batch`, which binds it inside the executor thread (ContextVars do NOT propagate into pool threads). `embed_query` runs on the caller's loop thread (`rag_agent._search`), so it inherits the bound chat context with `usage_context=None`. Confirmed by analysis of both call sites.
+  - **D20 — sync-from-async wrapping.** Per Step 2, existing behavior is retained and only wrapped: the vision Gemini call is wrapped in `record_one_async_attempt` via an `async` shim that runs the sync SDK call (still blocking, as before) while persistence runs off-loop via `to_thread`; caption + embeddings use `record_one_sync_attempt` (already sync methods / worker threads). No async-client refactor (explicitly out of scope).
+  - **D21 — embedding local estimate.** When the embed response carries no usage, the recorder's `estimate` callback counts input tokens via `TokenCounter().count_text(...)` per text content → `source="locally_estimated"` (image-embed contents are non-text → 0).
+  - **D22 — worker binds AND passes.** `index_document_task` builds `UsageContext(user_id=verified owner, conversation_id, document_id, operation="document_index")`, binds it around the in-thread caption stage, and ALSO passes it explicitly to `index_document(usage_context=...)` for the executor-threaded embeddings. Ownership is derived from the verified conversation owner, never from the Celery payload. `reindex_document` (maintenance) passes no context → `user_id = NULL`.
+  - **Test-fixture fixes (necessary, non-behavioral):** `_EmbeddingStub` in `test_document_index_service.py` now accepts `usage_context` (and captures it as `last_usage_context`) since `_embed_and_upsert` forwards the kwarg; added `test_index_document_threads_usage_context_to_embeddings`.
+  - **Deferred to Task 11 (unchanged from Task 9 note):** `ImageGeneratorAgent._generate_user_facing_response`'s direct `langchain_model.ainvoke` remains uninstrumented; the AST callsite inventory will flag it. The full `index_document_task` Celery path is covered by attribution unit tests (embedding-level owner/NULL) + Task 18 manual smoke rather than a mocked end-to-end worker test.
