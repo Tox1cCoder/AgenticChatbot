@@ -13,6 +13,10 @@ Wire rules enforced here (2026-07-02 response-format cleanup):
   image counters, ``pending_tool_calls``) and internal ``_``-prefixed keys are
   scrubbed from every AI SDK metadata projection. Images surface as ``file``
   parts; widgets/canvas/tool renders surface only through ``rich_items``.
+- Additive nested metadata such as ``context_window`` is preserved verbatim.
+  The projection deliberately has no nested allowlist, so model-limit fields,
+  token splits, ratios, and future fields survive both history and final-event
+  paths without adding a mandatory stream event.
 """
 
 from __future__ import annotations
@@ -70,7 +74,9 @@ def scrub_legacy_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
 
     Persistence is untouched — the Streamlit path still reads the legacy
     fields from the database. Callers that need image ``file`` parts must
-    extract them before scrubbing.
+    extract them before scrubbing. Values are intentionally not traversed:
+    nested contracts such as ``context_window`` and unknown future fields are
+    additive and pass through unchanged.
     """
     return {
         key: value

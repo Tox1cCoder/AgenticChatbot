@@ -91,7 +91,9 @@ class AISDKUIMessage(BaseModel):
         None,
         description=(
             "Backend message metadata: provider/model info, RAG citations, rich items, "
-            "suggested questions, etc. Legacy renderer fields are scrubbed."
+            "suggested questions, and additive `context_window` model-limit and usage "
+            "fields. Unknown metadata remains forward-compatible; only documented legacy "
+            "renderer and database-only fields are scrubbed."
         ),
     )
     created_at: str | None = Field(

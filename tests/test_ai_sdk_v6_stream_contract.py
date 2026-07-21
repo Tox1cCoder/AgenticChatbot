@@ -316,6 +316,68 @@ async def test_terminal_assistant_message_projects_to_ui_message_metadata_shape(
 
 
 @pytest.mark.asyncio
+async def test_terminal_assistant_message_preserves_additive_context_usage_without_new_event():
+    context_window = {
+        "provider": "provider-a",
+        "model": "model-a",
+        "context_window_tokens": 128000,
+        "max_input_tokens": 128000,
+        "max_output_tokens": 16384,
+        "limit_type": "shared_context",
+        "source": "provider_api",
+        "known": True,
+        "input_tokens": 1200,
+        "output_tokens": 300,
+        "total_tokens": 1500,
+        "usage_source": "provider_reported",
+        "used_tokens": 1500,
+        "used_token_source": "provider_reported_total",
+        "input_usage_ratio": 0.009375,
+        "output_usage_ratio": 0.00234375,
+        "usage_ratio": 0.01171875,
+        "usage_ratio_basis": "shared_context_total",
+        "display_state": "ok",
+        "future_limit_field": "ignored-by-old-clients",
+    }
+
+    async def source():
+        yield make_event("message_delta", sequence=1, data={"text": "Done"})
+        yield make_event(
+            "complete",
+            sequence=2,
+            data={
+                "message": {
+                    "id": "m-1",
+                    "sender": 2,
+                    "content": "Done",
+                    "message_metadata": {
+                        "context_window": context_window,
+                        "futureMetadata": True,
+                    },
+                }
+            },
+        )
+
+    payloads = await _collect_payloads(source)
+    wire_payloads = [payload for payload in payloads if payload != "[DONE]"]
+    terminal = wire_payloads[-4:]
+    assistant = terminal[0]
+
+    assert [payload["type"] for payload in terminal] == [
+        "data-assistant-message",
+        "text-end",
+        "finish-step",
+        "finish",
+    ]
+    assert assistant["data"]["message"]["metadata"] == {
+        "context_window": context_window,
+        "futureMetadata": True,
+    }
+    assert not any(payload.get("type") == "data-model-usage" for payload in wire_payloads)
+    assert payloads[-1] == "[DONE]"
+
+
+@pytest.mark.asyncio
 async def test_terminal_assistant_message_scrubs_legacy_renderer_fields():
     async def source():
         yield make_event(
