@@ -1086,15 +1086,15 @@ git commit -m "feat: proxy usage analytics through sidecar"
 - Test: `tests/test_model_usage_ai_sdk_contract.py`
 - Test: `tests/test_ai_sdk_v6_stream_contract.py`
 
-- [ ] **Step 1: Write failing compatibility tests**
+- [x] **Step 1: Write failing compatibility tests**
 
 Assert no new mandatory stream event, unchanged terminal framing, final/history metadata containing the additive context split, unknown fields remaining ignorable, and contract examples validating against Pydantic response schemas.
 
-- [ ] **Step 2: Preserve additive metadata in final and history paths**
+- [x] **Step 2: Preserve additive metadata in final and history paths**
 
 Ensure metadata scrubbing does not drop `context_window.input_tokens`, `output_tokens`, `total_tokens`, `usage_source`, `limit_type`, `input_usage_ratio`, `output_usage_ratio`, `usage_ratio`, `usage_ratio_basis`, or model-limit fields. Do not duplicate account-wide dashboard data into message streams.
 
-- [ ] **Step 3: Write the concise frontend contract**
+- [x] **Step 3: Write the concise frontend contract**
 
 The contract must include:
 
@@ -1105,13 +1105,13 @@ The contract must include:
 5. Context gauge formula and unknown-limit behavior.
 6. Empty/loading/error states and the rule that all unknown future fields are ignored.
 
-- [ ] **Step 4: Run contract tests**
+- [x] **Step 4: Run contract tests**
 
 Run: `python -m pytest tests/test_model_usage_ai_sdk_contract.py tests/test_ai_sdk_v6_stream_contract.py tests/test_ai_sdk_assistant_ui_compat.py -q`
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/api/ai_sdk.py app/services/event_streaming/ai_sdk_projection.py plans/TOKEN_USAGE_AI_SDK_FE_CONTRACT.md tests/test_model_usage_ai_sdk_contract.py tests/test_ai_sdk_v6_stream_contract.py
@@ -1444,3 +1444,5 @@ Implementation progress and decisions made during execution. Updated after each 
 - **Task 13 — complete (2026-07-21).** Commits `634b67b`, `4cd764e`, and `80b970b`. Added authenticated, typed `/usage/dashboard` and `/usage/conversations/{conversation_id}` endpoints with injected JWT identity, canonical single router registration, ownership-safe 404 behavior, exact camelCase envelopes, request-time UI feature hiding, and tracking/UI flag independence. Identity-looking query parameters cannot rewrite the injected user. Review caught and fixed two production-readiness issues: API tests now restore both global injector maps so the suite is order-independent, and the synchronous analytics/SQLAlchemy calls use regular FastAPI handlers so database work runs in the worker threadpool rather than blocking the ASGI event loop. Final evidence: 245 model-usage tests passed with 1 skipped, the required Task 13 suite passed 32 tests, Ruff/format/diff checks were clean, and both spec and quality reviews approved with no remaining findings.
 
 - **Task 14 — complete (2026-07-21).** Commit `6b524a1`. Added explicit local-session-protected sidecar proxies for `/usage/dashboard` and `/usage/conversations/{conversation_id}`. The routes are available under both plain and `/api` mounts, validate conversation UUIDs, preserve ordered/repeated/encoded query parameters and upstream status/JSON bodies, and rely on `ServerAPIClient` to replace the local session bearer with the canonical upstream access token. They neither rewrite nor inject user/device identity and add no `/ai` compatibility alias. Test helpers use lazy imports to remain stable after the existing module-eviction tests. Final evidence: 12 focused tests, 24 required auth/CORS tests, and the full sidecar suite (209 passed, 4 skipped) were green; reversed-order verification, Ruff/format/diff checks, spec review, and quality review all passed with no findings.
+
+- **Task 15 — complete (2026-07-21).** Commits `4bb88c6`, `6fad91c`, and `83b9c2e`. Defined the executable frontend contract for authenticated usage endpoints and additive AI SDK context metadata without adding a stream event or changing terminal framing. Exact JSON examples round-trip through real `ApiResponse`/usage schemas, include the full envelope, and enforce aggregate invariants; the contract covers ranges/defaults, TypeScript shapes, chart mapping, refresh behavior, gauge semantics, and resilient UI states. Added shared typed `ContextWindowMetadata` with required static limits, optional post-call usage fields, snake_case nesting, and forward-compatible unknown-field handling; `ConversationUsage.latest_context_window` now uses it. Public range constants replace private test coupling, and generated Pydantic schema is structurally compared with TypeScript required/optional fields, including a real static-only producer payload. Final evidence: 138 combined Task 12/API/Task 15 regressions passed, final focused review suites passed 74 tests, Ruff/format/diff checks were clean, and both spec and quality reviews approved with no remaining findings.
