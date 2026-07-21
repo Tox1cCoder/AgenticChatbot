@@ -31,7 +31,7 @@ router = APIRouter(
 
 @router.get("/dashboard", response_model=ApiResponse[UsageDashboard])
 @AppAutoInjector.auto_inject()
-async def get_usage_dashboard(
+def get_usage_dashboard(
     query: UsageDashboardQueryParams,
     model_usage_service: IModelUsageService,
     user_id: UUID,
@@ -46,7 +46,7 @@ async def get_usage_dashboard(
     response_model=ApiResponse[ConversationUsageResponse],
 )
 @AppAutoInjector.auto_inject()
-async def get_conversation_usage(
+def get_conversation_usage(
     conversation_id: UUID,
     query: ConversationUsageQueryParams,
     model_usage_service: IModelUsageService,

@@ -1,13 +1,16 @@
 """HTTP contract tests for authenticated model-usage read APIs."""
 
+import inspect
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from uuid import UUID
 
 import pytest
 from dependency_injector import providers
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
+from app.api.model_usage import router as model_usage_router
 from app.core.config import settings
 from app.core.container import Container, container, setup_auto_injection
 from app.core.dependency_injection import AppAutoInjector, AppContainerInjector
@@ -137,6 +140,15 @@ def test_api_test_module_preserves_declarative_injector_wiring() -> None:
     assert AppContainerInjector.wiring_map[ModelUsageRepository] is (
         Container.model_usage_repository
     )
+
+
+def test_usage_route_endpoints_are_synchronous_for_threadpool_execution() -> None:
+    endpoints = [
+        route.endpoint for route in model_usage_router.routes if isinstance(route, APIRoute)
+    ]
+
+    assert len(endpoints) == 2
+    assert all(not inspect.iscoroutinefunction(endpoint) for endpoint in endpoints)
 
 
 @pytest.mark.parametrize(
