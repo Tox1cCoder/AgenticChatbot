@@ -1125,11 +1125,11 @@ git commit -m "docs: define frontend usage analytics contract"
 - Test: `tests/test_demo_usage_dashboard.py`
 - Test: `tests/test_context_window_message_metadata.py`
 
-- [ ] **Step 1: Write failing UI helper tests**
+- [x] **Step 1: Write failing UI helper tests**
 
 Test API query construction, response normalization, compact token formatting, shared-context and separate-I/O gauge tooltips, 100% visual cap with uncapped backend ratio, unknown denominator, reported/estimated badge text, empty data, chart-frame construction, and conversation-panel refresh after completion.
 
-- [ ] **Step 2: Add authenticated API helpers**
+- [x] **Step 2: Add authenticated API helpers**
 
 ```python
 def get_usage_dashboard(*, start, end, bucket, timezone_name, conversation_id=None):
@@ -1150,27 +1150,27 @@ def get_usage_dashboard(*, start, end, bucket, timezone_name, conversation_id=No
 
 Import `urlencode` from `urllib.parse` and `ZoneInfo` from `zoneinfo`, and use the existing authenticated `make_api_request()` response-envelope helper. `align_usage_boundary()` converts day-picker dates to local midnight and hour inputs to local top-of-hour; the UI's inclusive end date becomes the next local midnight because the API `to` value is exclusive. Increase the GET cache TTL to 30 seconds only for usage helpers through a dedicated `_cached_usage_get_request()` so chat/history caching behavior remains unchanged; clear that cache after a completed turn.
 
-- [ ] **Step 3: Implement `render_usage_view()`**
+- [x] **Step 3: Implement `render_usage_view()`**
 
 Add a **Usage** tab after Models. Render date range, hour/day selector, timezone selector defaulting to the local zone when discoverable, optional conversation filter, total/input/output/request/image cards, stacked input/output trend, outcome chart, breakdown tables/charts, top conversations, coverage caption, and generated-at timestamp.
 
 Use Altair only through Streamlit's installed dependency. Bound chart rows to API output; do not perform unbounded client-side history fetches.
 
-- [ ] **Step 4: Add the compact conversation panel**
+- [x] **Step 4: Add the compact conversation panel**
 
 In `render_chat_view()`, fetch `/usage/conversations/{id}` without a range for retained two-year cumulative input/output/total, requests, models, and latest gauge. Endpoint failure must not block chat rendering.
 
-- [ ] **Step 5: Correct the existing circle tooltip and CSS**
+- [x] **Step 5: Correct the existing circle tooltip and CSS**
 
 For shared context format `2.2k / 65.5k (3%) · input 120 · output 2.0k · provider reported`. For separate I/O format `6% limiting · input 120 / 65.5k (0.2%) · output 2.0k / 32.8k (6%) · provider reported`. Keep `ok/warn/danger/unknown` states, visually cap fill at 100%, and preserve accessible `title`/`aria-label` text.
 
-- [ ] **Step 6: Run UI tests**
+- [x] **Step 6: Run UI tests**
 
 Run: `python -m pytest tests/test_demo_usage_dashboard.py tests/test_context_window_message_metadata.py tests/test_demo_stream_rendering.py tests/test_ai_sdk_context_window.py -q`
 
 Expected: all tests pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add demo.py tests/test_demo_usage_dashboard.py tests/test_context_window_message_metadata.py
@@ -1446,3 +1446,5 @@ Implementation progress and decisions made during execution. Updated after each 
 - **Task 14 — complete (2026-07-21).** Commit `6b524a1`. Added explicit local-session-protected sidecar proxies for `/usage/dashboard` and `/usage/conversations/{conversation_id}`. The routes are available under both plain and `/api` mounts, validate conversation UUIDs, preserve ordered/repeated/encoded query parameters and upstream status/JSON bodies, and rely on `ServerAPIClient` to replace the local session bearer with the canonical upstream access token. They neither rewrite nor inject user/device identity and add no `/ai` compatibility alias. Test helpers use lazy imports to remain stable after the existing module-eviction tests. Final evidence: 12 focused tests, 24 required auth/CORS tests, and the full sidecar suite (209 passed, 4 skipped) were green; reversed-order verification, Ruff/format/diff checks, spec review, and quality review all passed with no findings.
 
 - **Task 15 — complete (2026-07-21).** Commits `4bb88c6`, `6fad91c`, and `83b9c2e`. Defined the executable frontend contract for authenticated usage endpoints and additive AI SDK context metadata without adding a stream event or changing terminal framing. Exact JSON examples round-trip through real `ApiResponse`/usage schemas, include the full envelope, and enforce aggregate invariants; the contract covers ranges/defaults, TypeScript shapes, chart mapping, refresh behavior, gauge semantics, and resilient UI states. Added shared typed `ContextWindowMetadata` with required static limits, optional post-call usage fields, snake_case nesting, and forward-compatible unknown-field handling; `ConversationUsage.latest_context_window` now uses it. Public range constants replace private test coupling, and generated Pydantic schema is structurally compared with TypeScript required/optional fields, including a real static-only producer payload. Final evidence: 138 combined Task 12/API/Task 15 regressions passed, final focused review suites passed 74 tests, Ruff/format/diff checks were clean, and both spec and quality reviews approved with no remaining findings.
+
+- **Task 16 — complete (2026-07-21).** Commits `b2d702b`, `30a8230`, `f1594e0`, `f5edf94`, and `337f3b2`. Added a tenant-safe, token-fingerprint-partitioned 30-second usage cache; portable timezone discovery; DST-aware day/hour query construction; bounded dashboard charts/tables/cards; a resilient retained conversation panel; and corrected accessible shared/separate/unknown context gauges. Review hardening added an authenticated `/usage/capabilities` signal through the canonical API and sidecar so disabled analytics removes both UI surfaces, plus Streamlit 1.55 keyed lazy tabs so inactive workspaces do no API work (dependency manifests synchronized). Nonexistent local hours are rejected before requests, ambiguous folds expose explicit first/second occurrence choices (including Lord Howe half-hour transitions), and hostile legacy numeric metadata degrades safely without breaking chat. Usage cache invalidation occurs only on terminal completion, separate-I/O state follows the actual limiting ratio, and no user identity is placed in queries. Final evidence: 141 combined API/sidecar/UI tests, 196 broad UI regressions, and 130 final focused review tests passed; Ruff/format/compile/diff checks were clean; final spec and quality reviews approved with no findings.
