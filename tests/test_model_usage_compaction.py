@@ -13,6 +13,7 @@ import asyncio
 import inspect
 import json
 import logging
+import sys
 from dataclasses import asdict
 from types import SimpleNamespace
 from uuid import uuid4
@@ -359,12 +360,12 @@ def test_form_fill_accepts_no_user_controlled_identity_fields():
 
 def test_form_fill_recorder_failure_warns_with_exception_class_only(monkeypatch, caplog):
     from app.ai.mcp_servers import form_filler_server
-    from app.core import container
 
     def _raise():
         raise RuntimeError("database secret must not be logged")
 
-    monkeypatch.setattr(container, "get_container", _raise)
+    fake_container_module = SimpleNamespace(get_container=_raise)
+    monkeypatch.setitem(sys.modules, "app.core.container", fake_container_module)
 
     with caplog.at_level(logging.WARNING, logger=form_filler_server.__name__):
         assert form_filler_server._build_form_fill_recorder() is None

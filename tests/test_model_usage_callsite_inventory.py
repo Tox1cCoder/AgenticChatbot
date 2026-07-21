@@ -233,6 +233,27 @@ def _test_function_symbols(path: Path, function_name: str) -> set[str]:
     return symbols
 
 
+def _test_function_assertion_symbols(path: Path, function_name: str) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name
+    )
+    symbols: set[str] = set()
+    for assertion in (node for node in ast.walk(function) if isinstance(node, ast.Assert)):
+        symbols.update(node.id for node in ast.walk(assertion.test) if isinstance(node, ast.Name))
+        symbols.update(
+            node.attr for node in ast.walk(assertion.test) if isinstance(node, ast.Attribute)
+        )
+        symbols.update(
+            node.value
+            for node in ast.walk(assertion.test)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        )
+    return symbols
+
+
 def test_terminal_model_calls_match_reviewed_manifest_exactly():
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     expected_identities = [
@@ -365,6 +386,9 @@ def test_each_instrumented_callsite_names_an_operation_and_exercising_test():
         test_path = ROOT / relative_path
         assert test_path.is_file(), entry
         assert function in _test_functions(test_path), entry
+        proof_symbols = _test_function_symbols(test_path, function)
+        assertion_symbols = _test_function_assertion_symbols(test_path, function)
         exercise_symbol = entry.get("exercise_symbol")
         assert isinstance(exercise_symbol, str) and exercise_symbol, entry
-        assert exercise_symbol in _test_function_symbols(test_path, function), entry
+        assert exercise_symbol in proof_symbols, entry
+        assert entry["operation"] in assertion_symbols, entry

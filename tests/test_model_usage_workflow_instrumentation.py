@@ -210,6 +210,7 @@ async def test_generic_retries_record_one_attempt_each_under_one_operation():
     assert [c.status for c in repo.commands] == ["error", "error", "success"]
     assert all(c.provider == "gemini" for c in repo.commands)
     assert all(c.model == "gemini-3-flash-preview" for c in repo.commands)
+    assert all(c.context.operation == "workflow" for c in repo.commands)
 
 
 async def test_cancelled_provider_call_records_cancelled_attempt_and_reraises():
@@ -357,9 +358,7 @@ async def test_concurrent_users_keep_separate_attribution():
         user_id = uuid4()
         fake_llm = FakeLLM([("ok", AIMessage(content="ok"))])
         agent = make_agent(recorder=recorder, fake_llm=fake_llm, runtime_config=gemini_runtime())
-        await _run_invoke(
-            agent, user_id=user_id, conversation_id=uuid4(), request_id=uuid4()
-        )
+        await _run_invoke(agent, user_id=user_id, conversation_id=uuid4(), request_id=uuid4())
         return user_id
 
     user_ids = await asyncio.gather(*(one_user() for _ in range(6)))
@@ -429,9 +428,7 @@ async def test_router_deterministic_shortcircuits_record_zero_events(monkeypatch
         monkeypatch, recorder, client=FakeGeminiClient(response=_FakeGenResponse("x"))
     )
     with bind_usage_context(UsageContext(user_id=uuid4(), operation="workflow")):
-        result = await router.route_message(
-            AgentMessage(role=MessageRole.USER, content="hi"), []
-        )
+        result = await router.route_message(AgentMessage(role=MessageRole.USER, content="hi"), [])
     assert result == "chat_agent"
 
     # No client configured: deterministic fallback, still no provider call.
@@ -533,9 +530,7 @@ async def test_suggestions_record_one_attempt_and_skip_on_cache_hit():
     generator = SuggestionGenerator.__new__(SuggestionGenerator)
     generator.model_name = "gemini-3-flash-preview"
     generator._suggestion_cache = {}
-    generator.client = FakeGeminiClient(
-        response=_FakeGenResponse('["What next?", "Why?"]')
-    )
+    generator.client = FakeGeminiClient(response=_FakeGenResponse('["What next?", "Why?"]'))
 
     usage_context = UsageContext(
         user_id=uuid4(),
