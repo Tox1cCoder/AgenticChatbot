@@ -356,6 +356,10 @@ class Settings(BaseSettings):
     rag_agent_model: str = Field(default="gemini-3.1-pro-preview")
     chat_agent_model: str = Field(default="gemini-3-flash-preview")
     search_agent_model: str = Field(default="gemini-3-flash-preview")
+    form_filler_model: str = Field(
+        default="gemini-3-flash-preview",
+        description="Gemini model identifier used by the form-filler MCP tool",
+    )
 
     # RAG Embedding / Reranker / Chunking
     rag_embedding_provider: str = Field(

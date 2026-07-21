@@ -98,14 +98,17 @@ class ConversationCompactionWorker:
         previous_memory = self._previous_memory(compaction_input.summary_payload)
         mode = "emergency" if force else "background"
         try:
+            provider_timeout = self.settings.conversation_summary_timeout_seconds
             result = await asyncio.wait_for(
                 self.compactor.compact(
                     compaction_input.messages,
                     previous_memory=previous_memory,
                     user_id=compaction_input.owner_id,
+                    conversation_id=conversation_id,
                     force=force,
+                    timeout_seconds=provider_timeout,
                 ),
-                timeout=self.settings.conversation_summary_timeout_seconds,
+                timeout=provider_timeout + max(0.01, min(1.0, provider_timeout * 0.1)),
             )
         except TimeoutError:
             self.metrics.record_compaction(
@@ -319,6 +322,7 @@ def _build_worker() -> ConversationCompactionWorker:
         max_summary_tokens=settings.conversation_summary_max_tokens,
         max_input_tokens=max_compaction_input,
         credential_resolver=resolver,
+        recorder=container.model_usage_recorder(),
     )
     return ConversationCompactionWorker(
         repository=repository,

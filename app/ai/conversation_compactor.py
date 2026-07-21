@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Any
 from uuid import UUID
@@ -15,6 +17,8 @@ from app.ai.conversation_memory import MEMORY_KEYS, ConversationMemory
 from app.ai.request_budget import _atomic_history_groups
 from app.ai.token_counter import TokenCounter
 from app.models.enums import MessageRole
+from app.usage import begin_usage_operation, bind_usage_context
+from app.usage.types import UsageContext, UsageOperation
 
 
 class CompactionCredentialError(RuntimeError):
@@ -148,9 +152,11 @@ class ConversationCompactor:
         max_input_tokens: int | None = None,
         credential_resolver: CompactionCredentialResolver | None = None,
         prompt_version: str = "conversation-memory-v1",
+        recorder: Any | None = None,
     ) -> None:
         self.token_counter = token_counter
         self.generator = generator
+        self.recorder = recorder
         self.provider = str(provider).strip().lower()
         self.model = str(model).strip()
         self.trigger_messages = self._non_negative(trigger_messages, "trigger_messages")
@@ -209,13 +215,70 @@ class ConversationCompactor:
             retained_recent=full_window[cutoff + 1 :],
         )
 
+    @contextmanager
+    def _compaction_usage_scope(
+        self, user_id: UUID | None, conversation_id: UUID | None
+    ) -> Iterator[UsageOperation | None]:
+        """Bind a ``conversation_compaction`` operation for the one generator call.
+
+        Yields ``None`` (binding nothing) when no recorder is configured, so the
+        recorder-less path — including all existing injected-generator tests —
+        is byte-for-byte unchanged.
+        """
+        if self.recorder is None:
+            yield None
+            return
+        context = UsageContext(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            operation="conversation_compaction",
+        )
+        with bind_usage_context(context), begin_usage_operation() as operation:
+            yield operation
+
+    async def _invoke_generator(
+        self,
+        prompt: str,
+        api_key: str | None,
+        operation: UsageOperation | None,
+        timeout_seconds: float | None,
+    ) -> Any:
+        async def _generate() -> Any:
+            result = self.generator(
+                prompt=prompt,
+                provider=self.provider,
+                model=self.model,
+                api_key=api_key,
+                prompt_version=self.prompt_version,
+            )
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+
+        async def _call() -> Any:
+            if timeout_seconds is None:
+                return await _generate()
+            async with asyncio.timeout(timeout_seconds):
+                return await _generate()
+
+        if self.recorder is None or operation is None:
+            return await _call()
+        return await self.recorder.record_one_async_attempt(
+            call=_call,
+            provider=self.provider,
+            model=self.model,
+            operation=operation,
+        )
+
     async def compact(
         self,
         messages: Sequence[Any],
         *,
         previous_memory: ConversationMemory | None = None,
         user_id: UUID | None = None,
+        conversation_id: UUID | None = None,
         force: bool = False,
+        timeout_seconds: float | None = None,
     ) -> CompactionResult:
         """Generate, parse, validate, and recount a candidate memory payload."""
         trigger = self.evaluate_trigger(messages)
@@ -248,15 +311,12 @@ class ConversationCompactor:
             text=prompt,
         )
         try:
-            generated = self.generator(
-                prompt=prompt,
-                provider=self.provider,
-                model=self.model,
-                api_key=api_key,
-                prompt_version=self.prompt_version,
-            )
-            if inspect.isawaitable(generated):
-                generated = await generated
+            with self._compaction_usage_scope(user_id, conversation_id) as operation:
+                generated = await self._invoke_generator(
+                    prompt, api_key, operation, timeout_seconds
+                )
+        except TimeoutError:
+            raise
         except Exception:
             return self._failure("generation_failed", previous_memory, trigger, selection)
 

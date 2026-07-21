@@ -131,26 +131,6 @@ class ChatAgent(BaseAgent):
         response.metadata["persona_used"] = persona
         return response
 
-    async def _generate(self, prompt: str) -> str:
-        if not self.gemini_client:
-            raise RuntimeError("Gemini client not initialized")
-
-        try:
-            system_prompt = self._get_full_system_prompt()
-            generation_config = build_gemini_generate_config(
-                model_name=self.model_name,
-                include_thinking=True,
-                system_instruction=system_prompt,
-            )
-            response = self.gemini_client.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=generation_config,
-            )
-            return response.text if hasattr(response, "text") else str(response)
-        except Exception as exc:
-            raise RuntimeError(f"Gemini API error: {exc}") from exc
-
     _MAX_VISION_FALLBACK_ATTEMPTS: int = 3
 
     async def _generate_with_vision(

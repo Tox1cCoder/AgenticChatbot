@@ -16,6 +16,48 @@ from app.core.config import settings  # noqa: E402
 mcp = FastMCP("FormFiller")
 
 
+def _build_form_fill_recorder():
+    """Lazily resolve the usage recorder; fail open if unavailable.
+
+    This MCP tool runs in a standalone stdio subprocess with no request
+    context, so form-fill events are recorded unattributed (``user_id=NULL``).
+    Any failure to build the recorder leaves form filling working without a
+    usage event rather than breaking the tool.
+    """
+    try:
+        from app.core.container import get_container
+
+        return get_container().model_usage_recorder()
+    except Exception:
+        return None
+
+
+def _generate_form_content(client, model: str, prompt: str, *, recorder=None):
+    """Invoke Gemini once for form filling, recording a ``form_fill`` event.
+
+    The MCP transport carries no verified user identity, so the event is
+    recorded with ``user_id=NULL``; user-controlled identity is never read
+    from the tool arguments.
+    """
+    from app.usage import begin_usage_operation, bind_usage_context
+    from app.usage.types import UsageContext
+
+    recorder = recorder if recorder is not None else _build_form_fill_recorder()
+
+    def _call():
+        return client.models.generate_content(model=model, contents=prompt)
+
+    if recorder is None:
+        return _call()
+    with (
+        bind_usage_context(UsageContext(operation="form_fill")),
+        begin_usage_operation() as operation,
+    ):
+        return recorder.record_one_sync_attempt(
+            call=_call, provider="gemini", model=model, operation=operation
+        )
+
+
 @mcp.tool()
 def fill_form(natural_language_input: str) -> str:
     """
@@ -87,11 +129,8 @@ Guidelines:
 
 Return ONLY the JSON object, nothing else."""
 
-        # Call Gemini API
-        response = client.models.generate_content(
-            model="gemini-3-flash-preview",
-            contents=prompt,
-        )
+        # Call Gemini API (recorded as an unattributed ``form_fill`` event)
+        response = _generate_form_content(client, settings.form_filler_model, prompt)
 
         # Extract the response text
         response_text = response.text.strip()

@@ -1,0 +1,294 @@
+[
+  {
+    "file": "app/ai/agent_config.py",
+    "function": "create_gemini_client",
+    "call_chain": "genai.Client",
+    "disposition": "startup_validation"
+  },
+  {
+    "file": "app/ai/agent_config.py",
+    "function": "create_langchain_model",
+    "call_chain": "ChatGoogleGenerativeAI",
+    "disposition": "startup_validation"
+  },
+  {
+    "file": "app/ai/agents/base_agent.py",
+    "function": "BaseAgent._ainvoke_with_retries._ainvoke",
+    "call_chain": "llm_with_tools.ainvoke",
+    "disposition": "instrumented",
+    "operation": "workflow",
+    "exercising_test": "tests/test_model_usage_workflow_instrumentation.py::test_generic_retries_record_one_attempt_each_under_one_operation"
+  },
+  {
+    "file": "app/ai/agents/base_agent.py",
+    "function": "BaseAgent._ainvoke_with_retries._ainvoke",
+    "call_chain": "llm_with_tools.ainvoke",
+    "disposition": "instrumented",
+    "operation": "workflow",
+    "exercising_test": "tests/test_model_usage_workflow_instrumentation.py::test_generic_retries_record_one_attempt_each_under_one_operation"
+  },
+  {
+    "file": "app/ai/agents/base_agent.py",
+    "function": "_wrap_widget_session_tool._dispatch_widget_tool",
+    "call_chain": "tool.ainvoke",
+    "disposition": "non_provider_tool_dispatch"
+  },
+  {
+    "file": "app/ai/agents/chat_agent.py",
+    "function": "ChatAgent._invoke_vision_gemini._call",
+    "call_chain": "gemini_client.models.generate_content",
+    "disposition": "instrumented",
+    "operation": "vision",
+    "exercising_test": "tests/test_model_usage_direct_sdk.py::test_vision_gemini_records_provider_usage"
+  },
+  {
+    "file": "app/ai/agents/image_generator_agent.py",
+    "function": "ImageGeneratorAgent._generate_user_facing_response._call",
+    "call_chain": "llm.ainvoke",
+    "disposition": "instrumented",
+    "operation": "image_user_response",
+    "exercising_test": "tests/test_model_usage_compaction.py::test_image_user_response_records_one_attributed_attempt"
+  },
+  {
+    "file": "app/ai/agents/router.py",
+    "function": "Router._init_gemini",
+    "call_chain": "genai.Client",
+    "disposition": "startup_validation"
+  },
+  {
+    "file": "app/ai/context_overflow.py",
+    "function": "invoke_with_context_overflow_retry",
+    "call_chain": "invoke",
+    "disposition": "workflow_stream"
+  },
+  {
+    "file": "app/ai/context_overflow.py",
+    "function": "invoke_with_context_overflow_retry",
+    "call_chain": "invoke",
+    "disposition": "workflow_stream"
+  },
+  {
+    "file": "app/ai/graph.py",
+    "function": "MultiAgentWorkflow.execute_request",
+    "call_chain": "self.graph.ainvoke",
+    "disposition": "workflow_stream"
+  },
+  {
+    "file": "app/ai/graph.py",
+    "function": "MultiAgentWorkflow.resume",
+    "call_chain": "self.graph.ainvoke",
+    "disposition": "workflow_stream"
+  },
+  {
+    "file": "app/ai/image_generation/gemini.py",
+    "function": "GeminiImageProvider.stream_generate",
+    "call_chain": "self._client.aio.models.generate_content_stream",
+    "disposition": "instrumented",
+    "operation": "image_generation",
+    "exercising_test": "tests/test_model_usage_image_generation.py::test_gemini_stream_usage_recorded_as_image_operation"
+  },
+  {
+    "file": "app/ai/image_generation/openai_provider.py",
+    "function": "OpenAIImageProvider.__init__",
+    "call_chain": "AsyncOpenAI",
+    "disposition": "startup_validation"
+  },
+  {
+    "file": "app/ai/image_generation/openai_provider.py",
+    "function": "OpenAIImageProvider.__init__",
+    "call_chain": "AsyncOpenAI",
+    "disposition": "startup_validation"
+  },
+  {
+    "file": "app/ai/image_generation/openai_provider.py",
+    "function": "OpenAIImageProvider._open_stream",
+    "call_chain": "self._client.images.edit",
+    "disposition": "instrumented",
+    "operation": "image_generation",
+    "exercising_test": "tests/test_model_usage_image_generation.py::test_openai_image_stream_records_openai_provider"
+  },
+  {
+    "file": "app/ai/image_generation/openai_provider.py",
+    "function": "OpenAIImageProvider._open_stream",
+    "call_chain": "self._client.images.generate",
+    "disposition": "instrumented",
+    "operation": "image_generation",
+    "exercising_test": "tests/test_model_usage_image_generation.py::test_openai_image_stream_records_openai_provider"
+  },
+  {
+    "file": "app/ai/mcp_integration.py",
+    "function": "MCPManager.execute_tool",
+    "call_chain": "fresh_tool.ainvoke",
+    "disposition": "non_provider_tool_dispatch"
+  },
+  {
+    "file": "app/ai/mcp_integration.py",
+    "function": "MCPManager.execute_tool",
+    "call_chain": "tool.ainvoke",
+    "disposition": "non_provider_tool_dispatch"
+  },
+  {
+    "file": "app/ai/mcp_servers/boring_servers/core/batch_converter.py",
+    "function": "collect_boring_batches_results",
+    "call_chain": "genai.Client",
+    "disposition": "startup_validation"
+  },
+  {
+    "file": "app/ai/mcp_servers/boring_servers/core/batch_converter.py",
+    "function": "create_boring_batches_for_images",
+    "call_chain": "genai.Client",
+    "disposition": "startup_validation"
+  },
+  {
+    "file": "app/ai/mcp_servers/boring_servers/core/converter.py",
+    "function": "_call_model_once",
+    "call_chain": "client.models.generate_content",
+    "disposition": "startup_validation"
+  },
+  {
+    "file": "app/ai/mcp_servers/boring_servers/core/converter.py",
+    "function": "_get_client",
+    "call_chain": "genai.Client",
+    "disposition": "startup_validation"
+  },
+  {
+    "file": "app/ai/mcp_servers/form_filler_server.py",
+    "function": "_generate_form_content._call",
+    "call_chain": "client.models.generate_content",
+    "disposition": "instrumented",
+    "operation": "form_fill",
+    "exercising_test": "tests/test_model_usage_compaction.py::test_form_fill_records_unattributed_event"
+  },
+  {
+    "file": "app/ai/mcp_servers/form_filler_server.py",
+    "function": "fill_form",
+    "call_chain": "genai.Client",
+    "disposition": "startup_validation"
+  },
+  {
+    "file": "app/ai/model_factory.py",
+    "function": "ModelFactory._create_gemini_model",
+    "call_chain": "ChatGoogleGenerativeAI",
+    "disposition": "startup_validation"
+  },
+  {
+    "file": "app/ai/model_factory.py",
+    "function": "ModelFactory._create_openai_model",
+    "call_chain": "ChatOpenAI",
+    "disposition": "startup_validation"
+  },
+  {
+    "file": "app/ai/model_factory.py",
+    "function": "ModelFactory._create_openai_model",
+    "call_chain": "ChatOpenAI",
+    "disposition": "startup_validation"
+  },
+  {
+    "file": "app/ai/suggestion_generator.py",
+    "function": "SuggestionGenerator._get_cached_suggestions._generate",
+    "call_chain": "self.client.models.generate_content",
+    "disposition": "instrumented",
+    "operation": "suggestions",
+    "exercising_test": "tests/test_model_usage_workflow_instrumentation.py::test_suggestions_record_one_attempt_and_skip_on_cache_hit"
+  },
+  {
+    "file": "app/ai/tool_execution.py",
+    "function": "invoke_tool",
+    "call_chain": "ainvoke",
+    "disposition": "non_provider_tool_dispatch"
+  },
+  {
+    "file": "app/ai/tool_execution.py",
+    "function": "invoke_tool",
+    "call_chain": "tool.ainvoke",
+    "disposition": "non_provider_tool_dispatch"
+  },
+  {
+    "file": "app/services/ai_service.py",
+    "function": "AIService.generate_conversation_title",
+    "call_chain": "llm.ainvoke",
+    "disposition": "instrumented",
+    "operation": "title_generation",
+    "exercising_test": "tests/test_model_usage_workflow_instrumentation.py::test_generate_title_records_one_attempt"
+  },
+  {
+    "file": "app/services/ai_service.py",
+    "function": "AIService.generate_conversation_title",
+    "call_chain": "llm.ainvoke",
+    "disposition": "instrumented",
+    "operation": "title_generation",
+    "exercising_test": "tests/test_model_usage_workflow_instrumentation.py::test_generate_title_records_one_attempt"
+  },
+  {
+    "file": "app/services/document_processing_service.py",
+    "function": "DocumentProcessingService._init_gemini",
+    "call_chain": "genai.Client",
+    "disposition": "startup_validation"
+  },
+  {
+    "file": "app/services/document_processing_service.py",
+    "function": "DocumentProcessingService._request_image_caption._call",
+    "call_chain": "self.gemini_client.models.generate_content",
+    "disposition": "instrumented",
+    "operation": "image_caption",
+    "exercising_test": "tests/test_model_usage_direct_sdk.py::test_caption_records_image_caption_operation"
+  },
+  {
+    "file": "app/services/event_streaming/langchain_v3.py",
+    "function": "_iter_tuple_fallback",
+    "call_chain": "graph.astream",
+    "disposition": "workflow_stream"
+  },
+  {
+    "file": "app/services/event_streaming/subagents.py",
+    "function": "stream_with_subagent_events._pump_sink",
+    "call_chain": "sink.stream",
+    "disposition": "workflow_stream"
+  },
+  {
+    "file": "app/services/provider_service.py",
+    "function": "ProviderService._fetch_gemini_models_sync",
+    "call_chain": "genai.Client",
+    "disposition": "startup_validation"
+  },
+  {
+    "file": "app/services/provider_service.py",
+    "function": "ProviderService._fetch_openai_models",
+    "call_chain": "openai.OpenAI",
+    "disposition": "startup_validation"
+  },
+  {
+    "file": "app/services/rag_embedding_service.py",
+    "function": "GeminiRAGEmbeddingService.__post_init__",
+    "call_chain": "genai.Client",
+    "disposition": "startup_validation"
+  },
+  {
+    "file": "app/services/rag_embedding_service.py",
+    "function": "GeminiRAGEmbeddingService._run_embed_content._call",
+    "call_chain": "self.client.models.embed_content",
+    "disposition": "instrumented",
+    "operation": "embedding",
+    "exercising_test": "tests/test_rag_embedding_service.py::test_embed_documents_records_one_event_per_batch"
+  },
+  {
+    "file": "app/workers/conversation_compaction.py",
+    "function": "_langchain_generate",
+    "call_chain": "client.ainvoke",
+    "disposition": "instrumented",
+    "operation": "conversation_compaction",
+    "exercising_test": "tests/test_model_usage_compaction.py::test_compaction_records_provider_usage_attributed_to_owner"
+  },
+  {
+    "file": "client_backend/services/local_mcp_manager.py",
+    "function": "LocalMCPManager._call_tool_once",
+    "call_chain": "tool.ainvoke",
+    "disposition": "non_provider_tool_dispatch"
+  },
+  {
+    "file": "client_backend/services/server_api.py",
+    "function": "ServerAPIClient.stream_sse",
+    "call_chain": "client.stream",
+    "disposition": "workflow_stream"
+  }
+]

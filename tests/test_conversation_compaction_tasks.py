@@ -33,6 +33,7 @@ class FakeRepository:
     def __init__(self, events, *, claim=True, cas=True, input_exists=True):
         self.events = events
         self.conversation_id = uuid4()
+        self.owner_id = uuid4()
         self.claim_enabled = claim
         self.cas = cas
         self.input_exists = input_exists
@@ -50,7 +51,7 @@ class FakeRepository:
         if not self.input_exists:
             return None
         return SimpleNamespace(
-            owner_id=uuid4(),
+            owner_id=self.owner_id,
             messages=({"sequence": 3}, {"sequence": 4}),
             summary_payload=None,
             summary_version=0,
@@ -84,6 +85,7 @@ class FakeCompactor:
 
     async def compact(self, messages, **kwargs):
         self.events.append("provider_call")
+        self.compact_kwargs = kwargs
         return self.result
 
 
@@ -129,6 +131,26 @@ async def test_lease_commits_before_provider_and_success_persists_then_completes
     ]
     assert repository.persist_kwargs["base_summary_version"] == 0
     assert repository.persist_kwargs["base_cursor"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("force", [False, True])
+async def test_worker_passes_verified_owner_conversation_and_timeout(force) -> None:
+    events = []
+    repository = FakeRepository(events)
+    compactor = FakeCompactor(events, _result())
+    worker = ConversationCompactionWorker(
+        repository=repository,
+        compactor=compactor,
+        settings=_settings(),
+    )
+
+    await worker.execute(repository.conversation_id, force=force)
+
+    assert compactor.compact_kwargs["user_id"] == repository.owner_id
+    assert compactor.compact_kwargs["conversation_id"] == repository.conversation_id
+    assert compactor.compact_kwargs["force"] is force
+    assert compactor.compact_kwargs["timeout_seconds"] == 1
 
 
 @pytest.mark.asyncio
