@@ -1037,11 +1037,11 @@ git commit -m "feat: expose user usage endpoints"
 - Modify: `client_backend/api/proxy.py`
 - Test: `tests/client_backend/test_usage_proxy.py`
 
-- [ ] **Step 1: Write failing proxy tests**
+- [x] **Step 1: Write failing proxy tests**
 
 Verify query strings, bearer authentication forwarding, status/body preservation, `/usage/dashboard`, `/usage/conversations/{conversation_id}`, both plain and `/api` sidecar mounts, and no user-ID rewriting.
 
-- [ ] **Step 2: Add explicit proxy routes**
+- [x] **Step 2: Add explicit proxy routes**
 
 ```python
 @router.get("/usage/dashboard")
@@ -1064,13 +1064,13 @@ async def proxy_conversation_usage(
 
 Reuse the existing imports from `client_backend.core.auth` and `client_backend.core.security`; do not introduce a `require_local_auth` alias.
 
-- [ ] **Step 3: Run sidecar tests**
+- [x] **Step 3: Run sidecar tests**
 
 Run: `python -m pytest tests/client_backend/test_usage_proxy.py tests/client_backend/test_cors.py tests/client_backend/test_auth.py -q`
 
 Expected: all tests pass.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add client_backend/api/proxy.py tests/client_backend/test_usage_proxy.py
@@ -1442,3 +1442,5 @@ Implementation progress and decisions made during execution. Updated after each 
 - **Task 12 — complete (2026-07-21).** Commits `2597bdb`, `ab99949`, and `9cbf87c`. Added camelCase analytics/query schemas, `IModelUsageService`, user-scoped service assembly, deferred DI wiring, deterministic breakdowns/top conversations, latest context-gauge metadata, and exact timezone/range validation. Series data is aggregated in one bounded, parameterized PostgreSQL `VALUES`-CTE query (never by loading dimension-cardinality minute rows), scoped by user/conversation and zero-filled by the service. Local wall-clock interval generation covers Bangkok/Kathmandu, New York folds/gaps, ambiguous midnights, and Lord Howe 30-minute DST transitions. Dependency floors now match the required APIs (`fastapi>=0.115.0,<1.0.0`, `sqlalchemy>=2.0.42,<3.0.0`), and latest-event selection has a stable ID tie-breaker. Final review evidence: 44 service/dependency tests and 10 live PostgreSQL tests passed; Ruff/diff checks clean; spec and quality reviews approved with no findings.
 
 - **Task 13 — complete (2026-07-21).** Commits `634b67b`, `4cd764e`, and `80b970b`. Added authenticated, typed `/usage/dashboard` and `/usage/conversations/{conversation_id}` endpoints with injected JWT identity, canonical single router registration, ownership-safe 404 behavior, exact camelCase envelopes, request-time UI feature hiding, and tracking/UI flag independence. Identity-looking query parameters cannot rewrite the injected user. Review caught and fixed two production-readiness issues: API tests now restore both global injector maps so the suite is order-independent, and the synchronous analytics/SQLAlchemy calls use regular FastAPI handlers so database work runs in the worker threadpool rather than blocking the ASGI event loop. Final evidence: 245 model-usage tests passed with 1 skipped, the required Task 13 suite passed 32 tests, Ruff/format/diff checks were clean, and both spec and quality reviews approved with no remaining findings.
+
+- **Task 14 — complete (2026-07-21).** Commit `6b524a1`. Added explicit local-session-protected sidecar proxies for `/usage/dashboard` and `/usage/conversations/{conversation_id}`. The routes are available under both plain and `/api` mounts, validate conversation UUIDs, preserve ordered/repeated/encoded query parameters and upstream status/JSON bodies, and rely on `ServerAPIClient` to replace the local session bearer with the canonical upstream access token. They neither rewrite nor inject user/device identity and add no `/ai` compatibility alias. Test helpers use lazy imports to remain stable after the existing module-eviction tests. Final evidence: 12 focused tests, 24 required auth/CORS tests, and the full sidecar suite (209 passed, 4 skipped) were green; reversed-order verification, Ruff/format/diff checks, spec review, and quality review all passed with no findings.
