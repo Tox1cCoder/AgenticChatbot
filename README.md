@@ -100,7 +100,7 @@ Both services speak the same schemas (`app/schemas/`). The **client backend** ex
 
 - **Runtime**: Python 3.10+, FastAPI, Uvicorn, asyncio
 - **AI**: LangChain 1.x, LangGraph 1.x, LangSmith, langchain-google-genai, langchain-openai, langchain-mcp-adapters, Tavily
-- **Persistence**: SQLAlchemy 2.x + Alembic (28 migrations), PostgreSQL 14+, psycopg driver
+- **Persistence**: SQLAlchemy 2.x + Alembic, PostgreSQL 14+, psycopg driver
 - **Background**: Celery 5.x + Redis 7.x
 - **Vector search**: Qdrant, Gemini Embedding API (`gemini-embedding-2`) with optional sentence-transformers fallback for offline development, HF cross-encoder re-rankers
 - **Documents**: MinerU (pipeline / hybrid / VLM backends), pdfplumber, python-docx, openpyxl, Pillow, pypdf
@@ -497,7 +497,7 @@ The server accepts either a fully-formed URL (`REDIS_URL`) or a hostname + conve
 
 ## Database Migrations
 
-Migrations are Alembic-managed (single head, currently `v1w2x3y4z5a6`). They are applied **automatically** at application startup via `app.database.migrations.upgrade_database` inside the lifespan hook, so manual migration is only required for dev or out-of-process tooling:
+Migrations are Alembic-managed (single head, currently `b5c6d7e8f9a0`). They are applied **automatically** at application startup via `app.database.migrations.upgrade_database` inside the lifespan hook, so manual migration is only required for dev or out-of-process tooling:
 
 ```bash
 alembic upgrade head
@@ -615,7 +615,7 @@ The agent workflow is a **LangGraph state machine** defined in [`app/ai/graph.py
 
 1. **Persist current user message** — `MessageService` writes the row to PostgreSQL and reserves the assistant message id. Both ids ride into the workflow so prompt history can exclude the current turn by id (not by tail position) and the final assistant `AIMessage` carries the same id later persisted to the DB.
 2. **Hydrate prompt memory** — `ConversationHistoryProvider` (`app/ai/history.py`) returns the durable summary plus recent unsummarized DB messages after the summary cursor. Soft-deleted rows and empty paused/interrupt placeholders are filtered. Per-agent budgets (`chat_history_max_messages` / `_tokens`, …) trim the result.
-3. **Router** — [`Router`](app/ai/agents/router.py) invokes Gemini with `ROUTER_SYSTEM_PROMPT` plus server-generated runtime time context and returns one of `chat_agent` / `rag_agent` / `search_agent` / `image_generator_agent` / `planning_agent` / `canvas_agent`. (The legacy `summarize` node is kept as a no-op; `START` connects directly to `route`.)
+3. **Router** — [`Router`](app/ai/agents/router.py) invokes Gemini with `ROUTER_SYSTEM_PROMPT` plus server-generated runtime time context and returns one of `chat_agent` / `rag_agent` / `search_agent` / `image_generator_agent` / `planning_agent` / `canvas_agent`. `START` connects directly to `route`.
 4. **Agent execution** — the selected agent runs a ReAct-style loop with deferred tool binding, HITL gating, streaming, and the same runtime time context in its system prompt. Configure the local time anchor with `RUNTIME_TIME_CONTEXT_TIMEZONE`; UTC is always included.
 5. **Tool execution** — `tool_execution.execute_tool_calls` resolves an origin-aware soft/hard/total deadline policy, shares its attempt budget across retries and MCP reconnect, emits sanitized attempt diagnostics, and keeps compact model-facing errors separate from full UI artifacts.
 6. **Auto-continue** — on hitting iteration limits, continuation rounds run until user-configured caps (`auto_continue_max_rounds`, `auto_continue_max_total_iterations`, `auto_continue_timeout_seconds`).

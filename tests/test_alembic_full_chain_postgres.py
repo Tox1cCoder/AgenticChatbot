@@ -9,7 +9,9 @@ import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
+from importlib import import_module
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -20,7 +22,8 @@ from sqlalchemy.engine import URL, make_url
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _SCRATCH_DATABASE_PREFIX = "chatbot_migration_smoke_"
 _SCRATCH_DATABASE_RE = re.compile(r"chatbot_migration_smoke_[0-9a-f]{32}")
-_HEAD = "a4b5c6d7e8f9"
+_OLD_HEAD = "a4b5c6d7e8f9"
+_HEAD = "b5c6d7e8f9a0"
 _PREVIOUS_HEAD = "z3a4b5c6d7e8"
 _PRE_RECONCILIATION_HEAD = "1ce64a959f7d"
 _RECONCILIATION_REVISION = "6c6598a9eb26"
@@ -121,6 +124,32 @@ def _without_indexes(schema_snapshot: dict, index_names: set[str]) -> dict:
     return expected
 
 
+def _decision_type_labels(connection) -> list[str]:
+    return (
+        connection.execute(
+            text(
+                "SELECT e.enumlabel FROM pg_enum e "
+                "JOIN pg_type t ON t.oid = e.enumtypid "
+                "JOIN pg_namespace n ON n.oid = t.typnamespace "
+                "WHERE n.nspname = 'public' AND t.typname = 'decision_type' "
+                "ORDER BY e.enumsortorder"
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+def _uppercase_decision_type(connection, include_respond: bool) -> None:
+    labels = ["accept", "edit", "reject"]
+    if include_respond:
+        labels.append("respond")
+    for label in labels:
+        connection.execute(
+            text(f"ALTER TYPE decision_type RENAME VALUE '{label}' TO '{label.upper()}'")
+        )
+
+
 def _require_valid_scratch_database_name(name: str) -> str:
     if not _SCRATCH_DATABASE_RE.fullmatch(name):
         raise ValueError("refusing to operate on an invalid scratch database name")
@@ -147,35 +176,54 @@ def _postgres_test_url() -> URL:
 
 @contextmanager
 def _scratch_database(base_url: URL) -> Iterator[URL]:
+    __tracebackhide__ = True
     scratch_database = _validated_scratch_database_name()
     if scratch_database == base_url.database:
         raise ValueError("scratch database must differ from TEST_DATABASE_URL")
     scratch_url = _database_url(base_url, scratch_database)
-    admin_engine = create_engine(
-        _database_url(base_url, "postgres"),
-        isolation_level="AUTOCOMMIT",
-    )
+    try:
+        admin_engine = create_engine(
+            _database_url(base_url, "postgres"),
+            isolation_level="AUTOCOMMIT",
+        )
+    except Exception as exc:
+        raise _redacted_database_error(
+            "creating the PostgreSQL admin engine", exc, base_url
+        ) from None
     created = False
     try:
-        with admin_engine.connect() as connection:
-            connection.execute(text(f'CREATE DATABASE "{scratch_database}"'))
-            created = True
+        try:
+            with admin_engine.connect() as connection:
+                connection.execute(text(f'CREATE DATABASE "{scratch_database}"'))
+                created = True
+        except Exception as exc:
+            raise _redacted_database_error("creating the scratch database", exc, base_url) from None
         yield scratch_url
     finally:
         try:
             if created:
                 _require_valid_scratch_database_name(scratch_database)
-                with admin_engine.connect() as connection:
-                    connection.execute(
-                        text(
-                            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                            "WHERE datname = :database_name AND pid <> pg_backend_pid()"
-                        ),
-                        {"database_name": scratch_database},
-                    )
-                    connection.execute(text(f'DROP DATABASE IF EXISTS "{scratch_database}"'))
+                try:
+                    with admin_engine.connect() as connection:
+                        connection.execute(
+                            text(
+                                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                                "WHERE datname = :database_name AND pid <> pg_backend_pid()"
+                            ),
+                            {"database_name": scratch_database},
+                        )
+                        connection.execute(text(f'DROP DATABASE IF EXISTS "{scratch_database}"'))
+                except Exception as exc:
+                    raise _redacted_database_error(
+                        "dropping the scratch database", exc, base_url
+                    ) from None
         finally:
-            admin_engine.dispose()
+            try:
+                admin_engine.dispose()
+            except Exception as exc:
+                raise _redacted_database_error(
+                    "disposing the PostgreSQL admin engine", exc, base_url
+                ) from None
 
 
 def _run_alembic(scratch_url: URL, *args: str) -> None:
@@ -207,21 +255,33 @@ def _run_alembic(scratch_url: URL, *args: str) -> None:
 
 def _redact_database_credentials(output: str, database_url: URL) -> str:
     __tracebackhide__ = True
-    redacted = output
-    for rendered_url in {
+    redacted = re.sub(
+        r"postgresql(?:\+[A-Za-z0-9_.-]+)?://[^\s]+",
+        "<scratch-database-url>",
+        output,
+        flags=re.IGNORECASE,
+    )
+    rendered_urls = {
         database_url.render_as_string(hide_password=False),
         database_url.render_as_string(hide_password=True),
         str(database_url),
-    }:
+    }
+    for rendered_url in sorted(rendered_urls, key=len, reverse=True):
         redacted = redacted.replace(rendered_url, "<scratch-database-url>")
     for credential, replacement in (
-        (database_url.username, "<database-username>"),
         (database_url.password, "<database-password>"),
+        (database_url.username, "<database-username>"),
     ):
         if credential:
-            for secret in {credential, quote(credential, safe="")}:
+            for secret in sorted({credential, quote(credential, safe="")}, key=len, reverse=True):
                 redacted = redacted.replace(secret, replacement)
     return redacted
+
+
+def _redacted_database_error(action: str, error: Exception, database_url: URL) -> RuntimeError:
+    """Build an exception whose message cannot expose database credentials."""
+    message = _redact_database_credentials(str(error), database_url)
+    return RuntimeError(f"{action} failed: {message}")
 
 
 def _assert_head_schema(scratch_url: URL) -> None:
@@ -405,6 +465,122 @@ def test_alembic_timeout_redacts_captured_output(monkeypatch) -> None:
         assert secret not in message
 
 
+def test_redaction_replaces_password_before_username_substrings() -> None:
+    database_url = make_url(
+        "postgresql://token:prefix-token-suffix@example.invalid/"
+        "chatbot_migration_smoke_0123456789abcdef0123456789abcdef"
+    )
+
+    redacted = _redact_database_credentials(
+        "raw_password=prefix-token-suffix raw_username=token",
+        database_url,
+    )
+
+    assert redacted == ("raw_password=<database-password> raw_username=<database-username>")
+
+
+def test_scratch_database_operation_errors_are_credential_safe() -> None:
+    database_url = make_url(
+        "postgresql://token:prefix-token-suffix@example.invalid/"
+        "chatbot_migration_smoke_0123456789abcdef0123456789abcdef"
+    )
+    unsafe_error = RuntimeError(
+        "connection postgresql://token:***@example.invalid failed for token prefix-token-suffix"
+    )
+
+    safe_error = _redacted_database_error("creating scratch database", unsafe_error, database_url)
+
+    assert str(safe_error) == (
+        "creating scratch database failed: connection <scratch-database-url> "
+        "failed for <database-username> <database-password>"
+    )
+
+
+@pytest.mark.parametrize(
+    ("failure_point", "expected_action"),
+    [
+        ("engine", "creating the PostgreSQL admin engine"),
+        ("connect", "creating the scratch database"),
+        ("drop", "dropping the scratch database"),
+    ],
+)
+def test_scratch_database_exception_paths_are_redacted(
+    monkeypatch, failure_point: str, expected_action: str
+) -> None:
+    database_url = make_url(
+        "postgresql://token:prefix-token-suffix@example.invalid/source_database"
+    )
+    unsafe_error = RuntimeError(
+        "postgresql://token:prefix-token-suffix@example.invalid/source_database "
+        "token prefix-token-suffix"
+    )
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+    class FakeEngine:
+        connect_calls = 0
+
+        def connect(self):
+            self.connect_calls += 1
+            if failure_point == "connect" or (failure_point == "drop" and self.connect_calls == 2):
+                raise unsafe_error
+            return FakeConnection()
+
+        def dispose(self):
+            return None
+
+    def fake_create_engine(*_args, **_kwargs):
+        if failure_point == "engine":
+            raise unsafe_error
+        return FakeEngine()
+
+    monkeypatch.setattr(sys.modules[__name__], "create_engine", fake_create_engine)
+
+    with pytest.raises(RuntimeError) as failure, _scratch_database(database_url):
+        pass
+
+    message = str(failure.value)
+    assert expected_action in message
+    assert failure.value.__suppress_context__
+    for secret in ("token", "prefix-token-suffix", "postgresql://"):
+        assert secret not in message
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "app.alembic.versions.6c6598a9eb26_create_missing_tool_approvals_table",
+        "app.alembic.versions.b5c6d7e8f9a0_repair_tool_approvals_schema",
+    ],
+)
+def test_inspection_migrations_fail_clearly_offline(monkeypatch, module_name: str) -> None:
+    migration = import_module(module_name)
+    monkeypatch.setattr(migration.op, "get_context", lambda: SimpleNamespace(as_sql=True))
+
+    with pytest.raises(RuntimeError, match="online PostgreSQL connection"):
+        migration.upgrade()
+    if migration.revision == _RECONCILIATION_REVISION:
+        with pytest.raises(RuntimeError, match="online PostgreSQL connection"):
+            migration.downgrade()
+    else:
+        assert migration.downgrade() is None
+
+
+def test_readme_tracks_migration_head_and_current_graph_contract() -> None:
+    readme = (_PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert f"currently `{_HEAD}`" in readme
+    assert "legacy `summarize` node is kept" not in readme
+
+
 def test_full_alembic_chain_from_empty_postgres_database() -> None:
     with _scratch_database(_postgres_test_url()) as scratch_url:
         _run_alembic(scratch_url, "upgrade", "head")
@@ -528,8 +704,8 @@ def test_reconciliation_migration_round_trips_the_canonical_schema() -> None:
             engine.dispose()
 
 
-@pytest.mark.parametrize("drop_enum", [False, True], ids=["enum-exists", "enum-missing"])
-def test_reconciliation_repairs_missing_tool_approvals_exactly(drop_enum: bool) -> None:
+@pytest.mark.parametrize("enum_state", ["canonical", "missing", "uppercase"])
+def test_reconciliation_repairs_missing_tool_approvals_exactly(enum_state: str) -> None:
     with _scratch_database(_postgres_test_url()) as scratch_url:
         _run_alembic(scratch_url, "upgrade", _PRE_RECONCILIATION_HEAD)
         engine = create_engine(scratch_url)
@@ -545,8 +721,10 @@ def test_reconciliation_repairs_missing_tool_approvals_exactly(drop_enum: bool) 
                 ).scalars()
                 assert enum_labels.all() == ["accept", "edit", "reject"]
                 connection.execute(text("DROP TABLE tool_approvals"))
-                if drop_enum:
+                if enum_state == "missing":
                     connection.execute(text("DROP TYPE decision_type"))
+                elif enum_state == "uppercase":
+                    _uppercase_decision_type(connection, include_respond=False)
 
             _run_alembic(scratch_url, "upgrade", _RECONCILIATION_REVISION)
 
@@ -560,5 +738,202 @@ def test_reconciliation_repairs_missing_tool_approvals_exactly(drop_enum: bool) 
                     )
                 ).scalars()
                 assert repaired_labels.all() == ["accept", "edit", "reject"]
+        finally:
+            engine.dispose()
+
+
+def test_reconciliation_canonicalizes_legacy_enum_across_downgrade_reupgrade() -> None:
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", _PRE_RECONCILIATION_HEAD)
+        engine = create_engine(scratch_url)
+        try:
+            with engine.begin() as connection:
+                _uppercase_decision_type(connection, include_respond=False)
+
+            _run_alembic(scratch_url, "upgrade", _RECONCILIATION_REVISION)
+            with engine.connect() as connection:
+                assert _decision_type_labels(connection) == ["accept", "edit", "reject"]
+
+            _run_alembic(scratch_url, "downgrade", _PRE_RECONCILIATION_HEAD)
+            _run_alembic(scratch_url, "upgrade", _RECONCILIATION_REVISION)
+            with engine.connect() as connection:
+                assert _decision_type_labels(connection) == ["accept", "edit", "reject"]
+        finally:
+            engine.dispose()
+
+
+@pytest.mark.parametrize("drift", ["unknown-enum", "unsupported-dependent", "missing-column"])
+def test_reconciliation_rejects_unsafe_historical_drift(drift: str) -> None:
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", _PRE_RECONCILIATION_HEAD)
+        engine = create_engine(scratch_url)
+        try:
+            with engine.begin() as connection:
+                if drift == "unknown-enum":
+                    connection.execute(
+                        text("ALTER TYPE decision_type RENAME VALUE 'accept' TO 'maybe'")
+                    )
+                elif drift == "unsupported-dependent":
+                    connection.execute(
+                        text("CREATE TABLE rogue_decisions (decision decision_type)")
+                    )
+                else:
+                    connection.execute(text("ALTER TABLE tool_approvals DROP COLUMN original_args"))
+
+            expected_error = (
+                "unsupported decision_type labels"
+                if drift == "unknown-enum"
+                else (
+                    "unsupported decision_type dependent columns"
+                    if drift == "unsupported-dependent"
+                    else "unsafe tool_approvals schema drift"
+                )
+            )
+            with pytest.raises(pytest.fail.Exception, match=expected_error):
+                _run_alembic(scratch_url, "upgrade", _RECONCILIATION_REVISION)
+            with engine.connect() as connection:
+                assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+                    _PRE_RECONCILIATION_HEAD
+                )
+        finally:
+            engine.dispose()
+
+
+def test_forward_repair_canonicalizes_stamped_legacy_enum_and_is_irreversible() -> None:
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", _OLD_HEAD)
+        engine = create_engine(scratch_url)
+        approval_id = uuid4()
+        user_id = uuid4()
+        conversation_id = uuid4()
+        try:
+            with engine.begin() as connection:
+                canonical_table = _table_schema_snapshot(connection, "tool_approvals")
+                _uppercase_decision_type(connection, include_respond=True)
+                connection.execute(
+                    text(
+                        "INSERT INTO users "
+                        "(id, username, email, password_hash, created_at, updated_at) "
+                        "VALUES (:id, 'forward-user', 'forward@example.invalid', "
+                        "'not-a-real-password', now(), now())"
+                    ),
+                    {"id": user_id},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO conversations "
+                        "(id, owner_id, title, created_at, updated_at, planning_mode_enabled, "
+                        "next_message_sequence) VALUES "
+                        "(:id, :owner_id, 'forward', now(), now(), false, 1)"
+                    ),
+                    {"id": conversation_id, "owner_id": user_id},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO tool_approvals "
+                        "(id, conversation_id, user_id, interrupt_id, tool_name, tool_call_id, "
+                        "original_args, decision) VALUES "
+                        "(:id, :conversation_id, :user_id, 'interrupt', 'tool', 'call', "
+                        "'{}'::jsonb, 'ACCEPT')"
+                    ),
+                    {
+                        "id": approval_id,
+                        "conversation_id": conversation_id,
+                        "user_id": user_id,
+                    },
+                )
+
+            _run_alembic(scratch_url, "upgrade", "head")
+            with engine.connect() as connection:
+                assert _decision_type_labels(connection) == [
+                    "accept",
+                    "edit",
+                    "reject",
+                    "respond",
+                ]
+                assert (
+                    connection.scalar(
+                        text("SELECT decision::text FROM tool_approvals WHERE id = :id"),
+                        {"id": approval_id},
+                    )
+                    == "accept"
+                )
+                assert _table_schema_snapshot(connection, "tool_approvals") == canonical_table
+
+            _run_alembic(scratch_url, "downgrade", _OLD_HEAD)
+            with engine.connect() as connection:
+                assert _decision_type_labels(connection) == [
+                    "accept",
+                    "edit",
+                    "reject",
+                    "respond",
+                ]
+            _run_alembic(scratch_url, "upgrade", "head")
+        finally:
+            engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "missing-table",
+        "missing-table-uppercase-enum",
+        "missing-table-missing-enum",
+        "unknown-enum",
+        "unsupported-dependent",
+        "missing-column",
+    ],
+)
+def test_forward_repair_handles_only_safe_current_head_drift(drift: str) -> None:
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", _OLD_HEAD)
+        engine = create_engine(scratch_url)
+        try:
+            with engine.begin() as connection:
+                canonical_table = _table_schema_snapshot(connection, "tool_approvals")
+                if drift.startswith("missing-table"):
+                    connection.execute(text("DROP TABLE tool_approvals"))
+                    if drift == "missing-table-uppercase-enum":
+                        _uppercase_decision_type(connection, include_respond=True)
+                    elif drift == "missing-table-missing-enum":
+                        connection.execute(text("DROP TYPE decision_type"))
+                elif drift == "unknown-enum":
+                    connection.execute(
+                        text("ALTER TYPE decision_type RENAME VALUE 'accept' TO 'maybe'")
+                    )
+                elif drift == "unsupported-dependent":
+                    connection.execute(
+                        text("CREATE TABLE rogue_decisions (decision decision_type)")
+                    )
+                else:
+                    connection.execute(text("ALTER TABLE tool_approvals DROP COLUMN original_args"))
+
+            if drift.startswith("missing-table"):
+                _run_alembic(scratch_url, "upgrade", "head")
+                with engine.connect() as connection:
+                    assert _table_schema_snapshot(connection, "tool_approvals") == canonical_table
+                    assert _decision_type_labels(connection) == [
+                        "accept",
+                        "edit",
+                        "reject",
+                        "respond",
+                    ]
+            else:
+                expected_error = (
+                    "unsupported decision_type labels"
+                    if drift == "unknown-enum"
+                    else (
+                        "unsupported decision_type dependent columns"
+                        if drift == "unsupported-dependent"
+                        else "unsafe tool_approvals schema drift"
+                    )
+                )
+                with pytest.raises(pytest.fail.Exception, match=expected_error):
+                    _run_alembic(scratch_url, "upgrade", "head")
+                with engine.connect() as connection:
+                    assert (
+                        connection.scalar(text("SELECT version_num FROM alembic_version"))
+                        == _OLD_HEAD
+                    )
         finally:
             engine.dispose()

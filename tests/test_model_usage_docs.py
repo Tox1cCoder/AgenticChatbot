@@ -102,6 +102,7 @@ def test_runbook_covers_deployment_and_maintenance() -> None:
         "y2z3a4b5c6d7",
         "z3a4b5c6d7e8",
         "a4b5c6d7e8f9",
+        "b5c6d7e8f9a0",
         "No historical backfill",
         "MODEL_USAGE_TRACKING_ENABLED",
         "MODEL_USAGE_UI_ENABLED",
@@ -138,6 +139,8 @@ def test_runbook_requires_safe_rollback_order_and_no_schema_normal_path() -> Non
     assert "normal rollback leaves the additive usage tables and timestamp indexes" in rollback_text
     assert "The normal rollback path performs no schema action" in rollback_text
     assert "optional index-only downgrade" in rollback_text
+    assert "b5c6d7e8f9a0`'s safe no-op downgrade" in rollback_text
+    assert "preserving repaired tool-approval schema and data" in rollback_text
     assert "isolated scratch database" in rollback_text
     assert "coordinated maintenance" in rollback_text
 

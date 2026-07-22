@@ -14,7 +14,14 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects import postgresql
+
+from app.alembic.migration_helpers.tool_approval_repair_v1 import (
+    BASE_DECISION_LABELS,
+    canonicalize_decision_type,
+    create_tool_approvals,
+    require_online,
+    validate_tool_approvals_schema,
+)
 
 revision: str = "6c6598a9eb26"
 down_revision: str | None = "1ce64a959f7d"
@@ -26,84 +33,14 @@ def _column_names(table_name: str) -> set[str]:
     return {column["name"] for column in sa.inspect(op.get_bind()).get_columns(table_name)}
 
 
-def _create_tool_approvals_if_missing() -> None:
-    if sa.inspect(op.get_bind()).has_table("tool_approvals"):
-        return
-
-    op.execute(
-        """
-        DO $$ BEGIN
-            CREATE TYPE decision_type AS ENUM ('accept', 'edit', 'reject');
-        EXCEPTION
-            WHEN duplicate_object THEN null;
-        END $$;
-        """
-    )
-    op.create_table(
-        "tool_approvals",
-        sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.func.now(),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.func.now(),
-            nullable=False,
-        ),
-        sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("conversation_id", sa.UUID(), nullable=False),
-        sa.Column("user_id", sa.UUID(), nullable=False),
-        sa.Column("interrupt_id", sa.String(length=255), nullable=False),
-        sa.Column("tool_name", sa.String(length=255), nullable=False),
-        sa.Column("tool_call_id", sa.String(length=255), nullable=False),
-        sa.Column("original_args", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
-        sa.Column("modified_args", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-        sa.Column(
-            "decision",
-            postgresql.ENUM(
-                "accept",
-                "edit",
-                "reject",
-                name="decision_type",
-                create_type=False,
-            ),
-            nullable=False,
-        ),
-        sa.Column(
-            "decided_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.func.now(),
-            nullable=False,
-        ),
-        sa.ForeignKeyConstraint(
-            ["conversation_id"],
-            ["conversations.id"],
-            name="fk_tool_approvals_conversation_id",
-        ),
-        sa.ForeignKeyConstraint(
-            ["user_id"],
-            ["users.id"],
-            name="fk_tool_approvals_user_id",
-        ),
-        sa.PrimaryKeyConstraint("id"),
-    )
-    for index_name, columns in (
-        ("ix_tool_approvals_conversation_id", ["conversation_id"]),
-        ("ix_tool_approvals_decided_at", ["decided_at"]),
-        ("ix_tool_approvals_id", ["id"]),
-        ("ix_tool_approvals_interrupt_id", ["interrupt_id"]),
-        ("ix_tool_approvals_user_id", ["user_id"]),
-    ):
-        op.create_index(op.f(index_name), "tool_approvals", columns, unique=False)
-
-
 def upgrade() -> None:
-    """Apply application-owned reconciliation, intentionally retiring task metrics."""
-    _create_tool_approvals_if_missing()
+    """Apply an online reconciliation, intentionally retiring task metrics."""
+    require_online(op, revision)
+    connection = op.get_bind()
+    canonicalize_decision_type(connection, BASE_DECISION_LABELS)
+    if not sa.inspect(connection).has_table("tool_approvals", schema="public"):
+        create_tool_approvals(op, current=False)
+    validate_tool_approvals_schema(connection, current=False)
 
     for index_name, table_name, columns in (
         ("ix_agent_model_configs_id", "agent_model_configs", ["id"]),
@@ -186,6 +123,7 @@ def downgrade() -> None:
     cannot be recovered: nullable metrics return as NULL and ``retry_count``
     returns with its historical zero default.
     """
+    require_online(op, revision)
     task_plan_column_types = {
         "started_at": sa.DateTime(timezone=True),
         "estimated_duration_minutes": sa.Integer(),
