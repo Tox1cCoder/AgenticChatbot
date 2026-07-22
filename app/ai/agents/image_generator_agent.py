@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import BaseMessage
@@ -22,6 +22,7 @@ from ..image_generation import (
     image_provider_family,
     resolve_image_provider,
 )
+from ..model_context import build_context_window_usage, resolve_model_context_window
 from ..schemas import AgentResponse, AgentType
 from ..utils import coerce_response_text, extract_inline_images_from_content
 from .base_agent import BaseAgent
@@ -30,6 +31,15 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ...usage.recorder import ModelUsageRecorder
+
+
+@dataclass(frozen=True)
+class ImageGenerationOutcome:
+    """Delivered image content and terminal usage from one provider stream."""
+
+    images: list[dict[str, Any]]
+    narrative: str
+    usage: NormalizedUsage
 
 
 class ImageGeneratorAgent(BaseAgent):
@@ -195,7 +205,7 @@ Do not output anything else, just the prompt."""
         original_prompt = original_prompt or enhanced_prompt
 
         try:
-            images, narrative = await self._generate_images(
+            outcome = await self._generate_images(
                 enhanced_prompt,
                 original_prompt,
                 source_images=source_images,
@@ -204,15 +214,19 @@ Do not output anything else, just the prompt."""
             logger.error("Image generation failed: %s", e, exc_info=True)
             return response
 
-        if images:
-            if not response.metadata:
-                response.metadata = {}
-            response.metadata["images"] = images
+        if outcome.images:
+            response.metadata = response.metadata or {}
+            context_window = resolve_model_context_window(
+                image_provider_family(self.model_name), self.model_name
+            ).to_dict()
+            context_window.update(build_context_window_usage(context_window, outcome.usage))
+            response.metadata["context_window"] = context_window
+            response.metadata["images"] = outcome.images
 
         # Replace the enhanced prompt with a natural user-facing message
-        if narrative:
-            response.message.content = narrative
-        elif images:
+        if outcome.narrative:
+            response.message.content = outcome.narrative
+        elif outcome.images:
             response.message.content = await self._generate_user_facing_response(original_prompt)
 
         return response
@@ -289,13 +303,17 @@ Do not output anything else, just the prompt."""
         original_prompt: str,
         *,
         source_images: list[dict[str, str]] | None = None,
-    ) -> tuple[list[dict], str]:
+    ) -> ImageGenerationOutcome:
         provider = resolve_image_provider(
             self.model_name,
             gemini_client=self.gemini_client,
         )
         if provider is None:
-            return [], ""
+            return ImageGenerationOutcome(
+                images=[],
+                narrative="",
+                usage=NormalizedUsage(source="unavailable"),
+            )
 
         request = ImageGenerationRequest(
             prompt=prepared_prompt,
@@ -339,7 +357,7 @@ Do not output anything else, just the prompt."""
         original_prompt: str,
         *,
         handle: Any | None,
-    ) -> tuple[list[dict], str]:
+    ) -> ImageGenerationOutcome:
         """Drain the provider stream, publishing previews and feeding the handle.
 
         Consumes the stream to exhaustion (never breaking at ``max_images``) so
@@ -353,6 +371,7 @@ Do not output anything else, just the prompt."""
 
         images: list[dict] = []
         narrative_parts: list[str] = []
+        terminal_usage = NormalizedUsage(source="unavailable")
 
         async for event in provider.stream_generate(request):
             if isinstance(event, ImageFinal):
@@ -382,13 +401,18 @@ Do not output anything else, just the prompt."""
                     seq=event.seq,
                 )
             elif isinstance(event, ImageUsage):
+                terminal_usage = event.usage
                 if handle is not None:
                     handle.set_usage(event.usage, provider_request_id=event.provider_request_id)
             elif isinstance(event, NarrativeDelta) and event.text:
                 narrative_parts.append(event.text)
 
         narrative = " ".join(segment.strip() for segment in narrative_parts if segment)
-        return images, narrative.strip()
+        return ImageGenerationOutcome(
+            images=images,
+            narrative=narrative.strip(),
+            usage=replace(terminal_usage, generated_images=len(images)),
+        )
 
     async def cleanup(self):
         await super().cleanup()

@@ -320,10 +320,10 @@ async def test_agent_generate_images_collects_finals_and_narrative():
     agent.recorder = None
     agent.gemini_client = _gemini_client([_gemini_chunk(_image_part(b"img"), _text_part("A fox."))])
 
-    images, narrative = await agent._generate_images("enhanced prompt", "draw a fox")
+    outcome = await agent._generate_images("enhanced prompt", "draw a fox")
 
-    assert narrative == "A fox."
-    assert images == [
+    assert outcome.narrative == "A fox."
+    assert outcome.images == [
         {
             "data": base64.b64encode(b"img").decode("utf-8"),
             "mime": "image/png",
@@ -345,7 +345,10 @@ async def test_agent_generate_images_returns_empty_without_provider():
     agent.recorder = None
     agent.gemini_client = None
 
-    assert await agent._generate_images("p", "p") == ([], "")
+    outcome = await agent._generate_images("p", "p")
+    assert outcome.images == []
+    assert outcome.narrative == ""
+    assert outcome.usage.source == "unavailable"
 
 
 @pytest.mark.asyncio

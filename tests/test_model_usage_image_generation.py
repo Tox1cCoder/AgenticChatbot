@@ -147,10 +147,10 @@ async def test_gemini_stream_usage_recorded_as_image_operation():
         ),
         _patch_provider(provider),
     ):
-        images, narrative = await agent._generate_images("enhanced", "draw a fox")
+        outcome = await agent._generate_images("enhanced", "draw a fox")
 
-    assert [img["data"] for img in images] == ["AAA"]
-    assert narrative == "Here is your fox."
+    assert [img["data"] for img in outcome.images] == ["AAA"]
+    assert outcome.narrative == "Here is your fox."
     assert len(repo.commands) == 1, "exactly one ledger event per image stream"
     command = repo.commands[0]
     assert command.status == "success"
@@ -213,11 +213,11 @@ async def test_gemini_sdk_terminal_is_inside_image_generation_recorder_boundary(
     agent = _agent(_recorder(repo), model_name="gemini-3-pro-image", max_images=1)
 
     with bind_usage_context(UsageContext(operation="workflow")), _patch_provider(provider):
-        images, _ = await agent._generate_images("enhanced", "original")
+        outcome = await agent._generate_images("enhanced", "original")
 
     assert calls["generate_content_stream"]["model"] == "gemini-3-pro-image"
     assert calls["context_operation"] == "image_generation"
-    assert len(images) == 1
+    assert len(outcome.images) == 1
     assert len(repo.commands) == 1
     command = repo.commands[0]
     assert command.context.operation == "image_generation"
@@ -260,12 +260,12 @@ async def test_openai_generate_sdk_terminal_is_inside_image_generation_recorder_
     agent = _agent(_recorder(repo), model_name="gpt-image-1", max_images=1)
 
     with bind_usage_context(UsageContext(operation="workflow")), _patch_provider(provider):
-        images, _ = await agent._generate_images("enhanced", "original")
+        outcome = await agent._generate_images("enhanced", "original")
 
     assert calls["generate"]["model"] == "gpt-image-1"
     assert calls["context_operation"] == "image_generation"
     assert "edit" not in calls
-    assert len(images) == 1
+    assert len(outcome.images) == 1
     assert len(repo.commands) == 1
     command = repo.commands[0]
     assert command.context.operation == "image_generation"
@@ -308,7 +308,7 @@ async def test_openai_edit_sdk_terminal_is_inside_image_generation_recorder_boun
     source_data = base64.b64encode(b"source-image").decode("ascii")
 
     with bind_usage_context(UsageContext(operation="workflow")), _patch_provider(provider):
-        images, _ = await agent._generate_images(
+        outcome = await agent._generate_images(
             "enhanced",
             "original",
             source_images=[{"data": source_data, "mime": "image/png"}],
@@ -318,7 +318,7 @@ async def test_openai_edit_sdk_terminal_is_inside_image_generation_recorder_boun
     assert calls["context_operation"] == "image_generation"
     assert calls["edit"]["image"].read() == b"source-image"
     assert "generate" not in calls
-    assert len(images) == 1
+    assert len(outcome.images) == 1
     assert len(repo.commands) == 1
     command = repo.commands[0]
     assert command.context.operation == "image_generation"
@@ -345,9 +345,9 @@ async def test_generated_images_count_reflects_delivered_finals():
     )
 
     with bind_usage_context(UsageContext(operation="workflow")), _patch_provider(provider):
-        images, _ = await agent._generate_images("enhanced", "orig")
+        outcome = await agent._generate_images("enhanced", "orig")
 
-    assert len(images) == 2
+    assert len(outcome.images) == 2
     assert repo.commands[0].usage.generated_images == 2
 
 
@@ -358,9 +358,9 @@ async def test_stream_records_terminal_status_when_no_usage_event_arrives():
     provider = FakeProvider([ImageFinal(index=0, data_b64="AAA", mime="image/png")])
 
     with bind_usage_context(UsageContext(operation="workflow")), _patch_provider(provider):
-        images, _ = await agent._generate_images("enhanced", "orig")
+        outcome = await agent._generate_images("enhanced", "orig")
 
-    assert len(images) == 1
+    assert len(outcome.images) == 1
     assert len(repo.commands) == 1
     command = repo.commands[0]
     assert command.status == "success"
@@ -450,9 +450,9 @@ async def test_no_recording_when_recorder_absent():
     )
 
     with bind_usage_context(UsageContext(operation="workflow")), _patch_provider(provider):
-        images, _ = await agent._generate_images("enhanced", "orig")
+        outcome = await agent._generate_images("enhanced", "orig")
 
-    assert [img["data"] for img in images] == ["AAA"]
+    assert [img["data"] for img in outcome.images] == ["AAA"]
 
 
 @pytest.mark.asyncio
