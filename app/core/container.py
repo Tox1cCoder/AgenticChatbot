@@ -28,6 +28,7 @@ from app.interfaces.planning_runtime_interface import IPlanningRuntimeService
 from app.interfaces.task_plan_service_interface import ITaskPlanService
 from app.observability.model_usage import model_usage_metrics as model_usage_metrics_singleton
 from app.repositories.agent_model_config import AgentModelConfigRepository
+from app.repositories.chat_image import ChatImageRepository
 from app.repositories.conversation import ConversationRepository
 from app.repositories.conversation_compaction import ConversationCompactionRepository
 from app.repositories.custom_agent import CustomAgentRepository
@@ -48,6 +49,7 @@ from app.repositories.user import UserRepository
 from app.repositories.user_memory import UserMemoryRepository
 from app.services.ai_service import AIService
 from app.services.auth_service import AuthService
+from app.services.chat_image_service import ChatImageStorageService
 from app.services.conversation_service import ConversationService
 from app.services.custom_agent_service import CustomAgentService
 from app.services.document_chunk_builder import DocumentChunkBuilder
@@ -304,6 +306,18 @@ class Container(containers.DeclarativeContainer):
         storage_root=providers.Object(settings.tool_result_blob_storage_dir),
         threshold_chars=providers.Object(settings.tool_result_offload_threshold_chars),
         preview_chars=providers.Object(settings.tool_result_offload_preview_chars),
+    )
+
+    chat_image_repository = providers.Factory(
+        ChatImageRepository,
+        session_factory=db.provided.session,
+    )
+
+    chat_image_service = providers.Singleton(
+        ChatImageStorageService,
+        repository=chat_image_repository,
+        storage_root=providers.Object(settings.chat_images_storage_path),
+        max_bytes=providers.Object(settings.chat_image_max_bytes),
     )
 
     user_memory_repository = providers.Factory(
