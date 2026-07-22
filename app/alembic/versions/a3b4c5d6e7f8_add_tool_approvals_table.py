@@ -11,7 +11,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ENUM, JSONB, UUID
 
 # revision identifiers, used by Alembic.
 revision: str = "a3b4c5d6e7f8"
@@ -71,7 +71,7 @@ def upgrade() -> None:
         sa.Column("modified_args", JSONB, nullable=True),
         sa.Column(
             "decision",
-            sa.Enum("accept", "edit", "reject", name="decision_type", create_type=False),
+            ENUM("accept", "edit", "reject", name="decision_type", create_type=False),
             nullable=False,
         ),
         sa.Column(

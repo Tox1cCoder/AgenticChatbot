@@ -11,7 +11,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ENUM, JSONB, UUID
 
 # revision identifiers, used by Alembic.
 revision: str = "b1c2d3e4f5g6"
@@ -54,7 +54,7 @@ def upgrade() -> None:
         sa.Column("description", sa.Text(), nullable=False),
         sa.Column(
             "status",
-            sa.Enum(
+            ENUM(
                 "pending",
                 "in_progress",
                 "completed",

@@ -63,7 +63,6 @@ def upgrade() -> None:
             UUID(as_uuid=True),
             sa.ForeignKey("conversations.id"),
             nullable=False,
-            index=True,
         ),
         sa.Column(
             "user_id",
