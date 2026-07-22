@@ -61,6 +61,23 @@ def test_retired_settings_are_removed():
     assert not leaked, f"Retired RAG settings still declared: {sorted(leaked)}"
 
 
+def test_stale_retired_index_batch_env_does_not_block_settings_startup(tmp_path, monkeypatch):
+    from app.core.config import Settings
+
+    monkeypatch.delenv("RAG_INDEX_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("API_PORT", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "RAG_INDEX_BATCH_SIZE=definitely-not-an-int\nAPI_PORT=9123\n",
+        encoding="utf-8",
+    )
+
+    configured = Settings(_env_file=env_file)
+
+    assert configured.api_port == 9123
+    assert not hasattr(configured, "rag_index_batch_size")
+
+
 def test_container_does_not_instantiate_sentencetransformer_for_active_path():
     """When provider is ``gemini``, the active RAG embedding adapter must
     not be a local SentenceTransformer."""
