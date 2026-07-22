@@ -125,25 +125,47 @@ def canonicalize_decision_type(
         raise RuntimeError(
             f"unsupported decision_type label set or ordering: expected {expected}, found {labels}"
         )
-    dependents = tuple(
-        tuple(row)
-        for row in connection.execute(
+    unsupported_dependencies = tuple(
+        connection.execute(
             sa.text(
-                "SELECT n.nspname, c.relname, a.attname "
+                "SELECT pg_describe_object(d.classid, d.objid, d.objsubid) "
                 "FROM pg_type t "
-                "JOIN pg_namespace tn ON tn.oid = t.typnamespace "
-                "JOIN pg_attribute a ON a.atttypid = t.oid "
-                "AND a.attnum > 0 AND NOT a.attisdropped "
-                "JOIN pg_class c ON c.oid = a.attrelid "
-                "JOIN pg_namespace n ON n.oid = c.relnamespace "
-                "WHERE tn.nspname = 'public' AND t.typname = 'decision_type'"
+                "JOIN pg_namespace n ON n.oid = t.typnamespace "
+                "JOIN pg_depend d ON d.refclassid = 'pg_type'::regclass "
+                "AND d.refobjid IN (t.oid, t.typarray) AND d.refobjsubid = 0 "
+                "WHERE n.nspname = 'public' AND t.typname = 'decision_type' "
+                "AND NOT ("
+                "  (d.refobjid = t.oid AND d.classid = 'pg_type'::regclass "
+                "   AND d.objid = t.typarray "
+                "   AND d.objsubid = 0 AND d.deptype = 'i') "
+                "  OR "
+                "  (d.refobjid = t.oid AND d.classid = 'pg_class'::regclass "
+                "   AND d.objid = to_regclass('public.tool_approvals') "
+                "   AND d.objsubid = ("
+                "     SELECT a.attnum FROM pg_attribute a "
+                "     WHERE a.attrelid = to_regclass('public.tool_approvals') "
+                "     AND a.attname = 'decision' AND a.attnum > 0 "
+                "     AND NOT a.attisdropped"
+                "   ) AND d.deptype = 'n')"
+                ") ORDER BY 1"
             )
-        ).all()
+        ).scalars()
     )
-    supported_dependent = (("public", "tool_approvals", "decision"),)
-    if dependents not in ((), supported_dependent):
-        raise RuntimeError(f"unsupported decision_type dependent columns: {list(dependents)}")
-    if dependents:
+    if unsupported_dependencies:
+        raise RuntimeError(
+            f"unsupported decision_type catalog dependencies: {list(unsupported_dependencies)}"
+        )
+    decision_column_exists = connection.scalar(
+        sa.text(
+            "SELECT EXISTS ("
+            "SELECT 1 FROM pg_attribute a "
+            "WHERE a.attrelid = to_regclass('public.tool_approvals') "
+            "AND a.attname = 'decision' AND a.atttypid = "
+            "'public.decision_type'::regtype AND a.attnum > 0 "
+            "AND NOT a.attisdropped)"
+        )
+    )
+    if decision_column_exists:
         decision_default = connection.scalar(
             sa.text(
                 "SELECT column_default FROM information_schema.columns "
@@ -170,7 +192,7 @@ def canonicalize_decision_type(
         raise RuntimeError("unsafe schema drift: decision_type_canonical_tmp already exists")
 
     _create_decision_type(connection, expected, type_name="decision_type_canonical_tmp")
-    if dependents:
+    if decision_column_exists:
         connection.execute(
             sa.text(
                 "ALTER TABLE public.tool_approvals ALTER COLUMN decision "
@@ -242,10 +264,57 @@ def validate_tool_approvals_schema(connection: Connection, *, current: bool) -> 
         expected_indexes.pop("ix_tool_approvals_id")
         expected_indexes.update(_CURRENT_EXTRA_INDEXES)
     actual_indexes = {
-        index["name"]: (tuple(index.get("column_names") or ()), bool(index.get("unique")))
-        for index in inspector.get_indexes("tool_approvals", schema="public")
+        name: (tuple(column_names), catalog_valid)
+        for name, column_names, catalog_valid in connection.execute(
+            sa.text(
+                "SELECT idx.relname, "
+                "ARRAY("
+                "  SELECT a.attname "
+                "  FROM unnest(i.indkey::smallint[]) WITH ORDINALITY AS k(attnum, ord) "
+                "  LEFT JOIN pg_attribute a ON a.attrelid = i.indrelid "
+                "  AND a.attnum = k.attnum ORDER BY k.ord"
+                "), "
+                "(idx.relkind = 'i' AND idx.relpersistence = 'p' "
+                " AND am.amname = 'btree' AND NOT i.indisunique "
+                " AND NOT i.indisprimary AND NOT i.indisexclusion "
+                " AND i.indimmediate AND i.indisvalid AND i.indisready "
+                " AND i.indislive AND NOT i.indisclustered "
+                " AND NOT i.indisreplident AND NOT i.indcheckxmin "
+                " AND i.indpred IS NULL AND i.indexprs IS NULL "
+                " AND i.indnkeyatts = i.indnatts "
+                " AND cardinality(i.indkey::smallint[]) = i.indnatts "
+                " AND cardinality(i.indoption::smallint[]) = i.indnkeyatts "
+                " AND cardinality(i.indclass::oid[]) = i.indnkeyatts "
+                " AND cardinality(i.indcollation::oid[]) = i.indnkeyatts "
+                " AND (idx.reloptions IS NULL OR cardinality(idx.reloptions) = 0) "
+                " AND NOT EXISTS ("
+                "   SELECT 1 FROM unnest(i.indoption::smallint[]) AS options(value) "
+                "   WHERE options.value <> 0"
+                " ) AND NOT EXISTS ("
+                "   SELECT 1 FROM unnest(i.indclass::oid[]) AS classes(opclass_oid) "
+                "   LEFT JOIN pg_opclass opc ON opc.oid = classes.opclass_oid "
+                "   WHERE opc.oid IS NULL OR NOT opc.opcdefault "
+                "   OR opc.opcmethod <> idx.relam"
+                " ) AND NOT EXISTS ("
+                "   SELECT 1 "
+                "   FROM unnest(i.indkey::smallint[], i.indcollation::oid[]) "
+                "     AS pairs(attnum, collation_oid) "
+                "   LEFT JOIN pg_attribute a ON a.attrelid = i.indrelid "
+                "   AND a.attnum = pairs.attnum "
+                "   WHERE a.attnum IS NULL OR pairs.collation_oid <> a.attcollation"
+                " )) AS catalog_valid "
+                "FROM pg_index i "
+                "JOIN pg_class table_class ON table_class.oid = i.indrelid "
+                "JOIN pg_namespace table_ns ON table_ns.oid = table_class.relnamespace "
+                "JOIN pg_class idx ON idx.oid = i.indexrelid "
+                "JOIN pg_am am ON am.oid = idx.relam "
+                "WHERE table_ns.nspname = 'public' "
+                "AND table_class.relname = 'tool_approvals' "
+                "AND NOT i.indisprimary ORDER BY idx.relname"
+            )
+        ).all()
     }
-    expected_index_contract = {name: (columns, False) for name, columns in expected_indexes.items()}
+    expected_index_contract = {name: (columns, True) for name, columns in expected_indexes.items()}
     if actual_indexes != expected_index_contract:
         raise RuntimeError("unsafe tool_approvals schema drift: indexes mismatch")
     if inspector.get_unique_constraints("tool_approvals", schema="public"):

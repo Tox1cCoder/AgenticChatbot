@@ -784,7 +784,7 @@ def test_reconciliation_rejects_unsafe_historical_drift(drift: str) -> None:
                 "unsupported decision_type labels"
                 if drift == "unknown-enum"
                 else (
-                    "unsupported decision_type dependent columns"
+                    "unsupported decision_type catalog dependencies"
                     if drift == "unsupported-dependent"
                     else "unsafe tool_approvals schema drift"
                 )
@@ -874,6 +874,109 @@ def test_forward_repair_canonicalizes_stamped_legacy_enum_and_is_irreversible() 
 
 
 @pytest.mark.parametrize(
+    "dependency_ddl",
+    [
+        (
+            "CREATE FUNCTION public.echo_decision(public.decision_type) "
+            "RETURNS public.decision_type LANGUAGE sql IMMUTABLE AS 'SELECT $1'"
+        ),
+        (
+            "CREATE FUNCTION public.echo_decision(public.decision_type[]) "
+            "RETURNS public.decision_type[] LANGUAGE sql IMMUTABLE AS 'SELECT $1'"
+        ),
+        "CREATE DOMAIN public.decision_domain AS public.decision_type",
+        ("CREATE VIEW public.decision_view AS SELECT decision FROM public.tool_approvals"),
+    ],
+    ids=["function", "array-function", "domain", "view"],
+)
+def test_forward_repair_rejects_enum_catalog_dependency_transactionally(
+    dependency_ddl: str,
+) -> None:
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", _OLD_HEAD)
+        engine = create_engine(scratch_url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(dependency_ddl))
+
+            with pytest.raises(
+                pytest.fail.Exception, match="unsupported decision_type catalog dependencies"
+            ):
+                _run_alembic(scratch_url, "upgrade", "head")
+            with engine.connect() as connection:
+                assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+                    _OLD_HEAD
+                )
+        finally:
+            engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "partial",
+        "invalid",
+        "include",
+        "expression",
+        "hash",
+        "nondefault-opclass",
+        "nulls-first",
+        "reloptions",
+    ],
+)
+def test_forward_repair_rejects_noncanonical_index_catalog_state(drift: str) -> None:
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", _OLD_HEAD)
+        engine = create_engine(scratch_url)
+        index_name = "ix_tool_approvals_interrupt_id"
+        try:
+            with engine.begin() as connection:
+                if drift == "partial":
+                    connection.execute(text(f"DROP INDEX public.{index_name}"))
+                    connection.execute(
+                        text(
+                            f"CREATE INDEX {index_name} ON public.tool_approvals "
+                            "(interrupt_id) WHERE deleted_at IS NULL"
+                        )
+                    )
+                elif drift == "invalid":
+                    connection.execute(
+                        text(
+                            "UPDATE pg_index SET indisvalid = false, indisready = false "
+                            "WHERE indexrelid = to_regclass(:index_name)"
+                        ),
+                        {"index_name": f"public.{index_name}"},
+                    )
+                else:
+                    definitions = {
+                        "include": "(interrupt_id) INCLUDE (deleted_at)",
+                        "expression": "(lower(interrupt_id))",
+                        "hash": "USING hash (interrupt_id)",
+                        "nondefault-opclass": "(interrupt_id varchar_pattern_ops)",
+                        "nulls-first": "(interrupt_id ASC NULLS FIRST)",
+                        "reloptions": "(interrupt_id) WITH (fillfactor = 80)",
+                    }
+                    connection.execute(text(f"DROP INDEX public.{index_name}"))
+                    connection.execute(
+                        text(
+                            f"CREATE INDEX {index_name} ON public.tool_approvals "
+                            f"{definitions[drift]}"
+                        )
+                    )
+
+            with pytest.raises(
+                pytest.fail.Exception, match="unsafe tool_approvals schema drift: indexes mismatch"
+            ):
+                _run_alembic(scratch_url, "upgrade", "head")
+            with engine.connect() as connection:
+                assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+                    _OLD_HEAD
+                )
+        finally:
+            engine.dispose()
+
+
+@pytest.mark.parametrize(
     "drift",
     [
         "missing-table",
@@ -923,7 +1026,7 @@ def test_forward_repair_handles_only_safe_current_head_drift(drift: str) -> None
                     "unsupported decision_type labels"
                     if drift == "unknown-enum"
                     else (
-                        "unsupported decision_type dependent columns"
+                        "unsupported decision_type catalog dependencies"
                         if drift == "unsupported-dependent"
                         else "unsafe tool_approvals schema drift"
                     )
