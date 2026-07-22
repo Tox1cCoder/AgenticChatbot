@@ -1,9 +1,8 @@
-"""Re-embed existing chunks into the active Qdrant collection.
+"""Re-embed existing PostgreSQL chunks into the active Qdrant collection.
 
-Companion to ``scripts/reindex_documents.py``. Where ``reindex_documents``
-re-parses and re-chunks documents from source artifacts, this script
-re-embeds the chunk text already stored in PostgreSQL — typically used
-when the embedding provider, model, or vector dimension changes.
+This command never reparses source documents. It reuses chunk text already
+stored in PostgreSQL and is typically used when the embedding provider, model,
+or vector dimension changes.
 
 Usage::
 
@@ -91,14 +90,6 @@ def _mark_needs_reindex(db, document_ids: list[UUID]) -> None:
 
 
 def _run(args: argparse.Namespace) -> int:
-    from app.core.config import settings
-    from app.core.container import get_container
-
-    container = get_container()
-    db = container.db()
-    index_service = container.document_index_service()
-    embedding_service = container.rag_embedding_service()
-
     selector_count = sum(bool(x) for x in (args.document_id, args.conversation_id, args.all))
     if not args.dry_run and selector_count == 0:
         logger.error(
@@ -107,13 +98,10 @@ def _run(args: argparse.Namespace) -> int:
         )
         return 2
 
-    logger.info(
-        "Re-embedding with provider=%s model=%s dimension=%d collection=%s",
-        getattr(embedding_service, "provider", "unknown"),
-        getattr(embedding_service, "model_name", "unknown"),
-        getattr(embedding_service, "dimension", 0),
-        settings.qdrant_collection_name,
-    )
+    from app.core.container import get_container
+
+    container = get_container()
+    db = container.db()
 
     targets = _resolve_targets(db, args)
     logger.info("Found %d documents in scope", len(targets))
@@ -123,6 +111,19 @@ def _run(args: argparse.Namespace) -> int:
             print(str(doc_id))
         print(f"DRY RUN — {len(targets)} documents would be re-embedded")
         return 0
+
+    from app.core.config import settings
+
+    index_service = container.document_index_service()
+    embedding_service = container.rag_embedding_service()
+
+    logger.info(
+        "Re-embedding with provider=%s model=%s dimension=%d collection=%s",
+        getattr(embedding_service, "provider", "unknown"),
+        getattr(embedding_service, "model_name", "unknown"),
+        getattr(embedding_service, "dimension", 0),
+        settings.qdrant_collection_name,
+    )
 
     if not targets:
         logger.info("No documents to re-embed. Nothing to do.")

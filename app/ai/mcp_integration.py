@@ -34,6 +34,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_CONFIG_RELATIVE_SUFFIXES = {
+    ".bat",
+    ".cjs",
+    ".cmd",
+    ".exe",
+    ".js",
+    ".json",
+    ".mjs",
+    ".ps1",
+    ".py",
+    ".sh",
+    ".toml",
+    ".yaml",
+    ".yml",
+}
+
 logging.getLogger("langchain_google_genai._function_utils").setLevel(logging.ERROR)
 
 
@@ -129,7 +145,12 @@ class MCPManager:
             contains_separator = "/" in value or "\\" in value
             if preserve_bare_command and not explicit_relative and not contains_separator:
                 return value
-            if explicit_relative or contains_separator or (script_base / path).exists():
+            if (
+                explicit_relative
+                or contains_separator
+                or path.suffix.lower() in _CONFIG_RELATIVE_SUFFIXES
+                or (script_base / path).exists()
+            ):
                 return str((script_base / path).resolve())
             return value
 

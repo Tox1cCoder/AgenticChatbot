@@ -2031,7 +2031,7 @@ that diverged from the literal plan text.
 - Design divergence: added the repo-standard `sys.path` bootstrap
   (`_REPO_ROOT = Path(__file__).resolve().parent.parent`) the plan's literal script omitted
   — without it, `python scripts/evaluate_tool_search_accuracy.py` raises
-  `ModuleNotFoundError: No module named 'app'`. Matches `scripts/reindex_documents.py`.
+  `ModuleNotFoundError: No module named 'app'`. Matches `scripts/reindex_embeddings.py`.
 
 ### Task 10 — Final Verification Matrix — DONE
 

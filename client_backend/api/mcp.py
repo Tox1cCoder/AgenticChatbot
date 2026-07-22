@@ -16,7 +16,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from client_backend.api.common import make_api_response
 from client_backend.core.auth import require_local_session
 from client_backend.core.security import LocalSessionPayload
-from client_backend.services.local_mcp_manager import get_mcp_manager, shutdown_mcp_manager
+from client_backend.services.local_mcp_manager import (
+    canonicalize_mcp_config_document,
+    get_mcp_manager,
+    shutdown_mcp_manager,
+)
 from client_backend.services.runtime_bridge import get_runtime_bridge
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
@@ -47,17 +51,23 @@ def _load_config_document() -> dict[str, Any]:
             detail=f"Failed to read MCP config: {exc}",
         ) from exc
 
-    if not isinstance(payload, dict):
-        return {"mcpServers": {}}
-    if "mcpServers" not in payload or not isinstance(payload.get("mcpServers"), dict):
-        payload["mcpServers"] = {}
-    return payload
+    return canonicalize_mcp_config_document(payload)
 
 
 def _write_config_document(payload: dict[str, Any]) -> None:
     path = _config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    canonical = canonicalize_mcp_config_document(payload)
+    path.write_text(json.dumps(canonical, indent=2), encoding="utf-8")
+
+
+def _remove_bundled_provenance(payload: dict[str, Any], server_name: str) -> None:
+    names = payload.get("_sample_chatbot_bundled_servers")
+    if not isinstance(names, list):
+        return
+    payload["_sample_chatbot_bundled_servers"] = sorted(
+        str(name) for name in names if str(name) != server_name
+    )
 
 
 async def _reload_manager():
@@ -268,6 +278,7 @@ async def add_mcp_server(
         "enabled": bool(payload.get("enabled", True)),
         "description": payload.get("description") or "",
     }
+    _remove_bundled_provenance(document, name)
     _write_config_document(document)
     await _reload_manager()
     await _refresh_runtime_bridge_catalogs_if_connected()
@@ -291,6 +302,7 @@ async def add_mcp_server_from_url(
     document = _load_config_document()
     server_configs = document.setdefault("mcpServers", {})
     server_configs[name] = config
+    _remove_bundled_provenance(document, name)
     _write_config_document(document)
     await _reload_manager()
     await _refresh_runtime_bridge_catalogs_if_connected()
@@ -316,6 +328,7 @@ async def remove_mcp_server(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MCP server not found")
 
     del server_configs[server_name]
+    _remove_bundled_provenance(document, server_name)
     _write_config_document(document)
     await _reload_manager()
     await _refresh_runtime_bridge_catalogs_if_connected()

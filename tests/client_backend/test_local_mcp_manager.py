@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx2 import ASGITransport, AsyncClient
 
 from client_backend.api import mcp as mcp_api
 from client_backend.core.auth import require_local_session
@@ -149,7 +150,7 @@ def test_local_mcp_manager_seeds_dev_profile_config_from_repo_default(tmp_path, 
     try:
         manager._ensure_default_config_exists()
         seeded = json.loads(manager.config_path.read_text(encoding="utf-8"))
-        time_config = seeded["mcp_servers"]["time"]
+        time_config = seeded["mcpServers"]["time"]
         assert seeded["_sample_chatbot_seed"] == "bundled-defaults-v1"
         assert time_config["command"] == "python"
         assert time_config["args"] == ["app/ai/mcp_servers/time_server.py"]
@@ -184,7 +185,7 @@ def test_local_mcp_seed_makes_every_enabled_bundled_server_cwd_independent(tmp_p
     manager = LocalMCPManager()
     try:
         manager._ensure_default_config_exists()
-        seeded = json.loads(manager.config_path.read_text(encoding="utf-8"))["mcp_servers"]
+        seeded = json.loads(manager.config_path.read_text(encoding="utf-8"))["mcpServers"]
         assert {
             name for name, config in seeded.items() if config.get("enabled", True)
         } == expected_enabled
@@ -272,7 +273,7 @@ def test_local_mcp_seed_relocates_bundled_servers_without_rewriting_custom_serve
             "cwd": "custom-workdir",
             "enabled": True,
         }
-        payload["mcp_servers"]["custom"] = custom_server
+        payload["mcpServers"]["custom"] = custom_server
         first_manager.config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
         monkeypatch.setattr(
@@ -286,7 +287,7 @@ def test_local_mcp_seed_relocates_bundled_servers_without_rewriting_custom_serve
         persisted = json.loads(restarted_manager.config_path.read_text(encoding="utf-8"))
         runtime = {config.name: config for config in asyncio.run(restarted_manager._load_config())}
 
-        assert persisted["mcp_servers"]["custom"] == custom_server
+        assert persisted["mcpServers"]["custom"] == custom_server
         assert runtime["time"].command == "new-python"
         assert runtime["time"].args == [str(new_script.resolve())]
         assert runtime["custom"].command == "npx"
@@ -316,6 +317,17 @@ def test_local_mcp_manager_preserves_scoped_npm_package_args(tmp_path):
     )
 
     assert resolved == "@wonderwhy-er/desktop-commander@latest"
+
+
+def test_local_mcp_manager_resolves_missing_script_args_from_config_directory(tmp_path):
+    manager = LocalMCPManager(config_path=tmp_path / "mcp_config.json")
+
+    resolved = manager._resolve_config_relative_value(
+        "missing-server.py",
+        config_dir=tmp_path,
+    )
+
+    assert resolved == str((tmp_path / "missing-server.py").resolve())
 
 
 @pytest.mark.asyncio
@@ -508,3 +520,115 @@ def test_add_mcp_server_endpoint_refreshes_runtime_catalogs_when_bridge_active(
         app.dependency_overrides.clear()
         client_settings.mcp_config_path = original_mcp_config_path
         client_settings.profile_root = original_profile_root
+
+
+@pytest.mark.asyncio
+async def test_mcp_api_migrates_dual_keys_and_preserves_servers_and_provenance(
+    tmp_path, monkeypatch
+):
+    config_path = tmp_path / "mcp" / "mcp_config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "_sample_chatbot_seed": "bundled-defaults-v1",
+                "_sample_chatbot_bundled_servers": ["bundled", "collision"],
+                "mcp_servers": {
+                    "bundled": {"transport": "stdio", "command": "python"},
+                    "legacy-custom": {"transport": "stdio", "command": "legacy"},
+                    "collision": {"transport": "stdio", "command": "snake"},
+                },
+                "mcpServers": {
+                    "canonical-custom": {"transport": "stdio", "command": "canonical"},
+                    "collision": {"transport": "stdio", "command": "camel"},
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    now = datetime.now(timezone.utc)
+    fake_session = LocalSessionPayload(
+        user_id="user-123",
+        server_user_id="user-123",
+        device_id=None,
+        device_identifier="device-abc",
+        iat=now,
+        exp=now + timedelta(hours=1),
+    )
+    app.dependency_overrides[require_local_session] = lambda: fake_session
+
+    class _ManagerStub:
+        servers = {}
+
+        def _resolve_config_path(self) -> Path:
+            return config_path
+
+        async def initialize(self) -> None:
+            return None
+
+    class _BridgeStub:
+        def is_connected(self) -> bool:
+            return False
+
+        def get_registered_device_id(self) -> str | None:
+            return None
+
+    async def _noop_shutdown() -> None:
+        return None
+
+    manager = _ManagerStub()
+    monkeypatch.setattr(mcp_api, "get_mcp_manager", lambda: manager)
+    monkeypatch.setattr(mcp_api, "shutdown_mcp_manager", _noop_shutdown)
+    monkeypatch.setattr(mcp_api, "get_runtime_bridge", lambda: _BridgeStub())
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            added = await client.post(
+                "/api/mcp/servers",
+                json={
+                    "name": "new-custom",
+                    "transport": "stdio",
+                    "command": "new-command",
+                },
+            )
+            assert added.status_code == 201, added.text
+            after_add = json.loads(config_path.read_text(encoding="utf-8"))
+            assert "mcp_servers" not in after_add
+            assert set(after_add["mcpServers"]) == {
+                "bundled",
+                "legacy-custom",
+                "canonical-custom",
+                "collision",
+                "new-custom",
+            }
+            assert after_add["mcpServers"]["collision"]["command"] == "camel"
+
+            replaced = await client.post(
+                "/api/mcp/servers",
+                json={
+                    "name": "bundled",
+                    "transport": "stdio",
+                    "command": "user-replacement",
+                },
+            )
+            assert replaced.status_code == 201, replaced.text
+            after_replace = json.loads(config_path.read_text(encoding="utf-8"))
+            assert after_replace["mcpServers"]["bundled"]["command"] == "user-replacement"
+            assert after_replace["_sample_chatbot_bundled_servers"] == ["collision"]
+            assert "legacy-custom" in after_replace["mcpServers"]
+
+            removed = await client.delete("/api/mcp/servers/collision")
+            assert removed.status_code == 200, removed.text
+            after_delete = json.loads(config_path.read_text(encoding="utf-8"))
+            assert "collision" not in after_delete["mcpServers"]
+            assert after_delete["_sample_chatbot_bundled_servers"] == []
+            assert {
+                "bundled",
+                "legacy-custom",
+                "canonical-custom",
+                "new-custom",
+            }.issubset(after_delete["mcpServers"])
+    finally:
+        app.dependency_overrides.clear()

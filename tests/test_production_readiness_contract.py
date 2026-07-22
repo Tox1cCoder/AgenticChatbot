@@ -437,6 +437,41 @@ def test_httpx2_testclient_dependency_is_declared_in_every_manifest() -> None:
     assert "      - truststore==0.10.4" in environment
 
 
+def test_core_frozen_manifests_omit_unused_gradio_ui_dependencies() -> None:
+    for manifest in ("requirements.txt", "environment.yml"):
+        lines = (ROOT / manifest).read_text(encoding="utf-8").lower().splitlines()
+        assert not any(line.strip().lstrip("- ").startswith("gradio") for line in lines)
+
+
+def test_frozen_manifests_declare_the_cuda_wheel_index() -> None:
+    cuda_index = "--extra-index-url https://download.pytorch.org/whl/cu130"
+    assert cuda_index in (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    assert f"      - {cuda_index}" in (ROOT / "environment.yml").read_text(encoding="utf-8")
+
+
+def test_full_frozen_requirements_has_a_tracked_fresh_resolver_gate() -> None:
+    tracked = {path.relative_to(ROOT).as_posix() for path in _tracked_files("scripts")}
+    resolver = "scripts/verify_frozen_requirements.py"
+    assert resolver in tracked
+    source = (ROOT / resolver).read_text(encoding="utf-8")
+    assert "_EXPECTED_PYTHON = (3, 11)" in source
+    assert '"--dry-run"' in source
+    assert '"--ignore-installed"' in source
+    assert '"-r"' in source
+    assert '"requirements.txt"' in source
+
+
+def test_tracked_sources_and_docs_do_not_claim_a_document_reparse_cli() -> None:
+    obsolete_cli = "reindex_" + "documents"
+    violations = []
+    for path in _tracked_files("README.md", "docs", "plans", "scripts", "tests"):
+        if path.suffix.lower() not in {".md", ".py"}:
+            continue
+        if obsolete_cli in path.read_text(encoding="utf-8"):
+            violations.append(path.relative_to(ROOT).as_posix())
+    assert not violations, f"obsolete document-reparse CLI references remain: {violations}"
+
+
 def test_fastapi_testclient_uses_httpx2_without_deprecation_warning() -> None:
     script = """
 import warnings

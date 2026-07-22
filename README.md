@@ -644,13 +644,6 @@ python -m pytest tests/test_tool_search_accuracy.py tests/test_unified_tool_sear
 6. **Retrieval** — the RAG agent uses Qdrant for vector candidate IDs, then hydrates chunk text, filenames, page metadata, and linked image captions/files from PostgreSQL. If a Qdrant point references a missing SQL chunk, it is treated as an index consistency error and skipped rather than serving raw Qdrant payload content.
 7. **Agentic RAG** — document-aware chat always uses the agentic `search_documents` tool path. Available actions include `SCAN_ALL`, `READ_DOCUMENT`, `SEARCH_CHUNKS`, `GREP_DOCUMENT`, `LIST_DOCUMENTS`, and `VIEW_IMAGES`.
 
-After upgrading from the older direct-Qdrant index format, run the reindex utility so existing Qdrant points reference SQL chunks:
-
-```bash
-python scripts/reindex_documents.py --dry-run
-python scripts/reindex_documents.py --all --continue-on-error
-```
-
 ### RAG embedding migration
 
 Phase 11 swapped the embedding provider from the local `google/embeddinggemma-300m`

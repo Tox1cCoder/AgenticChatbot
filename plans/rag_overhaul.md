@@ -106,7 +106,6 @@ The implementation must remove legacy and deprecated code as part of the overhau
 - `app/services/document_index_service.py`
 - `app/services/rag_embedding_service.py`
 - `app/alembic/versions/<revision>_normalize_document_chunks.py`
-- `scripts/reindex_documents.py`
 - `scripts/reindex_embeddings.py`
 - `tests/test_document_chunk_model.py`
 - `tests/test_document_chunk_builder.py`
@@ -210,9 +209,9 @@ passing tests, +0 new failures.
   misconfigured `RAG_EMBEDDING_DIMENSION` surfaces immediately.
   `/health/qdrant` continues to read `settings.qdrant_collection_name` as
   the single source of truth.
-- New script `scripts/reindex_embeddings.py` with the same selector flags
-  as `reindex_documents.py` (`--document-id`, `--conversation-id`, `--all`,
-  `--dry-run`, `--continue-on-error`). Re-embeds existing SQL chunk text
+- New script `scripts/reindex_embeddings.py` with selector flags
+  (`--document-id`, `--conversation-id`, `--all`, `--dry-run`,
+  `--continue-on-error`). Re-embeds existing SQL chunk text
   through the active embedding service into the active Qdrant collection.
   Logs provider/model/dimension/collection at start; prints
   `chunks_scanned / chunks_reembedded / chunks_failed / qdrant_points_written`
@@ -337,7 +336,7 @@ Re-audit of the codebase against the post-Phase-10 plan claims. Verifies what is
 - Phase 7: `DocumentService` no longer constructs `RAGAgent`; `DocumentIndexService` is injected.
 - Phase 8: `process_message` is a 3-line delegator; `agentic_rag_enabled` is gone; `build_rag_prompt` is gone.
 - Phase 9: New `rag_*` settings present at `app/core/config.py:187-219`; retired settings absent; `model_config["extra"] = "ignore"`; container builds `SentenceTransformer` from `settings.rag_embedding_model`; `provider_service.py:45` references `gemini-3.1-pro-preview`.
-- Phase 10: `scripts/reindex_documents.py` exists with required CLI selectors.
+- Phase 10: `scripts/reindex_embeddings.py` exists with required CLI selectors.
 
 **Gaps confirmed (need work):**
 
@@ -405,10 +404,10 @@ After all 10 phases, `python -m pytest tests --ignore=tests/client_backend/test_
 All 7 are out-of-scope bugs (tool search, checkpoints, SSE keepalive, isolation snapshots, graph streaming test fixtures). None block the RAG overhaul's acceptance criteria. Tracking in the main backlog rather than fixing inside this PR — fixing them here would be scope creep and could mask regressions.
 
 **Phase 10: DONE** (2026-04-24)
-- Created `scripts/reindex_documents.py` with CLI selectors (`--document-id`, `--conversation-id`, `--all`, `--dry-run`, `--continue-on-error`). Mutually exclusive target selectors are enforced by `argparse`.
+- Created `scripts/reindex_embeddings.py` with CLI selectors (`--document-id`, `--conversation-id`, `--all`, `--dry-run`, `--continue-on-error`). Mutually exclusive target selectors are enforced by `argparse`.
 - Marks in-scope chunk rows `index_status = 'needs_reindex'` before rebuilding so a partial run leaves a resumable state.
 - Delegates to `DocumentIndexService.reindex_document(document_id)` per document; prints a one-line summary of `documents_scanned / documents_reindexed / documents_failed / chunks_written / qdrant_points_written`. Exit code is non-zero on any failure unless `--continue-on-error`.
-- Added `tests/test_reindex_documents_cli.py` (6 tests) pinning selector parsing and mutual exclusion.
+- Added `tests/test_reindex_embeddings_cli.py` pinning selector parsing and mutual exclusion.
 - Smoke-tested the dry-run path against the live DB — `0 documents would be reindexed` because there are no chunks in the `needs_reindex` queue on this fresh install.
 
 **Phase 9: DONE** (2026-04-24)
@@ -865,7 +864,7 @@ Modify `.env.example` and `README.md`:
 
 ## Phase 10: Reindex Job
 
-Create `scripts/reindex_documents.py`.
+Create `scripts/reindex_embeddings.py`.
 
 Write a narrow test or dry-run mode first if script tests are supported:
 
@@ -1080,7 +1079,7 @@ Failure modes to handle:
 - Partial reindex must be resumable. The `needs_reindex` queue is the resume point; a chunk that flipped to `indexed` is skipped on the next pass.
 - Dimension mismatch after a misconfigured deploy (e.g. someone changes `rag_embedding_dimension` to 1536 without recreating the collection): the new `ensure_collection` raises at startup. Document the recovery path in README — it is "create a new collection name, re-run the cold migration."
 
-Create `scripts/reindex_embeddings.py` (separate from `reindex_documents.py` — same selector flags, but per-chunk re-embed without reparse):
+Keep `scripts/reindex_embeddings.py` as the single reindex command; it re-embeds stored chunks without reparsing:
 
 - `--document-id`, `--conversation-id`, `--all`, `--dry-run`, `--continue-on-error`.
 - Refuses to run with `--all` unless explicit.
@@ -1110,7 +1109,7 @@ Required edits in `README.md` (a single explicit task — do not split across PR
 - "Document Pipeline & RAG" section (lines 468-478):
   - Step 5 ("Persist & index"): replace "embeds chunk content with `RAG_EMBEDDING_MODEL`" with the Gemini doc-format prompt and the `task: ...` query-side prefix; mention the `768` output dimensionality.
   - Add a step or note describing the cold-migration cutover and the `documents_gemini_embedding_2_768` collection.
-  - Reference `scripts/reindex_embeddings.py` alongside the existing `scripts/reindex_documents.py` link.
+  - Reference `scripts/reindex_embeddings.py` as the single cold-migration command.
 - Add a short "RAG embedding migration" subsection that documents:
   - Old → new collection rename;
   - Dimension is 768 (mention the 1536 / 3072 future dimension upgrade path);

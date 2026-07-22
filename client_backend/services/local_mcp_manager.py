@@ -33,6 +33,40 @@ from client_backend.services.upstream_auth import get_upstream_auth_service
 
 logger = get_logger(__name__)
 
+_CONFIG_RELATIVE_SUFFIXES = {
+    ".bat",
+    ".cjs",
+    ".cmd",
+    ".exe",
+    ".js",
+    ".json",
+    ".mjs",
+    ".ps1",
+    ".py",
+    ".sh",
+    ".toml",
+    ".yaml",
+    ".yml",
+}
+
+
+def canonicalize_mcp_config_document(payload: dict[str, Any] | None) -> dict[str, Any]:
+    """Merge legacy MCP keys into the canonical camel-case document shape."""
+    if not isinstance(payload, dict):
+        return {"mcpServers": {}}
+
+    legacy = payload.get("mcp_servers")
+    canonical = payload.get("mcpServers")
+    merged: dict[str, Any] = {}
+    if isinstance(legacy, dict):
+        merged.update(legacy)
+    if isinstance(canonical, dict):
+        merged.update(canonical)
+
+    normalized = {key: value for key, value in payload.items() if key != "mcp_servers"}
+    normalized["mcpServers"] = merged
+    return normalized
+
 
 @dataclass
 class MCPServerConfig:
@@ -171,10 +205,8 @@ class LocalMCPManager:
             return []
 
         servers: list[MCPServerConfig] = []
-        mcp_servers = config_data.get("mcpServers") or config_data.get("mcp_servers") or {}
-        if not isinstance(mcp_servers, dict):
-            logger.warning("Invalid MCP config structure in %s", self.config_path)
-            return []
+        config_data = canonicalize_mcp_config_document(config_data)
+        mcp_servers = config_data["mcpServers"]
 
         config_dir = self.config_path.parent
         bundled_seed = config_data.get("_sample_chatbot_seed") == "bundled-defaults-v1"
@@ -212,6 +244,7 @@ class LocalMCPManager:
                 resolved_command = self._resolve_config_relative_value(
                     self._expand_env_placeholders(str(command)),
                     config_dir=bundled_root if bundled_server else config_dir,
+                    preserve_bare_command=True,
                 )
                 if bundled_server and str(command).lower() in {"python", "python3"}:
                     resolved_command = sys.executable
@@ -348,6 +381,12 @@ class LocalMCPManager:
                 existing_payload = None
 
             if self._has_configured_servers(existing_payload):
+                canonical = canonicalize_mcp_config_document(existing_payload)
+                if canonical != existing_payload:
+                    self.config_path.write_text(
+                        json.dumps(canonical, indent=2),
+                        encoding="utf-8",
+                    )
                 return
 
             if seed_payload is None:
@@ -365,13 +404,7 @@ class LocalMCPManager:
 
     @staticmethod
     def _has_configured_servers(payload: dict[str, Any] | None) -> bool:
-        if not isinstance(payload, dict):
-            return False
-
-        raw_servers = payload.get("mcpServers")
-        if raw_servers is None:
-            raw_servers = payload.get("mcp_servers")
-        return isinstance(raw_servers, dict) and bool(raw_servers)
+        return bool(canonicalize_mcp_config_document(payload)["mcpServers"])
 
     def _load_repo_seed_config(self) -> dict[str, Any] | None:
         """
@@ -402,8 +435,9 @@ class LocalMCPManager:
             except Exception:
                 continue
             if self._has_configured_servers(payload):
+                payload = canonicalize_mcp_config_document(payload)
                 payload["_sample_chatbot_seed"] = "bundled-defaults-v1"
-                servers = payload.get("mcpServers") or payload.get("mcp_servers") or {}
+                servers = payload["mcpServers"]
                 payload["_sample_chatbot_bundled_servers"] = sorted(servers)
                 return payload
         return None
@@ -430,7 +464,12 @@ class LocalMCPManager:
         return re.sub(r"\$\{([^}]+)\}", replace, value)
 
     @staticmethod
-    def _resolve_config_relative_value(value: str, *, config_dir: Path) -> str:
+    def _resolve_config_relative_value(
+        value: str,
+        *,
+        config_dir: Path,
+        preserve_bare_command: bool = False,
+    ) -> str:
         """
         Resolve relative path-like config values against the MCP config directory.
 
@@ -438,26 +477,27 @@ class LocalMCPManager:
         """
         if not value:
             return value
+        if value.startswith(("-", "@")) or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value):
+            return value
 
         candidate = Path(value)
         if candidate.is_absolute():
             return str(normalize_path(candidate))
 
         explicit_config_relative = value.startswith(("./", ".\\", "../", "..\\"))
+        contains_separator = "/" in value or "\\" in value
+        if preserve_bare_command and not explicit_config_relative and not contains_separator:
+            return value
         looks_path_like = (
-            explicit_config_relative or "\\" in value or (config_dir / candidate).exists()
+            explicit_config_relative
+            or contains_separator
+            or candidate.suffix.lower() in _CONFIG_RELATIVE_SUFFIXES
+            or (config_dir / candidate).exists()
         )
         if not looks_path_like:
             return value
 
         config_relative_path = normalize_path(candidate, base_dir=config_dir)
-        if explicit_config_relative or config_relative_path.exists():
-            return str(config_relative_path)
-
-        fallback_path = normalize_path(candidate)
-        if fallback_path.exists():
-            return str(fallback_path)
-
         return str(config_relative_path)
 
     def _tool_records_from_loaded_tools(

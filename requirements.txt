@@ -1,3 +1,5 @@
+--extra-index-url https://download.pytorch.org/whl/cu130
+
 accelerate==1.13.0
 addict==2.4.0
 aiofile==3.9.0
@@ -96,9 +98,6 @@ GitPython==3.1.45
 google-auth==2.47.0
 google-genai==1.57.0
 googleapis-common-protos==1.73.0
-gradio==6.8.0
-gradio_client==2.2.0
-gradio_pdf==0.0.24
 greenlet==3.3.0
 griffelib==2.0.2
 groovy==0.1.2

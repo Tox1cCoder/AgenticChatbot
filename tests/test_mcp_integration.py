@@ -86,6 +86,7 @@ def test_explicit_stdio_resolves_all_path_fields_without_touching_path_commands_
                             "--watch",
                             "assets/schema.json",
                             "helper.exe",
+                            "missing-server.py",
                             "postgresql://db.example/service",
                         ],
                         "cwd": "runtime",
@@ -119,6 +120,7 @@ def test_explicit_stdio_resolves_all_path_fields_without_touching_path_commands_
         "--watch",
         str(asset.resolve()),
         str(executable_arg.resolve()),
+        str((config_dir / "missing-server.py").resolve()),
         "postgresql://db.example/service",
     ]
     assert resolved["custom"]["cwd"] == str(runtime_dir.resolve())
