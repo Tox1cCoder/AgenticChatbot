@@ -125,6 +125,7 @@ class MessageService(IMessageService):
         task_plan_service: ITaskPlanService | None = None,
         custom_agent_service: Any | None = None,
         tool_approval_setting_repository=None,
+        chat_image_service=None,
     ):
         self.repository = message_repository
         self.conversation_validation_utils = conversation_validation_utils
@@ -135,6 +136,8 @@ class MessageService(IMessageService):
         self.task_plan_service = task_plan_service
         # Resolves attached custom agents into workflow state each user turn.
         self.custom_agent_service = custom_agent_service
+        # Externalizes inline image base64 out of persisted message metadata.
+        self.chat_image_service = chat_image_service
         # Resolves the per-user HITL approval policy into workflow state each turn.
         self.tool_approval_setting_repository = tool_approval_setting_repository
         self.redis_client = self._init_redis_client()
@@ -855,6 +858,10 @@ class MessageService(IMessageService):
         message_entity = MessageFactory.create_from_schema_with_role(
             message_create_data, message_create_data.role
         )
+        if message_create_data.role == MessageRole.user:
+            refs = self._externalize_attachments_for_persist(message_create_data, user_id)
+            if refs is not None and isinstance(message_entity.get("message_metadata"), dict):
+                message_entity["message_metadata"]["attachments"] = refs
 
         created_message = self.repository.create(message_entity)
         # Reserve the assistant DB id up-front so the graph can stamp the
@@ -2216,6 +2223,43 @@ class MessageService(IMessageService):
             "order": getattr(task, "task_order", getattr(task, "order", 0)),
             "status": (task.status.value if hasattr(task.status, "value") else str(task.status)),
         }
+
+    def _externalize_attachments_for_persist(
+        self, message_create_data: MessageCreate, user_id: UUID
+    ) -> list[dict] | None:
+        """Replace inline base64 attachments with storage references for the
+        persisted row. The current-turn model call still receives the original
+        inline bytes; only the DB copy is externalized. Storage failures fall
+        back to the inline attachment so a send is never blocked."""
+        attachments = getattr(message_create_data, "attachments", None)
+        if not attachments:
+            return None
+        if self.chat_image_service is None:
+            return list(attachments)
+        refs: list[dict] = []
+        for att in attachments:
+            if not isinstance(att, dict):
+                continue
+            inline_b64 = att.get("data") or att.get("base64")
+            if not inline_b64:
+                refs.append(att)  # already a reference or remote URL
+                continue
+            try:
+                ref = self.chat_image_service.store(
+                    conversation_id=message_create_data.conversation_id,
+                    user_id=user_id,
+                    mime=att.get("mime") or att.get("mimeType") or "image/png",
+                    data_b64=inline_b64,
+                    name=att.get("name") or "image",
+                )
+                refs.append(ref)
+            except Exception:
+                logging.warning(
+                    "Chat image externalization failed; keeping inline attachment "
+                    "code=chat_image_store_failed"
+                )
+                refs.append(att)
+        return refs
 
     @staticmethod
     def _extract_message_execution_inputs(

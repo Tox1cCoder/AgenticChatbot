@@ -466,6 +466,7 @@ class Container(containers.DeclarativeContainer):
         task_plan_service=task_plan_service,
         custom_agent_service=custom_agent_service,
         tool_approval_setting_repository=tool_approval_setting_repository,
+        chat_image_service=chat_image_service,
     )
 
     feedback_service: providers.Provider[IFeedbackService] = providers.Factory(
