@@ -20,6 +20,11 @@ class DecisionType(str, enum.Enum):
     RESPOND = "respond"
 
 
+def _enum_member_values(enum_class: type[enum.Enum]) -> list[str]:
+    """Persist stable enum values instead of Python member names."""
+    return [str(member.value) for member in enum_class]
+
+
 class ToolApproval(Base):
     """
     Track all human approval decisions for tool calls in HITL workflows.
@@ -53,7 +58,15 @@ class ToolApproval(Base):
     modified_args = Column(JSONB, nullable=True)
 
     # Decision information
-    decision = Column(SQLEnum(DecisionType, name="decision_type", create_type=True), nullable=False)
+    decision = Column(
+        SQLEnum(
+            DecisionType,
+            name="decision_type",
+            create_type=True,
+            values_callable=_enum_member_values,
+        ),
+        nullable=False,
+    )
     decided_at = Column(DateTime(timezone=True), default=func.now(), nullable=False, index=True)
 
     # Device context (optional - set when tool originated from a client device)

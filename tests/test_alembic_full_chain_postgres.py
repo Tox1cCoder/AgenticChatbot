@@ -621,7 +621,6 @@ def test_full_alembic_chain_from_empty_postgres_database() -> None:
                 head_snapshot = _public_table_schema_snapshot(connection)
         finally:
             engine.dispose()
-
         _run_alembic(scratch_url, "downgrade", _PREVIOUS_HEAD)
         _assert_previous_head_schema(scratch_url)
         engine = create_engine(scratch_url)
@@ -638,6 +637,62 @@ def test_full_alembic_chain_from_empty_postgres_database() -> None:
         try:
             with engine.connect() as connection:
                 assert _public_table_schema_snapshot(connection) == head_snapshot
+        finally:
+            engine.dispose()
+
+
+def test_tool_approval_orm_round_trips_migrated_lowercase_enum() -> None:
+    from sqlalchemy.orm import Session
+
+    from app.models import Conversation, DecisionType, ToolApproval, User
+
+    assert ToolApproval.__table__.c.decision.type.enums == [
+        decision.value for decision in DecisionType
+    ]
+
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", "head")
+        engine = create_engine(scratch_url)
+        approval_id = uuid4()
+        try:
+            with Session(engine) as session:
+                user = User(
+                    username="orm-approval-user",
+                    email="orm-approval@example.invalid",
+                    password_hash="not-a-real-password",
+                )
+                session.add(user)
+                session.flush()
+                conversation = Conversation(owner_id=user.id, title="ORM approval round trip")
+                session.add(conversation)
+                session.flush()
+                session.add(
+                    ToolApproval(
+                        id=approval_id,
+                        conversation_id=conversation.id,
+                        user_id=user.id,
+                        interrupt_id="orm-round-trip",
+                        tool_name="test_tool",
+                        tool_call_id="orm-call",
+                        original_args={"source": "orm"},
+                        decision=DecisionType.RESPOND,
+                    )
+                )
+                session.commit()
+                session.expire_all()
+
+                approval = session.get(ToolApproval, approval_id)
+                assert approval is not None
+                assert approval.decision is DecisionType.RESPOND
+
+            with engine.connect() as connection:
+                assert (
+                    connection.scalar(
+                        text("SELECT decision::text FROM tool_approvals WHERE id = :id"),
+                        {"id": approval_id},
+                    )
+                    == "respond"
+                )
         finally:
             engine.dispose()
 

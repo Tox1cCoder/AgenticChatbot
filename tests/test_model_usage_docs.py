@@ -103,6 +103,8 @@ def test_runbook_covers_deployment_and_maintenance() -> None:
         "z3a4b5c6d7e8",
         "a4b5c6d7e8f9",
         "b5c6d7e8f9a0",
+        "Drain old API/worker approval writers",
+        "persists `DecisionType.value`",
         "No historical backfill",
         "MODEL_USAGE_TRACKING_ENABLED",
         "MODEL_USAGE_UI_ENABLED",

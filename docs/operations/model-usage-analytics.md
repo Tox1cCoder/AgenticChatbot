@@ -25,6 +25,13 @@ x1y2z3a4b5c6
 
 Deploy schema before code, then enable collection before presentation:
 
+For a database created by the original `6c6598a9eb26`, the current head also
+normalizes tool-approval enum labels. Drain old API/worker approval writers and
+apply `b5c6d7e8f9a0` together with code that persists `DecisionType.value`; do
+not leave an older uppercase-mapped process running during this repair. The
+ordinary schema-first sequence below applies once that compatibility boundary
+has been handled.
+
 1. Back up PostgreSQL, confirm Redis and the `summary` worker are reachable,
    validate the 17 settings, and begin with both feature flags disabled.
 2. Run `.venv\Scripts\python.exe -m alembic upgrade head`. Migration
