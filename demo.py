@@ -4888,11 +4888,35 @@ def render_sidebar():
                     st.rerun()
 
 
+@st.cache_data(show_spinner=False)
+def _fetch_chat_image_data_uri(relative_url: str, auth_token: str | None) -> str | None:
+    """Fetch an authenticated `/chat-images/<id>` reference and return a
+    `data:` URI. The browser cannot send the app's Bearer token on a bare
+    `<img src>`, so image bytes for the protected endpoint are pulled here
+    (server-side) and inlined. Cached per (url, token)."""
+    headers = {}
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    try:
+        response = get_http_session().get(
+            f"{API_BASE_URL}{relative_url}",
+            headers=headers,
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+    except Exception:
+        return None
+    mime = response.headers.get("Content-Type", "image/png")
+    encoded = base64.b64encode(response.content).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
 def _normalize_image_for_gallery(image: Any, fallback_name: str) -> dict[str, str] | None:
     """Extract `{src, name}` from an attachment-style dict.
 
-    Accepts dicts shaped like `{"url": ...}` (plain URL or `data:` URI) or
-    `{"data": "<base64>", "mime": ...}`. Returns None if neither is usable.
+    Accepts dicts shaped like `{"url": ...}` (a plain/`data:` URL, or a relative
+    `/chat-images/<id>` reference resolved via the authenticated endpoint) or
+    `{"data": "<base64>", "mime": ...}`. Returns None if none is usable.
     """
     if not isinstance(image, dict):
         return None
@@ -4901,14 +4925,23 @@ def _normalize_image_for_gallery(image: Any, fallback_name: str) -> dict[str, st
 
     url_value = image.get("url")
     if isinstance(url_value, str) and url_value.strip():
-        return {"src": url_value.strip(), "name": name}
+        url_value = url_value.strip()
+        if url_value.startswith("/"):
+            resolved = _fetch_chat_image_data_uri(
+                url_value, st.session_state.get("auth_token")
+            )
+            if resolved:
+                return {"src": resolved, "name": name}
+            # Fall through to any legacy inline data before giving up.
+        else:
+            return {"src": url_value, "name": name}
 
-    data_b64 = image.get("data")
+    data_b64 = image.get("data") or image.get("b64_data")
     if isinstance(data_b64, str) and data_b64.strip():
         payload = data_b64.strip()
         if payload.startswith("data:"):
             return {"src": payload, "name": name}
-        mime = image.get("mime", "image/png")
+        mime = image.get("mime") or image.get("mime_type") or "image/png"
         return {"src": f"data:{mime};base64,{payload}", "name": name}
 
     return None
@@ -5513,9 +5546,15 @@ def render_agent_images(message_metadata: dict):
         normalized = _normalize_image_for_gallery(image, f"Image {idx}")
         if not normalized:
             continue
-        # Base64-inlined images are model-generated content; remote URLs are
-        # search/result thumbnails that read better as a compact grid.
-        is_generated = isinstance(image, dict) and bool(image.get("data")) and not image.get("url")
+        # Model-generated content is either inline base64 or a stored reference
+        # (image_id / relative /chat-images url); remote http(s) URLs are
+        # search-result thumbnails that read better as a compact grid.
+        url = image.get("url") if isinstance(image, dict) else None
+        is_generated = isinstance(image, dict) and (
+            bool(image.get("image_id"))
+            or (isinstance(url, str) and url.startswith("/chat-images/"))
+            or (bool(image.get("data") or image.get("b64_data")) and not url)
+        )
         (generated if is_generated else thumbs).append(normalized)
 
     if generated:
