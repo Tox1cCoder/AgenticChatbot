@@ -723,10 +723,10 @@ class TestWidgetsMCPServer:
 # Agent scoping — widget tool exclusion
 # ---------------------------------------------------------------------------
 class TestWidgetAgentScoping:
-    def test_excluded_agent_keys_contain_canvas_and_image(self):
+    def test_permanent_exclusion_is_reserved_for_non_visual_agents(self):
         from app.ai.agents.base_agent import _WIDGET_EXCLUDED_AGENT_KEYS
 
-        assert "canvas" in _WIDGET_EXCLUDED_AGENT_KEYS
+        assert "canvas" not in _WIDGET_EXCLUDED_AGENT_KEYS
         assert "image_generator" in _WIDGET_EXCLUDED_AGENT_KEYS
         assert "planning" in _WIDGET_EXCLUDED_AGENT_KEYS
 
@@ -755,6 +755,37 @@ class TestWidgetAgentScoping:
         monkeypatch.setattr(settings, "planning_agent_allowed_tools", ["tavily"], raising=False)
 
         assert _get_effective_tool_allowlist("planning") == ["tavily"]
+
+    def test_canvas_edit_deferred_binding_omits_widget_mutations(self):
+        from app.ai.canvas_state import CANVAS_EDIT_DENIED_TOOL_NAMES
+        from app.ai.deferred_tool_binding import build_deferred_tool_list
+
+        async def _noop(**kwargs):
+            return kwargs
+
+        tools = [
+            StructuredTool.from_function(
+                coroutine=_noop,
+                name=name,
+                description=name,
+            )
+            for name in ("widget_create", "widget_update", "widget_get_state")
+        ]
+
+        bound = build_deferred_tool_list(
+            conversation_id=None,
+            agent_key="canvas",
+            mcp_manager=None,
+            all_mcp_tools=[],
+            internal_tools=tools,
+            excluded_tool_names=CANVAS_EDIT_DENIED_TOOL_NAMES,
+        )
+
+        names = {tool.name for tool in bound}
+        assert "widget_create" not in names
+        assert "widget_update" not in names
+        assert "widget_get_state" in names
+        assert "tool_search" in names
 
 
 # ---------------------------------------------------------------------------

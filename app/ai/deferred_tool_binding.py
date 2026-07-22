@@ -259,6 +259,7 @@ def build_deferred_tool_list(
     all_mcp_tools: list[BaseTool],
     internal_tools: list[BaseTool] | None = None,
     allowlist: list[str] | None = None,
+    excluded_tool_names: set[str] | frozenset[str] | None = None,
 ) -> list[BaseTool]:
     """
     Build the complete tool list for an agent with deferred loading enabled.
@@ -282,16 +283,20 @@ def build_deferred_tool_list(
     """
     result_tools: list[BaseTool] = []
     seen_names: set[str] = set()
+    excluded = set(excluded_tool_names or ())
 
     # 1. Add internal tools first
     if internal_tools:
         for tool in internal_tools:
-            if tool.name not in seen_names:
+            if tool.name not in seen_names and tool.name not in excluded:
                 result_tools.append(tool)
                 seen_names.add(tool.name)
 
     # 2. Add tool_search tool
-    tool_search = create_tool_search_tool(allowlist=allowlist)
+    tool_search = create_tool_search_tool(
+        allowlist=allowlist,
+        excluded_tool_names=excluded,
+    )
     if tool_search.name not in seen_names:
         result_tools.append(tool_search)
         seen_names.add(tool_search.name)
@@ -300,7 +305,7 @@ def build_deferred_tool_list(
     if mcp_manager and all_mcp_tools:
         pinned = get_pinned_tools(mcp_manager, all_mcp_tools, agent_key=agent_key)
         for tool in pinned:
-            if tool.name not in seen_names:
+            if tool.name not in seen_names and tool.name not in excluded:
                 result_tools.append(tool)
                 seen_names.add(tool.name)
 
@@ -310,7 +315,7 @@ def build_deferred_tool_list(
             conversation_id, agent_key, mcp_manager, all_mcp_tools
         )
         for tool in deferred:
-            if tool.name not in seen_names:
+            if tool.name not in seen_names and tool.name not in excluded:
                 result_tools.append(tool)
                 seen_names.add(tool.name)
 

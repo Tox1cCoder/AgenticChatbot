@@ -147,7 +147,7 @@ _OPENAI_REASONING_SUMMARY_DISABLED_USERS: set[str] = set()
 # Agents that must NOT receive widget tools.
 # Widgets are for in-chat visual aids on chat/rag/search agents only.
 _WIDGET_TARGET_AGENT_KEYS = {"chat", "rag", "search"}
-_WIDGET_EXCLUDED_AGENT_KEYS = {"canvas", "image_generator", "planning"}
+_WIDGET_EXCLUDED_AGENT_KEYS = {"image_generator", "planning"}
 _WIDGET_TOOL_NAMES = {
     "widget_create",
     "widget_update",
@@ -465,6 +465,7 @@ class BaseAgent(ABC):
         device_id: str | None = None,
         tool_scope: str | None = None,
         include_hand_off: bool | None = None,
+        excluded_tool_names: set[str] | frozenset[str] | None = None,
     ) -> list[BaseTool]:
         """
         Get the tools to bind to the model for this invocation.
@@ -539,6 +540,7 @@ class BaseAgent(ABC):
                 all_mcp_tools=[] if client_only_scope else self.tools,
                 internal_tools=internal_tools,
                 allowlist=self._get_allowlist(),
+                excluded_tool_names=excluded_tool_names,
             )
             if conversation_id and remote_tools:
                 from ..deferred_tool_state import get_deferred_tool_state
@@ -579,6 +581,11 @@ class BaseAgent(ABC):
         if include_hand_off is False:
             tools = [tool for tool in tools if getattr(tool, "name", None) != "hand_off"]
 
+        if excluded_tool_names:
+            tools = [
+                tool for tool in tools if getattr(tool, "name", None) not in excluded_tool_names
+            ]
+
         seen_names = {tool.name for tool in tools}
         for tool in remote_tools:
             if tool.name not in seen_names:
@@ -609,6 +616,7 @@ class BaseAgent(ABC):
         user_id: str | None = None,
         device_id: str | None = None,
         include_hand_off: bool | None = None,
+        excluded_tool_names: set[str] | frozenset[str] | None = None,
     ) -> Any:
         """
         Bind tools to the model for invocation.
@@ -633,6 +641,7 @@ class BaseAgent(ABC):
             user_id=user_id,
             device_id=device_id,
             include_hand_off=include_hand_off,
+            excluded_tool_names=excluded_tool_names,
         )
 
         if not tools or llm is None:
@@ -1186,6 +1195,7 @@ class BaseAgent(ABC):
         internal_tools: list[BaseTool] | None = None,
         run_config: RunnableConfig | None = None,
         include_hand_off: bool | None = None,
+        excluded_tool_names: set[str] | frozenset[str] | None = None,
         **system_prompt_kwargs: Any,
     ) -> AgentResponse:
         try:
@@ -1210,6 +1220,7 @@ class BaseAgent(ABC):
                     user_id=user_id,
                     device_id=device_id,
                     include_hand_off=include_hand_off,
+                    excluded_tool_names=excluded_tool_names,
                 )
                 bound_tools = self._get_tools_for_binding(
                     conversation_id=conversation_id,
@@ -1217,6 +1228,7 @@ class BaseAgent(ABC):
                     user_id=user_id,
                     device_id=device_id,
                     include_hand_off=include_hand_off,
+                    excluded_tool_names=excluded_tool_names,
                 )
             has_tool_context = any(
                 isinstance(msg, ToolMessage)

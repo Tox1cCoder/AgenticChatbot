@@ -15,6 +15,7 @@ from app.ai.hitl_config import (
     policy_from_context,
     redact_sensitive_args,
 )
+from app.ai.canvas_state import CANVAS_EDIT_DENIED_TOOL_NAMES
 from app.ai.mcp_registry import get_global_mcp_manager
 from app.ai.schemas import GraphState, GraphStateView
 from app.ai.token_instrumentation import truncate_tool_result
@@ -90,6 +91,51 @@ class ToolLoopMixin:
             # Return early so _route_tool_output can send the agent back to re-respond.
             return state
 
+        denied_feedback: dict[str, str] = {}
+        if (
+            state.get("selected_agent") == "canvas_agent"
+            and GraphStateView(state).context().get("canvas_edit_mode") is True
+        ):
+            for tool_call in tool_calls_pending:
+                normalized = normalize_tool_call(tool_call)
+                if normalized.get("name") in CANVAS_EDIT_DENIED_TOOL_NAMES:
+                    tool_call_id = normalized.get("id")
+                    if tool_call_id:
+                        denied_feedback[str(tool_call_id)] = (
+                            "This widget mutation is unavailable during a canvas edit. "
+                            "Return the complete updated canvas artifact or hand off the "
+                            "inline-widget work."
+                        )
+
+        denied_outputs = [
+            {
+                "tool_call_id": normalize_tool_call(tool_call).get("id"),
+                "name": normalize_tool_call(tool_call).get("name"),
+                "content": denied_feedback[str(normalize_tool_call(tool_call).get("id"))],
+            }
+            for tool_call in tool_calls_pending
+            if str(normalize_tool_call(tool_call).get("id")) in denied_feedback
+        ]
+        denied_artifacts = build_rejected_tool_artifacts(
+            tool_calls=tool_calls_pending,
+            rejected_feedback=denied_feedback,
+        )
+        tool_calls_pending = [
+            tool_call
+            for tool_call in tool_calls_pending
+            if str(normalize_tool_call(tool_call).get("id")) not in denied_feedback
+        ]
+
+        if not tool_calls_pending:
+            self._apply_tool_outputs_to_state(
+                state,
+                tool_outputs=denied_outputs,
+                tool_artifacts=denied_artifacts,
+                all_images=[],
+                truncate_outputs=True,
+            )
+            return state
+
         selected_agent_name = state.get("selected_agent")
         agent = self._resolve_runtime_agent(state, selected_agent_name)
         if not agent:
@@ -123,6 +169,8 @@ class ToolLoopMixin:
             capture_images=True,
             internal_tools=scoped_internal_tools,
         )
+        tool_outputs = [*denied_outputs, *tool_outputs]
+        tool_artifacts = [*denied_artifacts, *tool_artifacts]
 
         # Inter-agent delegation is interpreted before ToolMessages are
         # persisted so a rejected handoff rewrites its one matching output

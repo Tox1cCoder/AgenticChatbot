@@ -263,6 +263,61 @@ async def test_execute_tool_search_passes_query_through_unchanged(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_tool_search_excludes_canvas_edit_mutations_before_autoload(monkeypatch):
+    class FakeCatalog:
+        def search(self, query=None, top_k=5, server_name=None, allowlist=None):
+            return [
+                ToolDescriptor(
+                    tool_name="widget_create",
+                    server_name="widgets",
+                    description="Create a live inline widget.",
+                    arg_names=[],
+                    required_arg_names=[],
+                    schema_fingerprint="fp-create",
+                ),
+                ToolDescriptor(
+                    tool_name="widget_get_state",
+                    server_name="widgets",
+                    description="Read a live widget state.",
+                    arg_names=[],
+                    required_arg_names=[],
+                    schema_fingerprint="fp-read",
+                ),
+            ]
+
+        def is_ambiguous(self, tool_name):
+            return False
+
+    async def fake_get_global_mcp_manager():
+        return object()
+
+    async def fake_get_tool_catalog(_manager):
+        return FakeCatalog()
+
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_global_mcp_manager",
+        fake_get_global_mcp_manager,
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_tool_catalog",
+        fake_get_tool_catalog,
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_tool_context",
+        lambda: ToolContext(),
+    )
+
+    result = await _execute_tool_search(
+        query="widget",
+        excluded_tool_names={"widget_create", "widget_update"},
+    )
+
+    names = {item["tool_name"] for item in result["results"]}
+    assert "widget_create" not in names
+    assert "widget_get_state" in names
+
+
+@pytest.mark.asyncio
 async def test_execute_tool_search_promotes_named_integration_query_to_server_inventory(
     monkeypatch,
 ):

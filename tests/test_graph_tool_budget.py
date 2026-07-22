@@ -243,6 +243,53 @@ async def test_tool_node_resolves_pending_calls_when_tool_map_empty(monkeypatch)
     assert "missing_tool" in updated["messages"][-1].content
 
 
+@pytest.mark.asyncio
+async def test_canvas_edit_rejects_stale_widget_mutation_before_execution(monkeypatch):
+    graph = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+
+    class _Agent:
+        agent_config_key = "canvas"
+        tool_state_key = "canvas"
+
+    graph._resolve_runtime_agent = lambda state, selected: _Agent()
+    graph._handoff_tool_for_agent = lambda state, selected: None
+
+    async def _tool_map(*args, **kwargs):
+        return {"widget_create": object()}
+
+    async def _must_not_execute(**kwargs):
+        raise AssertionError("denied widget mutation reached execution")
+
+    monkeypatch.setattr("app.ai.workflow.tool_loop.ensure_agent_tool_map", _tool_map)
+    graph._execute_agent_tool_calls = _must_not_execute
+
+    state = {
+        "selected_agent": "canvas_agent",
+        "messages": [
+            HumanMessage(content="edit the canvas"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call-widget",
+                        "name": "widget_create",
+                        "args": {},
+                    }
+                ],
+            ),
+        ],
+        "context": {"canvas_edit_mode": True},
+    }
+
+    updated = await graph._tool_node(state)
+
+    assert isinstance(updated["messages"][-1], ToolMessage)
+    assert updated["messages"][-1].tool_call_id == "call-widget"
+    assert "canvas edit" in updated["messages"][-1].content.lower()
+    artifact = updated["context"]["tool_artifacts"][-1]
+    assert artifact["status"] == "rejected"
+
+
 def test_apply_tool_outputs_tracks_same_error_streak(monkeypatch):
     monkeypatch.setattr(settings, "tool_execution_consecutive_errors_limit", 2, raising=False)
     graph = MultiAgentWorkflow.__new__(MultiAgentWorkflow)

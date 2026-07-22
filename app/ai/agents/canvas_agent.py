@@ -30,7 +30,11 @@ from langchain_core.messages import HumanMessage as LCHumanMessage
 
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..schemas import AgentMessage, AgentResponse, AgentType
-from ..canvas_state import CANVAS_ARTIFACT_ID, CanvasArtifactSnapshot
+from ..canvas_state import (
+    CANVAS_ARTIFACT_ID,
+    CANVAS_EDIT_DENIED_TOOL_NAMES,
+    CanvasArtifactSnapshot,
+)
 from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
@@ -286,6 +290,9 @@ class CanvasAgent(BaseAgent):
             user_id=user_id,
             device_id=device_id,
             model_request=model_request,
+            excluded_tool_names=(
+                CANVAS_EDIT_DENIED_TOOL_NAMES if previous_artifact is not None else None
+            ),
             **system_prompt_kwargs,
         )
 

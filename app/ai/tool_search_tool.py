@@ -214,6 +214,7 @@ async def _execute_tool_search(
     allowlist: list[str] | None = None,
     server_allowlist: list[str] | None | object = _ALLOWLIST_UNSET,
     client_allowlist: list[str] | None | object = _ALLOWLIST_UNSET,
+    excluded_tool_names: set[str] | frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """
     Core implementation of tool search logic.
@@ -239,6 +240,7 @@ async def _execute_tool_search(
     effective_client_allowlist = (
         allowlist if client_allowlist is _ALLOWLIST_UNSET else client_allowlist
     )
+    excluded = set(excluded_tool_names or ())
     # Catalogs treat an empty allowlist as "no filter". For explicit per-origin
     # scoping an empty list must mean "no tools from this origin".
     if server_allowlist is not _ALLOWLIST_UNSET and effective_server_allowlist == []:
@@ -423,6 +425,18 @@ async def _execute_tool_search(
         query=query,
         top_k=effective_top_k + 1,  # Request one extra to detect truncation
     )
+
+    if excluded:
+        kept_pairs = [
+            (public, internal)
+            for public, internal in zip(public_results, internal_results, strict=True)
+            if public.get("tool_name") not in excluded
+            and public.get("call_name") not in excluded
+            and internal.get("tool_name") not in excluded
+            and internal.get("call_name") not in excluded
+        ]
+        public_results = [public for public, _ in kept_pairs]
+        internal_results = [internal for _, internal in kept_pairs]
 
     # Check if truncated
     truncated = len(public_results) > effective_top_k
@@ -864,6 +878,7 @@ def create_tool_search_tool(
     *,
     server_allowlist: list[str] | None | object = _ALLOWLIST_UNSET,
     client_allowlist: list[str] | None | object = _ALLOWLIST_UNSET,
+    excluded_tool_names: set[str] | frozenset[str] | None = None,
 ):
     """
     Create a tool_search tool with a specific allowlist baked in.
@@ -921,6 +936,7 @@ def create_tool_search_tool(
             allowlist=allowlist,
             server_allowlist=server_allowlist,
             client_allowlist=client_allowlist,
+            excluded_tool_names=excluded_tool_names,
         )
         return _serialize_tool_search_output(result)
 
