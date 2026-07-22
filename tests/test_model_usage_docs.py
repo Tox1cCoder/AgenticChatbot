@@ -9,6 +9,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 README = ROOT / "README.md"
 RUNBOOK = ROOT / "docs" / "operations" / "model-usage-analytics.md"
@@ -63,7 +65,7 @@ def _postman_request_url(request: dict) -> tuple[str, dict[str, list[str]]]:
 
 def _aware_datetime(value: str) -> datetime:
     assert re.fullmatch(
-        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})",
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?[+-]\d{2}:\d{2}",
         value,
     )
     parsed = datetime.fromisoformat(value)
@@ -219,6 +221,11 @@ def test_runbook_documents_account_deletion_across_all_data_stores() -> None:
     assert "LangSmith" in verification_text
 
 
+def test_postman_timestamp_parser_requires_a_numeric_offset() -> None:
+    with pytest.raises(AssertionError):
+        _aware_datetime("2026-07-15T00:00:00Z")
+
+
 def test_postman_has_authenticated_dashboard_and_conversation_examples() -> None:
     collection = json.loads(POSTMAN.read_text(encoding="utf-8"))
     folder = next(item for item in collection["item"] if item["name"] == "Model Usage Analytics")
@@ -236,11 +243,13 @@ def test_postman_has_authenticated_dashboard_and_conversation_examples() -> None
     dashboard_from = _aware_datetime(dashboard_query["from"][0])
     dashboard_to = _aware_datetime(dashboard_query["to"][0])
     bangkok = ZoneInfo("Asia/Bangkok")
-    assert dashboard_from.astimezone(bangkok).time().isoformat() == "00:00:00"
-    assert dashboard_to.astimezone(bangkok).time().isoformat() == "00:00:00"
-    assert dashboard_from.utcoffset() == dashboard_from.astimezone(bangkok).utcoffset()
-    assert dashboard_to.utcoffset() == dashboard_to.astimezone(bangkok).utcoffset()
-    assert dashboard_to > dashboard_from
+    dashboard_from_local = dashboard_from.astimezone(bangkok)
+    dashboard_to_local = dashboard_to.astimezone(bangkok)
+    assert dashboard_from_local.time().isoformat() == "00:00:00"
+    assert dashboard_to_local.time().isoformat() == "00:00:00"
+    assert dashboard_from.utcoffset() == dashboard_from_local.utcoffset()
+    assert dashboard_to.utcoffset() == dashboard_to_local.utcoffset()
+    assert dashboard_to_local.date() - dashboard_from_local.date() == timedelta(days=7)
 
     conversation = requests["Conversation Usage - Hourly 7 Days"]
     assert conversation["method"] == "GET"
