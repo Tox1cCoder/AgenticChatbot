@@ -1,4 +1,5 @@
 from app.models.agent_model_config import AgentModelConfig
+from app.models.chat_image import ChatImage
 from app.models.client_device import ClientDevice, DevicePlatform, DeviceStatus
 from app.models.conversation import Conversation
 from app.models.conversation_memory_summary import ConversationMemorySummary
@@ -40,6 +41,7 @@ __all__ = [
     "CustomAgent",
     "ConversationCustomAgent",
     "Message",
+    "ChatImage",
     "Feedback",
     "Document",
     "DocumentChunk",
