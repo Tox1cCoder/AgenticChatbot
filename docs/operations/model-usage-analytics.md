@@ -217,28 +217,88 @@ or provider credentials are stored in the ledger, rollups, Redis failure keys,
 retry payloads, health output, or metric labels. This boundary is mandatory;
 do not weaken it for debugging.
 
+### Queued failed-write lifecycle
+
+“Content-free” does not mean anonymous. A failed-write payload can include user,
+conversation, message, and document IDs when the call was attributable. It also
+contains the operation ID and attempt, correlation and LangSmith run IDs,
+provider/model/status/timing dimensions, a bounded error code, and normalized
+usage. Classify the broker payload as user-linked telemetry even though it has no
+prompt, response, tool argument, or raw provider payload.
+
+The initial Celery `.delay(payload)` call and the retry task set no
+analytics-specific expiry or TTL. The Redis failure-store TTL controls only
+aggregate health counters; it does not expire queued commands. Likewise, the
+broker visibility timeout is not a privacy TTL: it governs redelivery of an
+unacknowledged task. A payload remains subject to the broker's configured
+lifecycle until a worker acknowledges it or an operator purges it. On failure,
+the worker schedules exponential countdown retries up to
+`MODEL_USAGE_RETRY_MAX_ATTEMPTS`; exhaustion records a dropped outcome and the
+task fails. The application configures no dedicated dead-letter queue. If the
+deployment adds a DLQ or failed-task archive, apply the same retention and
+deletion controls there.
+
 Deleting a user cascades to both raw `model_usage_events` and aggregated
 `model_usage_minute` rows through PostgreSQL foreign keys. Conversation deletion
 removes conversation rollups and clears the nullable conversation reference on
-raw events while the user exists. Include both analytics tables when verifying
-account deletion and retention audits.
+raw events while the user exists.
+
+Before account deletion, block new authenticated work for the user, then drain or
+purge that user's queued, scheduled, reserved, and deployment-DLQ failed-write
+payloads. Draining requires a tracking-enabled, schema-compatible `summary`
+worker; a selective purge must use broker tooling that preserves other users'
+tasks. After the database delete, any racing replay that still carries deleted
+foreign keys is rejected as `ModelUsageReferenceError` and retried until the
+configured limit. PostgreSQL reference validation means it cannot recreate the
+user or tenant data, but the rejected payload still retains identifiers until it
+is acknowledged, exhausted, or purged.
+
+LangSmith is an external data store. The application database cascade does not
+erase external traces. Honor the configured LangSmith retention/deletion policy
+through the provider project/API for every project used by the deployment. Build
+the authorized deletion inventory before the database cascade, then locate and
+verify traces by keyed user hash or correlation metadata without putting raw IDs,
+hashes, or correlation values into tickets, logs, dashboards, or metrics.
+
+### Account-deletion verification
+
+- **PostgreSQL:** verify `model_usage_events` and `model_usage_minute` have no
+  rows for the deleted user, and verify the user row itself is absent.
+- **Broker:** inspect queued, scheduled, and reserved tasks plus the broker and
+  any deployment-managed DLQ or failed-task archive. Confirm no failed-write
+  payload remains for the deletion inventory; do not copy identifiers into the
+  audit record.
+- **LangSmith:** in every configured project, verify the provider project/API
+  retention or deletion result using the ephemeral keyed hash/correlation
+  inventory. Record only the outcome and policy reference, not tenant-linked
+  values.
 
 ## Rollback
 
-Rollback ordering is the reverse of enablement:
+Rollback is feature-flag first. A normal rollback leaves the additive usage
+tables and timestamp indexes in place:
 
 1. Set `MODEL_USAGE_UI_ENABLED=false` everywhere and verify dashboard and
    conversation routes are hidden.
-2. Set `MODEL_USAGE_TRACKING_ENABLED=false` on API producers and restart them to
-   disable new collection. Keep a schema-compatible, tracking-enabled `summary`
-   worker running while it drains failed-write retries; then disable tracking on
-   that worker. Finish this sequence before rolling back code/schema.
-3. Roll back application, worker, sidecar, and UI code to a schema-compatible
-   release. In a normal rollback, leave the additive usage tables in place.
-4. From the current head, `.venv\Scripts\python.exe -m alembic downgrade
-   z3a4b5c6d7e8` removes only the latest timestamp-index migration. This is an
-   index rollback, not a removal of the usage ledger.
-5. Test the table migration only in an isolated scratch database: bring the
+2. Set `MODEL_USAGE_TRACKING_ENABLED=false` and restart API producers to disable
+   new collection on API producers.
+3. Keep a schema-compatible, tracking-enabled current-release `summary` worker
+   running while it can drain failed-write retries. Then disable tracking on that
+   worker and stop it.
+4. The normal rollback path performs no schema action. If an optional index-only
+   downgrade is required, perform it now, using the current release's migration
+   artifacts before any old code is deployed:
+
+   ```powershell
+   .venv\Scripts\python.exe -m alembic downgrade z3a4b5c6d7e8
+   ```
+
+   This removes only migration `a4b5c6d7e8f9`'s timestamp indexes. It does not
+   remove the usage ledger. Skip this step for the normal path.
+5. Deploy the previous application, worker, sidecar, and UI release only after
+   the optional current-artifact migration step has completed or been skipped.
+   Keep presentation and tracking disabled until compatibility is verified.
+6. Test the table migration only in an isolated scratch database: bring the
    scratch schema to `x1y2z3a4b5c6`, upgrade to `y2z3a4b5c6d7`, verify empty
    usage tables, then downgrade to `x1y2z3a4b5c6` and discard the database.
 
