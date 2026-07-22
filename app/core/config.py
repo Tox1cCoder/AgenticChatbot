@@ -868,6 +868,21 @@ class Settings(BaseSettings):
         default="app/storage/document_images",
         description="Storage path for extracted document images",
     )
+    chat_images_storage_path: str = Field(
+        default="app/storage/chat_images",
+        description="Content-addressed storage root for externalized chat image bytes.",
+    )
+    chat_image_max_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        description="Maximum decoded byte size accepted when externalizing a chat image.",
+    )
+    chat_image_history_rehydrate_limit: int = Field(
+        default=4,
+        description=(
+            "Max historical stored images re-sent to the model per request "
+            "(most recent first). 0 disables the cap."
+        ),
+    )
     parse_artifacts_storage_path: str = Field(
         default="app/storage/parse_artifacts",
         description="Directory where parse artifact JSON files are stored.",
@@ -1530,6 +1545,7 @@ class Settings(BaseSettings):
         "model_usage_health_lookback_minutes",
         "model_usage_health_failure_window_seconds",
         "model_usage_failure_store_ttl_seconds",
+        "chat_image_max_bytes",
         mode="before",
     )
     @classmethod
@@ -1632,6 +1648,7 @@ class Settings(BaseSettings):
         "conversation_summary_keep_recent_turns",
         "conversation_summary_safety_margin_tokens",
         "conversation_summary_default_reserved_output_tokens",
+        "chat_image_history_rehydrate_limit",
         mode="before",
     )
     @classmethod
