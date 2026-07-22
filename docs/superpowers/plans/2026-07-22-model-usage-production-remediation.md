@@ -129,7 +129,7 @@ def test_conversation_delete_removes_events_and_rollups_without_reconciliation_r
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_model_usage_schema.py tests/test_model_usage_conversation_cascade_migration.py -q
+python -m pytest tests/test_model_usage_schema.py tests/test_model_usage_conversation_cascade_migration.py -q
 ```
 
 Expected: the ORM assertion fails and the migration import is missing. If `TEST_DATABASE_URL` is set, the live regression also fails because the event FK currently nulls its conversation reference.
@@ -176,8 +176,8 @@ Set `_HEAD = "c6d7e8f9a0b1"` in the full-chain test and assert the inspected `fk
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_model_usage_schema.py tests/test_model_usage_conversation_cascade_migration.py tests/test_model_usage_migration.py tests/test_model_usage_docs.py -q
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m alembic heads
+python -m pytest tests/test_model_usage_schema.py tests/test_model_usage_conversation_cascade_migration.py tests/test_model_usage_migration.py tests/test_model_usage_docs.py -q
+python -m alembic heads
 ```
 
 Expected: all tests pass and Alembic prints exactly `c6d7e8f9a0b1 (head)`. Live PostgreSQL tests may skip only when `TEST_DATABASE_URL` is absent.
@@ -261,7 +261,7 @@ The live repository test must insert user and assistant messages with different 
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_model_usage_service.py -k "latest or context" -q
+python -m pytest tests/test_model_usage_service.py -k "latest or context" -q
 ```
 
 Expected: failures mention the missing `get_latest_conversation_context_window` method and the service's obsolete raw-event lookup.
@@ -324,7 +324,7 @@ def _latest_context_window(raw: Any | None) -> ContextWindowMetadata | None:
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_model_usage_service.py tests/integration/test_model_usage_repository_postgres.py -q
+python -m pytest tests/test_model_usage_service.py tests/integration/test_model_usage_repository_postgres.py -q
 ```
 
 Expected: unit tests pass; PostgreSQL tests pass when configured or report only the existing environment skip.
@@ -386,7 +386,7 @@ async def test_usage_transform_failure_keeps_original_usage_and_response(
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_model_usage_recorder.py -k "transform" -q
+python -m pytest tests/test_model_usage_recorder.py -k "transform" -q
 ```
 
 Expected: the recorder rejects the new `usage_transform` keyword.
@@ -446,7 +446,7 @@ The image-agent test must provide a raw model response with two inline image blo
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_model_usage_recorder.py tests/test_model_usage_image_generation.py -q
+python -m pytest tests/test_model_usage_recorder.py tests/test_model_usage_image_generation.py -q
 ```
 
 Expected: all recorder and image usage tests pass.
@@ -498,7 +498,7 @@ assert response.metadata["context_window"] == {
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_model_usage_image_generation.py -k "context_window" -q
+python -m pytest tests/test_model_usage_image_generation.py -k "context_window" -q
 ```
 
 Expected: response metadata still contains the prompt model's gauge or has no terminal image usage.
@@ -548,7 +548,7 @@ Keep image attachment and narrative behavior unchanged. Do not let `_generate_us
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_model_usage_image_generation.py tests/test_image_generation_providers.py -q
+python -m pytest tests/test_model_usage_image_generation.py tests/test_image_generation_providers.py -q
 ```
 
 Expected: all image provider, streaming, cancellation, accounting, and gauge tests pass.
@@ -607,7 +607,7 @@ Also retain a legacy test proving metadata without `limit_type` still maps `max_
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_model_context_metadata.py tests/test_provider_model_context_metadata.py -k "limit or context_window" -q
+python -m pytest tests/test_model_context_metadata.py tests/test_provider_model_context_metadata.py -k "limit or context_window" -q
 ```
 
 Expected: `limit_type` is absent from catalog fields and separate-I/O returns as shared context.
@@ -660,7 +660,7 @@ Extend `_CONTEXT_FIELD_KEYS` in the provider tests so recommended-model flagging
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_model_context_metadata.py tests/test_provider_model_context_metadata.py -q
+python -m pytest tests/test_model_context_metadata.py tests/test_provider_model_context_metadata.py -q
 ```
 
 Expected: all shared, separate-I/O, unknown, provider precedence, and schema tests pass.
@@ -701,7 +701,7 @@ def test_image_embedding_without_provider_usage_is_unavailable(monkeypatch):
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_rag_embedding_service.py -k "image_embedding_without_provider_usage" -q
+python -m pytest tests/test_rag_embedding_service.py -k "image_embedding_without_provider_usage" -q
 ```
 
 Expected: usage is `locally_estimated` with a misleading `input_tokens == 0`.
@@ -727,7 +727,7 @@ return NormalizedUsage(input_tokens=total, source="locally_estimated")
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_rag_embedding_service.py -q
+python -m pytest tests/test_rag_embedding_service.py -q
 ```
 
 Expected: image-only usage is unavailable and existing text batch estimates remain positive.
@@ -780,7 +780,7 @@ def test_contract_covers_capability_gating_and_message_gauge_authority() -> None
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_model_usage_ai_sdk_contract.py -q
+python -m pytest tests/test_model_usage_ai_sdk_contract.py -q
 ```
 
 Expected: capability example and new implementation guidance are missing.
@@ -818,7 +818,7 @@ Keep the detailed usage contract in one file; do not duplicate all TypeScript ty
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_model_usage_ai_sdk_contract.py tests/test_model_usage_api.py tests/test_ai_sdk_context_window.py tests/test_ai_sdk_v6_stream_contract.py -q
+python -m pytest tests/test_model_usage_ai_sdk_contract.py tests/test_model_usage_api.py tests/test_ai_sdk_context_window.py tests/test_ai_sdk_v6_stream_contract.py -q
 ```
 
 Expected: Markdown examples validate against actual Pydantic schemas and existing AI SDK stream ordering remains unchanged.
@@ -841,7 +841,7 @@ git commit -m "docs: publish AI SDK usage frontend contract"
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m ruff check app tests
+python -m ruff check app tests
 rg -n "get_latest_conversation_event|_latest_context_window|tuple\[list\[dict\], str\]" app tests
 rg -n -i "deprecated|legacy|fallback|compat(ibility)?|obsolete" app tests scripts README.md docs plans -g '*.py' -g '*.md'
 rg -n "_CONTEXT_KEYS|_SHARED_CONTEXT_KEYS|_INPUT_LIMIT_KEYS" app tests
@@ -882,7 +882,7 @@ Record that `vulture` was not added as a production dependency; Ruff plus exact 
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -W error -m pytest tests/test_model_usage_recorder.py tests/test_model_usage_service.py tests/test_model_usage_image_generation.py tests/test_model_context_metadata.py tests/test_provider_model_context_metadata.py tests/test_rag_embedding_service.py tests/test_model_usage_ai_sdk_contract.py -q
+python -W error -m pytest tests/test_model_usage_recorder.py tests/test_model_usage_service.py tests/test_model_usage_image_generation.py tests/test_model_context_metadata.py tests/test_provider_model_context_metadata.py tests/test_rag_embedding_service.py tests/test_model_usage_ai_sdk_contract.py -q
 ```
 
 Expected: all tests pass with no deprecation or resource warnings. Any warning introduced or exposed by changed code is fixed at its source; unrelated third-party warnings are reported with exact origin rather than suppressed globally.
@@ -907,7 +907,7 @@ git commit -m "refactor: remove superseded usage paths"
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_model_usage_schema.py tests/test_model_usage_conversation_cascade_migration.py tests/test_model_usage_migration.py tests/test_model_usage_timestamp_index_migration.py tests/test_model_usage_recorder.py tests/test_model_usage_service.py tests/test_model_usage_image_generation.py tests/test_image_generation_providers.py tests/test_model_context_metadata.py tests/test_provider_model_context_metadata.py tests/test_rag_embedding_service.py tests/test_model_usage_api.py tests/test_model_usage_ai_sdk_contract.py tests/test_model_usage_docs.py tests/test_ai_sdk_context_window.py tests/test_ai_sdk_v6_stream_contract.py -q
+python -m pytest tests/test_model_usage_schema.py tests/test_model_usage_conversation_cascade_migration.py tests/test_model_usage_migration.py tests/test_model_usage_timestamp_index_migration.py tests/test_model_usage_recorder.py tests/test_model_usage_service.py tests/test_model_usage_image_generation.py tests/test_image_generation_providers.py tests/test_model_context_metadata.py tests/test_provider_model_context_metadata.py tests/test_rag_embedding_service.py tests/test_model_usage_api.py tests/test_model_usage_ai_sdk_contract.py tests/test_model_usage_docs.py tests/test_ai_sdk_context_window.py tests/test_ai_sdk_v6_stream_contract.py -q
 ```
 
 Expected: all selected tests pass.
@@ -917,7 +917,7 @@ Expected: all selected tests pass.
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/integration/test_model_usage_repository_postgres.py tests/test_alembic_full_chain_postgres.py -q
+python -m pytest tests/integration/test_model_usage_repository_postgres.py tests/test_alembic_full_chain_postgres.py -q
 ```
 
 Expected: all tests pass when `TEST_DATABASE_URL` is configured. If absent, record exact skip counts and do not describe live database coverage as passed.
@@ -927,7 +927,7 @@ Expected: all tests pass when `TEST_DATABASE_URL` is configured. If absent, reco
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -W error -m pytest -q
+python -W error -m pytest -q
 ```
 
 Expected: all non-environmental tests pass. Investigate every new failure with the systematic-debugging workflow; do not weaken assertions or add global warning filters.
@@ -937,9 +937,9 @@ Expected: all non-environmental tests pass. Investigate every new failure with t
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m ruff check .
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m ruff format --check .
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m alembic heads
+python -m ruff check .
+python -m ruff format --check .
+python -m alembic heads
 git diff --check
 git status --short
 ```
