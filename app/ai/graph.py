@@ -1604,6 +1604,7 @@ class MultiAgentWorkflow(
         conversation_history = await self._get_conversation_history(
             conversation_id, user_id, agent_key="chat", state=state
         )
+        previous_artifact = await self._get_active_canvas_snapshot(conversation_id, user_id)
 
         current_turn_messages = self._messages_for_selected_agent(
             state,
@@ -1623,6 +1624,7 @@ class MultiAgentWorkflow(
             user_id=user_id,
             device_id=state.get("device_id"),
             model_request=state.get("model_request"),
+            previous_artifact=previous_artifact,
             **self._final_response_kwargs(state),
             **self._multi_agent_kwargs(state, "canvas_agent"),
         )
