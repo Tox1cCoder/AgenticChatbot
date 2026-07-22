@@ -23,6 +23,7 @@ from app.core.response_constants import (
     NO_RESPONSE_GENERATED,
     UNKNOWN_ERROR,
     build_bot_metadata,
+    externalize_metadata_images,
     extract_response_content,
     normalize_message_content,
 )
@@ -2224,6 +2225,28 @@ class MessageService(IMessageService):
             "status": (task.status.value if hasattr(task.status, "value") else str(task.status)),
         }
 
+    def _externalize_generated_images(
+        self, metadata: dict[str, Any], conversation_id: UUID, user_id: UUID
+    ) -> None:
+        """Move inline base64 in ``metadata['images']`` into storage, in place.
+        No-op when the storage service is absent or there are no images."""
+        if getattr(self, "chat_image_service", None) is None or not user_id:
+            return
+        images = metadata.get("images")
+        if not images:
+            return
+
+        def _store(*, mime: str, data_b64: str, name: str) -> dict:
+            return self.chat_image_service.store(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                mime=mime,
+                data_b64=data_b64,
+                name=name,
+            )
+
+        metadata["images"] = externalize_metadata_images(images, store=_store)
+
     def _externalize_attachments_for_persist(
         self, message_create_data: MessageCreate, user_id: UUID
     ) -> list[dict] | None:
@@ -2234,7 +2257,7 @@ class MessageService(IMessageService):
         attachments = getattr(message_create_data, "attachments", None)
         if not attachments:
             return None
-        if self.chat_image_service is None:
+        if getattr(self, "chat_image_service", None) is None:
             return list(attachments)
         refs: list[dict] = []
         for att in attachments:
@@ -2594,6 +2617,7 @@ class MessageService(IMessageService):
         )
         bot_response_content = finalize_article_content(bot_response, bot_response_content)
         bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
+        self._externalize_generated_images(bot_metadata, conversation_id, user_id)
         if reply_to_user_message_id:
             bot_metadata["reply_to_user_message_id"] = str(reply_to_user_message_id)
 

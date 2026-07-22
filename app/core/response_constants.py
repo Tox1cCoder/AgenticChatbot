@@ -371,6 +371,48 @@ def _filter_unreferenced_images_from_metadata_images(
         metadata.pop("images", None)
 
 
+def externalize_metadata_images(
+    images: list[dict[str, Any]] | None,
+    *,
+    store: Any,
+) -> list[dict[str, Any]] | None:
+    """Replace inline base64 in ``metadata["images"]`` entries with storage
+    references. ``store`` is a callable ``(*, mime, data_b64, name) -> ref``.
+    Entries already carrying a ``url`` (or no inline bytes) are left untouched.
+    A store failure keeps the original inline entry so the image is never lost."""
+    if images is None:
+        return None
+    if not images or store is None:
+        return list(images)
+    out: list[dict[str, Any]] = []
+    for entry in images:
+        if not isinstance(entry, dict):
+            continue
+        inline_b64 = entry.get("data") or entry.get("b64_data")
+        if not inline_b64:
+            out.append(entry)  # remote url or already a reference
+            continue
+        try:
+            ref = store(
+                mime=entry.get("mime") or entry.get("mime_type") or "image/png",
+                data_b64=inline_b64,
+                name=entry.get("name") or "image",
+            )
+        except Exception:
+            _logger.warning(
+                "Generated image externalization failed; keeping inline entry "
+                "code=chat_image_store_failed"
+            )
+            out.append(entry)
+            continue
+        merged = {k: v for k, v in entry.items() if k not in ("data", "b64_data")}
+        merged["image_id"] = ref["image_id"]
+        merged["url"] = ref["url"]
+        merged.setdefault("mime", ref.get("mime"))
+        out.append(merged)
+    return out
+
+
 def build_bot_metadata(
     response: WorkflowResponse | None,
     persona: str | None = None,
