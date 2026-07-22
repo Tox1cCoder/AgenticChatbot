@@ -218,16 +218,24 @@ def _canvas_rich_item_from_artifact(artifact: Any) -> dict[str, Any] | None:
     title = title if isinstance(title, str) and title.strip() else "Canvas"
     language = artifact.get("language")
     language = language if isinstance(language, str) and language.strip() else "html"
+    payload: dict[str, Any] = {
+        "language": language,
+        "title": title,
+        "content": content,
+    }
+    revision = artifact.get("revision")
+    if isinstance(revision, int) and revision > 0:
+        payload["revision"] = revision
+    operation = artifact.get("operation")
+    if operation in {"create", "update"}:
+        payload["operation"] = operation
+
     return {
         "id": "canvas:main",
         "type": RichItemType.canvas_artifact.value,
         "display_policy": RichDisplayPolicy.inline_or_append.value,
         "title": title,
-        "payload": {
-            "language": language,
-            "title": title,
-            "content": content,
-        },
+        "payload": payload,
     }
 
 

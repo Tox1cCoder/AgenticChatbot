@@ -219,6 +219,30 @@ def test_capable_canvas_response_promotes_canvas_rich_item():
     assert metadata["canvas_artifact"]["title"] == "Hello"
 
 
+def test_canvas_revision_metadata_is_additive_in_rich_payload():
+    response = WorkflowResponse(
+        message=WorkflowResponseMessage(content="Updated your page."),
+        metadata={
+            "_inline_rich_response_v1": True,
+            "canvas_artifact": {
+                "artifact_id": "canvas:main",
+                "revision": 2,
+                "operation": "update",
+                "content": "<!doctype html><title>Updated</title>",
+                "language": "html",
+                "title": "Updated",
+            },
+        },
+    )
+
+    metadata = build_bot_metadata(response)
+
+    canvas = next(item for item in metadata["rich_items"] if item["type"] == "canvas_artifact")
+    assert canvas["id"] == "canvas:main"
+    assert canvas["payload"]["revision"] == 2
+    assert canvas["payload"]["operation"] == "update"
+
+
 def test_capable_canvas_response_defaults_missing_title_and_language():
     response = WorkflowResponse(
         message=WorkflowResponseMessage(content="Here is your page."),

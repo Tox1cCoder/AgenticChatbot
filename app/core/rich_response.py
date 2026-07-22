@@ -140,6 +140,8 @@ class CanvasPayload(PublicPayload):
     title: str
     content: str
     preferred_height: int | None = None
+    revision: int | None = Field(default=None, ge=1)
+    operation: Literal["create", "update"] | None = None
 
 
 class CitationPayload(PublicPayload):

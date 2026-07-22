@@ -1234,7 +1234,7 @@ Marker rules:
 | RAG document image | `image:document:<document_image_id>` |
 | Generated image | `image:generated:<assistant_message_id>:<zero_based_index>` |
 | Live widget | `widget:<widget_id>` |
-| Canvas artifact | `canvas:<assistant_message_id>` |
+| Canvas artifact | `canvas:main` (stable across conversation revisions) |
 | Structured citation item | `citation:<assistant_message_id>:<zero_based_index>` |
 
 ### Per-message metadata

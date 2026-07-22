@@ -926,12 +926,18 @@ promoted. `title` is present only when the render carries one.
   "payload": {
     "language": "html",
     "title": "Canvas title",
-    "content": "<!doctype html>..."
+    "content": "<!doctype html>...",
+    "revision": 2,
+    "operation": "update"
   }
 }
 ```
 
 - At most one per message; the id is always `canvas:main`.
+- `payload.revision` and `payload.operation` (`create` or `update`) are optional
+  additive fields. Reconcile equal `canvas:main` ids by keeping the highest
+  revision. Legacy messages omit both fields and normalize to revision 1 when
+  used as the next Canvas edit base.
 - Created only for capable requests (or messages that already have other
   rich-item activity). Non-capable canvas messages expose no canvas on the AI
   SDK wire.
@@ -946,8 +952,9 @@ promoted. `title` is present only when the render carries one.
 - `payload.title` falls back to `Canvas`.
 - `payload.preferred_height` is schema-accepted but never emitted. Use your
   default frame height.
-- A truncated generation still produces an artifact; the assistant text then
-  contains a visible "output was cut off" note. There is no wire flag.
+- A truncated first generation still produces an artifact and a visible
+  "output was cut off" note. A truncated edit does not replace the last valid
+  revision; persisted `canvas_update.status` is `failed` with a bounded reason.
 
 ### Reserved Types
 
