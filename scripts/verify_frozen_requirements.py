@@ -1,4 +1,4 @@
-"""Resolve the complete frozen runtime requirements without installed packages."""
+"""Resolve the Windows/Python 3.11 frozen requirements without installed packages."""
 
 from __future__ import annotations
 
@@ -7,9 +7,17 @@ import sys
 from pathlib import Path
 
 _EXPECTED_PYTHON = (3, 11)
+_EXPECTED_PLATFORM = "win32"
 
 
 def main() -> int:
+    if sys.platform != _EXPECTED_PLATFORM:
+        print(
+            'This frozen CUDA environment is supported only on Windows (sys.platform == "win32").',
+            file=sys.stderr,
+        )
+        return 2
+
     if sys.version_info[:2] != _EXPECTED_PYTHON:
         expected = ".".join(map(str, _EXPECTED_PYTHON))
         actual = f"{sys.version_info.major}.{sys.version_info.minor}"

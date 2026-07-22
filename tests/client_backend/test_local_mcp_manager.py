@@ -16,7 +16,10 @@ from client_backend.core.paths import get_profile_subdir
 from client_backend.core.security import LocalSessionPayload
 from client_backend.main import app
 from client_backend.services import local_mcp_manager as local_mcp_manager_module
-from client_backend.services.local_mcp_manager import LocalMCPManager, shutdown_mcp_manager
+from client_backend.services.local_mcp_manager import (
+    LocalMCPManager,
+    shutdown_mcp_manager,
+)
 
 
 async def test_local_mcp_manager_creates_default_config(tmp_path):
@@ -30,6 +33,81 @@ async def test_local_mcp_manager_creates_default_config(tmp_path):
     assert manager.config_path.read_text(encoding="utf-8").strip() == '{\n  "mcpServers": {}\n}'
 
     await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_dual_key_migration_treats_differing_canonical_server_as_custom(tmp_path):
+    config_path = tmp_path / "mcp" / "mcp_config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "_sample_chatbot_seed": "bundled-defaults-v1",
+                "_sample_chatbot_bundled_servers": ["collision"],
+                "mcp_servers": {
+                    "collision": {
+                        "transport": "stdio",
+                        "command": "python",
+                        "args": ["app/ai/mcp_servers/time_server.py"],
+                    }
+                },
+                "mcpServers": {
+                    "collision": {
+                        "transport": "stdio",
+                        "command": "./custom/bin/runner",
+                        "args": ["./custom/settings.json"],
+                        "cwd": "./custom/workdir",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = LocalMCPManager(config_path=config_path)
+
+    manager._ensure_default_config_exists()
+    migrated = json.loads(config_path.read_text(encoding="utf-8"))
+    configs = await manager._load_config()
+
+    assert "mcp_servers" not in migrated
+    assert migrated["_sample_chatbot_bundled_servers"] == []
+    assert len(configs) == 1
+    config = configs[0]
+    assert config.command == str((config_path.parent / "custom/bin/runner").resolve())
+    assert config.command != sys.executable
+    assert config.args == [str((config_path.parent / "custom/settings.json").resolve())]
+    assert config.cwd == str((config_path.parent / "custom/workdir").resolve())
+
+
+@pytest.mark.asyncio
+async def test_dual_key_migration_keeps_identical_bundled_server_provenance(tmp_path):
+    config_path = tmp_path / "mcp" / "mcp_config.json"
+    config_path.parent.mkdir(parents=True)
+    shared = {
+        "transport": "stdio",
+        "command": "python",
+        "args": ["app/ai/mcp_servers/time_server.py"],
+    }
+    config_path.write_text(
+        json.dumps(
+            {
+                "_sample_chatbot_seed": "bundled-defaults-v1",
+                "_sample_chatbot_bundled_servers": ["collision"],
+                "mcp_servers": {"collision": shared},
+                "mcpServers": {"collision": dict(shared)},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = LocalMCPManager(config_path=config_path)
+
+    manager._ensure_default_config_exists()
+    migrated = json.loads(config_path.read_text(encoding="utf-8"))
+    configs = await manager._load_config()
+
+    assert migrated["_sample_chatbot_bundled_servers"] == ["collision"]
+    assert len(configs) == 1
+    assert configs[0].command == sys.executable
 
 
 async def test_local_mcp_manager_loads_real_fastmcp_stdio_server(tmp_path):
@@ -604,6 +682,7 @@ async def test_mcp_api_migrates_dual_keys_and_preserves_servers_and_provenance(
                 "new-custom",
             }
             assert after_add["mcpServers"]["collision"]["command"] == "camel"
+            assert after_add["_sample_chatbot_bundled_servers"] == ["bundled"]
 
             replaced = await client.post(
                 "/api/mcp/servers",
@@ -616,7 +695,7 @@ async def test_mcp_api_migrates_dual_keys_and_preserves_servers_and_provenance(
             assert replaced.status_code == 201, replaced.text
             after_replace = json.loads(config_path.read_text(encoding="utf-8"))
             assert after_replace["mcpServers"]["bundled"]["command"] == "user-replacement"
-            assert after_replace["_sample_chatbot_bundled_servers"] == ["collision"]
+            assert after_replace["_sample_chatbot_bundled_servers"] == []
             assert "legacy-custom" in after_replace["mcpServers"]
 
             removed = await client.delete("/api/mcp/servers/collision")

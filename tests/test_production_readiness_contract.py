@@ -455,10 +455,15 @@ def test_full_frozen_requirements_has_a_tracked_fresh_resolver_gate() -> None:
     assert resolver in tracked
     source = (ROOT / resolver).read_text(encoding="utf-8")
     assert "_EXPECTED_PYTHON = (3, 11)" in source
+    assert "sys.platform" in source
+    assert '"win32"' in source
     assert '"--dry-run"' in source
     assert '"--ignore-installed"' in source
     assert '"-r"' in source
     assert '"requirements.txt"' in source
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "python scripts/verify_frozen_requirements.py" in readme
 
 
 def test_tracked_sources_and_docs_do_not_claim_a_document_reparse_cli() -> None:

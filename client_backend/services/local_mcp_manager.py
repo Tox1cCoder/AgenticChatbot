@@ -57,13 +57,25 @@ def canonicalize_mcp_config_document(payload: dict[str, Any] | None) -> dict[str
 
     legacy = payload.get("mcp_servers")
     canonical = payload.get("mcpServers")
+    divergent_names: set[str] = set()
     merged: dict[str, Any] = {}
     if isinstance(legacy, dict):
         merged.update(legacy)
     if isinstance(canonical, dict):
+        if isinstance(legacy, dict):
+            divergent_names = {
+                str(name)
+                for name in legacy.keys() & canonical.keys()
+                if legacy[name] != canonical[name]
+            }
         merged.update(canonical)
 
     normalized = {key: value for key, value in payload.items() if key != "mcp_servers"}
+    bundled_names = normalized.get("_sample_chatbot_bundled_servers")
+    if divergent_names and isinstance(bundled_names, list):
+        normalized["_sample_chatbot_bundled_servers"] = [
+            name for name in bundled_names if str(name) not in divergent_names
+        ]
     normalized["mcpServers"] = merged
     return normalized
 

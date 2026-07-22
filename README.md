@@ -213,6 +213,17 @@ conda env create -f environment.yml
 conda activate sample-chatbot
 ```
 
+The frozen `requirements.txt` and `environment.yml` capture the Windows,
+Python 3.11, CUDA 13.0 environment. Validate the complete frozen dependency
+graph from a Windows Python 3.11 interpreter with:
+
+```bash
+python scripts/verify_frozen_requirements.py
+```
+
+The verifier exits with code 2 on other platforms or Python versions. On
+macOS or Linux, use the editable install above instead of these frozen files.
+
 ### 2. Create environment files
 
 ```bash
