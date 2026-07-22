@@ -21,7 +21,6 @@ from __future__ import annotations
 import logging
 import time as _time
 import uuid
-import warnings
 from collections.abc import Iterable
 from typing import Any
 from uuid import UUID
@@ -55,7 +54,6 @@ class DocumentIndexService:
         embedding_model_name: str | None = None,
         embedding_dimension: int | None = None,
         embedding_provider: str | None = None,
-        index_batch_size: int | None = None,
         qdrant_upsert_batch_size: int = 1000,
     ):
         self.chunk_repository = chunk_repository
@@ -76,15 +74,6 @@ class DocumentIndexService:
         self.embedding_provider = embedding_provider or getattr(
             embedding_service, "provider", "unknown"
         )
-        # index_batch_size is deprecated; batching is now internal to the
-        # embedding service. Accept but ignore the parameter.
-        if index_batch_size is not None:
-            warnings.warn(
-                "index_batch_size is deprecated. Batching is now internal to "
-                "the embedding service (rag_embedding_batch_size). This parameter is ignored.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
         self.qdrant_upsert_batch_size = max(1, int(qdrant_upsert_batch_size))
 
     # ------------------------------------------------------------------

@@ -132,7 +132,6 @@ def _build_service(
     embedding_model_name: str = "gemini-embedding-2",
     embedding_dimension: int = 8,
     embedding_provider: str = "gemini",
-    batch_size: int = 2,
 ):
     from app.services.document_index_service import DocumentIndexService
 
@@ -144,8 +143,13 @@ def _build_service(
         embedding_model_name=embedding_model_name,
         embedding_dimension=embedding_dimension,
         embedding_provider=embedding_provider,
-        index_batch_size=batch_size,
     )
+
+
+def test_constructor_does_not_expose_retired_index_batch_size():
+    from app.services.document_index_service import DocumentIndexService
+
+    assert "index_batch_size" not in inspect.signature(DocumentIndexService).parameters
 
 
 def test_index_document_replaces_sql_chunks_first():
@@ -260,7 +264,6 @@ def test_index_document_passes_titles_to_embedding_service():
         chunk_repo=repo,
         embedding_service=embedding,
         embedding_dimension=4,
-        batch_size=2,
     )
 
     service.index_document(
@@ -311,7 +314,6 @@ def test_index_document_embeds_in_single_call():
         qdrant_client=qdrant,
         embedding_service=embedding,
         embedding_dimension=4,
-        batch_size=2,  # deprecated — accepted but ignored
     )
     service.index_document(
         document=document,

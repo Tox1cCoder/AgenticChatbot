@@ -53,6 +53,7 @@ def test_retired_settings_are_removed():
         "document_chunk_size",
         "document_chunk_overlap",
         "preserve_cross_page_context",
+        "rag_index_batch_size",
         # Phase 11: legacy embedding_dimension is gone — only rag_embedding_dimension remains.
         "embedding_dimension",
     }
