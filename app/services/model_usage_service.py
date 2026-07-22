@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app.ai.model_context import build_context_window_usage, resolve_model_context_window
+from pydantic import ValidationError
+
 from app.core.exceptions import ResourceNotFoundException, ValidationException
 from app.interfaces.model_usage_service_interface import IModelUsageService
 from app.repositories.model_usage import DimensionUsageTotals
@@ -27,7 +29,8 @@ from app.schemas.model_usage import (
     UsageSeriesPoint,
     UsageTotals,
 )
-from app.usage.types import NormalizedUsage
+
+logger = logging.getLogger(__name__)
 
 _UTC = timezone.utc
 USAGE_DASHBOARD_DEFAULT_DAYS = 30
@@ -96,7 +99,7 @@ class ModelUsageService(IModelUsageService):
             query, default_days=USAGE_CONVERSATION_DEFAULT_DAYS
         )
         scope = self._query_scope(user_id, start_utc, end_utc, conversation_id)
-        latest = self.repository.get_latest_conversation_event(
+        latest = self.repository.get_latest_conversation_context_window(
             user_id=user_id, conversation_id=conversation_id
         )
         return ConversationUsage(
@@ -372,21 +375,14 @@ class ModelUsageService(IModelUsageService):
         ]
 
     @staticmethod
-    def _latest_context_window(event: Any | None) -> ContextWindowMetadata | None:
-        if event is None:
+    def _latest_context_window(raw: Any | None) -> ContextWindowMetadata | None:
+        if raw is None:
             return None
-        context = resolve_model_context_window(event.provider, event.model).to_dict()
-        usage = NormalizedUsage(
-            input_tokens=event.input_tokens,
-            output_tokens=event.output_tokens,
-            total_tokens=event.total_tokens,
-            reasoning_tokens=event.reasoning_tokens,
-            cached_input_tokens=event.cached_input_tokens,
-            generated_images=event.generated_images,
-            source=event.usage_source,
-        )
-        context.update(build_context_window_usage(context, usage))
-        return ContextWindowMetadata.model_validate(context)
+        try:
+            return ContextWindowMetadata.model_validate(raw)
+        except ValidationError:
+            logger.warning("Ignoring invalid persisted context-window metadata")
+            return None
 
 
 __all__ = [

@@ -228,8 +228,8 @@ class EmptyUsageRepository:
         self.calls.append(("top", kwargs))
         return []
 
-    def get_latest_conversation_event(self, **kwargs):
-        self.calls.append(("latest", kwargs))
+    def get_latest_conversation_context_window(self, **kwargs):
+        self.calls.append(("latest_context", kwargs))
         return None
 
 
@@ -265,7 +265,7 @@ class PopulatedUsageRepository(EmptyUsageRepository):
         self.minute_rows: list[SimpleNamespace] = []
         self.dimensions: dict[str, list[DimensionUsageTotals]] = {}
         self.top_rows: list[SimpleNamespace] = []
-        self.latest_event = None
+        self.latest_context_window = None
 
     def get_summary_totals(self, **kwargs):
         self.calls.append(("summary", kwargs))
@@ -303,9 +303,9 @@ class PopulatedUsageRepository(EmptyUsageRepository):
         self.calls.append(("top", kwargs))
         return self.top_rows
 
-    def get_latest_conversation_event(self, **kwargs):
-        self.calls.append(("latest", kwargs))
-        return self.latest_event
+    def get_latest_conversation_context_window(self, **kwargs):
+        self.calls.append(("latest_context", kwargs))
+        return self.latest_context_window
 
 
 def make_empty_service(
@@ -783,33 +783,66 @@ def test_top_conversations_are_bounded_and_deterministic() -> None:
     assert actual == sorted(actual, key=lambda item: (-item[0], item[1]))
 
 
-def test_conversation_latest_event_builds_context_gauge_without_message_scan() -> None:
+def test_conversation_uses_latest_assistant_message_context_window() -> None:
     repository = PopulatedUsageRepository()
-    repository.latest_event = SimpleNamespace(
-        provider="openai",
-        model="gpt-4o",
-        input_tokens=60_000,
-        output_tokens=4_000,
-        total_tokens=64_000,
-        reasoning_tokens=None,
-        cached_input_tokens=1_000,
-        generated_images=0,
-        usage_source="provider_reported",
+    repository.latest_context_window = {
+        "provider": "gemini",
+        "model": "gemini-3-pro-image",
+        "context_window_tokens": None,
+        "max_input_tokens": 65_536,
+        "max_output_tokens": 32_768,
+        "limit_type": "separate_io",
+        "source": "registry",
+        "known": True,
+        "input_tokens": 100,
+        "output_tokens": 200,
+        "total_tokens": 300,
+        "usage_source": "provider_reported",
+        "used_tokens": 300,
+        "used_token_source": "provider_reported_total",
+        "input_usage_ratio": 100 / 65_536,
+        "output_usage_ratio": 200 / 32_768,
+        "usage_ratio": 200 / 32_768,
+        "usage_ratio_basis": "most_constrained_io_limit",
+        "display_state": "ok",
+    }
+    service = ModelUsageService(
+        repository=repository,
+        conversation_repository=OwningConversationRepository(),
     )
+    user_id = uuid4()
+    conversation_id = uuid4()
+
+    result = service.get_conversation_usage(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        query=ConversationUsageQuery(),
+    )
+
+    assert result.latest_context_window is not None
+    assert result.latest_context_window.model == "gemini-3-pro-image"
+    assert result.latest_context_window.limit_type == "separate_io"
+    assert result.latest_context_window.usage_ratio == 200 / 32_768
+    assert ("latest_context", {"user_id": user_id, "conversation_id": conversation_id}) in (
+        repository.calls
+    )
+
+
+def test_conversation_ignores_invalid_assistant_context_window() -> None:
+    repository = PopulatedUsageRepository()
+    repository.latest_context_window = {"provider": "openai"}
     service = ModelUsageService(
         repository=repository,
         conversation_repository=OwningConversationRepository(),
     )
 
     result = service.get_conversation_usage(
-        user_id=uuid4(), conversation_id=uuid4(), query=ConversationUsageQuery()
+        user_id=uuid4(),
+        conversation_id=uuid4(),
+        query=ConversationUsageQuery(),
     )
 
-    assert result.latest_context_window is not None
-    assert result.latest_context_window.context_window_tokens == 128_000
-    assert result.latest_context_window.used_tokens == 64_000
-    assert result.latest_context_window.usage_ratio == 0.5
-    assert not any(name == "message" for name, _ in repository.calls)
+    assert result.latest_context_window is None
 
 
 class EmptyMappingResult:
@@ -914,18 +947,29 @@ def test_top_conversations_is_tenant_scoped_half_open_and_bounded_in_sql() -> No
     assert "LIMIT 20" in sql
 
 
-def test_latest_conversation_event_has_deterministic_id_tie_breaker() -> None:
+def test_latest_conversation_context_is_owner_scoped_visible_assistant_and_bounded() -> None:
     statements: list = []
     repository = ModelUsageRepository(lambda: CapturingLatestSession(statements))
+    user_id = uuid4()
+    conversation_id = uuid4()
 
     assert (
-        repository.get_latest_conversation_event(user_id=uuid4(), conversation_id=uuid4()) is None
+        repository.get_latest_conversation_context_window(
+            user_id=user_id, conversation_id=conversation_id
+        )
+        is None
     )
 
     sql = compile_postgres(statements[0])
-    assert "ORDER BY model_usage_events.started_at DESC" in sql
-    assert "model_usage_events.attempt DESC" in sql
-    assert "model_usage_events.id DESC" in sql
+    assert "JOIN conversations" in sql
+    assert f"conversations.owner_id = '{user_id}'" in sql
+    assert f"conversations.id = '{conversation_id}'" in sql
+    assert "conversations.deleted_at IS NULL" in sql
+    assert "messages.deleted_at IS NULL" in sql
+    assert "messages.sender = 2" in sql
+    assert "messages.message_metadata ? 'context_window'" in sql
+    assert "ORDER BY messages.sequence DESC, messages.id DESC" in sql
+    assert "LIMIT 1" in sql
 
 
 def test_model_usage_service_is_a_factory_and_injectable_by_interface() -> None:

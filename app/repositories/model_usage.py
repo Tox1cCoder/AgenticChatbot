@@ -7,9 +7,9 @@ transaction: insert the immutable event with ``ON CONFLICT DO NOTHING`` on
 contribution into the UTC-minute rollup with ``ON CONFLICT DO UPDATE``.
 
 The remaining methods are bounded read and maintenance queries: summary
-totals, a minute time series, a dimension breakdown, the most recent event
-for a conversation, minute-range reconciliation (rebuild rollups exactly
-from raw events), and batched deletion of aged raw events / rollups.
+totals, a minute time series, a dimension breakdown, the latest visible
+assistant-message context gauge, minute-range reconciliation (rebuild rollups
+exactly from raw events), and batched deletion of aged raw events / rollups.
 """
 
 from __future__ import annotations
@@ -28,6 +28,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.conversation import Conversation
+from app.models.enums import MessageRole
+from app.models.message import Message
 from app.models.model_usage import NULLABLE_TOKEN_FIELDS, ModelUsageEvent, ModelUsageMinute
 from app.usage.types import NormalizedUsage, UsageContext, UsageStatus
 
@@ -619,30 +621,34 @@ class ModelUsageRepository:
             for row in rows
         ]
 
-    def get_latest_conversation_event(
+    def get_latest_conversation_context_window(
         self, *, user_id: UUID, conversation_id: UUID
-    ) -> ModelUsageEvent | None:
-        """Return the most recent raw event for a user's conversation, if any."""
+    ) -> dict[str, Any] | None:
+        """Return context metadata from the latest visible assistant message."""
         if user_id is None:
-            raise ValueError("get_latest_conversation_event requires a non-null user_id")
+            raise ValueError(
+                "get_latest_conversation_context_window requires a non-null user_id"
+            )
         statement = (
-            select(ModelUsageEvent)
+            select(Message.message_metadata["context_window"])
+            .join(Conversation, Conversation.id == Message.conversation_id)
             .where(
-                ModelUsageEvent.user_id == user_id,
-                ModelUsageEvent.conversation_id == conversation_id,
+                Conversation.owner_id == user_id,
+                Conversation.id == conversation_id,
+                Conversation.deleted_at.is_(None),
+                Message.deleted_at.is_(None),
+                Message.sender == MessageRole.assistant.value,
+                Message.message_metadata.op("?")("context_window"),
             )
             .order_by(
-                ModelUsageEvent.started_at.desc(),
-                ModelUsageEvent.attempt.desc(),
-                ModelUsageEvent.id.desc(),
+                Message.sequence.desc(),
+                Message.id.desc(),
             )
             .limit(1)
         )
         with self.session_factory() as session:
-            event = session.execute(statement).scalar_one_or_none()
-            if event is not None:
-                session.expunge(event)
-            return event
+            value = session.execute(statement).scalar_one_or_none()
+        return dict(value) if isinstance(value, dict) else None
 
     # -- Maintenance (not user-scoped: whole-table reconciliation/cleanup) --
 

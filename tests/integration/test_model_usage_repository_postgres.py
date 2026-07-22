@@ -460,39 +460,83 @@ def test_bucket_series_aggregates_intervals_in_sql_and_stays_tenant_bounded(
     assert cross_tenant == []
 
 
-def test_latest_conversation_event_breaks_timestamp_attempt_ties_by_id(
-    repository, tenant_factory
+def test_latest_conversation_context_uses_visible_assistant_metadata_not_helper_event(
+    repository, tenant_factory, session_factory
 ) -> None:
     user_id, conversation_id, _ = tenant_factory()
+    other_user_id, other_conversation_id, _ = tenant_factory()
     started = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-    first = repository.record_event(
+    expected = {
+        "provider": "gemini",
+        "model": "gemini-3-pro-image",
+        "context_window_tokens": None,
+        "max_input_tokens": 65_536,
+        "max_output_tokens": 32_768,
+        "limit_type": "separate_io",
+        "source": "registry",
+        "known": True,
+    }
+    with session_factory.begin() as session:
+        session.add_all(
+            [
+                Message(
+                    conversation_id=conversation_id,
+                    sender=MessageRole.assistant.value,
+                    content="older",
+                    message_metadata={"context_window": {**expected, "model": "older"}},
+                    sequence=1,
+                ),
+                Message(
+                    conversation_id=conversation_id,
+                    sender=MessageRole.assistant.value,
+                    content="image",
+                    message_metadata={"context_window": expected},
+                    sequence=2,
+                ),
+                Message(
+                    conversation_id=conversation_id,
+                    sender=MessageRole.assistant.value,
+                    content="deleted",
+                    message_metadata={"context_window": {**expected, "model": "deleted"}},
+                    sequence=3,
+                    deleted_at=started,
+                ),
+                Message(
+                    conversation_id=conversation_id,
+                    sender=MessageRole.user.value,
+                    content="new user turn",
+                    message_metadata={"context_window": {**expected, "model": "user"}},
+                    sequence=4,
+                ),
+                Message(
+                    conversation_id=other_conversation_id,
+                    sender=MessageRole.assistant.value,
+                    content="foreign",
+                    message_metadata={"context_window": {**expected, "model": "foreign"}},
+                    sequence=1,
+                ),
+            ]
+        )
+
+    repository.record_event(
         _command(
             user_id=user_id,
             conversation_id=conversation_id,
             provider="openai",
-            model="gpt-4o",
-            attempt=1,
+            model="gpt-4o-mini",
+            operation="image_user_response",
             started_at=started,
         )
     )
-    second = repository.record_event(
-        _command(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            provider="gemini",
-            model="gemini-2.5-flash",
-            attempt=1,
-            started_at=started,
-        )
-    )
-    expected_id = max(first.event_id, second.event_id)
 
-    latest = repository.get_latest_conversation_event(
+    latest = repository.get_latest_conversation_context_window(
         user_id=user_id, conversation_id=conversation_id
     )
 
-    assert latest is not None
-    assert latest.id == expected_id
+    assert latest == expected
+    assert repository.get_latest_conversation_context_window(
+        user_id=other_user_id, conversation_id=conversation_id
+    ) is None
 
 
 def test_conversation_delete_removes_usage_without_reconciliation_resurrection(
