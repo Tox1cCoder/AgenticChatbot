@@ -20,6 +20,7 @@ from app.schemas.model_usage import (
     ContextWindowMetadata,
     ConversationUsage,
     ConversationUsageResponse,
+    UsageCapabilities,
     UsageDashboard,
 )
 from app.schemas.pagination import MessagePaginationParams
@@ -65,6 +66,14 @@ def test_dashboard_example_round_trips_through_real_response_schema() -> None:
     example = _json_example("usage-dashboard-response")
 
     parsed = ApiResponse[UsageDashboard].model_validate(example)
+
+    assert parsed.model_dump(mode="json", by_alias=True) == example
+
+
+def test_capability_example_round_trips_through_real_response_schema() -> None:
+    example = _json_example("usage-capabilities-response")
+
+    parsed = ApiResponse[UsageCapabilities].model_validate(example)
 
     assert parsed.model_dump(mode="json", by_alias=True) == example
 
@@ -242,6 +251,24 @@ def test_contract_covers_types_visualization_refresh_and_ui_states() -> None:
         "visual fill",
         "raw ratio",
         "unknown denominator",
+    )
+
+    for phrase in required_phrases:
+        assert phrase in contract
+
+
+def test_contract_covers_capability_gating_and_message_gauge_authority() -> None:
+    contract = _contract()
+    required_phrases = (
+        "GET /usage/capabilities",
+        "type UsageCapabilities",
+        "latest non-deleted assistant message",
+        "helper calls cannot replace",
+        "No new SSE event",
+        "AbortController",
+        "separate_io",
+        "unknown denominator",
+        "Frontend acceptance checklist",
     )
 
     for phrase in required_phrases:

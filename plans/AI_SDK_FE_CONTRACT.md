@@ -17,6 +17,10 @@
 
 All endpoints require the normal `Authorization: Bearer <jwt>` header.
 
+For usage capability discovery, dashboards, conversation totals, refresh behavior, and
+the complete context-gauge UI contract, use
+[`TOKEN_USAGE_AI_SDK_FE_CONTRACT.md`](TOKEN_USAGE_AI_SDK_FE_CONTRACT.md).
+
 ## Chat Request
 
 ```http
@@ -701,11 +705,19 @@ Token/context fields:
     "context_window_tokens": 128000,
     "max_input_tokens": 128000,
     "max_output_tokens": 16384,
+    "limit_type": "shared_context",
     "source": "registry",
     "known": true,
+    "input_tokens": 10000,
+    "output_tokens": 2500,
+    "total_tokens": 12500,
+    "usage_source": "provider_reported",
     "used_tokens": 12500,
-    "used_token_source": "actual_total",
+    "used_token_source": "provider_reported_total",
+    "input_usage_ratio": 0.078125,
+    "output_usage_ratio": 0.01953125,
     "usage_ratio": 0.09765625,
+    "usage_ratio_basis": "shared_context_total",
     "display_state": "ok"
   }
 }

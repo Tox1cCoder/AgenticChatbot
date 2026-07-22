@@ -1,15 +1,17 @@
 # Token usage frontend contract
 
 This is the frontend contract for authenticated, user-scoped token analytics. It is
-additive to the existing AI SDK v6 contract: no new stream event is required, and the
+additive to the existing AI SDK v6 contract: No new SSE event is required, and the
 terminal sequence remains `data-assistant-message`, `text-end`, `finish-step`, `finish`,
 then `[DONE]` when an assistant message is available.
 
 ## HTTP API
 
-Send `Authorization: Bearer <JWT>` on both requests. The server always derives the user
+Send `Authorization: Bearer <JWT>` on every request. The server always derives the user
 from that JWT; clients must not send a user ID.
 
+- `GET /usage/capabilities` has no query parameters and remains available when the
+  usage UI is disabled. Read `data.enabled` before mounting usage navigation or views.
 - `GET /usage/dashboard` accepts `from`, `to`, `bucket`, `timezone`, and optional
   `conversationId`.
 - `GET /usage/conversations/{conversationId}` accepts `from`, `to`, `bucket`, and
@@ -26,12 +28,22 @@ When the range is omitted, the dashboard defaults to 30 local calendar days and 
 conversation defaults to the retained 730 days. Both defaults end at the next local
 midnight in the requested timezone.
 
-Responses are `200`. Missing or invalid JWT is `401`; a disabled usage UI or a
+Successful responses are `200`. Missing or invalid JWT is `401`; a disabled usage UI or a
 conversation outside the user's ownership is `404`; malformed UUIDs, timestamps,
 timezones, alignment, or ranges are `422`. Treat other non-2xx responses as errors and
 use the existing API error envelope.
 
 ## Exact JSON examples
+
+<!-- example:usage-capabilities-response -->
+```json
+{
+  "success": true,
+  "message": "Usage capabilities retrieved",
+  "data": {"enabled": true},
+  "error": null
+}
+```
 
 <!-- example:usage-dashboard-response -->
 ```json
@@ -111,6 +123,7 @@ intentionally keeps its snake_case keys.
 
 ```ts
 type UsageTotals = { inputTokens: number; outputTokens: number; totalTokens: number; reasoningTokens: number; cachedInputTokens: number; generatedImages: number; requestCount: number };
+type UsageCapabilities = { enabled: boolean };
 type UsageBreakdownItem = { key: string; totals: UsageTotals };
 type UsageSeriesPoint = { start: string; end: string; totals: UsageTotals };
 type UsageCoverage = { providerReportedRequests: number; mixedRequests: number; locallyEstimatedRequests: number; unavailableRequests: number; requestsWithKnownTotal: number; totalRequests: number; knownTotalRatio: number };
@@ -152,6 +165,41 @@ The context shape appears after completion at
 do not copy dashboard totals, series, rankings, or top conversations into message
 metadata. Ignore all unknown future fields in API objects and message metadata.
 
+For `GET /usage/conversations/{conversationId}`, `latestContextWindow` is copied from
+the latest non-deleted assistant message in the authenticated user's conversation that
+contains valid `context_window` metadata. The raw usage ledger still owns aggregate
+totals, but it does not select the visible gauge. Later prompt-enhancement,
+acknowledgement, suggestion, or other helper calls cannot replace the user-facing
+response gauge.
+
+## Fetching and capability gating
+
+Fetch capabilities after authentication and before exposing usage UI. An enabled
+capability permits dashboard and conversation requests; `enabled: false` hides those
+views without disabling model-usage collection. Cache the capability only for the
+authenticated session and clear it on logout or identity change.
+
+Use one request helper that preserves the typed API error envelope and accepts an
+`AbortSignal`:
+
+```ts
+async function getUsage<T>(path: string, token: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(path, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal,
+  });
+  const body = (await response.json()) as ApiResponse<T>;
+  if (!response.ok || !body.success || body.data == null) {
+    throw new Error(body.message || `Usage request failed (${response.status})`);
+  }
+  return body.data;
+}
+```
+
+Create a new `AbortController` whenever filters or the active conversation change,
+abort the previous request, and ignore results whose request key no longer matches the
+current view. Do not display aborted requests as errors.
+
 ## Rendering and refresh
 
 - Plot `series[].totals.inputTokens` and `outputTokens` as a stacked input/output area
@@ -159,7 +207,8 @@ metadata. Ignore all unknown future fields in API objects and message metadata.
 - Render ranked provider/model/operation/agent lists from their matching arrays and top
   conversations from `topConversations`. Arrays are already bounded and ordered.
 - Fetch the dashboard on view entry and every filter change. Refetch a conversation
-  summary after the AI SDK `finish` event. Never poll during generation.
+  summary after the AI SDK `finish` event. Never poll during generation. Do not refetch
+  on intermediate text, tool, image-preview, or helper activity.
 - For `shared_context`, the gauge's raw ratio is `used_tokens / context_window_tokens`.
   For `separate_io`, calculate both available ratios and show their maximum (the most
   constrained limit). With an unknown denominator, show counts but no percentage.
@@ -170,3 +219,20 @@ metadata. Ignore all unknown future fields in API objects and message metadata.
 - **Error:** keep chat usable, show a retry action, and do not substitute fabricated data.
 
 Clients must ignore unknown future fields everywhere for forward compatibility.
+
+## Frontend acceptance checklist
+
+- Capability discovery runs only after authentication; disabled capability hides usage
+  navigation while chat remains usable.
+- Dashboard filters emit RFC 3339 bounds with numeric offsets, use IANA timezones, and
+  cancel stale requests with `AbortController`.
+- Empty totals and arrays render an explicit empty state rather than an error.
+- The conversation gauge refreshes once after AI SDK `finish`, never during generation.
+- `shared_context` uses the combined denominator; `separate_io` shows the most
+  constrained independent ratio; an unknown denominator never produces a percentage.
+- Generated image totals render from `generatedImages` and do not infer counts from
+  message attachments.
+- Raw ratios remain available for labels/tooltips while only visual fill is clamped.
+- A failed usage request never disables chat and always offers a bounded retry action.
+- Unknown response and metadata fields are ignored.
+- No dashboard aggregate is copied into assistant message metadata.
