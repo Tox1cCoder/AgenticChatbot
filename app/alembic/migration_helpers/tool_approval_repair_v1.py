@@ -60,9 +60,8 @@ _BASE_FOREIGN_KEYS = {
         "public",
         "conversations",
         ("id",),
-        (),
     ),
-    "fk_tool_approvals_user_id": (("user_id",), "public", "users", ("id",), ()),
+    "fk_tool_approvals_user_id": (("user_id",), "public", "users", ("id",)),
 }
 _CURRENT_EXTRA_FOREIGN_KEYS = {
     "fk_tool_approvals_device_id_client_devices": (
@@ -70,7 +69,6 @@ _CURRENT_EXTRA_FOREIGN_KEYS = {
         "public",
         "client_devices",
         ("id",),
-        (),
     )
 }
 
@@ -87,9 +85,12 @@ def require_online(operations: Operations, revision: str) -> None:
 def canonicalize_decision_type(
     connection: Connection,
     expected_labels: Sequence[str],
+    *,
+    allowed_future_labels: Sequence[str] = (),
 ) -> None:
-    """Replace a known lowercase/uppercase enum with the canonical labels."""
+    """Normalize known case-only enum drift in place after dependency checks."""
     expected = tuple(expected_labels)
+    future = tuple(allowed_future_labels)
     type_kind = connection.scalar(
         sa.text(
             "SELECT t.typtype FROM pg_type t "
@@ -114,17 +115,15 @@ def canonicalize_decision_type(
             )
         ).scalars()
     )
+    accepted_label_sequences = (expected, expected + future) if future else (expected,)
     allowed = {
-        label for expected_label in expected for label in (expected_label, expected_label.upper())
+        label
+        for expected_label in expected + future
+        for label in (expected_label, expected_label.upper())
     }
     unknown = sorted(set(labels) - allowed)
     if unknown:
         raise RuntimeError(f"unsupported decision_type labels: {unknown}")
-    normalized_labels = tuple(label.lower() for label in labels)
-    if normalized_labels != expected:
-        raise RuntimeError(
-            f"unsupported decision_type label set or ordering: expected {expected}, found {labels}"
-        )
     unsupported_dependencies = tuple(
         connection.execute(
             sa.text(
@@ -155,6 +154,12 @@ def canonicalize_decision_type(
         raise RuntimeError(
             f"unsupported decision_type catalog dependencies: {list(unsupported_dependencies)}"
         )
+    normalized_labels = tuple(label.lower() for label in labels)
+    if normalized_labels not in accepted_label_sequences:
+        raise RuntimeError(
+            "unsupported decision_type label set or ordering: "
+            f"expected one of {accepted_label_sequences}, found {labels}"
+        )
     decision_column_exists = connection.scalar(
         sa.text(
             "SELECT EXISTS ("
@@ -177,33 +182,177 @@ def canonicalize_decision_type(
             raise RuntimeError(
                 "unsupported tool_approvals.decision default while canonicalizing decision_type"
             )
-    if labels == expected:
+    if labels == normalized_labels:
         return
+    for source_label, target_label in zip(labels, normalized_labels, strict=True):
+        if source_label != target_label:
+            connection.execute(
+                sa.text(
+                    "ALTER TYPE public.decision_type "
+                    f"RENAME VALUE '{source_label}' TO '{target_label}'"
+                )
+            )
 
-    temporary_exists = connection.scalar(
-        sa.text(
-            "SELECT EXISTS (SELECT 1 FROM pg_type t "
-            "JOIN pg_namespace n ON n.oid = t.typnamespace "
-            "WHERE n.nspname = 'public' "
-            "AND t.typname = 'decision_type_canonical_tmp')"
-        )
-    )
-    if temporary_exists:
-        raise RuntimeError("unsafe schema drift: decision_type_canonical_tmp already exists")
 
-    _create_decision_type(connection, expected, type_name="decision_type_canonical_tmp")
-    if decision_column_exists:
+def repair_current_legacy_tool_approvals(connection: Connection) -> None:
+    """Normalize only the exact, known original-6c differences at current head."""
+    defaults = dict(
         connection.execute(
             sa.text(
-                "ALTER TABLE public.tool_approvals ALTER COLUMN decision "
-                "TYPE public.decision_type_canonical_tmp "
-                "USING lower(decision::text)::public.decision_type_canonical_tmp"
+                "SELECT column_name, column_default FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = 'tool_approvals' "
+                "AND column_name IN ('created_at', 'updated_at', 'decided_at')"
+            )
+        ).all()
+    )
+    if set(defaults) != {"created_at", "updated_at", "decided_at"}:
+        raise RuntimeError("unsafe tool_approvals schema drift: timestamp columns are missing")
+    for column_name, default in defaults.items():
+        normalized_default = _normalize_default(default)
+        if normalized_default is None:
+            connection.execute(
+                sa.text(
+                    "ALTER TABLE public.tool_approvals "
+                    f"ALTER COLUMN {column_name} SET DEFAULT now()"
+                )
+            )
+        elif normalized_default != "now()":
+            raise RuntimeError(
+                "unsafe tool_approvals schema drift: unsupported timestamp default "
+                f"on {column_name}"
+            )
+
+    foreign_keys = _foreign_key_catalog(connection)
+    _raise_for_not_valid_foreign_keys(foreign_keys)
+    expected_contracts = _expected_foreign_key_contracts(current=True)
+    legacy_names = {
+        "tool_approvals_conversation_id_fkey": "fk_tool_approvals_conversation_id",
+        "tool_approvals_user_id_fkey": "fk_tool_approvals_user_id",
+    }
+    for legacy_name, canonical_name in legacy_names.items():
+        if legacy_name not in foreign_keys:
+            continue
+        if canonical_name in foreign_keys:
+            raise RuntimeError(
+                "unsafe tool_approvals schema drift: duplicate legacy and canonical foreign keys"
+            )
+        if foreign_keys[legacy_name] != expected_contracts[canonical_name]:
+            raise RuntimeError(
+                f"unsafe tool_approvals schema drift: legacy foreign key {legacy_name} mismatch"
+            )
+        connection.execute(
+            sa.text(
+                "ALTER TABLE public.tool_approvals "
+                f"RENAME CONSTRAINT {legacy_name} TO {canonical_name}"
             )
         )
-    connection.execute(sa.text("DROP TYPE public.decision_type"))
-    connection.execute(
-        sa.text("ALTER TYPE public.decision_type_canonical_tmp RENAME TO decision_type")
+
+
+def _foreign_key_catalog(connection: Connection) -> dict[str, tuple]:
+    rows = connection.execute(
+        sa.text(
+            "SELECT con.conname, "
+            "ARRAY("
+            " SELECT a.attname FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) "
+            " JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum "
+            " ORDER BY k.ord"
+            "), ref_ns.nspname, ref.relname, "
+            "ARRAY("
+            " SELECT a.attname FROM unnest(con.confkey) WITH ORDINALITY AS k(attnum, ord) "
+            " JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum "
+            " ORDER BY k.ord"
+            "), con.convalidated, con.condeferrable, con.condeferred, "
+            "con.confupdtype, con.confdeltype, con.confmatchtype, con.conislocal, "
+            "con.coninhcount, con.connoinherit, "
+            "ARRAY("
+            " SELECT p.proname FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid "
+            " WHERE t.tgconstraint = con.oid ORDER BY p.proname"
+            "), NOT EXISTS ("
+            " SELECT 1 FROM pg_trigger t WHERE t.tgconstraint = con.oid "
+            " AND (NOT t.tgisinternal OR t.tgenabled <> 'O')"
+            ") "
+            "FROM pg_constraint con "
+            "JOIN pg_class ref ON ref.oid = con.confrelid "
+            "JOIN pg_namespace ref_ns ON ref_ns.oid = ref.relnamespace "
+            "WHERE con.conrelid = 'public.tool_approvals'::regclass "
+            "AND con.contype = 'f' ORDER BY con.conname"
+        )
+    ).all()
+    return {
+        name: (
+            tuple(columns),
+            referred_schema,
+            referred_table,
+            tuple(referred_columns),
+            validated,
+            deferrable,
+            deferred,
+            update_action,
+            delete_action,
+            match_type,
+            is_local,
+            inherit_count,
+            no_inherit,
+            tuple(trigger_functions),
+            triggers_enabled,
+        )
+        for (
+            name,
+            columns,
+            referred_schema,
+            referred_table,
+            referred_columns,
+            validated,
+            deferrable,
+            deferred,
+            update_action,
+            delete_action,
+            match_type,
+            is_local,
+            inherit_count,
+            no_inherit,
+            trigger_functions,
+            triggers_enabled,
+        ) in rows
+    }
+
+
+def _expected_foreign_key_contracts(*, current: bool) -> dict[str, tuple]:
+    definitions = dict(_BASE_FOREIGN_KEYS)
+    if current:
+        definitions.update(_CURRENT_EXTRA_FOREIGN_KEYS)
+    trigger_functions = (
+        "RI_FKey_check_ins",
+        "RI_FKey_check_upd",
+        "RI_FKey_noaction_del",
+        "RI_FKey_noaction_upd",
     )
+    return {
+        name: (
+            *definition,
+            True,
+            False,
+            False,
+            "a",
+            "a",
+            "s",
+            True,
+            0,
+            True,
+            trigger_functions,
+            True,
+        )
+        for name, definition in definitions.items()
+    }
+
+
+def _raise_for_not_valid_foreign_keys(foreign_keys: dict[str, tuple]) -> None:
+    for name, contract in foreign_keys.items():
+        if not contract[4]:
+            raise RuntimeError(
+                f"foreign key {name} is NOT VALID; repair orphan rows and run "
+                f"ALTER TABLE tool_approvals VALIDATE CONSTRAINT {name} before retrying"
+            )
 
 
 def validate_tool_approvals_schema(connection: Connection, *, current: bool) -> None:
@@ -243,20 +392,9 @@ def validate_tool_approvals_schema(connection: Connection, *, current: bool) -> 
     ) != ("id",):
         raise RuntimeError("unsafe tool_approvals schema drift: primary key mismatch")
 
-    expected_foreign_keys = dict(_BASE_FOREIGN_KEYS)
-    if current:
-        expected_foreign_keys.update(_CURRENT_EXTRA_FOREIGN_KEYS)
-    actual_foreign_keys = {
-        foreign_key["name"]: (
-            tuple(foreign_key["constrained_columns"]),
-            foreign_key["referred_schema"],
-            foreign_key["referred_table"],
-            tuple(foreign_key["referred_columns"]),
-            tuple(sorted((foreign_key.get("options") or {}).items())),
-        )
-        for foreign_key in inspector.get_foreign_keys("tool_approvals", schema="public")
-    }
-    if actual_foreign_keys != expected_foreign_keys:
+    actual_foreign_keys = _foreign_key_catalog(connection)
+    _raise_for_not_valid_foreign_keys(actual_foreign_keys)
+    if actual_foreign_keys != _expected_foreign_key_contracts(current=current):
         raise RuntimeError("unsafe tool_approvals schema drift: foreign keys mismatch")
 
     expected_indexes = dict(_BASE_INDEXES)

@@ -19,6 +19,7 @@ from app.alembic.migration_helpers.tool_approval_repair_v1 import (
     CURRENT_DECISION_LABELS,
     canonicalize_decision_type,
     create_tool_approvals,
+    repair_current_legacy_tool_approvals,
     require_online,
     validate_tool_approvals_schema,
 )
@@ -36,6 +37,7 @@ def upgrade() -> None:
     canonicalize_decision_type(connection, CURRENT_DECISION_LABELS)
     if not sa.inspect(connection).has_table("tool_approvals", schema="public"):
         create_tool_approvals(op, current=True)
+    repair_current_legacy_tool_approvals(connection)
     validate_tool_approvals_schema(connection, current=True)
 
 

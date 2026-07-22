@@ -157,6 +157,16 @@ assert asyncio.get_event_loop_policy() is policy
     assert completed.returncode == 0, completed.stderr
 
 
+def test_live_server_integration_is_explicit_and_portable() -> None:
+    source = (ROOT / "tests" / "client_backend" / "test_live_server_integration.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'os.getenv("RUN_LIVE_SERVER_TESTS"' in source
+    assert 'os.getenv("LIVE_SERVER_TEST_URL"' in source
+    assert "pytestmark = pytest.mark.skipif" in source
+
+
 def test_runtime_model_defaults_are_settings_backed() -> None:
     configured = Settings(
         _env_file=None,

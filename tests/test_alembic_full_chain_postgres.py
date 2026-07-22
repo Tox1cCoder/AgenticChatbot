@@ -26,6 +26,7 @@ _OLD_HEAD = "a4b5c6d7e8f9"
 _HEAD = "b5c6d7e8f9a0"
 _PREVIOUS_HEAD = "z3a4b5c6d7e8"
 _PRE_RECONCILIATION_HEAD = "1ce64a959f7d"
+_PARALLEL_ALLOW_CUSTOM_MODEL_HEAD = "0f1e2d3c4b5a"
 _RECONCILIATION_REVISION = "6c6598a9eb26"
 _TIMESTAMP_INDEXES = {
     "ix_model_usage_events_started_at",
@@ -268,13 +269,21 @@ def _redact_database_credentials(output: str, database_url: URL) -> str:
     }
     for rendered_url in sorted(rendered_urls, key=len, reverse=True):
         redacted = redacted.replace(rendered_url, "<scratch-database-url>")
+    credential_variants: list[tuple[str, str]] = []
     for credential, replacement in (
         (database_url.password, "<database-password>"),
         (database_url.username, "<database-username>"),
     ):
         if credential:
-            for secret in sorted({credential, quote(credential, safe="")}, key=len, reverse=True):
-                redacted = redacted.replace(secret, replacement)
+            credential_variants.extend(
+                (secret, replacement) for secret in {credential, quote(credential, safe="")}
+            )
+    for secret, replacement in sorted(
+        credential_variants,
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        redacted = redacted.replace(secret, replacement)
     return redacted
 
 
@@ -465,14 +474,26 @@ def test_alembic_timeout_redacts_captured_output(monkeypatch) -> None:
         assert secret not in message
 
 
-def test_redaction_replaces_password_before_username_substrings() -> None:
-    database_url = make_url(
-        "postgresql://token:prefix-token-suffix@example.invalid/"
-        "chatbot_migration_smoke_0123456789abcdef0123456789abcdef"
+@pytest.mark.parametrize(
+    ("username", "password"),
+    [
+        ("token", "prefix-token-suffix"),
+        ("prefix-token-suffix", "token"),
+    ],
+)
+def test_redaction_replaces_longer_credential_before_contained_credential(
+    username: str, password: str
+) -> None:
+    database_url = URL.create(
+        "postgresql",
+        username=username,
+        password=password,
+        host="example.invalid",
+        database="chatbot_migration_smoke_0123456789abcdef0123456789abcdef",
     )
 
     redacted = _redact_database_credentials(
-        "raw_password=prefix-token-suffix raw_username=token",
+        f"raw_password={password} raw_username={username}",
         database_url,
     )
 
@@ -576,9 +597,18 @@ def test_inspection_migrations_fail_clearly_offline(monkeypatch, module_name: st
 
 def test_readme_tracks_migration_head_and_current_graph_contract() -> None:
     readme = (_PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    readme_lower = readme.lower()
 
     assert f"currently `{_HEAD}`" in readme
     assert "legacy `summarize` node is kept" not in readme
+    for warning in (
+        "original `6c6598a9eb26`",
+        "cannot reconstruct deleted checkpoint or MCP OAuth data",
+        "restore the affected tables from a pre-upgrade backup",
+        "users must reauthenticate affected MCP servers",
+        "inspect these tables before upgrading",
+    ):
+        assert warning.lower() in readme_lower
 
 
 def test_full_alembic_chain_from_empty_postgres_database() -> None:
@@ -608,6 +638,79 @@ def test_full_alembic_chain_from_empty_postgres_database() -> None:
         try:
             with engine.connect() as connection:
                 assert _public_table_schema_snapshot(connection) == head_snapshot
+        finally:
+            engine.dispose()
+
+
+def test_head_round_trips_below_reconciliation_with_schema_and_data_intact() -> None:
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", "head")
+        engine = create_engine(scratch_url)
+        user_id = uuid4()
+        conversation_id = uuid4()
+        approval_id = uuid4()
+        try:
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO users "
+                        "(id, username, email, password_hash, created_at, updated_at) "
+                        "VALUES (:id, 'deep-user', 'deep@example.invalid', "
+                        "'not-a-real-password', now(), now())"
+                    ),
+                    {"id": user_id},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO conversations "
+                        "(id, owner_id, title, created_at, updated_at, planning_mode_enabled, "
+                        "next_message_sequence) VALUES "
+                        "(:id, :owner_id, 'deep', now(), now(), false, 1)"
+                    ),
+                    {"id": conversation_id, "owner_id": user_id},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO tool_approvals "
+                        "(id, conversation_id, user_id, interrupt_id, tool_name, tool_call_id, "
+                        "original_args, decision) VALUES "
+                        "(:id, :conversation_id, :user_id, 'deep', 'tool', 'call', "
+                        "'{\"depth\": 1}'::jsonb, 'respond')"
+                    ),
+                    {
+                        "id": approval_id,
+                        "conversation_id": conversation_id,
+                        "user_id": user_id,
+                    },
+                )
+                head_snapshot = _public_table_schema_snapshot(connection)
+
+            _run_alembic(scratch_url, "downgrade", _PRE_RECONCILIATION_HEAD)
+            with engine.connect() as connection:
+                assert set(
+                    connection.execute(text("SELECT version_num FROM alembic_version")).scalars()
+                ) == {_PRE_RECONCILIATION_HEAD, _PARALLEL_ALLOW_CUSTOM_MODEL_HEAD}
+                assert _decision_type_labels(connection) == [
+                    "accept",
+                    "edit",
+                    "reject",
+                    "respond",
+                ]
+                assert (
+                    connection.scalar(
+                        text("SELECT decision::text FROM tool_approvals WHERE id = :id"),
+                        {"id": approval_id},
+                    )
+                    == "respond"
+                )
+
+            _run_alembic(scratch_url, "upgrade", "head")
+            with engine.connect() as connection:
+                assert _public_table_schema_snapshot(connection) == head_snapshot
+                assert connection.execute(
+                    text("SELECT decision::text, original_args FROM tool_approvals WHERE id = :id"),
+                    {"id": approval_id},
+                ).one() == ("respond", {"depth": 1})
         finally:
             engine.dispose()
 
@@ -869,6 +972,189 @@ def test_forward_repair_canonicalizes_stamped_legacy_enum_and_is_irreversible() 
                     "respond",
                 ]
             _run_alembic(scratch_url, "upgrade", "head")
+        finally:
+            engine.dispose()
+
+
+def test_forward_repair_normalizes_original_6c_shape_without_rewriting_data() -> None:
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", _OLD_HEAD)
+        engine = create_engine(scratch_url)
+        user_id = uuid4()
+        conversation_id = uuid4()
+        approval_id = uuid4()
+        try:
+            with engine.begin() as connection:
+                canonical_table = _table_schema_snapshot(connection, "tool_approvals")
+                original_type_oid = connection.scalar(
+                    text("SELECT 'public.decision_type'::regtype::oid")
+                )
+                for label in ("accept", "edit", "reject"):
+                    connection.execute(
+                        text(
+                            f"ALTER TYPE public.decision_type RENAME VALUE '{label}' "
+                            f"TO '{label.upper()}'"
+                        )
+                    )
+                for column_name in ("created_at", "updated_at", "decided_at"):
+                    connection.execute(
+                        text(
+                            "ALTER TABLE public.tool_approvals "
+                            f"ALTER COLUMN {column_name} DROP DEFAULT"
+                        )
+                    )
+                for constraint_name in (
+                    "fk_tool_approvals_conversation_id",
+                    "fk_tool_approvals_user_id",
+                ):
+                    connection.execute(
+                        text(f"ALTER TABLE public.tool_approvals DROP CONSTRAINT {constraint_name}")
+                    )
+                connection.execute(
+                    text(
+                        "ALTER TABLE public.tool_approvals ADD FOREIGN KEY "
+                        "(conversation_id) REFERENCES public.conversations(id)"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "ALTER TABLE public.tool_approvals ADD FOREIGN KEY "
+                        "(user_id) REFERENCES public.users(id)"
+                    )
+                )
+                legacy_fk_names = {
+                    row[0]
+                    for row in connection.execute(
+                        text(
+                            "SELECT conname FROM pg_constraint "
+                            "WHERE conrelid = 'public.tool_approvals'::regclass "
+                            "AND contype = 'f'"
+                        )
+                    )
+                }
+                assert {
+                    "tool_approvals_conversation_id_fkey",
+                    "tool_approvals_user_id_fkey",
+                } <= legacy_fk_names
+                connection.execute(
+                    text(
+                        "INSERT INTO users "
+                        "(id, username, email, password_hash, created_at, updated_at) "
+                        "VALUES (:id, 'legacy-user', 'legacy@example.invalid', "
+                        "'not-a-real-password', now(), now())"
+                    ),
+                    {"id": user_id},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO conversations "
+                        "(id, owner_id, title, created_at, updated_at, planning_mode_enabled, "
+                        "next_message_sequence) VALUES "
+                        "(:id, :owner_id, 'legacy', now(), now(), false, 1)"
+                    ),
+                    {"id": conversation_id, "owner_id": user_id},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO tool_approvals "
+                        "(id, created_at, updated_at, conversation_id, user_id, interrupt_id, "
+                        "tool_name, tool_call_id, original_args, decision, decided_at) VALUES "
+                        "(:id, '2026-01-02T03:04:05Z', '2026-01-02T03:04:06Z', "
+                        ":conversation_id, :user_id, 'legacy', 'tool', 'call', "
+                        "'{\"legacy\": true}'::jsonb, 'ACCEPT', '2026-01-02T03:04:07Z')"
+                    ),
+                    {
+                        "id": approval_id,
+                        "conversation_id": conversation_id,
+                        "user_id": user_id,
+                    },
+                )
+                legacy_row = connection.execute(
+                    text("SELECT * FROM tool_approvals WHERE id = :id"),
+                    {"id": approval_id},
+                ).one()
+
+            _run_alembic(scratch_url, "upgrade", "head")
+            with engine.connect() as connection:
+                assert _table_schema_snapshot(connection, "tool_approvals") == canonical_table
+                assert (
+                    connection.scalar(text("SELECT 'public.decision_type'::regtype::oid"))
+                    == original_type_oid
+                )
+                repaired_row = connection.execute(
+                    text("SELECT * FROM tool_approvals WHERE id = :id"),
+                    {"id": approval_id},
+                ).one()
+                assert repaired_row._mapping["decision"] == "accept"
+                assert {
+                    key: value for key, value in repaired_row._mapping.items() if key != "decision"
+                } == {key: value for key, value in legacy_row._mapping.items() if key != "decision"}
+        finally:
+            engine.dispose()
+
+
+def test_forward_repair_rejects_not_valid_foreign_key_with_orphan() -> None:
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", _OLD_HEAD)
+        engine = create_engine(scratch_url)
+        user_id = uuid4()
+        orphan_conversation_id = uuid4()
+        approval_id = uuid4()
+        try:
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO users "
+                        "(id, username, email, password_hash, created_at, updated_at) "
+                        "VALUES (:id, 'orphan-user', 'orphan@example.invalid', "
+                        "'not-a-real-password', now(), now())"
+                    ),
+                    {"id": user_id},
+                )
+                connection.execute(
+                    text(
+                        "ALTER TABLE public.tool_approvals DROP CONSTRAINT "
+                        "fk_tool_approvals_conversation_id"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO tool_approvals "
+                        "(id, conversation_id, user_id, interrupt_id, tool_name, tool_call_id, "
+                        "original_args, decision) VALUES "
+                        "(:id, :conversation_id, :user_id, 'orphan', 'tool', 'call', "
+                        "'{}'::jsonb, 'accept')"
+                    ),
+                    {
+                        "id": approval_id,
+                        "conversation_id": orphan_conversation_id,
+                        "user_id": user_id,
+                    },
+                )
+                connection.execute(
+                    text(
+                        "ALTER TABLE public.tool_approvals ADD CONSTRAINT "
+                        "fk_tool_approvals_conversation_id FOREIGN KEY (conversation_id) "
+                        "REFERENCES public.conversations(id) NOT VALID"
+                    )
+                )
+
+            with pytest.raises(
+                pytest.fail.Exception,
+                match="NOT VALID.*repair orphan rows.*VALIDATE CONSTRAINT",
+            ):
+                _run_alembic(scratch_url, "upgrade", "head")
+            with engine.connect() as connection:
+                assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+                    _OLD_HEAD
+                )
+                assert (
+                    connection.scalar(
+                        text("SELECT count(*) FROM tool_approvals WHERE id = :id"),
+                        {"id": approval_id},
+                    )
+                    == 1
+                )
         finally:
             engine.dispose()
 

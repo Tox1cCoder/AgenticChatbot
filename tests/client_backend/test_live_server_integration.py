@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import uuid
 from pathlib import Path
@@ -17,8 +18,19 @@ from client_backend.services import runtime_bridge as runtime_bridge_module
 from client_backend.services import server_api as server_api_module
 from client_backend.services import upstream_auth as upstream_auth_module
 
-LIVE_SERVER_URL = "http://127.0.0.1:8000"
+_RUN_LIVE_SERVER_TESTS = os.getenv("RUN_LIVE_SERVER_TESTS", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+LIVE_SERVER_URL = os.getenv("LIVE_SERVER_TEST_URL", "http://127.0.0.1:8000").rstrip("/")
 TEST_PASSWORD = "Passw0rd!234"
+
+pytestmark = pytest.mark.skipif(
+    not _RUN_LIVE_SERVER_TESTS,
+    reason="set RUN_LIVE_SERVER_TESTS=1 to test against a running API server",
+)
 
 
 def _run(coro):

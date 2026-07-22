@@ -530,8 +530,10 @@ LangGraph checkpoints are kept in the same database under `CHECKPOINT_SCHEMA` (d
 
 ### Schema ownership and cleanup
 
-- **Alembic owns the application tables only.** Autogenerate is filtered (`app/alembic/autogenerate_filters.py`) so it never touches the LangGraph checkpoint tables or `alembic_version`.
-- **LangGraph owns the checkpoint tables** (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`). They are never created, dropped, or altered by application migrations; pruning their rows is operational cleanup, not a schema migration.
+> **Historical migration warning:** the original `6c6598a9eb26` revision could drop LangGraph checkpoint tables and `mcp_oauth_tokens`. For a deployment that may have run that revision, inspect these tables before upgrading and take a verified database backup. The forward `b5c6d7e8f9a0` repair cannot reconstruct deleted checkpoint or MCP OAuth data. Restore the affected tables from a pre-upgrade backup when available. Without a checkpoint backup, reinitialize LangGraph only after accepting the loss of resumable workflow/HITL state; users must reauthenticate affected MCP servers when OAuth rows cannot be restored.
+
+- **Alembic owns the application tables only.** Current autogenerate is filtered (`app/alembic/autogenerate_filters.py`) so it does not touch the LangGraph checkpoint tables or `alembic_version`.
+- **LangGraph owns the checkpoint tables** (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`). Corrected migration history and new application migrations leave them unchanged; pruning their rows is operational cleanup, not a schema migration.
 - Migrations are the **only** schema-mutation path — `Base.metadata.create_all()` is not called at application startup (the old `Database.create_database()` helper was removed).
 - `conversation_device_bindings` was dropped (migration `v1w2x3y4z5a6`): conversation ownership is **user-based**, not device-bound.
 - **Checkpoint retention** (expiring abandoned HITL interrupts and reaping the checkpoint threads of expired interrupts and soft-deleted conversations) is handled by `CheckpointRetentionService`, invoked from the `cleanup_abandoned_interrupts` Celery beat task.
@@ -1352,6 +1354,17 @@ Coverage spans:
 - client-backend bundle, auth, CORS, conversations, SSE keepalive, runtime bridge, local MCP manager
 
 Fixtures live under [`tests/fixtures/`](tests/fixtures/).
+
+The client/backend live-server suite is intentionally opt-in so a normal test
+run never waits on or mutates a developer-specific API instance. Start a
+disposable API server, set `RUN_LIVE_SERVER_TESTS=1`, and set
+`LIVE_SERVER_TEST_URL` when the server is not at `http://127.0.0.1:8000`:
+
+```powershell
+$env:RUN_LIVE_SERVER_TESTS = "1"
+$env:LIVE_SERVER_TEST_URL = "http://127.0.0.1:8000"
+pytest tests/client_backend/test_live_server_integration.py
+```
 
 ---
 

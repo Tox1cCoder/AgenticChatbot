@@ -37,7 +37,11 @@ def upgrade() -> None:
     """Apply an online reconciliation, intentionally retiring task metrics."""
     require_online(op, revision)
     connection = op.get_bind()
-    canonicalize_decision_type(connection, BASE_DECISION_LABELS)
+    canonicalize_decision_type(
+        connection,
+        BASE_DECISION_LABELS,
+        allowed_future_labels=("respond",),
+    )
     if not sa.inspect(connection).has_table("tool_approvals", schema="public"):
         create_tool_approvals(op, current=False)
     validate_tool_approvals_schema(connection, current=False)
