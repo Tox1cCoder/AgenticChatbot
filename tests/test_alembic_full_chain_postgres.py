@@ -23,7 +23,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _SCRATCH_DATABASE_PREFIX = "chatbot_migration_smoke_"
 _SCRATCH_DATABASE_RE = re.compile(r"chatbot_migration_smoke_[0-9a-f]{32}")
 _OLD_HEAD = "a4b5c6d7e8f9"
-_HEAD = "b5c6d7e8f9a0"
+_HEAD = "c6d7e8f9a0b1"
 _PREVIOUS_HEAD = "z3a4b5c6d7e8"
 _PRE_RECONCILIATION_HEAD = "1ce64a959f7d"
 _PARALLEL_ALLOW_CUSTOM_MODEL_HEAD = "0f1e2d3c4b5a"
@@ -333,6 +333,17 @@ def _assert_head_schema(scratch_url: URL) -> None:
             }
             assert event_indexes["ix_model_usage_events_started_at"] == ["started_at"]
             assert minute_indexes["ix_model_usage_minute_bucket_start_utc"] == ["bucket_start_utc"]
+
+            event_foreign_keys = {
+                foreign_key["name"]: foreign_key
+                for foreign_key in schema.get_foreign_keys("model_usage_events")
+            }
+            assert (
+                event_foreign_keys["fk_model_usage_events_conversation"]["options"][
+                    "ondelete"
+                ]
+                == "CASCADE"
+            )
 
             validity = dict(
                 connection.execute(

@@ -65,7 +65,7 @@ event_key VARCHAR(160) unique, stable for idempotent retries
 operation_id UUID, allocated before related retry/context-overflow/provider-fallback loops
 attempt INTEGER >= 1, monotonically allocated within operation_id
 user_id UUID nullable -> users.id ON DELETE CASCADE
-conversation_id UUID nullable -> conversations.id ON DELETE SET NULL
+conversation_id UUID nullable -> conversations.id ON DELETE CASCADE
 request_message_id UUID nullable -> messages.id ON DELETE SET NULL
 document_id UUID nullable -> documents.id ON DELETE SET NULL
 correlation_id VARCHAR(128) nullable
@@ -353,7 +353,7 @@ class ModelUsageEvent(Base):
     attempt = Column(Integer, nullable=False)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"))
     conversation_id = Column(
-        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="SET NULL")
+        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE")
     )
     request_message_id = Column(
         UUID(as_uuid=True), ForeignKey("messages.id", ondelete="SET NULL")

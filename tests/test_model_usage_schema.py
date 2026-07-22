@@ -121,7 +121,7 @@ def test_model_usage_events_foreign_key_delete_behavior():
     table = ModelUsageEvent.__table__
 
     assert next(iter(table.c.user_id.foreign_keys)).ondelete == "CASCADE"
-    assert next(iter(table.c.conversation_id.foreign_keys)).ondelete == "SET NULL"
+    assert next(iter(table.c.conversation_id.foreign_keys)).ondelete == "CASCADE"
     assert next(iter(table.c.request_message_id.foreign_keys)).ondelete == "SET NULL"
     assert next(iter(table.c.document_id.foreign_keys)).ondelete == "SET NULL"
 

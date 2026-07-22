@@ -130,7 +130,7 @@ class ModelUsageEvent(Base):
         ForeignKey(
             "conversations.id",
             name="fk_model_usage_events_conversation",
-            ondelete="SET NULL",
+            ondelete="CASCADE",
         ),
     )
     request_message_id = Column(

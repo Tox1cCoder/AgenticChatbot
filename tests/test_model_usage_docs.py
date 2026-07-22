@@ -103,6 +103,7 @@ def test_runbook_covers_deployment_and_maintenance() -> None:
         "z3a4b5c6d7e8",
         "a4b5c6d7e8f9",
         "b5c6d7e8f9a0",
+        "c6d7e8f9a0b1",
         "Drain old API/worker approval writers",
         "persists `DecisionType.value`",
         "No historical backfill",
@@ -187,6 +188,8 @@ def test_runbook_covers_api_privacy_and_frontend_contracts() -> None:
         "No prompt or response content",
         "user-scoped identifiers",
         "cascades",
+        "conversation deletion removes raw events and rollups",
+        "reconciliation cannot recreate deleted-conversation usage",
         "No monetary cost tracking",
         "plans/TOKEN_USAGE_AI_SDK_FE_CONTRACT.md",
     )

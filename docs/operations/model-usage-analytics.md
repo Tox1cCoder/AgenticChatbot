@@ -20,7 +20,8 @@ x1y2z3a4b5c6
   -> y2z3a4b5c6d7  model_usage_events and model_usage_minute
   -> z3a4b5c6d7e8  device-scoped HITL policy
   -> a4b5c6d7e8f9  model-usage timestamp indexes
-  -> b5c6d7e8f9a0  tool-approval schema repair (current head)
+  -> b5c6d7e8f9a0  tool-approval schema repair
+  -> c6d7e8f9a0b1  cascade conversation-scoped usage (current head)
 ```
 
 Deploy schema before code, then enable collection before presentation:
@@ -247,9 +248,12 @@ deployment adds a DLQ or failed-task archive, apply the same retention and
 deletion controls there.
 
 Deleting a user cascades to both raw `model_usage_events` and aggregated
-`model_usage_minute` rows through PostgreSQL foreign keys. Conversation deletion
-removes conversation rollups and clears the nullable conversation reference on
-raw events while the user exists.
+`model_usage_minute` rows through PostgreSQL foreign keys. Likewise,
+conversation deletion removes raw events and rollups for that conversation.
+Because no detached raw events remain, reconciliation cannot recreate
+deleted-conversation usage in account-level rollups. Historical raw rows whose
+conversation reference was already cleared before `c6d7e8f9a0b1` cannot be
+safely reattributed and are not changed by the migration.
 
 Before account deletion, block new authenticated work for the user, then drain or
 purge that user's queued, scheduled, reserved, and deployment-DLQ failed-write
@@ -301,10 +305,12 @@ tables and timestamp indexes in place:
    .venv\Scripts\python.exe -m alembic downgrade z3a4b5c6d7e8
    ```
 
-   From the current head, this first applies migration `b5c6d7e8f9a0`'s safe
-   no-op downgrade, preserving repaired tool-approval schema and data, and then
-   removes only migration `a4b5c6d7e8f9`'s timestamp indexes. It does not remove
-   the usage ledger. Skip this step for the normal path.
+   From the current head, this first restores the raw event conversation FK's
+   prior `SET NULL` behavior by downgrading `c6d7e8f9a0b1`, then applies
+   migration `b5c6d7e8f9a0`'s safe no-op downgrade, preserving repaired
+   tool-approval schema and data, and finally removes only migration
+   `a4b5c6d7e8f9`'s timestamp indexes. It does not remove the usage ledger. Skip
+   this step for the normal path.
 5. Deploy the previous application, worker, sidecar, and UI release only after
    the optional current-artifact migration step has completed or been skipped.
    Keep presentation and tracking disabled until compatibility is verified.

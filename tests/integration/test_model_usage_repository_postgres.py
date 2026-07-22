@@ -495,6 +495,46 @@ def test_latest_conversation_event_breaks_timestamp_attempt_ties_by_id(
     assert latest.id == expected_id
 
 
+def test_conversation_delete_removes_usage_without_reconciliation_resurrection(
+    repository, tenant_factory, session_factory
+) -> None:
+    user_id, conversation_id, _ = tenant_factory()
+    started = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    repository.record_event(
+        _command(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            started_at=started,
+        )
+    )
+
+    with session_factory.begin() as session:
+        session.execute(delete(Conversation).where(Conversation.id == conversation_id))
+
+    def _usage_row_counts() -> tuple[int, int]:
+        with session_factory() as session:
+            event_count = session.scalar(
+                select(func.count())
+                .select_from(ModelUsageEvent)
+                .where(ModelUsageEvent.user_id == user_id)
+            )
+            rollup_count = session.scalar(
+                select(func.count())
+                .select_from(ModelUsageMinute)
+                .where(ModelUsageMinute.user_id == user_id)
+            )
+        return int(event_count or 0), int(rollup_count or 0)
+
+    assert _usage_row_counts() == (0, 0)
+
+    repository.reconcile_minute_range(
+        start_inclusive=started,
+        end_exclusive=started + timedelta(minutes=1),
+    )
+
+    assert _usage_row_counts() == (0, 0)
+
+
 def test_reconcile_minute_rebuilds_exactly_from_raw_events(
     repository, tenant_factory, session_factory
 ) -> None:
