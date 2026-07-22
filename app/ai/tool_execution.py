@@ -524,9 +524,7 @@ def _apply_offload_to_outputs_and_artifacts(
         # dispatch_subagents; replacing that ToolMessage with a blob preview
         # would hide the result it needs to reconcile todos. Skill terminal
         # errors carry the same flag: their content must reach the model uncut.
-        if output.get("name") in _FULL_MODEL_HANDOFF_TOOLS or output.get(
-            "preserve_full_content"
-        ):
+        if output.get("name") in _FULL_MODEL_HANDOFF_TOOLS or output.get("preserve_full_content"):
             continue
         tool_call_id = output.get("tool_call_id")
         public_text, blob_info = apply_tool_output_offload(
