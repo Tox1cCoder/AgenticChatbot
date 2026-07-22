@@ -50,7 +50,7 @@ assert snapshot.is_latest_assistant is True
 
 - [ ] **Step 2: Run the focused tests and verify RED**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_history_provider.py -q`
+Run: `python -m pytest tests/test_history_provider.py -q`
 
 Expected: FAIL because `get_latest_canvas_artifact` and repository candidate queries do not exist.
 
@@ -73,7 +73,7 @@ class CanvasArtifactSnapshot:
 
 - [ ] **Step 4: Run focused tests and verify GREEN**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_history_provider.py -q`
+Run: `python -m pytest tests/test_history_provider.py -q`
 
 Expected: PASS.
 
@@ -106,7 +106,7 @@ assert out["context"]["canvas_edit_mode"] is True
 
 - [ ] **Step 2: Run the routing tests and verify RED**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_custom_agent_stickiness.py tests/test_router.py -q`
+Run: `python -m pytest tests/test_custom_agent_stickiness.py tests/test_router.py -q`
 
 Expected: FAIL because routing does not hydrate canvas state or support canvas continuity.
 
@@ -124,7 +124,7 @@ if active_canvas and active_canvas.is_latest_assistant:
 
 - [ ] **Step 4: Run routing tests and verify GREEN**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_custom_agent_stickiness.py tests/test_router.py -q`
+Run: `python -m pytest tests/test_custom_agent_stickiness.py tests/test_router.py -q`
 
 Expected: PASS.
 
@@ -154,7 +154,7 @@ assert response.metadata["canvas_update"]["status"] == "updated"
 
 - [ ] **Step 2: Run the canvas tests and verify RED**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_canvas_agent.py -q`
+Run: `python -m pytest tests/test_canvas_agent.py -q`
 
 Expected: FAIL because previous source is not injected and revision/failure metadata is absent.
 
@@ -178,7 +178,7 @@ Fetch the full snapshot in `_canvas_node` and pass it to `CanvasAgent.invoke_mod
 
 - [ ] **Step 5: Run canvas and graph tests and verify GREEN**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_canvas_agent.py tests/test_message_history_pipeline.py -q`
+Run: `python -m pytest tests/test_canvas_agent.py tests/test_message_history_pipeline.py -q`
 
 Expected: PASS.
 
@@ -212,7 +212,7 @@ assert "widget_get_state" in edit_tool_names
 
 - [ ] **Step 2: Run focused policy tests and verify RED**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_widget_runtime.py tests/test_tool_search_accuracy.py -q`
+Run: `python -m pytest tests/test_widget_runtime.py tests/test_tool_search_accuracy.py -q`
 
 Expected: FAIL because exclusion is currently static, incomplete under deferred discovery, and not turn-scoped.
 
@@ -237,7 +237,7 @@ In the generic tool loop, partition calls denied by the active canvas-edit polic
 
 - [ ] **Step 6: Run focused policy tests and verify GREEN**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_widget_runtime.py tests/test_tool_search_accuracy.py tests/test_tool_execution_policy.py -q`
+Run: `python -m pytest tests/test_widget_runtime.py tests/test_tool_search_accuracy.py tests/test_tool_execution_policy.py -q`
 
 Expected: PASS.
 
@@ -269,7 +269,7 @@ assert canvas["payload"]["operation"] == "update"
 
 - [ ] **Step 2: Run metadata tests and verify RED**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_rich_response_metadata.py -q`
+Run: `python -m pytest tests/test_rich_response_metadata.py -q`
 
 Expected: FAIL because strict `CanvasPayload` drops/rejects revision fields.
 
@@ -279,7 +279,7 @@ Add optional validated revision/operation fields, project them in `_canvas_rich_
 
 - [ ] **Step 4: Run metadata tests and verify GREEN**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_rich_response_metadata.py tests/test_ai_sdk_v6_stream_contract.py tests/test_ai_sdk_context_window.py -q`
+Run: `python -m pytest tests/test_rich_response_metadata.py tests/test_ai_sdk_v6_stream_contract.py tests/test_ai_sdk_context_window.py -q`
 
 Expected: PASS.
 
@@ -300,7 +300,7 @@ git commit -m "feat: publish canvas revision metadata"
 Run:
 
 ```powershell
-C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_canvas_agent.py tests/test_history_provider.py tests/test_router.py tests/test_custom_agent_stickiness.py tests/test_widget_runtime.py tests/test_tool_search_accuracy.py tests/test_rich_response_metadata.py -q
+python -m pytest tests/test_canvas_agent.py tests/test_history_provider.py tests/test_router.py tests/test_custom_agent_stickiness.py tests/test_widget_runtime.py tests/test_tool_search_accuracy.py tests/test_rich_response_metadata.py -q
 ```
 
 Expected: PASS with zero failures.
@@ -310,15 +310,15 @@ Expected: PASS with zero failures.
 Run:
 
 ```powershell
-C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m ruff check app/ai/canvas_state.py app/ai/history.py app/ai/graph.py app/ai/agents/canvas_agent.py app/ai/agents/router.py app/ai/agents/base_agent.py app/ai/deferred_tool_binding.py app/ai/tool_search_tool.py app/ai/workflow/tool_loop.py app/repositories/message.py app/core/rich_response.py app/core/response_constants.py tests/test_canvas_agent.py tests/test_history_provider.py tests/test_router.py tests/test_custom_agent_stickiness.py tests/test_widget_runtime.py tests/test_tool_search_accuracy.py tests/test_rich_response_metadata.py
-C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m ruff format --check app/ai/canvas_state.py app/ai/history.py app/ai/graph.py app/ai/agents/canvas_agent.py app/ai/agents/router.py app/ai/agents/base_agent.py app/ai/deferred_tool_binding.py app/ai/tool_search_tool.py app/ai/workflow/tool_loop.py app/repositories/message.py app/core/rich_response.py app/core/response_constants.py tests/test_canvas_agent.py tests/test_history_provider.py tests/test_router.py tests/test_custom_agent_stickiness.py tests/test_widget_runtime.py tests/test_tool_search_accuracy.py tests/test_rich_response_metadata.py
+python -m ruff check app/ai/canvas_state.py app/ai/history.py app/ai/graph.py app/ai/agents/canvas_agent.py app/ai/agents/router.py app/ai/agents/base_agent.py app/ai/deferred_tool_binding.py app/ai/tool_search_tool.py app/ai/workflow/tool_loop.py app/repositories/message.py app/core/rich_response.py app/core/response_constants.py tests/test_canvas_agent.py tests/test_history_provider.py tests/test_router.py tests/test_custom_agent_stickiness.py tests/test_widget_runtime.py tests/test_tool_search_accuracy.py tests/test_rich_response_metadata.py
+python -m ruff format --check app/ai/canvas_state.py app/ai/history.py app/ai/graph.py app/ai/agents/canvas_agent.py app/ai/agents/router.py app/ai/agents/base_agent.py app/ai/deferred_tool_binding.py app/ai/tool_search_tool.py app/ai/workflow/tool_loop.py app/repositories/message.py app/core/rich_response.py app/core/response_constants.py tests/test_canvas_agent.py tests/test_history_provider.py tests/test_router.py tests/test_custom_agent_stickiness.py tests/test_widget_runtime.py tests/test_tool_search_accuracy.py tests/test_rich_response_metadata.py
 ```
 
 Expected: both commands exit 0.
 
 - [ ] **Step 3: Run the full test suite**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest -q`
+Run: `python -m pytest -q`
 
 Expected: PASS with zero failures.
 

@@ -38,7 +38,6 @@ from .agent_metadata import (
     normalize_handoff_metadata,
     normalize_subagent_metadata,
 )
-from .canvas_state import CanvasArtifactSnapshot
 from .agents.canvas_agent import CanvasAgent
 from .agents.chat_agent import ChatAgent
 from .agents.image_generator_agent import ImageGeneratorAgent
@@ -46,6 +45,7 @@ from .agents.planning_agent import PlanningAgent
 from .agents.rag_agent import RAGAgent
 from .agents.router import Router
 from .agents.search_agent import SearchAgent
+from .canvas_state import CanvasArtifactSnapshot
 from .custom_agent_runtime import is_custom_runtime_id
 from .history import ConversationHistoryProvider
 from .hitl_config import (

@@ -581,16 +581,18 @@ class BaseAgent(ABC):
         if include_hand_off is False:
             tools = [tool for tool in tools if getattr(tool, "name", None) != "hand_off"]
 
-        if excluded_tool_names:
-            tools = [
-                tool for tool in tools if getattr(tool, "name", None) not in excluded_tool_names
-            ]
-
         seen_names = {tool.name for tool in tools}
         for tool in remote_tools:
             if tool.name not in seen_names:
                 tools.append(tool)
                 seen_names.add(tool.name)
+
+        # Apply invocation-scoped denials after merging every tool source,
+        # including already-loaded client runtime tools.
+        if excluded_tool_names:
+            tools = [
+                tool for tool in tools if getattr(tool, "name", None) not in excluded_tool_names
+            ]
 
         return _bind_widget_session_tools(tools, conversation_id)
 

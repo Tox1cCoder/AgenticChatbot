@@ -512,6 +512,62 @@ def test_history_provider_returns_latest_valid_canvas_artifact():
     message_repo.get_prompt_history.assert_not_called()
 
 
+def test_history_provider_keeps_canvas_sticky_after_unchanged_update():
+    from app.ai.history import ConversationHistoryProvider
+
+    conversation_id = uuid4()
+    user_id = uuid4()
+    base = datetime(2026, 7, 22, 10, 0, tzinfo=timezone.utc)
+    artifact_message = _make_message(
+        conversation_id=conversation_id,
+        sender=MessageRole.assistant.value,
+        content="Built the canvas.",
+        created_at=base,
+        metadata={
+            "canvas_artifact": {
+                "artifact_id": "canvas:main",
+                "revision": 3,
+                "content": "<html><body>Current</body></html>",
+                "language": "html",
+                "title": "Current",
+            }
+        },
+    )
+    unchanged_message = _make_message(
+        conversation_id=conversation_id,
+        sender=MessageRole.assistant.value,
+        content="The canvas is already up to date.",
+        created_at=base + timedelta(seconds=10),
+        metadata={
+            "canvas_update": {
+                "status": "unchanged",
+                "artifact_id": "canvas:main",
+                "base_revision": 3,
+                "revision": 3,
+            }
+        },
+    )
+
+    message_repo = MagicMock()
+    message_repo.get_canvas_artifact_candidates.return_value = [artifact_message]
+    message_repo.get_latest_assistant_by_conversation.return_value = unchanged_message
+    provider = ConversationHistoryProvider(
+        message_repository=message_repo,
+        summary_repository=MagicMock(),
+        settings=_fake_settings(),
+    )
+
+    snapshot = asyncio.run(
+        provider.get_latest_canvas_artifact(
+            conversation_id=conversation_id,
+            user_id=user_id,
+        )
+    )
+
+    assert snapshot is not None
+    assert snapshot.is_latest_assistant is True
+
+
 def test_history_provider_canvas_artifact_is_conversation_scoped():
     from app.ai.history import ConversationHistoryProvider
 

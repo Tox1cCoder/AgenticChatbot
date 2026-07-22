@@ -10,12 +10,12 @@ from typing import Any
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import interrupt
 
+from app.ai.canvas_state import CANVAS_EDIT_DENIED_TOOL_NAMES
 from app.ai.hitl_config import (
     any_call_requires_approval,
     policy_from_context,
     redact_sensitive_args,
 )
-from app.ai.canvas_state import CANVAS_EDIT_DENIED_TOOL_NAMES
 from app.ai.mcp_registry import get_global_mcp_manager
 from app.ai.schemas import GraphState, GraphStateView
 from app.ai.token_instrumentation import truncate_tool_result

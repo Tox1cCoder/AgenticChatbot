@@ -110,7 +110,7 @@ async def test_canvas_edit_injects_source_and_emits_next_revision(monkeypatch):
         captured["messages"] = messages
         return _model_response(
             "Updated the accent colour.\n\n"
-            "```html\n<!doctype html><html><body class=\"blue\">UPDATED</body></html>\n```"
+            '```html\n<!doctype html><html><body class="blue">UPDATED</body></html>\n```'
         )
 
     monkeypatch.setattr(BaseAgent, "invoke_model_with_history", fake_base_invoke)

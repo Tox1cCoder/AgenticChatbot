@@ -787,6 +787,58 @@ class TestWidgetAgentScoping:
         assert "widget_get_state" in names
         assert "tool_search" in names
 
+    def test_canvas_edit_omits_loaded_client_widget_mutations(self, monkeypatch):
+        from app.ai.agents.base_agent import BaseAgent
+        from app.ai.canvas_state import CANVAS_EDIT_DENIED_TOOL_NAMES
+        from app.ai.schemas import AgentType
+
+        class _CanvasAgent(BaseAgent):
+            def _init_gemini(self) -> None:
+                self.gemini_client = None
+                self.langchain_model = None
+
+            @property
+            def agent_type(self) -> AgentType:
+                return AgentType.CANVAS
+
+            @property
+            def agent_id(self) -> str:
+                return "canvas_agent"
+
+            def _get_base_system_prompt(self) -> str:
+                return "Canvas"
+
+        async def _noop(**kwargs):
+            return kwargs
+
+        client_tools = [
+            StructuredTool.from_function(
+                coroutine=_noop,
+                name=name,
+                description=name,
+            )
+            for name in ("widget_create", "widget_get_state")
+        ]
+        agent = _CanvasAgent(agent_config_key="canvas")
+        monkeypatch.setattr(
+            "app.ai.agents.base_agent.should_use_deferred_loading",
+            lambda _agent_key: False,
+        )
+        monkeypatch.setattr(agent, "_get_client_runtime_tools", lambda **_kwargs: client_tools)
+
+        names = {
+            tool.name
+            for tool in agent._get_tools_for_binding(
+                conversation_id="conversation-1",
+                user_id="user-1",
+                device_id="device-1",
+                excluded_tool_names=CANVAS_EDIT_DENIED_TOOL_NAMES,
+            )
+        }
+
+        assert "widget_create" not in names
+        assert "widget_get_state" in names
+
 
 # ---------------------------------------------------------------------------
 # Deferred binding — pinned widget tools

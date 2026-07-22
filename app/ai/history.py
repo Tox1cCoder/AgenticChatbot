@@ -22,8 +22,8 @@ from uuid import UUID
 
 from cachetools import TTLCache
 
-from app.ai.conversation_memory import ConversationMemory
 from app.ai.canvas_state import CanvasArtifactSnapshot, canvas_snapshot_from_message
+from app.ai.conversation_memory import ConversationMemory
 from app.ai.schemas import AgentMessage, MessageRole
 from app.ai.token_instrumentation import HistoryBudgetConfig, trim_history_to_budget
 from app.models.enums import MessageRole as DBMessageRole
@@ -233,9 +233,7 @@ class ConversationHistoryProvider:
         self._coerce_uuid(user_id)
 
         try:
-            candidates = self.message_repository.get_canvas_artifact_candidates(
-                conversation_uuid
-            )
+            candidates = self.message_repository.get_canvas_artifact_candidates(conversation_uuid)
             latest_assistant = self.message_repository.get_latest_assistant_by_conversation(
                 conversation_uuid
             )
@@ -257,7 +255,20 @@ class ConversationHistoryProvider:
                     conversation_uuid,
                 )
                 continue
-            return snapshot.with_latest_assistant(snapshot.message_id == latest_assistant_id)
+            is_latest_canvas_turn = snapshot.message_id == latest_assistant_id
+            if not is_latest_canvas_turn and latest_assistant is not None:
+                latest_metadata = getattr(latest_assistant, "message_metadata", None)
+                latest_update = (
+                    latest_metadata.get("canvas_update")
+                    if isinstance(latest_metadata, dict)
+                    else None
+                )
+                is_latest_canvas_turn = bool(
+                    isinstance(latest_update, dict)
+                    and latest_update.get("artifact_id") == snapshot.artifact_id
+                    and latest_update.get("status") in {"updated", "unchanged", "failed"}
+                )
+            return snapshot.with_latest_assistant(is_latest_canvas_turn)
         return None
 
     # ------------------------------------------------------------------
