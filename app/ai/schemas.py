@@ -189,6 +189,9 @@ class GraphContext(TypedDict, total=False):
     # Per-turn, per-user HITL approval policy (checkpoint-safe plain dict). Read by
     # the gate via ``policy_from_context``; absent/None falls back to the global policy.
     hitl_policy: dict[str, Any]
+    # Bounded canvas routing state. Full executable source never enters graph state.
+    active_canvas: dict[str, Any]
+    canvas_edit_mode: bool
     # Turn-scoped Planning rubric metadata. ``planning_rubric`` mirrors the
     # PlanningRubricAttempt metadata for the most recent graded plan; the
     # ``planning_rubric_feedback`` string drives a forced revision pass when a

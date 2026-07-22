@@ -16,6 +16,7 @@ import pytest
 from langchain_core.messages import HumanMessage
 
 from app.ai.agents.router import Router
+from app.ai.canvas_state import CanvasArtifactSnapshot
 from app.ai.graph import MultiAgentWorkflow
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 
@@ -46,6 +47,7 @@ def _workflow(router):
     wf._runtime_model_resolver = None
     wf.router = router
     wf.document_repository = None
+    wf.history_provider = None
     return wf
 
 
@@ -196,3 +198,72 @@ def test_finalize_persists_last_agent():
     wf._finalize_agent_response(state, response)
 
     assert state["last_agent"] == rid
+
+
+@pytest.mark.asyncio
+async def test_followup_sticks_to_latest_persisted_canvas_without_router():
+    router = _RecordingRouter()
+    wf = _workflow(router)
+    wf.history_provider = type(
+        "HistoryProvider",
+        (),
+        {
+            "get_latest_canvas_artifact": staticmethod(
+                lambda **kwargs: _async_value(
+                    CanvasArtifactSnapshot(
+                        artifact_id="canvas:main",
+                        revision=3,
+                        content="<html>current</html>",
+                        language="html",
+                        title="Current",
+                        message_id=str(uuid4()),
+                        sequence=9,
+                        is_latest_assistant=True,
+                    )
+                )
+            )
+        },
+    )()
+    state = _followup_state(
+        last_agent=None,
+        content="make the header blue",
+        custom_agents={},
+    )
+    state["conversation_id"] = str(uuid4())
+    state["user_id"] = str(uuid4())
+
+    out = await wf._route_node(state)
+
+    assert out["selected_agent"] == "canvas_agent"
+    assert router.calls == 0
+    assert out["context"]["canvas_edit_mode"] is True
+    assert out["context"]["active_canvas"]["revision"] == 3
+    assert "content" not in out["context"]["active_canvas"]
+
+
+@pytest.mark.asyncio
+async def test_missing_canvas_snapshot_uses_normal_router():
+    router = _RecordingRouter()
+    wf = _workflow(router)
+    wf.history_provider = type(
+        "HistoryProvider",
+        (),
+        {"get_latest_canvas_artifact": staticmethod(lambda **kwargs: _async_value(None))},
+    )()
+    state = _followup_state(
+        last_agent="canvas_agent",
+        content="make the header blue",
+        custom_agents={},
+    )
+    state["conversation_id"] = str(uuid4())
+    state["user_id"] = str(uuid4())
+
+    out = await wf._route_node(state)
+
+    assert out["selected_agent"] == "chat_agent"
+    assert router.calls == 1
+    assert out["context"].get("canvas_edit_mode") is not True
+
+
+async def _async_value(value):
+    return value

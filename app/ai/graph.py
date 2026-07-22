@@ -38,6 +38,7 @@ from .agent_metadata import (
     normalize_handoff_metadata,
     normalize_subagent_metadata,
 )
+from .canvas_state import CanvasArtifactSnapshot
 from .agents.canvas_agent import CanvasAgent
 from .agents.chat_agent import ChatAgent
 from .agents.image_generator_agent import ImageGeneratorAgent
@@ -301,6 +302,28 @@ class MultiAgentWorkflow(
                 return list(context.messages)
 
         return []
+
+    async def _get_active_canvas_snapshot(
+        self,
+        conversation_id: str | None,
+        user_id: str | None,
+    ) -> CanvasArtifactSnapshot | None:
+        """Return durable canvas state without exposing failures to routing."""
+        provider = getattr(self, "history_provider", None)
+        if not conversation_id or not user_id or provider is None:
+            return None
+        loader = getattr(provider, "get_latest_canvas_artifact", None)
+        if not callable(loader):
+            return None
+        try:
+            return await loader(conversation_id=conversation_id, user_id=user_id)
+        except Exception as exc:
+            logger.warning(
+                "Canvas state lookup failed for conversation=%s: %s",
+                conversation_id,
+                exc,
+            )
+            return None
 
     def invalidate_history_cache(self, conversation_id: str) -> None:
         """Invalidate cached history for a conversation (call when new messages added)."""
@@ -882,6 +905,32 @@ class MultiAgentWorkflow(
 
         planning_mode_enabled, has_existing_plan = self._get_planning_flags(state)
 
+        active_canvas = await self._get_active_canvas_snapshot(
+            conversation_id,
+            state.get("user_id"),
+        )
+        active_canvas_descriptor = active_canvas.descriptor() if active_canvas else None
+        if active_canvas_descriptor:
+            context = dict(state.get("context") or {})
+            context["active_canvas"] = active_canvas_descriptor
+            state["context"] = context
+
+        # Canvas is a conversation-scoped working artifact. Keep an immediate
+        # follow-up on the agent that owns the latest persisted canvas; unlike
+        # checkpoint state, this survives message compaction and process restarts.
+        if (
+            not (planning_mode_enabled and has_existing_plan)
+            and active_canvas is not None
+            and active_canvas.is_latest_assistant
+            and "canvas_agent" in self.agents
+        ):
+            state["selected_agent"] = "canvas_agent"
+            context = dict(state.get("context") or {})
+            context["canvas_edit_mode"] = True
+            state["context"] = context
+            self._record_agent_invocation(state, "canvas_agent", via="canvas_continuity")
+            return state
+
         # Custom-agent stickiness: keep a natural follow-up on the custom agent
         # that handled the previous turn instead of letting the router silently
         # re-route a terse follow-up to a base agent (which would lose the custom
@@ -919,12 +968,17 @@ class MultiAgentWorkflow(
             planning_mode_enabled=planning_mode_enabled,
             has_existing_plan=has_existing_plan,
             custom_agent_descriptors=custom_descriptors or None,
+            active_canvas=active_canvas_descriptor,
         )
 
         if selected_agent == "rag_agent" and not has_documents:
             selected_agent = "chat_agent"
 
         state["selected_agent"] = selected_agent
+        if selected_agent == "canvas_agent" and active_canvas is not None:
+            context = dict(state.get("context") or {})
+            context["canvas_edit_mode"] = True
+            state["context"] = context
         self._record_agent_invocation(state, selected_agent, via="router")
         return state
 

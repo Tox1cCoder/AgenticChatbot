@@ -120,6 +120,39 @@ async def test_canvas_agent_honors_llm_decision_for_browser_artifact_request(mon
     assert result == "canvas_agent"
 
 
+@pytest.mark.asyncio
+async def test_router_receives_bounded_active_canvas_context(monkeypatch):
+    monkeypatch.setattr(
+        Router,
+        "_init_gemini",
+        lambda self: setattr(self, "gemini_client", None),
+    )
+    router = Router()
+
+    async def fake_call_llm(prompt: str, available_agents: list[str]) -> str | None:
+        assert "active canvas" in prompt.lower()
+        assert "Current Site" in prompt
+        assert "revision 4" in prompt
+        assert "SECRET SOURCE" not in prompt
+        return "canvas_agent"
+
+    monkeypatch.setattr(router, "_call_llm", fake_call_llm)
+
+    result = await router.route_message(
+        AgentMessage(role=MessageRole.USER, content="change its accent colour"),
+        ["chat_agent", "canvas_agent"],
+        active_canvas={
+            "artifact_id": "canvas:main",
+            "revision": 4,
+            "title": "Current Site",
+            "message_id": "m-1",
+            "content": "SECRET SOURCE",
+        },
+    )
+
+    assert result == "canvas_agent"
+
+
 def test_router_prompt_uses_semantic_canvas_liveui_boundary():
     from app.ai.prompts import ROUTER_SYSTEM_PROMPT
 

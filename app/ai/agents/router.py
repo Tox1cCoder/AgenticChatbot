@@ -60,6 +60,7 @@ class Router:
         planning_mode_enabled: bool = False,
         has_existing_plan: bool = False,
         custom_agent_descriptors: list[dict] | None = None,
+        active_canvas: dict | None = None,
     ) -> str:
         """Route a user message to the most appropriate agent via LLM.
 
@@ -101,6 +102,7 @@ class Router:
             user_id=request_user_id,
             device_id=request_device_id,
             custom_agent_descriptors=custom_agent_descriptors,
+            active_canvas=active_canvas,
         )
 
         selected_agent = await self._call_llm(prompt, available_agents)
@@ -162,6 +164,7 @@ class Router:
         user_id: str | None,
         device_id: str | None,
         custom_agent_descriptors: list[dict] | None = None,
+        active_canvas: dict | None = None,
     ) -> str:
         prompt_parts: list[str] = []
 
@@ -181,6 +184,17 @@ class Router:
 
         if has_existing_plan:
             prompt_parts.append("CONTEXT: This conversation has an existing task plan.\n")
+
+        if isinstance(active_canvas, dict):
+            title = active_canvas.get("title")
+            revision = active_canvas.get("revision")
+            if isinstance(title, str) and title.strip() and isinstance(revision, int):
+                prompt_parts.append(
+                    "CONTEXT: An active canvas artifact exists "
+                    f'(title: "{title[:120]}", revision {revision}). '
+                    "Route requests that semantically continue or edit that artifact to "
+                    "canvas_agent.\n"
+                )
 
         prompt_parts.append(f"Available agents for this request: {', '.join(available_agents)}")
         prompt_parts.append(build_runtime_time_context_block().strip())
