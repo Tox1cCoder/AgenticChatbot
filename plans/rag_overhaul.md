@@ -239,7 +239,7 @@ passing tests, +0 new failures.
   `RAG_EMBEDDING_PROVIDER`, `RAG_EMBEDDING_MODEL`, `RAG_EMBEDDING_DIMENSION`,
   `RAG_EMBEDDING_QUERY_TASK`, `RAG_MULTIMODAL_IMAGE_EMBEDDINGS_ENABLED`,
   `RAG_RERANKER_MODEL`, `RAG_CHUNK_TARGET_TOKENS`, `RAG_CHUNK_OVERLAP_TOKENS`,
-  `RAG_CHUNK_MAX_TOKENS`, `RAG_INDEX_BATCH_SIZE`, `RAG_AGENT_MODEL`. Server
+  `RAG_CHUNK_MAX_TOKENS`, `RAG_EMBEDDING_BATCH_SIZE`, `RAG_AGENT_MODEL`. Server
   tolerates stale env keys via `Settings.model_config["extra"] = "ignore"`,
   so a stale file does not crash startup; this is a documentation hygiene
   task rather than a correctness gap. Phase 11B (raw multimodal image
@@ -351,7 +351,7 @@ Re-audit of the codebase against the post-Phase-10 plan claims. Verifies what is
 
 3. **Qdrant collection bootstrap lives in the legacy service.** `_ensure_collection_exists` is at `app/services/document_processing_service.py:84-109` and reads `self.embedding_dimension` (the legacy field). It validates vector size and raises on mismatch. `DocumentIndexService` does NOT ensure the collection. With Phase 11 switching collection name and re-embedding into a fresh collection, the bootstrap code must move to either a startup hook or onto `DocumentIndexService`, and must read `settings.rag_embedding_dimension` and `settings.qdrant_collection_name` from a single source. → Phase 11 item.
 
-4. **`.env.example` is out of sync with post-Phase-9 `Settings`.** Currently lists `RAG_MAX_CONTEXT_TOKENS` (line 67), `RAG_CHUNKS_IN_PROMPT` (line 79), and other retired keys. Missing the new `RAG_*` keys (`RAG_EMBEDDING_MODEL`, `RAG_EMBEDDING_DIMENSION`, `RAG_RERANKER_MODEL`, `RAG_CHUNK_TARGET_TOKENS`, `RAG_CHUNK_OVERLAP_TOKENS`, `RAG_CHUNK_MAX_TOKENS`, `RAG_INDEX_BATCH_SIZE`). `QDRANT_COLLECTION_NAME=documents` does not match the live default `documents_gemma`. The Phase 9 progress note implied `.env.example` was handled, but the diff shows it was not. `extra="ignore"` keeps the server from crashing, but the example file still misleads operators. → Phase 11 item (folded with the new Gemini env keys).
+4. **`.env.example` is out of sync with post-Phase-9 `Settings`.** Currently lists `RAG_MAX_CONTEXT_TOKENS` (line 67), `RAG_CHUNKS_IN_PROMPT` (line 79), and other retired keys. Missing the new `RAG_*` keys (`RAG_EMBEDDING_MODEL`, `RAG_EMBEDDING_DIMENSION`, `RAG_RERANKER_MODEL`, `RAG_CHUNK_TARGET_TOKENS`, `RAG_CHUNK_OVERLAP_TOKENS`, `RAG_CHUNK_MAX_TOKENS`, `RAG_EMBEDDING_BATCH_SIZE`). `QDRANT_COLLECTION_NAME=documents` does not match the live default `documents_gemma`. The Phase 9 progress note implied `.env.example` was handled, but the diff shows it was not. `extra="ignore"` keeps the server from crashing, but the example file still misleads operators. → Phase 11 item (folded with the new Gemini env keys).
 
 5. **Demo upload types still mismatch server validation.** `demo.py:7716` and `upload_support.py:52` allow only `["txt", "pdf", "docx", "md"]`. Server accepts `pptx`, `xlsx`, `html` as well. Plan's Phase 11 already lists `tests/test_demo_document_file_types.py` but the demo code change is required for those tests to pass — promoted from optional to required.
 
@@ -1092,7 +1092,7 @@ Required edits in `.env.example`:
 
 - Remove retired keys: `RAG_MAX_CONTEXT_TOKENS`, `RAG_CHUNKS_IN_PROMPT`, `MAX_CHUNK_CHARS_IN_PROMPT`, `DOCUMENT_CHUNK_SIZE`, `DOCUMENT_CHUNK_OVERLAP`, `PRESERVE_CROSS_PAGE_CONTEXT`, `AGENTIC_RAG_ENABLED`.
 - Update `QDRANT_COLLECTION_NAME` default to `documents_gemini_embedding_2_768` to match the post-Phase-11 config default.
-- Add the Phase 9 settings that were never documented: `RAG_EMBEDDING_MODEL`, `RAG_EMBEDDING_DIMENSION`, `RAG_RERANKER_MODEL`, `RAG_CHUNK_TARGET_TOKENS`, `RAG_CHUNK_OVERLAP_TOKENS`, `RAG_CHUNK_MAX_TOKENS`, `RAG_INDEX_BATCH_SIZE`, `RAG_AGENT_MODEL`.
+- Add the Phase 9 settings that were never documented: `RAG_EMBEDDING_MODEL`, `RAG_EMBEDDING_DIMENSION`, `RAG_RERANKER_MODEL`, `RAG_CHUNK_TARGET_TOKENS`, `RAG_CHUNK_OVERLAP_TOKENS`, `RAG_CHUNK_MAX_TOKENS`, `RAG_EMBEDDING_BATCH_SIZE`, `RAG_AGENT_MODEL`.
 - Add the Phase 11 settings: `RAG_EMBEDDING_PROVIDER`, `RAG_EMBEDDING_QUERY_TASK`, `RAG_MULTIMODAL_IMAGE_EMBEDDINGS_ENABLED`.
 - Document `GEMINI_API_KEY` as required (not optional) for the active RAG embedding path.
 - Group RAG keys together with a comment header so operators see the active config in one block.

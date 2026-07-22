@@ -111,7 +111,8 @@ def test_tracked_runtime_and_docs_do_not_embed_developer_home_paths() -> None:
 
 def test_retired_index_batch_names_are_absent_from_runtime_and_guidance() -> None:
     retired_name = re.compile(
-        r"(?<![A-Za-z0-9_])(?:rag_index_batch_size|index_batch_size)(?![A-Za-z0-9_])"
+        r"(?<![A-Za-z0-9_])(?:rag_index_batch_size|index_batch_size)(?![A-Za-z0-9_])",
+        re.IGNORECASE,
     )
     violations: list[str] = []
 
