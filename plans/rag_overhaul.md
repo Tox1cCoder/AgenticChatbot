@@ -439,7 +439,7 @@ All 7 are out-of-scope bugs (tool search, checkpoints, SSE keepalive, isolation 
 - Added `tests/test_document_service_deletion.py` (3 tests) pinning that `DocumentService.delete_document` doesn't import or instantiate `RAGAgent` and delegates to `DocumentIndexService.delete_document_index`.
 - Rewrote `DocumentService` to depend on `DocumentIndexService` instead of building a throwaway `RAGAgent` to clean up vectors. CRUD cleanup is cleanly decoupled from the model runtime.
 - Wired `document_index_service` into `app/core/container.py` and updated `DocumentService`'s DI signature.
-- Added `rag_embedding_model`, `rag_embedding_dimension`, `rag_reranker_model`, `rag_chunk_*`, `rag_index_batch_size` settings to `config.py` (also covers Phase 9 config additions so Phase 7's DI wiring can reference them).
+- Added `rag_embedding_model`, `rag_embedding_dimension`, `rag_reranker_model`, `rag_chunk_*`, and an index-layer batch control to `config.py` (also covers Phase 9 config additions so Phase 7's DI wiring can reference them). The index-layer control was subsequently retired when batching moved into the embedding service.
 
 **Phase 4: DONE** (2026-04-24)
 - Added `tests/test_unified_parse_pipeline.py` (5 tests): `SUPPORTED_UPLOAD_EXTENSIONS` exported from `app.api.documents`, processing service accepts/rejects the expanded extension set, MinerU helper is format-neutral (`_process_with_mineru`, not `_process_pdf_with_mineru`), `process_document` dispatches every rich format.
@@ -460,7 +460,7 @@ All 7 are out-of-scope bugs (tool search, checkpoints, SSE keepalive, isolation 
 - Token counting delegates to existing `app.utils.text_processing.estimate_tokens` (tiktoken cl100k_base). Consistent with the codebase's existing estimation heuristic.
 
 **Phase 6: DONE** (2026-04-24)
-- Added `tests/test_document_index_service.py` (7 tests): replace-before-index, Qdrant payload carries `document_id`/`chunk_id`/`conversation_id`/`user_id`, embedding batched by `index_batch_size`, `mark_indexed` records model+dimension+collection, `mark_index_failed` fires and error re-raises, delete removes both Qdrant and SQL, no RAGAgent import.
+- Added `tests/test_document_index_service.py` (7 tests): replace-before-index, Qdrant payload carries `document_id`/`chunk_id`/`conversation_id`/`user_id`, embedding grouping at the index layer (subsequently internalized by the embedding service), `mark_indexed` records model+dimension+collection, `mark_index_failed` fires and error re-raises, delete removes both Qdrant and SQL, no RAGAgent import.
 - Created `app/services/document_index_service.py`. Three public methods: `index_document`, `delete_document_index`, `reindex_document`. All write ops are idempotent by `document_id` — existing Qdrant points are deleted before new upsert. Point IDs are derived from chunk UUIDs (stable). Qdrant payload holds only lookup metadata (IDs + page range + section path + embedding model).
 
 **Design decisions:**
@@ -843,7 +843,7 @@ Modify `app/core/config.py`:
   - `rag_chunk_target_tokens`
   - `rag_chunk_overlap_tokens`
   - `rag_chunk_max_tokens`
-  - `rag_index_batch_size`
+  - `rag_embedding_batch_size` (embedding-service-owned)
 - Delete settings used only by removed prompt-built RAG or old chunking behavior.
 
 Modify `app/core/container.py`:

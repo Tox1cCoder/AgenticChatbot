@@ -109,6 +109,23 @@ def test_tracked_runtime_and_docs_do_not_embed_developer_home_paths() -> None:
     assert not violations, f"machine-specific home paths found in tracked files: {violations}"
 
 
+def test_retired_index_batch_names_are_absent_from_runtime_and_guidance() -> None:
+    retired_name = re.compile(
+        r"(?<![A-Za-z0-9_])(?:rag_index_batch_size|index_batch_size)(?![A-Za-z0-9_])"
+    )
+    violations: list[str] = []
+
+    for path in _tracked_files(*TRACKED_AUDIT_ROOTS, "plans"):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if retired_name.search(text):
+            violations.append(path.relative_to(ROOT).as_posix())
+
+    assert not violations, f"retired index-batch names found in tracked guidance: {violations}"
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows event-loop policy regression")
 def test_importing_server_app_preserves_event_loop_policy() -> None:
     script = """

@@ -14,7 +14,7 @@ concurrency is increased. Root causes, verified in code:
 
 | # | Bottleneck | Location | Impact |
 |---|-----------|----------|--------|
-| B1 | Embedding is one blocking Gemini API call **per chunk**, sequential. `rag_index_batch_size=16` only groups chunks; each group still makes 16 serial HTTP round-trips. | `app/services/rag_embedding_service.py:104-115`, `app/services/document_index_service.py:234-237` | A 200-chunk PDF = 200 serial calls ≈ 30–60 s of pure network latency. Batch-size tuning changes nothing. |
+| B1 | At plan outset, embedding made one blocking Gemini API call **per chunk**, sequential; index-layer grouping did not reduce HTTP round-trips. This was superseded by embedding-service-owned request batching. | `app/services/rag_embedding_service.py:104-115`, `app/services/document_index_service.py:234-237` | A 200-chunk PDF required 200 serial calls ≈ 30–60 s of pure network latency. Index-layer tuning changed nothing. |
 | B2 | MinerU cold-starts per document. With `mineru_api_url` blank (default), every CLI invocation boots a temporary MinerU service and loads models from scratch. | `app/services/document_processing_service.py:439-445`, `app/core/config.py:491-497` | ~30–90 s overhead per file; concurrent MinerU subprocesses contend for the same GPU/CPU, so raising Celery concurrency makes parses *slower*. |
 | B3 | Image captioning is one sequential Gemini call per image with retry sleeps. | `app/services/document_processing_service.py:1260-1293` | Image-heavy PDFs serialize again after parsing. |
 | B4 | One monolithic Celery task runs parse + caption + embed + index. GPU-bound and IO-bound work share the same worker slots; `task_time_limit=300s` covers the whole pipeline; an embed failure retries the expensive parse. | `app/workers/document_processor.py:40-216` | Concurrency can't overlap heterogeneous stages; large files hit the hard kill; retries waste GPU time. |
@@ -122,8 +122,8 @@ Phases are ordered by value ÷ effort and each ships independently. Tasks marked
   `app/services/document_index_service.py`: `_embed_and_upsert` passes all chunk texts in
   a single `embed_documents()` call (batching now internal to the embedding service).
   Slice the Qdrant upsert by the existing `qdrant_upsert_batch_size` setting. Remove the
-  now-redundant `rag_index_batch_size` grouping (deprecate the setting; keep it parsed
-  with a warning so existing `.env` files don't break).
+  now-redundant index-layer grouping and compatibility parameter/configuration entirely;
+  stale `.env` values remain harmless under the settings extra-input ignore policy.
 - **T004 — Bulk `mark_indexed`.**
   `app/repositories/document_chunk.py`: add `mark_indexed_bulk(chunk_ids, …)` issuing one
   UPDATE; replace the per-chunk loop at `document_index_service.py:152-161` and the
@@ -263,7 +263,7 @@ time × ⌈images/4⌉; benchmark report produced.
 |---------|---------|-------|
 | `rag_embedding_batch_size` | 32 (clamped to API max) | 1 |
 | `rag_embedding_max_concurrency` | 4 | 1 |
-| `rag_index_batch_size` | deprecated (warning) | 1 |
+| Index-layer batch control | removed; batching is owned by the embedding service | 1 |
 | `mineru_api_url` | set in deployment `.env` | 2 |
 | `celery_parse_concurrency` | 2 | 3 |
 | `celery_index_concurrency` | 8 | 3 |
