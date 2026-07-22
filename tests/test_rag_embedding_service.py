@@ -385,6 +385,21 @@ def test_embed_batch_locally_estimates_input_when_no_usage(monkeypatch):
     assert command.usage.input_tokens is not None and command.usage.input_tokens > 0
 
 
+def test_image_embedding_without_provider_usage_is_unavailable(monkeypatch):
+    service, client, repo = _build_recording_service(monkeypatch)
+    client.models.embed_content.return_value = _make_response([0.1, 0.2])
+
+    service.embed_image(
+        b"image-bytes",
+        mime_type="image/png",
+        usage_context=UsageContext(user_id=uuid4(), operation="document_index"),
+    )
+
+    usage = repo.commands[0].usage
+    assert usage.source == "unavailable"
+    assert usage.input_tokens is None
+
+
 def test_embed_batch_records_one_event_per_retry_attempt(monkeypatch):
     from google.genai import errors as genai_errors
 

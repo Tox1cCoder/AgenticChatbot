@@ -300,12 +300,13 @@ class GeminiRAGEmbeddingService:
 
         counter = TokenCounter()
         items = contents if isinstance(contents, list) else [contents]
-        total = 0
-        for item in items:
-            if isinstance(item, str):
-                total += counter.count_text(
-                    provider="gemini", model=self.model_name, text=item
-                ).tokens
+        texts = [item for item in items if isinstance(item, str)]
+        if not texts:
+            return NormalizedUsage(source="unavailable")
+        total = sum(
+            counter.count_text(provider="gemini", model=self.model_name, text=text).tokens
+            for text in texts
+        )
         return NormalizedUsage(input_tokens=total, source="locally_estimated")
 
     # ------------------------------------------------------------------
