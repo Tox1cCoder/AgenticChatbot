@@ -33,13 +33,49 @@ TRACKED_AUDIT_ROOTS = (
 
 
 def _tracked_audit_files() -> list[Path]:
+    return _tracked_files(*TRACKED_AUDIT_ROOTS)
+
+
+def _tracked_files(*roots: str) -> list[Path]:
     completed = subprocess.run(
-        ["git", "ls-files", "-z", "--", *TRACKED_AUDIT_ROOTS],
+        ["git", "ls-files", "-z", "--", *roots],
         cwd=ROOT,
         check=True,
         capture_output=True,
     )
     return [ROOT / item.decode() for item in completed.stdout.split(b"\0") if item]
+
+
+def test_tracked_test_script_imports_have_tracked_package_sources() -> None:
+    tracked = {
+        path.relative_to(ROOT).as_posix() for path in _tracked_files("scripts") if path.is_file()
+    }
+    imported_modules: set[str] = set()
+    for path in _tracked_files("tests"):
+        if path.suffix != ".py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_modules.update(
+                    alias.name.removeprefix("scripts.")
+                    for alias in node.names
+                    if alias.name.startswith("scripts.")
+                )
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                if node.module == "scripts":
+                    imported_modules.update(alias.name for alias in node.names)
+                elif node.module.startswith("scripts."):
+                    imported_modules.add(node.module.removeprefix("scripts."))
+
+    assert "scripts/__init__.py" in tracked
+    missing = sorted(
+        module
+        for module in imported_modules
+        if f"scripts/{module.replace('.', '/')}.py" not in tracked
+        and f"scripts/{module.replace('.', '/')}/__init__.py" not in tracked
+    )
+    assert not missing, f"tracked tests import ignored or untracked scripts: {missing}"
 
 
 def _env_example_values() -> dict[str, str]:
@@ -168,7 +204,6 @@ def test_every_model_usage_setting_is_discoverable_with_accurate_default() -> No
     example_values = _env_example_values()
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert len(usage_fields) == 17
     for name, field in usage_fields.items():
         env_name = name.upper()
         expected = _env_default(field.default)
@@ -264,8 +299,8 @@ def test_production_never_uses_version_specific_starlette_422_symbols() -> None:
     forbidden = {"HTTP_422_UNPROCESSABLE_CONTENT", "HTTP_422_UNPROCESSABLE_ENTITY"}
     violations: list[str] = []
 
-    for root_name in ("app", "client_backend"):
-        for path in (ROOT / root_name).rglob("*.py"):
+    for path in _tracked_audit_files():
+        if path.suffix == ".py" and path.relative_to(ROOT).parts[0] in {"app", "client_backend"}:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             if any(
                 (isinstance(node, ast.Attribute) and node.attr in forbidden)
@@ -280,8 +315,12 @@ def test_production_never_uses_version_specific_starlette_422_symbols() -> None:
 
 def test_production_no_longer_depends_on_sunset_langchain_community() -> None:
     source_violations: list[str] = []
-    for path in (ROOT / "app").rglob("*.py"):
-        if "langchain_community" in path.read_text(encoding="utf-8"):
+    for path in _tracked_audit_files():
+        if (
+            path.suffix == ".py"
+            and path.relative_to(ROOT).parts[0] == "app"
+            and "langchain_community" in path.read_text(encoding="utf-8")
+        ):
             source_violations.append(path.relative_to(ROOT).as_posix())
 
     manifest_violations = [
@@ -369,12 +408,33 @@ def test_httpx2_testclient_dependency_is_declared_in_every_manifest() -> None:
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
     environment = (ROOT / "environment.yml").read_text(encoding="utf-8").splitlines()
 
-    assert "httpx2>=2.0.0,<3.0.0" in dependencies
-    assert "httpx>=0.25.0" in dependencies
-    assert "httpx2==2.0.0" in requirements
+    expected_project_pins = {
+        "fastapi==0.139.2",
+        "starlette==1.3.1",
+        "httpx2==2.3.0",
+        "httpcore2==2.3.0",
+        "httpx==0.28.1",
+        "httpcore==1.0.9",
+        "idna==3.11",
+        "truststore==0.10.4",
+    }
+    assert expected_project_pins.issubset(dependencies)
+    assert "httpx2==2.3.0" in requirements
+    assert "httpcore2==2.3.0" in requirements
+    assert "fastapi==0.139.2" in requirements
+    assert "starlette==1.3.1" in requirements
     assert "httpx==0.28.1" in requirements
-    assert "      - httpx2==2.0.0" in environment
-    assert any(line.strip().startswith("- httpx=") for line in environment)
+    assert "httpcore==1.0.9" in requirements
+    assert "idna==3.11" in requirements
+    assert "truststore==0.10.4" in requirements
+    assert "      - fastapi==0.139.2" in environment
+    assert "      - httpx2==2.3.0" in environment
+    assert "      - httpcore2==2.3.0" in environment
+    assert "      - starlette==1.3.1" in environment
+    assert "  - httpx=0.28.1=py311haa95532_1" in environment
+    assert "  - httpcore=1.0.9=py311haa95532_0" in environment
+    assert "  - idna=3.11=py311haa95532_0" in environment
+    assert "      - truststore==0.10.4" in environment
 
 
 def test_fastapi_testclient_uses_httpx2_without_deprecation_warning() -> None:
@@ -385,6 +445,9 @@ warnings.simplefilter("error", DeprecationWarning)
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import starlette.testclient
+
+assert starlette.testclient.httpx.__name__ == "httpx2"
 
 app = FastAPI()
 

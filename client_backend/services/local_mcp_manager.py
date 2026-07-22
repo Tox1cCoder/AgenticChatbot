@@ -177,6 +177,12 @@ class LocalMCPManager:
             return []
 
         config_dir = self.config_path.parent
+        bundled_seed = config_data.get("_sample_chatbot_seed") == "bundled-defaults-v1"
+        bundled_server_names = config_data.get("_sample_chatbot_bundled_servers") or []
+        if not isinstance(bundled_server_names, list):
+            bundled_server_names = []
+        bundled_server_names = {str(name) for name in bundled_server_names}
+        bundled_root = Path(__file__).resolve().parents[2]
 
         for name, server_data in mcp_servers.items():
             if not isinstance(server_data, dict):
@@ -194,6 +200,7 @@ class LocalMCPManager:
             }
 
             if transport == "stdio":
+                bundled_server = bundled_seed and name in bundled_server_names
                 command = server_data.get("command")
                 if not command:
                     logger.warning("Skipping MCP server %s: no command specified", name)
@@ -204,12 +211,14 @@ class LocalMCPManager:
 
                 resolved_command = self._resolve_config_relative_value(
                     self._expand_env_placeholders(str(command)),
-                    config_dir=config_dir,
+                    config_dir=bundled_root if bundled_server else config_dir,
                 )
+                if bundled_server and str(command).lower() in {"python", "python3"}:
+                    resolved_command = sys.executable
                 resolved_args = [
                     self._resolve_config_relative_value(
                         self._expand_env_placeholders(str(arg)),
-                        config_dir=config_dir,
+                        config_dir=bundled_root if bundled_server else config_dir,
                     )
                     for arg in args
                 ]
@@ -218,7 +227,7 @@ class LocalMCPManager:
                     resolved_cwd = str(
                         normalize_path(
                             self._expand_env_placeholders(str(cwd)),
-                            base_dir=config_dir,
+                            base_dir=bundled_root if bundled_server else config_dir,
                         )
                     )
                 else:
@@ -393,22 +402,9 @@ class LocalMCPManager:
             except Exception:
                 continue
             if self._has_configured_servers(payload):
+                payload["_sample_chatbot_seed"] = "bundled-defaults-v1"
                 servers = payload.get("mcpServers") or payload.get("mcp_servers") or {}
-                repo_root = resolved_candidate.parents[2]
-                for server in servers.values():
-                    if not isinstance(server, dict) or server.get("transport") != "stdio":
-                        continue
-                    command = str(server.get("command") or "")
-                    if command.lower() in {"python", "python3"}:
-                        server["command"] = sys.executable
-                    server["args"] = [
-                        str((repo_root / arg).resolve())
-                        if isinstance(arg, str)
-                        and arg.endswith(".py")
-                        and not Path(arg).is_absolute()
-                        else arg
-                        for arg in server.get("args", [])
-                    ]
+                payload["_sample_chatbot_bundled_servers"] = sorted(servers)
                 return payload
         return None
 

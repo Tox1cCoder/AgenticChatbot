@@ -9,13 +9,18 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     # Core Framework
-    "fastapi>=0.115.0,<1.0.0",
+    "fastapi==0.139.2",
+    "starlette==1.3.1",
     "uvicorn[standard]>=0.24.0",
     "pydantic>=2.5.0",
     "pydantic-settings>=2.1.0",
     "python-multipart>=0.0.6",
-    "httpx>=0.25.0",
-    "httpx2>=2.0.0,<3.0.0",
+    "httpx==0.28.1",
+    "httpcore==1.0.9",
+    "httpx2==2.3.0",
+    "httpcore2==2.3.0",
+    "idna==3.11",
+    "truststore==0.10.4",
     "websockets>=12.0",
     
     # Database & ORM
@@ -95,6 +100,7 @@ allow-direct-references = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 filterwarnings = [
     # Third-party packages currently emit Python 3.14+ compatibility warnings
     # during import/callback handling. Keep the filters scoped so application

@@ -150,8 +150,12 @@ def test_local_mcp_manager_seeds_dev_profile_config_from_repo_default(tmp_path, 
         manager._ensure_default_config_exists()
         seeded = json.loads(manager.config_path.read_text(encoding="utf-8"))
         time_config = seeded["mcp_servers"]["time"]
-        assert time_config["command"] == sys.executable
-        assert time_config["args"] == [str(server_script.resolve())]
+        assert seeded["_sample_chatbot_seed"] == "bundled-defaults-v1"
+        assert time_config["command"] == "python"
+        assert time_config["args"] == ["app/ai/mcp_servers/time_server.py"]
+        runtime = asyncio.run(manager._load_config())[0]
+        assert runtime.command == sys.executable
+        assert runtime.args == [str(server_script.resolve())]
     finally:
         client_settings.mcp_config_path = original_mcp_config_path
         client_settings.profile_root = original_profile_root
@@ -185,10 +189,109 @@ def test_local_mcp_seed_makes_every_enabled_bundled_server_cwd_independent(tmp_p
             name for name, config in seeded.items() if config.get("enabled", True)
         } == expected_enabled
         for name in expected_enabled:
-            assert seeded[name]["command"] == sys.executable
-            script = Path(seeded[name]["args"][0])
+            assert seeded[name]["command"] == "python"
+        runtime = {config.name: config for config in asyncio.run(manager._load_config())}
+        for name in expected_enabled:
+            assert runtime[name].command == sys.executable
+            script = Path(runtime[name].args[0])
             assert script.is_absolute()
             assert script.is_file()
+    finally:
+        client_settings.mcp_config_path = original_mcp_config_path
+        client_settings.profile_root = original_profile_root
+        client_settings.environment = original_environment
+
+
+def test_local_mcp_seed_relocates_bundled_servers_without_rewriting_custom_servers(
+    tmp_path, monkeypatch
+):
+    old_repo = tmp_path / "old-repo"
+    new_repo = tmp_path / "new-repo"
+    old_seed = old_repo / "app" / "ai" / "mcp_config.json"
+    old_script = old_repo / "app" / "ai" / "mcp_servers" / "time_server.py"
+    new_script = new_repo / "app" / "ai" / "mcp_servers" / "time_server.py"
+    for script in (old_script, new_script):
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("print('ok')", encoding="utf-8")
+    old_seed.write_text(
+        json.dumps(
+            {
+                "mcp_servers": {
+                    "time": {
+                        "transport": "stdio",
+                        "command": "python",
+                        "args": ["app/ai/mcp_servers/time_server.py"],
+                        "enabled": True,
+                    }
+                }
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    original_mcp_config_path = client_settings.mcp_config_path
+    original_profile_root = client_settings.profile_root
+    original_environment = client_settings.environment
+    client_settings.mcp_config_path = ""
+    client_settings.profile_root = str(tmp_path / "profiles")
+    client_settings.environment = "development"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        local_mcp_manager_module,
+        "get_upstream_auth_service",
+        lambda: SimpleNamespace(get_current_user_id=lambda: None),
+    )
+
+    try:
+        monkeypatch.setattr(
+            local_mcp_manager_module,
+            "__file__",
+            str(old_repo / "client_backend" / "services" / "local_mcp_manager.py"),
+        )
+        monkeypatch.setattr(local_mcp_manager_module.sys, "executable", "old-python")
+        first_manager = LocalMCPManager()
+        first_manager._ensure_default_config_exists()
+
+        payload = json.loads(first_manager.config_path.read_text(encoding="utf-8"))
+        assert payload["_sample_chatbot_seed"] == "bundled-defaults-v1"
+        assert payload["_sample_chatbot_bundled_servers"] == ["time"]
+        assert str(old_repo) not in json.dumps(payload)
+        assert "old-python" not in json.dumps(payload)
+
+        config_dir = first_manager.config_path.parent
+        custom_asset = config_dir / "custom-assets" / "settings.json"
+        custom_cwd = config_dir / "custom-workdir"
+        custom_asset.parent.mkdir(parents=True)
+        custom_asset.write_text("{}", encoding="utf-8")
+        custom_cwd.mkdir()
+        custom_server = {
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["--yes", "custom-assets/settings.json"],
+            "cwd": "custom-workdir",
+            "enabled": True,
+        }
+        payload["mcp_servers"]["custom"] = custom_server
+        first_manager.config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+        monkeypatch.setattr(
+            local_mcp_manager_module,
+            "__file__",
+            str(new_repo / "client_backend" / "services" / "local_mcp_manager.py"),
+        )
+        monkeypatch.setattr(local_mcp_manager_module.sys, "executable", "new-python")
+        restarted_manager = LocalMCPManager()
+        restarted_manager._ensure_default_config_exists()
+        persisted = json.loads(restarted_manager.config_path.read_text(encoding="utf-8"))
+        runtime = {config.name: config for config in asyncio.run(restarted_manager._load_config())}
+
+        assert persisted["mcp_servers"]["custom"] == custom_server
+        assert runtime["time"].command == "new-python"
+        assert runtime["time"].args == [str(new_script.resolve())]
+        assert runtime["custom"].command == "npx"
+        assert runtime["custom"].args == ["--yes", str(custom_asset.resolve())]
+        assert runtime["custom"].cwd == str(custom_cwd.resolve())
     finally:
         client_settings.mcp_config_path = original_mcp_config_path
         client_settings.profile_root = original_profile_root

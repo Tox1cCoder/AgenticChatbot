@@ -56,6 +56,81 @@ def test_explicit_stdio_script_resolves_relative_to_config_file(tmp_path, monkey
     assert resolved["args"] == [str(server_script.resolve())]
 
 
+def test_explicit_stdio_resolves_all_path_fields_without_touching_path_commands_or_urls(
+    tmp_path, monkeypatch
+):
+    config_dir = tmp_path / "custom"
+    command = config_dir / "bin" / "custom-runner"
+    asset = config_dir / "assets" / "schema.json"
+    executable_arg = config_dir / "helper.exe"
+    runtime_dir = config_dir / "runtime"
+    for path in (command, asset, executable_arg):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture", encoding="utf-8")
+    runtime_dir.mkdir()
+
+    # A same-named config-relative file must not turn a bare PATH command into
+    # a file path. Commands such as npx/python are intentionally PATH-resolved.
+    (config_dir / "npx").write_text("fixture", encoding="utf-8")
+    (config_dir / "npx.cmd").write_text("fixture", encoding="utf-8")
+    config_path = config_dir / "mcp_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcp_servers": {
+                    "custom": {
+                        "enabled": True,
+                        "transport": "stdio",
+                        "command": "bin/custom-runner",
+                        "args": [
+                            "--watch",
+                            "assets/schema.json",
+                            "helper.exe",
+                            "postgresql://db.example/service",
+                        ],
+                        "cwd": "runtime",
+                    },
+                    "package": {
+                        "enabled": True,
+                        "transport": "stdio",
+                        "command": "npx",
+                        "args": ["--yes", "@scope/package", "https://example.test/spec"],
+                    },
+                    "windows-package": {
+                        "enabled": True,
+                        "transport": "stdio",
+                        "command": "npx.cmd",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    manager = MCPManager(config_path=str(config_path))
+    manager._ensure_config_loaded()
+    resolved = manager._build_server_config()
+
+    assert resolved["custom"]["command"] == str(command.resolve())
+    assert resolved["custom"]["args"] == [
+        "--watch",
+        str(asset.resolve()),
+        str(executable_arg.resolve()),
+        "postgresql://db.example/service",
+    ]
+    assert resolved["custom"]["cwd"] == str(runtime_dir.resolve())
+    assert resolved["package"]["command"] == "npx"
+    assert resolved["package"]["args"] == [
+        "--yes",
+        "@scope/package",
+        "https://example.test/spec",
+    ]
+    assert resolved["windows-package"]["command"] == "npx.cmd"
+
+
 @pytest.mark.asyncio
 async def test_server_mcp_manager_cleans_up_stdio_session_without_cancel_scope_error(
     tmp_path,

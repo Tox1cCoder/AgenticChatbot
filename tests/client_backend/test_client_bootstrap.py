@@ -46,6 +46,7 @@ def test_setup_logging_closes_replaced_handlers(monkeypatch):
     logger = logging.getLogger("client_backend")
     original_handlers = list(logger.handlers)
     replaced = TrackingHandler()
+    replaced._client_backend_owned = True
     logger.handlers = [replaced]
     monkeypatch.setattr(logging_module.client_settings, "log_to_file", False)
     monkeypatch.setattr(logging_module.client_settings, "log_level", "INFO")
@@ -56,4 +57,28 @@ def test_setup_logging_closes_replaced_handlers(monkeypatch):
     finally:
         for handler in logger.handlers:
             handler.close()
+        logger.handlers = original_handlers
+
+
+def test_setup_logging_preserves_foreign_handlers(monkeypatch):
+    logger = logging.getLogger("client_backend")
+    original_handlers = list(logger.handlers)
+    foreign = logging.NullHandler()
+    logger.handlers = [foreign]
+    monkeypatch.setattr(logging_module.client_settings, "log_to_file", False)
+
+    try:
+        logging_module.setup_logging()
+        assert foreign in logger.handlers
+        assert getattr(foreign, "_closed", False) is False
+        logging_module.setup_logging()
+        assert foreign in logger.handlers
+        assert (
+            sum(getattr(handler, "_client_backend_owned", False) for handler in logger.handlers)
+            == 1
+        )
+    finally:
+        for handler in logger.handlers:
+            if handler is not foreign:
+                handler.close()
         logger.handlers = original_handlers

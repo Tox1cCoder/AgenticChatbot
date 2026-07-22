@@ -30,6 +30,6 @@ def test_sqlalchemy_floor_supports_values_cte() -> None:
 def test_fastapi_floor_supports_pydantic_query_parameter_models() -> None:
     requirement = project_requirement("fastapi")
 
-    assert Version("0.115.0") in requirement.specifier
-    assert Version("0.114.9") not in requirement.specifier
-    assert Version("1.0.0") not in requirement.specifier
+    assert Version("0.139.2") in requirement.specifier
+    assert Version("0.139.1") not in requirement.specifier
+    assert Version("0.140.0") not in requirement.specifier

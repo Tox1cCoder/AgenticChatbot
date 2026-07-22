@@ -32,11 +32,14 @@ def setup_logging() -> logging.Logger:
     # Close replaced file streams as well as removing handlers. Repeated app
     # lifespans (including tests) otherwise leak descriptors.
     for handler in root_logger.handlers[:]:
+        if not getattr(handler, "_client_backend_owned", False):
+            continue
         root_logger.removeHandler(handler)
         handler.close()
 
     # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
+    console_handler._client_backend_owned = True
     console_handler.setLevel(log_level)
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
@@ -49,6 +52,7 @@ def setup_logging() -> logging.Logger:
         # Rotating file name with date
         log_file = log_dir / f"client_{datetime.now().strftime('%Y-%m-%d')}.log"
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler._client_backend_owned = True
         file_handler.setLevel(log_level)
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)

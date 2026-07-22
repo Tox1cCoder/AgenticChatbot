@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import time
 from collections.abc import Iterable
@@ -118,6 +119,20 @@ class MCPManager:
             Path(__file__).resolve().parents[2] if uses_bundled_config else configured_path.parent
         )
 
+        def resolve_path_like(value: str, *, preserve_bare_command: bool = False) -> str:
+            if value.startswith(("-", "@")) or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value):
+                return value
+            path = Path(value)
+            if path.is_absolute():
+                return str(path)
+            explicit_relative = value.startswith(("./", ".\\", "../", "..\\"))
+            contains_separator = "/" in value or "\\" in value
+            if preserve_bare_command and not explicit_relative and not contains_separator:
+                return value
+            if explicit_relative or contains_separator or (script_base / path).exists():
+                return str((script_base / path).resolve())
+            return value
+
         for server_name, server_info in mcp_servers.items():
             if not server_info.get("enabled", True):
                 continue
@@ -127,24 +142,25 @@ class MCPManager:
             if transport == "stdio":
                 # Resolve scripts against the selected bundled/custom base,
                 # independent of the process working directory.
-                args = server_info.get("args", [])
-                abs_args = []
-                for arg in args:
-                    path = Path(arg)
-                    if arg.endswith(".py") and not path.is_absolute():
-                        abs_args.append(str((script_base / path).resolve()))
-                    else:
-                        abs_args.append(arg)
+                abs_args = [resolve_path_like(str(arg)) for arg in server_info.get("args", [])]
 
                 command = str(server_info.get("command") or "python")
                 if uses_bundled_config and command.lower() in {"python", "python3"}:
                     command = sys.executable
+                else:
+                    command = resolve_path_like(command, preserve_bare_command=True)
+                cwd = server_info.get("cwd")
+                resolved_cwd = (
+                    str((script_base / cwd).resolve())
+                    if cwd and not Path(cwd).is_absolute()
+                    else cwd
+                )
 
                 entry = build_mcp_server_entry(
                     transport=transport,
                     command=command,
                     args=abs_args,
-                    cwd=server_info.get("cwd"),
+                    cwd=resolved_cwd,
                     env=server_info.get("env"),
                 )
             elif transport in {"streamable_http", "sse"}:
