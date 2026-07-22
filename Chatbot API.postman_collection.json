@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "62a30d98-c3e9-4172-aca0-b945bad5351b",
     "name": "Chatbot API",
-    "description": "HTTP collection for the canonical Sample Chatbot server backend. Covers auth, conversations, messages, AI SDK routes, documents, planning, providers, model config, MCP, skills, client devices, and widget connection token minting. WebSocket-only flows are documented in README but excluded here.",
+    "description": "HTTP collection for the canonical Sample Chatbot server backend. Covers auth, conversations, messages, AI SDK routes, model-usage analytics, documents, planning, providers, model config, MCP, skills, client devices, and widget connection token minting. WebSocket-only flows are documented in README but excluded here.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -164,6 +164,47 @@
             "url": {
               "raw": "{{HOST}}:{{PORT}}/health/all"
             }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Model Usage Analytics",
+      "item": [
+        {
+          "name": "Dashboard - Bangkok Daily",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/usage/dashboard?from=2026-07-15T00:00:00%2B07:00&to=2026-07-22T00:00:00%2B07:00&bucket=day&timezone=Asia/Bangkok"
+            },
+            "description": "Authenticated account-wide daily usage for seven Bangkok calendar days. from is inclusive and to is exclusive."
+          },
+          "response": []
+        },
+        {
+          "name": "Conversation Usage - Hourly 7 Days",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/usage/conversations/{{conversation_id}}?from=2026-07-15T00:00:00%2B07:00&to=2026-07-22T00:00:00%2B07:00&bucket=hour&timezone=Asia/Bangkok"
+            },
+            "description": "Authenticated hourly usage for the existing conversation_id variable over exactly seven Bangkok calendar days."
           },
           "response": []
         }

@@ -307,8 +307,10 @@ The full schema lives in [`app/core/config.py`](app/core/config.py). Selected hi
 ### Model usage analytics
 
 These variables are discovered by `app/core/config.py::Settings`. The values
-below are safe development defaults; deployment-specific guidance will live in
-the operations runbook.
+below are safe development defaults. See the
+[model-usage analytics operations runbook](docs/operations/model-usage-analytics.md)
+for schema-first rollout, maintenance, monitoring, investigation, and rollback
+guidance.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -341,6 +343,14 @@ failure-window, and TTL integers must be positive; unattributed ratio must be
 between 0 and 1; rollup lag thresholds must be nonnegative; failure window
 cannot exceed 3600 seconds; failure-store TTL must be between 60 and 86400
 seconds; failure-store timeout must be positive.
+
+Authenticated clients discover availability at `/usage/capabilities`, query
+account-wide analytics at `/usage/dashboard`, and query one owned conversation
+at `/usage/conversations/{conversation_id}`. Operators use the aggregate-only
+`/health/model-usage` and `/metrics/model-usage` endpoints. By default, cleanup
+retains 90 days of raw events and 730 days of minute rollups. Analytics reports
+tokens, requests, images, coverage, and operational health; it does not
+calculate or track monetary cost.
 
 ### Vector store / RAG
 
