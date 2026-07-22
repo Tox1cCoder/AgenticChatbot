@@ -196,6 +196,45 @@ def test_normalize_picks_larger_when_both_context_and_input_present():
     assert out.max_input_tokens == 128000
 
 
+def test_normalize_explicit_separate_io_keeps_independent_limits():
+    out = normalize_context_window_metadata(
+        "gemini",
+        "gemini-3-pro-image",
+        {
+            "context_window_tokens": None,
+            "max_input_tokens": 65_536,
+            "max_output_tokens": 32_768,
+            "limit_type": "separate_io",
+        },
+    )
+
+    assert out is not None
+    assert out.known is True
+    assert out.source == "provider_api"
+    assert out.limit_type == "separate_io"
+    assert out.context_window_tokens is None
+    assert out.max_input_tokens == 65_536
+    assert out.max_output_tokens == 32_768
+
+
+def test_normalize_explicit_shared_context_keeps_shared_denominator():
+    out = normalize_context_window_metadata(
+        "openai",
+        "gpt-4o",
+        {
+            "context_window_tokens": 128_000,
+            "max_input_tokens": 120_000,
+            "max_output_tokens": 16_384,
+            "limit_type": "shared_context",
+        },
+    )
+
+    assert out is not None
+    assert out.limit_type == "shared_context"
+    assert out.context_window_tokens == 128_000
+    assert out.max_input_tokens == 128_000
+
+
 # ---------------------------------------------------------------------------
 # Catalog metadata precedence
 # ---------------------------------------------------------------------------

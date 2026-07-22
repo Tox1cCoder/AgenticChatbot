@@ -161,14 +161,17 @@ def _lookup_registry(provider: str, model_id: str) -> _RegistryEntry | None:
 # ---------------------------------------------------------------------------
 
 # Keys we accept from provider-supplied metadata, mapped to a logical role.
-_CONTEXT_KEYS = (
+_SHARED_CONTEXT_KEYS = (
     "context_window_tokens",
     "contextWindowTokens",
+)
+_INPUT_LIMIT_KEYS = (
     "max_input_tokens",
     "maxInputTokens",
     "input_token_limit",
     "inputTokenLimit",
 )
+_CONTEXT_KEYS = _SHARED_CONTEXT_KEYS + _INPUT_LIMIT_KEYS
 _OUTPUT_KEYS = (
     "max_output_tokens",
     "maxOutputTokens",
@@ -214,15 +217,38 @@ def normalize_context_window_metadata(
     if not isinstance(raw_metadata, dict) or not raw_metadata:
         return None
 
-    # Collect every present context-style value so we can pick the largest.
+    explicit_limit_type = raw_metadata.get("limit_type", raw_metadata.get("limitType"))
+    if explicit_limit_type not in (None, "shared_context", "separate_io", "unknown"):
+        return None
+
+    source = raw_metadata.get("context_window_source", raw_metadata.get("source"))
+    if source not in ("provider_api", "registry", "heuristic", "unknown"):
+        source = "provider_api"
+
+    max_output = _extract_first(raw_metadata, _OUTPUT_KEYS)
+    if explicit_limit_type == "separate_io":
+        max_input = _extract_first(raw_metadata, _INPUT_LIMIT_KEYS)
+        if max_input is None and max_output is None:
+            return None
+        return ModelContextWindow(
+            provider=provider,
+            model=model_id,
+            context_window_tokens=None,
+            max_input_tokens=max_input,
+            max_output_tokens=max_output,
+            source=source,
+            known=True,
+            limit_type="separate_io",
+        )
+
+    # Shared and legacy metadata treat input-limit aliases as context-window
+    # aliases, preserving the established behavior when ``limit_type`` is absent.
     context_candidates: list[int] = []
     for key in _CONTEXT_KEYS:
         if key in raw_metadata:
             value = _coerce_positive_int(raw_metadata[key])
             if value is not None:
                 context_candidates.append(value)
-
-    max_output = _extract_first(raw_metadata, _OUTPUT_KEYS)
 
     if not context_candidates and max_output is None:
         return None
@@ -238,7 +264,7 @@ def normalize_context_window_metadata(
         context_window_tokens=context_window,
         max_input_tokens=max_input,
         max_output_tokens=max_output,
-        source="provider_api",
+        source=source,
         known=True,
         limit_type="shared_context",
     )

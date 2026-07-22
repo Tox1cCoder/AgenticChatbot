@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from app.ai.model_context import resolve_model_context_window
 from app.services.provider_service import ProviderService
 
 
@@ -39,6 +40,7 @@ _CONTEXT_FIELD_KEYS = {
     "context_window_tokens",
     "max_input_tokens",
     "max_output_tokens",
+    "limit_type",
     "context_window_source",
     "context_window_known",
 }
@@ -405,6 +407,21 @@ def test_apply_recommended_flags_preserves_context_window_fields_gemini(
     assert by_id["gemini-2.5-flash"]["context_window_tokens"] == 1_000_000
     assert by_id["gemini-2.5-pro"]["context_window_source"] == "registry"
     assert by_id["gemini-2.5-pro"]["context_window_known"] is True
+
+
+def test_provider_catalog_round_trip_preserves_separate_io(
+    service: ProviderService,
+) -> None:
+    original = resolve_model_context_window("gemini", "gemini-3-pro-image")
+
+    fields = service._context_window_fields(original)
+    resolved = service._resolve_catalog_context_window(
+        "gemini",
+        "gemini-3-pro-image",
+        fields,
+    )
+
+    assert resolved == original
 
 
 # ---------------------------------------------------------------------------

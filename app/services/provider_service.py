@@ -608,6 +608,7 @@ class ProviderService:
             "context_window_tokens": context_window.context_window_tokens,
             "max_input_tokens": context_window.max_input_tokens,
             "max_output_tokens": context_window.max_output_tokens,
+            "limit_type": context_window.limit_type,
             "context_window_source": context_window.source,
             "context_window_known": context_window.known,
         }
