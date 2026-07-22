@@ -51,7 +51,7 @@ from .history import ConversationHistoryProvider
 from .hitl_config import (
     build_interrupt_response,
 )
-from .image_context import build_multimodal_content, has_image_parts
+from .image_context import build_multimodal_content, has_image_parts, use_chat_image_loader
 from .image_generation import use_image_preview_emitter
 from .rag_tool_actions import canonicalize_rag_tool_call, execute_search_documents_action
 from .schemas import (
@@ -145,8 +145,12 @@ class MultiAgentWorkflow(
         runtime_model_resolver: IRuntimeModelResolver | None = None,
         history_provider: ConversationHistoryProvider | None = None,
         model_usage_recorder: "ModelUsageRecorder | None" = None,
+        chat_image_service: Any | None = None,
     ):
         self.qdrant_client = qdrant_client
+        # Resolves stored image references back to base64 for the model when
+        # replaying conversation history (bytes live outside message metadata).
+        self.chat_image_service = chat_image_service
         # Canonical prompt-history source. Workflows without it intentionally
         # run without persisted history rather than using a second source.
         self.history_provider = history_provider
@@ -1524,6 +1528,37 @@ class MultiAgentWorkflow(
         self._merge_tool_artifacts(state, response)
         return self._finalize_agent_response(state, response)
 
+    def _build_chat_image_loader(self, user_id):
+        """Build a per-run resolver that maps a stored ``image_id`` to a base64
+        data URL, so historical image references are re-sent to the model. The
+        per-run count is capped by ``chat_image_history_rehydrate_limit`` (0 =
+        unlimited) to bound storage reads and injected bytes per request."""
+        service = getattr(self, "chat_image_service", None)
+        if service is None or not user_id:
+            return None
+        limit = settings.chat_image_history_rehydrate_limit
+        state = {"resolved": 0, "dropped": 0}
+
+        def _loader(image_id: str) -> str | None:
+            if limit and state["resolved"] >= limit:
+                state["dropped"] += 1
+                if state["dropped"] == 1:
+                    logger.info(
+                        "chat image rehydrate cap reached (limit=%d); dropping older "
+                        "history images from model context code=chat_image_rehydrate_capped",
+                        limit,
+                    )
+                return None
+            try:
+                data_url = service.load_data_url(UUID(str(image_id)), user_id)
+            except Exception:
+                return None
+            if data_url:
+                state["resolved"] += 1
+            return data_url
+
+        return _loader
+
     def _build_image_preview_emitter(self, state: GraphState):
         """Bind an image-preview emitter to this run's live event sink.
 
@@ -2656,6 +2691,7 @@ class MultiAgentWorkflow(
         total_iterations = 0
         start_time = time.monotonic()
         current_state = initial_state
+        chat_image_loader = self._build_chat_image_loader(user_id)
 
         while round_num <= max_rounds:
             # Safety: wall-clock timeout across all rounds
@@ -2683,9 +2719,10 @@ class MultiAgentWorkflow(
                     iter_v3_events_from_graph(self.graph, current_state, config=config),
                     subagent_event_sink,
                 )
-                async for event in merged:
-                    for public_event in projector.map_event(event, ctx):
-                        yield public_event
+                with use_chat_image_loader(chat_image_loader):
+                    async for event in merged:
+                        for public_event in projector.map_event(event, ctx):
+                            yield public_event
 
             except GraphRecursionError:
                 logger.warning(
@@ -2907,6 +2944,7 @@ def create_workflow(
     runtime_model_resolver: IRuntimeModelResolver | None = None,
     history_provider: ConversationHistoryProvider | None = None,
     model_usage_recorder: "ModelUsageRecorder | None" = None,
+    chat_image_service: Any | None = None,
 ) -> MultiAgentWorkflow:
     """
     Create multi-agent workflow with required shared dependencies.
@@ -2919,4 +2957,5 @@ def create_workflow(
         runtime_model_resolver=runtime_model_resolver,
         history_provider=history_provider,
         model_usage_recorder=model_usage_recorder,
+        chat_image_service=chat_image_service,
     )

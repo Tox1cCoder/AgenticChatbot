@@ -879,8 +879,8 @@ class Settings(BaseSettings):
     chat_image_history_rehydrate_limit: int = Field(
         default=4,
         description=(
-            "Max historical stored images re-sent to the model per request "
-            "(most recent first). 0 disables the cap."
+            "Max stored image references resolved back to bytes for the model "
+            "per request. Bounds storage reads and injected base64. 0 = unlimited."
         ),
     )
     parse_artifacts_storage_path: str = Field(

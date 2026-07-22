@@ -2,10 +2,42 @@ from __future__ import annotations
 
 import mimetypes
 import re
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 _LOCAL_PATH_PREFIXES = ("/", "./", "../")
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+CHAT_IMAGE_LOADER: ContextVar[Callable[[str], str | None] | None] = ContextVar(
+    "chat_image_loader", default=None
+)
+
+
+def current_chat_image_loader() -> Callable[[str], str | None] | None:
+    return CHAT_IMAGE_LOADER.get()
+
+
+@contextmanager
+def use_chat_image_loader(loader: Callable[[str], str | None] | None) -> Iterator[None]:
+    """Install a per-run resolver that maps a stored ``image_id`` to a base64
+    data URL, so historical image references can be re-sent to the model."""
+    token = CHAT_IMAGE_LOADER.set(loader)
+    try:
+        yield
+    finally:
+        CHAT_IMAGE_LOADER.reset(token)
+
+
+def _resolve_reference_url(attachment: dict[str, Any]) -> str | None:
+    image_id = attachment.get("image_id")
+    if not image_id or attachment.get("data") or attachment.get("base64"):
+        return None
+    loader = current_chat_image_loader()
+    if loader is None:
+        return None
+    return loader(str(image_id))
 
 
 def _clean_str(value: Any) -> str | None:
@@ -100,6 +132,18 @@ def build_multimodal_content(text: Any, attachments: list[Any] | None) -> list[d
         parts.append({"type": "text", "text": text_value})
 
     for attachment in attachments or []:
+        if isinstance(attachment, dict):
+            ref_url = _resolve_reference_url(attachment)
+            if ref_url:
+                parts.append(image_url_part(ref_url))
+                continue
+            has_ref = attachment.get("image_id") and not (
+                attachment.get("data") or attachment.get("base64")
+            )
+            if has_ref:
+                # Unresolved reference (no loader / missing): drop it rather than
+                # leak the internal /chat-images URL, which the model can't fetch.
+                continue
         normalized = normalize_image_attachment(attachment)
         if normalized is None:
             continue

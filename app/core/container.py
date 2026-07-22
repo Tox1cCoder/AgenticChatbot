@@ -406,6 +406,7 @@ class Container(containers.DeclarativeContainer):
             runtime_model_resolver=container.model_config_service(),
             history_provider=container.history_provider(),
             model_usage_recorder=container.model_usage_recorder(),
+            chat_image_service=container.chat_image_service(),
         )
 
         return AIService(
