@@ -12,6 +12,7 @@ from redis import Redis
 from app.api import (
     ai_sdk_router,
     auth_router,
+    chat_images_router,
     client_devices_router,
     conversations_router,
     custom_agents_conversation_router,
@@ -273,6 +274,7 @@ def create_app() -> FastAPI:
     app.include_router(client_devices_router)
     app.include_router(device_runtime_router)
     app.include_router(tool_result_blobs_router)
+    app.include_router(chat_images_router)
     app.include_router(widgets_router)
 
     # Initialize and register event listeners

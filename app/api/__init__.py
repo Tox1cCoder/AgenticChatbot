@@ -6,6 +6,7 @@ setup_auto_injection(Container)
 
 from app.api.ai_sdk import router as ai_sdk_router  # noqa: E402
 from app.api.auth import router as auth_router  # noqa: E402
+from app.api.chat_images import router as chat_images_router  # noqa: E402
 from app.api.client_devices import router as client_devices_router  # noqa: E402
 from app.api.conversations import router as conversations_router  # noqa: E402
 from app.api.custom_agents import (  # noqa: E402
@@ -30,6 +31,7 @@ from app.api.widgets import router as widgets_router  # noqa: E402
 __all__ = [
     "ai_sdk_router",
     "auth_router",
+    "chat_images_router",
     "client_devices_router",
     "device_runtime_router",
     "documents_router",
