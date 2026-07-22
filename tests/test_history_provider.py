@@ -450,3 +450,90 @@ def test_history_provider_invalidate_clears_cached_entries():
         )
     )
     assert message_repo.get_prompt_history.call_count == 2
+
+
+def test_history_provider_returns_latest_valid_canvas_artifact():
+    """Canvas recovery is independent of bounded prompt history and normalizes
+    legacy artifact metadata into the stable working-artifact contract."""
+    from app.ai.history import ConversationHistoryProvider
+
+    conversation_id = uuid4()
+    user_id = uuid4()
+    base = datetime(2026, 7, 22, 10, 0, tzinfo=timezone.utc)
+
+    legacy = _make_message(
+        conversation_id=conversation_id,
+        sender=MessageRole.assistant.value,
+        content="Built the original canvas.",
+        created_at=base,
+        metadata={
+            "canvas_artifact": {
+                "content": "<html><body>ORIGINAL</body></html>",
+                "language": "html",
+                "title": "Original",
+            }
+        },
+    )
+    legacy.sequence = 7
+    malformed_newer = _make_message(
+        conversation_id=conversation_id,
+        sender=MessageRole.assistant.value,
+        content="Bad canvas response.",
+        created_at=base + timedelta(seconds=10),
+        metadata={"canvas_artifact": {"content": "", "revision": 2}},
+    )
+    malformed_newer.sequence = 8
+
+    message_repo = MagicMock()
+    message_repo.get_canvas_artifact_candidates.return_value = [malformed_newer, legacy]
+    message_repo.get_latest_assistant_by_conversation.return_value = legacy
+    summary_repo = MagicMock()
+    summary_repo.get_owned_valid_memory.return_value = None
+    provider = ConversationHistoryProvider(
+        message_repository=message_repo,
+        summary_repository=summary_repo,
+        settings=_fake_settings(),
+    )
+
+    snapshot = asyncio.run(
+        provider.get_latest_canvas_artifact(
+            conversation_id=conversation_id,
+            user_id=user_id,
+        )
+    )
+
+    assert snapshot is not None
+    assert snapshot.artifact_id == "canvas:main"
+    assert snapshot.revision == 1
+    assert snapshot.content == "<html><body>ORIGINAL</body></html>"
+    assert snapshot.message_id == str(legacy.id)
+    assert snapshot.sequence == 7
+    assert snapshot.is_latest_assistant is True
+    message_repo.get_prompt_history.assert_not_called()
+
+
+def test_history_provider_canvas_artifact_is_conversation_scoped():
+    from app.ai.history import ConversationHistoryProvider
+
+    conversation_id = uuid4()
+    user_id = uuid4()
+    message_repo = MagicMock()
+    message_repo.get_canvas_artifact_candidates.return_value = []
+    message_repo.get_latest_assistant_by_conversation.return_value = None
+    summary_repo = MagicMock()
+    provider = ConversationHistoryProvider(
+        message_repository=message_repo,
+        summary_repository=summary_repo,
+        settings=_fake_settings(),
+    )
+
+    snapshot = asyncio.run(
+        provider.get_latest_canvas_artifact(
+            conversation_id=conversation_id,
+            user_id=user_id,
+        )
+    )
+
+    assert snapshot is None
+    message_repo.get_canvas_artifact_candidates.assert_called_once_with(conversation_id)
+    message_repo.get_latest_assistant_by_conversation.assert_called_once_with(conversation_id)

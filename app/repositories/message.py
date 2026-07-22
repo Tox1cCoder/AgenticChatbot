@@ -250,6 +250,44 @@ class MessageCRUDStrategy(
 
         return list(db.execute(statement).scalars().all())
 
+    def get_canvas_artifact_candidates(
+        self,
+        db: Session,
+        conversation_id: UUID,
+        *,
+        limit: int = 20,
+    ) -> list[Message]:
+        """Return newest assistant rows that advertise canvas metadata."""
+        statement = (
+            select(Message)
+            .where(
+                Message.conversation_id == conversation_id,
+                Message.sender == MessageRole.assistant.value,
+                Message.deleted_at.is_(None),
+                Message.message_metadata.op("?")("canvas_artifact"),
+            )
+            .order_by(Message.sequence.desc())
+            .limit(max(1, limit))
+        )
+        return list(db.execute(statement).scalars().all())
+
+    def get_latest_assistant_by_conversation(
+        self,
+        db: Session,
+        conversation_id: UUID,
+    ) -> Message | None:
+        statement = (
+            select(Message)
+            .where(
+                Message.conversation_id == conversation_id,
+                Message.sender == MessageRole.assistant.value,
+                Message.deleted_at.is_(None),
+            )
+            .order_by(Message.sequence.desc())
+            .limit(1)
+        )
+        return db.execute(statement).scalars().first()
+
 
 class MessageRepository:
     """Repository for Message model using session factory pattern"""
@@ -401,6 +439,26 @@ class MessageRepository:
                 .limit(1)
             )
             return session.execute(statement).scalars().first()
+
+    def get_canvas_artifact_candidates(
+        self,
+        conversation_id: UUID,
+        *,
+        limit: int = 20,
+    ) -> list[Message]:
+        with self.session_factory() as session:
+            return self._crud_strategy.get_canvas_artifact_candidates(
+                session,
+                conversation_id,
+                limit=limit,
+            )
+
+    def get_latest_assistant_by_conversation(self, conversation_id: UUID) -> Message | None:
+        with self.session_factory() as session:
+            return self._crud_strategy.get_latest_assistant_by_conversation(
+                session,
+                conversation_id,
+            )
 
     def exists(self, id: UUID) -> bool:
         """Check if message exists"""

@@ -23,6 +23,7 @@ from uuid import UUID
 from cachetools import TTLCache
 
 from app.ai.conversation_memory import ConversationMemory
+from app.ai.canvas_state import CanvasArtifactSnapshot, canvas_snapshot_from_message
 from app.ai.schemas import AgentMessage, MessageRole
 from app.ai.token_instrumentation import HistoryBudgetConfig, trim_history_to_budget
 from app.models.enums import MessageRole as DBMessageRole
@@ -219,6 +220,45 @@ class ConversationHistoryProvider:
         # Drop the per-conversation lock too — a fresh one will be created on
         # the next call. Holding a stale lock would only slow callers down.
         self._locks.pop(prefix, None)
+
+    async def get_latest_canvas_artifact(
+        self,
+        *,
+        conversation_id: UUID | str,
+        user_id: UUID | str,
+    ) -> CanvasArtifactSnapshot | None:
+        """Load the latest valid canvas independently of prompt-history bounds."""
+        conversation_uuid = self._coerce_uuid(conversation_id)
+        # Preserve the provider's identifier validation at this trusted boundary.
+        self._coerce_uuid(user_id)
+
+        try:
+            candidates = self.message_repository.get_canvas_artifact_candidates(
+                conversation_uuid
+            )
+            latest_assistant = self.message_repository.get_latest_assistant_by_conversation(
+                conversation_uuid
+            )
+        except Exception as exc:
+            logger.warning(
+                "History provider could not load canvas state for %s: %s",
+                conversation_uuid,
+                exc,
+            )
+            return None
+
+        latest_assistant_id = str(latest_assistant.id) if latest_assistant is not None else None
+        for candidate in candidates:
+            snapshot = canvas_snapshot_from_message(candidate)
+            if snapshot is None:
+                logger.warning(
+                    "Skipping invalid canvas artifact metadata message_id=%s conversation_id=%s",
+                    getattr(candidate, "id", None),
+                    conversation_uuid,
+                )
+                continue
+            return snapshot.with_latest_assistant(snapshot.message_id == latest_assistant_id)
+        return None
 
     # ------------------------------------------------------------------
     # Helpers
