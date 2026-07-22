@@ -1238,25 +1238,25 @@ git commit -m "feat: operate model usage retention"
 - Modify: `Chatbot API.postman_collection.json`
 - Test: `tests/test_model_usage_docs.py`
 
-- [ ] **Step 1: Write a failing documentation contract test**
+- [x] **Step 1: Write a failing documentation contract test**
 
 Assert README configuration names, endpoint paths, retention semantics, no-cost statement, Postman requests, operational runbook sections, and the frontend contract link.
 
-- [ ] **Step 2: Write operational documentation**
+- [x] **Step 2: Write operational documentation**
 
 Document migration/rollback order, deployment flags, start-clean behavior, retention schedules, health/metrics interpretation, unattributed-call investigation, replay-safe failed writes, query limits, data classification, user deletion behavior, and rollback with collection disabled before schema downgrade.
 
-- [ ] **Step 3: Add Postman requests**
+- [x] **Step 3: Add Postman requests**
 
 Add dashboard and conversation-usage requests using existing bearer-token and conversation variables. Include a Bangkok daily example and an hourly 7-day example.
 
-- [ ] **Step 4: Run focused documentation tests**
+- [x] **Step 4: Run focused documentation tests**
 
 Run: `python -m pytest tests/test_model_usage_docs.py -q`
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Run formatting and static checks**
+- [x] **Step 5: Run formatting and static checks**
 
 Run: `python -m ruff check app client_backend tests demo.py`
 
@@ -1266,13 +1266,13 @@ Run: `python -m ruff format --check app client_backend tests demo.py`
 
 Expected: exit code 0.
 
-- [ ] **Step 6: Run the complete test suite**
+- [x] **Step 6: Run the complete test suite**
 
 Run: `python -m pytest -q`
 
 Expected: exit code 0 with no failures.
 
-- [ ] **Step 7: Run migration smoke checks in a PostgreSQL test environment**
+- [x] **Step 7: Run migration smoke checks in a PostgreSQL test environment**
 
 Run: `python -m alembic upgrade head`
 
@@ -1288,6 +1288,12 @@ Expected: migration reapplies successfully.
 
 - [ ] **Step 8: Perform manual smoke verification**
 
+This remains an explicit release-operator check because it requires disposable
+accounts, real provider credentials, and the complete PostgreSQL/Redis/Qdrant/API/
+worker/beat/sidecar/Streamlit stack. Automated API, UI, isolation, retry,
+maintenance, and live PostgreSQL coverage is complete; do not treat that as a
+substitute for this end-to-end staging exercise.
+
 1. Start PostgreSQL, Redis, Qdrant, the FastAPI server, Celery workers/beat, sidecar, and Streamlit.
 2. Sign in as user A; send a text request with a tool loop, create an image, and upload/index a document.
 3. Confirm one row per provider attempt, including router/helper/image/embedding calls and correct retry/fallback linkage.
@@ -1298,7 +1304,7 @@ Expected: migration reapplies successfully.
 8. Disable `MODEL_USAGE_UI_ENABLED` and confirm collection continues while usage routes/UI are unavailable.
 9. Simulate repository failure and confirm chat succeeds, a normalized retry is queued, and replay does not double-count.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add README.md docs/operations/model-usage-analytics.md Chatbot\ API.postman_collection.json tests/test_model_usage_docs.py
@@ -1450,3 +1456,5 @@ Implementation progress and decisions made during execution. Updated after each 
 - **Task 16 — complete (2026-07-21).** Commits `b2d702b`, `30a8230`, `f1594e0`, `f5edf94`, and `337f3b2`. Added a tenant-safe, token-fingerprint-partitioned 30-second usage cache; portable timezone discovery; DST-aware day/hour query construction; bounded dashboard charts/tables/cards; a resilient retained conversation panel; and corrected accessible shared/separate/unknown context gauges. Review hardening added an authenticated `/usage/capabilities` signal through the canonical API and sidecar so disabled analytics removes both UI surfaces, plus Streamlit 1.55 keyed lazy tabs so inactive workspaces do no API work (dependency manifests synchronized). Nonexistent local hours are rejected before requests, ambiguous folds expose explicit first/second occurrence choices (including Lord Howe half-hour transitions), and hostile legacy numeric metadata degrades safely without breaking chat. Usage cache invalidation occurs only on terminal completion, separate-I/O state follows the actual limiting ratio, and no user identity is placed in queries. Final evidence: 141 combined API/sidecar/UI tests, 196 broad UI regressions, and 130 final focused review tests passed; Ruff/format/compile/diff checks were clean; final spec and quality reviews approved with no findings.
 
 - **Task 17 — complete (2026-07-21).** Commits `ae34511`, `b57c32e`, `78007ec`, `ec75244`, and `478041f`. Added scheduled reconciliation and bounded retention workers without replacing existing beat schedules; reconciliation covers the latest 2,880 complete UTC minutes in configurable chunks, is idempotent, and serializes same-minute writes with ordered transaction advisory locks. Cleanup uses 5,000-row batches and the configured 90/730-day policies, with startup invariants that keep reconciliation strictly inside raw retention and rollups at least as durable as raw events. Aggregate-only health and metrics surfaces now report database lag/unattributed rate plus deployment-shared, content-free Redis failure buckets with bounded timeouts, transactional expiry, capped reads, freshness gauges, and explicit degraded behavior when the shared store is unavailable. The maintenance path reuses the application database lifecycle; standalone timestamp indexes use retry-safe concurrent replacement and recover invalid/wrong same-name artifacts. Final evidence: 221 blast-radius tests plus 17 live PostgreSQL tests passed before the last boundedness fixes; final focused re-reviews passed 39, 27, and 14 tests, Ruff/format/diff checks were clean, Alembic had one head (`a4b5c6d7e8f9`), and both final spec and quality reviews approved with no findings.
+
+- **Task 18 — automated/documentation work complete; staging smoke pending (2026-07-22).** Commits `3d74bbd`, `dff95f4`, `a4e9c17`, and `ddc8fbb` added the operations runbook, frontend-contract linkage, safe rollback/deletion guidance, and portable Postman examples. Production audit and migration hardening continued through `063ac1f`, `2a4c60e`, `2657ae1`, and `c439cbe`: the full Alembic history now installs from an empty database, upgrades the known original-`6c` deployed shape, fails closed on unsafe enum/index/FK drift, survives deep rollback/re-upgrade, preserves the enum OID during case normalization, and maps ORM decisions to the canonical lowercase database values. Historical checkpoint/OAuth loss and the maintenance-window rollback boundary are documented. The normal suite no longer depends on one developer's live API/MCP/skills environment; external live-server tests are explicit and URL-configurable. Final automated evidence: `2432 passed, 69 skipped` under `-W error`; 48 live PostgreSQL migration/ORM cases passed; Ruff check and the 633-file format gate passed; Alembic has one head (`b5c6d7e8f9a0`); final quality review approved with no findings. Step 8 remains the required full-stack staging exercise with real provider credentials and disposable users.
