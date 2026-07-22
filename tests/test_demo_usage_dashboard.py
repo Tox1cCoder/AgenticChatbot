@@ -4,6 +4,7 @@ import importlib
 import sys
 import types
 from datetime import date, datetime
+from functools import wraps
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -32,8 +33,25 @@ class _CacheDecorator:
         self.decorator_kwargs.append(kwargs)
 
         def decorate(func):
-            func.clear = self.clear
-            return func
+            if kwargs.get("ttl") != 30:
+                func.clear = self.clear
+                return func
+
+            cache: dict[tuple[Any, ...], Any] = {}
+
+            @wraps(func)
+            def cached(*func_args: Any, **func_kwargs: Any):
+                key = (*func_args, *sorted(func_kwargs.items()))
+                if key not in cache:
+                    cache[key] = func(*func_args, **func_kwargs)
+                return cache[key]
+
+            def clear() -> None:
+                cache.clear()
+                self.clear()
+
+            cached.clear = clear
+            return cached
 
         return decorate
 
@@ -64,6 +82,7 @@ class _StreamlitStub(types.ModuleType):
         self.sidebar = _Context()
         self.markdown_calls: list[tuple[str, dict[str, Any]]] = []
         self.tabs_calls: list[tuple[list[str], dict[str, Any]]] = []
+        self.toast_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
     def set_page_config(self, *args: Any, **kwargs: Any) -> None:
         return None
@@ -72,7 +91,7 @@ class _StreamlitStub(types.ModuleType):
         self.markdown_calls.append((body, kwargs))
 
     def toast(self, *args: Any, **kwargs: Any) -> None:
-        return None
+        self.toast_calls.append((args, kwargs))
 
     def expander(self, *args: Any, **kwargs: Any) -> _Context:
         return _Context()
@@ -279,7 +298,10 @@ def test_dashboard_query_is_encoded_and_has_no_user_identity(monkeypatch):
 
     def fake_usage_get(endpoint: str, *, auth_identity: str, cache_version: int):
         calls.append((endpoint, auth_identity, bool(cache_version)))
-        return {"success": True, "data": {"totals": {}}}
+        return {
+            "status_code": 200,
+            "payload": {"success": True, "data": {"totals": {}}},
+        }
 
     monkeypatch.setattr(demo, "_cached_usage_get_request", fake_usage_get)
     response = demo.get_usage_dashboard(
@@ -324,22 +346,209 @@ def test_usage_cache_is_dedicated_30_second_authenticated_cache(monkeypatch):
     assert "token" not in first and "token" not in second
 
 
-def test_usage_cache_miss_uses_authenticated_response_envelope_helper(monkeypatch):
+def test_usage_cache_miss_sends_authenticated_get_and_returns_response_envelope(monkeypatch):
     demo, stub = _import_demo(monkeypatch)
     stub.session_state.auth_token = "active-auth-token"
-    calls: list[tuple[str, str, bool, str]] = []
+    calls: list[tuple[str, dict[str, Any]]] = []
 
-    def fake_request(method: str, endpoint: str, *, use_cache: bool):
-        calls.append((method, endpoint, use_cache, stub.session_state.auth_token))
-        return {"success": True, "data": {}}
+    class Response:
+        status_code = 200
 
-    monkeypatch.setattr(demo, "make_api_request", fake_request)
+        @staticmethod
+        def json():
+            return {"success": True, "data": {}}
+
+    class Session:
+        @staticmethod
+        def get(url: str, **kwargs: Any):
+            calls.append((url, kwargs))
+            return Response()
+
+    monkeypatch.setattr(demo, "get_http_session", lambda: Session())
+    monkeypatch.setattr(
+        demo,
+        "make_api_request",
+        lambda *_args, **_kwargs: pytest.fail("cached usage reads must not emit UI elements"),
+    )
     response = demo._cached_usage_get_request(
         "/usage/dashboard", auth_identity="safe-partition", cache_version=0
     )
 
+    assert response == {
+        "status_code": 200,
+        "payload": {"success": True, "data": {}},
+    }
+    assert calls == [
+        (
+            f"{demo.API_BASE_URL}/usage/dashboard",
+            {
+                "headers": {"Authorization": "Bearer active-auth-token"},
+                "timeout": demo.REQUEST_TIMEOUT,
+            },
+        )
+    ]
+    assert stub.toast_calls == []
+
+
+def test_usage_cache_hit_reuses_silent_transport_envelope(monkeypatch):
+    demo, stub = _import_demo(monkeypatch)
+    stub.session_state.auth_token = "active-auth-token"
+    stub.session_state.current_user_id = "user-a"
+    calls: list[str] = []
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"success": True, "data": {"enabled": True}}
+
+    class Session:
+        @staticmethod
+        def get(url: str, **_kwargs: Any):
+            calls.append(url)
+            return Response()
+
+    monkeypatch.setattr(demo, "get_http_session", lambda: Session())
+
+    first = demo._usage_get("/usage/capabilities")
+    second = demo._usage_get("/usage/capabilities")
+
+    assert first == second == {"success": True, "data": {"enabled": True}}
+    assert calls == [f"{demo.API_BASE_URL}/usage/capabilities"]
+    assert stub.toast_calls == []
+
+
+def test_usage_cache_partitions_same_tenant_when_token_changes(monkeypatch):
+    demo, stub = _import_demo(monkeypatch)
+    stub.session_state.current_user_id = "user-a"
+    calls: list[str] = []
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"success": True, "data": {}}
+
+    class Session:
+        @staticmethod
+        def get(url: str, **_kwargs: Any):
+            calls.append(url)
+            return Response()
+
+    monkeypatch.setattr(demo, "get_http_session", lambda: Session())
+
+    stub.session_state.auth_token = "first-token"
+    demo._usage_get("/usage/dashboard")
+    stub.session_state.auth_token = "second-token"
+    demo._usage_get("/usage/dashboard")
+
+    assert calls == [
+        f"{demo.API_BASE_URL}/usage/dashboard",
+        f"{demo.API_BASE_URL}/usage/dashboard",
+    ]
+
+
+def test_successful_usage_read_clears_previous_api_error(monkeypatch):
+    demo, stub = _import_demo(monkeypatch)
+    stub.session_state["_last_api_error_message"] = "stale failure"
+    monkeypatch.setattr(
+        demo,
+        "_cached_usage_get_request",
+        lambda *_args, **_kwargs: {
+            "status_code": 200,
+            "payload": {"success": True, "data": {}},
+        },
+    )
+
+    response = demo._usage_get("/usage/dashboard")
+
     assert response == {"success": True, "data": {}}
-    assert calls == [("GET", "/usage/dashboard", False, "active-auth-token")]
+    assert stub.session_state["_last_api_error_message"] is None
+
+
+def test_usage_http_error_is_parsed_and_toasted_outside_cached_function(monkeypatch):
+    demo, stub = _import_demo(monkeypatch)
+    stub.session_state.auth_token = "active-auth-token"
+    stub.session_state.current_user_id = "user-a"
+    calls: list[str] = []
+
+    class Response:
+        status_code = 503
+
+        @staticmethod
+        def json():
+            return {"detail": "Usage service unavailable"}
+
+    class Session:
+        @staticmethod
+        def get(url: str, **_kwargs: Any):
+            calls.append(url)
+            return Response()
+
+    monkeypatch.setattr(demo, "get_http_session", lambda: Session())
+    identity = demo._usage_cache_identity()
+
+    cached = demo._cached_usage_get_request(
+        "/usage/dashboard", auth_identity=identity, cache_version=0
+    )
+    assert cached == {
+        "status_code": 503,
+        "payload": {"detail": "Usage service unavailable"},
+    }
+    assert stub.toast_calls == []
+
+    response = demo._usage_get("/usage/dashboard")
+
+    assert response == {}
+    assert calls == [f"{demo.API_BASE_URL}/usage/dashboard"]
+    assert stub.session_state["_last_api_error_message"] == "Usage service unavailable"
+    assert stub.toast_calls == [(("Usage service unavailable",), {"icon": ":material/cancel:"})]
+
+
+@pytest.mark.parametrize(
+    ("status_code", "payload"),
+    [
+        (401, {"detail": "Token expired"}),
+        (200, {"success": False, "code": "unauthenticated", "message": "Token expired"}),
+    ],
+)
+def test_usage_auth_expiry_transitions_to_login_outside_cache(monkeypatch, status_code, payload):
+    demo, stub = _import_demo(monkeypatch)
+    stub.session_state.auth_token = "expired-token"
+    stub.session_state.current_user_id = "user-a"
+    stub.session_state.current_user_profile = {"id": "user-a"}
+    stub.session_state.show_login = False
+    monkeypatch.setattr(
+        demo,
+        "_cached_usage_get_request",
+        lambda *_args, **_kwargs: {"status_code": status_code, "payload": payload},
+    )
+
+    response = demo._usage_get("/usage/dashboard")
+
+    assert response == {}
+    assert stub.session_state.auth_token is None
+    assert stub.session_state.current_user_id is None
+    assert stub.session_state.current_user_profile is None
+    assert stub.session_state.show_login is True
+    assert stub.toast_calls == [(("Please log in",), {"icon": ":material/lock:"})]
+
+
+def test_usage_malformed_success_response_reports_unexpected_response(monkeypatch):
+    demo, stub = _import_demo(monkeypatch)
+    monkeypatch.setattr(
+        demo,
+        "_cached_usage_get_request",
+        lambda *_args, **_kwargs: {"status_code": 200, "payload": {}},
+    )
+
+    response = demo._usage_get("/usage/dashboard")
+
+    assert response == {}
+    assert stub.session_state["_last_api_error_message"] == "Unexpected response from API"
+    assert stub.toast_calls == [(("Unexpected response from API",), {"icon": ":material/cancel:"})]
 
 
 def test_usage_capability_defaults_to_hidden_on_false_or_unavailable(monkeypatch):

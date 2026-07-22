@@ -3154,17 +3154,69 @@ def _cached_usage_get_request(
     auth_identity: str,
     cache_version: int,
 ) -> dict[str, Any]:
-    """Cache authenticated usage reads without sharing entries across users."""
+    """Fetch a usage read silently so cached results carry no replayable UI elements.
+
+    Emitting Streamlit elements (e.g. st.toast) inside a cached function makes cache
+    hits raise CacheReplayClosureError, so error signalling lives in _usage_get instead.
+    """
     del auth_identity, cache_version  # Values intentionally participate in the cache key.
-    return make_api_request("GET", endpoint, use_cache=False)
+    headers: dict[str, str] = {}
+    auth_token = st.session_state.get("auth_token")
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+
+    response = get_http_session().get(
+        f"{API_BASE_URL}{endpoint}",
+        headers=headers,
+        timeout=REQUEST_TIMEOUT,
+    )
+
+    payload: Any = {}
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+
+    return {
+        "status_code": response.status_code,
+        "payload": payload if isinstance(payload, dict) else {},
+    }
 
 
 def _usage_get(endpoint: str) -> dict[str, Any]:
-    return _cached_usage_get_request(
-        endpoint,
-        auth_identity=_usage_cache_identity(),
-        cache_version=int(st.session_state.get("usage_cache_version", 0)),
-    )
+    st.session_state["_last_api_error_message"] = None
+    try:
+        cached = _cached_usage_get_request(
+            endpoint,
+            auth_identity=_usage_cache_identity(),
+            cache_version=int(st.session_state.get("usage_cache_version", 0)),
+        )
+    except requests.exceptions.ConnectionError:
+        st.session_state["_last_api_error_message"] = "Cannot connect to API"
+        st.toast("Cannot connect to API", icon=":material/cancel:")
+        return {}
+    except requests.exceptions.RequestException as exc:
+        st.session_state["_last_api_error_message"] = str(exc)
+        st.toast(f"Error: {exc}", icon=":material/cancel:")
+        return {}
+
+    status_code = int(cached.get("status_code") or 0)
+    payload = cached.get("payload") or {}
+
+    if status_code >= 400 or not payload.get("success"):
+        error_status = status_code if status_code >= 400 else None
+        error_message = _extract_api_error_message(error_status, payload)
+        if error_status is None and error_message == "Request failed":
+            error_message = "Unexpected response from API"
+        st.session_state["_last_api_error_message"] = error_message
+        if status_code == 401 or payload.get("code") == "unauthenticated":
+            _transition_to_login()
+            st.toast("Please log in", icon=":material/lock:")
+        else:
+            st.toast(error_message, icon=":material/cancel:")
+        return {}
+
+    return payload
 
 
 def _clear_usage_cache_after_completed_turn() -> None:
