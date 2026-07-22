@@ -1075,6 +1075,7 @@ class BaseAgent(ABC):
                         provider=provider or "unknown",
                         model=model or "unknown",
                         operation=operation,
+                        usage_transform=self._transform_recorded_usage,
                     )
                 return await _ainvoke()
             except Exception as exc:
@@ -1637,6 +1638,12 @@ class BaseAgent(ABC):
         directly by an image-capable model.
         """
         return False
+
+    def _transform_recorded_usage(
+        self, response: Any, usage: NormalizedUsage
+    ) -> NormalizedUsage:
+        """Allow response-aware subclasses to enrich usage before persistence."""
+        return usage
 
     def _build_delegation_suffix(self, target_descriptions: dict[str, str] | None = None) -> str:
         """Delegation prompt suffix.

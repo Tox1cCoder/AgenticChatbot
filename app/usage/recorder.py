@@ -48,6 +48,7 @@ logger = logging.getLogger("app.usage.model_usage_recorder")
 _TIMEOUT_TYPES: tuple[type[BaseException], ...] = (asyncio.TimeoutError, TimeoutError)
 
 EstimateCallback = Callable[[Any], NormalizedUsage]
+UsageTransform = Callable[[Any, NormalizedUsage], NormalizedUsage]
 FailedWriteEnqueue = Callable[[dict[str, Any]], None]
 
 
@@ -124,6 +125,7 @@ class ModelUsageRecorder:
         model: str,
         operation: UsageOperation,
         estimate: EstimateCallback | None = None,
+        usage_transform: UsageTransform | None = None,
     ) -> Any:
         """Execute ``call`` once, record its outcome off the event loop, return it."""
         if not settings.model_usage_tracking_enabled:
@@ -177,7 +179,11 @@ class ModelUsageRecorder:
                 provider=provider,
                 model=model,
                 status="success",
-                usage=self._resolve_usage(provider, response, estimate),
+                usage=self._transform_usage(
+                    response,
+                    self._resolve_usage(provider, response, estimate),
+                    usage_transform,
+                ),
                 started_at=started_at,
                 started_monotonic=started_monotonic,
                 error_code=None,
@@ -193,6 +199,7 @@ class ModelUsageRecorder:
         model: str,
         operation: UsageOperation,
         estimate: EstimateCallback | None = None,
+        usage_transform: UsageTransform | None = None,
     ) -> Any:
         """Synchronous twin of :meth:`record_one_async_attempt` for worker threads.
 
@@ -248,7 +255,11 @@ class ModelUsageRecorder:
                 provider=provider,
                 model=model,
                 status="success",
-                usage=self._resolve_usage(provider, response, estimate),
+                usage=self._transform_usage(
+                    response,
+                    self._resolve_usage(provider, response, estimate),
+                    usage_transform,
+                ),
                 started_at=started_at,
                 started_monotonic=started_monotonic,
                 error_code=None,
@@ -264,6 +275,23 @@ class ModelUsageRecorder:
         if usage.source == "unavailable" and estimate is not None:
             return estimate(response)
         return usage
+
+    @staticmethod
+    def _transform_usage(
+        response: Any,
+        usage: NormalizedUsage,
+        usage_transform: UsageTransform | None,
+    ) -> NormalizedUsage:
+        if usage_transform is None:
+            return usage
+        try:
+            transformed = usage_transform(response, usage)
+            if not isinstance(transformed, NormalizedUsage):
+                raise TypeError("usage_transform must return NormalizedUsage")
+            return transformed
+        except Exception:
+            logger.exception("model usage transform failed; preserving normalized usage")
+            return usage
 
     def _build_command(
         self,

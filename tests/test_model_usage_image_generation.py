@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
@@ -96,6 +97,34 @@ def _gemini_usage() -> NormalizedUsage:
         output_image_tokens=2048,
         source="provider_reported",
     )
+
+
+def test_inline_image_usage_transform_counts_generated_output_blocks():
+    agent = _agent(None)
+    response = SimpleNamespace(
+        content=[
+            {
+                "type": "image",
+                "source_type": "base64",
+                "data": base64.b64encode(b"one").decode("ascii"),
+                "mime_type": "image/png",
+            },
+            {
+                "inline_data": {
+                    "data": b"two",
+                    "mime_type": "image/jpeg",
+                }
+            },
+        ]
+    )
+    usage = replace(_gemini_usage(), generated_images=0)
+
+    transformed = agent._transform_recorded_usage(response, usage)
+
+    assert transformed.generated_images == 2
+    assert transformed.input_tokens == usage.input_tokens
+    assert transformed.output_tokens == usage.output_tokens
+    assert transformed.total_tokens == usage.total_tokens
 
 
 @pytest.mark.asyncio

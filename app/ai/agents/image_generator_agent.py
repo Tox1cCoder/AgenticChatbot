@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import BaseMessage
@@ -9,6 +10,7 @@ from ...core.config import settings
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ...usage import begin_usage_operation, bind_usage_context, current_usage_context
 from ...usage.recorder import classify_error, classify_status
+from ...usage.types import NormalizedUsage
 from ..agent_config import AGENT_CONFIG, create_gemini_client, create_langchain_model
 from ..image_generation import (
     ImageFinal,
@@ -72,6 +74,15 @@ class ImageGeneratorAgent(BaseAgent):
 
     def _should_harvest_inline_images(self) -> bool:
         return True
+
+    def _transform_recorded_usage(
+        self, response: Any, usage: NormalizedUsage
+    ) -> NormalizedUsage:
+        """Count inline image blocks before immutable usage persistence."""
+        images = extract_inline_images_from_content(getattr(response, "content", None))
+        if not images:
+            return usage
+        return replace(usage, generated_images=len(images))
 
     def _harvest_inline_images(
         self, response: AgentResponse, original_prompt: str

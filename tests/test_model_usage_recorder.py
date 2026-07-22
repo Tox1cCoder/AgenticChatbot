@@ -15,6 +15,7 @@ import asyncio
 import json
 import threading
 import typing
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
@@ -113,6 +114,69 @@ async def test_success_records_provider_reported_usage_and_returns_response():
     assert command.latency_ms >= 0
     assert command.started_at.tzinfo is not None
     assert command.completed_at.tzinfo is not None
+
+
+async def test_async_attempt_transforms_usage_before_persistence():
+    repo = FakeRepository()
+    recorder = _recorder(repo)
+    call = CountingCall(result={"usage_metadata": {"input_tokens": 5}})
+
+    with bind_usage_context(UsageContext(operation="image_generation")):
+        returned = await recorder.record_one_async_attempt(
+            call=call,
+            provider="gemini",
+            model="gemini-3-pro-image",
+            operation=UsageOperation(),
+            usage_transform=lambda response, usage: replace(
+                usage,
+                generated_images=2 if response is call.result else 0,
+            ),
+        )
+
+    assert returned is call.result
+    assert repo.commands[0].usage.input_tokens == 5
+    assert repo.commands[0].usage.generated_images == 2
+
+
+async def test_async_usage_transform_failure_preserves_response_and_original_usage():
+    repo = FakeRepository()
+    recorder = _recorder(repo)
+    call = CountingCall(result={"usage_metadata": {"input_tokens": 5}})
+
+    def _raise(_response, _usage):
+        raise ValueError("transform failed")
+
+    with bind_usage_context(UsageContext(operation="image_generation")):
+        returned = await recorder.record_one_async_attempt(
+            call=call,
+            provider="gemini",
+            model="gemini-3-pro-image",
+            operation=UsageOperation(),
+            usage_transform=_raise,
+        )
+
+    assert returned is call.result
+    assert repo.commands[0].usage.input_tokens == 5
+    assert repo.commands[0].usage.generated_images == 0
+
+
+def test_sync_attempt_transforms_usage_before_persistence():
+    repo = FakeRepository()
+    recorder = _recorder(repo)
+    response = {"usage_metadata": {"input_tokens": 7}}
+
+    with bind_usage_context(UsageContext(operation="image_generation")):
+        returned = recorder.record_one_sync_attempt(
+            call=lambda: response,
+            provider="gemini",
+            model="gemini-3-pro-image",
+            operation=UsageOperation(),
+            usage_transform=lambda _response, usage: replace(usage, generated_images=1),
+        )
+
+    assert returned is response
+    assert repo.commands[0].usage.input_tokens == 7
+    assert repo.commands[0].usage.generated_images == 1
 
 
 async def test_success_records_metric():
