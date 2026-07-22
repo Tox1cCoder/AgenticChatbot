@@ -41,18 +41,12 @@ def compute_skill_bundle_hash(
         for dir_name in dir_names:
             directory = current / dir_name
             if link_checker(directory):
-                raise UnsafeSkillBundleError(
-                    f"skill bundle contains linked directory: {dir_name}"
-                )
-        dir_names[:] = sorted(
-            name for name in dir_names if name not in _IGNORED_DIR_NAMES
-        )
+                raise UnsafeSkillBundleError(f"skill bundle contains linked directory: {dir_name}")
+        dir_names[:] = sorted(name for name in dir_names if name not in _IGNORED_DIR_NAMES)
         for file_name in file_names:
             path = current / file_name
             if link_checker(path):
-                raise UnsafeSkillBundleError(
-                    f"skill bundle contains linked file: {file_name}"
-                )
+                raise UnsafeSkillBundleError(f"skill bundle contains linked file: {file_name}")
             relative = path.relative_to(root).as_posix()
             if relative == _INSTALL_METADATA_FILENAME or path.suffix == ".pyc":
                 continue
@@ -77,9 +71,7 @@ def compute_skill_bundle_hash(
             descriptor = os.open(path, flags)
             before = os.fstat(descriptor)
             if not stat.S_ISREG(before.st_mode):
-                raise UnsafeSkillBundleError(
-                    f"skill bundle path is not a regular file: {relative}"
-                )
+                raise UnsafeSkillBundleError(f"skill bundle path is not a regular file: {relative}")
             relative_bytes = relative.encode("utf-8")
             _add_record_field(hasher, relative_bytes)
             hasher.update(struct.pack(">I", stat.S_IMODE(before.st_mode)))
@@ -93,9 +85,7 @@ def compute_skill_bundle_hash(
                 after_open = os.fstat(stream.fileno())
             after = path.stat(follow_symlinks=False)
         except OSError as exc:
-            raise UnsafeSkillBundleError(
-                f"skill bundle changed while hashing: {relative}"
-            ) from exc
+            raise UnsafeSkillBundleError(f"skill bundle changed while hashing: {relative}") from exc
         finally:
             if descriptor is not None:
                 os.close(descriptor)
@@ -111,7 +101,5 @@ def compute_skill_bundle_hash(
             or after.st_mtime_ns != before.st_mtime_ns
             or link_checker(path)
         ):
-            raise UnsafeSkillBundleError(
-                f"skill bundle changed while hashing: {relative}"
-            )
+            raise UnsafeSkillBundleError(f"skill bundle changed while hashing: {relative}")
     return hasher.hexdigest()
