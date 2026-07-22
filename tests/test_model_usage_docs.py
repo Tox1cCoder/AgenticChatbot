@@ -14,6 +14,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 README = ROOT / "README.md"
 RUNBOOK = ROOT / "docs" / "operations" / "model-usage-analytics.md"
+CLEANUP_AUDIT = ROOT / "docs" / "operations" / "model-usage-cleanup-audit.md"
 POSTMAN = ROOT / "Chatbot API.postman_collection.json"
 
 MODEL_USAGE_CONTROLS = (
@@ -168,6 +169,22 @@ def test_runbook_covers_observability_investigation_and_replay() -> None:
     )
     for phrase in required:
         assert phrase in runbook
+
+
+def test_cleanup_audit_records_removed_and_retained_compatibility_paths() -> None:
+    audit = _normalized(CLEANUP_AUDIT)
+
+    for phrase in (
+        "Raw-event latest gauge selector",
+        "Image generation tuple result",
+        "Provider retry/fallback runtime",
+        "Image acknowledgement text fallback",
+        "gemini-3-pro-image-preview",
+        "Sidecar `/api` aliases",
+        "Ruff",
+        "vulture",
+    ):
+        assert phrase in audit
 
 
 def test_runbook_covers_api_privacy_and_frontend_contracts() -> None:

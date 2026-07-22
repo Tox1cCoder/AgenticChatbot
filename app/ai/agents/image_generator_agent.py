@@ -85,9 +85,7 @@ class ImageGeneratorAgent(BaseAgent):
     def _should_harvest_inline_images(self) -> bool:
         return True
 
-    def _transform_recorded_usage(
-        self, response: Any, usage: NormalizedUsage
-    ) -> NormalizedUsage:
+    def _transform_recorded_usage(self, response: Any, usage: NormalizedUsage) -> NormalizedUsage:
         """Count inline image blocks before immutable usage persistence."""
         images = extract_inline_images_from_content(getattr(response, "content", None))
         if not images:

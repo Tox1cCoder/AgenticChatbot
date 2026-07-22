@@ -626,9 +626,7 @@ class ModelUsageRepository:
     ) -> dict[str, Any] | None:
         """Return context metadata from the latest visible assistant message."""
         if user_id is None:
-            raise ValueError(
-                "get_latest_conversation_context_window requires a non-null user_id"
-            )
+            raise ValueError("get_latest_conversation_context_window requires a non-null user_id")
         statement = (
             select(Message.message_metadata["context_window"])
             .join(Conversation, Conversation.id == Message.conversation_id)

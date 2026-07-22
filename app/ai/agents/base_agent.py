@@ -1639,9 +1639,7 @@ class BaseAgent(ABC):
         """
         return False
 
-    def _transform_recorded_usage(
-        self, response: Any, usage: NormalizedUsage
-    ) -> NormalizedUsage:
+    def _transform_recorded_usage(self, response: Any, usage: NormalizedUsage) -> NormalizedUsage:
         """Allow response-aware subclasses to enrich usage before persistence."""
         return usage
 

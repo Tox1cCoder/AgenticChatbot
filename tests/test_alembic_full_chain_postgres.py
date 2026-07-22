@@ -339,9 +339,7 @@ def _assert_head_schema(scratch_url: URL) -> None:
                 for foreign_key in schema.get_foreign_keys("model_usage_events")
             }
             assert (
-                event_foreign_keys["fk_model_usage_events_conversation"]["options"][
-                    "ondelete"
-                ]
+                event_foreign_keys["fk_model_usage_events_conversation"]["options"]["ondelete"]
                 == "CASCADE"
             )
 

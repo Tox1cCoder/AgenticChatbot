@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import json
 import re
@@ -12,6 +11,8 @@ from types import SimpleNamespace
 from typing import Any, get_args
 from unittest.mock import MagicMock
 from uuid import uuid4
+
+import pytest
 
 from app.ai.model_context import resolve_model_context_window
 from app.api.ai_sdk import AISDKUIMessage, get_conversation_messages_ai_sdk
@@ -158,7 +159,8 @@ def test_real_usage_response_schemas_ignore_unknown_future_fields() -> None:
     assert "futureDashboardField" not in parsed.data.model_dump(by_alias=True)
 
 
-def test_history_path_preserves_complete_additive_context_metadata() -> None:
+@pytest.mark.asyncio
+async def test_history_path_preserves_complete_additive_context_metadata() -> None:
     context_window = _json_example("context-window-metadata")
     message_service = MagicMock()
     message_service.get_conversation_messages.return_value = SimpleNamespace(
@@ -177,13 +179,11 @@ def test_history_path_preserves_complete_additive_context_metadata() -> None:
         meta=PaginationMeta.calculate(1, 100, 1),
     )
 
-    response = asyncio.run(
-        get_conversation_messages_ai_sdk(
-            uuid4(),
-            message_service,
-            uuid4(),
-            MessagePaginationParams(),
-        )
+    response = await get_conversation_messages_ai_sdk(
+        uuid4(),
+        message_service,
+        uuid4(),
+        MessagePaginationParams(),
     )
 
     assert response.data is not None

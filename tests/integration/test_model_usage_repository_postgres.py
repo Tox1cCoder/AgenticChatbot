@@ -534,9 +534,12 @@ def test_latest_conversation_context_uses_visible_assistant_metadata_not_helper_
     )
 
     assert latest == expected
-    assert repository.get_latest_conversation_context_window(
-        user_id=other_user_id, conversation_id=conversation_id
-    ) is None
+    assert (
+        repository.get_latest_conversation_context_window(
+            user_id=other_user_id, conversation_id=conversation_id
+        )
+        is None
+    )
 
 
 def test_conversation_delete_removes_usage_without_reconciliation_resurrection(
