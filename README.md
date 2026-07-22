@@ -350,7 +350,8 @@ at `/usage/conversations/{conversation_id}`. Operators use the aggregate-only
 `/health/model-usage` and `/metrics/model-usage` endpoints. By default, cleanup
 retains 90 days of raw events and 730 days of minute rollups. Analytics reports
 tokens, requests, images, coverage, and operational health; it does not
-calculate or track monetary cost.
+calculate or track monetary cost. Frontend consumers should follow the
+[AI SDK usage analytics contract](plans/TOKEN_USAGE_AI_SDK_FE_CONTRACT.md).
 
 ### Vector store / RAG
 

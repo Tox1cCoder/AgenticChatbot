@@ -53,6 +53,7 @@ def test_readme_advertises_the_complete_model_usage_contract() -> None:
     assert "730 days of minute rollups" in readme
     assert "does not calculate or track monetary cost" in readme
     assert "docs/operations/model-usage-analytics.md" in readme
+    assert "plans/TOKEN_USAGE_AI_SDK_FE_CONTRACT.md" in readme
 
 
 def test_runbook_covers_deployment_maintenance_and_rollback() -> None:
