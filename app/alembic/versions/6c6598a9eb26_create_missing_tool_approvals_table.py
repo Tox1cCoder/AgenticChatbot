@@ -1,5 +1,10 @@
 """Reconcile the application schema and create tool approvals if missing.
 
+Checkpoint and OAuth tables are outside this revision's ownership and remain
+untouched. Task-execution metrics are intentionally retired: upgrade drops
+their columns and values, while downgrade can restore only their schema and
+historical NULL/zero defaults, not the discarded values.
+
 Revision ID: 6c6598a9eb26
 Revises: 1ce64a959f7d
 Create Date: 2026-03-10 13:59:13.889216
@@ -37,8 +42,18 @@ def _create_tool_approvals_if_missing() -> None:
     op.create_table(
         "tool_approvals",
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("conversation_id", sa.UUID(), nullable=False),
         sa.Column("user_id", sa.UUID(), nullable=False),
@@ -58,9 +73,22 @@ def _create_tool_approvals_if_missing() -> None:
             ),
             nullable=False,
         ),
-        sa.Column("decided_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["conversation_id"], ["conversations.id"]),
-        sa.ForeignKeyConstraint(["user_id"], ["users.id"]),
+        sa.Column(
+            "decided_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["conversation_id"],
+            ["conversations.id"],
+            name="fk_tool_approvals_conversation_id",
+        ),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name="fk_tool_approvals_user_id",
+        ),
         sa.PrimaryKeyConstraint("id"),
     )
     for index_name, columns in (
@@ -74,7 +102,7 @@ def _create_tool_approvals_if_missing() -> None:
 
 
 def upgrade() -> None:
-    """Apply only application-owned, existence-aware reconciliation DDL."""
+    """Apply application-owned reconciliation, intentionally retiring task metrics."""
     _create_tool_approvals_if_missing()
 
     for index_name, table_name, columns in (
@@ -153,14 +181,17 @@ def downgrade() -> None:
     """Restore the canonical application schema at ``1ce64a959f7d``.
 
     Externally managed checkpoint tables and unrelated OAuth data are not
-    created, dropped, or altered in either direction.
+    created, dropped, or altered in either direction. The task-execution
+    metric columns are restored structurally, but values removed by upgrade
+    cannot be recovered: nullable metrics return as NULL and ``retry_count``
+    returns with its historical zero default.
     """
     task_plan_column_types = {
+        "started_at": sa.DateTime(timezone=True),
+        "estimated_duration_minutes": sa.Integer(),
         "actual_duration_minutes": sa.Integer(),
         "retry_count": sa.Integer(),
         "completion_confidence": sa.Float(),
-        "started_at": sa.DateTime(timezone=True),
-        "estimated_duration_minutes": sa.Integer(),
     }
     for column_name, column_type in task_plan_column_types.items():
         if column_name not in _column_names("task_plans"):
@@ -203,16 +234,6 @@ def downgrade() -> None:
     ):
         op.drop_index(op.f(index_name), table_name=table_name, if_exists=True)
 
-    for restored_column in ("citations", "extra_metadata"):
-        if restored_column not in _column_names("messages"):
-            op.add_column(
-                "messages",
-                sa.Column(
-                    restored_column,
-                    postgresql.JSON(astext_type=sa.Text()),
-                    nullable=True,
-                ),
-            )
     op.create_index(
         op.f("ix_hitl_interrupts_status_expires_at"),
         "hitl_interrupts",

@@ -8,6 +8,7 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
+from copy import deepcopy
 from pathlib import Path
 from urllib.parse import quote
 from uuid import uuid4
@@ -27,6 +28,97 @@ _TIMESTAMP_INDEXES = {
     "ix_model_usage_events_started_at",
     "ix_model_usage_minute_bucket_start_utc",
 }
+
+
+def _normalized_metadata(value):
+    if isinstance(value, dict):
+        return tuple(sorted((key, _normalized_metadata(item)) for key, item in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_normalized_metadata(item) for item in value)
+    if isinstance(value, set):
+        return tuple(sorted(_normalized_metadata(item) for item in value))
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _table_schema_snapshot(connection, table_name: str) -> dict:
+    schema = inspect(connection)
+    indexes = []
+    for index in schema.get_indexes(table_name, schema="public"):
+        validity = connection.scalar(
+            text(
+                "SELECT i.indisvalid FROM pg_index i "
+                "WHERE i.indexrelid = to_regclass(:qualified_name)"
+            ),
+            {"qualified_name": f"public.{index['name']}"},
+        )
+        indexes.append(
+            {
+                "name": index["name"],
+                "columns": tuple(index.get("column_names") or ()),
+                "expressions": tuple(str(item) for item in index.get("expressions") or ()),
+                "unique": bool(index.get("unique")),
+                "dialect_options": _normalized_metadata(index.get("dialect_options") or {}),
+                "valid": validity,
+            }
+        )
+
+    return {
+        "comment": _normalized_metadata(
+            schema.get_table_comment(table_name, schema="public").get("text")
+        ),
+        "columns": tuple(
+            (
+                column["name"],
+                str(column["type"]),
+                column["nullable"],
+                _normalized_metadata(column.get("default")),
+                _normalized_metadata(column.get("identity")),
+                _normalized_metadata(column.get("computed")),
+                _normalized_metadata(column.get("comment")),
+            )
+            for column in schema.get_columns(table_name, schema="public")
+        ),
+        "primary_key": _normalized_metadata(schema.get_pk_constraint(table_name, schema="public")),
+        "foreign_keys": tuple(
+            sorted(
+                _normalized_metadata(item)
+                for item in schema.get_foreign_keys(table_name, schema="public")
+            )
+        ),
+        "unique_constraints": tuple(
+            sorted(
+                _normalized_metadata(item)
+                for item in schema.get_unique_constraints(table_name, schema="public")
+            )
+        ),
+        "check_constraints": tuple(
+            sorted(
+                _normalized_metadata(item)
+                for item in schema.get_check_constraints(table_name, schema="public")
+            )
+        ),
+        "indexes": tuple(sorted(indexes, key=lambda item: item["name"])),
+    }
+
+
+def _public_table_schema_snapshot(connection, excluded_tables: set[str] | None = None) -> dict:
+    excluded_tables = excluded_tables or set()
+    return {
+        table_name: _table_schema_snapshot(connection, table_name)
+        for table_name in sorted(inspect(connection).get_table_names(schema="public"))
+        if table_name not in excluded_tables
+    }
+
+
+def _without_indexes(schema_snapshot: dict, index_names: set[str]) -> dict:
+    expected = deepcopy(schema_snapshot)
+    for table in expected.values():
+        table["indexes"] = tuple(
+            index for index in table["indexes"] if index["name"] not in index_names
+        )
+    return expected
 
 
 def _require_valid_scratch_database_name(name: str) -> str:
@@ -115,13 +207,20 @@ def _run_alembic(scratch_url: URL, *args: str) -> None:
 
 def _redact_database_credentials(output: str, database_url: URL) -> str:
     __tracebackhide__ = True
-    redacted = output.replace(
+    redacted = output
+    for rendered_url in {
         database_url.render_as_string(hide_password=False),
-        "<scratch-database-url>",
-    )
-    if database_url.password:
-        for secret in {database_url.password, quote(database_url.password, safe="")}:
-            redacted = redacted.replace(secret, "<database-password>")
+        database_url.render_as_string(hide_password=True),
+        str(database_url),
+    }:
+        redacted = redacted.replace(rendered_url, "<scratch-database-url>")
+    for credential, replacement in (
+        (database_url.username, "<database-username>"),
+        (database_url.password, "<database-password>"),
+    ):
+        if credential:
+            for secret in {credential, quote(credential, safe="")}:
+                redacted = redacted.replace(secret, replacement)
     return redacted
 
 
@@ -234,28 +333,107 @@ def test_scratch_database_name_validation_rejects_non_generated_names(
 
 def test_database_output_redaction_removes_url_and_password_forms() -> None:
     database_url = make_url(
-        "postgresql://migration_user:p%40ss@example.invalid/"
+        "postgresql://migration%40user:p%40ss@example.invalid/"
         "chatbot_migration_smoke_0123456789abcdef0123456789abcdef"
     )
-    output = f"url={database_url.render_as_string(hide_password=False)} raw=p@ss encoded=p%40ss"
+    output = (
+        f"url={database_url.render_as_string(hide_password=False)} "
+        f"masked={database_url.render_as_string(hide_password=True)} "
+        "raw_user=migration@user encoded_user=migration%40user "
+        "raw_password=p@ss encoded_password=p%40ss"
+    )
 
     redacted = _redact_database_credentials(output, database_url)
 
-    assert "migration_user" not in redacted
+    assert "migration@user" not in redacted
+    assert "migration%40user" not in redacted
     assert "p@ss" not in redacted
     assert "p%40ss" not in redacted
+    assert "***" not in redacted
+
+
+def test_alembic_failure_redacts_stdout_stderr_and_environment(monkeypatch) -> None:
+    database_url = make_url(
+        "postgresql://migration%40user:p%40ss@example.invalid/"
+        "chatbot_migration_smoke_0123456789abcdef0123456789abcdef"
+    )
+    captured_env = None
+
+    def failed_run(*_args, **kwargs):
+        nonlocal captured_env
+        captured_env = kwargs["env"]
+        return subprocess.CompletedProcess(
+            args=["alembic"],
+            returncode=1,
+            stdout="raw migration@user p@ss",
+            stderr=(
+                f"masked {database_url.render_as_string(hide_password=True)} "
+                "encoded migration%40user p%40ss"
+            ),
+        )
+
+    monkeypatch.setattr(subprocess, "run", failed_run)
+    with pytest.raises(pytest.fail.Exception) as failure:
+        _run_alembic(database_url, "upgrade", "head")
+
+    message = str(failure.value)
+    for secret in ("migration@user", "migration%40user", "p@ss", "p%40ss", "***"):
+        assert secret not in message
+    assert captured_env["DATABASE_URL"] == "<redacted>"
+
+
+def test_alembic_timeout_redacts_captured_output(monkeypatch) -> None:
+    database_url = make_url(
+        "postgresql://migration%40user:p%40ss@example.invalid/"
+        "chatbot_migration_smoke_0123456789abcdef0123456789abcdef"
+    )
+
+    def timed_out(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd=["alembic"],
+            timeout=180,
+            output="raw migration@user p@ss",
+            stderr="encoded migration%40user p%40ss",
+        )
+
+    monkeypatch.setattr(subprocess, "run", timed_out)
+    with pytest.raises(pytest.fail.Exception) as failure:
+        _run_alembic(database_url, "upgrade", "head")
+
+    message = str(failure.value)
+    for secret in ("migration@user", "migration%40user", "p@ss", "p%40ss"):
+        assert secret not in message
 
 
 def test_full_alembic_chain_from_empty_postgres_database() -> None:
     with _scratch_database(_postgres_test_url()) as scratch_url:
         _run_alembic(scratch_url, "upgrade", "head")
         _assert_head_schema(scratch_url)
+        engine = create_engine(scratch_url)
+        try:
+            with engine.connect() as connection:
+                head_snapshot = _public_table_schema_snapshot(connection)
+        finally:
+            engine.dispose()
 
         _run_alembic(scratch_url, "downgrade", _PREVIOUS_HEAD)
         _assert_previous_head_schema(scratch_url)
+        engine = create_engine(scratch_url)
+        try:
+            with engine.connect() as connection:
+                previous_snapshot = _public_table_schema_snapshot(connection)
+        finally:
+            engine.dispose()
+        assert previous_snapshot == _without_indexes(head_snapshot, _TIMESTAMP_INDEXES)
 
         _run_alembic(scratch_url, "upgrade", "head")
         _assert_head_schema(scratch_url)
+        engine = create_engine(scratch_url)
+        try:
+            with engine.connect() as connection:
+                assert _public_table_schema_snapshot(connection) == head_snapshot
+        finally:
+            engine.dispose()
 
 
 def test_reconciliation_migration_round_trips_the_canonical_schema() -> None:
@@ -268,14 +446,48 @@ def test_reconciliation_migration_round_trips_the_canonical_schema() -> None:
             "mcp_oauth_tokens",
             "checkpoint_migrations",
         }
+        user_id = uuid4()
+        conversation_id = uuid4()
+        task_id = uuid4()
         seed_engine = create_engine(scratch_url)
         try:
             with seed_engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO users "
+                        "(id, username, email, password_hash, created_at, updated_at) "
+                        "VALUES (:id, 'migration-user', 'migration@example.invalid', "
+                        "'not-a-real-password', now(), now())"
+                    ),
+                    {"id": user_id},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO conversations "
+                        "(id, owner_id, title, created_at, updated_at, planning_mode_enabled) "
+                        "VALUES (:id, :owner_id, 'migration', now(), now(), false)"
+                    ),
+                    {"id": conversation_id, "owner_id": user_id},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO task_plans "
+                        "(id, conversation_id, task_order, description, status, "
+                        "created_at, updated_at, estimated_duration_minutes, "
+                        "actual_duration_minutes, retry_count, completion_confidence, started_at) "
+                        "VALUES (:id, :conversation_id, 1, 'migration', 'pending', "
+                        "now(), now(), 21, 13, 4, 0.75, now())"
+                    ),
+                    {"id": task_id, "conversation_id": conversation_id},
+                )
                 for table_name in external_tables:
                     connection.execute(
                         text(f'CREATE TABLE "{table_name}" (sentinel integer PRIMARY KEY)')
                     )
                     connection.execute(text(f'INSERT INTO "{table_name}" VALUES (1)'))
+                predecessor_snapshot = _public_table_schema_snapshot(
+                    connection, excluded_tables=external_tables
+                )
         finally:
             seed_engine.dispose()
 
@@ -288,58 +500,65 @@ def test_reconciliation_migration_round_trips_the_canonical_schema() -> None:
                 assert connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalars().all() == [_PRE_RECONCILIATION_HEAD]
-                schema = inspect(connection)
-                tables = set(schema.get_table_names())
-                assert "tool_approvals" in tables
-                assert external_tables <= tables
+                assert (
+                    _public_table_schema_snapshot(connection, excluded_tables=external_tables)
+                    == predecessor_snapshot
+                )
                 for table_name in external_tables:
                     assert connection.scalar(text(f'SELECT sentinel FROM "{table_name}"')) == 1
-                assert "file_size" not in {
-                    column["name"] for column in schema.get_columns("documents")
-                }
-                assert {"extra_metadata", "citations"} <= {
-                    column["name"] for column in schema.get_columns("messages")
-                }
-                assert {
-                    "estimated_duration_minutes",
-                    "started_at",
-                    "completion_confidence",
-                    "retry_count",
-                    "actual_duration_minutes",
-                } <= {column["name"] for column in schema.get_columns("task_plans")}
-
-                indexes = {
-                    table: {index["name"] for index in schema.get_indexes(table)}
-                    for table in (
-                        "agent_model_configs",
-                        "document_images",
-                        "hitl_interrupts",
-                        "model_providers",
-                        "task_plans",
-                    )
-                }
-                assert "ix_agent_model_configs_id" not in indexes["agent_model_configs"]
-                assert "ix_agent_model_configs_user_id" not in indexes["agent_model_configs"]
-                assert "idx_document_images_document_id" in indexes["document_images"]
-                assert "ix_document_images_document_id" not in indexes["document_images"]
-                assert {
-                    "ix_hitl_interrupts_assistant_message_id",
-                    "ix_hitl_interrupts_status_expires_at",
-                } <= indexes["hitl_interrupts"]
-                assert "ix_model_providers_id" not in indexes["model_providers"]
-                assert "ix_model_providers_user_id" not in indexes["model_providers"]
-                assert {
-                    "ix_task_plans_conversation_order",
-                    "ix_task_plans_status",
-                } <= indexes["task_plans"]
-                assert "idx_task_plan_conversation_order" not in indexes["task_plans"]
-
-                assert any(
-                    foreign_key["constrained_columns"] == ["assistant_message_id"]
-                    and foreign_key["referred_table"] == "messages"
-                    and foreign_key["referred_columns"] == ["id"]
-                    and foreign_key["referred_schema"] in (None, "public")
-                    for foreign_key in schema.get_foreign_keys("hitl_interrupts")
+                restored_metrics = connection.execute(
+                    text(
+                        "SELECT estimated_duration_minutes, actual_duration_minutes, "
+                        "retry_count, completion_confidence, started_at "
+                        "FROM task_plans WHERE id = :id"
+                    ),
+                    {"id": task_id},
+                ).one()
+                # 6c intentionally retired these columns and their data. Its
+                # downgrade restores the exact predecessor schema, but cannot
+                # reconstruct values deleted by the forward migration.
+                assert restored_metrics == (
+                    None,
+                    None,
+                    0,
+                    None,
+                    None,
                 )
+        finally:
+            engine.dispose()
+
+
+@pytest.mark.parametrize("drop_enum", [False, True], ids=["enum-exists", "enum-missing"])
+def test_reconciliation_repairs_missing_tool_approvals_exactly(drop_enum: bool) -> None:
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", _PRE_RECONCILIATION_HEAD)
+        engine = create_engine(scratch_url)
+        try:
+            with engine.begin() as connection:
+                canonical_table = _table_schema_snapshot(connection, "tool_approvals")
+                enum_labels = connection.execute(
+                    text(
+                        "SELECT e.enumlabel FROM pg_enum e "
+                        "JOIN pg_type t ON t.oid = e.enumtypid "
+                        "WHERE t.typname = 'decision_type' ORDER BY e.enumsortorder"
+                    )
+                ).scalars()
+                assert enum_labels.all() == ["accept", "edit", "reject"]
+                connection.execute(text("DROP TABLE tool_approvals"))
+                if drop_enum:
+                    connection.execute(text("DROP TYPE decision_type"))
+
+            _run_alembic(scratch_url, "upgrade", _RECONCILIATION_REVISION)
+
+            with engine.connect() as connection:
+                assert _table_schema_snapshot(connection, "tool_approvals") == canonical_table
+                repaired_labels = connection.execute(
+                    text(
+                        "SELECT e.enumlabel FROM pg_enum e "
+                        "JOIN pg_type t ON t.oid = e.enumtypid "
+                        "WHERE t.typname = 'decision_type' ORDER BY e.enumsortorder"
+                    )
+                ).scalars()
+                assert repaired_labels.all() == ["accept", "edit", "reject"]
         finally:
             engine.dispose()
