@@ -4,11 +4,17 @@ from types import SimpleNamespace
 import pytest
 
 from app.schemas.runtime_protocol import RuntimeErrorMessage
+from client_backend.schemas.mcp_config import MCPProfileScope
 from client_backend.schemas.runtime import CatalogSyncResult, RuntimeStatus, ToolDispatchRequest
 from client_backend.services import runtime_bridge as runtime_bridge_module
 from client_backend.services.runtime_bridge import RuntimeBridgeService
 from client_backend.services.skill_runtime.manager import SkillReadiness
 from shared.skills.errors import SkillRuntimeError
+
+_MCP_SCOPE = MCPProfileScope(
+    user_id="user-1",
+    device_identifier="test-device",
+)
 
 
 class _ServerClientStub:
@@ -44,7 +50,8 @@ class _ServerClientStub:
 @pytest.mark.asyncio
 async def test_refresh_catalogs_syncs_skill_summaries_without_content(monkeypatch):
     server_client = _ServerClientStub()
-    bridge = RuntimeBridgeService(server_client=server_client)
+    bridge = RuntimeBridgeService(server_client=server_client, mcp_scope=_MCP_SCOPE)
+    bridge._device_identifier = _MCP_SCOPE.device_identifier
     bridge._device_id = "device-123"
 
     include_content_calls: list[bool] = []
@@ -59,7 +66,7 @@ async def test_refresh_catalogs_syncs_skill_summaries_without_content(monkeypatc
     monkeypatch.setattr(
         runtime_bridge_module,
         "get_mcp_manager",
-        lambda: SimpleNamespace(
+        lambda _scope: SimpleNamespace(
             get_tool_catalog=lambda: {"tools": [], "server_count": 0, "active_servers": []}
         ),
     )
@@ -79,7 +86,11 @@ async def test_refresh_catalogs_syncs_skill_summaries_without_content(monkeypatc
 
 @pytest.mark.asyncio
 async def test_runtime_bridge_executes_activate_skill_locally(monkeypatch):
-    bridge = RuntimeBridgeService(server_client=_ServerClientStub())
+    bridge = RuntimeBridgeService(
+        server_client=_ServerClientStub(),
+        mcp_scope=_MCP_SCOPE,
+    )
+    bridge._device_identifier = _MCP_SCOPE.device_identifier
 
     monkeypatch.setattr(
         runtime_bridge_module,
@@ -188,7 +199,10 @@ async def test_ready_activation_explains_missing_secret_remediation(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_runtime_bridge_preserves_float_tool_execution_timeout(monkeypatch):
-    bridge = RuntimeBridgeService(server_client=_ServerClientStub())
+    bridge = RuntimeBridgeService(
+        server_client=_ServerClientStub(),
+        mcp_scope=_MCP_SCOPE,
+    )
     calls: list[dict] = []
 
     async def _call_tool(**kwargs):
@@ -198,7 +212,7 @@ async def test_runtime_bridge_preserves_float_tool_execution_timeout(monkeypatch
     monkeypatch.setattr(
         runtime_bridge_module,
         "get_mcp_manager",
-        lambda: SimpleNamespace(call_tool=_call_tool),
+        lambda _scope: SimpleNamespace(call_tool=_call_tool),
     )
 
     result = await bridge._execute_tool_request(
@@ -418,7 +432,8 @@ async def test_handle_server_message_uses_typed_runtime_error_context():
 @pytest.mark.asyncio
 async def test_build_tool_catalog_returns_mcp_tools_only(monkeypatch):
     server_client = _ServerClientStub()
-    bridge = RuntimeBridgeService(server_client=server_client)
+    bridge = RuntimeBridgeService(server_client=server_client, mcp_scope=_MCP_SCOPE)
+    bridge._device_identifier = _MCP_SCOPE.device_identifier
     bridge._device_id = "device-123"
     bridge._session_id = "session-123"
     bridge._tool_catalog_version = 0
@@ -426,7 +441,7 @@ async def test_build_tool_catalog_returns_mcp_tools_only(monkeypatch):
     monkeypatch.setattr(
         runtime_bridge_module,
         "get_mcp_manager",
-        lambda: SimpleNamespace(
+        lambda _scope: SimpleNamespace(
             get_tool_catalog=lambda: {
                 "tools": [
                     {

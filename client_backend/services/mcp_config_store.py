@@ -178,8 +178,21 @@ class MCPConfigStore:
         candidate = profile.model_copy(
             update={"custom_servers": {**profile.custom_servers, name: parsed}}
         )
-        self.secret_store.set_for_server(name, env=env, headers=headers)
-        self._write_profile(candidate)
+        previous = self.secret_store.get_for_server(name)
+        previous_names = self.secret_store.list_for_server(name)
+        try:
+            self.secret_store.set_for_server(name, env=env, headers=headers)
+            self._write_profile(candidate)
+        except Exception:
+            if previous_names["envKeys"] or previous_names["headerKeys"]:
+                self.secret_store.set_for_server(
+                    name,
+                    env=previous.env,
+                    headers=previous.headers,
+                )
+            else:
+                self.secret_store.delete_server(name)
+            raise
 
     def set_enabled(self, name: str, enabled: bool) -> None:
         registry = self.load_registry()
@@ -195,6 +208,28 @@ class MCPConfigStore:
         servers = dict(profile.custom_servers)
         servers[name] = custom.model_copy(update={"enabled": enabled})
         self._write_profile(profile.model_copy(update={"custom_servers": servers}))
+
+    def delete_server(
+        self,
+        name: str,
+    ) -> Literal["disabled_bundled", "deleted_custom"]:
+        """Disable a bundled server or permanently delete a custom server."""
+
+        registry = self.load_registry()
+        profile = self.load_profile()
+        if name in registry.servers:
+            overrides = dict(profile.bundled_overrides)
+            overrides[name] = BundledOverride(enabled=False)
+            self._write_profile(profile.model_copy(update={"bundled_overrides": overrides}))
+            return "disabled_bundled"
+
+        if name not in profile.custom_servers:
+            raise KeyError(name)
+        servers = dict(profile.custom_servers)
+        del servers[name]
+        self._write_profile(profile.model_copy(update={"custom_servers": servers}))
+        self.secret_store.delete_server(name)
+        return "deleted_custom"
 
     def _resolve_bundled_value(self, value: str) -> str:
         path = Path(value)

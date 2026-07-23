@@ -121,12 +121,12 @@ class MCPManager:
     def _ensure_config_loaded(self) -> None:
         if not self.config:
             self.config = self._load_config()
-        mcp_servers = self.config.get("mcp_servers")
-        if not isinstance(mcp_servers, dict):
-            self.config["mcp_servers"] = {}
+        servers = self.config.get("servers")
+        if not isinstance(servers, dict):
+            self.config["servers"] = {}
 
     def _build_server_config(self) -> dict[str, dict[str, Any]]:
-        mcp_servers = self.config.get("mcp_servers", {})
+        servers = self.config.get("servers", {})
         server_config: dict[str, dict[str, Any]] = {}
         default_config = Path(self._get_default_config_path()).resolve()
         configured_path = Path(self.config_path).resolve()
@@ -154,8 +154,8 @@ class MCPManager:
                 return str((script_base / path).resolve())
             return value
 
-        for server_name, server_info in mcp_servers.items():
-            if not server_info.get("enabled", True):
+        for server_name, server_info in servers.items():
+            if not self._server_enabled(server_info):
                 continue
 
             transport = normalize_mcp_transport(server_info.get("transport"))
@@ -202,8 +202,17 @@ class MCPManager:
     def _get_enabled_server_names(self) -> list[str]:
         """Return names of all enabled servers from configuration."""
         self._ensure_config_loaded()
-        servers = self.config.get("mcp_servers", {})
-        return [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+        servers = self.config.get("servers", {})
+        return [name for name, cfg in servers.items() if self._server_enabled(cfg)]
+
+    @staticmethod
+    def _server_enabled(server_info: dict[str, Any]) -> bool:
+        return bool(
+            server_info.get(
+                "enabledByDefault",
+                server_info.get("enabled", True),
+            )
+        )
 
     async def initialize(self) -> None:
         if settings.tavily_api_key:
@@ -266,8 +275,8 @@ class MCPManager:
             return []
 
         self._ensure_config_loaded()
-        server_cfg = self.config.get("mcp_servers", {}).get(server_name)
-        if not server_cfg or not server_cfg.get("enabled", True):
+        server_cfg = self.config.get("servers", {}).get(server_name)
+        if not server_cfg or not self._server_enabled(server_cfg):
             raise ServerNotFoundError(server_name)
 
         if server_name in self._server_tools:
@@ -386,18 +395,18 @@ class MCPManager:
     def add_server(self, server_name: str, server_config: dict[str, Any]) -> None:
         self._ensure_config_loaded()
 
-        if "mcp_servers" not in self.config:
-            self.config["mcp_servers"] = {}
+        if "servers" not in self.config:
+            self.config["servers"] = {}
 
         if server_name in self.DEFAULT_SERVERS:
             raise ServerConfigurationError(
                 f"Server '{server_name}' is reserved and managed by the system"
             )
 
-        if server_name in self.config["mcp_servers"]:
+        if server_name in self.config["servers"]:
             raise ServerConfigurationError(f"Server '{server_name}' already exists")
 
-        self.config["mcp_servers"][server_name] = server_config
+        self.config["servers"][server_name] = server_config
         self.save_config()
 
         # Notify registry of configuration change
@@ -405,7 +414,7 @@ class MCPManager:
 
     async def remove_server(self, server_name: str) -> None:
         self._ensure_config_loaded()
-        if server_name not in self.config.get("mcp_servers", {}):
+        if server_name not in self.config.get("servers", {}):
             raise ServerNotFoundError(server_name)
         if server_name in self.DEFAULT_SERVERS:
             raise ServerConfigurationError(f"Cannot remove core server '{server_name}'")
@@ -429,7 +438,7 @@ class MCPManager:
         if removed_tools:
             self._tools = [tool for tool in self._tools if tool not in removed_tools]
 
-        del self.config["mcp_servers"][server_name]
+        del self.config["servers"][server_name]
         self.save_config()
 
         # Notify registry of configuration change
@@ -437,10 +446,10 @@ class MCPManager:
 
     async def enable_server(self, server_name: str) -> None:
         self._ensure_config_loaded()
-        if server_name not in self.config.get("mcp_servers", {}):
+        if server_name not in self.config.get("servers", {}):
             raise ServerNotFoundError(server_name)
 
-        self.config["mcp_servers"][server_name]["enabled"] = True
+        self.config["servers"][server_name]["enabledByDefault"] = True
         self.save_config()
 
         # Notify registry of configuration change
@@ -448,7 +457,7 @@ class MCPManager:
 
     async def disable_server(self, server_name: str) -> None:
         self._ensure_config_loaded()
-        if server_name not in self.config.get("mcp_servers", {}):
+        if server_name not in self.config.get("servers", {}):
             raise ServerNotFoundError(server_name)
 
         # Properly close session context if it exists
@@ -470,7 +479,7 @@ class MCPManager:
         if removed_tools:
             self._tools = [tool for tool in self._tools if tool not in removed_tools]
 
-        self.config["mcp_servers"][server_name]["enabled"] = False
+        self.config["servers"][server_name]["enabledByDefault"] = False
         self.save_config()
 
         # Notify registry of configuration change
@@ -771,10 +780,10 @@ class MCPManager:
         """
         self._ensure_config_loaded()
         status = {}
-        mcp_servers = self.config.get("mcp_servers", {})
+        servers = self.config.get("servers", {})
 
-        for server_name, server_info in mcp_servers.items():
-            enabled = server_info.get("enabled", True)
+        for server_name, server_info in servers.items():
+            enabled = self._server_enabled(server_info)
             tool_count = len(self._server_tools.get(server_name, []))
 
             status[server_name] = {
@@ -800,15 +809,15 @@ class MCPManager:
             ServerNotFoundError: If server doesn't exist
         """
         self._ensure_config_loaded()
-        if server_name not in self.config.get("mcp_servers", {}):
+        if server_name not in self.config.get("servers", {}):
             raise ServerNotFoundError(server_name)
 
-        server_config = self.config["mcp_servers"][server_name]
+        server_config = self.config["servers"][server_name]
         tool_count = len(self._server_tools.get(server_name, []))
 
         return {
             "name": server_name,
-            "enabled": server_config.get("enabled", True),
+            "enabled": self._server_enabled(server_config),
             "tool_count": tool_count,
             "config": server_config,
             "description": server_config.get("description", ""),

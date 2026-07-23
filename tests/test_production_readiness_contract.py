@@ -383,7 +383,7 @@ def test_default_stdio_mcp_servers_only_launch_tracked_portable_scripts() -> Non
         ).stdout.splitlines()
     }
 
-    for name, server in config["mcp_servers"].items():
+    for name, server in config["servers"].items():
         if server.get("transport") != "stdio":
             continue
         command = str(server.get("command") or "")

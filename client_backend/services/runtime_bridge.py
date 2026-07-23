@@ -30,6 +30,7 @@ from client_backend import __version__
 from client_backend.core.config import client_settings
 from client_backend.core.logging import get_logger
 from client_backend.core.security import generate_device_identifier
+from client_backend.schemas.mcp_config import MCPProfileScope
 from client_backend.schemas.runtime import (
     DeviceInfo,
     DeviceRegistrationResult,
@@ -39,7 +40,11 @@ from client_backend.schemas.runtime import (
     ToolDispatchRequest,
     ToolDispatchResult,
 )
-from client_backend.services.local_mcp_manager import get_mcp_manager, shutdown_mcp_manager
+from client_backend.services.local_mcp_manager import (
+    get_mcp_manager,
+    resolve_current_mcp_scope,
+    shutdown_mcp_manager,
+)
 from client_backend.services.local_skills_registry import (
     get_skills_registry,
     initialize_skills_registry,
@@ -87,10 +92,12 @@ class RuntimeBridgeService:
         self,
         server_client: ServerAPIClient | None = None,
         websocket_base_url: str | None = None,
+        mcp_scope: MCPProfileScope | None = None,
     ):
         self._server_client = server_client or get_server_client()
         self._websocket_base_url = websocket_base_url
         self._device_identifier = generate_device_identifier()
+        self._mcp_scope = mcp_scope
         self._runtime_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
         self._stop_requested = False
@@ -199,7 +206,8 @@ class RuntimeBridgeService:
         if device_id and self._server_client.is_authenticated():
             await self._wait_for_server_disconnect(device_id)
 
-        await shutdown_mcp_manager()
+        if self._mcp_scope is not None:
+            await shutdown_mcp_manager(self._mcp_scope)
 
         self._device_id = None
         self._session_id = None
@@ -344,7 +352,7 @@ class RuntimeBridgeService:
 
     async def _initialize_local_runtime(self) -> None:
         with suppress(Exception):
-            await get_mcp_manager().initialize()
+            await self._get_mcp_manager().initialize()
         await initialize_skills_registry()
 
     async def _wait_for_server_disconnect(self, device_id: str) -> None:
@@ -635,7 +643,7 @@ class RuntimeBridgeService:
                 qualified_tool_id, arguments, timeout_seconds, request.mutation_approved
             )
 
-        return await get_mcp_manager().call_tool(
+        return await self._get_mcp_manager().call_tool(
             qualified_tool_id=qualified_tool_id,
             arguments=arguments,
             timeout=timeout_seconds,
@@ -728,7 +736,7 @@ class RuntimeBridgeService:
         )
 
     async def _build_tool_catalog(self) -> dict[str, Any]:
-        mcp_catalog = get_mcp_manager().get_tool_catalog()
+        mcp_catalog = self._get_mcp_manager().get_tool_catalog()
         raw_tools = mcp_catalog.get("tools", []) if isinstance(mcp_catalog, dict) else []
         tools = [dict(entry) for entry in raw_tools if isinstance(entry, dict)]
 
@@ -757,6 +765,16 @@ class RuntimeBridgeService:
             "mcp_server_count": mcp_catalog.get("server_count", 0),
             "active_servers": mcp_catalog.get("active_servers", []),
         }
+
+    def _get_mcp_manager(self):
+        """Resolve and retain one account/installation scope for this bridge."""
+
+        if self._mcp_scope is None:
+            resolved = resolve_current_mcp_scope()
+            if resolved.device_identifier != self._device_identifier:
+                raise RuntimeError("Runtime and MCP device identifiers do not match")
+            self._mcp_scope = resolved
+        return get_mcp_manager(self._mcp_scope)
 
     @staticmethod
     def _collect_skill_capability_tools() -> list[dict[str, Any]]:

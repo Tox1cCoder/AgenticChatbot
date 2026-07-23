@@ -14,6 +14,7 @@ from client_backend.schemas.mcp_config import (
     MCPProfileScope,
     MCPRegistryDocument,
 )
+from client_backend.services.local_mcp_manager import LocalMCPManager
 from client_backend.services.mcp_config_migration import (
     MCPConfigMigrationConflictError,
     migrate_legacy_mcp_profile,
@@ -240,6 +241,56 @@ def test_mcp_config_store_rejects_custom_bundled_name_collision(tmp_path):
         )
 
 
+def test_mcp_config_store_delete_disables_bundled_and_removes_custom(tmp_path):
+    store = _store(tmp_path, "device-a")
+    store.save_custom_server(
+        "custom",
+        {"transport": "stdio", "command": "runner"},
+        env={"API_TOKEN": "secret"},
+        headers={},
+    )
+
+    assert store.delete_server("time") == "disabled_bundled"
+    assert store.delete_server("custom") == "deleted_custom"
+    assert next(
+        server for server in store.list_effective_servers() if server.name == "time"
+    ).enabled is False
+    assert "custom" not in {
+        server.name for server in store.list_effective_servers()
+    }
+    assert store.secret_store.get_for_server("custom").env == {}
+
+
+def test_mcp_config_store_rolls_back_credentials_when_profile_write_fails(
+    tmp_path,
+    monkeypatch,
+):
+    store = _store(tmp_path, "device-a")
+    store.save_custom_server(
+        "custom",
+        {"transport": "stdio", "command": "runner"},
+        env={"API_TOKEN": "original"},
+        headers={},
+    )
+
+    def fail_write(_profile):
+        raise OSError("simulated profile write failure")
+
+    monkeypatch.setattr(store, "_write_profile", fail_write)
+
+    with pytest.raises(OSError, match="simulated"):
+        store.save_custom_server(
+            "custom",
+            {"transport": "stdio", "command": "replacement"},
+            env={"API_TOKEN": "replacement"},
+            headers={},
+        )
+
+    assert store.secret_store.get_for_server("custom").env == {
+        "API_TOKEN": "original"
+    }
+
+
 def test_mcp_migration_preserves_custom_server_and_encrypts_credentials(tmp_path):
     store = _store(tmp_path, "device-a")
     legacy_path = tmp_path / "legacy" / "mcp_config.json"
@@ -352,3 +403,51 @@ def test_mcp_migration_canonical_key_wins_dual_key_collision(tmp_path):
     )
 
     assert store.load_profile().custom_servers["custom"].command == "canonical-command"
+
+
+@pytest.mark.asyncio
+async def test_v2_manager_discovers_real_bundled_time_server(tmp_path):
+    repo_root = Path(__file__).resolve().parents[2]
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 2,
+                "servers": {
+                    "time": {
+                        "transport": "stdio",
+                        "command": "python",
+                        "args": ["app/ai/mcp_servers/time_server.py"],
+                        "enabledByDefault": True,
+                        "description": "Time",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = MCPConfigStore(
+        MCPProfileScope(user_id="user-1", device_identifier="device-a"),
+        registry_path=registry_path,
+        application_root=repo_root,
+        profile_root=tmp_path / "profiles",
+    )
+    manager = LocalMCPManager(store=store)
+
+    try:
+        await manager.initialize()
+        assert manager.servers["time"].is_running()
+        assert {tool.name for tool in manager.get_tools_by_server("time")} == {
+            "get_current_time"
+        }
+    finally:
+        await manager.shutdown()
+
+
+def test_v2_manager_catalogs_are_device_scoped(tmp_path):
+    first = LocalMCPManager(store=_store(tmp_path, "device-a"))
+    second = LocalMCPManager(store=_store(tmp_path, "device-b"))
+
+    assert first.scope.device_identifier == "device-a"
+    assert second.scope.device_identifier == "device-b"
+    assert first.store.profile_path != second.store.profile_path

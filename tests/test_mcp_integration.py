@@ -33,7 +33,7 @@ def test_explicit_stdio_script_resolves_relative_to_config_file(tmp_path, monkey
     config_path.write_text(
         json.dumps(
             {
-                "mcp_servers": {
+                "servers": {
                     "custom": {
                         "enabled": True,
                         "transport": "stdio",
@@ -77,7 +77,7 @@ def test_explicit_stdio_resolves_all_path_fields_without_touching_path_commands_
     config_path.write_text(
         json.dumps(
             {
-                "mcp_servers": {
+                "servers": {
                     "custom": {
                         "enabled": True,
                         "transport": "stdio",
@@ -142,7 +142,7 @@ async def test_server_mcp_manager_cleans_up_stdio_session_without_cancel_scope_e
     config_path.write_text(
         json.dumps(
             {
-                "mcp_servers": {
+                "servers": {
                     "time": {
                         "enabled": True,
                         "transport": "stdio",
@@ -177,7 +177,7 @@ async def test_server_mcp_manager_closes_session_opened_by_another_task_without_
     config_path.write_text(
         json.dumps(
             {
-                "mcp_servers": {
+                "servers": {
                     "time": {
                         "enabled": True,
                         "transport": "stdio",
@@ -234,7 +234,7 @@ async def test_server_mcp_tool_cancellation_does_not_escape_as_unbound_local_err
     config_path.write_text(
         json.dumps(
             {
-                "mcp_servers": {
+                "servers": {
                     "slow": {
                         "enabled": True,
                         "transport": "stdio",

@@ -1105,8 +1105,8 @@ class TestMCPConfig:
     def test_widgets_in_config(self):
         with open("app/ai/mcp_config.json") as f:
             config = json.load(f)
-        assert "widgets" in config["mcp_servers"]
-        assert config["mcp_servers"]["widgets"]["enabled"] is True
+        assert "widgets" in config["servers"]
+        assert config["servers"]["widgets"]["enabledByDefault"] is True
 
     def test_widgets_in_default_servers(self):
         from app.ai.mcp_integration import MCPManager

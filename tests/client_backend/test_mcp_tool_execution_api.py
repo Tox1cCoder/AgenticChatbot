@@ -36,15 +36,24 @@ class _ManagerStub:
     def get_all_tools(self) -> list[Any]:
         return self.tools
 
-    async def call_tool(self, qualified_tool_id: str, arguments: dict[str, Any]) -> Any:
+    async def call_tool(
+        self,
+        qualified_tool_id: str,
+        arguments: dict[str, Any],
+        timeout: float = 30.0,
+    ) -> Any:
         self.calls.append((qualified_tool_id, arguments))
         return {"selected": qualified_tool_id}
+
+
+def _session():
+    return SimpleNamespace(user_id="user-1", device_identifier="device-a")
 
 
 @pytest.mark.asyncio
 async def test_execute_duplicate_name_tool_uses_requested_qualified_identity(monkeypatch):
     manager = _ManagerStub()
-    monkeypatch.setattr(mcp_api, "get_mcp_manager", lambda: manager)
+    monkeypatch.setattr(mcp_api, "get_mcp_manager", lambda _scope: manager)
 
     response = await mcp_api.execute_mcp_tool(
         "inspect",
@@ -53,7 +62,7 @@ async def test_execute_duplicate_name_tool_uses_requested_qualified_identity(mon
             "serverName": "beta",
             "qualifiedToolId": "beta::inspect",
         },
-        object(),
+        _session(),
     )
     body = json.loads(response.body)
 
@@ -63,11 +72,11 @@ async def test_execute_duplicate_name_tool_uses_requested_qualified_identity(mon
 
 
 @pytest.mark.asyncio
-async def test_legacy_bare_name_execution_remains_compatible(monkeypatch):
+async def test_bare_name_execution_selects_first_scoped_match(monkeypatch):
     manager = _ManagerStub()
-    monkeypatch.setattr(mcp_api, "get_mcp_manager", lambda: manager)
+    monkeypatch.setattr(mcp_api, "get_mcp_manager", lambda _scope: manager)
 
-    await mcp_api.execute_mcp_tool("inspect", {"arguments": {}}, object())
+    await mcp_api.execute_mcp_tool("inspect", {"arguments": {}}, _session())
 
     assert manager.calls == [("alpha::inspect", {})]
 
@@ -75,7 +84,7 @@ async def test_legacy_bare_name_execution_remains_compatible(monkeypatch):
 @pytest.mark.asyncio
 async def test_execute_rejects_mismatched_server_and_qualified_identity(monkeypatch):
     manager = _ManagerStub()
-    monkeypatch.setattr(mcp_api, "get_mcp_manager", lambda: manager)
+    monkeypatch.setattr(mcp_api, "get_mcp_manager", lambda _scope: manager)
 
     with pytest.raises(HTTPException) as exc_info:
         await mcp_api.execute_mcp_tool(
@@ -85,7 +94,7 @@ async def test_execute_rejects_mismatched_server_and_qualified_identity(monkeypa
                 "serverName": "alpha",
                 "qualifiedToolId": "beta::inspect",
             },
-            object(),
+            _session(),
         )
 
     assert exc_info.value.status_code == 404

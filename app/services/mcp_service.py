@@ -32,7 +32,7 @@ class MCPService:
             Dict with servers list and summary statistics
         """
         servers_status = self.mcp_manager.get_servers_status()
-        mcp_servers = self.mcp_manager.config.get("mcp_servers", {})
+        configured_servers = self.mcp_manager.config.get("servers", {})
 
         servers_list = []
         enabled_count = 0
@@ -42,7 +42,7 @@ class MCPService:
                 enabled_count += 1
 
             # Get full config for this server
-            server_config = mcp_servers.get(server_name, {})
+            server_config = configured_servers.get(server_name, {})
 
             servers_list.append(
                 {

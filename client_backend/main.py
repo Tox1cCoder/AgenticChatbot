@@ -26,7 +26,6 @@ from client_backend.api.runtime import router as runtime_router
 from client_backend.api.skills import router as skills_router
 from client_backend.core.config import client_settings, initialize_client_environment
 from client_backend.core.logging import get_logger, setup_logging
-from client_backend.services.local_mcp_manager import get_mcp_manager
 from client_backend.services.local_skills_registry import initialize_skills_registry
 from client_backend.services.runtime_bridge import get_runtime_bridge
 from client_backend.services.server_api import close_server_client
@@ -54,11 +53,6 @@ async def lifespan(app: FastAPI):
         await initialize_skills_registry()
     except Exception as exc:
         logger.warning("Skills registry initialization failed during startup: %s", exc)
-
-    try:
-        await get_mcp_manager().initialize()
-    except Exception as exc:
-        logger.warning("MCP manager initialization failed during startup: %s", exc)
 
     yield
 

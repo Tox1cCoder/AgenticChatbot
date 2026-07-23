@@ -13,13 +13,15 @@ def _load_config() -> dict:
 
 
 def test_enabled_server_mcp_is_exactly_the_global_default_set():
-    servers = _load_config()["mcp_servers"]
-    enabled = {name for name, spec in servers.items() if spec.get("enabled")}
+    servers = _load_config()["servers"]
+    enabled = {
+        name for name, spec in servers.items() if spec.get("enabledByDefault")
+    }
     assert enabled == GLOBAL_DEFAULT_SERVERS
 
 
 def test_machine_specific_servers_are_not_in_the_server_config():
-    servers = _load_config()["mcp_servers"]
+    servers = _load_config()["servers"]
     for name in MACHINE_SPECIFIC_SERVERS:
         assert name not in servers
 
@@ -31,7 +33,7 @@ def test_brave_image_search_is_a_reserved_managed_server():
 
 
 def test_tavily_remains_one_global_server_with_multiple_tools():
-    servers = _load_config()["mcp_servers"]
+    servers = _load_config()["servers"]
 
-    assert servers["tavily"]["enabled"] is True
+    assert servers["tavily"]["enabledByDefault"] is True
     assert "tavily_server.py" in " ".join(servers["tavily"]["args"])
