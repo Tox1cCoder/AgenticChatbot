@@ -28,8 +28,11 @@ from app.models.user import User
 from app.repositories.custom_agent import CustomAgentRepository
 from app.schemas.custom_agent import (
     ConversationCustomAgentsUpdate,
+    CustomAgentAvailability,
     CustomAgentCreate,
+    CustomAgentOptions,
     CustomAgentUpdate,
+    DeviceCatalogSnapshot,
 )
 from app.services.custom_agent_service import CustomAgentService
 from app.utils.validation.conversation_validation import ConversationValidationUtils
@@ -135,6 +138,47 @@ def test_attachment_schema_rejects_duplicate_ids():
     dup = uuid4()
     with pytest.raises(ValidationError):
         ConversationCustomAgentsUpdate(custom_agent_ids=[dup, dup])
+
+
+def test_custom_agent_availability_serializes_camel_case():
+    value = CustomAgentAvailability(
+        status="degraded",
+        device_id="device-b",
+        session_id="session-b",
+        missing_tools=[
+            {
+                "server_name": "desktop-commander",
+                "qualified_tool_id": "desktop-commander::read_file",
+                "tool_name": "read_file",
+            }
+        ],
+        missing_skills=[{"lookup_name": "kobo-library", "name": "kobo-library"}],
+        warnings=["missing"],
+    )
+
+    payload = value.model_dump(mode="json", by_alias=True)
+
+    assert payload["deviceId"] == "device-b"
+    assert payload["missingTools"][0]["qualifiedToolId"] == (
+        "desktop-commander::read_file"
+    )
+    assert payload["missingSkills"][0]["lookupName"] == "kobo-library"
+
+
+def test_custom_agent_options_requires_explicit_device_snapshot():
+    options = CustomAgentOptions(
+        device_snapshot=DeviceCatalogSnapshot(status="unavailable")
+    )
+
+    payload = options.model_dump(mode="json", by_alias=True)
+
+    assert payload["deviceSnapshot"] == {
+        "deviceId": None,
+        "sessionId": None,
+        "toolCatalogVersion": None,
+        "skillCatalogVersion": None,
+        "status": "unavailable",
+    }
 
 
 # --------------------------------------------------------------------------- #

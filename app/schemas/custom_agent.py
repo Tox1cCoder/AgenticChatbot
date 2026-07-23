@@ -85,6 +85,42 @@ class CustomAgentSkillRef(_CamelModel):
 
 
 # --------------------------------------------------------------------------- #
+# Device snapshot / capability availability
+# --------------------------------------------------------------------------- #
+
+CapabilityAvailabilityStatus = Literal["ready", "degraded", "device_unavailable"]
+DeviceSnapshotStatus = Literal["ready", "unavailable"]
+
+
+class DeviceCatalogSnapshot(_CamelModel):
+    device_id: str | None = None
+    session_id: str | None = None
+    tool_catalog_version: int | None = None
+    skill_catalog_version: int | None = None
+    status: DeviceSnapshotStatus
+
+
+class MissingClientTool(_CamelModel):
+    server_name: str
+    qualified_tool_id: str
+    tool_name: str | None = None
+
+
+class MissingClientSkill(_CamelModel):
+    lookup_name: str
+    name: str
+
+
+class CustomAgentAvailability(_CamelModel):
+    status: CapabilityAvailabilityStatus
+    device_id: str | None = None
+    session_id: str | None = None
+    missing_tools: list[MissingClientTool] = Field(default_factory=list)
+    missing_skills: list[MissingClientSkill] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
 # Create / update / read
 # --------------------------------------------------------------------------- #
 
@@ -165,6 +201,7 @@ class CustomAgentRead(_CamelModel):
     skill_refs: list[dict[str, Any]] = Field(default_factory=list)
     enabled: bool = True
     runtime_agent_id: str | None = None
+    availability: CustomAgentAvailability | None = None
 
     @model_validator(mode="after")
     def _default_runtime_id(self) -> "CustomAgentRead":
@@ -215,6 +252,7 @@ class CustomAgentOptions(_CamelModel):
     client_tools: list[dict[str, Any]] = Field(default_factory=list)
     client_servers: list[dict[str, Any]] = Field(default_factory=list)
     skills: list[dict[str, Any]] = Field(default_factory=list)
+    device_snapshot: DeviceCatalogSnapshot
 
 
 # --------------------------------------------------------------------------- #
