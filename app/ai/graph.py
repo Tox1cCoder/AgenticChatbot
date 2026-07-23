@@ -2633,7 +2633,7 @@ class MultiAgentWorkflow(
         # sink; it is drained between graph supersteps below. Only a weakref
         # token enters graph state (state must stay msgpack-serializable for
         # checkpointing); _build_planning_internal_tools resolves it back.
-        subagent_event_sink = SubagentEventSink()
+        subagent_event_sink = SubagentEventSink(maxsize=settings.subagent_event_queue_maxsize)
         if isinstance(initial_state, dict):
             context = initial_state.setdefault("context", {})
             if isinstance(context, dict):

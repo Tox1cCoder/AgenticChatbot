@@ -883,6 +883,14 @@ class Settings(BaseSettings):
             "per request. Bounds storage reads and injected base64. 0 = unlimited."
         ),
     )
+    subagent_event_queue_maxsize: int = Field(
+        default=512,
+        description=(
+            "Soft cap on queued subagent stream events. When saturated, transient "
+            "frames (image previews, message deltas) are dropped to bound memory "
+            "under a slow client; lifecycle events are never dropped."
+        ),
+    )
     parse_artifacts_storage_path: str = Field(
         default="app/storage/parse_artifacts",
         description="Directory where parse artifact JSON files are stored.",
@@ -1546,6 +1554,7 @@ class Settings(BaseSettings):
         "model_usage_health_failure_window_seconds",
         "model_usage_failure_store_ttl_seconds",
         "chat_image_max_bytes",
+        "subagent_event_queue_maxsize",
         mode="before",
     )
     @classmethod

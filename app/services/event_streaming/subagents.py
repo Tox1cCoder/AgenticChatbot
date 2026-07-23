@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import weakref
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -19,13 +20,24 @@ from uuid import uuid4
 
 from .events import SubagentRef, V3StreamEvent, make_event
 
+logger = logging.getLogger(__name__)
+
 _SINK_CLOSED = object()
+
+# Frames the client replaces in place (previews) or can lose without breaking
+# the activity view (message deltas). These are dropped first under backpressure;
+# lifecycle events (start / tool / end) are always kept.
+_TRANSIENT_EVENT_TYPES = frozenset({"image_preview", "subagent_message_delta"})
 
 
 class SubagentEventSink:
-    def __init__(self) -> None:
+    def __init__(self, maxsize: int = 0) -> None:
+        # The queue stays unbounded; the soft cap is enforced in ``emit_event``
+        # so lifecycle events are never rejected while transient frames are.
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
         self._sequence = 0
+        self._maxsize = max(0, int(maxsize))
+        self.dropped_transient_count = 0
 
     def _next_sequence(self) -> int:
         self._sequence += 1
@@ -61,9 +73,24 @@ class SubagentEventSink:
     def emit_event(self, event: V3StreamEvent) -> None:
         """Enqueue a prebuilt canonical event (e.g. ``image_preview``).
 
-        Synchronous on purpose: producers inside graph nodes must not await
-        the stream; the queue is unbounded so ``put_nowait`` never fails.
+        Synchronous on purpose: producers inside graph nodes must not await the
+        stream. When the queue is saturated (``maxsize`` reached) a transient
+        frame is dropped rather than growing memory without bound; lifecycle
+        events are always enqueued.
         """
+        if (
+            self._maxsize > 0
+            and event.type in _TRANSIENT_EVENT_TYPES
+            and self._queue.qsize() >= self._maxsize
+        ):
+            self.dropped_transient_count += 1
+            if self.dropped_transient_count == 1:
+                logger.info(
+                    "subagent event queue saturated (maxsize=%d); dropping transient "
+                    "frames code=subagent_event_queue_saturated",
+                    self._maxsize,
+                )
+            return
         self._queue.put_nowait(event.model_copy(update={"sequence": self._next_sequence()}))
 
     async def drain(self) -> list[V3StreamEvent]:
