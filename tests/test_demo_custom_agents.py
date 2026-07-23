@@ -452,10 +452,12 @@ def test_retain_session_options_prunes_unavailable_picks(monkeypatch):
 
 
 def test_custom_agent_edit_matches_reconnected_client_tool_by_stable_identity(monkeypatch):
+    # Stable identity is (server_name, qualified_tool_id) — device-independent —
+    # so a ref saved on device A matches the current option on device B.
     demo = _import_demo_with_ui_stubs(monkeypatch)
     current_client_tool = {
         "type": "client",
-        "device_id": "device-1",
+        "device_id": "device-b",
         "session_id": "session-2",
         "catalog_version": "2",
         "tool_instance_id": "instance-2",
@@ -465,6 +467,7 @@ def test_custom_agent_edit_matches_reconnected_client_tool_by_stable_identity(mo
     }
     saved_client_tool = {
         **current_client_tool,
+        "device_id": "device-a",
         "session_id": "session-1",
         "catalog_version": "1",
         "tool_instance_id": "instance-1",
@@ -476,6 +479,68 @@ def test_custom_agent_edit_matches_reconnected_client_tool_by_stable_identity(mo
     )
 
     assert selected_keys == [demo._custom_agent_tool_option_key(current_client_tool)]
+
+
+def test_custom_agent_edit_matches_same_logical_tool_on_another_device(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    saved = {
+        "type": "client",
+        "device_id": "device-a",
+        "session_id": "session-a",
+        "catalog_version": "1",
+        "tool_instance_id": "instance-a",
+        "server_name": "desktop_commander",
+        "qualified_tool_id": "desktop_commander::read_file",
+        "tool_name": "read_file",
+    }
+    current = dict(
+        saved,
+        device_id="device-b",
+        session_id="session-b",
+        catalog_version="2",
+        tool_instance_id="instance-b",
+    )
+
+    assert demo._custom_agent_tool_refs_available([saved], [], [current])
+    assert demo._custom_agent_selected_tool_keys([saved], [], [current]) == [
+        demo._custom_agent_tool_option_key(current)
+    ]
+
+
+def test_missing_ref_preservation_keeps_unavailable_account_wide_intent(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    missing = {
+        "type": "client",
+        "server_name": "desktop_commander",
+        "qualified_tool_id": "desktop_commander::read_file",
+    }
+    available = [{"type": "server_mcp", "qualified_tool_id": "calc::add"}]
+
+    assert demo._preserve_missing_custom_agent_tool_refs(
+        existing_refs=[missing],
+        rebuilt_refs=available,
+        current_client_tools=[],
+    ) == [missing, available[0]]
+
+
+def test_missing_skill_preservation_normalizes_legacy_source(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    legacy = {"source": "server", "lookup_name": "kobo-library", "name": "kobo-library"}
+    current = {"source": "client", "lookup_name": "kobo-library", "name": "kobo-library"}
+
+    # Available on this device: rebuilt current selection replaces the legacy ref.
+    assert demo._preserve_missing_custom_agent_skill_refs(
+        existing_refs=[legacy],
+        rebuilt_refs=[current],
+        current_skills=[current],
+    ) == [current]
+
+    # Missing on this device: retain the account-wide saved intent.
+    assert demo._preserve_missing_custom_agent_skill_refs(
+        existing_refs=[legacy],
+        rebuilt_refs=[],
+        current_skills=[],
+    ) == [legacy]
 
 
 def test_custom_agent_edit_matches_legacy_server_skill_to_client_skill(monkeypatch):

@@ -84,14 +84,21 @@ async def test_proxy_forwards_active_device_id_for_options_and_mutations(monkeyp
     )
 
     with client:
+        assert client.get("/custom-agents").status_code == 200
+        assert client.get("/custom-agents/abc").status_code == 200
         assert client.get("/custom-agents/options").status_code == 200
         assert client.post("/custom-agents", json={"name": "x"}).status_code == 200
         assert client.patch("/custom-agents/abc", json={"name": "y"}).status_code == 200
 
     params_by_call = {(method, path): kwargs["params"] for method, path, kwargs in server.calls}
-    assert ("deviceId", "device-123") in params_by_call[("GET", "/custom-agents/options")]
-    assert ("deviceId", "device-123") in params_by_call[("POST", "/custom-agents")]
-    assert ("deviceId", "device-123") in params_by_call[("PATCH", "/custom-agents/abc")]
+    for key in (
+        ("GET", "/custom-agents"),
+        ("GET", "/custom-agents/abc"),
+        ("GET", "/custom-agents/options"),
+        ("POST", "/custom-agents"),
+        ("PATCH", "/custom-agents/abc"),
+    ):
+        assert ("deviceId", "device-123") in params_by_call[key]
 
 
 @pytest.mark.asyncio
@@ -120,6 +127,7 @@ async def test_proxy_ai_custom_agents_aliases(monkeypatch):
 
     with client:
         assert client.get("/ai/custom-agents").status_code == 200
+        assert client.get("/ai/custom-agents/abc").status_code == 200
         assert client.post("/ai/custom-agents", json={"name": "x"}).status_code == 200
         assert client.get("/ai/custom-agents/options").status_code == 200
         assert client.patch("/ai/custom-agents/abc", json={"name": "y"}).status_code == 200
@@ -133,9 +141,14 @@ async def test_proxy_ai_custom_agents_aliases(monkeypatch):
     assert ("DELETE", "/ai/custom-agents/abc") in paths
 
     params_by_call = {(method, path): kwargs["params"] for method, path, kwargs in server.calls}
-    assert ("deviceId", "device-123") in params_by_call[("POST", "/ai/custom-agents")]
-    assert ("deviceId", "device-123") in params_by_call[("GET", "/ai/custom-agents/options")]
-    assert ("deviceId", "device-123") in params_by_call[("PATCH", "/ai/custom-agents/abc")]
+    for key in (
+        ("GET", "/ai/custom-agents"),
+        ("GET", "/ai/custom-agents/abc"),
+        ("GET", "/ai/custom-agents/options"),
+        ("POST", "/ai/custom-agents"),
+        ("PATCH", "/ai/custom-agents/abc"),
+    ):
+        assert ("deviceId", "device-123") in params_by_call[key]
 
 
 @pytest.mark.asyncio

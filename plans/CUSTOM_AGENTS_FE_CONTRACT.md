@@ -800,3 +800,18 @@ Recommended backend fix: if non-discoverability is a requirement, query by `(own
 - Displays final `custom_agent_warnings` as nonfatal message warnings.
 - Does not present `enabled` or server MCP selections as enforced runtime/security controls until backend issues IR-1 and IR-2 are fixed.
 - Ignores unknown additive response fields and unknown SSE event types.
+
+## Device capability resolution (account-wide intent, device-local execution)
+
+Saved MCP/skill selections are account-wide *desired* capabilities keyed by stable
+logical identity. They are resolved against the requesting device's live catalog for
+availability and runtime binding. The frontend MUST follow these rules:
+
+- Cache options by returned `deviceSnapshot`, not user ID alone.
+- Cache client options only when `deviceSnapshot.status=ready`; `unavailable` includes offline and not-yet-synced sessions.
+- Match saved client MCP selections by `(server_name, qualified_tool_id)`.
+- Require the full current device/session/catalog/tool-instance/tool-name identity for newly submitted client refs.
+- Show `availability.status=degraded`/`device_unavailable` as non-blocking.
+- Preserve missing saved refs on unrelated edits; do not silently clear them.
+- Provide an explicit control to remove retained unavailable refs.
+- Never merge catalogs or HITL settings from two devices.

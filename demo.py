@@ -1214,7 +1214,9 @@ def _custom_agent_device_query() -> str:
 
 
 def list_custom_agents() -> list[dict[str, Any]]:
-    status, payload = _custom_agent_request("GET", "/custom-agents")
+    status, payload = _custom_agent_request(
+        "GET", f"/custom-agents{_custom_agent_device_query()}"
+    )
     if status == 200:
         agents = payload.get("data") or []
         # Refresh the runtime-id -> name cache used by get_agent_display_name.
@@ -1321,6 +1323,19 @@ def render_custom_agents_manager() -> None:
     client_tools = options.get("clientTools") or options.get("client_tools") or []
     client_servers = options.get("clientServers") or options.get("client_servers") or []
     skills = options.get("skills") or []
+    # Client tools/skills are only trustworthy when the device snapshot is ready.
+    # An unavailable snapshot (offline device or a session whose catalogs have not
+    # finished syncing) must never be cached as ready data, so drop client options.
+    device_snapshot = options.get("deviceSnapshot") or options.get("device_snapshot") or {}
+    device_ready = str(device_snapshot.get("status") or "") == "ready"
+    if not device_ready:
+        client_tools = []
+        skills = []
+        st.info(
+            "This device's tools and skills are syncing or offline. Provider, model, "
+            "prompt, and server tools remain editable; client MCP tools and skills will "
+            "reappear once the device catalog is ready."
+        )
     selectable_server_tools = [*server_default_tools, *server_tools]
     server_groups = _custom_agent_server_groups(
         selectable_server_tools, client_tools, client_servers
@@ -1364,12 +1379,18 @@ def render_custom_agents_manager() -> None:
             )
             current_tool_refs = agent.get("toolRefs") or agent.get("tool_refs") or []
             current_skill_refs = agent.get("skillRefs") or agent.get("skill_refs") or []
-            tool_refs_editable = _custom_agent_tool_refs_available(
-                current_tool_refs,
-                selectable_server_tools,
-                client_tools,
+            availability = agent.get("availability") or {}
+            for warning in availability.get("warnings") or []:
+                st.warning(warning)
+            keep_missing = st.checkbox(
+                "Keep unavailable device selections",
+                value=True,
+                key=f"ca_keep_missing_{agent['id']}",
+                help=(
+                    "Retain saved MCP tools/skills that are not on the active device so an "
+                    "unrelated edit does not clear them. Uncheck to remove them intentionally."
+                ),
             )
-            skill_refs_editable = _custom_agent_skill_refs_available(current_skill_refs, skills)
             edit_server_group_keys_default = _custom_agent_selected_server_group_keys(
                 current_tool_refs,
                 selectable_server_tools,
@@ -1381,7 +1402,6 @@ def render_custom_agents_manager() -> None:
                 list(server_group_labels.keys()),
                 default=edit_server_group_keys_default,
                 format_func=lambda key: server_group_labels.get(key, key),
-                disabled=not tool_refs_editable,
                 key=f"ca_edit_server_tools_{agent['id']}",
             )
             edit_excluded_tool_keys = _custom_agent_grouped_tool_keys(
@@ -1404,11 +1424,8 @@ def render_custom_agents_manager() -> None:
                 edit_tool_options,
                 default=edit_tool_default,
                 format_func=lambda tid: tool_labels.get(tid, tid),
-                disabled=not tool_refs_editable,
                 key=f"ca_edit_tools_{agent['id']}",
             )
-            if not tool_refs_editable:
-                st.caption("Reconnect the original device to edit this agent's tools.")
             edit_skill_keys = st.multiselect(
                 "Skills",
                 list(skill_labels.keys()),
@@ -1417,11 +1434,8 @@ def render_custom_agents_manager() -> None:
                     skills,
                 ),
                 format_func=lambda key: skill_labels.get(key, str(key)),
-                disabled=not skill_refs_editable,
                 key=f"ca_edit_skills_{agent['id']}",
             )
-            if not skill_refs_editable:
-                st.caption("Reconnect the original device to edit this agent's skills.")
             col_save, col_del = st.columns(2)
             with col_save:
                 if st.button("Save", key=f"ca_save_{agent['id']}"):
@@ -1431,16 +1445,28 @@ def render_custom_agents_manager() -> None:
                         "prompt": edit_prompt,
                         "model": edit_model,
                     }
-                    if tool_refs_editable:
-                        body["tool_refs"] = _build_tool_refs(
-                            edit_tool_ids,
-                            selectable_server_tools,
-                            client_tools,
-                            selected_server_group_keys=edit_server_names,
-                            client_servers=client_servers,
+                    rebuilt_tool_refs = _build_tool_refs(
+                        edit_tool_ids,
+                        selectable_server_tools,
+                        client_tools,
+                        selected_server_group_keys=edit_server_names,
+                        client_servers=client_servers,
+                    )
+                    rebuilt_skill_refs = _build_skill_refs(edit_skill_keys, skills)
+                    if keep_missing:
+                        body["tool_refs"] = _preserve_missing_custom_agent_tool_refs(
+                            existing_refs=current_tool_refs,
+                            rebuilt_refs=rebuilt_tool_refs,
+                            current_client_tools=client_tools,
                         )
-                    if skill_refs_editable:
-                        body["skill_refs"] = _build_skill_refs(edit_skill_keys, skills)
+                        body["skill_refs"] = _preserve_missing_custom_agent_skill_refs(
+                            existing_refs=current_skill_refs,
+                            rebuilt_refs=rebuilt_skill_refs,
+                            current_skills=skills,
+                        )
+                    else:
+                        body["tool_refs"] = rebuilt_tool_refs
+                        body["skill_refs"] = rebuilt_skill_refs
                     status, payload = update_custom_agent(
                         agent["id"],
                         body,
@@ -1736,13 +1762,13 @@ def _ca_retain_session_options(state_key: str, options: list[str]) -> None:
 def _custom_agent_client_tool_stable_key(tool: dict[str, Any]) -> tuple[str, str] | None:
     if str(_custom_agent_value(tool, "type") or "") != "client":
         return None
-    device_id = str(_custom_agent_value(tool, "device_id", "deviceId") or "").strip()
+    server_name = str(_custom_agent_value(tool, "server_name", "serverName") or "").strip()
     qualified_id = str(
         _custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId") or ""
     ).strip()
-    if not device_id or not qualified_id:
+    if not server_name or not qualified_id:
         return None
-    return (device_id, qualified_id)
+    return server_name, qualified_id
 
 
 def _custom_agent_tool_label(tool: dict[str, Any]) -> str:
@@ -1963,6 +1989,83 @@ def _custom_agent_skill_refs_available(
             continue
         return False
     return True
+
+
+def _preserve_missing_custom_agent_tool_refs(
+    *,
+    existing_refs: list[dict[str, Any]],
+    rebuilt_refs: list[dict[str, Any]],
+    current_client_tools: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge rebuilt selections with saved client refs missing from this device.
+
+    Missing account-wide client selections survive an unrelated edit instead of
+    being silently dropped. Deduplicated by stable identity (client) / qualified
+    id (server), missing refs first so their account-wide intent is preserved.
+    """
+    current_keys = {
+        key
+        for tool in current_client_tools
+        if (key := _custom_agent_client_tool_stable_key(tool)) is not None
+    }
+    missing = [
+        ref
+        for ref in existing_refs
+        if str(_custom_agent_value(ref, "type") or "") == "client"
+        and _custom_agent_client_tool_stable_key(ref) not in current_keys
+    ]
+    merged = [*missing, *rebuilt_refs]
+    seen: set[tuple[Any, ...]] = set()
+    result: list[dict[str, Any]] = []
+    for ref in merged:
+        if str(_custom_agent_value(ref, "type") or "") == "client":
+            key = ("client", _custom_agent_client_tool_stable_key(ref))
+        else:
+            key = (
+                "server",
+                str(_custom_agent_value(ref, "qualified_tool_id", "qualifiedToolId") or ""),
+            )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(ref)
+    return result
+
+
+def _custom_agent_normalized_skill_key(ref: dict[str, Any]) -> tuple[str, str] | None:
+    key = _custom_agent_skill_key(ref)
+    if key is None:
+        return None
+    source, lookup_name = key
+    return ("client" if source == "server" else source, lookup_name)
+
+
+def _preserve_missing_custom_agent_skill_refs(
+    *,
+    existing_refs: list[dict[str, Any]],
+    rebuilt_refs: list[dict[str, Any]],
+    current_skills: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge rebuilt skill selections with saved skill refs missing from this device.
+
+    Deduplicated by normalized logical identity (legacy ``source="server"`` folds
+    into client), missing refs first so account-wide intent survives an edit.
+    """
+    missing = [
+        ref
+        for ref in existing_refs
+        if not _custom_agent_skill_refs_available([ref], current_skills)
+    ]
+    merged = [*missing, *rebuilt_refs]
+    seen: set[tuple[str, str] | tuple[str, int]] = set()
+    result: list[dict[str, Any]] = []
+    for ref in merged:
+        key = _custom_agent_normalized_skill_key(ref) or ("invalid", id(ref))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(ref)
+    return result
 
 
 def _validate_custom_agent_create_body(body: dict[str, Any]) -> str | None:
