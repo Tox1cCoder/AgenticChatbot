@@ -92,7 +92,10 @@ async def test_decision_stream_accepts_all_approval_interrupt_nodes(pending_node
         [InterruptDecision(type="approve", tool_call_id="call-1")],
     )
 
-    assert await anext(stream) == {"type": "agent_selected", "agent": "chat_agent"}
+    first = await anext(stream)
+    assert first.type == "agent_selected"
+    assert first.agent == "chat_agent"
+    assert first.data == {"agent": "chat_agent"}
     await stream.aclose()
 
 

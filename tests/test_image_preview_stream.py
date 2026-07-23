@@ -124,14 +124,13 @@ def test_projector_maps_image_preview_despite_token_suppression():
 
     public = list(projector.map_event(event, ctx))
 
-    assert public == [
-        {
-            "type": "image_preview",
-            "item_id": "image-preview-0",
-            "image_index": 0,
-            "status": "final",
-        }
-    ]
+    assert len(public) == 1
+    assert public[0].type == "image_preview"
+    assert public[0].data == {
+        "item_id": "image-preview-0",
+        "image_index": 0,
+        "status": "final",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -140,19 +139,22 @@ def test_projector_maps_image_preview_despite_token_suppression():
 
 
 @pytest.mark.asyncio
-async def test_ai_service_maps_image_preview_dict_to_canonical_event():
+async def test_ai_service_passes_image_preview_event_through():
     service = object.__new__(AIService)
 
     async def _stream():
-        yield {
-            "type": "image_preview",
-            "item_id": "image-preview-0",
-            "image_index": 0,
-            "status": "final",
-            "mime": "image/png",
-            "data_b64": "QUJD",
-            "seq": 0,
-        }
+        yield make_event(
+            "image_preview",
+            sequence=0,
+            data={
+                "item_id": "image-preview-0",
+                "image_index": 0,
+                "status": "final",
+                "mime": "image/png",
+                "data_b64": "QUJD",
+                "seq": 0,
+            },
+        )
 
     events = [event async for event in service._map_workflow_stream(_stream())]
 

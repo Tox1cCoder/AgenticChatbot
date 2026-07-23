@@ -1,8 +1,9 @@
 """Unit tests for the graph public-event stream projector.
 
 ``GraphPublicStreamProjector`` is constructed directly here (no
-``MultiAgentWorkflow`` involved) to pin the canonical v3 → legacy public dict
-projection extracted from ``app/ai/graph.py``. The tool-loop dependency
+``MultiAgentWorkflow`` involved) to pin the canonical v3 curation extracted
+from ``app/ai/graph.py``. The projector now emits canonical ``V3StreamEvent``s
+(the service layer no longer re-translates dicts). The tool-loop dependency
 (``tool_end_events_from_node_state``) is injected as a fake to prove the
 projector never reaches back into workflow internals.
 """
@@ -38,7 +39,8 @@ def _make_projector(
 
 def test_message_delta_emits_cumulative_delta_only():
     """Gemini-style deltas resend the full text so far; only the new suffix
-    should surface as a ``token`` event, mirroring ``_consume_stream_text_chunk``."""
+    should surface as a ``message_delta`` event, mirroring
+    ``_consume_stream_text_chunk``."""
     projector = _make_projector()
     ctx = StreamProjectionContext()
 
@@ -56,8 +58,8 @@ def test_message_delta_emits_cumulative_delta_only():
         )
     )
 
-    assert first == [{"type": "token", "content": "Hello"}]
-    assert second == [{"type": "token", "content": ", world"}]
+    assert [(e.type, e.data) for e in first] == [("message_delta", {"text": "Hello"})]
+    assert [(e.type, e.data) for e in second] == [("message_delta", {"text": ", world"})]
     assert repeat == []
     assert ctx.accumulated_content == "Hello, world"
 
@@ -76,21 +78,21 @@ def test_tool_call_available_dedupes_by_tool_call_id():
     first = list(projector.map_event(event, ctx))
     second = list(projector.map_event(event, ctx))
 
-    assert first == [
-        {
-            "type": "tool_start",
-            "name": "search_documents",
-            "tool_call_id": "call-1",
-            "args": {"query": "x"},
-        }
-    ]
+    assert len(first) == 1
+    emitted = first[0]
+    assert emitted.type == "tool_call_available"
+    assert emitted.tool_name == "search_documents"
+    assert emitted.tool_call_id == "call-1"
+    assert emitted.data == {"args": {"query": "x"}}
     assert second == []
 
 
 def test_updates_tuple_tool_message_delegates_to_injected_callable():
     """A ``ToolMessage``-terminated node update must route through the
     injected ``tool_end_events_from_node_state`` callable rather than any
-    workflow attribute — this is the tool-end → workflow injection seam."""
+    workflow attribute — this is the tool-end → workflow injection seam. The
+    injected callable still yields legacy ``tool_end`` dicts; the projector
+    converts them to canonical ``tool_execution_end`` events."""
     seen_kwargs: dict[str, Any] = {}
 
     def fake_tool_end(*, node_state, last_state_values, emitted_tool_result_ids):
@@ -120,14 +122,12 @@ def test_updates_tuple_tool_message_delegates_to_injected_callable():
 
     events = list(projector.map_event(event, ctx))
 
-    assert events == [
-        {
-            "type": "tool_end",
-            "name": "search_documents",
-            "tool_call_id": "call-1",
-            "result": "result text",
-        }
-    ]
+    assert len(events) == 1
+    emitted = events[0]
+    assert emitted.type == "tool_execution_end"
+    assert emitted.tool_name == "search_documents"
+    assert emitted.tool_call_id == "call-1"
+    assert emitted.data == {"output": "result text"}
     assert seen_kwargs["node_state"] is node_state
     assert seen_kwargs["last_state_values"] == node_state
     assert seen_kwargs["emitted_tool_result_ids"] is ctx.emitted_tool_result_ids
@@ -151,7 +151,11 @@ def test_values_snapshot_selected_agent_change_emits_second_agent_selected():
 
     events = list(projector.map_event(event, ctx))
 
-    assert events == [{"type": "agent_selected", "agent": "search_agent", "reason": "handoff"}]
+    assert len(events) == 1
+    emitted = events[0]
+    assert emitted.type == "agent_selected"
+    assert emitted.agent == "search_agent"
+    assert emitted.data == {"agent": "search_agent", "reason": "handoff"}
     assert ctx.last_emitted_agent == "search_agent"
 
     # No re-emission once the agent has already been announced.
@@ -179,19 +183,22 @@ def test_updates_tuple_planning_agent_tool_calls_emit_node_complete():
 
     events = list(projector.map_event(event, ctx))
 
-    assert events == [
-        {
-            "type": "node_complete",
-            "node": "planning_agent",
-            "tool_calls": [{"name": "write_todos", "id": "call-1", "args": {"todos": []}}],
-        },
-        {
-            "type": "tool_start",
-            "name": "write_todos",
-            "tool_call_id": "call-1",
-            "args": {"todos": []},
-        },
-    ]
+    assert len(events) == 2
+    node_complete, tool_start = events
+
+    # node_complete is carried as a state_snapshot with a legacy_type discriminator.
+    assert node_complete.type == "state_snapshot"
+    assert node_complete.node == "planning_agent"
+    assert node_complete.data == {
+        "node": "planning_agent",
+        "tool_calls": [{"name": "write_todos", "id": "call-1", "args": {"todos": []}}],
+        "legacy_type": "node_complete",
+    }
+
+    assert tool_start.type == "tool_call_available"
+    assert tool_start.tool_name == "write_todos"
+    assert tool_start.tool_call_id == "call-1"
+    assert tool_start.data == {"args": {"todos": []}}
 
 
 def test_planning_node_complete_also_derived_from_values_snapshot():
@@ -217,21 +224,23 @@ def test_planning_node_complete_also_derived_from_values_snapshot():
 
     events = list(projector.map_event(event, ctx))
 
-    node_complete = next(e for e in events if e["type"] == "node_complete")
-    assert node_complete == {
-        "type": "node_complete",
+    node_complete = next(
+        e
+        for e in events
+        if e.type == "state_snapshot" and e.data.get("legacy_type") == "node_complete"
+    )
+    assert node_complete.node == "planning_agent"
+    assert node_complete.data == {
         "node": "planning_agent",
         "tool_calls": [{"name": "write_todos", "id": "call-2", "args": {"todos": ["a"]}}],
+        "legacy_type": "node_complete",
     }
-    tool_start_events = [e for e in events if e["type"] == "tool_start"]
-    assert tool_start_events == [
-        {
-            "type": "tool_start",
-            "name": "write_todos",
-            "tool_call_id": "call-2",
-            "args": {"todos": ["a"]},
-        }
-    ]
+    tool_start_events = [e for e in events if e.type == "tool_call_available"]
+    assert len(tool_start_events) == 1
+    tool_start = tool_start_events[0]
+    assert tool_start.tool_name == "write_todos"
+    assert tool_start.tool_call_id == "call-2"
+    assert tool_start.data == {"args": {"todos": ["a"]}}
 
 
 def test_subagent_events_pass_through_unchanged():
@@ -254,18 +263,17 @@ def test_subagent_events_pass_through_unchanged():
 
     events = list(projector.map_event(event, ctx))
 
-    assert events == [
-        {
-            "type": "subagent_start",
-            "data": {"task": "look this up"},
-            "subagent": {
-                "id": "worker-a",
-                "name": "search_agent",
-                "path": ["planning_agent", "worker-a"],
-                "status": "running",
-            },
-        }
-    ]
+    assert len(events) == 1
+    emitted = events[0]
+    assert emitted.type == "subagent_start"
+    assert emitted.data == {"task": "look this up"}
+    assert emitted.subagent == subagent
+    assert emitted.subagent.model_dump(mode="json") == {
+        "id": "worker-a",
+        "name": "search_agent",
+        "path": ["planning_agent", "worker-a"],
+        "status": "running",
+    }
 
 
 def test_suppress_internal_stream_chunks_drops_internal_message_chunk():
@@ -294,4 +302,6 @@ def test_suppress_internal_stream_chunks_drops_internal_message_chunk():
     )
 
     assert suppressed_events == []
-    assert passthrough_events == [{"type": "token", "content": "internal text"}]
+    assert [(e.type, e.data) for e in passthrough_events] == [
+        ("message_delta", {"text": "internal text"})
+    ]

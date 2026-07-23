@@ -40,8 +40,7 @@ from ..usage import (
     bind_usage_context,
 )
 from ..utils.text_processing import sanitize_persona
-from .event_streaming.compat import coerce_legacy_event_to_v3
-from .event_streaming.events import V3StreamEvent, make_event
+from .event_streaming.events import make_event
 from .event_streaming.tool_state import infer_tool_state
 
 
@@ -281,12 +280,14 @@ class AIService:
         return self._build_error_response(ERROR_NO_RESPONSE_RESUME)
 
     async def _map_workflow_stream(self, workflow_stream, *, emit_rich_items: bool = False):
-        """Map graph public dict events to canonical ``V3StreamEvent``s.
+        """Curate the workflow's canonical ``V3StreamEvent`` stream for the API.
 
-        This is the boundary where the stream becomes canonical: the graph
-        still emits legacy public dicts, every event leaving this method is a
-        ``V3StreamEvent``. Capability filtering for transient rich items stays
-        here.
+        The workflow already emits canonical events; this method re-stamps
+        sequence numbers and layers on the value-adds the service owns: tool
+        ``duration_ms`` timing, tool ``error`` inference, transient
+        ``rich_items`` emission, service-layer normalization of ``interrupt``
+        and ``error`` payloads, and buffering the terminal ``complete``
+        response through :meth:`_to_service_response`.
         """
         final_response = None
         tool_started_at: dict[str, float] = {}
@@ -298,78 +299,35 @@ class AIService:
             return sequence
 
         async for event in workflow_stream:
-            if isinstance(event, V3StreamEvent):
+            etype = event.type
+
+            if etype == "tool_call_available":
+                if event.tool_call_id is not None:
+                    tool_started_at[str(event.tool_call_id)] = perf_counter()
                 yield event.model_copy(update={"sequence": _next_sequence()})
-                continue
 
-            event_type = event.get("type")
-
-            if event_type == "agent_selected":
-                agent_name = event.get("agent", "unknown")
-                yield make_event(
-                    "agent_selected",
-                    sequence=_next_sequence(),
-                    agent=agent_name,
-                    data={"agent": agent_name},
-                )
-
-            elif event_type == "thinking":
-                yield make_event(
-                    "reasoning_delta",
-                    sequence=_next_sequence(),
-                    data={"text": event.get("content", "")},
-                )
-
-            elif event_type == "token":
-                yield make_event(
-                    "message_delta",
-                    sequence=_next_sequence(),
-                    data={"text": event.get("content", "")},
-                )
-
-            elif event_type == "tool_start":
-                tool_call_id = event.get("tool_call_id")
-                if tool_call_id is not None:
-                    tool_started_at[str(tool_call_id)] = perf_counter()
-                yield make_event(
-                    "tool_call_available",
-                    sequence=_next_sequence(),
-                    tool_call_id=str(tool_call_id) if tool_call_id is not None else None,
-                    tool_name=event.get("name", "unknown"),
-                    data={"args": make_json_safe(event.get("args"))},
-                )
-
-            elif event_type == "tool_end":
-                tool_name = event.get("name", "unknown")
-                tool_call_id = event.get("tool_call_id")
-                result = make_json_safe(event.get("result"))
-                duration_ms = None
+            elif etype == "tool_execution_end":
+                tool_data = dict(event.data)
+                result = tool_data.get("output")
+                tool_call_id = event.tool_call_id
                 if tool_call_id is not None:
                     started_at = tool_started_at.pop(str(tool_call_id), None)
                     if started_at is not None:
-                        duration_ms = int((perf_counter() - started_at) * 1000)
-                render_payload = make_json_safe(event.get("render"))
-                tool_data: dict[str, Any] = {"output": result, "render": render_payload}
-                if duration_ms is not None:
-                    tool_data["duration_ms"] = duration_ms
+                        tool_data["duration_ms"] = int((perf_counter() - started_at) * 1000)
                 if infer_tool_state(phase="end", result=result) == "error":
                     tool_data["error"] = str(result)
-                yield make_event(
-                    "tool_execution_end",
-                    sequence=_next_sequence(),
-                    tool_call_id=str(tool_call_id) if tool_call_id is not None else None,
-                    tool_name=tool_name,
-                    data=tool_data,
+                yield event.model_copy(
+                    update={"sequence": _next_sequence(), "data": tool_data}
                 )
                 # Emit a `rich_items` upsert for safe non-image candidates as
                 # soon as the tool result exists. Image records are never
                 # streamed transiently; canvas source is excluded.
                 if emit_rich_items:
                     rich_items = self._build_tool_end_rich_items(
-                        render=render_payload,
+                        render=tool_data.get("render"),
                         result=result,
                         tool_call_id=tool_call_id,
-                        tool_name=tool_name,
+                        tool_name=event.tool_name,
                     )
                     if rich_items:
                         yield make_event(
@@ -378,18 +336,11 @@ class AIService:
                             data={"operation": "upsert", "items": rich_items},
                         )
 
-            elif event_type == "image_preview":
-                yield make_event(
-                    "image_preview",
-                    sequence=_next_sequence(),
-                    data={key: value for key, value in event.items() if key != "type"},
-                )
+            elif etype == "complete":
+                final_response = self._to_service_response(event.data.get("response"))
 
-            elif event_type == "complete":
-                final_response = self._to_service_response(event.get("response"))
-
-            elif event_type == "error":
-                error_msg = event.get("error", UNKNOWN_ERROR)
+            elif etype == "error":
+                error_msg = event.data.get("error", UNKNOWN_ERROR)
                 display_error = str(error_msg).strip() or UNKNOWN_ERROR
                 if not display_error.lower().startswith("error:"):
                     display_error = f"Error: {display_error}"
@@ -402,18 +353,8 @@ class AIService:
                     },
                 )
 
-            elif event_type == "continuation_start" or event_type == "node_complete":
-                payload = dict(event)
-                payload["legacy_type"] = event_type
-                yield make_event(
-                    "state_snapshot",
-                    sequence=_next_sequence(),
-                    node=event.get("node"),
-                    data=payload,
-                )
-
-            elif event_type == "interrupt":
-                interrupt_payload = event.get("interrupt")
+            elif etype == "interrupt":
+                interrupt_payload = event.data.get("interrupt")
                 normalized_interrupt = self._normalize_interrupt_payload(interrupt_payload)
                 interrupt_message = None
                 if isinstance(normalized_interrupt, dict):
@@ -428,18 +369,19 @@ class AIService:
                     "interrupt",
                     sequence=_next_sequence(),
                     data={
-                        "next": event.get("next", []),
-                        "thread_id": event.get("thread_id"),
-                        "pending_tool_calls": event.get("pending_tool_calls"),
+                        "next": event.data.get("next", []),
+                        "thread_id": event.data.get("thread_id"),
+                        "pending_tool_calls": event.data.get("pending_tool_calls"),
                         "interrupt": normalized_interrupt,
                         "message": interrupt_message,
                     },
                 )
 
             else:
-                # Subagent lifecycle dicts and any forward-compatible payloads
-                # are coerced to canonical events instead of being dropped.
-                yield coerce_legacy_event_to_v3(event, sequence=_next_sequence())
+                # message_delta, reasoning_delta, agent_selected, state_snapshot,
+                # image_preview, rich_items, subagent_* and forward-compatible
+                # events pass through with a fresh sequence number.
+                yield event.model_copy(update={"sequence": _next_sequence()})
 
         if final_response:
             yield make_event(

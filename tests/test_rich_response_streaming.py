@@ -85,22 +85,25 @@ def test_ai_service_builds_transient_item_for_live_widget_tool_result():
     assert item["payload"] == SAFE_WIDGET_ITEM["payload"]
 
 
-def _widget_tool_end_event() -> dict[str, Any]:
-    return {
-        "type": "tool_end",
-        "name": "widget_create",
-        "tool_call_id": "call-widget",
-        "result": json.dumps(
-            {
-                "widget_id": "w-1",
-                "session_id": "conv-1",
-                "widget_type": "chart",
-                "status": "active",
-                "version": 1,
-            }
-        ),
-        "render": {"version": 1, "type": "live_widget"},
-    }
+def _widget_tool_end_event() -> Any:
+    return make_event(
+        "tool_execution_end",
+        sequence=0,
+        tool_call_id="call-widget",
+        tool_name="widget_create",
+        data={
+            "output": json.dumps(
+                {
+                    "widget_id": "w-1",
+                    "session_id": "conv-1",
+                    "widget_type": "chart",
+                    "status": "active",
+                    "version": 1,
+                }
+            ),
+            "render": {"version": 1, "type": "live_widget"},
+        },
+    )
 
 
 @pytest.mark.asyncio

@@ -205,8 +205,8 @@ async def test_streaming_workflow_does_not_compact_before_complete_event(monkeyp
     )
 
     async for event in workflow.execute_request_stream(request):
-        events.append(event["type"])
-        if event["type"] == "complete":
+        events.append(event.type)
+        if event.type == "complete":
             break
 
     assert events == ["agent_selected", "complete"]

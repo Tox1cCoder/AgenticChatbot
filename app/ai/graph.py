@@ -2438,10 +2438,11 @@ class MultiAgentWorkflow(
         decisions: list[InterruptDecision],
     ):
         if not self.checkpointer:
-            yield {
-                "type": "error",
-                "error": "Checkpointing is not enabled, cannot resume.",
-            }
+            yield make_event(
+                "error",
+                sequence=0,
+                data={"error": "Checkpointing is not enabled, cannot resume."},
+            )
             return
 
         config = self._build_graph_config(thread_id)
@@ -2457,7 +2458,12 @@ class MultiAgentWorkflow(
         selected_agent = state_snapshot.values.get("selected_agent", "search_agent")
         conversation_id = state_snapshot.values.get("conversation_id")
 
-        yield {"type": "agent_selected", "agent": selected_agent}
+        yield make_event(
+            "agent_selected",
+            sequence=0,
+            agent=selected_agent,
+            data={"agent": selected_agent},
+        )
 
         suppressed_nodes: set = {"image_generator_agent"}
         suppress_tokens = selected_agent in suppressed_nodes
@@ -2492,12 +2498,16 @@ class MultiAgentWorkflow(
                 break
 
             if round_num > 1 and settings.auto_continue_emit_events:
-                yield {
-                    "type": "continuation_start",
-                    "round": round_num,
-                    "max_rounds": max_rounds,
-                    "reason": continue_reason,
-                }
+                yield make_event(
+                    "state_snapshot",
+                    sequence=0,
+                    data={
+                        "round": round_num,
+                        "max_rounds": max_rounds,
+                        "reason": continue_reason,
+                        "legacy_type": "continuation_start",
+                    },
+                )
 
             should_continue = False
             continue_reason = None
@@ -2519,7 +2529,7 @@ class MultiAgentWorkflow(
                 continue_reason = "recursion_limit"
 
             except Exception as e:
-                yield {"type": "error", "error": str(e)}
+                yield make_event("error", sequence=0, data={"error": str(e)})
                 return
 
             if not should_continue and ctx.last_state_values:
@@ -2596,13 +2606,16 @@ class MultiAgentWorkflow(
                             thread_id,
                             conversation_id or "",
                         )
-                        yield {
-                            "type": "interrupt",
-                            "next": snapshot.next,
-                            "thread_id": thread_id,
-                            "pending_tool_calls": pending_tool_calls,
-                            "interrupt": interrupt_response,
-                        }
+                        yield make_event(
+                            "interrupt",
+                            sequence=0,
+                            data={
+                                "next": snapshot.next,
+                                "thread_id": thread_id,
+                                "pending_tool_calls": pending_tool_calls,
+                                "interrupt": interrupt_response,
+                            },
+                        )
                         return
 
             final_state = snapshot.values if snapshot and hasattr(snapshot, "values") else {}
@@ -2641,11 +2654,11 @@ class MultiAgentWorkflow(
                     response.metadata["continuation_rounds"] = round_num
                     response.metadata["total_iterations"] = total_iterations
 
-                yield {"type": "complete", "response": response}
+                yield make_event("complete", sequence=0, data={"response": response})
             else:
-                yield {"type": "error", "error": NO_RESPONSE_GENERATED}
+                yield make_event("error", sequence=0, data={"error": NO_RESPONSE_GENERATED})
         except Exception as e:
-            yield {"type": "error", "error": str(e)}
+            yield make_event("error", sequence=0, data={"error": str(e)})
 
     async def execute_request_stream(self, request: WorkflowExecutionRequest):
         initial_state = self._build_initial_state_from_request(request)
@@ -2680,10 +2693,15 @@ class MultiAgentWorkflow(
         except Exception as e:
             if history_prefetch and not history_prefetch.done():
                 history_prefetch.cancel()
-            yield {"type": "error", "error": str(e)}
+            yield make_event("error", sequence=0, data={"error": str(e)})
             return
 
-        yield {"type": "agent_selected", "agent": selected_agent}
+        yield make_event(
+            "agent_selected",
+            sequence=0,
+            agent=selected_agent,
+            data={"agent": selected_agent},
+        )
 
         # For image_generator_agent the streamed LLM tokens are the internal
         # enhanced prompt — not meant for the user.  Suppress token events and
@@ -2724,12 +2742,16 @@ class MultiAgentWorkflow(
 
             # Emit continuation_start event for rounds > 1
             if round_num > 1 and settings.auto_continue_emit_events:
-                yield {
-                    "type": "continuation_start",
-                    "round": round_num,
-                    "max_rounds": max_rounds,
-                    "reason": continue_reason,
-                }
+                yield make_event(
+                    "state_snapshot",
+                    sequence=0,
+                    data={
+                        "round": round_num,
+                        "max_rounds": max_rounds,
+                        "reason": continue_reason,
+                        "legacy_type": "continuation_start",
+                    },
+                )
 
             should_continue = False
             continue_reason = None
@@ -2753,7 +2775,7 @@ class MultiAgentWorkflow(
                 continue_reason = "recursion_limit"
 
             except Exception as e:
-                yield {"type": "error", "error": str(e)}
+                yield make_event("error", sequence=0, data={"error": str(e)})
                 return
 
             # ── Check if graph ended because we *want* to continue ─────
@@ -2836,13 +2858,16 @@ class MultiAgentWorkflow(
                                 thread_id,
                                 conversation_id or "",
                             )
-                            yield {
-                                "type": "interrupt",
-                                "next": snapshot.next,
-                                "thread_id": thread_id,
-                                "pending_tool_calls": pending_tool_calls,
-                                "interrupt": interrupt_response,
-                            }
+                            yield make_event(
+                                "interrupt",
+                                sequence=0,
+                                data={
+                                    "next": snapshot.next,
+                                    "thread_id": thread_id,
+                                    "pending_tool_calls": pending_tool_calls,
+                                    "interrupt": interrupt_response,
+                                },
+                            )
                             return
 
                 final_state = snapshot.values if snapshot and hasattr(snapshot, "values") else {}
@@ -2884,11 +2909,11 @@ class MultiAgentWorkflow(
                         response.metadata["continuation_rounds"] = round_num
                         response.metadata["total_iterations"] = total_iterations
 
-                    yield {"type": "complete", "response": response}
+                    yield make_event("complete", sequence=0, data={"response": response})
                 else:
-                    yield {"type": "error", "error": NO_RESPONSE_GENERATED}
+                    yield make_event("error", sequence=0, data={"error": NO_RESPONSE_GENERATED})
             except Exception as e:
-                yield {"type": "error", "error": str(e)}
+                yield make_event("error", sequence=0, data={"error": str(e)})
         else:
             fallback_content = (
                 accumulated_content if not suppress_tokens and not _internal_content_only else None
@@ -2919,9 +2944,9 @@ class MultiAgentWorkflow(
                     response.metadata["continuation_rounds"] = round_num
                     response.metadata["total_iterations"] = total_iterations
 
-                yield {"type": "complete", "response": response}
+                yield make_event("complete", sequence=0, data={"response": response})
             else:
-                yield {"type": "error", "error": NO_RESPONSE_GENERATED}
+                yield make_event("error", sequence=0, data={"error": NO_RESPONSE_GENERATED})
 
     async def get_state(self, thread_id: str) -> dict:
         if not self.checkpointer:

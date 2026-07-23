@@ -30,6 +30,7 @@ from app.core.config import settings
 from app.core.runtime_modeling import ResolvedRuntimeModelConfig, RuntimeFallbackConfig
 from app.observability.model_usage import ModelUsageMetrics
 from app.repositories.model_usage import RecordEventCommand, RecordResult
+from app.services.event_streaming.events import make_event
 from app.usage import (
     UsageContext,
     bind_usage_context,
@@ -593,7 +594,7 @@ class CtxCapturingWorkflow:
 
     async def execute_request_stream(self, _ai_request):
         self.captured = current_usage_context()
-        yield {"type": "complete", "response": None}
+        yield make_event("complete", sequence=0, data={"response": None})
 
     async def resume(self, **_kwargs):
         self.captured = current_usage_context()
@@ -601,7 +602,7 @@ class CtxCapturingWorkflow:
 
     async def resume_with_decisions_stream(self, **_kwargs):
         self.captured = current_usage_context()
-        yield {"type": "complete", "response": None}
+        yield make_event("complete", sequence=0, data={"response": None})
 
 
 def _ai_service(workflow, *, checkpointer=None):

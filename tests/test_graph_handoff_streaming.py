@@ -102,24 +102,28 @@ async def test_planning_handoff_stream_returns_delegated_agent_answer():
 
     workflow.graph = FakeGraph()
 
-    events: list[dict[str, Any]] = []
+    events: list[Any] = []
     async for event in workflow.execute_request_stream(
         WorkflowExecutionRequest(message="latest info please", conversation_id="conv-1")
     ):
         events.append(event)
-        if event["type"] == "complete":
+        if event.type == "complete":
             break
 
-    agent_selected_events = [event for event in events if event["type"] == "agent_selected"]
-    assert {"type": "agent_selected", "agent": "planning_agent"} in agent_selected_events
-    assert {
-        "type": "agent_selected",
-        "agent": "search_agent",
-        "reason": "handoff",
-    } in agent_selected_events
+    agent_selected_events = [event for event in events if event.type == "agent_selected"]
+    # Initial selection carries no reason; the mid-stream handoff carries reason=handoff.
+    assert any(
+        event.agent == "planning_agent" and event.data == {"agent": "planning_agent"}
+        for event in agent_selected_events
+    )
+    assert any(
+        event.agent == "search_agent"
+        and event.data == {"agent": "search_agent", "reason": "handoff"}
+        for event in agent_selected_events
+    )
 
-    complete = next(event for event in events if event["type"] == "complete")
-    assert complete["response"].message.content == "Search Agent final answer."
+    complete = next(event for event in events if event.type == "complete")
+    assert complete.data["response"].message.content == "Search Agent final answer."
 
 
 def test_recover_terminal_response_ignores_handoff_narration():

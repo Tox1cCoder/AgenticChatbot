@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import Any
 
+from ..services.event_streaming.events import V3StreamEvent
+
 
 class IWorkflowRuntime(ABC):
     """Minimal workflow runtime port consumed by the service layer."""
@@ -19,7 +21,7 @@ class IWorkflowRuntime(ABC):
         pass
 
     @abstractmethod
-    async def execute_request_stream(self, request: Any) -> AsyncIterator[dict[str, Any]]:
+    async def execute_request_stream(self, request: Any) -> AsyncIterator[V3StreamEvent]:
         """Stream workflow execution events for a request."""
         pass
 
@@ -33,7 +35,7 @@ class IWorkflowRuntime(ABC):
         self,
         thread_id: str,
         decisions: list[Any],
-    ) -> AsyncIterator[dict[str, Any]]:
+    ) -> AsyncIterator[V3StreamEvent]:
         """Resume an interrupted workflow thread with explicit tool decisions."""
         pass
 
