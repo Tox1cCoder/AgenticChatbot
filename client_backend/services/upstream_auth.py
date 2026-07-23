@@ -18,6 +18,8 @@ from client_backend.services.server_api import (
     AuthenticationError,
     OperationResult,
     ServerAPIClient,
+    ServerAPIError,
+    ServerConnectionError,
     TokenPair,
     get_server_client,
 )
@@ -193,9 +195,24 @@ class UpstreamAuthService:
             return True
 
         except AuthenticationError as e:
-            logger.warning(f"Failed to restore session: {e}")
+            # The refresh token was genuinely rejected by the server — the stored
+            # credentials are dead, so clear them and require a fresh login.
+            logger.warning(f"Stored credentials rejected during restore: {e}")
             self._clear_credentials(user_id)
             return False
+        except (ServerConnectionError, ServerAPIError) as e:
+            # Transient failure (server unreachable, timeout, 5xx). Do NOT wipe the
+            # stored credentials over a hiccup — keep the session set so ordinary
+            # requests (which refresh-and-retry on 401) can recover once the server
+            # is reachable again, instead of forcing the user to log in.
+            logger.warning(
+                "Could not verify session for user %s (transient: %s); keeping credentials.",
+                user_id,
+                e,
+            )
+            self._credentials = credentials
+            self._current_user_id = user_id
+            return True
 
     async def refresh_if_needed(self) -> bool:
         """

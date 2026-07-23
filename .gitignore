@@ -11,6 +11,7 @@ ENV/
 venv.bak/
 .env
 .env.client
+.dev_secret_key
 
 # IDEs
 .vscode/

@@ -25,6 +25,37 @@ if _langsmith_tracing and _langsmith_api_key:
     os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGSMITH_PROJECT", "sample-chatbot")
 
 
+_DEV_SECRET_KEY_PATH = Path(__file__).resolve().parents[2] / ".dev_secret_key"
+
+
+def _load_or_create_dev_secret_key(key_path: Path | None = None) -> str:
+    """Return a stable development signing key, persisted across restarts.
+
+    A fresh random key on every process start would invalidate all previously
+    issued access/refresh tokens, forcing everyone to re-authenticate on each
+    reload (the root cause of recurring 401s in development). Persisting the key
+    to a gitignored local file keeps sessions stable between restarts. Production
+    never reaches this path — it hard-requires an explicit ``SECRET_KEY``.
+    """
+    path = key_path or _DEV_SECRET_KEY_PATH
+    try:
+        existing = path.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+    except OSError:
+        pass
+    generated = secrets.token_urlsafe(48)
+    try:
+        path.write_text(generated, encoding="utf-8")
+    except OSError:
+        logging.getLogger(__name__).warning(
+            "Could not persist development SECRET_KEY to %s; auth sessions will "
+            "reset on every restart. Set SECRET_KEY explicitly to avoid this.",
+            path,
+        )
+    return generated
+
+
 def _inject_redis_password(url: str, password: str) -> str:
     """Attach a password to a redis/rediss URL when credentials are missing."""
     raw_url = (url or "").strip()
@@ -1738,10 +1769,11 @@ class Settings(BaseSettings):
         self.celery_result_backend = _normalize_redis_loopback_host(self.celery_result_backend)
         if not self.secret_key or self.secret_key == "secret-key":
             if self.environment == "development":
-                self.secret_key = secrets.token_urlsafe(48)
+                self.secret_key = _load_or_create_dev_secret_key()
                 logging.getLogger(__name__).warning(
-                    "SECRET_KEY is not set; generated ephemeral development key. "
-                    "Set SECRET_KEY in .env for stable local auth sessions."
+                    "SECRET_KEY is not set; using a persisted development key "
+                    "(.dev_secret_key). Set SECRET_KEY explicitly for shared or "
+                    "production environments so sessions stay valid across machines."
                 )
             else:
                 raise ValueError("secret_key must be set to a strong value outside development")

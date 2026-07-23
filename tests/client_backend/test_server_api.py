@@ -272,3 +272,89 @@ async def test_proxy_server_request_preserves_arbitrary_response_fields(monkeypa
         "GET",
         "/model-config/options",
     )
+
+
+from client_backend.services.server_api import AuthenticationError, TokenPair  # noqa: E402
+
+
+def _resp(status: int, path: str, body: dict | None = None) -> httpx.Response:
+    return httpx.Response(
+        status,
+        json=body if body is not None else {},
+        request=httpx.Request("GET", f"http://example.test{path}"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_request_refreshes_and_retries_once_on_401(monkeypatch):
+    client = ServerAPIClient(base_url="http://example.test", timeout=5)
+    client.set_tokens(TokenPair(access_token="old", refresh_token="refresh"))
+    paths: list[str] = []
+    responses = iter(
+        [
+            _resp(401, "/messages/", {"detail": "expired"}),
+            _resp(200, "/messages/", {"success": True, "data": {"ok": 1}}),
+        ]
+    )
+
+    async def _rr(method, path, **kwargs):
+        paths.append(path)
+        return next(responses)
+
+    monkeypatch.setattr(client, "request_response", _rr)
+    refreshed: list[bool] = []
+
+    async def _refresh():
+        refreshed.append(True)
+        client.set_tokens(TokenPair(access_token="new", refresh_token="refresh"))
+        return client.get_tokens()
+
+    monkeypatch.setattr(client, "refresh_token", _refresh)
+
+    result = await client.request("GET", "/messages/")
+
+    assert refreshed == [True]
+    assert paths == ["/messages/", "/messages/"]  # original request + one replay
+    assert result == {"success": True, "data": {"ok": 1}}
+
+
+@pytest.mark.asyncio
+async def test_request_surfaces_401_when_refresh_fails(monkeypatch):
+    client = ServerAPIClient(base_url="http://example.test", timeout=5)
+    client.set_tokens(TokenPair(access_token="old", refresh_token="refresh"))
+
+    async def _rr(method, path, **kwargs):
+        return _resp(401, path, {"detail": "expired"})
+
+    monkeypatch.setattr(client, "request_response", _rr)
+
+    async def _refresh():
+        raise AuthenticationError("refresh rejected", status_code=401)
+
+    monkeypatch.setattr(client, "refresh_token", _refresh)
+
+    with pytest.raises(AuthenticationError):
+        await client.request("GET", "/messages/")
+
+
+@pytest.mark.asyncio
+async def test_request_does_not_retry_the_auth_refresh_path(monkeypatch):
+    client = ServerAPIClient(base_url="http://example.test", timeout=5)
+    client.set_tokens(TokenPair(access_token="old", refresh_token="refresh"))
+    calls: list[str] = []
+
+    async def _rr(method, path, **kwargs):
+        calls.append(path)
+        return _resp(401, path)
+
+    monkeypatch.setattr(client, "request_response", _rr)
+
+    async def _refresh():
+        raise AssertionError("refresh must not be attempted for /auth/* paths")
+
+    monkeypatch.setattr(client, "refresh_token", _refresh)
+
+    with pytest.raises(AuthenticationError):
+        await client.request("POST", "/auth/refresh")
+
+    assert calls == ["/auth/refresh"]  # no retry recursion

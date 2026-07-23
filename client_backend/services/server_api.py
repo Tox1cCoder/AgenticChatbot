@@ -224,10 +224,17 @@ class ServerAPIClient:
         self,
         method: str,
         path: str,
+        *,
+        _retry_on_auth: bool = True,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """
         Make an authenticated request to the server.
+
+        On a 401 with a refresh token available, transparently refresh the access
+        token once and replay the request, so a normally-expired access token does
+        not surface as an error to the caller. The ``/auth/*`` endpoints are excluded
+        (they carry their own credentials and must not recurse through refresh).
 
         Args:
             method: HTTP method (GET, POST, PUT, DELETE, etc.)
@@ -239,10 +246,24 @@ class ServerAPIClient:
 
         Raises:
             ServerConnectionError: If the server is unreachable.
-            AuthenticationError: If authentication fails.
+            AuthenticationError: If authentication fails (and refresh could not recover it).
             ServerAPIError: For other server errors.
         """
         response = await self.request_response(method, path, **kwargs)
+        if (
+            response.status_code == 401
+            and _retry_on_auth
+            and self._tokens is not None
+            and self._tokens.refresh_token
+            and not path.startswith("/auth/")
+        ):
+            try:
+                await self.refresh_token()
+            except (AuthenticationError, ServerAPIError):
+                # Refresh genuinely failed — surface the original 401.
+                return await self._handle_response(response)
+            # Replay once with the refreshed token; never retry a second time.
+            return await self.request(method, path, _retry_on_auth=False, **kwargs)
         return await self._handle_response(response)
 
     async def get(self, path: str, **kwargs: Any) -> dict[str, Any]:
