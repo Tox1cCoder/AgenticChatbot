@@ -14,6 +14,10 @@ from client_backend.schemas.mcp_config import (
     MCPProfileScope,
     MCPRegistryDocument,
 )
+from client_backend.services.mcp_config_migration import (
+    MCPConfigMigrationConflictError,
+    migrate_legacy_mcp_profile,
+)
 from client_backend.services.mcp_config_store import MCPConfigConflictError, MCPConfigStore
 from client_backend.services.mcp_secret_store import MCPSecretStore
 
@@ -234,3 +238,117 @@ def test_mcp_config_store_rejects_custom_bundled_name_collision(tmp_path):
             env={},
             headers={},
         )
+
+
+def test_mcp_migration_preserves_custom_server_and_encrypts_credentials(tmp_path):
+    store = _store(tmp_path, "device-a")
+    legacy_path = tmp_path / "legacy" / "mcp_config.json"
+    legacy_path.parent.mkdir()
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "time": {
+                        "transport": "stdio",
+                        "command": "python",
+                        "args": ["app/ai/mcp_servers/time_server.py"],
+                        "enabled": False,
+                        "description": "Time",
+                    },
+                    "notion": {
+                        "transport": "stdio",
+                        "command": "npx",
+                        "args": ["-y", "@notionhq/notion-mcp-server"],
+                        "env": {"NOTION_TOKEN": "migration-secret"},
+                        "enabled": True,
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = migrate_legacy_mcp_profile(
+        store.scope,
+        legacy_path=legacy_path,
+        store=store,
+    )
+
+    assert result.status == "migrated"
+    assert result.migrated_servers == ("notion", "time")
+    assert result.backup_path is not None and result.backup_path.is_file()
+    assert result.receipt_path is not None and result.receipt_path.is_file()
+    profile = store.load_profile()
+    assert profile.bundled_overrides["time"].enabled is False
+    assert "notion" in profile.custom_servers
+    assert store.secret_store.get_for_server("notion").env == {
+        "NOTION_TOKEN": "migration-secret"
+    }
+    assert "migration-secret" not in result.receipt_path.read_text(encoding="utf-8")
+    assert legacy_path.is_file()
+
+    repeated = migrate_legacy_mcp_profile(
+        store.scope,
+        legacy_path=legacy_path,
+        store=store,
+    )
+    assert repeated.status == "already_v2"
+
+
+def test_mcp_migration_stops_on_modified_bundled_name_collision(tmp_path):
+    store = _store(tmp_path, "device-a")
+    legacy_path = tmp_path / "legacy.json"
+    original = {
+        "mcp_servers": {
+            "time": {
+                "transport": "stdio",
+                "command": "custom-time",
+                "args": [],
+                "enabled": True,
+            }
+        }
+    }
+    legacy_path.write_text(json.dumps(original), encoding="utf-8")
+
+    with pytest.raises(MCPConfigMigrationConflictError):
+        migrate_legacy_mcp_profile(
+            store.scope,
+            legacy_path=legacy_path,
+            store=store,
+        )
+
+    assert json.loads(legacy_path.read_text(encoding="utf-8")) == original
+    assert not store.profile_path.exists()
+    assert not store.secret_store.path.exists()
+
+
+def test_mcp_migration_canonical_key_wins_dual_key_collision(tmp_path):
+    store = _store(tmp_path, "device-a")
+    legacy_path = tmp_path / "legacy.json"
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "mcp_servers": {
+                    "custom": {
+                        "transport": "stdio",
+                        "command": "legacy-command",
+                    }
+                },
+                "mcpServers": {
+                    "custom": {
+                        "transport": "stdio",
+                        "command": "canonical-command",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    migrate_legacy_mcp_profile(
+        store.scope,
+        legacy_path=legacy_path,
+        store=store,
+    )
+
+    assert store.load_profile().custom_servers["custom"].command == "canonical-command"
