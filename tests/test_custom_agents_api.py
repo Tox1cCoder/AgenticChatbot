@@ -240,3 +240,17 @@ def test_options_endpoint(api):
     data = r.json()["data"]
     assert {"providers", "serverDefaultTools", "clientTools", "skills"} <= set(data.keys())
     assert isinstance(data["serverDefaultTools"], list)
+
+
+def test_contextual_reads_and_options_serialize_camel_case_contract(api):
+    owner = api[0]
+    agent_id = owner.post("/custom-agents", json=_create_body()).json()["data"]["id"]
+
+    listed = owner.get("/ai/custom-agents?deviceId=desktop-1").json()["data"][0]
+    fetched = owner.get(f"/ai/custom-agents/{agent_id}?deviceId=desktop-1").json()["data"]
+    options = owner.get("/ai/custom-agents/options?deviceId=desktop-1").json()["data"]
+
+    assert listed["availability"]["status"] == "ready"
+    assert fetched["availability"]["missingTools"] == []
+    assert options["deviceSnapshot"]["status"] == "unavailable"
+    assert "toolCatalogVersion" in options["deviceSnapshot"]

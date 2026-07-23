@@ -205,14 +205,42 @@ def _fake_client_tools(user_id, device_id):
             "catalog_version": "v1",
             "tool_instance_id": "csv-profile-instance",
             "server_name": "csv",
-            "qualified_tool_id": "client__csv__profile",
+            "qualified_tool_id": "csv::profile",
             "tool_name": "profile",
         }
     ]
 
 
 def _fake_skills(user_id, device_id):
-    return [{"source": "server", "lookup_name": "data-analysis", "name": "data-analysis"}]
+    if device_id != "desktop-1":
+        return []
+    return [{"source": "client", "lookup_name": "data-analysis", "name": "data-analysis"}]
+
+
+def _fake_device_snapshot(user_id, device_id):
+    if device_id == "syncing-desktop":
+        return {
+            "device_id": device_id,
+            "session_id": "syncing-session",
+            "tool_catalog_version": 0,
+            "skill_catalog_version": 0,
+            "status": "unavailable",
+        }
+    if device_id != "desktop-1":
+        return {
+            "device_id": device_id,
+            "session_id": None,
+            "tool_catalog_version": None,
+            "skill_catalog_version": None,
+            "status": "unavailable",
+        }
+    return {
+        "device_id": "desktop-1",
+        "session_id": "session-1",
+        "tool_catalog_version": 1,
+        "skill_catalog_version": 2,
+        "status": "ready",
+    }
 
 
 def _fake_server_tools():
@@ -250,6 +278,7 @@ class _Env:
             list_client_tool_refs=_fake_client_tools,
             list_server_tool_refs=_fake_server_tools,
             list_skill_refs=_fake_skills,
+            get_device_snapshot=_fake_device_snapshot,
         )
 
     def _make_user(self):
@@ -378,10 +407,10 @@ def test_create_validates_tool_and_skill_refs(env):
         "catalog_version": "v1",
         "tool_instance_id": "csv-profile-instance",
         "server_name": "csv",
-        "qualified_tool_id": "client__csv__profile",
+        "qualified_tool_id": "csv::profile",
         "tool_name": "profile",
     }
-    skill = {"source": "server", "lookup_name": "data-analysis", "name": "data-analysis"}
+    skill = {"source": "client", "lookup_name": "data-analysis", "name": "data-analysis"}
 
     ok = env.service.create_agent(
         env.owner_id,
@@ -439,10 +468,10 @@ def test_update_validates_and_persists_tool_and_skill_refs(env):
         "catalog_version": "v1",
         "tool_instance_id": "csv-profile-instance",
         "server_name": "csv",
-        "qualified_tool_id": "client__csv__profile",
+        "qualified_tool_id": "csv::profile",
         "tool_name": "profile",
     }
-    skill = {"source": "server", "lookup_name": "data-analysis", "name": "data-analysis"}
+    skill = {"source": "client", "lookup_name": "data-analysis", "name": "data-analysis"}
 
     updated = env.service.update_agent(
         env.owner_id,
@@ -456,10 +485,10 @@ def test_update_validates_and_persists_tool_and_skill_refs(env):
 
     assert [ref["qualified_tool_id"] for ref in updated.tool_refs] == [
         "calculator::calculate",
-        "client__csv__profile",
+        "csv::profile",
     ]
     assert [(ref["source"], ref["lookup_name"], ref["name"]) for ref in updated.skill_refs] == [
-        ("server", "data-analysis", "data-analysis")
+        ("client", "data-analysis", "data-analysis")
     ]
 
     cleared = env.service.update_agent(
@@ -471,6 +500,88 @@ def test_update_validates_and_persists_tool_and_skill_refs(env):
 
     assert cleared.tool_refs == []
     assert cleared.skill_refs == []
+
+
+def test_contextual_read_reports_missing_local_capabilities(env):
+    selected = {
+        "type": "client",
+        "device_id": "desktop-1",
+        "session_id": "session-1",
+        "catalog_version": "v1",
+        "tool_instance_id": "csv-profile-instance",
+        "server_name": "csv",
+        "qualified_tool_id": "csv::profile",
+        "tool_name": "profile",
+    }
+    created = env.service.create_agent(
+        env.owner_id,
+        _payload(tool_refs=[selected]),
+        device_id="desktop-1",
+    )
+    env.service._list_client_tool_refs = lambda _user_id, _device_id: []
+
+    read = env.service.get_agent(env.owner_id, created.id, device_id="desktop-1")
+
+    assert read.availability is not None
+    assert read.availability.status == "degraded"
+    assert read.availability.missing_tools[0].qualified_tool_id == ("csv::profile")
+
+
+@pytest.mark.asyncio
+async def test_options_echo_complete_device_snapshot(env):
+    options = await env.service.get_options(env.owner_id, device_id="desktop-1")
+
+    assert options.device_snapshot.status == "ready"
+    assert options.device_snapshot.device_id == "desktop-1"
+    assert options.device_snapshot.session_id == "session-1"
+    assert options.device_snapshot.tool_catalog_version == 1
+    assert options.device_snapshot.skill_catalog_version == 2
+
+
+@pytest.mark.asyncio
+async def test_options_never_label_unsynced_empty_catalogs_ready(env):
+    options = await env.service.get_options(env.owner_id, device_id="syncing-desktop")
+
+    assert options.device_snapshot.status == "unavailable"
+    assert options.client_tools == []
+    assert options.skills == []
+
+
+def test_context_retries_when_snapshot_rotates_during_catalog_read(env):
+    snapshots = iter(
+        [
+            {
+                "device_id": "desktop-1",
+                "session_id": "s1",
+                "tool_catalog_version": 1,
+                "skill_catalog_version": 1,
+                "status": "ready",
+            },
+            {
+                "device_id": "desktop-1",
+                "session_id": "s2",
+                "tool_catalog_version": 1,
+                "skill_catalog_version": 1,
+                "status": "ready",
+            },
+            {
+                "device_id": "desktop-1",
+                "session_id": "s2",
+                "tool_catalog_version": 1,
+                "skill_catalog_version": 1,
+                "status": "ready",
+            },
+        ]
+    )
+    tool_reads = iter([[{"session_id": "s1"}], [{"session_id": "s2"}]])
+    env.service._get_device_snapshot = lambda _u, _d: next(snapshots)
+    env.service._list_client_tool_refs = lambda _u, _d: next(tool_reads)
+    env.service._list_skill_refs = lambda _u, _d: []
+
+    snapshot, tools, _skills = env.service._load_device_context(env.owner_id, "desktop-1")
+
+    assert snapshot["session_id"] == "s2"
+    assert tools == [{"session_id": "s2"}]
 
 
 def test_soft_delete_detaches_from_conversations(env):

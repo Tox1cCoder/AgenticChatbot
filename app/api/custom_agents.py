@@ -32,9 +32,10 @@ _DEVICE_QUERY = Query(default=None, alias="deviceId", description="Active client
 async def list_custom_agents(
     custom_agent_service: CustomAgentService,
     user_id: UUID,
+    device_id: str | None = _DEVICE_QUERY,
 ) -> ApiResponse[list[CustomAgentRead]]:
     """List the authenticated user's custom agents."""
-    result = custom_agent_service.list_agents(user_id)
+    result = custom_agent_service.list_agents(user_id, device_id=device_id)
     return ApiResponse(success=True, message="Custom agents retrieved", data=result)
 
 
@@ -70,9 +71,10 @@ async def get_custom_agent(
     custom_agent_id: UUID,
     custom_agent_service: CustomAgentService,
     user_id: UUID,
+    device_id: str | None = _DEVICE_QUERY,
 ) -> ApiResponse[CustomAgentRead]:
     """Get a single custom agent owned by the authenticated user."""
-    result = custom_agent_service.get_agent(user_id, custom_agent_id)
+    result = custom_agent_service.get_agent(user_id, custom_agent_id, device_id=device_id)
     return ApiResponse(success=True, message="Custom agent retrieved", data=result)
 
 

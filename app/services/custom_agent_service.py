@@ -21,11 +21,17 @@ from app.repositories.custom_agent import CustomAgentRepository
 from app.schemas.custom_agent import (
     CUSTOM_MODEL_AGENT_KEY,
     ConversationCustomAgentsUpdate,
+    CustomAgentAvailability,
     CustomAgentCreate,
     CustomAgentOptions,
     CustomAgentRead,
     CustomAgentState,
+    DeviceCatalogSnapshot,
     runtime_agent_id_for,
+)
+from app.services.client_device_service import ClientDeviceService
+from app.services.custom_agent_capability_resolver import (
+    resolve_custom_agent_capabilities,
 )
 from app.utils.validation.conversation_validation import ConversationValidationUtils
 
@@ -53,6 +59,7 @@ class CustomAgentService:
         | None = None,
         list_server_tool_refs: Callable[[], list[dict[str, Any]]] | None = None,
         list_skill_refs: Callable[[str | None, str | None], list[dict[str, Any]]] | None = None,
+        get_device_snapshot: Callable[[str | None, str | None], dict[str, Any]] | None = None,
     ):
         self.repository = repository
         self.conversation_validation_utils = conversation_validation_utils
@@ -61,14 +68,107 @@ class CustomAgentService:
         self._list_client_tool_refs = list_client_tool_refs or _default_list_client_tool_refs
         self._list_server_tool_refs = list_server_tool_refs or _default_list_server_tool_refs
         self._list_skill_refs = list_skill_refs or _default_list_skill_refs
+        self._get_device_snapshot = get_device_snapshot or _default_get_device_snapshot
 
     # ------------------------------------------------------------------ reads
 
-    def list_agents(self, owner_id: UUID) -> list[CustomAgentRead]:
-        return [self._to_read(a) for a in self.repository.list_by_owner(owner_id)]
+    def list_agents(
+        self, owner_id: UUID, *, device_id: str | None = None
+    ) -> list[CustomAgentRead]:
+        snapshot, live_tools, live_skills = self._load_device_context(owner_id, device_id)
+        return [
+            self._to_read(
+                agent,
+                availability=self._availability_for(
+                    agent,
+                    snapshot=snapshot,
+                    live_tools=live_tools,
+                    live_skills=live_skills,
+                ),
+            )
+            for agent in self.repository.list_by_owner(owner_id)
+        ]
 
-    def get_agent(self, owner_id: UUID, custom_agent_id: UUID) -> CustomAgentRead:
-        return self._to_read(self._load_owned_or_raise(owner_id, custom_agent_id))
+    def get_agent(
+        self, owner_id: UUID, custom_agent_id: UUID, *, device_id: str | None = None
+    ) -> CustomAgentRead:
+        agent = self._load_owned_or_raise(owner_id, custom_agent_id)
+        snapshot, live_tools, live_skills = self._load_device_context(owner_id, device_id)
+        return self._to_read(
+            agent,
+            availability=self._availability_for(
+                agent,
+                snapshot=snapshot,
+                live_tools=live_tools,
+                live_skills=live_skills,
+            ),
+        )
+
+    @staticmethod
+    def _snapshot_identity(snapshot: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            snapshot.get("device_id"),
+            snapshot.get("session_id"),
+            snapshot.get("tool_catalog_version"),
+            snapshot.get("skill_catalog_version"),
+            snapshot.get("status"),
+        )
+
+    def _load_device_context(
+        self, owner_id: UUID, device_id: str | None
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+        """Read a caller-owned snapshot and its catalogs under one consistent identity.
+
+        Retries once if a reconnect/resync rotates identity while catalogs are being
+        materialized, then fails closed as unavailable rather than pairing one
+        session's options with another session's cache key.
+        """
+        user_id = str(owner_id)
+        snapshot = self._get_device_snapshot(user_id, device_id)
+        if snapshot.get("status") != "ready":
+            return snapshot, [], []
+
+        for _attempt in range(2):
+            before = snapshot
+            live_tools = self._list_client_tool_refs(user_id, device_id)
+            live_skills = self._list_skill_refs(user_id, device_id)
+            after = self._get_device_snapshot(user_id, device_id)
+            if after.get("status") == "ready" and self._snapshot_identity(
+                before
+            ) == self._snapshot_identity(after):
+                return after, live_tools, live_skills
+            snapshot = after
+            if snapshot.get("status") != "ready":
+                return snapshot, [], []
+
+        unstable = dict(snapshot)
+        unstable["status"] = "unavailable"
+        return unstable, [], []
+
+    @staticmethod
+    def _availability_for(
+        agent: CustomAgent,
+        *,
+        snapshot: dict[str, Any],
+        live_tools: list[dict[str, Any]],
+        live_skills: list[dict[str, Any]],
+    ) -> CustomAgentAvailability:
+        resolution = resolve_custom_agent_capabilities(
+            selected_tool_refs=list(agent.tool_refs or []),
+            selected_skill_refs=list(agent.skill_refs or []),
+            live_tool_refs=live_tools,
+            live_skill_refs=live_skills,
+            request_device_id=snapshot.get("device_id"),
+            device_available=snapshot.get("status") == "ready",
+        )
+        return CustomAgentAvailability(
+            status=resolution.status,
+            device_id=snapshot.get("device_id"),
+            session_id=snapshot.get("session_id"),
+            missing_tools=resolution.missing_tools,
+            missing_skills=resolution.missing_skills,
+            warnings=resolution.warnings,
+        )
 
     # --------------------------------------------------------------- mutations
 
@@ -194,14 +294,15 @@ class CustomAgentService:
         uses, so the custom-agent picker shows the same (and freshest) catalog.
         """
         await self.refresh_server_tool_catalog()
-        client_tools = self._list_client_tool_refs(str(owner_id), device_id)
+        snapshot, client_tools, skills = self._load_device_context(owner_id, device_id)
         return CustomAgentOptions(
             providers=await self._list_providers(owner_id),
             server_default_tools=list(self._list_server_tool_refs()),
             server_tools=[],
             client_tools=client_tools,
             client_servers=self._group_client_servers(client_tools),
-            skills=self._list_skill_refs(str(owner_id), device_id),
+            skills=skills,
+            device_snapshot=DeviceCatalogSnapshot.model_validate(snapshot),
         )
 
     @staticmethod
@@ -457,13 +558,51 @@ class CustomAgentService:
             raise CustomAgentInUseError()
 
     @staticmethod
-    def _to_read(agent: CustomAgent) -> CustomAgentRead:
-        return CustomAgentRead.model_validate(agent)
+    def _to_read(
+        agent: CustomAgent,
+        availability: CustomAgentAvailability | None = None,
+    ) -> CustomAgentRead:
+        value = CustomAgentRead.model_validate(agent)
+        return value.model_copy(update={"availability": availability})
 
 
 # --------------------------------------------------------------------------- #
 # Default lookups (production wiring). Tests inject fakes instead.
 # --------------------------------------------------------------------------- #
+
+
+def _default_get_device_snapshot(user_id: str | None, device_id: str | None) -> dict[str, Any]:
+    unavailable = {
+        "device_id": device_id,
+        "session_id": None,
+        "tool_catalog_version": None,
+        "skill_catalog_version": None,
+        "status": "unavailable",
+    }
+    if not user_id or not device_id:
+        return unavailable
+    try:
+        device_uuid = UUID(str(device_id))
+    except (TypeError, ValueError, AttributeError):
+        return unavailable
+    session = ClientDeviceService.lookup_active_session(device_uuid)
+    if session is None or str(session.user_id) != str(user_id):
+        return unavailable
+    if session.tool_catalog_version <= 0 or session.skill_catalog_version <= 0:
+        return {
+            "device_id": str(session.device_id),
+            "session_id": session.session_id,
+            "tool_catalog_version": session.tool_catalog_version,
+            "skill_catalog_version": session.skill_catalog_version,
+            "status": "unavailable",
+        }
+    return {
+        "device_id": str(session.device_id),
+        "session_id": session.session_id,
+        "tool_catalog_version": session.tool_catalog_version,
+        "skill_catalog_version": session.skill_catalog_version,
+        "status": "ready",
+    }
 
 
 def _default_list_client_tool_refs(
