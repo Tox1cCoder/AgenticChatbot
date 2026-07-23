@@ -77,6 +77,7 @@ class PlanningAgent(BaseAgent):
         user_id: str | None = None,
         device_id: str | None = None,
         include_hand_off: bool | None = None,
+        excluded_tool_names: set[str] | frozenset[str] | None = None,
     ) -> Any:
         """
         Override to ensure write_todos is always included as an internal tool.
@@ -91,6 +92,7 @@ class PlanningAgent(BaseAgent):
             user_id=user_id,
             device_id=device_id,
             include_hand_off=include_hand_off,
+            excluded_tool_names=excluded_tool_names,
         )
 
     def _get_tools_for_binding(
@@ -101,6 +103,7 @@ class PlanningAgent(BaseAgent):
         device_id: str | None = None,
         tool_scope: str | None = None,
         include_hand_off: bool | None = None,
+        excluded_tool_names: set[str] | frozenset[str] | None = None,
     ) -> list[BaseTool]:
         """
         Ensure write_todos is always present in both binding and execution maps.
@@ -112,6 +115,7 @@ class PlanningAgent(BaseAgent):
             device_id=device_id,
             tool_scope=tool_scope,
             include_hand_off=include_hand_off,
+            excluded_tool_names=excluded_tool_names,
         )
 
     @staticmethod

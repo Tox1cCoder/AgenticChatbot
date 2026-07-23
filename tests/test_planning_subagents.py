@@ -933,6 +933,58 @@ def test_planning_agent_binding_includes_graph_injected_hand_off(monkeypatch):
     assert "hand_off" in tool_names
 
 
+def test_planning_agent_binding_honors_excluded_tool_names(monkeypatch):
+    from app.ai.agents.planning_agent import PlanningAgent
+    from app.ai.hand_off_tool import create_hand_off_tool
+
+    monkeypatch.setattr(
+        "app.ai.agents.base_agent.should_use_deferred_loading",
+        lambda _agent_key: True,
+    )
+    monkeypatch.setattr(
+        "app.ai.agents.base_agent.get_available_skill_summaries",
+        lambda **kwargs: [],
+    )
+
+    agent = PlanningAgent.__new__(PlanningAgent)
+    agent.agent_config_key = "planning"
+    agent.mcp_manager = None
+    agent.tools = []
+
+    tools = agent._get_tools_for_binding(
+        conversation_id="conversation-1",
+        internal_tools=[create_hand_off_tool(["search_agent"])],
+        excluded_tool_names={"hand_off"},
+    )
+    tool_names = {tool.name for tool in tools}
+
+    assert "write_todos" in tool_names
+    assert "hand_off" not in tool_names
+
+
+def test_planning_llm_binding_forwards_excluded_tool_names(monkeypatch):
+    from app.ai.agents.base_agent import BaseAgent
+    from app.ai.agents.planning_agent import PlanningAgent
+
+    captured = {}
+
+    def fake_get_llm_with_tools(self, **kwargs):
+        captured.update(kwargs)
+        return "bound-model"
+
+    monkeypatch.setattr(BaseAgent, "_get_llm_with_tools", fake_get_llm_with_tools)
+    agent = PlanningAgent.__new__(PlanningAgent)
+
+    result = agent._get_llm_with_tools(
+        model=object(),
+        excluded_tool_names={"blocked_tool"},
+    )
+
+    assert result == "bound-model"
+    assert captured["excluded_tool_names"] == {"blocked_tool"}
+    assert "write_todos" in {tool.name for tool in captured["internal_tools"]}
+
+
 def test_planning_agent_binding_has_no_static_hand_off_fallback(monkeypatch):
     """Only graph injection can bind hand_off for Planning."""
     from app.ai.agents.planning_agent import PlanningAgent
