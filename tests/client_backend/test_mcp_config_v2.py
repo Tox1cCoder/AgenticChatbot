@@ -12,6 +12,7 @@ from client_backend.schemas.mcp_config import (
     MCPProfileScope,
     MCPRegistryDocument,
 )
+from client_backend.services.mcp_secret_store import MCPSecretStore
 
 
 def test_mcp_profile_rejects_unknown_schema_version():
@@ -88,3 +89,54 @@ def test_device_profile_path_rejects_unsafe_components(tmp_path, monkeypatch, un
 def test_profile_scope_rejects_empty_identity():
     with pytest.raises(ValidationError):
         MCPProfileScope(user_id="", device_identifier="device-a")
+
+
+def test_mcp_credentials_are_encrypted_and_device_isolated(tmp_path):
+    first = MCPSecretStore(
+        MCPProfileScope(user_id="user-1", device_identifier="device-a"),
+        profile_root=tmp_path,
+    )
+    second = MCPSecretStore(
+        MCPProfileScope(user_id="user-1", device_identifier="device-b"),
+        profile_root=tmp_path,
+    )
+
+    first.set_for_server(
+        "notion",
+        env={"NOTION_TOKEN": "secret-token-value"},
+        headers={"Authorization": "Bearer secret-token-value"},
+    )
+
+    credentials = first.get_for_server("notion")
+    assert credentials.env == {"NOTION_TOKEN": "secret-token-value"}
+    assert credentials.headers == {"Authorization": "Bearer secret-token-value"}
+    assert first.list_for_server("notion") == {
+        "envKeys": ["NOTION_TOKEN"],
+        "headerKeys": ["Authorization"],
+    }
+    assert second.get_for_server("notion").env == {}
+    assert second.get_for_server("notion").headers == {}
+    assert first.path != second.path
+    assert "secret-token-value" not in first.path.read_text(encoding="utf-8")
+
+
+def test_mcp_credentials_delete_server_binding(tmp_path):
+    store = MCPSecretStore(
+        MCPProfileScope(user_id="user-1", device_identifier="device-a"),
+        profile_root=tmp_path,
+    )
+    store.set_for_server("demo", env={"API_TOKEN": "value"}, headers={})
+
+    assert store.delete_server("demo") is True
+    assert store.delete_server("demo") is False
+    assert store.get_for_server("demo").env == {}
+
+
+def test_mcp_credentials_reject_invalid_environment_name(tmp_path):
+    store = MCPSecretStore(
+        MCPProfileScope(user_id="user-1", device_identifier="device-a"),
+        profile_root=tmp_path,
+    )
+
+    with pytest.raises(ValueError):
+        store.set_for_server("demo", env={"INVALID-NAME": "value"}, headers={})
