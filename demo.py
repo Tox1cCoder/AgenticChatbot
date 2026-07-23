@@ -1214,9 +1214,7 @@ def _custom_agent_device_query() -> str:
 
 
 def list_custom_agents() -> list[dict[str, Any]]:
-    status, payload = _custom_agent_request(
-        "GET", f"/custom-agents{_custom_agent_device_query()}"
-    )
+    status, payload = _custom_agent_request("GET", f"/custom-agents{_custom_agent_device_query()}")
     if status == 200:
         agents = payload.get("data") or []
         # Refresh the runtime-id -> name cache used by get_agent_display_name.
@@ -4100,6 +4098,31 @@ def get_mcp_servers() -> dict[str, Any] | None:
     return response.get("data") if response else None
 
 
+def _group_mcp_tools_by_server(tools: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Bucket a flat tool catalog by its owning server.
+
+    Each tool already carries ``serverName``; the MCP Tools tab renders one section
+    per server from this map so a server's card only ever lists its own tools (the
+    badge count and the listed tools stay consistent). Tools without a server name
+    fall into an explicit ``(unknown)`` bucket rather than leaking under a real one.
+    """
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for tool in tools:
+        server = str(tool.get("serverName") or "").strip() or "(unknown)"
+        grouped.setdefault(server, []).append(tool)
+    return grouped
+
+
+def _mcp_server_is_removable(server: dict[str, Any]) -> bool:
+    """True only for user-added (custom) servers.
+
+    Built-in/bundled servers are backend-owned infrastructure shipped with the app;
+    they can be enabled/disabled per device but not removed. Anything without an
+    explicit ``source == "custom"`` is treated as non-removable (fail safe).
+    """
+    return str(server.get("source") or "").strip().lower() == "custom"
+
+
 def get_mcp_tools(server_name: str | None = None) -> dict[str, Any] | None:
     """Fetch MCP tools, optionally filtered by server"""
     endpoint = "/mcp/tools"
@@ -5030,9 +5053,7 @@ def _normalize_image_for_gallery(image: Any, fallback_name: str) -> dict[str, st
     if isinstance(url_value, str) and url_value.strip():
         url_value = url_value.strip()
         if url_value.startswith("/"):
-            resolved = _fetch_chat_image_data_uri(
-                url_value, st.session_state.get("auth_token")
-            )
+            resolved = _fetch_chat_image_data_uri(url_value, st.session_state.get("auth_token"))
             if resolved:
                 return {"src": resolved, "name": name}
             # Fall through to any legacy inline data before giving up.
@@ -7754,6 +7775,127 @@ def render_tool_parameter_form(
     return parameters, parsing_errors
 
 
+def _render_mcp_tool_tester(selected_tool: dict[str, Any], qualified_id: str) -> None:
+    """Render details, per-tool HITL approval mode, and the execute form for one tool.
+
+    Scoped to a single tool (identified by its qualified id) so it can be rendered
+    inside each server's own section of the MCP Tools tab.
+    """
+    selected_tool_name = selected_tool.get("name")
+
+    st.markdown("---")
+    st.markdown(f"## {selected_tool.get('name')}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(f"**Server:** `{selected_tool.get('serverName', 'Unknown')}`")
+    with col2:
+        st.markdown("**Type:** Tool")
+
+    st.markdown(f"**Description:** {selected_tool.get('description', 'No description available')}")
+
+    # Per-tool human-approval mode (tri-state: inherit server / always / never).
+    st.markdown("**Human approval**")
+    hitl_settings = get_hitl_settings() or {}
+    tool_rules = {
+        item["scopeValue"]: item["requireApproval"]
+        for item in hitl_settings.get("tools", [])
+        if item.get("toolOrigin") == "client_mcp"
+    }
+
+    if qualified_id in tool_rules:
+        current_mode = "Require" if tool_rules[qualified_id] else "Skip"
+    else:
+        current_mode = "Inherit"
+
+    modes = ["Inherit", "Require", "Skip"]
+    chosen = st.radio(
+        "Approval mode for this tool",
+        modes,
+        index=modes.index(current_mode),
+        key=f"hitl_tool_mode_{qualified_id}",
+        horizontal=True,
+        help="Inherit = follow the server rule; Require = always prompt; Skip = never prompt",
+    )
+    if chosen != current_mode:
+        with st.spinner("Updating tool approval..."):
+            if chosen == "Inherit":
+                result = clear_hitl_setting("client_mcp", "tool", qualified_id)
+            else:
+                result = set_hitl_setting("client_mcp", "tool", qualified_id, chosen == "Require")
+            if result is not None:
+                st.rerun()
+
+    # Tool parameter form
+    st.markdown("---")
+    args_schema = selected_tool.get("argsSchema", {})
+
+    with st.form(key=f"tool_execute_form_{qualified_id}"):
+        st.markdown("### Execute Tool")
+
+        # Render parameter inputs
+        parameters, parameter_errors = render_tool_parameter_form(
+            args_schema, key_prefix=qualified_id
+        )
+
+        # Submit button
+        execute_button = st.form_submit_button("Execute Tool", width="stretch")
+
+        if execute_button:
+            if parameter_errors:
+                for error_msg in parameter_errors:
+                    st.error(error_msg)
+            else:
+                with st.spinner(f"Executing {selected_tool_name}..."):
+                    result = execute_mcp_tool(
+                        selected_tool_name,
+                        parameters,
+                        server_name=selected_tool.get("serverName"),
+                        qualified_tool_id=qualified_id,
+                    )
+
+                    if result:
+                        _remember_mcp_tool_execution_result(qualified_id, result)
+                    else:
+                        st.error("Tool execution failed. Check API logs.")
+
+    # Display execution result
+    result = _mcp_tool_execution_results().get(qualified_id)
+    if result:
+        st.markdown("---")
+        st.markdown("### Execution Result")
+
+        success = result.get("success", False)
+        execution_time = result.get("executionTime", 0)
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            status_label = (
+                ":material/check_circle: Success" if success else ":material/cancel: Failed"
+            )
+            st.markdown(f"**Status:** {status_label}")
+        with col2:
+            st.markdown(f"**Time:** {execution_time:.3f}s")
+        with col3:
+            st.markdown(f"**Tool:** {result.get('toolName', 'Unknown')}")
+
+        if success:
+            st.success("Tool executed successfully!")
+        else:
+            error_msg = result.get("error", "Unknown error")
+            st.error(f"Execution failed: {error_msg}")
+
+        payload = result.get("result")
+        if payload is not None:
+            with st.expander("Result Data", expanded=True):
+                render_tool_result_payload(payload)
+
+        # Clear button
+        if st.button("Clear Result", key=f"clear_tool_result_{qualified_id}"):
+            _clear_mcp_tool_execution_result(qualified_id)
+            st.rerun()
+
+
 def render_tools_tab():
     """Render the MCP Tools management and testing interface"""
     st.markdown("# :material/extension: MCP Tools Management")
@@ -8072,12 +8214,19 @@ def render_tools_tab():
                     ":material/info: Human-in-the-loop is globally disabled (admin setting); "
                     "approval rules below are inactive until it is enabled."
                 )
+            st.caption(
+                ":material/devices: MCP servers run locally on **this device**. Config is "
+                "per-device and is not synced across your other machines. Built-in servers "
+                "ship with the app and can be disabled but not removed."
+            )
             for server in servers:
                 server_name = server.get("name", "Unknown")
                 enabled = server.get("enabled", False)
                 tool_count = server.get("toolCount", 0)
                 transport = server.get("transport", "unknown")
                 description = server.get("description", "No description")
+                is_removable = _mcp_server_is_removable(server)
+                kind_label = "Custom" if is_removable else "Built-in"
 
                 status_icon = ":material/check_circle:" if enabled else ":material/cancel:"
                 status_text = "Enabled" if enabled else "Disabled"
@@ -8087,7 +8236,7 @@ def render_tools_tab():
                 with col1:
                     st.markdown(
                         f"""
-                    **{status_icon} {server_name}** - {status_text}
+                    **{status_icon} {server_name}** - {status_text} · _{kind_label}_
                     - Transport: `{transport}`
                     - Tools: {tool_count}
                     - {description if description else "No description available"}
@@ -8103,12 +8252,15 @@ def render_tools_tab():
                                 st.rerun()
 
                 with col3:
-                    if st.button("Remove", key=f"remove_{server_name}"):
-                        with st.spinner("Removing server..."):
-                            result = remove_mcp_server(server_name)
-                            if result:
-                                st.success(f"Removed '{server_name}'")
-                                st.rerun()
+                    if is_removable:
+                        if st.button("Remove", key=f"remove_{server_name}"):
+                            with st.spinner("Removing server..."):
+                                result = remove_mcp_server(server_name)
+                                if result:
+                                    st.success(f"Removed '{server_name}'")
+                                    st.rerun()
+                    else:
+                        st.caption("Built-in — use Disable")
 
                 with col4:
                     server_gated = bool(hitl_servers.get(server_name, False))
@@ -8160,145 +8312,38 @@ def render_tools_tab():
         st.warning(f"No tools match '{search_query}'")
         return
 
-    # Display tools as selectbox, keyed by qualified id so duplicate tool names
-    # across servers each select their own rule (server::tool).
-    qualified_tool_options = {
-        str(tool.get("qualifiedId") or f"{tool.get('serverName', '')}::{tool.get('name')}"): tool
-        for tool in filtered_tools
-        if tool.get("name")
-    }
-    selected_tool_key = st.selectbox(
-        "Select a tool to test",
-        options=list(qualified_tool_options.keys()),
-        format_func=lambda key: (
-            f"{qualified_tool_options[key].get('name')} "
-            f"({qualified_tool_options[key].get('serverName', '')})"
-        ),
-    )
-
-    if not selected_tool_key:
-        return
-
-    # Get selected tool details
-    selected_tool = qualified_tool_options.get(selected_tool_key)
-
-    if not selected_tool:
-        return
-    selected_tool_name = selected_tool.get("name")
-
-    # Display tool details
-    st.markdown("---")
-    st.markdown(f"## {selected_tool.get('name')}")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown(f"**Server:** `{selected_tool.get('serverName', 'Unknown')}`")
-    with col2:
-        st.markdown("**Type:** Tool")
-
-    st.markdown(f"**Description:** {selected_tool.get('description', 'No description available')}")
-
-    # Per-tool human-approval mode (tri-state: inherit server / always / never).
-    st.markdown("**Human approval**")
-    qualified_id = selected_tool_key
-    hitl_settings = get_hitl_settings() or {}
-    tool_rules = {
-        item["scopeValue"]: item["requireApproval"]
-        for item in hitl_settings.get("tools", [])
-        if item.get("toolOrigin") == "client_mcp"
-    }
-
-    if qualified_id in tool_rules:
-        current_mode = "Require" if tool_rules[qualified_id] else "Skip"
-    else:
-        current_mode = "Inherit"
-
-    modes = ["Inherit", "Require", "Skip"]
-    chosen = st.radio(
-        "Approval mode for this tool",
-        modes,
-        index=modes.index(current_mode),
-        key=f"hitl_tool_mode_{qualified_id}",
-        horizontal=True,
-        help="Inherit = follow the server rule; Require = always prompt; Skip = never prompt",
-    )
-    if chosen != current_mode:
-        with st.spinner("Updating tool approval..."):
-            if chosen == "Inherit":
-                result = clear_hitl_setting("client_mcp", "tool", qualified_id)
-            else:
-                result = set_hitl_setting("client_mcp", "tool", qualified_id, chosen == "Require")
-            if result is not None:
-                st.rerun()
-
-    # Tool parameter form
-    st.markdown("---")
-    args_schema = selected_tool.get("argsSchema", {})
-
-    with st.form(key=f"tool_execute_form_{qualified_id}"):
-        st.markdown("### Execute Tool")
-
-        # Render parameter inputs
-        parameters, parameter_errors = render_tool_parameter_form(
-            args_schema, key_prefix=qualified_id
-        )
-
-        # Submit button
-        execute_button = st.form_submit_button("Execute Tool", width="stretch")
-
-        if execute_button:
-            if parameter_errors:
-                for error_msg in parameter_errors:
-                    st.error(error_msg)
-            else:
-                with st.spinner(f"Executing {selected_tool_name}..."):
-                    result = execute_mcp_tool(
-                        selected_tool_name,
-                        parameters,
-                        server_name=selected_tool.get("serverName"),
-                        qualified_tool_id=qualified_id,
-                    )
-
-                    if result:
-                        _remember_mcp_tool_execution_result(qualified_id, result)
-                    else:
-                        st.error("Tool execution failed. Check API logs.")
-
-    # Display execution result
-    result = _mcp_tool_execution_results().get(qualified_id)
-    if result:
-        st.markdown("---")
-        st.markdown("### Execution Result")
-
-        success = result.get("success", False)
-        execution_time = result.get("executionTime", 0)
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            status_label = (
-                ":material/check_circle: Success" if success else ":material/cancel: Failed"
+    # Group tools by their owning server so each section lists ONLY that server's
+    # tools. This keeps the per-server tool set consistent with its card badge and
+    # prevents tools from one server appearing under another (a purely-display bug
+    # the flat list used to have — the backend already scopes tools per server).
+    tools_by_server = _group_mcp_tools_by_server(filtered_tools)
+    for server_name in sorted(tools_by_server):
+        server_tools = tools_by_server[server_name]
+        qualified_tool_options = {
+            str(
+                tool.get("qualifiedId") or f"{tool.get('serverName', '')}::{tool.get('name')}"
+            ): tool
+            for tool in server_tools
+            if tool.get("name")
+        }
+        with st.expander(
+            f"{server_name} — {len(qualified_tool_options)} tool(s)",
+            expanded=bool(search_query),
+        ):
+            if not qualified_tool_options:
+                st.caption("No runnable tools.")
+                continue
+            selected_tool_key = st.selectbox(
+                "Select a tool to test",
+                options=list(qualified_tool_options.keys()),
+                format_func=lambda key, _opts=qualified_tool_options: _opts[key].get("name"),
+                key=f"mcp_tool_select_{server_name}",
             )
-            st.markdown(f"**Status:** {status_label}")
-        with col2:
-            st.markdown(f"**Time:** {execution_time:.3f}s")
-        with col3:
-            st.markdown(f"**Tool:** {result.get('toolName', 'Unknown')}")
-
-        if success:
-            st.success("Tool executed successfully!")
-        else:
-            error_msg = result.get("error", "Unknown error")
-            st.error(f"Execution failed: {error_msg}")
-
-        payload = result.get("result")
-        if payload is not None:
-            with st.expander("Result Data", expanded=True):
-                render_tool_result_payload(payload)
-
-        # Clear button
-        if st.button("Clear Result", key=f"clear_tool_result_{qualified_id}"):
-            _clear_mcp_tool_execution_result(qualified_id)
-            st.rerun()
+            if not selected_tool_key:
+                continue
+            selected_tool = qualified_tool_options.get(selected_tool_key)
+            if selected_tool:
+                _render_mcp_tool_tester(selected_tool, selected_tool_key)
 
 
 def render_skills_tab():
