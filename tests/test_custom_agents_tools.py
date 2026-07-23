@@ -572,6 +572,4 @@ def test_missing_selected_skill_populates_runtime_warning(monkeypatch):
     assert agent._runtime_warnings == [
         "Selected skill 'kobo-library' is not available on this device."
     ]
-    assert "kobo-library" not in agent._build_skills_suffix(
-        user_id="user-1", device_id="desktop-2"
-    )
+    assert "kobo-library" not in agent._build_skills_suffix(user_id="user-1", device_id="desktop-2")

@@ -61,9 +61,7 @@ def test_custom_agent_resolves_its_own_model_request():
 
 def test_custom_agent_prompt_mentions_missing_device_capabilities():
     agent = CustomAgent(_spec())
-    agent.set_runtime_warnings(
-        ["Selected skill 'kobo-library' is not available on this device."]
-    )
+    agent.set_runtime_warnings(["Selected skill 'kobo-library' is not available on this device."])
 
     prompt = agent._build_system_prompt(None, False)
 

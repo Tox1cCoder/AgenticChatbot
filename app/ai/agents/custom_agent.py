@@ -23,7 +23,6 @@ from ..custom_agent_runtime import (
     AgentRuntimeSpec,
     filter_tools_for_custom_agent,
 )
-from ..skill_resolver import list_resolved_skills
 from ..deferred_tool_binding import (
     get_deferred_tools_for_binding,
     should_use_deferred_loading,
@@ -31,6 +30,7 @@ from ..deferred_tool_binding import (
 from ..deferred_tool_state import get_deferred_tool_state
 from ..hand_off_tool import create_hand_off_tool
 from ..schemas import AgentType
+from ..skill_resolver import list_resolved_skills
 from ..skills_tool import create_activate_skill_tool
 from ..tool_scope import is_client_only_scope
 from ..tool_search_tool import create_tool_search_tool_for_custom_agent

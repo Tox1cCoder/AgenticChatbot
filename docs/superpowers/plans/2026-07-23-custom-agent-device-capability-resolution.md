@@ -1,6 +1,6 @@
 # Custom-Agent Device Capability Resolution Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Make account-wide Custom Agent MCP/skill selections resolve safely against the active sidecar, report missing capabilities without disabling the agent, and eliminate false-ready empty catalog snapshots.
 
@@ -215,11 +215,13 @@ Tasks T001 and T002 can run independently. T003 is the shared implementation bou
 
 ### Task 1 (T001): Publish sidecar readiness only after catalog synchronization
 
+**Status:** DONE (2026-07-23). RED confirmed (missing `_sync_initial_catalogs_and_mark_ready`), GREEN 16/16 runtime bridge tests. Commit "fix: wait for sidecar catalogs before readiness". Design note: `_sync_initial_catalogs_and_mark_ready` clears the event before refresh so a failed/blocked `refresh_catalogs` leaves readiness unpublished; the `finally` block in `_connect_and_serve` still clears on disconnect.
+
 **Files:**
 - Modify: `tests/client_backend/test_runtime_bridge.py`
 - Modify: `client_backend/services/runtime_bridge.py:387-439`
 
-- [ ] **Step 1: Write failing readiness-order tests**
+- [x] **Step 1: Write failing readiness-order tests**
 
 Append these tests:
 
@@ -260,7 +262,7 @@ async def test_failed_initial_catalog_sync_never_publishes_ready(monkeypatch):
     assert bridge._connected_event.is_set() is False
 ```
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/client_backend/test_runtime_bridge.py -k "initial_ready_event or failed_initial_catalog" -q
@@ -268,7 +270,7 @@ async def test_failed_initial_catalog_sync_never_publishes_ready(monkeypatch):
 
 Expected: both tests fail because `_sync_initial_catalogs_and_mark_ready` does not exist.
 
-- [ ] **Step 3: Add the readiness boundary and move the event**
+- [x] **Step 3: Add the readiness boundary and move the event**
 
 Add this method to `RuntimeBridgeService`:
 
@@ -297,7 +299,7 @@ self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
 Remove the earlier `self._connected_event.set()` and direct `await self.refresh_catalogs()` statements. Keep the `finally` block clearing the event.
 
-- [ ] **Step 4: Run focused bridge tests and verify GREEN**
+- [x] **Step 4: Run focused bridge tests and verify GREEN**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/client_backend/test_runtime_bridge.py -q
@@ -305,7 +307,7 @@ Remove the earlier `self._connected_event.set()` and direct `await self.refresh_
 
 Expected: all runtime bridge tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add client_backend/services/runtime_bridge.py tests/client_backend/test_runtime_bridge.py
@@ -314,11 +316,13 @@ git commit -m "fix: wait for sidecar catalogs before readiness"
 
 ### Task 2 (T002): Add typed snapshot and availability contracts
 
+**Status:** DONE (2026-07-23). RED confirmed (ImportError on new models), GREEN 2/2. Commit "feat: define custom agent availability contract". Design note: `CustomAgentOptions.device_snapshot` is a required field with no default per the contract — every producer of `CustomAgentOptions` must now supply it (wired in T004). Nested `MissingClientTool`/`MissingClientSkill` models carry the camel-case aliasing.
+
 **Files:**
 - Modify: `tests/test_custom_agents_service.py:42-139`
 - Modify: `app/schemas/custom_agent.py`
 
-- [ ] **Step 1: Write failing schema serialization tests**
+- [x] **Step 1: Write failing schema serialization tests**
 
 Add imports for `CustomAgentAvailability`, `CustomAgentOptions`, and `DeviceCatalogSnapshot`, then add:
 
@@ -364,7 +368,7 @@ def test_custom_agent_options_requires_explicit_device_snapshot():
     }
 ```
 
-- [ ] **Step 2: Run the schema tests and verify RED**
+- [x] **Step 2: Run the schema tests and verify RED**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/test_custom_agents_service.py -k "availability_serializes or explicit_device_snapshot" -q
@@ -372,7 +376,7 @@ def test_custom_agent_options_requires_explicit_device_snapshot():
 
 Expected: import/validation failures for the missing response models and field.
 
-- [ ] **Step 3: Implement the public Pydantic models**
+- [x] **Step 3: Implement the public Pydantic models**
 
 In `app/schemas/custom_agent.py`, import `Literal` if not already present and add exactly the contract models from the **Public Contract** section. Extend `CustomAgentRead` with:
 
@@ -386,11 +390,11 @@ Extend `CustomAgentOptions` with:
 device_snapshot: DeviceCatalogSnapshot
 ```
 
-- [ ] **Step 4: Run the schema tests and verify GREEN**
+- [x] **Step 4: Run the schema tests and verify GREEN**
 
 Run the Step 2 command. Expected: both tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add app/schemas/custom_agent.py tests/test_custom_agents_service.py
@@ -399,11 +403,13 @@ git commit -m "feat: define custom agent availability contract"
 
 ### Task 3 (T003): Build the shared exact capability resolver
 
+**Status:** DONE (2026-07-23). RED confirmed (ModuleNotFoundError), GREEN 9/9. Ruff clean after formatting + one manual f-string wrap of the MCP warning (ruff format does not split string literals). Commit "feat: resolve custom agent capabilities by logical identity".
+
 **Files:**
 - Create: `app/services/custom_agent_capability_resolver.py`
 - Create: `tests/test_custom_agent_capability_resolver.py`
 
-- [ ] **Step 1: Write failing resolver tests**
+- [x] **Step 1: Write failing resolver tests**
 
 Create the test file:
 
@@ -587,7 +593,7 @@ def test_legacy_skill_ref_matches_current_client_ref_but_not_another_name():
     assert skill_refs_match(legacy, other) is False
 ```
 
-- [ ] **Step 2: Run resolver tests and verify RED**
+- [x] **Step 2: Run resolver tests and verify RED**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/test_custom_agent_capability_resolver.py -q
@@ -595,7 +601,7 @@ def test_legacy_skill_ref_matches_current_client_ref_but_not_another_name():
 
 Expected: collection fails because the resolver module does not exist.
 
-- [ ] **Step 3: Implement the pure resolver**
+- [x] **Step 3: Implement the pure resolver**
 
 Create `app/services/custom_agent_capability_resolver.py` with these public types and functions:
 
@@ -791,11 +797,11 @@ def resolve_custom_agent_capabilities(
 
 During implementation, keep the shown API and assertions exact. Formatting may wrap long expressions without changing behavior.
 
-- [ ] **Step 4: Run resolver tests and verify GREEN**
+- [x] **Step 4: Run resolver tests and verify GREEN**
 
 Run the Step 2 command. Expected: nine tests pass.
 
-- [ ] **Step 5: Run Ruff on the new unit**
+- [x] **Step 5: Run Ruff on the new unit**
 
 ```powershell
 .\.venv\Scripts\python.exe -m ruff check app/services/custom_agent_capability_resolver.py tests/test_custom_agent_capability_resolver.py
@@ -804,7 +810,7 @@ Run the Step 2 command. Expected: nine tests pass.
 
 Expected: both commands exit 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add app/services/custom_agent_capability_resolver.py tests/test_custom_agent_capability_resolver.py
@@ -813,13 +819,21 @@ git commit -m "feat: resolve custom agent capabilities by logical identity"
 
 ### Task 4 (T004): Expose device snapshots and contextual agent availability
 
+**Status:** DONE (2026-07-23). RED confirmed (TypeError: unexpected `get_device_snapshot` kwarg), GREEN 40/40 service+API tests. Commit "feat: expose custom agent device availability".
+
+**Design decisions:**
+- **Fixture rename pulled forward from T005 Step 1.** T004's new tests create agents selecting `csv::profile` on `desktop-1`, which the still-old `_validate_tool_refs` checks against `_fake_client_tools`. That fake returned `client__csv__profile`, so the create would have failed validation before availability could be read. The fake rename (`client__csv__profile`→`csv::profile`) and `_fake_skills`→client-only were therefore done here, along with the two affected existing service tests (`test_create_validates_tool_and_skill_refs`, `test_update_validates_and_persists_tool_and_skill_refs`). T005 Step 1's fixture bullet is thus already satisfied; T005 only adds its new tests.
+- Pure schema tests (lines ~60/78/119) still use `client__csv__profile` as a literal string; they don't validate against the fake, so they were left unchanged to minimize churn.
+- Trimmed the resolver import in the service to only `resolve_custom_agent_capabilities`; T005 adds the logical/binding/skill key imports when it uses them, keeping each commit lint-clean.
+- API tests exercise the real service (no fakes); `deviceId=desktop-1` is not a valid UUID, so `_default_get_device_snapshot` returns `unavailable` — which is exactly the shape the new contract test locks.
+
 **Files:**
 - Modify: `tests/test_custom_agents_service.py:145-676`
 - Modify: `app/services/custom_agent_service.py`
 - Modify: `app/api/custom_agents.py`
 - Modify: `tests/test_custom_agents_api.py`
 
-- [ ] **Step 1: Extend service fakes and write failing availability tests**
+- [x] **Step 1: Extend service fakes and write failing availability tests**
 
 In `tests/test_custom_agents_service.py`, change `_fake_skills` to return client skills only and add a snapshot fake:
 
@@ -928,7 +942,7 @@ def test_context_retries_when_snapshot_rotates_during_catalog_read(env):
     assert tools == [{"session_id": "s2"}]
 ```
 
-- [ ] **Step 2: Run service tests and verify RED**
+- [x] **Step 2: Run service tests and verify RED**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/test_custom_agents_service.py -k "contextual_read or complete_device_snapshot or unsynced_empty or snapshot_rotates" -q
@@ -936,7 +950,7 @@ def test_context_retries_when_snapshot_rotates_during_catalog_read(env):
 
 Expected: constructor/signature/field failures because snapshot lookup and contextual availability are absent.
 
-- [ ] **Step 3: Add production snapshot lookup**
+- [x] **Step 3: Add production snapshot lookup**
 
 Add the constructor dependency:
 
@@ -989,7 +1003,7 @@ def _default_get_device_snapshot(user_id: str | None, device_id: str | None) -> 
 
 Import `ClientDeviceService`, the new resolver, and schema types.
 
-- [ ] **Step 4: Build one contextual read path**
+- [x] **Step 4: Build one contextual read path**
 
 Add a consistency helper. It retries once if a reconnect/resync changes identity
 while catalogs are being materialized, then fails closed as unavailable rather than
@@ -1121,7 +1135,7 @@ return CustomAgentOptions(
 )
 ```
 
-- [ ] **Step 5: Pass device context through list and single-read routes**
+- [x] **Step 5: Pass device context through list and single-read routes**
 
 Change `app/api/custom_agents.py` handlers:
 
@@ -1168,7 +1182,7 @@ def test_contextual_reads_and_options_serialize_camel_case_contract(api):
     assert "toolCatalogVersion" in options["deviceSnapshot"]
 ```
 
-- [ ] **Step 6: Run service and API tests and verify GREEN**
+- [x] **Step 6: Run service and API tests and verify GREEN**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/test_custom_agents_service.py tests/test_custom_agents_api.py -q
@@ -1176,7 +1190,7 @@ def test_contextual_reads_and_options_serialize_camel_case_contract(api):
 
 Expected: all Custom Agent service/API tests pass against configured PostgreSQL.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```powershell
 git add app/services/custom_agent_service.py app/api/custom_agents.py tests/test_custom_agents_service.py tests/test_custom_agents_api.py
@@ -1185,11 +1199,17 @@ git commit -m "feat: expose custom agent device availability"
 
 ### Task 5 (T005): Preserve unavailable saved intent and deduplicate portable selections
 
+**Status:** DONE (2026-07-23). RED confirmed (4 new tests failed on old validation/missing `_dedupe_skill_refs`; the 5th, `requires_full_current_binding`, already passed under old exact-tuple validation and stayed green). GREEN 37/37 service, 17/17 API+resolver. Commit "fix: preserve portable custom agent selections".
+
+**Design decisions:**
+- **Exact-equality assertions adjusted for serialization.** `ClientToolRef`/`CustomAgentSkillRef` `model_dump()` always emits `display_metadata: None` (no `exclude_none` on `_CamelModel`), so a saved ref round-trips with that extra key. The plan's `preserved.tool_refs == [selected]` / `preserved.skill_refs == [selected]` would fail on that key alone, not on the preservation behavior. Assertions were written as `== [{**selected, "display_metadata": None}]` to test the intended behavior (saved intent survives an edit from a disconnected device) faithfully. Verified `model_dump()` output before writing.
+- Step 1 fixture rename was already completed in T004 (see T004 note); T005 only added its new tests.
+
 **Files:**
 - Modify: `tests/test_custom_agents_service.py:323-429,639-676`
 - Modify: `app/services/custom_agent_service.py:339-430`
 
-- [ ] **Step 1: Write failing portable update and dedupe tests**
+- [x] **Step 1: Write failing portable update and dedupe tests**
 
 First update `_fake_client_tools()` and its affected assertions so the fake uses
 `qualified_tool_id="csv::profile"`; keep `tool_name="profile"` and use
@@ -1317,7 +1337,7 @@ def test_skill_ref_dedupe_normalizes_legacy_server_source():
     assert CustomAgentService._dedupe_skill_refs([legacy, current]) == [legacy]
 ```
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/test_custom_agents_service.py -k "preserves_existing_unavailable or requires_full_current_binding or dedupe_uses_server or existing_skill_survives or skill_ref_dedupe" -q
@@ -1325,7 +1345,7 @@ def test_skill_ref_dedupe_normalizes_legacy_server_source():
 
 Expected: the current validator rejects the preserved ref and current dedupe retains both device instances.
 
-- [ ] **Step 3: Validate new selections separately from existing intent**
+- [x] **Step 3: Validate new selections separately from existing intent**
 
 Change update validation calls to pass the existing refs:
 
@@ -1476,7 +1496,7 @@ def _validate_skill_refs(
             )
 ```
 
-- [ ] **Step 4: Change client and skill dedupe identity**
+- [x] **Step 4: Change client and skill dedupe identity**
 
 Replace the client branch in `_dedupe_tool_refs()` with:
 
@@ -1520,7 +1540,7 @@ def _dedupe_skill_refs(skill_refs: list[dict[str, Any]]) -> list[dict[str, Any]]
 Replace both raw skill list comprehensions with
 `self._dedupe_skill_refs([...])`.
 
-- [ ] **Step 5: Run full service tests and verify GREEN**
+- [x] **Step 5: Run full service tests and verify GREEN**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/test_custom_agents_service.py -q
@@ -1528,7 +1548,7 @@ Replace both raw skill list comprehensions with
 
 Expected: all tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add app/services/custom_agent_service.py tests/test_custom_agents_service.py
@@ -1537,6 +1557,14 @@ git commit -m "fix: preserve portable custom agent selections"
 
 ### Task 6 (T006): Use portable resolution at runtime and warn the agent
 
+**Status:** DONE (2026-07-23). RED confirmed (3 new tests failed: stale cross-device rebase, absent prompt notice, absent skill warning). GREEN 68/68 across resync+tools+graph+agent_metadata. Commit "feat: rebind portable custom agent capabilities".
+
+**Design decisions:**
+- **Resync fixture needed `server_name`.** Switching `rebase_client_tool_refs` to the resolver keys client tools by `(server_name, qualified_tool_id)`, but the resync test's `_live_tool`/other-tool metadata omitted `server_name`. Production client-tool metadata always carries it (verified `client_runtime_tools.py:331`), so the fixture was unrealistic; `server_name` was added to both fake tools (`"csv"` / `"other"`) alongside the `_QID`→`csv::profile` / `other::thing` changes. Without it the resolver could not match the live tool and the rebase tests would fail for the wrong reason.
+- **Prompt-notice assertion capitalization.** Plan Step 2 asserted lowercase `"continue with available capabilities"` while Step 6 emits `"Continue with available capabilities"`. The implementation string is authoritative; the graph test asserts the capitalized form so it verifies the real prompt.
+- Removed the now-unused `rebase_client_tool_refs` import from `custom_agent.py` (the new `_request_spec` calls the resolver directly). The public `rebase_client_tool_refs` wrapper is retained in `custom_agent_runtime.py` for its existing direct callers/tests, with identity-preserving no-op semantics for unresolved refs.
+- No early `request_device_id` guard is needed in the wrapper: with `device_available=bool(request_device_id)`, a `None` device yields no live candidates, the comprehension reproduces the input list, and `rebased != refs` is False so the original object is returned (preserving the `is refs` no-op contract).
+
 **Files:**
 - Modify: `tests/test_custom_agent_client_tool_resync.py`
 - Modify: `tests/test_custom_agents_tools.py`
@@ -1544,7 +1572,7 @@ git commit -m "fix: preserve portable custom agent selections"
 - Modify: `app/ai/custom_agent_runtime.py`
 - Modify: `app/ai/agents/custom_agent.py`
 
-- [ ] **Step 1: Write the failing machine-B rebinding test**
+- [x] **Step 1: Write the failing machine-B rebinding test**
 
 First change `_QID` in `tests/test_custom_agent_client_tool_resync.py` to
 `"csv::profile"` and change the other-tool qualified ID to `"other::thing"`.
@@ -1577,7 +1605,7 @@ def test_saved_machine_a_ref_rebases_to_same_logical_tool_on_machine_b():
 
 Keep `test_rebase_does_not_authorize_foreign_device_tool`: it requests desktop-1 while only desktop-2 is live, so it must still fail closed.
 
-- [ ] **Step 2: Write failing missing-skill prompt/metadata tests**
+- [x] **Step 2: Write failing missing-skill prompt/metadata tests**
 
 In `tests/test_custom_agents_graph.py`, create a Custom Agent with warnings and assert:
 
@@ -1610,7 +1638,7 @@ assert "kobo-library" not in agent._build_skills_suffix(
 )
 ```
 
-- [ ] **Step 3: Run runtime tests and verify RED**
+- [x] **Step 3: Run runtime tests and verify RED**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/test_custom_agent_client_tool_resync.py tests/test_custom_agents_tools.py tests/test_custom_agents_graph.py -k "machine_a_ref or missing_device_capabilities or missing_selected_skill" -q
@@ -1618,7 +1646,7 @@ assert "kobo-library" not in agent._build_skills_suffix(
 
 Expected: cross-device rebase stays stale and missing skills do not populate runtime warnings/prompt context.
 
-- [ ] **Step 4: Delegate rebase to the shared resolver**
+- [x] **Step 4: Delegate rebase to the shared resolver**
 
 In `app/ai/custom_agent_runtime.py`, import `client_tool_logical_key` alongside the
 resolver, retain the public `rebase_client_tool_refs()` function for compatibility,
@@ -1652,7 +1680,7 @@ does **not** put missing refs into its allowlist. The caller supplies tools from
 `request_device_id`, and the resolver independently enforces that device boundary.
 Do not add any all-user device lookup. The existing exact matcher remains unchanged.
 
-- [ ] **Step 5: Resolve MCP and skill availability together in CustomAgent**
+- [x] **Step 5: Resolve MCP and skill availability together in CustomAgent**
 
 Import `list_resolved_skills` and `resolve_custom_agent_capabilities`. Change `_request_spec()` to accept `user_id` and return `(spec, warnings)`:
 
@@ -1706,7 +1734,7 @@ Because the spec contains only resolved client refs, the strict filter does not 
 a second warning for an already-known missing ref. Its warnings now represent only
 an unexpected exact-match loss after resolution.
 
-- [ ] **Step 6: Add the warning prompt suffix**
+- [x] **Step 6: Add the warning prompt suffix**
 
 Override `_build_system_prompt()` in `CustomAgent`:
 
@@ -1733,7 +1761,7 @@ def _build_system_prompt(
 
 The normal invocation order binds tools before building the system prompt, so the warning list is populated for that invocation.
 
-- [ ] **Step 7: Run runtime tests and verify GREEN**
+- [x] **Step 7: Run runtime tests and verify GREEN**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/test_custom_agent_client_tool_resync.py tests/test_custom_agents_tools.py tests/test_custom_agents_graph.py tests/test_agent_metadata.py -q
@@ -1741,7 +1769,7 @@ The normal invocation order binds tools before building the system prompt, so th
 
 Expected: all tests pass, including strict stale-session/foreign-device rejection.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```powershell
 git add app/ai/custom_agent_runtime.py app/ai/agents/custom_agent.py tests/test_custom_agent_client_tool_resync.py tests/test_custom_agents_tools.py tests/test_custom_agents_graph.py
@@ -1749,6 +1777,14 @@ git commit -m "feat: rebind portable custom agent capabilities"
 ```
 
 ### Task 7 (T007): Align proxy, Streamlit, and frontend cache behavior
+
+**Status:** DONE (2026-07-23). Proxy: contract-lock only (all custom-agent read routes already stamp `deviceId` via `_params_with_active_device`) — extended both device-forwarding tests, 6/6 pass. Demo: RED confirmed (missing preservation helpers / device-scoped stable key), GREEN 23/23. Compile OK. Commit "feat: show degraded custom agent capabilities".
+
+**Design decisions:**
+- The existing `test_custom_agent_edit_matches_reconnected_client_tool_by_stable_identity` was made cross-device (saved device-a, current device-b) per the plan, proving the stable key dropped `device_id` (now `(server_name, qualified_tool_id)`).
+- README has no standalone "Custom Agents" section; the account-wide-intent/device-local-execution paragraph was added as a Highlights-table row (the concise placement the plan intends).
+- `render_custom_agents_manager` refactor: reads `deviceSnapshot` and forces `client_tools=[]`/`skills=[]` + info notice when not `ready`; per-agent renders `availability.warnings` via `st.warning`, adds a default-on "Keep unavailable device selections" checkbox, drops the all-or-nothing disabled state and the "Reconnect the original device" captions, and always rebuilds selections on save (through the preservation helpers when the checkbox is checked, directly otherwise). This UI path is compile-checked, not unit-tested; the preservation/matching helpers it calls are unit-tested.
+- `_custom_agent_tool_refs_available`/`_custom_agent_skill_refs_available` remain (still used by tests and inside the skill preservation helper) even though the manager no longer gates on them.
 
 **Files:**
 - Modify: `tests/client_backend/test_custom_agents_proxy.py`
@@ -1758,7 +1794,7 @@ git commit -m "feat: rebind portable custom agent capabilities"
 - Modify: `plans/CUSTOM_AGENTS_FE_CONTRACT.md`
 - Modify: `README.md`
 
-- [ ] **Step 1: Lock sidecar stamping for every contextual read**
+- [x] **Step 1: Lock sidecar stamping for every contextual read**
 
 Extend `test_proxy_forwards_active_device_id_for_options_and_mutations` to request list and single-read routes:
 
@@ -1779,7 +1815,7 @@ for key in (
 
 Add the same assertions for `/ai/custom-agents` aliases. The current proxy is expected to pass; if it does, this is a contract-locking test rather than a production edit.
 
-- [ ] **Step 2: Run proxy tests**
+- [x] **Step 2: Run proxy tests**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/client_backend/test_custom_agents_proxy.py -q
@@ -1787,7 +1823,7 @@ Add the same assertions for `/ai/custom-agents` aliases. The current proxy is ex
 
 Expected: all pass. If a route omits stamping, change only that route to use `_params_with_active_device(request)` and rerun.
 
-- [ ] **Step 3: Write failing Streamlit stable-identity and warning tests**
+- [x] **Step 3: Write failing Streamlit stable-identity and warning tests**
 
 Update the current reconnect test so the saved ref is device A and the current option is device B with the same server/qid. Add:
 
@@ -1851,7 +1887,7 @@ def test_missing_skill_preservation_normalizes_legacy_source():
     ) == [legacy]
 ```
 
-- [ ] **Step 4: Run demo tests and verify RED**
+- [x] **Step 4: Run demo tests and verify RED**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/test_demo_custom_agents.py -k "another_device or missing_ref_preservation or missing_skill_preservation" -q
@@ -1859,7 +1895,7 @@ def test_missing_skill_preservation_normalizes_legacy_source():
 
 Expected: stable key still includes device ID and the preservation helper is absent.
 
-- [ ] **Step 5: Implement stable matching and non-blocking degraded hints**
+- [x] **Step 5: Implement stable matching and non-blocking degraded hints**
 
 Change `_custom_agent_client_tool_stable_key()` to:
 
@@ -1970,7 +2006,7 @@ status, payload = _custom_agent_request(
 )
 ```
 
-- [ ] **Step 6: Update the frontend contract**
+- [x] **Step 6: Update the frontend contract**
 
 Document these exact rules in `plans/CUSTOM_AGENTS_FE_CONTRACT.md`:
 
@@ -1987,7 +2023,7 @@ Document these exact rules in `plans/CUSTOM_AGENTS_FE_CONTRACT.md`:
 
 Add a concise README paragraph under Custom Agents stating account-wide desired capability/device-local execution semantics.
 
-- [ ] **Step 7: Run demo, proxy, and compile checks**
+- [x] **Step 7: Run demo, proxy, and compile checks**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/test_demo_custom_agents.py tests/client_backend/test_custom_agents_proxy.py -q
@@ -1996,7 +2032,7 @@ Add a concise README paragraph under Custom Agents stating account-wide desired 
 
 Expected: tests pass and both modules compile.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```powershell
 git add demo.py tests/test_demo_custom_agents.py tests/client_backend/test_custom_agents_proxy.py plans/CUSTOM_AGENTS_FE_CONTRACT.md README.md
@@ -2005,11 +2041,13 @@ git commit -m "feat: show degraded custom agent capabilities"
 
 ### Task 8 (T008): Prove skills and HITL remain device-local
 
+**Status:** DONE (2026-07-23). Evidence-only. New skill isolation file (2 tests) + HITL same-server test (with `build_policy` on `_MemoryRepository`) pass 9/9; adjacent policy suites (hitl_api, turn_policy_injection, gate_policy, tool_approval_setting_repository, client_tool_isolation, multi_sidecar_hardening) pass 55/55. No regression — assertions were not weakened. Commit "test: lock skill and HITL device isolation".
+
 **Files:**
 - Create: `tests/test_skill_device_isolation.py`
 - Modify: `tests/test_hitl_settings_device_isolation.py`
 
-- [ ] **Step 1: Add same-user two-device skill isolation tests**
+- [x] **Step 1: Add same-user two-device skill isolation tests**
 
 Create `tests/test_skill_device_isolation.py`:
 
@@ -2072,7 +2110,7 @@ def test_foreign_user_cannot_read_device_skills(monkeypatch):
     assert list_resolved_skills(user_id=str(other_id), device_id=str(device_id)) == []
 ```
 
-- [ ] **Step 2: Add same-name MCP HITL isolation test**
+- [x] **Step 2: Add same-name MCP HITL isolation test**
 
 Add this method to that file's `_MemoryRepository` so the test exercises the
 actual turn-policy shape as well as settings reads:
@@ -2116,7 +2154,7 @@ def test_same_mcp_server_name_keeps_independent_device_rules(owned_devices):
     }
 ```
 
-- [ ] **Step 3: Run isolation tests**
+- [x] **Step 3: Run isolation tests**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/test_skill_device_isolation.py tests/test_hitl_settings_device_isolation.py -q
@@ -2124,7 +2162,7 @@ def test_same_mcp_server_name_keeps_independent_device_rules(owned_devices):
 
 Expected: all tests pass against the already device-scoped skill/HITL implementation. A failure indicates regression in the prior fix and must be investigated before continuing; do not weaken these assertions.
 
-- [ ] **Step 4: Run adjacent policy suites**
+- [x] **Step 4: Run adjacent policy suites**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/test_hitl_api.py tests/test_hitl_turn_policy_injection.py tests/test_hitl_gate_policy.py tests/test_tool_approval_setting_repository.py tests/test_client_tool_isolation.py tests/test_multi_sidecar_hardening.py -q
@@ -2132,7 +2170,7 @@ Expected: all tests pass against the already device-scoped skill/HITL implementa
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit regression evidence**
+- [x] **Step 5: Commit regression evidence**
 
 ```powershell
 git add tests/test_skill_device_isolation.py tests/test_hitl_settings_device_isolation.py
@@ -2141,11 +2179,18 @@ git commit -m "test: lock skill and HITL device isolation"
 
 ### Task 9 (T009): Final contract and regression verification
 
+**Status:** DONE (2026-07-23).
+- Step 1 feature matrix: **222 passed**.
+- Step 2 broader non-live suite (`--ignore=tests/client_backend/test_live_server_integration.py`): **2531 passed, 63 skipped** (skips are environment-dependent, not failures).
+- Step 3 ruff check: clean after one auto-fixed import-order in `custom_agent.py`; `ruff format --check`: clean after reformatting 4 files that had cosmetic line-wrap drift from earlier task commits (`custom_agent_service.py`, `test_custom_agents_graph.py`, `test_custom_agents_service.py`, `test_custom_agents_tools.py` — whitespace only, all 88 of their tests re-verified green); `git diff --check`: clean.
+- Step 4 contract scan: camel-case aliases in public schemas, snake-case internal refs, frontend matching by `(server_name, qualified_tool_id)`, no all-device scan in the resolver, warnings cover tools+skills, HITL language device-local — all confirmed.
+- Documentation (this plan progress log + the format fixups) committed at finalization; contract/README already updated in T007, no further wording changes were required.
+
 **Files:**
 - Verify all files listed in the Source Map
 - Update only if verification reveals stale wording: `plans/CUSTOM_AGENTS_FE_CONTRACT.md`, `README.md`
 
-- [ ] **Step 1: Run the complete feature matrix**
+- [x] **Step 1: Run the complete feature matrix**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/client_backend/test_runtime_bridge.py tests/client_backend/test_custom_agents_proxy.py tests/test_custom_agent_capability_resolver.py tests/test_custom_agent_client_tool_resync.py tests/test_custom_agents_service.py tests/test_custom_agents_api.py tests/test_custom_agents_tools.py tests/test_custom_agents_graph.py tests/test_demo_custom_agents.py tests/test_skill_device_isolation.py tests/test_hitl_settings_device_isolation.py tests/test_hitl_turn_policy_injection.py tests/test_hitl_gate_policy.py tests/test_hitl_api.py tests/test_tool_approval_setting_repository.py tests/test_client_tool_isolation.py tests/test_multi_sidecar_hardening.py -q
@@ -2153,7 +2198,7 @@ git commit -m "test: lock skill and HITL device isolation"
 
 Expected: all selected tests pass.
 
-- [ ] **Step 2: Run the broader non-live suite**
+- [x] **Step 2: Run the broader non-live suite**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests -q --ignore=tests/client_backend/test_live_server_integration.py
@@ -2161,7 +2206,7 @@ Expected: all selected tests pass.
 
 Expected: all runnable tests pass; environment-dependent skips remain explicitly reported as skips.
 
-- [ ] **Step 3: Run format, lint, and whitespace checks**
+- [x] **Step 3: Run format, lint, and whitespace checks**
 
 ```powershell
 .\.venv\Scripts\python.exe -m ruff check app/services/custom_agent_capability_resolver.py app/services/custom_agent_service.py app/schemas/custom_agent.py app/api/custom_agents.py app/ai/custom_agent_runtime.py app/ai/agents/custom_agent.py client_backend/services/runtime_bridge.py tests/test_custom_agent_capability_resolver.py tests/test_custom_agent_client_tool_resync.py tests/test_custom_agents_service.py tests/test_custom_agents_api.py tests/test_custom_agents_tools.py tests/test_custom_agents_graph.py tests/test_skill_device_isolation.py tests/test_hitl_settings_device_isolation.py
@@ -2171,7 +2216,7 @@ git diff --check
 
 Expected: every command exits 0.
 
-- [ ] **Step 4: Perform a contract consistency scan**
+- [x] **Step 4: Perform a contract consistency scan**
 
 ```powershell
 rg -n "deviceSnapshot|availability|degraded|device_unavailable|server_name, qualified_tool_id|serverName, qualifiedToolId|custom_agent_warnings" app client_backend demo.py plans/CUSTOM_AGENTS_FE_CONTRACT.md README.md tests
@@ -2186,7 +2231,7 @@ Confirm all of the following from the output:
 - warnings cover tools and skills;
 - HITL language remains device-local.
 
-- [ ] **Step 5: Record final verification in the plan progress log or commit message**
+- [x] **Step 5: Record final verification in the plan progress log or commit message**
 
 If documentation changed during verification:
 

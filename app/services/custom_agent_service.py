@@ -76,9 +76,7 @@ class CustomAgentService:
 
     # ------------------------------------------------------------------ reads
 
-    def list_agents(
-        self, owner_id: UUID, *, device_id: str | None = None
-    ) -> list[CustomAgentRead]:
+    def list_agents(self, owner_id: UUID, *, device_id: str | None = None) -> list[CustomAgentRead]:
         snapshot, live_tools, live_skills = self._load_device_context(owner_id, device_id)
         return [
             self._to_read(

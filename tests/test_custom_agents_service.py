@@ -159,16 +159,12 @@ def test_custom_agent_availability_serializes_camel_case():
     payload = value.model_dump(mode="json", by_alias=True)
 
     assert payload["deviceId"] == "device-b"
-    assert payload["missingTools"][0]["qualifiedToolId"] == (
-        "desktop-commander::read_file"
-    )
+    assert payload["missingTools"][0]["qualifiedToolId"] == ("desktop-commander::read_file")
     assert payload["missingSkills"][0]["lookupName"] == "kobo-library"
 
 
 def test_custom_agent_options_requires_explicit_device_snapshot():
-    options = CustomAgentOptions(
-        device_snapshot=DeviceCatalogSnapshot(status="unavailable")
-    )
+    options = CustomAgentOptions(device_snapshot=DeviceCatalogSnapshot(status="unavailable"))
 
     payload = options.model_dump(mode="json", by_alias=True)
 
