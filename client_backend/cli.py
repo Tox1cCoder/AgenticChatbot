@@ -151,26 +151,13 @@ def migrate_mcp_config(
         client_settings,
         initialize_client_environment,
     )
-    from client_backend.core.paths import get_profile_subdir, normalize_path
     from client_backend.services.mcp_config_migration import (
-        migrate_legacy_mcp_profile,
+        prepare_mcp_config_store,
     )
-    from client_backend.services.mcp_config_store import MCPConfigStore
 
     initialize_client_environment(client_settings)
     scope = _resolve_mcp_scope(user_id, device_identifier)
-    store = MCPConfigStore(scope)
-    configured_path = client_settings.mcp_config_path.strip()
-    legacy_path = (
-        normalize_path(configured_path)
-        if configured_path
-        else get_profile_subdir(scope.user_id, "mcp") / "mcp_config.json"
-    )
-    result = migrate_legacy_mcp_profile(
-        scope,
-        legacy_path=legacy_path,
-        store=store,
-    )
+    store, result = prepare_mcp_config_store(scope)
     print(f"Status: {result.status}")
     print(f"Profile: {store.profile_path}")
     if result.migrated_servers:

@@ -19,6 +19,7 @@ from client_backend.services.local_mcp_manager import LocalMCPManager
 from client_backend.services.mcp_config_migration import (
     MCPConfigMigrationConflictError,
     migrate_legacy_mcp_profile,
+    prepare_mcp_config_store,
 )
 from client_backend.services.mcp_config_store import MCPConfigConflictError, MCPConfigStore
 from client_backend.services.mcp_secret_store import MCPSecretStore
@@ -407,6 +408,38 @@ def test_mcp_migration_canonical_key_wins_dual_key_collision(tmp_path):
     )
 
     assert store.load_profile().custom_servers["custom"].command == "canonical-command"
+
+
+def test_prepare_store_migrates_legacy_before_first_profile_load(tmp_path):
+    store = _store(tmp_path, "device-a")
+    legacy_path = tmp_path / "legacy.json"
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "custom": {
+                        "transport": "stdio",
+                        "command": "runner",
+                        "env": {"API_TOKEN": "secret"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    prepared, result = prepare_mcp_config_store(
+        store.scope,
+        store=store,
+        legacy_path=legacy_path,
+    )
+
+    assert prepared is store
+    assert result.status == "migrated"
+    assert "custom" in prepared.load_profile().custom_servers
+    assert prepared.secret_store.get_for_server("custom").env == {
+        "API_TOKEN": "secret"
+    }
 
 
 @pytest.mark.asyncio

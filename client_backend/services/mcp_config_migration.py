@@ -13,6 +13,8 @@ from typing import Any, Literal
 
 from pydantic import TypeAdapter
 
+from client_backend.core.config import client_settings
+from client_backend.core.paths import get_profile_subdir, normalize_path
 from client_backend.core.security import encrypt_local_secret
 from client_backend.schemas.mcp_config import (
     BundledOverride,
@@ -35,6 +37,31 @@ class MigrationResult:
     migrated_servers: tuple[str, ...] = ()
     backup_path: Path | None = None
     receipt_path: Path | None = None
+
+
+def prepare_mcp_config_store(
+    scope: MCPProfileScope,
+    *,
+    store: MCPConfigStore | None = None,
+    legacy_path: Path | None = None,
+) -> tuple[MCPConfigStore, MigrationResult]:
+    """Open a canonical store only after its one-time migration check."""
+
+    resolved_store = store or MCPConfigStore(scope)
+    if resolved_store.scope != scope:
+        raise ValueError("configuration store scope does not match requested scope")
+    if legacy_path is None:
+        legacy_path = (
+            normalize_path(client_settings.mcp_config_path)
+            if client_settings.mcp_config_path
+            else get_profile_subdir(scope.user_id, "mcp") / "mcp_config.json"
+        )
+    result = migrate_legacy_mcp_profile(
+        scope,
+        legacy_path=legacy_path,
+        store=resolved_store,
+    )
+    return resolved_store, result
 
 
 def _legacy_servers(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:

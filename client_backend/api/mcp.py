@@ -20,6 +20,7 @@ from client_backend.services.local_mcp_manager import (
     get_mcp_manager,
     shutdown_mcp_manager,
 )
+from client_backend.services.mcp_config_migration import prepare_mcp_config_store
 from client_backend.services.mcp_config_store import (
     EffectiveMCPServer,
     MCPConfigConflictError,
@@ -38,7 +39,8 @@ def _scope(session: LocalSessionPayload) -> MCPProfileScope:
 
 
 def _store(session: LocalSessionPayload) -> MCPConfigStore:
-    return MCPConfigStore(_scope(session))
+    store, _ = prepare_mcp_config_store(_scope(session))
+    return store
 
 
 async def _reload_manager(scope: MCPProfileScope) -> LocalMCPManager:

@@ -23,6 +23,7 @@ from client_backend.schemas.mcp_config import (
     MCPProfileScope,
     MCPRegistryDocument,
 )
+from client_backend.services.mcp_file_lock import mcp_path_lock
 from client_backend.services.mcp_secret_store import MCPSecretStore
 
 
@@ -166,6 +167,17 @@ class MCPConfigStore:
         env: dict[str, str],
         headers: dict[str, str],
     ) -> None:
+        with mcp_path_lock(self.profile_path.parent):
+            self._save_custom_server(name, definition, env=env, headers=headers)
+
+    def _save_custom_server(
+        self,
+        name: str,
+        definition: CustomServerDefinition | dict[str, Any],
+        *,
+        env: dict[str, str],
+        headers: dict[str, str],
+    ) -> None:
         registry = self.load_registry()
         if name in registry.servers:
             raise MCPConfigConflictError(f"'{name}' is a reserved bundled server name")
@@ -195,19 +207,22 @@ class MCPConfigStore:
             raise
 
     def set_enabled(self, name: str, enabled: bool) -> None:
-        registry = self.load_registry()
-        profile = self.load_profile()
-        if name in registry.servers:
-            overrides = dict(profile.bundled_overrides)
-            overrides[name] = BundledOverride(enabled=enabled)
-            self._write_profile(profile.model_copy(update={"bundled_overrides": overrides}))
-            return
-        custom = profile.custom_servers.get(name)
-        if custom is None:
-            raise KeyError(name)
-        servers = dict(profile.custom_servers)
-        servers[name] = custom.model_copy(update={"enabled": enabled})
-        self._write_profile(profile.model_copy(update={"custom_servers": servers}))
+        with mcp_path_lock(self.profile_path.parent):
+            registry = self.load_registry()
+            profile = self.load_profile()
+            if name in registry.servers:
+                overrides = dict(profile.bundled_overrides)
+                overrides[name] = BundledOverride(enabled=enabled)
+                self._write_profile(
+                    profile.model_copy(update={"bundled_overrides": overrides})
+                )
+                return
+            custom = profile.custom_servers.get(name)
+            if custom is None:
+                raise KeyError(name)
+            servers = dict(profile.custom_servers)
+            servers[name] = custom.model_copy(update={"enabled": enabled})
+            self._write_profile(profile.model_copy(update={"custom_servers": servers}))
 
     def delete_server(
         self,
@@ -215,21 +230,24 @@ class MCPConfigStore:
     ) -> Literal["disabled_bundled", "deleted_custom"]:
         """Disable a bundled server or permanently delete a custom server."""
 
-        registry = self.load_registry()
-        profile = self.load_profile()
-        if name in registry.servers:
-            overrides = dict(profile.bundled_overrides)
-            overrides[name] = BundledOverride(enabled=False)
-            self._write_profile(profile.model_copy(update={"bundled_overrides": overrides}))
-            return "disabled_bundled"
+        with mcp_path_lock(self.profile_path.parent):
+            registry = self.load_registry()
+            profile = self.load_profile()
+            if name in registry.servers:
+                overrides = dict(profile.bundled_overrides)
+                overrides[name] = BundledOverride(enabled=False)
+                self._write_profile(
+                    profile.model_copy(update={"bundled_overrides": overrides})
+                )
+                return "disabled_bundled"
 
-        if name not in profile.custom_servers:
-            raise KeyError(name)
-        servers = dict(profile.custom_servers)
-        del servers[name]
-        self._write_profile(profile.model_copy(update={"custom_servers": servers}))
-        self.secret_store.delete_server(name)
-        return "deleted_custom"
+            if name not in profile.custom_servers:
+                raise KeyError(name)
+            servers = dict(profile.custom_servers)
+            del servers[name]
+            self._write_profile(profile.model_copy(update={"custom_servers": servers}))
+            self.secret_store.delete_server(name)
+            return "deleted_custom"
 
     def _resolve_bundled_value(self, value: str) -> str:
         path = Path(value)

@@ -13,6 +13,7 @@ from uuid import uuid4
 from client_backend.core.paths import get_device_profile_subdir
 from client_backend.core.security import decrypt_local_secret, encrypt_local_secret
 from client_backend.schemas.mcp_config import MCPProfileScope
+from client_backend.services.mcp_file_lock import mcp_path_lock
 
 _STORAGE_VERSION = 1
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -74,6 +75,16 @@ class MCPSecretStore:
         env: dict[str, str],
         headers: dict[str, str],
     ) -> None:
+        with mcp_path_lock(self.path.parent):
+            self._set_for_server(server_name, env=env, headers=headers)
+
+    def _set_for_server(
+        self,
+        server_name: str,
+        *,
+        env: dict[str, str],
+        headers: dict[str, str],
+    ) -> None:
         name = self._validate_server_name(server_name)
         normalized_env: dict[str, str] = {}
         for key, value in env.items():
@@ -92,13 +103,14 @@ class MCPSecretStore:
         self._write(bindings)
 
     def delete_server(self, server_name: str) -> bool:
-        name = self._validate_server_name(server_name)
-        bindings = self._read()
-        if name not in bindings:
-            return False
-        del bindings[name]
-        self._write(bindings)
-        return True
+        with mcp_path_lock(self.path.parent):
+            name = self._validate_server_name(server_name)
+            bindings = self._read()
+            if name not in bindings:
+                return False
+            del bindings[name]
+            self._write(bindings)
+            return True
 
     @staticmethod
     def _validate_server_name(server_name: str) -> str:

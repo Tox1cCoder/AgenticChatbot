@@ -18,6 +18,7 @@ from app.core.mcp_adapter_utils import (
 from client_backend.core.logging import get_logger
 from client_backend.core.security import generate_device_identifier
 from client_backend.schemas.mcp_config import MCPProfileScope
+from client_backend.services.mcp_config_migration import prepare_mcp_config_store
 from client_backend.services.mcp_config_store import EffectiveMCPServer, MCPConfigStore
 from client_backend.services.upstream_auth import get_upstream_auth_service
 
@@ -334,7 +335,8 @@ def get_mcp_manager(scope: MCPProfileScope | None = None) -> LocalMCPManager:
     resolved_scope = scope or resolve_current_mcp_scope()
     manager = _mcp_managers.get(resolved_scope)
     if manager is None:
-        manager = LocalMCPManager(store=MCPConfigStore(resolved_scope))
+        store, _ = prepare_mcp_config_store(resolved_scope)
+        manager = LocalMCPManager(store=store)
         _mcp_managers[resolved_scope] = manager
     return manager
 
