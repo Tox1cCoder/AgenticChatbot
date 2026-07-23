@@ -51,7 +51,12 @@ from .history import ConversationHistoryProvider
 from .hitl_config import (
     build_interrupt_response,
 )
-from .image_context import build_multimodal_content, has_image_parts, use_chat_image_loader
+from .image_context import (
+    build_multimodal_content,
+    describe_attachment_rejections,
+    has_image_parts,
+    use_chat_image_loader,
+)
 from .image_generation import use_image_preview_emitter
 from .rag_tool_actions import canonicalize_rag_tool_call, execute_search_documents_action
 from .schemas import (
@@ -547,6 +552,14 @@ class MultiAgentWorkflow(
         original_content = original_message.content
         user_text = coerce_response_text(original_content)
         multimodal_content = build_multimodal_content(user_text, attachments)
+
+        rejections = describe_attachment_rejections(attachments)
+        if rejections:
+            logger.info(
+                "dropped %d unusable image attachment(s) code=attachment_dropped: %s",
+                len(rejections),
+                "; ".join(rejections),
+            )
 
         if not has_image_parts(multimodal_content):
             return messages_copy, False

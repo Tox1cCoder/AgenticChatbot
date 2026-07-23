@@ -70,9 +70,22 @@ def _candidate_payloads(attachment: dict[str, Any]) -> list[Any]:
     ]
 
 
-def normalize_image_attachment(attachment: Any) -> dict[str, str] | None:
+# Human-readable guidance for drops the user can actually fix. Other drops
+# (empty payload, non-image mime) have no reason code and stay silent.
+_REJECTION_MESSAGES = {
+    "blob_url": "browser blob URLs aren't supported — attach the image data instead",
+    "local_path": "local file paths can't be attached — upload the image data instead",
+}
+
+
+def normalize_image_attachment_result(attachment: Any) -> tuple[dict[str, str] | None, str | None]:
+    """Normalize an attachment to ``{name, mime, url}`` or explain why not.
+
+    Returns ``(normalized, reason)``. ``reason`` is a short code (``"blob_url"``
+    / ``"local_path"``) for drops the caller can surface to the user, else None.
+    """
     if not isinstance(attachment, dict):
-        return None
+        return None, None
 
     name = _clean_str(attachment.get("name") or attachment.get("filename")) or "image"
     mime = _clean_str(
@@ -97,28 +110,49 @@ def normalize_image_attachment(attachment: Any) -> dict[str, str] | None:
         if raw_value:
             break
 
-    if not raw_value or _looks_like_local_path(raw_value):
-        return None
+    if not raw_value:
+        return None, None
+    if _looks_like_local_path(raw_value):
+        return None, "local_path"
 
     if raw_value.startswith("data:"):
         inferred = _mime_from_data_url(raw_value)
         mime = inferred or mime
         if not mime.startswith("image/"):
-            return None
-        return {"name": name, "mime": mime, "url": raw_value}
+            return None, None
+        return {"name": name, "mime": mime, "url": raw_value}, None
 
     if not mime.startswith("image/"):
-        return None
+        return None, None
 
     if raw_value.startswith("blob:"):
         # Browser blob URLs are scoped to the page process and are not fetchable
         # by the backend or model provider. The UI must send data URLs instead.
-        return None
+        return None, "blob_url"
 
     if raw_value.startswith(("http://", "https://")):
-        return {"name": name, "mime": mime, "url": raw_value}
+        return {"name": name, "mime": mime, "url": raw_value}, None
 
-    return {"name": name, "mime": mime, "url": f"data:{mime};base64,{raw_value}"}
+    return {"name": name, "mime": mime, "url": f"data:{mime};base64,{raw_value}"}, None
+
+
+def normalize_image_attachment(attachment: Any) -> dict[str, str] | None:
+    return normalize_image_attachment_result(attachment)[0]
+
+
+def describe_attachment_rejections(attachments: list[Any] | None) -> list[str]:
+    """Human-readable notices for attachments dropped for a fixable reason."""
+    messages: list[str] = []
+    for attachment in attachments or []:
+        _, reason = normalize_image_attachment_result(attachment)
+        message = _REJECTION_MESSAGES.get(reason or "")
+        if not message:
+            continue
+        label = None
+        if isinstance(attachment, dict):
+            label = _clean_str(attachment.get("name") or attachment.get("filename"))
+        messages.append(f"{label or 'an image'}: {message}")
+    return messages
 
 
 def image_url_part(url: str) -> dict[str, Any]:
