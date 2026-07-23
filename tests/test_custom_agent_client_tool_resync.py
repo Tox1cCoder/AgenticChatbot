@@ -20,7 +20,7 @@ from app.ai.custom_agent_runtime import (
     rebase_client_tool_refs,
 )
 
-_QID = "client__csv__profile"
+_QID = "csv::profile"
 
 # Selected at agent-creation time, in session-1.
 PERSISTED_CLIENT_REF = {
@@ -67,6 +67,7 @@ def _live_tool(*, device_id="desktop-1", session_id="session-2", instance="csv-p
             "session_id": session_id,
             "catalog_version": 2,
             "tool_instance_id": instance,
+            "server_name": "csv",
             "qualified_tool_id": _QID,
         },
     )
@@ -157,7 +158,8 @@ def test_rebase_leaves_ref_when_tool_absent_from_live_catalog():
             "session_id": "session-2",
             "catalog_version": 2,
             "tool_instance_id": "other-instance",
-            "qualified_tool_id": "client__other__thing",
+            "server_name": "other",
+            "qualified_tool_id": "other::thing",
         },
     )
     rebased = rebase_client_tool_refs(
@@ -204,3 +206,26 @@ def test_catalog_rebuilds_on_session_change_with_same_version():
     )
     assert catalog.refresh_from_session(session_b) is True
     assert catalog.session_id == "sess-B"
+
+
+def test_saved_machine_a_ref_rebases_to_same_logical_tool_on_machine_b():
+    spec = _spec([PERSISTED_CLIENT_REF])
+    live_b = _live_tool(
+        device_id="desktop-2",
+        session_id="session-b",
+        instance="csv-profile-instance-b",
+    )
+
+    rebased = rebase_client_tool_refs(
+        spec.allowed_client_tool_refs,
+        [live_b],
+        request_device_id="desktop-2",
+    )
+    rebased_spec = spec.model_copy(update={"allowed_client_tool_refs": rebased})
+    allowed, warnings = filter_tools_for_custom_agent(
+        [live_b], rebased_spec, request_device_id="desktop-2"
+    )
+
+    assert rebased[0]["device_id"] == "desktop-2"
+    assert [tool.name for tool in allowed] == ["client__csv__profile"]
+    assert warnings == []

@@ -59,6 +59,20 @@ def test_custom_agent_resolves_its_own_model_request():
     assert resolved["provider_type"] == "openai"
 
 
+def test_custom_agent_prompt_mentions_missing_device_capabilities():
+    agent = CustomAgent(_spec())
+    agent.set_runtime_warnings(
+        ["Selected skill 'kobo-library' is not available on this device."]
+    )
+
+    prompt = agent._build_system_prompt(None, False)
+
+    assert "DEVICE CAPABILITY NOTICE" in prompt
+    assert "kobo-library" in prompt
+    # Implementation emits the sentence capitalized (see T006 progress note).
+    assert "Continue with available capabilities" in prompt
+
+
 # --------------------------------------------------------------------------- #
 # Static graph multiplexer routing (Task 9)
 # --------------------------------------------------------------------------- #

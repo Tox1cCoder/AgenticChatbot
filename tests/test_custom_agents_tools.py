@@ -547,3 +547,31 @@ def test_tool_search_allowlist_full_server_scoped_client():
     assert "csv-profile-instance" in client_allowlist
     assert "client__csv__profile" not in client_allowlist
     assert "profile" not in client_allowlist
+
+
+def test_missing_selected_skill_populates_runtime_warning(monkeypatch):
+    from app.ai.agents import custom_agent as custom_agent_module
+    from app.ai.agents.custom_agent import CustomAgent
+
+    kobo = {"source": "client", "lookup_name": "kobo-library", "name": "kobo-library"}
+    agent = CustomAgent(_spec(skill_refs=[kobo]))
+
+    monkeypatch.setattr(custom_agent_module, "list_resolved_skills", lambda **kwargs: [])
+    monkeypatch.setattr(
+        custom_agent_module,
+        "get_active_client_runtime_session",
+        lambda **kwargs: SimpleNamespace(
+            session_id="session-b",
+            tool_catalog_version=1,
+            skill_catalog_version=1,
+        ),
+    )
+
+    agent._get_tools_for_binding(user_id="user-1", device_id="desktop-2")
+
+    assert agent._runtime_warnings == [
+        "Selected skill 'kobo-library' is not available on this device."
+    ]
+    assert "kobo-library" not in agent._build_skills_suffix(
+        user_id="user-1", device_id="desktop-2"
+    )

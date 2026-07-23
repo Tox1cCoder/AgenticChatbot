@@ -19,6 +19,10 @@ from app.schemas.custom_agent import (
     CUSTOM_MODEL_AGENT_KEY,
     runtime_agent_id_for,
 )
+from app.services.custom_agent_capability_resolver import (
+    client_tool_logical_key,
+    resolve_custom_agent_capabilities,
+)
 
 __all__ = [
     "AgentRuntimeSpec",
@@ -324,37 +328,31 @@ def rebase_client_tool_refs(
     used as a rebase source, so cross-device isolation is preserved. The strict
     matcher and dispatch-time validation are untouched — this only refreshes the
     volatile fields the matcher compares.
+
+    This is a compatibility wrapper over :func:`resolve_custom_agent_capabilities`.
+    It deliberately retains an unresolved (missing) ref unchanged because its
+    existing callers/tests expect identity-preserving no-op semantics. The Custom
+    Agent binding path uses ``resolution.resolved_client_tool_refs`` directly and
+    therefore does not put missing refs into its allowlist.
     """
-    if not request_device_id or not refs:
+    if not refs:
         return refs
 
-    live_by_qid: dict[str, dict[str, Any]] = {}
-    for tool in live_tools:
-        meta = _tool_metadata(tool)
-        if not _is_client_tool(meta):
-            continue
-        if str(meta.get("device_id")) != str(request_device_id):
-            continue
-        qualified_id = str(meta.get("qualified_tool_id") or "")
-        if qualified_id:
-            live_by_qid[qualified_id] = meta
-
-    rebased: list[dict[str, Any]] = []
-    changed = False
-    for ref in refs:
-        qualified_id = str(ref.get("qualified_tool_id") or "")
-        live_meta = live_by_qid.get(qualified_id)
-        if live_meta is not None and str(ref.get("device_id")) == str(request_device_id):
-            new_ref = dict(ref)
-            new_ref["session_id"] = live_meta.get("session_id")
-            new_ref["catalog_version"] = live_meta.get("catalog_version")
-            new_ref["tool_instance_id"] = live_meta.get("tool_instance_id")
-            rebased.append(new_ref)
-            if new_ref != ref:
-                changed = True
-        else:
-            rebased.append(ref)
-    return rebased if changed else refs
+    resolution = resolve_custom_agent_capabilities(
+        selected_tool_refs=refs,
+        selected_skill_refs=[],
+        live_tool_refs=live_tools,
+        live_skill_refs=[],
+        request_device_id=request_device_id,
+        device_available=bool(request_device_id),
+    )
+    resolved_by_key = {
+        client_tool_logical_key(ref): ref
+        for ref in resolution.resolved_client_tool_refs
+        if client_tool_logical_key(ref) is not None
+    }
+    rebased = [resolved_by_key.get(client_tool_logical_key(ref), ref) for ref in refs]
+    return rebased if rebased != refs else refs
 
 
 # --------------------------------------------------------------------------- #

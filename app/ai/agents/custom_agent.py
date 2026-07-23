@@ -15,12 +15,15 @@ from langchain_core.tools import BaseTool
 
 from ...core.config import settings
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
+from ...services.custom_agent_capability_resolver import (
+    resolve_custom_agent_capabilities,
+)
 from ..client_runtime_tools import get_active_client_runtime_session
 from ..custom_agent_runtime import (
     AgentRuntimeSpec,
     filter_tools_for_custom_agent,
-    rebase_client_tool_refs,
 )
+from ..skill_resolver import list_resolved_skills
 from ..deferred_tool_binding import (
     get_deferred_tools_for_binding,
     should_use_deferred_loading,
@@ -99,6 +102,26 @@ class CustomAgent(BaseAgent):
             user_id=user_id,
             device_id=device_id,
             allowed_skill_refs=self._spec.allowed_skill_refs,
+        )
+
+    def _build_system_prompt(
+        self,
+        persona: str | None,
+        has_tool_context: bool,
+        **kwargs: Any,
+    ) -> str:
+        prompt = super()._build_system_prompt(
+            persona,
+            has_tool_context,
+            **kwargs,
+        )
+        if not self._runtime_warnings:
+            return prompt
+        warnings = "\n".join(f"- {warning}" for warning in self._runtime_warnings)
+        return (
+            f"{prompt}\n\nDEVICE CAPABILITY NOTICE:\n{warnings}\n"
+            "Continue with available capabilities. "
+            "Do not claim a missing tool or skill was used."
         )
 
     def _build_delegation_suffix(self, target_descriptions: dict[str, str] | None = None) -> str:
@@ -180,7 +203,11 @@ class CustomAgent(BaseAgent):
         # selected tools. The strict matcher stays unchanged — it just compares
         # against current-session refs. No-op for server-only agents or when no
         # device is connected.
-        spec = self._request_spec(device_id=device_id, live_tools=remote_tools)
+        spec, resolution_warnings = self._request_spec(
+            user_id=user_id,
+            device_id=device_id,
+            live_tools=remote_tools,
+        )
 
         _, availability_warnings = filter_tools_for_custom_agent(
             [*server_candidates, *remote_tools],
@@ -229,7 +256,7 @@ class CustomAgent(BaseAgent):
                 spec,
                 request_device_id=device_id,
             )
-        self.set_runtime_warnings(warnings)
+        self.set_runtime_warnings(list(dict.fromkeys([*resolution_warnings, *warnings])))
 
         tools: list[BaseTool] = list(
             self.restricted_internal_tools(user_id=user_id, device_id=device_id, spec=spec)
@@ -251,25 +278,39 @@ class CustomAgent(BaseAgent):
     def _request_spec(
         self,
         *,
+        user_id: str | None,
         device_id: str | None,
         live_tools: list[BaseTool],
-    ) -> AgentRuntimeSpec:
-        """Spec with client-tool refs rebased onto the current session's live tools.
+    ) -> tuple[AgentRuntimeSpec, list[str]]:
+        """Resolve MCP tools and skills together for this request.
 
-        Returns ``self._spec`` unchanged for server-only agents, when no device is
-        connected, or when nothing needs rebasing — so server-tool flows and the
-        no-client path are untouched.
+        Returns ``(spec, warnings)`` where the spec's ``allowed_client_tool_refs``
+        contains only the live, current-session refs (missing refs never enter the
+        runtime allowlist) and ``warnings`` names each missing local capability once.
+        The caller supplies tools from ``request_device_id`` and the resolver
+        independently enforces that device boundary — no all-user device lookup.
         """
-        if not device_id or not self._spec.allowed_client_tool_refs:
-            return self._spec
-        rebased = rebase_client_tool_refs(
-            self._spec.allowed_client_tool_refs,
-            live_tools,
-            request_device_id=str(device_id),
+        active_session = get_active_client_runtime_session(
+            user_id=user_id,
+            device_id=device_id,
         )
-        if rebased is self._spec.allowed_client_tool_refs:
-            return self._spec
-        return self._spec.model_copy(update={"allowed_client_tool_refs": rebased})
+        device_ready = bool(
+            active_session is not None
+            and getattr(active_session, "tool_catalog_version", 0) > 0
+            and getattr(active_session, "skill_catalog_version", 0) > 0
+        )
+        resolution = resolve_custom_agent_capabilities(
+            selected_tool_refs=self._spec.allowed_client_tool_refs,
+            selected_skill_refs=self._spec.allowed_skill_refs,
+            live_tool_refs=live_tools,
+            live_skill_refs=list_resolved_skills(user_id=user_id, device_id=device_id),
+            request_device_id=str(device_id) if device_id else None,
+            device_available=device_ready,
+        )
+        spec = self._spec.model_copy(
+            update={"allowed_client_tool_refs": resolution.resolved_client_tool_refs}
+        )
+        return spec, resolution.warnings
 
     def restricted_internal_tools(
         self,
