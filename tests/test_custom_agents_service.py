@@ -584,6 +584,128 @@ def test_context_retries_when_snapshot_rotates_during_catalog_read(env):
     assert tools == [{"session_id": "s2"}]
 
 
+def test_update_preserves_existing_unavailable_ref_but_rejects_new_fabricated_ref(env):
+    selected = {
+        "type": "client",
+        "device_id": "desktop-1",
+        "session_id": "session-1",
+        "catalog_version": "v1",
+        "tool_instance_id": "csv-profile-instance",
+        "server_name": "csv",
+        "qualified_tool_id": "csv::profile",
+        "tool_name": "profile",
+    }
+    created = env.service.create_agent(
+        env.owner_id,
+        _payload(tool_refs=[selected]),
+        device_id="desktop-1",
+    )
+
+    preserved = env.service.update_agent(
+        env.owner_id,
+        created.id,
+        CustomAgentUpdate(prompt="Changed", tool_refs=[selected]),
+        device_id="not-connected",
+    )
+    # Stored form carries the schema default display_metadata=None.
+    assert preserved.tool_refs == [{**selected, "display_metadata": None}]
+
+    fabricated = dict(selected, qualified_tool_id="csv::fabricated", tool_name="fabricated")
+    with pytest.raises(CustomAgentValidationError):
+        env.service.update_agent(
+            env.owner_id,
+            created.id,
+            CustomAgentUpdate(tool_refs=[selected, fabricated]),
+            device_id="not-connected",
+        )
+
+
+def test_new_ref_requires_full_current_binding_not_only_live_logical_key(env):
+    forged = {
+        "type": "client",
+        "device_id": "desktop-1",
+        "session_id": "forged-session",
+        "catalog_version": "v1",
+        "tool_instance_id": "forged-instance",
+        "server_name": "csv",
+        "qualified_tool_id": "csv::profile",
+        "tool_name": "profile",
+    }
+
+    with pytest.raises(CustomAgentValidationError):
+        env.service.create_agent(
+            env.owner_id,
+            _payload(name="Forged", tool_refs=[forged]),
+            device_id="desktop-1",
+        )
+
+
+def test_client_ref_dedupe_uses_server_and_qualified_id_not_device_instance():
+    a = {
+        "type": "client",
+        "server_name": "desktop-commander",
+        "qualified_tool_id": "desktop-commander::read_file",
+        "device_id": "device-a",
+        "session_id": "session-a",
+        "tool_instance_id": "instance-a",
+    }
+    b = dict(
+        a,
+        device_id="device-b",
+        session_id="session-b",
+        tool_instance_id="instance-b",
+    )
+
+    assert CustomAgentService._dedupe_tool_refs([a, b]) == [a]
+
+
+def test_existing_skill_survives_absence_but_new_and_legacy_source_do_not(env):
+    selected = {
+        "source": "client",
+        "lookup_name": "data-analysis",
+        "name": "data-analysis",
+    }
+    created = env.service.create_agent(
+        env.owner_id,
+        _payload(name="Skill Agent", skill_refs=[selected]),
+        device_id="desktop-1",
+    )
+    env.service._list_skill_refs = lambda _user_id, _device_id: []
+
+    preserved = env.service.update_agent(
+        env.owner_id,
+        created.id,
+        CustomAgentUpdate(prompt="Changed", skill_refs=[selected]),
+        device_id="not-connected",
+    )
+    assert preserved.skill_refs == [{**selected, "display_metadata": None}]
+
+    new_ref = {"source": "client", "lookup_name": "never-installed", "name": "never-installed"}
+    with pytest.raises(CustomAgentValidationError):
+        env.service.update_agent(
+            env.owner_id,
+            created.id,
+            CustomAgentUpdate(skill_refs=[selected, new_ref]),
+            device_id="not-connected",
+        )
+
+    env.service._list_skill_refs = _fake_skills
+    legacy_new = dict(selected, source="server")
+    with pytest.raises(CustomAgentValidationError):
+        env.service.create_agent(
+            env.owner_id,
+            _payload(name="Legacy New", skill_refs=[legacy_new]),
+            device_id="desktop-1",
+        )
+
+
+def test_skill_ref_dedupe_normalizes_legacy_server_source():
+    legacy = {"source": "server", "lookup_name": "kobo-library", "name": "kobo-library"}
+    current = dict(legacy, source="client")
+
+    assert CustomAgentService._dedupe_skill_refs([legacy, current]) == [legacy]
+
+
 def test_soft_delete_detaches_from_conversations(env):
     agent = env.service.create_agent(env.owner_id, _payload())
     env.service.set_conversation_agents(

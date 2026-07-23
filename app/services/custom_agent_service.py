@@ -31,7 +31,11 @@ from app.schemas.custom_agent import (
 )
 from app.services.client_device_service import ClientDeviceService
 from app.services.custom_agent_capability_resolver import (
+    client_tool_binding_key,
+    client_tool_logical_key,
     resolve_custom_agent_capabilities,
+    skill_logical_key,
+    skill_refs_match,
 )
 from app.utils.validation.conversation_validation import ConversationValidationUtils
 
@@ -211,11 +215,21 @@ class CustomAgentService:
 
         if "tool_refs" in provided:
             tool_refs = self._dedupe_tool_refs([r.model_dump() for r in (data.tool_refs or [])])
-            self._validate_tool_refs(owner_id, tool_refs, device_id)
+            self._validate_tool_refs(
+                owner_id,
+                tool_refs,
+                device_id,
+                existing_refs=list(existing.tool_refs or []),
+            )
             fields["tool_refs"] = tool_refs
         if "skill_refs" in provided:
-            skill_refs = [r.model_dump() for r in (data.skill_refs or [])]
-            self._validate_skill_refs(owner_id, skill_refs, device_id)
+            skill_refs = self._dedupe_skill_refs([r.model_dump() for r in (data.skill_refs or [])])
+            self._validate_skill_refs(
+                owner_id,
+                skill_refs,
+                device_id,
+                existing_refs=list(existing.skill_refs or []),
+            )
             fields["skill_refs"] = skill_refs
 
         for key in (
@@ -420,7 +434,7 @@ class CustomAgentService:
     ) -> dict[str, Any]:
         self._validate_model(owner_id, data.provider_type, data.model)
         tool_refs = self._dedupe_tool_refs([r.model_dump() for r in data.tool_refs])
-        skill_refs = [r.model_dump() for r in data.skill_refs]
+        skill_refs = self._dedupe_skill_refs([r.model_dump() for r in data.skill_refs])
         self._validate_tool_refs(owner_id, tool_refs, device_id)
         self._validate_skill_refs(owner_id, skill_refs, device_id)
         return {
@@ -451,15 +465,46 @@ class CustomAgentService:
         deduped: list[dict[str, Any]] = []
         for ref in tool_refs:
             if ref.get("type") == "client":
+                logical_key = client_tool_logical_key(ref)
                 key: tuple[Any, ...] = (
-                    "client",
-                    ref.get("qualified_tool_id"),
-                    ref.get("device_id"),
-                    ref.get("session_id"),
-                    ref.get("tool_instance_id"),
+                    ("client", *logical_key)
+                    if logical_key is not None
+                    else (
+                        "client-invalid",
+                        ref.get("device_id"),
+                        ref.get("tool_instance_id"),
+                    )
                 )
             else:
                 key = ("server", ref.get("qualified_tool_id"))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(ref)
+        return deduped
+
+    @staticmethod
+    def _dedupe_skill_refs(skill_refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Collapse duplicate skill refs by normalized logical identity, first-seen order.
+
+        Legacy ``source="server"`` refs normalize to client (server-owned skills were
+        removed), so a legacy ref and its current client ref for the same skill are
+        one selection.
+        """
+        seen: set[tuple[Any, ...]] = set()
+        deduped: list[dict[str, Any]] = []
+        for ref in skill_refs:
+            logical_key = skill_logical_key(ref)
+            key = (
+                ("skill", *logical_key)
+                if logical_key is not None
+                else (
+                    "skill-invalid",
+                    ref.get("source"),
+                    ref.get("lookup_name"),
+                    ref.get("name"),
+                )
+            )
             if key in seen:
                 continue
             seen.add(key)
@@ -477,56 +522,74 @@ class CustomAgentService:
             ) from exc
 
     def _validate_tool_refs(
-        self, owner_id: UUID, tool_refs: list[dict[str, Any]], device_id: str | None
+        self,
+        owner_id: UUID,
+        tool_refs: list[dict[str, Any]],
+        device_id: str | None,
+        *,
+        existing_refs: list[dict[str, Any]] | None = None,
     ) -> None:
         if not tool_refs:
             return
-        available = {
-            (t.get("qualified_tool_id"), t.get("device_id"), t.get("tool_instance_id"))
-            for t in self._list_client_tool_refs(str(owner_id), device_id)
+        available_client_bindings = {
+            key
+            for tool in self._list_client_tool_refs(str(owner_id), device_id)
+            if (key := client_tool_binding_key(tool)) is not None
+        }
+        existing_client_keys = {
+            key
+            for ref in (existing_refs or [])
+            if (key := client_tool_logical_key(ref)) is not None
         }
         available_server_ids = {
-            str(t.get("qualified_tool_id"))
-            for t in self._list_server_tool_refs()
-            if t.get("qualified_tool_id")
+            str(tool.get("qualified_tool_id"))
+            for tool in self._list_server_tool_refs()
+            if tool.get("qualified_tool_id")
         }
         for ref in tool_refs:
             ref_type = ref.get("type")
             if ref_type in {"server_mcp", "server_default"}:
                 if str(ref.get("qualified_tool_id")) not in available_server_ids:
                     raise CustomAgentValidationError(
-                        detail=(
-                            f"Server MCP tool '{ref.get('qualified_tool_id')}' is not available"
-                        ),
+                        detail=f"Server MCP tool '{ref.get('qualified_tool_id')}' is not available",
                     )
-            elif ref_type == "client":
-                key = (
-                    ref.get("qualified_tool_id"),
-                    ref.get("device_id"),
-                    ref.get("tool_instance_id"),
-                )
-                if key not in available:
-                    raise CustomAgentValidationError(
-                        detail=(
-                            f"Client tool '{ref.get('qualified_tool_id')}' is not available "
-                            "in the active device catalog"
-                        ),
-                    )
-            else:
+                continue
+            if ref_type != "client":
                 raise CustomAgentValidationError(detail=f"Invalid tool ref type: {ref_type}")
+            logical_key = client_tool_logical_key(ref)
+            binding_key = client_tool_binding_key(ref)
+            if logical_key is None or (
+                logical_key not in existing_client_keys
+                and binding_key not in available_client_bindings
+            ):
+                raise CustomAgentValidationError(
+                    detail=(
+                        f"Client tool '{ref.get('qualified_tool_id')}' is not available "
+                        "in the active device catalog"
+                    ),
+                )
 
     def _validate_skill_refs(
-        self, owner_id: UUID, skill_refs: list[dict[str, Any]], device_id: str | None
+        self,
+        owner_id: UUID,
+        skill_refs: list[dict[str, Any]],
+        device_id: str | None,
+        *,
+        existing_refs: list[dict[str, Any]] | None = None,
     ) -> None:
         if not skill_refs:
             return
-        available = {
-            (s.get("source"), s.get("lookup_name"))
-            for s in self._list_skill_refs(str(owner_id), device_id)
-        }
+        available_skills = self._list_skill_refs(str(owner_id), device_id)
+        existing_skills = list(existing_refs or [])
         for ref in skill_refs:
-            key = (ref.get("source"), ref.get("lookup_name"))
-            if key not in available:
+            retains_existing = any(skill_refs_match(ref, old) for old in existing_skills)
+            is_exact_live_option = any(
+                str(ref.get("source") or "") == str(live.get("source") or "")
+                and str(ref.get("lookup_name") or "") == str(live.get("lookup_name") or "")
+                and str(ref.get("name") or "") == str(live.get("name") or "")
+                for live in available_skills
+            )
+            if not retains_existing and not is_exact_live_option:
                 raise CustomAgentValidationError(
                     detail=f"Skill '{ref.get('lookup_name')}' is not available",
                 )
