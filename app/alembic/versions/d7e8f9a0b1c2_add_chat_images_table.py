@@ -52,11 +52,9 @@ def upgrade() -> None:
     )
     op.create_index("ix_chat_images_conversation_id", "chat_images", ["conversation_id"])
     op.create_index("ix_chat_images_user_id", "chat_images", ["user_id"])
-    op.create_index("ix_chat_images_sha256", "chat_images", ["sha256"])
 
 
 def downgrade() -> None:
-    op.drop_index("ix_chat_images_sha256", table_name="chat_images")
     op.drop_index("ix_chat_images_user_id", table_name="chat_images")
     op.drop_index("ix_chat_images_conversation_id", table_name="chat_images")
     op.drop_table("chat_images")

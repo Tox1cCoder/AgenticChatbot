@@ -24,12 +24,6 @@ class _Repo:
             return row
         return None
 
-    def find_active_by_sha_for_user(self, sha256, user_id):
-        for row in self.rows.values():
-            if row.sha256 == sha256 and row.user_id == user_id:
-                return row
-        return None
-
 
 def _svc(tmp_path, max_bytes=1024):
     return ChatImageStorageService(

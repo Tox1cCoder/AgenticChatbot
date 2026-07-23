@@ -66,9 +66,3 @@ def test_get_for_user_returns_row():
     marker = object()
     repo = ChatImageRepository(_factory(_FakeSession(rows=[marker])))
     assert repo.get_for_user(uuid4(), uuid4()) is marker
-
-
-def test_find_active_by_sha_for_user_returns_row():
-    marker = object()
-    repo = ChatImageRepository(_factory(_FakeSession(rows=[marker])))
-    assert repo.find_active_by_sha_for_user("a" * 64, uuid4()) is marker

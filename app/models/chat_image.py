@@ -24,7 +24,7 @@ class ChatImage(Base):
         UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False, index=True
     )
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
-    sha256 = Column(String(64), nullable=False, index=True)
+    sha256 = Column(String(64), nullable=False)
     size_bytes = Column(Integer, nullable=False)
     content_type = Column(String(128), nullable=False, default="image/png")
     storage_path = Column(String(1024), nullable=False)

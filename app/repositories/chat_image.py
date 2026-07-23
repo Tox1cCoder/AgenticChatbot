@@ -30,12 +30,3 @@ class ChatImageRepository:
                 ChatImage.deleted_at.is_(None),
             )
             return db.execute(statement).scalars().first()
-
-    def find_active_by_sha_for_user(self, sha256: str, user_id: UUID) -> ChatImage | None:
-        with self.session_factory() as db:
-            statement = select(ChatImage).where(
-                ChatImage.sha256 == sha256,
-                ChatImage.user_id == user_id,
-                ChatImage.deleted_at.is_(None),
-            )
-            return db.execute(statement).scalars().first()
