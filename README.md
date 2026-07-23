@@ -486,7 +486,7 @@ The server accepts either a fully-formed URL (`REDIS_URL`) or a hostname + conve
 | `CLIENT_DEVICE_NAME` | — |
 | `CLIENT_SKILLS_ROOTS` | comma-separated absolute paths for local skill scanning |
 | `CLIENT_WORKSPACE_ROOTS` | comma-separated absolute paths for local filesystem tools |
-| `CLIENT_MCP_CONFIG_PATH` | optional explicit path |
+| `CLIENT_MCP_CONFIG_PATH` | optional legacy source path for the one-time `mcp migrate` command |
 | `CLIENT_MCP_STARTUP_TIMEOUT_SECONDS` | `30` |
 | `CLIENT_TOOL_CALL_TIMEOUT_SECONDS` | `60` |
 | `CLIENT_HEARTBEAT_INTERVAL_SECONDS` | `30` |
@@ -756,7 +756,7 @@ The bundled in-process MCP servers are under [`app/ai/mcp_servers/`](app/ai/mcp_
 
 The same endpoints are exposed by `client_backend` at `/mcp/*` so a desktop UI can configure MCP both globally (server) and per-device (client).
 
-**Global default tools.** Enabled servers in [`app/ai/mcp_config.json`](app/ai/mcp_config.json) are by definition global-default tools, visible to every client (currently `time`, `tavily`, `widgets`, `brave_image_search` — enforced by `tests/test_mcp_global_allowlist.py`). `brave_image_search` is pinned by default for the chat and search agents; other agents can discover it via `tool_search`. Anything machine-specific (e.g. desktop-commander, excel) belongs in a sidecar's local MCP config (`<profile>/mcp/mcp_config.json`, same `mcpServers` JSON shape), where it becomes a device-scoped `client__` tool.
+**Global default tools.** Enabled servers in [`app/ai/mcp_config.json`](app/ai/mcp_config.json) are by definition global-default tools, visible to every client (currently `time`, `tavily`, `widgets`, `brave_image_search` — enforced by `tests/test_mcp_global_allowlist.py`). `brave_image_search` is pinned by default for the chat and search agents; other agents can discover it via `tool_search`. Machine-specific servers (for example, desktop-commander or Excel) belong to the sidecar schema-v2 profile at `<profile>/<server-hash>/<user-id>/devices/<device-identifier>/mcp/config.v2.json`; credentials are stored separately in encrypted form. Use `python -m client_backend mcp migrate` once for an authenticated session, then verify with `python -m client_backend mcp doctor --servers widgets,tavily,time`.
 
 `tavily` is one global server with multiple retrieval tools. Only `tavily_search` is pinned for the search agent; `tavily_extract`, `tavily_map`, and `tavily_crawl` are discovered through `tool_search` when needed.
 

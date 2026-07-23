@@ -43,6 +43,11 @@ def test_client_backend_bundle_can_import_local_skills_registry(tmp_path):
     assert build.returncode == 0, build.stderr or build.stdout
 
     bundle_root = output_root / "client-backend-bundle"
+    assert (bundle_root / "app" / "ai" / "mcp_config.json").is_file()
+    assert (
+        bundle_root / "app" / "ai" / "mcp_servers" / "time_server.py"
+    ).is_file()
+    assert (bundle_root / "app" / "services" / "widget_runtime.py").is_file()
     probe = subprocess.run(
         [
             sys.executable,
