@@ -282,6 +282,24 @@ def test_two_custom_agents_do_not_share_deferred_tool_state():
     assert agent_a.agent_config_key == agent_b.agent_config_key == "custom"
 
 
+def test_custom_agent_binding_honors_excluded_tool_names():
+    from app.ai.agents.custom_agent import CustomAgent
+
+    agent = CustomAgent(_spec())
+    agent.tools = []
+    blocked = _FakeTool("blocked_tool", {})
+    retained = _FakeTool("retained_tool", {})
+
+    tools = agent._get_tools_for_binding(
+        internal_tools=[blocked, retained],
+        excluded_tool_names={"blocked_tool"},
+    )
+    names = {tool.name for tool in tools}
+
+    assert "blocked_tool" not in names
+    assert "retained_tool" in names
+
+
 def test_custom_agent_initial_binding_defers_selected_server_tools():
     from app.ai.agents.custom_agent import CustomAgent
     from app.ai.deferred_tool_state import reset_deferred_tool_state

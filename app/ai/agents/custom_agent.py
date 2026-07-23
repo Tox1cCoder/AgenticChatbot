@@ -177,6 +177,7 @@ class CustomAgent(BaseAgent):
         device_id: str | None = None,
         tool_scope: str | None = None,
         include_hand_off: bool | None = None,
+        excluded_tool_names: set[str] | frozenset[str] | None = None,
     ) -> list[BaseTool]:
         """Bind exactly the restricted toolset (same set used for execution).
 
@@ -265,11 +266,12 @@ class CustomAgent(BaseAgent):
             tools.append(tool)
         tools.extend(external)
 
+        excluded = set(excluded_tool_names or ())
         seen: set[str] = set()
         deduped: list[BaseTool] = []
         for tool in tools:
             name = getattr(tool, "name", None)
-            if name in seen:
+            if name in excluded or name in seen:
                 continue
             seen.add(name)
             deduped.append(tool)
