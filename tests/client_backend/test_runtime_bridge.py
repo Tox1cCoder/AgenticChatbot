@@ -486,3 +486,39 @@ async def test_start_waits_when_connected_event_is_stale_during_reconnect():
 
     assert connected is False
     assert bridge._connected_event.is_set() is False
+
+
+@pytest.mark.asyncio
+async def test_initial_ready_event_waits_for_catalog_sync(monkeypatch):
+    bridge = RuntimeBridgeService(server_client=_ServerClientStub())
+    sync_started = asyncio.Event()
+    release_sync = asyncio.Event()
+
+    async def _blocked_refresh():
+        sync_started.set()
+        await release_sync.wait()
+
+    monkeypatch.setattr(bridge, "refresh_catalogs", _blocked_refresh)
+    task = asyncio.create_task(bridge._sync_initial_catalogs_and_mark_ready())
+    await sync_started.wait()
+
+    assert bridge._connected_event.is_set() is False
+
+    release_sync.set()
+    await task
+    assert bridge._connected_event.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_failed_initial_catalog_sync_never_publishes_ready(monkeypatch):
+    bridge = RuntimeBridgeService(server_client=_ServerClientStub())
+
+    async def _failed_refresh():
+        raise RuntimeError("catalog upload failed")
+
+    monkeypatch.setattr(bridge, "refresh_catalogs", _failed_refresh)
+
+    with pytest.raises(RuntimeError, match="catalog upload failed"):
+        await bridge._sync_initial_catalogs_and_mark_ready()
+
+    assert bridge._connected_event.is_set() is False

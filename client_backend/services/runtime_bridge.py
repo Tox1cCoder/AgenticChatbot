@@ -384,6 +384,12 @@ class RuntimeBridgeService:
             capabilities=capabilities,
         )
 
+    async def _sync_initial_catalogs_and_mark_ready(self) -> None:
+        """Publish readiness only after both device catalogs are durable upstream."""
+        self._connected_event.clear()
+        await self.refresh_catalogs()
+        self._connected_event.set()
+
     async def _connect_and_serve(self) -> None:
         try:
             from websockets import connect as websocket_connect
@@ -422,10 +428,8 @@ class RuntimeBridgeService:
                 session_id=self._session_id,
                 error_message=None,
             )
-            self._connected_event.set()
 
-            await self.refresh_catalogs()
-
+            await self._sync_initial_catalogs_and_mark_ready()
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
             try:
                 await self._receive_loop()
