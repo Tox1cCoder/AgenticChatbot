@@ -6,7 +6,7 @@
 
 **Architecture:** Treat saved client references as account-wide desired capabilities keyed by exact logical identity, then resolve them into the requesting device's current session/catalog identity before strict authorization and dispatch. A shared pure resolver drives management availability and runtime warnings, while the sidecar publishes readiness only after both catalogs sync. Skills and HITL remain device-local and receive explicit two-device regression coverage.
 
-**Tech Stack:** Python 3.12, FastAPI, Pydantic v2, SQLAlchemy 2/JSONB, LangChain tools, Redis-backed runtime sessions, Streamlit, pytest, Ruff.
+**Tech Stack:** Python 3.10+ (verified with the repository's Python 3.13 virtualenv), FastAPI, Pydantic v2, SQLAlchemy 2/JSONB, LangChain tools, Redis-backed runtime sessions, Streamlit, pytest, Ruff.
 
 ---
 
@@ -17,6 +17,35 @@
 - Existing device/HITL contract: `plans/SKILLS_MCP_HITL_FE_CONTRACT.md`
 - Existing reconnect behavior: `tests/test_custom_agent_client_tool_resync.py`
 - Existing device isolation: `tests/test_multi_sidecar_hardening.py`, `tests/test_client_tool_isolation.py`, `tests/test_hitl_settings_device_isolation.py`
+
+## Plan Audit Corrections
+
+This plan was re-checked against the codebase on 2026-07-23. The following details
+are intentional corrections to the first draft and are requirements for execution:
+
+1. A server session is not a ready device snapshot until **both** catalog version
+   counters are greater than zero. A connected-but-not-yet-synced session returns an
+   unavailable snapshot with empty client options, so a concurrent direct API request
+   cannot label the transient empty catalogs as ready.
+2. Management reads load snapshot identity before and after their tool/skill reads.
+   They return a ready snapshot only when those identities agree, preventing options
+   from being cached under metadata belonging to a different reconnect/resync.
+3. The resolver returns only live, current-session client refs for runtime binding.
+   Missing saved refs stay in persistence/read payloads, but never enter the runtime
+   allowlist. This yields one resolver warning per missing logical capability instead
+   of a second, differently worded strict-filter warning for the same absence.
+4. A **new** client-tool selection must match the full active option identity
+   `(server_name, qualified_tool_id, device_id, session_id, catalog_version,
+   tool_instance_id, tool_name)`. Stable logical identity is used only to retain an
+   already-saved intent. This prevents a fabricated binding from passing validation
+   merely because its server/tool pair exists.
+5. Existing legacy `source="server"` skill refs may be retained and resolved as
+   client refs, but newly submitted legacy-source refs are not accepted as current
+   options. Tool and skill selections are both deduplicated by normalized logical
+   identity.
+6. Test fixtures distinguish the model-callable name (`client__csv__profile`) from
+   the real qualified ID (`csv::profile`), matching `client_runtime_tools.py` and
+   `local_mcp_manager.py`.
 
 ## Summary
 
@@ -36,11 +65,13 @@ No database migration is needed. Existing JSONB refs already contain `server_nam
 | Persistence | Keep `custom_agents.tool_refs` and `skill_refs` JSONB unchanged. |
 | Stable MCP identity | Exact `(server_name, qualified_tool_id)`. No fuzzy or bare-name matching. |
 | Stable skill identity | Client source plus compatible `lookup_name`/`name`; legacy saved `source="server"` normalizes to client because server-owned skills were removed. |
-| Runtime authorization | Rebuild current device/session/catalog/instance ref, then retain the existing five-field strict matcher and sidecar validation. |
-| Missing capability | Skip capability, mark agent degraded, warn before and after execution, continue agent run. |
+| Runtime authorization | Rebuild only resolved refs with current device/session/catalog/instance identity, then retain the existing five-field strict matcher and sidecar validation. Missing refs never enter the runtime allowlist. |
+| New-selection validation | Require a full exact active-option identity. Stable logical keys authorize retention only when that intent already exists on the same agent. |
+| Missing capability | Skip capability, mark agent degraded, emit one warning per logical key before and after execution, continue agent run. |
 | Device ownership | Reuse `ClientDeviceService.lookup_active_session()` plus exact `session.user_id` comparison. |
 | API compatibility | Add `deviceSnapshot` and `availability`; preserve current fields and aliases. |
-| Cache boundary | `(deviceId, sessionId, toolCatalogVersion, skillCatalogVersion)`. |
+| Snapshot readiness | `ready` requires caller ownership and both catalog versions `> 0`; otherwise client options are empty and the snapshot is `unavailable`. |
+| Cache boundary | `(deviceId, sessionId, toolCatalogVersion, skillCatalogVersion)` read consistently before/after catalog materialization. Never cache an unavailable snapshot as ready data. |
 | Test database | Existing Custom Agent service/API tests use configured PostgreSQL because JSONB is required. |
 
 ## Constitution Check
@@ -103,6 +134,12 @@ class CustomAgentOptions(_CamelModel):
     device_snapshot: DeviceCatalogSnapshot
 ```
 
+`DeviceCatalogSnapshot.status="unavailable"` means there is no complete,
+caller-owned snapshot to consume. It covers an offline/unowned device and the short
+window where a WebSocket session exists but either catalog version is still zero.
+The version fields may therefore be `0` (sync in progress) or `null` (no session);
+only `status="ready"` authorizes use/caching of the returned client option lists.
+
 Example degraded response:
 
 ```json
@@ -154,6 +191,7 @@ Example degraded response:
 - `demo.py`: stable cross-device matching, degraded hints, and preservation of missing refs.
 - `tests/test_demo_custom_agents.py`: Streamlit helper regressions.
 - `tests/test_hitl_settings_device_isolation.py`: same-server-name device policy isolation.
+- `tests/test_hitl_turn_policy_injection.py`, `tests/test_hitl_gate_policy.py`: adjacent verification that the selected device policy reaches the execution gate.
 - `tests/test_skill_device_isolation.py`: same-user client skill isolation.
 - `plans/CUSTOM_AGENTS_FE_CONTRACT.md`: frontend state, cache, matching, and warnings.
 - `README.md`: concise account-wide intent/device-local execution behavior.
@@ -371,8 +409,10 @@ Create the test file:
 
 ```python
 from app.services.custom_agent_capability_resolver import (
+    client_tool_binding_key,
     client_tool_logical_key,
     resolve_custom_agent_capabilities,
+    skill_refs_match,
 )
 
 
@@ -415,9 +455,9 @@ def test_same_logical_mcp_rebinds_to_current_device_identity():
 
     assert result.status == "ready"
     assert result.missing_tools == []
-    assert result.effective_client_tool_refs[0]["device_id"] == "device-b"
-    assert result.effective_client_tool_refs[0]["session_id"] == "session-b"
-    assert result.effective_client_tool_refs[0]["tool_instance_id"] == "instance-b"
+    assert result.resolved_client_tool_refs[0]["device_id"] == "device-b"
+    assert result.resolved_client_tool_refs[0]["session_id"] == "session-b"
+    assert result.resolved_client_tool_refs[0]["tool_instance_id"] == "instance-b"
 
 
 def test_same_tool_name_under_different_server_is_missing():
@@ -436,13 +476,13 @@ def test_same_tool_name_under_different_server_is_missing():
     )
 
     assert result.status == "degraded"
-    assert result.effective_client_tool_refs == [SAVED_TOOL]
+    assert result.resolved_client_tool_refs == []
     assert result.missing_tools[0]["qualified_tool_id"] == (
         "desktop-commander::read_file"
     )
 
 
-def test_missing_skill_degrades_and_legacy_server_source_matches_client():
+def test_missing_skill_degrades_and_legacy_server_source_matches_client_once():
     missing = resolve_custom_agent_capabilities(
         selected_tool_refs=[],
         selected_skill_refs=[
@@ -469,6 +509,9 @@ def test_missing_skill_degrades_and_legacy_server_source_matches_client():
     assert missing.status == "degraded"
     assert missing.missing_skills[0]["lookup_name"] == "kobo-library"
     assert compatible.status == "ready"
+    assert missing.warnings == [
+        "Selected skill 'kobo-library' is not available on this device."
+    ]
 
 
 def test_local_dependencies_without_session_are_device_unavailable():
@@ -482,6 +525,7 @@ def test_local_dependencies_without_session_are_device_unavailable():
     )
 
     assert result.status == "device_unavailable"
+    assert result.resolved_client_tool_refs == []
     assert len(result.warnings) == 1
 
 
@@ -496,7 +540,7 @@ def test_same_logical_tool_on_non_request_device_is_not_a_candidate():
     )
 
     assert result.status == "degraded"
-    assert result.effective_client_tool_refs == [SAVED_TOOL]
+    assert result.resolved_client_tool_refs == []
 
 
 def test_client_tool_logical_key_rejects_incomplete_or_server_refs():
@@ -506,6 +550,41 @@ def test_client_tool_logical_key_rejects_incomplete_or_server_refs():
     )
     assert client_tool_logical_key({"type": "client", "qualified_tool_id": "x::y"}) is None
     assert client_tool_logical_key({"type": "server_mcp", "server_name": "x", "qualified_tool_id": "x::y"}) is None
+
+
+def test_binding_key_covers_every_submitted_live_identity_field():
+    assert client_tool_binding_key(SAVED_TOOL) == (
+        "desktop-commander",
+        "desktop-commander::read_file",
+        "device-a",
+        "session-a",
+        "1",
+        "instance-a",
+        "read_file",
+    )
+
+
+def test_duplicate_missing_refs_emit_one_missing_entry_and_warning():
+    result = resolve_custom_agent_capabilities(
+        selected_tool_refs=[SAVED_TOOL, dict(SAVED_TOOL)],
+        selected_skill_refs=[],
+        live_tool_refs=[],
+        live_skill_refs=[],
+        request_device_id="device-b",
+        device_available=True,
+    )
+
+    assert len(result.missing_tools) == 1
+    assert len(result.warnings) == 1
+
+
+def test_legacy_skill_ref_matches_current_client_ref_but_not_another_name():
+    legacy = {"source": "server", "lookup_name": "kobo-library", "name": "kobo-library"}
+    current = {"source": "client", "lookup_name": "kobo-library", "name": "kobo-library"}
+    other = {"source": "client", "lookup_name": "calendar", "name": "calendar"}
+
+    assert skill_refs_match(legacy, current) is True
+    assert skill_refs_match(legacy, other) is False
 ```
 
 - [ ] **Step 2: Run resolver tests and verify RED**
@@ -541,7 +620,7 @@ _LIVE_IDENTITY_FIELDS = (
 @dataclass(frozen=True)
 class CapabilityResolution:
     status: CapabilityStatus
-    effective_client_tool_refs: list[dict[str, Any]]
+    resolved_client_tool_refs: list[dict[str, Any]]
     missing_tools: list[dict[str, Any]]
     missing_skills: list[dict[str, Any]]
     warnings: list[str]
@@ -559,18 +638,42 @@ def _mapping(value: Any) -> dict[str, Any]:
         "source": getattr(value, "source", None),
         "lookup_name": getattr(value, "lookup_name", None),
         "name": getattr(value, "name", None),
+        "device_id": getattr(value, "bound_device_id", None),
+        "session_id": getattr(value, "bound_session_id", None),
     }
 
 
 def client_tool_logical_key(value: Any) -> tuple[str, str] | None:
     item = _mapping(value)
-    if str(item.get("type") or "client") != "client":
+    explicit_type = str(item.get("type") or "").strip()
+    if explicit_type and explicit_type != "client":
+        return None
+    if not explicit_type and not (
+        bool(item.get("is_client_tool"))
+        or "client" in str(item.get("tool_origin") or item.get("origin") or "")
+    ):
         return None
     server_name = str(item.get("server_name") or "").strip()
     qualified_id = str(item.get("qualified_tool_id") or "").strip()
     if not server_name or not qualified_id:
         return None
     return server_name, qualified_id
+
+
+def client_tool_binding_key(value: Any) -> tuple[str, ...] | None:
+    """Full identity required when a caller submits a new current option."""
+    item = _mapping(value)
+    logical = client_tool_logical_key(item)
+    fields = (
+        item.get("device_id"),
+        item.get("session_id"),
+        item.get("catalog_version"),
+        item.get("tool_instance_id"),
+        item.get("tool_name") or item.get("source_tool_name"),
+    )
+    if logical is None or any(not str(field or "").strip() for field in fields):
+        return None
+    return (*logical, *(str(field) for field in fields))
 
 
 def _skill_aliases(value: Any) -> tuple[str, set[str]]:
@@ -586,6 +689,26 @@ def _skill_aliases(value: Any) -> tuple[str, set[str]]:
     return source, aliases
 
 
+def skill_logical_key(value: Any) -> tuple[str, str] | None:
+    item = _mapping(value)
+    source, aliases = _skill_aliases(item)
+    lookup_name = str(item.get("lookup_name") or item.get("name") or "").strip()
+    if not source or not lookup_name or not aliases:
+        return None
+    return source, lookup_name
+
+
+def skill_refs_match(left: Any, right: Any) -> bool:
+    left_source, left_aliases = _skill_aliases(left)
+    right_source, right_aliases = _skill_aliases(right)
+    return bool(
+        left_source
+        and left_source == right_source
+        and left_aliases
+        and left_aliases & right_aliases
+    )
+
+
 def resolve_custom_agent_capabilities(
     *,
     selected_tool_refs: list[dict[str, Any]],
@@ -599,21 +722,25 @@ def resolve_custom_agent_capabilities(
         ref for ref in selected_tool_refs if str(ref.get("type") or "") == "client"
     ]
     live_by_key: dict[tuple[str, str], dict[str, Any]] = {}
-    for tool in live_tool_refs:
+    for tool in live_tool_refs if device_available and request_device_id else []:
         item = _mapping(tool)
         if request_device_id and str(item.get("device_id") or "") != str(request_device_id):
             continue
         key = client_tool_logical_key(item)
         if key is not None:
             live_by_key[key] = item
-    effective: list[dict[str, Any]] = []
+    resolved: list[dict[str, Any]] = []
     missing_tools: list[dict[str, Any]] = []
     warnings: list[str] = []
+    missing_tool_keys: set[tuple[Any, ...]] = set()
 
     for ref in selected_clients:
         live = live_by_key.get(client_tool_logical_key(ref))
         if live is None:
-            effective.append(ref)
+            missing_key = client_tool_logical_key(ref) or ("invalid", id(ref))
+            if missing_key in missing_tool_keys:
+                continue
+            missing_tool_keys.add(missing_key)
             missing = {
                 "server_name": str(ref.get("server_name") or ""),
                 "qualified_tool_id": str(ref.get("qualified_tool_id") or ""),
@@ -628,14 +755,18 @@ def resolve_custom_agent_capabilities(
         for field in _LIVE_IDENTITY_FIELDS:
             if live.get(field) is not None:
                 rebound[field] = live[field]
-        effective.append(rebound)
+        resolved.append(rebound)
 
-    live_skills = [_skill_aliases(skill) for skill in live_skill_refs]
+    live_skills = list(live_skill_refs) if device_available and request_device_id else []
     missing_skills: list[dict[str, Any]] = []
+    missing_skill_keys: set[tuple[Any, ...]] = set()
     for ref in selected_skill_refs:
-        source, aliases = _skill_aliases(ref)
-        if any(source == live_source and aliases & live_aliases for live_source, live_aliases in live_skills):
+        if any(skill_refs_match(ref, live) for live in live_skills):
             continue
+        missing_key = skill_logical_key(ref) or ("invalid", id(ref))
+        if missing_key in missing_skill_keys:
+            continue
+        missing_skill_keys.add(missing_key)
         lookup_name = str(ref.get("lookup_name") or ref.get("name") or "")
         name = str(ref.get("name") or lookup_name)
         missing_skills.append({"lookup_name": lookup_name, "name": name})
@@ -651,7 +782,7 @@ def resolve_custom_agent_capabilities(
 
     return CapabilityResolution(
         status=status,
-        effective_client_tool_refs=effective,
+        resolved_client_tool_refs=resolved,
         missing_tools=missing_tools,
         missing_skills=missing_skills,
         warnings=list(dict.fromkeys(warnings)),
@@ -662,7 +793,7 @@ During implementation, keep the shown API and assertions exact. Formatting may w
 
 - [ ] **Step 4: Run resolver tests and verify GREEN**
 
-Run the Step 2 command. Expected: six tests pass.
+Run the Step 2 command. Expected: nine tests pass.
 
 - [ ] **Step 5: Run Ruff on the new unit**
 
@@ -700,6 +831,14 @@ def _fake_skills(user_id, device_id):
 
 
 def _fake_device_snapshot(user_id, device_id):
+    if device_id == "syncing-desktop":
+        return {
+            "device_id": device_id,
+            "session_id": "syncing-session",
+            "tool_catalog_version": 0,
+            "skill_catalog_version": 0,
+            "status": "unavailable",
+        }
     if device_id != "desktop-1":
         return {
             "device_id": device_id,
@@ -728,7 +867,7 @@ def test_contextual_read_reports_missing_local_capabilities(env):
         "catalog_version": "v1",
         "tool_instance_id": "csv-profile-instance",
         "server_name": "csv",
-        "qualified_tool_id": "client__csv__profile",
+        "qualified_tool_id": "csv::profile",
         "tool_name": "profile",
     }
     created = env.service.create_agent(
@@ -743,7 +882,7 @@ def test_contextual_read_reports_missing_local_capabilities(env):
     assert read.availability is not None
     assert read.availability.status == "degraded"
     assert read.availability.missing_tools[0].qualified_tool_id == (
-        "client__csv__profile"
+        "csv::profile"
     )
 
 
@@ -756,12 +895,43 @@ async def test_options_echo_complete_device_snapshot(env):
     assert options.device_snapshot.session_id == "session-1"
     assert options.device_snapshot.tool_catalog_version == 1
     assert options.device_snapshot.skill_catalog_version == 2
+
+
+@pytest.mark.asyncio
+async def test_options_never_label_unsynced_empty_catalogs_ready(env):
+    options = await env.service.get_options(env.owner_id, device_id="syncing-desktop")
+
+    assert options.device_snapshot.status == "unavailable"
+    assert options.client_tools == []
+    assert options.skills == []
+
+
+def test_context_retries_when_snapshot_rotates_during_catalog_read(env):
+    snapshots = iter([
+        {"device_id": "desktop-1", "session_id": "s1", "tool_catalog_version": 1,
+         "skill_catalog_version": 1, "status": "ready"},
+        {"device_id": "desktop-1", "session_id": "s2", "tool_catalog_version": 1,
+         "skill_catalog_version": 1, "status": "ready"},
+        {"device_id": "desktop-1", "session_id": "s2", "tool_catalog_version": 1,
+         "skill_catalog_version": 1, "status": "ready"},
+    ])
+    tool_reads = iter([[{"session_id": "s1"}], [{"session_id": "s2"}]])
+    env.service._get_device_snapshot = lambda _u, _d: next(snapshots)
+    env.service._list_client_tool_refs = lambda _u, _d: next(tool_reads)
+    env.service._list_skill_refs = lambda _u, _d: []
+
+    snapshot, tools, _skills = env.service._load_device_context(
+        env.owner_id, "desktop-1"
+    )
+
+    assert snapshot["session_id"] == "s2"
+    assert tools == [{"session_id": "s2"}]
 ```
 
 - [ ] **Step 2: Run service tests and verify RED**
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_custom_agents_service.py -k "contextual_read or complete_device_snapshot" -q
+.\.venv\Scripts\python.exe -m pytest tests/test_custom_agents_service.py -k "contextual_read or complete_device_snapshot or unsynced_empty or snapshot_rotates" -q
 ```
 
 Expected: constructor/signature/field failures because snapshot lookup and contextual availability are absent.
@@ -800,6 +970,14 @@ def _default_get_device_snapshot(user_id: str | None, device_id: str | None) -> 
     session = ClientDeviceService.lookup_active_session(device_uuid)
     if session is None or str(session.user_id) != str(user_id):
         return unavailable
+    if session.tool_catalog_version <= 0 or session.skill_catalog_version <= 0:
+        return {
+            "device_id": str(session.device_id),
+            "session_id": session.session_id,
+            "tool_catalog_version": session.tool_catalog_version,
+            "skill_catalog_version": session.skill_catalog_version,
+            "status": "unavailable",
+        }
     return {
         "device_id": str(session.device_id),
         "session_id": session.session_id,
@@ -813,13 +991,82 @@ Import `ClientDeviceService`, the new resolver, and schema types.
 
 - [ ] **Step 4: Build one contextual read path**
 
-Change service read signatures to:
+Add a consistency helper. It retries once if a reconnect/resync changes identity
+while catalogs are being materialized, then fails closed as unavailable rather than
+pairing one session's options with another session's cache key:
+
+```python
+@staticmethod
+def _snapshot_identity(snapshot: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        snapshot.get("device_id"),
+        snapshot.get("session_id"),
+        snapshot.get("tool_catalog_version"),
+        snapshot.get("skill_catalog_version"),
+        snapshot.get("status"),
+    )
+
+def _load_device_context(
+    self, owner_id: UUID, device_id: str | None
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    user_id = str(owner_id)
+    snapshot = self._get_device_snapshot(user_id, device_id)
+    if snapshot.get("status") != "ready":
+        return snapshot, [], []
+
+    for _attempt in range(2):
+        before = snapshot
+        live_tools = self._list_client_tool_refs(user_id, device_id)
+        live_skills = self._list_skill_refs(user_id, device_id)
+        after = self._get_device_snapshot(user_id, device_id)
+        if (
+            after.get("status") == "ready"
+            and self._snapshot_identity(before) == self._snapshot_identity(after)
+        ):
+            return after, live_tools, live_skills
+        snapshot = after
+        if snapshot.get("status") != "ready":
+            return snapshot, [], []
+
+    unstable = dict(snapshot)
+    unstable["status"] = "unavailable"
+    return unstable, [], []
+```
+
+Add the complete availability adapter:
+
+```python
+@staticmethod
+def _availability_for(
+    agent: CustomAgent,
+    *,
+    snapshot: dict[str, Any],
+    live_tools: list[dict[str, Any]],
+    live_skills: list[dict[str, Any]],
+) -> CustomAgentAvailability:
+    resolution = resolve_custom_agent_capabilities(
+        selected_tool_refs=list(agent.tool_refs or []),
+        selected_skill_refs=list(agent.skill_refs or []),
+        live_tool_refs=live_tools,
+        live_skill_refs=live_skills,
+        request_device_id=snapshot.get("device_id"),
+        device_available=snapshot.get("status") == "ready",
+    )
+    return CustomAgentAvailability(
+        status=resolution.status,
+        device_id=snapshot.get("device_id"),
+        session_id=snapshot.get("session_id"),
+        missing_tools=resolution.missing_tools,
+        missing_skills=resolution.missing_skills,
+        warnings=resolution.warnings,
+    )
+```
+
+Change service read signatures to use that single context:
 
 ```python
 def list_agents(self, owner_id: UUID, *, device_id: str | None = None) -> list[CustomAgentRead]:
-    snapshot = self._get_device_snapshot(str(owner_id), device_id)
-    live_tools = self._list_client_tool_refs(str(owner_id), device_id)
-    live_skills = self._list_skill_refs(str(owner_id), device_id)
+    snapshot, live_tools, live_skills = self._load_device_context(owner_id, device_id)
     return [
         self._to_read(
             agent,
@@ -835,24 +1082,43 @@ def get_agent(
     self, owner_id: UUID, custom_agent_id: UUID, *, device_id: str | None = None
 ) -> CustomAgentRead:
     agent = self._load_owned_or_raise(owner_id, custom_agent_id)
-    snapshot = self._get_device_snapshot(str(owner_id), device_id)
+    snapshot, live_tools, live_skills = self._load_device_context(owner_id, device_id)
     return self._to_read(
         agent,
         availability=self._availability_for(
             agent,
             snapshot=snapshot,
-            live_tools=self._list_client_tool_refs(str(owner_id), device_id),
-            live_skills=self._list_skill_refs(str(owner_id), device_id),
+            live_tools=live_tools,
+            live_skills=live_skills,
         ),
     )
 ```
 
-Implement `_availability_for()` by calling `resolve_custom_agent_capabilities()` with `request_device_id=snapshot.get("device_id")` and constructing `CustomAgentAvailability`. This keeps the shared resolver device-safe even if a caller accidentally supplies another device's live catalog. Change `_to_read()` to accept the optional availability and use `model_copy(update={"availability": availability})`.
-
-In `get_options()`, call the snapshot helper once and pass:
+Change `_to_read()` explicitly:
 
 ```python
-device_snapshot=DeviceCatalogSnapshot.model_validate(snapshot)
+@staticmethod
+def _to_read(
+    agent: CustomAgent,
+    availability: CustomAgentAvailability | None = None,
+) -> CustomAgentRead:
+    value = CustomAgentRead.model_validate(agent)
+    return value.model_copy(update={"availability": availability})
+```
+
+In `get_options()`, replace the independent catalog reads with:
+
+```python
+snapshot, client_tools, skills = self._load_device_context(owner_id, device_id)
+return CustomAgentOptions(
+    providers=await self._list_providers(owner_id),
+    server_default_tools=list(self._list_server_tool_refs()),
+    server_tools=[],
+    client_tools=client_tools,
+    client_servers=self._group_client_servers(client_tools),
+    skills=skills,
+    device_snapshot=DeviceCatalogSnapshot.model_validate(snapshot),
+)
 ```
 
 - [ ] **Step 5: Pass device context through list and single-read routes**
@@ -880,7 +1146,27 @@ async def get_custom_agent(
     )
 ```
 
-Add an API test that creates an agent and asserts `/ai/custom-agents?deviceId=...` and `/ai/custom-agents/{id}?deviceId=...` both serialize an `availability` object, while `/ai/custom-agents/options?deviceId=...` serializes `deviceSnapshot`.
+Add this API serialization test (the fake device ID intentionally has no active
+session, so it also locks the unavailable snapshot shape):
+
+```python
+def test_contextual_reads_and_options_serialize_camel_case_contract(api):
+    owner = api[0]
+    agent_id = owner.post("/custom-agents", json=_create_body()).json()["data"]["id"]
+
+    listed = owner.get("/ai/custom-agents?deviceId=desktop-1").json()["data"][0]
+    fetched = owner.get(
+        f"/ai/custom-agents/{agent_id}?deviceId=desktop-1"
+    ).json()["data"]
+    options = owner.get(
+        "/ai/custom-agents/options?deviceId=desktop-1"
+    ).json()["data"]
+
+    assert listed["availability"]["status"] == "ready"
+    assert fetched["availability"]["missingTools"] == []
+    assert options["deviceSnapshot"]["status"] == "unavailable"
+    assert "toolCatalogVersion" in options["deviceSnapshot"]
+```
 
 - [ ] **Step 6: Run service and API tests and verify GREEN**
 
@@ -905,7 +1191,9 @@ git commit -m "feat: expose custom agent device availability"
 
 - [ ] **Step 1: Write failing portable update and dedupe tests**
 
-Add service tests with one existing A ref and one live B ref sharing the exact logical key:
+First update `_fake_client_tools()` and its affected assertions so the fake uses
+`qualified_tool_id="csv::profile"`; keep `tool_name="profile"` and use
+`client__csv__profile` only where a model-callable tool name is expected. Then add:
 
 ```python
 def test_update_preserves_existing_unavailable_ref_but_rejects_new_fabricated_ref(env):
@@ -913,10 +1201,10 @@ def test_update_preserves_existing_unavailable_ref_but_rejects_new_fabricated_re
         "type": "client",
         "device_id": "desktop-1",
         "session_id": "session-1",
-        "catalog_version": "1",
+        "catalog_version": "v1",
         "tool_instance_id": "csv-profile-instance",
         "server_name": "csv",
-        "qualified_tool_id": "client__csv__profile",
+        "qualified_tool_id": "csv::profile",
         "tool_name": "profile",
     }
     created = env.service.create_agent(
@@ -943,6 +1231,26 @@ def test_update_preserves_existing_unavailable_ref_but_rejects_new_fabricated_re
         )
 
 
+def test_new_ref_requires_full_current_binding_not_only_live_logical_key(env):
+    forged = {
+        "type": "client",
+        "device_id": "desktop-1",
+        "session_id": "forged-session",
+        "catalog_version": "v1",
+        "tool_instance_id": "forged-instance",
+        "server_name": "csv",
+        "qualified_tool_id": "csv::profile",
+        "tool_name": "profile",
+    }
+
+    with pytest.raises(CustomAgentValidationError):
+        env.service.create_agent(
+            env.owner_id,
+            _payload(name="Forged", tool_refs=[forged]),
+            device_id="desktop-1",
+        )
+
+
 def test_client_ref_dedupe_uses_server_and_qualified_id_not_device_instance():
     a = {
         "type": "client",
@@ -960,14 +1268,59 @@ def test_client_ref_dedupe_uses_server_and_qualified_id_not_device_instance():
     )
 
     assert CustomAgentService._dedupe_tool_refs([a, b]) == [a]
-```
 
-Add equivalent skill coverage: an existing `kobo-library` ref may remain when absent, while a newly submitted unavailable `never-installed` ref is rejected.
+
+def test_existing_skill_survives_absence_but_new_and_legacy_source_do_not(env):
+    selected = {
+        "source": "client",
+        "lookup_name": "data-analysis",
+        "name": "data-analysis",
+    }
+    created = env.service.create_agent(
+        env.owner_id,
+        _payload(name="Skill Agent", skill_refs=[selected]),
+        device_id="desktop-1",
+    )
+    env.service._list_skill_refs = lambda _user_id, _device_id: []
+
+    preserved = env.service.update_agent(
+        env.owner_id,
+        created.id,
+        CustomAgentUpdate(prompt="Changed", skill_refs=[selected]),
+        device_id="not-connected",
+    )
+    assert preserved.skill_refs == [selected]
+
+    new_ref = {"source": "client", "lookup_name": "never-installed", "name": "never-installed"}
+    with pytest.raises(CustomAgentValidationError):
+        env.service.update_agent(
+            env.owner_id,
+            created.id,
+            CustomAgentUpdate(skill_refs=[selected, new_ref]),
+            device_id="not-connected",
+        )
+
+    env.service._list_skill_refs = _fake_skills
+    legacy_new = dict(selected, source="server")
+    with pytest.raises(CustomAgentValidationError):
+        env.service.create_agent(
+            env.owner_id,
+            _payload(name="Legacy New", skill_refs=[legacy_new]),
+            device_id="desktop-1",
+        )
+
+
+def test_skill_ref_dedupe_normalizes_legacy_server_source():
+    legacy = {"source": "server", "lookup_name": "kobo-library", "name": "kobo-library"}
+    current = dict(legacy, source="client")
+
+    assert CustomAgentService._dedupe_skill_refs([legacy, current]) == [legacy]
+```
 
 - [ ] **Step 2: Run tests and verify RED**
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_custom_agents_service.py -k "preserves_existing_unavailable or dedupe_uses_server or newly_submitted_unavailable" -q
+.\.venv\Scripts\python.exe -m pytest tests/test_custom_agents_service.py -k "preserves_existing_unavailable or requires_full_current_binding or dedupe_uses_server or existing_skill_survives or skill_ref_dedupe" -q
 ```
 
 Expected: the current validator rejects the preserved ref and current dedupe retains both device instances.
@@ -991,22 +1344,139 @@ self._validate_skill_refs(
 )
 ```
 
-Use stable allowed sets:
+Implement client validation with full live binding identity for new logical keys:
 
 ```python
-available_client_keys = {
-    client_tool_logical_key(tool)
+available_client_bindings = {
+    client_tool_binding_key(tool)
     for tool in self._list_client_tool_refs(str(owner_id), device_id)
+    if client_tool_binding_key(tool) is not None
 }
 existing_client_keys = {
     client_tool_logical_key(ref)
     for ref in (existing_refs or [])
+    if client_tool_logical_key(ref) is not None
 }
+
+# Inside the client-ref branch:
+logical_key = client_tool_logical_key(ref)
+binding_key = client_tool_binding_key(ref)
+if logical_key is None or (
+    logical_key not in existing_client_keys
+    and binding_key not in available_client_bindings
+):
+    raise CustomAgentValidationError(
+        detail=(
+            f"Client tool '{ref.get('qualified_tool_id')}' is not available "
+            "in the active device catalog"
+        ),
+    )
 ```
 
-A submitted client ref is valid when its non-null stable key is in either set. Server MCP validation remains unchanged. Apply the same pattern to normalized skill identities. Creation passes no existing refs and therefore continues rejecting fabricated unavailable selections.
+Server MCP validation remains unchanged. For skills, allow compatibility matching
+only against existing refs; a new ref must be an exact current option including its
+source, lookup name, and name:
 
-- [ ] **Step 4: Change client dedupe identity**
+```python
+available_skills = self._list_skill_refs(str(owner_id), device_id)
+existing_skills = list(existing_refs or [])
+for ref in skill_refs:
+    retains_existing = any(skill_refs_match(ref, old) for old in existing_skills)
+    is_exact_live_option = any(
+        str(ref.get("source") or "") == str(live.get("source") or "")
+        and str(ref.get("lookup_name") or "") == str(live.get("lookup_name") or "")
+        and str(ref.get("name") or "") == str(live.get("name") or "")
+        for live in available_skills
+    )
+    if not retains_existing and not is_exact_live_option:
+        raise CustomAgentValidationError(
+            detail=f"Skill '{ref.get('lookup_name')}' is not available",
+        )
+```
+
+Creation passes no existing refs, so both fabricated live bindings and newly
+submitted legacy `source="server"` refs fail.
+
+Use these complete final method bodies (they supersede the partial fragments above):
+
+```python
+def _validate_tool_refs(
+    self,
+    owner_id: UUID,
+    tool_refs: list[dict[str, Any]],
+    device_id: str | None,
+    *,
+    existing_refs: list[dict[str, Any]] | None = None,
+) -> None:
+    if not tool_refs:
+        return
+    available_client_bindings = {
+        key
+        for tool in self._list_client_tool_refs(str(owner_id), device_id)
+        if (key := client_tool_binding_key(tool)) is not None
+    }
+    existing_client_keys = {
+        key
+        for ref in (existing_refs or [])
+        if (key := client_tool_logical_key(ref)) is not None
+    }
+    available_server_ids = {
+        str(tool.get("qualified_tool_id"))
+        for tool in self._list_server_tool_refs()
+        if tool.get("qualified_tool_id")
+    }
+    for ref in tool_refs:
+        ref_type = ref.get("type")
+        if ref_type in {"server_mcp", "server_default"}:
+            if str(ref.get("qualified_tool_id")) not in available_server_ids:
+                raise CustomAgentValidationError(
+                    detail=f"Server MCP tool '{ref.get('qualified_tool_id')}' is not available",
+                )
+            continue
+        if ref_type != "client":
+            raise CustomAgentValidationError(detail=f"Invalid tool ref type: {ref_type}")
+        logical_key = client_tool_logical_key(ref)
+        binding_key = client_tool_binding_key(ref)
+        if logical_key is None or (
+            logical_key not in existing_client_keys
+            and binding_key not in available_client_bindings
+        ):
+            raise CustomAgentValidationError(
+                detail=(
+                    f"Client tool '{ref.get('qualified_tool_id')}' is not available "
+                    "in the active device catalog"
+                ),
+            )
+
+
+def _validate_skill_refs(
+    self,
+    owner_id: UUID,
+    skill_refs: list[dict[str, Any]],
+    device_id: str | None,
+    *,
+    existing_refs: list[dict[str, Any]] | None = None,
+) -> None:
+    if not skill_refs:
+        return
+    available_skills = self._list_skill_refs(str(owner_id), device_id)
+    existing_skills = list(existing_refs or [])
+    for ref in skill_refs:
+        retains_existing = any(skill_refs_match(ref, old) for old in existing_skills)
+        is_exact_live_option = any(
+            str(ref.get("source") or "") == str(live.get("source") or "")
+            and str(ref.get("lookup_name") or "")
+            == str(live.get("lookup_name") or "")
+            and str(ref.get("name") or "") == str(live.get("name") or "")
+            for live in available_skills
+        )
+        if not retains_existing and not is_exact_live_option:
+            raise CustomAgentValidationError(
+                detail=f"Skill '{ref.get('lookup_name')}' is not available",
+            )
+```
+
+- [ ] **Step 4: Change client and skill dedupe identity**
 
 Replace the client branch in `_dedupe_tool_refs()` with:
 
@@ -1020,6 +1490,35 @@ key = ("client", *logical_key) if logical_key is not None else (
 ```
 
 Keep first-seen order. Do not deduplicate server and client refs together even when their qualified IDs match.
+
+Add the parallel skill helper and use it in both create and update before validation:
+
+```python
+@staticmethod
+def _dedupe_skill_refs(skill_refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[Any, ...]] = set()
+    deduped: list[dict[str, Any]] = []
+    for ref in skill_refs:
+        logical_key = skill_logical_key(ref)
+        key = (
+            ("skill", *logical_key)
+            if logical_key is not None
+            else (
+                "skill-invalid",
+                ref.get("source"),
+                ref.get("lookup_name"),
+                ref.get("name"),
+            )
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(ref)
+    return deduped
+```
+
+Replace both raw skill list comprehensions with
+`self._dedupe_skill_refs([...])`.
 
 - [ ] **Step 5: Run full service tests and verify GREEN**
 
@@ -1047,7 +1546,10 @@ git commit -m "fix: preserve portable custom agent selections"
 
 - [ ] **Step 1: Write the failing machine-B rebinding test**
 
-Append to `tests/test_custom_agent_client_tool_resync.py`:
+First change `_QID` in `tests/test_custom_agent_client_tool_resync.py` to
+`"csv::profile"` and change the other-tool qualified ID to `"other::thing"`.
+Keep each fake tool's callable `name` as `client__csv__profile` or
+`client__other__thing`. Then append:
 
 ```python
 def test_saved_machine_a_ref_rebases_to_same_logical_tool_on_machine_b():
@@ -1093,7 +1595,20 @@ def test_custom_agent_prompt_mentions_missing_device_capabilities():
     assert "continue with available capabilities" in prompt
 ```
 
-In `tests/test_custom_agents_tools.py`, mock the active device's skill list as empty while the spec selects `kobo-library`; call `_get_tools_for_binding()` and assert `_runtime_warnings` contains one skill warning and no skill from another device becomes visible.
+In `tests/test_custom_agents_tools.py`, add a test that patches
+`app.ai.agents.custom_agent.list_resolved_skills` to return `[]`, patches
+`get_active_client_runtime_session` to a session with both catalog versions set to
+`1`, and creates a spec selecting `kobo-library`. After
+`_get_tools_for_binding(user_id="user-1", device_id="desktop-2")`, assert:
+
+```python
+assert agent._runtime_warnings == [
+    "Selected skill 'kobo-library' is not available on this device."
+]
+assert "kobo-library" not in agent._build_skills_suffix(
+    user_id="user-1", device_id="desktop-2"
+)
+```
 
 - [ ] **Step 3: Run runtime tests and verify RED**
 
@@ -1105,7 +1620,9 @@ Expected: cross-device rebase stays stale and missing skills do not populate run
 
 - [ ] **Step 4: Delegate rebase to the shared resolver**
 
-In `app/ai/custom_agent_runtime.py`, retain the public `rebase_client_tool_refs()` function for compatibility but implement it with:
+In `app/ai/custom_agent_runtime.py`, import `client_tool_logical_key` alongside the
+resolver, retain the public `rebase_client_tool_refs()` function for compatibility,
+and implement it with:
 
 ```python
 resolution = resolve_custom_agent_capabilities(
@@ -1116,11 +1633,24 @@ resolution = resolve_custom_agent_capabilities(
     request_device_id=request_device_id,
     device_available=bool(request_device_id),
 )
-rebased = resolution.effective_client_tool_refs
+resolved_by_key = {
+    client_tool_logical_key(ref): ref
+    for ref in resolution.resolved_client_tool_refs
+    if client_tool_logical_key(ref) is not None
+}
+rebased = [
+    resolved_by_key.get(client_tool_logical_key(ref), ref)
+    for ref in refs
+]
 return rebased if rebased != refs else refs
 ```
 
-The caller should supply tools from `request_device_id`, and the resolver must independently enforce that device boundary. Do not add any all-user device lookup. The existing exact matcher remains unchanged.
+This compatibility wrapper deliberately retains an unresolved stale ref because its
+existing callers/tests use identity-preserving no-op semantics. The Custom Agent
+binding path below uses `resolution.resolved_client_tool_refs` directly and therefore
+does **not** put missing refs into its allowlist. The caller supplies tools from
+`request_device_id`, and the resolver independently enforces that device boundary.
+Do not add any all-user device lookup. The existing exact matcher remains unchanged.
 
 - [ ] **Step 5: Resolve MCP and skill availability together in CustomAgent**
 
@@ -1138,21 +1668,43 @@ def _request_spec(
         user_id=user_id,
         device_id=device_id,
     )
+    device_ready = bool(
+        active_session is not None
+        and getattr(active_session, "tool_catalog_version", 0) > 0
+        and getattr(active_session, "skill_catalog_version", 0) > 0
+    )
     resolution = resolve_custom_agent_capabilities(
         selected_tool_refs=self._spec.allowed_client_tool_refs,
         selected_skill_refs=self._spec.allowed_skill_refs,
         live_tool_refs=live_tools,
         live_skill_refs=list_resolved_skills(user_id=user_id, device_id=device_id),
         request_device_id=str(device_id) if device_id else None,
-        device_available=active_session is not None,
+        device_available=device_ready,
     )
     spec = self._spec.model_copy(
-        update={"allowed_client_tool_refs": resolution.effective_client_tool_refs}
+        update={"allowed_client_tool_refs": resolution.resolved_client_tool_refs}
     )
     return spec, resolution.warnings
 ```
 
-In `_get_tools_for_binding()`, use the returned warnings as the authoritative availability warnings. Preserve any additional exact-filter warning and deduplicate with `list(dict.fromkeys(...))` before `set_runtime_warnings()`.
+Change the call site and warning merge explicitly:
+
+```python
+spec, resolution_warnings = self._request_spec(
+    user_id=user_id,
+    device_id=device_id,
+    live_tools=remote_tools,
+)
+
+# Keep the existing availability/filter calls. At the final assignment:
+self.set_runtime_warnings(
+    list(dict.fromkeys([*resolution_warnings, *warnings]))
+)
+```
+
+Because the spec contains only resolved client refs, the strict filter does not emit
+a second warning for an already-known missing ref. Its warnings now represent only
+an unexpected exact-match loss after resolution.
 
 - [ ] **Step 6: Add the warning prompt suffix**
 
@@ -1265,7 +1817,7 @@ def test_custom_agent_edit_matches_same_logical_tool_on_another_device(monkeypat
     ]
 
 
-def test_missing_ref_preservation_keeps_unavailable_account_wide_intent(monkeypatch):
+def test_missing_ref_preservation_keeps_unavailable_account_wide_intent():
     missing = {
         "type": "client",
         "server_name": "desktop_commander",
@@ -1273,17 +1825,36 @@ def test_missing_ref_preservation_keeps_unavailable_account_wide_intent(monkeypa
     }
     available = [{"type": "server_mcp", "qualified_tool_id": "calc::add"}]
 
-    assert demo._preserve_missing_custom_agent_refs(
+    assert demo._preserve_missing_custom_agent_tool_refs(
         existing_refs=[missing],
         rebuilt_refs=available,
         current_client_tools=[],
     ) == [missing, available[0]]
+
+
+def test_missing_skill_preservation_normalizes_legacy_source():
+    legacy = {"source": "server", "lookup_name": "kobo-library", "name": "kobo-library"}
+    current = {"source": "client", "lookup_name": "kobo-library", "name": "kobo-library"}
+
+    # Available on this device: rebuilt current selection replaces the legacy ref.
+    assert demo._preserve_missing_custom_agent_skill_refs(
+        existing_refs=[legacy],
+        rebuilt_refs=[current],
+        current_skills=[current],
+    ) == [current]
+
+    # Missing on this device: retain the account-wide saved intent.
+    assert demo._preserve_missing_custom_agent_skill_refs(
+        existing_refs=[legacy],
+        rebuilt_refs=[],
+        current_skills=[],
+    ) == [legacy]
 ```
 
 - [ ] **Step 4: Run demo tests and verify RED**
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_demo_custom_agents.py -k "another_device or missing_ref_preservation" -q
+.\.venv\Scripts\python.exe -m pytest tests/test_demo_custom_agents.py -k "another_device or missing_ref_preservation or missing_skill_preservation" -q
 ```
 
 Expected: stable key still includes device ID and the preservation helper is absent.
@@ -1309,7 +1880,87 @@ def _custom_agent_client_tool_stable_key(
     return server_name, qualified_id
 ```
 
-Add `_preserve_missing_custom_agent_refs()` using stable keys, with first-seen deduplication. In the edit save body, merge unavailable existing refs into rebuilt current selections. Remove the all-or-nothing disabled state and “Reconnect the original device” captions. Render `agent.availability.warnings` with `st.warning()` and explain that the agent remains usable with reduced capabilities.
+Add explicit preservation helpers:
+
+```python
+def _preserve_missing_custom_agent_tool_refs(
+    *,
+    existing_refs: list[dict[str, Any]],
+    rebuilt_refs: list[dict[str, Any]],
+    current_client_tools: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    current_keys = {
+        key
+        for tool in current_client_tools
+        if (key := _custom_agent_client_tool_stable_key(tool)) is not None
+    }
+    missing = [
+        ref
+        for ref in existing_refs
+        if str(_custom_agent_value(ref, "type") or "") == "client"
+        and _custom_agent_client_tool_stable_key(ref) not in current_keys
+    ]
+    merged = [*missing, *rebuilt_refs]
+    seen: set[tuple[Any, ...]] = set()
+    result: list[dict[str, Any]] = []
+    for ref in merged:
+        if str(_custom_agent_value(ref, "type") or "") == "client":
+            key = ("client", _custom_agent_client_tool_stable_key(ref))
+        else:
+            key = (
+                "server",
+                str(_custom_agent_value(ref, "qualified_tool_id", "qualifiedToolId") or ""),
+            )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(ref)
+    return result
+
+
+def _custom_agent_normalized_skill_key(ref: dict[str, Any]) -> tuple[str, str] | None:
+    key = _custom_agent_skill_key(ref)
+    if key is None:
+        return None
+    source, lookup_name = key
+    return ("client" if source == "server" else source, lookup_name)
+
+
+def _preserve_missing_custom_agent_skill_refs(
+    *,
+    existing_refs: list[dict[str, Any]],
+    rebuilt_refs: list[dict[str, Any]],
+    current_skills: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    missing = [
+        ref
+        for ref in existing_refs
+        if not _custom_agent_skill_refs_available([ref], current_skills)
+    ]
+    merged = [*missing, *rebuilt_refs]
+    seen: set[tuple[str, str] | tuple[str, int]] = set()
+    result: list[dict[str, Any]] = []
+    for ref in merged:
+        key = _custom_agent_normalized_skill_key(ref) or ("invalid", id(ref))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(ref)
+    return result
+```
+
+Read `deviceSnapshot` before building client pickers. When its status is not
+`ready`, force `client_tools=[]` and `skills=[]`, render a short syncing/offline
+notice, and continue rendering provider/server options and editable prompt/model
+fields. Never treat an unavailable snapshot as cacheable ready data.
+
+For each existing agent, render `availability.warnings` with `st.warning()` and a
+`Keep unavailable device selections` checkbox (default `True`). Remove the
+all-or-nothing disabled state and the “Reconnect the original device” captions.
+Always rebuild available selections on save. When the checkbox is checked, pass
+them through both preservation helpers; when unchecked, submit the rebuilt lists
+directly so the user can intentionally clear every missing local selection. This
+preserves missing refs on unrelated edits without making them impossible to remove.
 
 Change `list_custom_agents()` to request:
 
@@ -1325,10 +1976,12 @@ Document these exact rules in `plans/CUSTOM_AGENTS_FE_CONTRACT.md`:
 
 ```text
 - Cache options by returned deviceSnapshot, not user ID alone.
+- Cache client options only when deviceSnapshot.status=ready; unavailable includes offline and not-yet-synced sessions.
 - Match saved client MCP selections by (server_name, qualified_tool_id).
-- Treat device/session/catalog/tool-instance fields as the current option's execution identity.
+- Require the full current device/session/catalog/tool-instance/tool-name identity for newly submitted client refs.
 - Show availability.status=degraded/device_unavailable as non-blocking.
 - Preserve missing saved refs on unrelated edits; do not silently clear them.
+- Provide an explicit control to remove retained unavailable refs.
 - Never merge catalogs or HITL settings from two devices.
 ```
 
@@ -1421,7 +2074,22 @@ def test_foreign_user_cannot_read_device_skills(monkeypatch):
 
 - [ ] **Step 2: Add same-name MCP HITL isolation test**
 
-Append to `tests/test_hitl_settings_device_isolation.py`:
+Add this method to that file's `_MemoryRepository` so the test exercises the
+actual turn-policy shape as well as settings reads:
+
+```python
+def build_policy(self, user_id, device_id):
+    grouped = {
+        "client_mcp": {"servers": {}, "tools": {}},
+        "client_skill": {"servers": {}, "tools": {}},
+    }
+    for row in self.list_by_device(user_id, device_id):
+        target = "servers" if row.scope_type == "server" else "tools"
+        grouped[row.tool_origin][target][row.scope_value] = bool(row.require_approval)
+    return grouped
+```
+
+Append:
 
 ```python
 def test_same_mcp_server_name_keeps_independent_device_rules(owned_devices):
@@ -1435,9 +2103,17 @@ def test_same_mcp_server_name_keeps_independent_device_rules(owned_devices):
 
     settings_a = service.get_settings(user_id, str(device_a))
     settings_b = service.get_settings(user_id, str(device_b))
+    policy_a = service.build_turn_policy(user_id, device_a)
+    policy_b = service.build_turn_policy(user_id, device_b)
 
     assert settings_a["servers"][0]["require_approval"] is True
     assert settings_b["servers"][0]["require_approval"] is False
+    assert policy_a["client_rules"]["client_mcp"]["servers"] == {
+        "desktop-commander": True
+    }
+    assert policy_b["client_rules"]["client_mcp"]["servers"] == {
+        "desktop-commander": False
+    }
 ```
 
 - [ ] **Step 3: Run isolation tests**
@@ -1451,7 +2127,7 @@ Expected: all tests pass against the already device-scoped skill/HITL implementa
 - [ ] **Step 4: Run adjacent policy suites**
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_hitl_api.py tests/test_tool_approval_setting_repository.py tests/test_client_tool_isolation.py tests/test_multi_sidecar_hardening.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_hitl_api.py tests/test_hitl_turn_policy_injection.py tests/test_hitl_gate_policy.py tests/test_tool_approval_setting_repository.py tests/test_client_tool_isolation.py tests/test_multi_sidecar_hardening.py -q
 ```
 
 Expected: all tests pass.
@@ -1472,7 +2148,7 @@ git commit -m "test: lock skill and HITL device isolation"
 - [ ] **Step 1: Run the complete feature matrix**
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/client_backend/test_runtime_bridge.py tests/client_backend/test_custom_agents_proxy.py tests/test_custom_agent_capability_resolver.py tests/test_custom_agent_client_tool_resync.py tests/test_custom_agents_service.py tests/test_custom_agents_api.py tests/test_custom_agents_tools.py tests/test_custom_agents_graph.py tests/test_demo_custom_agents.py tests/test_skill_device_isolation.py tests/test_hitl_settings_device_isolation.py tests/test_hitl_api.py tests/test_tool_approval_setting_repository.py tests/test_client_tool_isolation.py tests/test_multi_sidecar_hardening.py -q
+.\.venv\Scripts\python.exe -m pytest tests/client_backend/test_runtime_bridge.py tests/client_backend/test_custom_agents_proxy.py tests/test_custom_agent_capability_resolver.py tests/test_custom_agent_client_tool_resync.py tests/test_custom_agents_service.py tests/test_custom_agents_api.py tests/test_custom_agents_tools.py tests/test_custom_agents_graph.py tests/test_demo_custom_agents.py tests/test_skill_device_isolation.py tests/test_hitl_settings_device_isolation.py tests/test_hitl_turn_policy_injection.py tests/test_hitl_gate_policy.py tests/test_hitl_api.py tests/test_tool_approval_setting_repository.py tests/test_client_tool_isolation.py tests/test_multi_sidecar_hardening.py -q
 ```
 
 Expected: all selected tests pass.
@@ -1525,12 +2201,12 @@ If no file changed, record the exact passing counts in the implementation handof
 
 | Requirement | Primary evidence |
 |---|---|
-| No false-ready empty snapshot | T001 bridge event tests |
+| No false-ready empty snapshot | T001 bridge event tests + T004 zero-version and rotation guards |
 | Same MCP on A/B works independently | T003 resolver + T006 runtime rebind |
 | Missing MCP produces hint, agent still runs | T004 availability + T006 prompt/metadata |
 | Missing skill produces hint, no leakage | T003/T006 + T008 skill isolation |
 | Another device is never used for execution | Existing foreign-device tests + T006 |
-| Existing missing refs survive edits | T005 service + T007 UI preservation |
+| Existing missing refs survive edits; fabricated new bindings fail | T005 exact validation/dedupe + T007 UI preservation/removal control |
 | Frontend cache cannot mix snapshots | T002/T004 response + T007 contract |
 | HITL settings remain local | T008 same-name server regression |
 | No schema migration required | Source review + unchanged Alembic heads |
