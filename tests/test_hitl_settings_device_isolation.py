@@ -39,6 +39,16 @@ class _MemoryRepository:
         ]
         return len(self.rows) != before
 
+    def build_policy(self, user_id, device_id):
+        grouped = {
+            "client_mcp": {"servers": {}, "tools": {}},
+            "client_skill": {"servers": {}, "tools": {}},
+        }
+        for row in self.list_by_device(user_id, device_id):
+            target = "servers" if row.scope_type == "server" else "tools"
+            grouped[row.tool_origin][target][row.scope_value] = bool(row.require_approval)
+        return grouped
+
 
 def _row(user_id, device_id, origin, scope_type, value, required=False):
     return SimpleNamespace(
@@ -259,3 +269,25 @@ async def test_api_endpoints_pass_device_and_origin_through_service(owned_device
     assert updated.data.tools[0].tool_origin == "client_skill"
     assert fetched.data.device_id == device_a
     assert cleared.data.tools == []
+
+
+def test_same_mcp_server_name_keeps_independent_device_rules(owned_devices):
+    user_id, device_a, device_b = owned_devices
+    repo = _MemoryRepository()
+    repo.rows.extend(
+        [
+            _row(user_id, device_a, "client_mcp", "server", "desktop-commander", True),
+            _row(user_id, device_b, "client_mcp", "server", "desktop-commander", False),
+        ]
+    )
+    service = HitlSettingsService(repo)
+
+    settings_a = service.get_settings(user_id, str(device_a))
+    settings_b = service.get_settings(user_id, str(device_b))
+    policy_a = service.build_turn_policy(user_id, device_a)
+    policy_b = service.build_turn_policy(user_id, device_b)
+
+    assert settings_a["servers"][0]["require_approval"] is True
+    assert settings_b["servers"][0]["require_approval"] is False
+    assert policy_a["client_rules"]["client_mcp"]["servers"] == {"desktop-commander": True}
+    assert policy_b["client_rules"]["client_mcp"]["servers"] == {"desktop-commander": False}
