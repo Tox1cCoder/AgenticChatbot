@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from client_backend.core import paths as profile_paths
+from client_backend.core.security import decrypt_local_secret
 from client_backend.schemas.mcp_config import (
     MCPProfileDocument,
     MCPProfileScope,
@@ -328,6 +329,9 @@ def test_mcp_migration_preserves_custom_server_and_encrypts_credentials(tmp_path
     assert result.status == "migrated"
     assert result.migrated_servers == ("notion", "time")
     assert result.backup_path is not None and result.backup_path.is_file()
+    assert "migration-secret" not in result.backup_path.read_text(encoding="utf-8")
+    backup_envelope = json.loads(result.backup_path.read_text(encoding="utf-8"))
+    assert decrypt_local_secret(backup_envelope) == legacy_path.read_bytes()
     assert result.receipt_path is not None and result.receipt_path.is_file()
     profile = store.load_profile()
     assert profile.bundled_overrides["time"].enabled is False

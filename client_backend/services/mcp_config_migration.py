@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
-import shutil
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Any, Literal
 
 from pydantic import TypeAdapter
 
+from client_backend.core.security import encrypt_local_secret
 from client_backend.schemas.mcp_config import (
     BundledOverride,
     CustomServerDefinition,
@@ -152,8 +154,13 @@ def migrate_legacy_mcp_profile(
     migration_dir = store.profile_path.parent / "migration"
     migration_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    backup_path = migration_dir / f"legacy-{timestamp}.json"
-    shutil.copy2(legacy_path, backup_path)
+    backup_path = migration_dir / f"legacy-{timestamp}.encrypted.json"
+    backup_path.write_text(
+        json.dumps(encrypt_local_secret(source_bytes)),
+        encoding="utf-8",
+    )
+    with contextlib.suppress(OSError):
+        os.chmod(backup_path, 0o600)
 
     profile = MCPProfileDocument(
         schemaVersion=2,
