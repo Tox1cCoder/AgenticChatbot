@@ -2476,6 +2476,12 @@ class MultiAgentWorkflow(
         total_iterations = 0
         start_time = time.monotonic()
         current_state: Any = Command(resume=resume_data)
+        # Rehydrate historical image references for the model on resume too,
+        # otherwise a replayed turn drops prior images from context.
+        chat_image_loader = self._build_chat_image_loader(state_snapshot.values.get("user_id"))
+        # No SubagentEventSink here by design: subagent dispatch on resume is rare
+        # and intentionally left unstreamed (see docs event_streaming.md). Only the
+        # main execute_request_stream path wires live subagent progress.
 
         while round_num <= max_rounds:
             if (
@@ -2497,11 +2503,12 @@ class MultiAgentWorkflow(
             continue_reason = None
 
             try:
-                async for event in iter_v3_events_from_graph(
-                    self.graph, current_state, config=config
-                ):
-                    for public_event in projector.map_event(event, ctx):
-                        yield public_event
+                with use_chat_image_loader(chat_image_loader):
+                    async for event in iter_v3_events_from_graph(
+                        self.graph, current_state, config=config
+                    ):
+                        for public_event in projector.map_event(event, ctx):
+                            yield public_event
 
             except GraphRecursionError:
                 logger.warning(
