@@ -28,7 +28,7 @@ from dateutil import parser
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from app.services.event_streaming.compat import infer_tool_state, normalize_tool_phase
+from app.services.event_streaming.tool_state import infer_tool_state, normalize_tool_phase
 from app.ui.clipboard_image_capture import capture_pasted_images
 from app.ui.hitl_decisions import (
     approval_tool_label,

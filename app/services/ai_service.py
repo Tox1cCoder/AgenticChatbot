@@ -40,8 +40,9 @@ from ..usage import (
     bind_usage_context,
 )
 from ..utils.text_processing import sanitize_persona
-from .event_streaming.compat import coerce_legacy_event_to_v3, infer_tool_state
+from .event_streaming.compat import coerce_legacy_event_to_v3
 from .event_streaming.events import V3StreamEvent, make_event
+from .event_streaming.tool_state import infer_tool_state
 
 
 def _parse_uuid(value: Any) -> UUID | None:
