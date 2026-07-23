@@ -141,31 +141,42 @@ class AISDKV6StreamAdapter:
     async def _events_with_heartbeats(
         self,
     ) -> AsyncGenerator[V3StreamEvent, None]:
-        source = self._event_source_factory()
-        pending_next: asyncio.Task | None = None
+        queue: asyncio.Queue[V3StreamEvent | object] = asyncio.Queue()
+        source_complete = object()
+
+        async def produce_events() -> None:
+            source = self._event_source_factory()
+            try:
+                async for event in source:
+                    await queue.put(event)
+            finally:
+                aclose = getattr(source, "aclose", None)
+                if callable(aclose):
+                    with contextlib.suppress(Exception):
+                        await aclose()
+                await queue.put(source_complete)
+
+        producer = asyncio.create_task(produce_events())
         try:
             while True:
-                if pending_next is None:
-                    pending_next = asyncio.create_task(anext(source))
-                done, _ = await asyncio.wait({pending_next}, timeout=self._heartbeat_interval)
-                if not done:
+                try:
+                    item = await asyncio.wait_for(
+                        queue.get(),
+                        timeout=self._heartbeat_interval,
+                    )
+                except asyncio.TimeoutError:
                     yield make_event("heartbeat", sequence=0)
                     continue
-                try:
-                    event = pending_next.result()
-                except StopAsyncIteration:
+
+                if item is source_complete:
+                    await producer
                     break
-                pending_next = None
-                yield event
+                yield item
         finally:
-            if pending_next is not None and not pending_next.done():
-                pending_next.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await pending_next
-            aclose = getattr(source, "aclose", None)
-            if callable(aclose):
-                with contextlib.suppress(Exception):
-                    await aclose()
+            if not producer.done():
+                producer.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await producer
 
     # -- canonical event mapping ------------------------------------------
 

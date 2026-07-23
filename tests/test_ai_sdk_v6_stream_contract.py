@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import pytest
 
@@ -47,6 +50,67 @@ async def test_text_stream_maps_to_ui_message_chunks():
     assert payloads[3]["delta"] == "hel"
     assert payloads[4]["delta"] == "lo"
     assert payloads[-1] == "[DONE]"
+
+
+@pytest.mark.asyncio
+async def test_text_stream_preserves_source_context_until_cleanup():
+    chat_scope = ContextVar("test_chat_scope", default=None)
+
+    @contextmanager
+    def bind_chat_scope():
+        token = chat_scope.set("bound")
+        try:
+            yield
+        finally:
+            chat_scope.reset(token)
+
+    async def source():
+        with bind_chat_scope():
+            yield make_event("message_delta", sequence=1, data={"text": "hello"})
+        yield make_event("complete", sequence=2, data={"message": {"id": "m-1"}})
+
+    payloads = await _collect_payloads(source)
+
+    errors = [
+        payload for payload in payloads if payload != "[DONE]" and payload.get("type") == "error"
+    ]
+    assert errors == []
+    assert any(
+        payload != "[DONE]"
+        and payload.get("type") == "text-delta"
+        and payload.get("delta") == "hello"
+        for payload in payloads
+    )
+    assert payloads[-1] == "[DONE]"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_stream_closes_source_in_its_own_context():
+    chat_scope = ContextVar("test_close_chat_scope", default=None)
+    cleaned = asyncio.Event()
+    block_forever = asyncio.Event()
+
+    async def source():
+        token = chat_scope.set("bound")
+        try:
+            yield make_event("message_delta", sequence=1, data={"text": "hello"})
+            await block_forever.wait()
+        finally:
+            chat_scope.reset(token)
+            cleaned.set()
+
+    adapter = AISDKV6StreamAdapter(
+        source,
+        AISDKV6StreamState(message_id="m-1", text_id="t-1", reasoning_id="r-1"),
+        heartbeat_interval_seconds=1,
+    )
+    events = adapter._events_with_heartbeats()
+
+    first = await anext(events)
+    await events.aclose()
+
+    assert first.type == "message_delta"
+    await asyncio.wait_for(cleaned.wait(), timeout=0.1)
 
 
 @pytest.mark.asyncio
