@@ -1,48 +1,49 @@
 {
-  "mcp_servers": {
+  "schemaVersion": 2,
+  "servers": {
     "widgets": {
-      "enabled": true,
       "transport": "stdio",
       "command": "python",
       "args": [
         "app/ai/mcp_servers/widgets_server.py"
       ],
+      "enabledByDefault": true,
       "description": "Live UI widget tools for showing interactive tables, charts, dashboards, and forms inside chat"
     },
     "tavily": {
-      "enabled": true,
       "transport": "stdio",
       "command": "python",
       "args": [
         "app/ai/mcp_servers/tavily_server.py"
       ],
+      "enabledByDefault": true,
       "description": "Web search using Tavily API for real-time information retrieval"
     },
     "time": {
-      "enabled": true,
       "transport": "stdio",
       "command": "python",
       "args": [
         "app/ai/mcp_servers/time_server.py"
       ],
+      "enabledByDefault": true,
       "description": "Current time lookup utility with timezone support"
     },
     "brave_image_search": {
-      "enabled": true,
       "transport": "stdio",
       "command": "python",
       "args": [
         "app/ai/mcp_servers/brave_image_search_server.py"
       ],
+      "enabledByDefault": true,
       "description": "Image search using Brave Search API for visual references and article-style inline image candidates"
     },
     "form_filler": {
-      "enabled": false,
       "transport": "stdio",
       "command": "python",
       "args": [
         "app/ai/mcp_servers/form_filler_server.py"
       ],
+      "enabledByDefault": false,
       "description": "Natural language incident report form filler - extracts structured data from Vietnamese/English descriptions"
     }
   }

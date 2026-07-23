@@ -4,6 +4,7 @@ Path handling utilities for the client backend.
 Provides secure path normalization, validation, and sandboxing.
 """
 
+import hashlib
 import os
 import re
 from pathlib import Path
@@ -153,11 +154,41 @@ def get_profile_subdir(user_id: str, subdir: str) -> Path:
     Returns:
         The path to the subdirectory, created if it doesn't exist.
     """
-    import hashlib
-
     server_hash = hashlib.sha256(client_settings.server_api_base_url.encode()).hexdigest()[:12]
 
     path = Path(client_settings.profile_root) / server_hash / user_id / subdir
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _validate_profile_component(value: str, label: str) -> str:
+    normalized = str(value or "").strip()
+    if (
+        not normalized
+        or normalized in {".", ".."}
+        or "/" in normalized
+        or "\\" in normalized
+        or Path(normalized).name != normalized
+    ):
+        raise ValueError(f"{label} must be a non-empty path component")
+    return normalized
+
+
+def get_device_profile_subdir(
+    user_id: str,
+    device_identifier: str,
+    subdir: str,
+) -> Path:
+    """Return a profile directory isolated to one installation identity."""
+
+    safe_user_id = _validate_profile_component(user_id, "user_id")
+    safe_device_id = _validate_profile_component(device_identifier, "device_identifier")
+    safe_subdir = _validate_profile_component(subdir, "subdir")
+    path = (
+        get_profile_subdir(safe_user_id, "devices")
+        / safe_device_id
+        / safe_subdir
+    )
     path.mkdir(parents=True, exist_ok=True)
     return path
 
