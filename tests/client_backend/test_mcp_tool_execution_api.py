@@ -5,7 +5,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 from client_backend.api import mcp as mcp_api
 
@@ -79,6 +80,41 @@ async def test_bare_name_execution_selects_first_scoped_match(monkeypatch):
     await mcp_api.execute_mcp_tool("inspect", {"arguments": {}}, _session())
 
     assert manager.calls == [("alpha::inspect", {})]
+
+
+def _tools_client(monkeypatch) -> TestClient:
+    manager = _ManagerStub()
+    monkeypatch.setattr(mcp_api, "get_mcp_manager", lambda _scope: manager)
+    app = FastAPI()
+    app.include_router(mcp_api.router)
+    app.dependency_overrides[mcp_api.require_local_session] = _session
+    return TestClient(app)
+
+
+def test_list_tools_filters_by_camelcase_server_name(monkeypatch):
+    """GET /mcp/tools?serverName=beta must return only that server's tools.
+
+    Regression: the query param was declared as ``server_name`` with no alias, so
+    the camelCase key the client sends never bound and the filter returned every
+    server's tools.
+    """
+    client = _tools_client(monkeypatch)
+
+    resp = client.get("/mcp/tools", params={"serverName": "beta"})
+
+    assert resp.status_code == 200
+    tools = resp.json()["data"]["tools"]
+    assert {tool["serverName"] for tool in tools} == {"beta"}
+
+
+def test_list_tools_without_filter_returns_all(monkeypatch):
+    client = _tools_client(monkeypatch)
+
+    resp = client.get("/mcp/tools")
+
+    assert resp.status_code == 200
+    tools = resp.json()["data"]["tools"]
+    assert {tool["serverName"] for tool in tools} == {"alpha", "beta"}
 
 
 @pytest.mark.asyncio

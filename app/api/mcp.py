@@ -117,7 +117,11 @@ async def toggle_server(
 @AppAutoInjector.auto_inject()
 async def list_tools(
     mcp_service: MCPService,
-    server_name: str | None = Query(None, description="Filter by server name"),
+    server_name: str | None = Query(
+        None,
+        alias="serverName",
+        description="Filter by server name",
+    ),
 ) -> ApiResponse[MCPToolListResponse]:
     """List all available MCP tools"""
     result = await mcp_service.list_tools(server_name)

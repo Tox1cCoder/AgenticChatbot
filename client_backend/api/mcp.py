@@ -374,7 +374,11 @@ async def toggle_mcp_server(
 
 @router.get("/tools")
 async def list_mcp_tools(
-    server_name: str | None = Query(None, description="Filter by server name"),
+    server_name: str | None = Query(
+        None,
+        alias="serverName",
+        description="Filter by server name",
+    ),
     session: LocalSessionPayload = Depends(require_local_session),
 ):
     manager = get_mcp_manager(_scope(session))
