@@ -3,8 +3,11 @@
 from .base import ImageGenerationProvider
 from .emitter import (
     ImagePreviewPublisher,
+    MediaDeliveryService,
     current_image_preview_emitter,
+    current_media_delivery_service,
     use_image_preview_emitter,
+    use_media_delivery_service,
 )
 from .models import (
     ImageFinal,
@@ -12,6 +15,7 @@ from .models import (
     ImagePartial,
     ImageStreamEvent,
     ImageUsage,
+    MediaDeliveryError,
     NarrativeDelta,
 )
 from .registry import image_provider_family, resolve_image_provider
@@ -24,9 +28,13 @@ __all__ = [
     "ImagePreviewPublisher",
     "ImageStreamEvent",
     "ImageUsage",
+    "MediaDeliveryError",
+    "MediaDeliveryService",
     "NarrativeDelta",
     "current_image_preview_emitter",
+    "current_media_delivery_service",
     "image_provider_family",
     "resolve_image_provider",
     "use_image_preview_emitter",
+    "use_media_delivery_service",
 ]

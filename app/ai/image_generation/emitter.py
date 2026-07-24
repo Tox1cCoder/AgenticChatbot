@@ -10,11 +10,15 @@ runs) a silent no-op.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
+from uuid import uuid4
+
+from .models import MediaDeliveryError
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +29,7 @@ _image_preview_emitter: ContextVar[PreviewEmitter | None] = ContextVar(
 )
 
 PREVIEW_ITEM_ID_PREFIX = "image-preview-"
+FINAL_ITEM_ID_PREFIX = "image-final-"
 
 
 @contextmanager
@@ -94,3 +99,155 @@ class ImagePreviewPublisher:
             logger.warning("Image preview emission failed (index=%s): %s", image_index, err)
             return False
         return True
+
+
+_media_delivery_service: ContextVar[MediaDeliveryService | None] = ContextVar(
+    "media_delivery_service", default=None
+)
+
+
+@contextmanager
+def use_media_delivery_service(
+    service: MediaDeliveryService | None,
+) -> Iterator[None]:
+    token = _media_delivery_service.set(service)
+    try:
+        yield
+    finally:
+        _media_delivery_service.reset(token)
+
+
+def current_media_delivery_service() -> MediaDeliveryService | None:
+    return _media_delivery_service.get()
+
+
+class MediaDeliveryService:
+    """Per-run delivery of generated images: transient previews + durable storage.
+
+    Bound once at the graph boundary with the run's user/conversation context
+    and storage backend, then read by the image generator agent through
+    :func:`current_media_delivery_service`. It owns two concerns:
+
+    - ``publish_partial`` — stream an in-progress preview (transient, bounded by
+      the SSE character cap the preview publisher enforces).
+    - ``persist_final`` — publish the final transient preview *and* persist the
+      final bytes to storage the moment the image is ready, returning a
+      reference descriptor. Storage is bounded by the storage byte cap, not the
+      transient preview character cap, so a final too large to preview is still
+      persisted.
+
+    ``persist_final`` is idempotent per ``(run id, item id, content hash)`` and
+    returns the existing descriptor on repeat, so terminal persistence can reuse
+    it instead of decoding and writing the same bytes again. Storage failures do
+    not raise: they are recorded as a typed :class:`MediaDeliveryError` and
+    ``persist_final`` returns ``None`` so the caller preserves its current
+    behavior (the image keeps its inline bytes for the terminal fallback).
+    """
+
+    def __init__(
+        self,
+        *,
+        storage: Any,
+        conversation_id: Any,
+        user_id: Any,
+        preview_publisher: ImagePreviewPublisher,
+        request_id: str | None = None,
+    ) -> None:
+        self._storage = storage
+        self._conversation_id = conversation_id
+        self._user_id = user_id
+        self._preview = preview_publisher
+        self._run_id = request_id or uuid4().hex
+        self._descriptors: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._failures: list[MediaDeliveryError] = []
+
+    @property
+    def failures(self) -> list[MediaDeliveryError]:
+        return list(self._failures)
+
+    def publish_partial(
+        self,
+        *,
+        image_index: int,
+        mime: str,
+        data_b64: str,
+        seq: int = 0,
+    ) -> bool:
+        return self._preview.publish(
+            image_index=image_index,
+            status="partial",
+            mime=mime,
+            data_b64=data_b64,
+            seq=seq,
+        )
+
+    def persist_final(
+        self,
+        *,
+        image_index: int,
+        mime: str,
+        data_b64: str,
+    ) -> dict[str, Any] | None:
+        # Preserve the current transient-preview behavior for the final image
+        # (character-capped; oversized previews are dropped by the publisher).
+        self._preview.publish(
+            image_index=image_index,
+            status="final",
+            mime=mime,
+            data_b64=data_b64,
+        )
+        return self._store_final(image_index=image_index, mime=mime, data_b64=data_b64)
+
+    def _store_final(
+        self,
+        *,
+        image_index: int,
+        mime: str,
+        data_b64: str,
+    ) -> dict[str, Any] | None:
+        if self._storage is None or not data_b64 or not self._user_id:
+            return None
+
+        item_id = f"{FINAL_ITEM_ID_PREFIX}{image_index}"
+        content_hash = hashlib.sha256(data_b64.encode("ascii", "ignore")).hexdigest()
+        key = (self._run_id, item_id, content_hash)
+        cached = self._descriptors.get(key)
+        if cached is not None:
+            return dict(cached)
+
+        try:
+            ref = self._storage.store(
+                conversation_id=self._conversation_id,
+                user_id=self._user_id,
+                mime=mime or "image/png",
+                data_b64=data_b64,
+                name="generated-image",
+            )
+        except Exception as err:
+            self._record_failure(item_id, err)
+            return None
+
+        descriptor = {
+            "image_id": ref["image_id"],
+            "url": ref["url"],
+            "mime": ref.get("mime") or mime or "image/png",
+            "name": ref.get("name") or "generated-image",
+        }
+        if ref.get("content_hash"):
+            descriptor["content_hash"] = ref["content_hash"]
+        self._descriptors[key] = descriptor
+        return dict(descriptor)
+
+    def _record_failure(self, item_id: str, err: Exception) -> None:
+        failure = MediaDeliveryError(
+            code="media_delivery_persist_failed",
+            item_id=item_id,
+            detail=type(err).__name__,
+        )
+        self._failures.append(failure)
+        logger.warning(
+            "Final image persistence failed code=%s item_id=%s detail=%s",
+            failure.code,
+            failure.item_id,
+            failure.detail,
+        )

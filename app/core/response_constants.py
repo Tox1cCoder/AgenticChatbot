@@ -371,6 +371,32 @@ def _filter_unreferenced_images_from_metadata_images(
         metadata.pop("images", None)
 
 
+def _reuse_stored_ref(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """Promote an early-persisted ``stored_ref`` descriptor to a reference entry.
+
+    When an image was already persisted during generation, it carries a
+    ``stored_ref`` descriptor. Terminal persistence reuses it verbatim instead of
+    decoding and writing the bytes a second time, dropping the transient
+    ``stored_ref`` and any inline bytes so the persisted entry is a clean
+    reference."""
+    stored = entry.get("stored_ref")
+    if not isinstance(stored, dict):
+        return None
+    image_id = stored.get("image_id")
+    url = stored.get("url")
+    if not image_id or not url:
+        return None
+    merged = {
+        key: value
+        for key, value in entry.items()
+        if key not in ("data", "b64_data", "stored_ref")
+    }
+    merged["image_id"] = image_id
+    merged["url"] = url
+    merged.setdefault("mime", stored.get("mime") or entry.get("mime"))
+    return merged
+
+
 def externalize_metadata_images(
     images: list[dict[str, Any]] | None,
     *,
@@ -378,15 +404,24 @@ def externalize_metadata_images(
 ) -> list[dict[str, Any]] | None:
     """Replace inline base64 in ``metadata["images"]`` entries with storage
     references. ``store`` is a callable ``(*, mime, data_b64, name) -> ref``.
-    Entries already carrying a ``url`` (or no inline bytes) are left untouched.
-    A store failure keeps the original inline entry so the image is never lost."""
+    Entries already carrying a ``stored_ref`` descriptor (persisted early during
+    generation) reuse that reference without re-storing. Entries already carrying
+    a ``url`` (or no inline bytes) are left untouched. A store failure keeps the
+    original inline entry so the image is never lost."""
     if images is None:
         return None
-    if not images or store is None:
+    if not images:
         return list(images)
     out: list[dict[str, Any]] = []
     for entry in images:
         if not isinstance(entry, dict):
+            continue
+        reused = _reuse_stored_ref(entry)
+        if reused is not None:
+            out.append(reused)  # early-persisted — reuse descriptor, no re-store
+            continue
+        if store is None:
+            out.append(entry)
             continue
         inline_b64 = entry.get("data") or entry.get("b64_data")
         if not inline_b64:

@@ -1,4 +1,5 @@
 import base64
+import hashlib
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -40,9 +41,10 @@ def test_store_writes_file_and_returns_reference(tmp_path):
         conversation_id=conv, user_id=user, mime="image/png", data_b64=b64, name="a.png"
     )
 
-    assert set(ref) == {"name", "mime", "image_id", "url"}
+    assert set(ref) == {"name", "mime", "image_id", "url", "content_hash"}
     assert ref["mime"] == "image/png"
     assert ref["url"] == f"/chat-images/{ref['image_id']}"
+    assert ref["content_hash"] == hashlib.sha256(raw).hexdigest()
     assert "data" not in ref and "base64" not in ref
     data_url = svc.load_data_url(UUID(ref["image_id"]), user)
     assert data_url.startswith("data:image/png;base64,")

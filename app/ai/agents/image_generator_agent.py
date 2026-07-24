@@ -18,7 +18,9 @@ from ..image_generation import (
     ImagePartial,
     ImagePreviewPublisher,
     ImageUsage,
+    MediaDeliveryService,
     NarrativeDelta,
+    current_media_delivery_service,
     image_provider_family,
     resolve_image_provider,
 )
@@ -361,11 +363,25 @@ Do not output anything else, just the prompt."""
         Consumes the stream to exhaustion (never breaking at ``max_images``) so
         the terminal ``ImageUsage`` event is always seen; the provider caps
         image emission internally.
+
+        Final images are persisted through the per-run media delivery service the
+        moment they arrive (before the next narrative delta / terminal event), and
+        the returned reference descriptor is attached to the image record so
+        terminal persistence reuses it instead of decoding and writing the bytes
+        again. When no service is bound (non-streaming, resume, tests) a storage-
+        less fallback preserves the previous transient-preview-only behavior.
         """
-        publisher = ImagePreviewPublisher(
-            enabled=settings.enable_image_streaming,
-            max_b64_chars=settings.image_stream_preview_max_b64_chars,
-        )
+        media = current_media_delivery_service()
+        if media is None:
+            media = MediaDeliveryService(
+                storage=None,
+                conversation_id=None,
+                user_id=None,
+                preview_publisher=ImagePreviewPublisher(
+                    enabled=settings.enable_image_streaming,
+                    max_b64_chars=settings.image_stream_preview_max_b64_chars,
+                ),
+            )
 
         images: list[dict] = []
         narrative_parts: list[str] = []
@@ -373,27 +389,26 @@ Do not output anything else, just the prompt."""
 
         async for event in provider.stream_generate(request):
             if isinstance(event, ImageFinal):
-                images.append(
-                    {
-                        "data": event.data_b64,
-                        "mime": event.mime,
-                        "prompt": original_prompt,
-                        "model": self.model_name,
-                        "aspect_ratio": self.default_aspect_ratio,
-                    }
-                )
-                if handle is not None:
-                    handle.note_generated_image()
-                publisher.publish(
+                record = {
+                    "data": event.data_b64,
+                    "mime": event.mime,
+                    "prompt": original_prompt,
+                    "model": self.model_name,
+                    "aspect_ratio": self.default_aspect_ratio,
+                }
+                descriptor = media.persist_final(
                     image_index=event.index,
-                    status="final",
                     mime=event.mime,
                     data_b64=event.data_b64,
                 )
+                if descriptor is not None:
+                    record["stored_ref"] = descriptor
+                images.append(record)
+                if handle is not None:
+                    handle.note_generated_image()
             elif isinstance(event, ImagePartial):
-                publisher.publish(
+                media.publish_partial(
                     image_index=event.index,
-                    status="partial",
                     mime=event.mime,
                     data_b64=event.data_b64,
                     seq=event.seq,

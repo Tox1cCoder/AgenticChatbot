@@ -57,7 +57,12 @@ from .image_context import (
     has_image_parts,
     use_chat_image_loader,
 )
-from .image_generation import use_image_preview_emitter
+from .image_generation import (
+    ImagePreviewPublisher,
+    MediaDeliveryService,
+    use_image_preview_emitter,
+    use_media_delivery_service,
+)
 from .rag_tool_actions import canonicalize_rag_tool_call, execute_search_documents_action
 from .schemas import (
     AgentMessage,
@@ -1600,6 +1605,36 @@ class MultiAgentWorkflow(
 
         return _emit
 
+    def _build_media_delivery_service(self, state: GraphState) -> MediaDeliveryService:
+        """Bind this run's media delivery service at the graph boundary.
+
+        Carries the run's user/conversation context and the storage backend so
+        the agent can persist a final image the moment it is produced without
+        reaching into the DI container. The preview publisher captures the sink
+        installed by ``use_image_preview_emitter`` (None on resume/non-streaming,
+        making previews a no-op while durable persistence still runs)."""
+
+        def _coerce_uuid(value: Any) -> Any:
+            if value is None or isinstance(value, UUID):
+                return value
+            try:
+                return UUID(str(value))
+            except (ValueError, TypeError, AttributeError):
+                return value
+
+        conversation_id = state.get("conversation_id") if isinstance(state, dict) else None
+        user_id = state.get("user_id") if isinstance(state, dict) else None
+        return MediaDeliveryService(
+            storage=getattr(self, "chat_image_service", None),
+            conversation_id=_coerce_uuid(conversation_id),
+            user_id=_coerce_uuid(user_id),
+            preview_publisher=ImagePreviewPublisher(
+                enabled=settings.enable_image_streaming,
+                max_b64_chars=settings.image_stream_preview_max_b64_chars,
+            ),
+            request_id=str(conversation_id) if conversation_id else None,
+        )
+
     async def _image_generator_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
         if not messages:
@@ -1622,7 +1657,10 @@ class MultiAgentWorkflow(
             current_turn_messages,
         )
 
-        with use_image_preview_emitter(self._build_image_preview_emitter(state)):
+        with (
+            use_image_preview_emitter(self._build_image_preview_emitter(state)),
+            use_media_delivery_service(self._build_media_delivery_service(state)),
+        ):
             response = await self.image_generator_agent.invoke_model_with_history(
                 current_turn_messages,
                 conversation_history,

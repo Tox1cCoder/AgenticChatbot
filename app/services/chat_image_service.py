@@ -65,6 +65,7 @@ class ChatImageStorageService:
             "mime": content_type,
             "image_id": str(image_id),
             "url": f"{CHAT_IMAGE_URL_PREFIX}{image_id}",
+            "content_hash": sha,
         }
 
     def load_data_url(self, image_id: UUID, user_id: UUID) -> str | None:

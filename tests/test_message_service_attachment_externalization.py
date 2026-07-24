@@ -59,3 +59,35 @@ def test_externalize_falls_back_to_inline_on_store_failure():
     refs = svc._externalize_attachments_for_persist(data, uuid4())
     # storage failure must not lose the image — keep the inline attachment
     assert refs == [original]
+
+
+def test_generated_images_reuse_early_stored_ref_without_restoring():
+    """A generated image persisted early carries a ``stored_ref`` descriptor;
+    terminal persistence reuses it and never calls the storage backend again."""
+    called = []
+
+    def store(**kwargs):
+        called.append(kwargs)
+        return {"image_id": "SHOULD-NOT-RUN", "url": "/chat-images/SHOULD-NOT-RUN"}
+
+    svc = _make_service(store)
+    metadata = {
+        "images": [
+            {
+                "mime": "image/png",
+                "data": base64.b64encode(b"final").decode(),
+                "stored_ref": {
+                    "image_id": "early-9",
+                    "url": "/chat-images/early-9",
+                    "mime": "image/png",
+                },
+            }
+        ]
+    }
+    svc._externalize_generated_images(metadata, uuid4(), uuid4())
+
+    assert called == []  # early descriptor reused — no re-decode/re-write
+    img = metadata["images"][0]
+    assert img["image_id"] == "early-9"
+    assert img["url"] == "/chat-images/early-9"
+    assert "data" not in img and "stored_ref" not in img

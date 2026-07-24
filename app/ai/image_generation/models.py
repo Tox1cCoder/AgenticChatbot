@@ -57,4 +57,18 @@ class ImageUsage:
     provider_request_id: str | None = None
 
 
+@dataclass(frozen=True)
+class MediaDeliveryError:
+    """Typed record of a media-delivery failure.
+
+    Carries only structural detail (a stable ``code``, the failing ``item_id``
+    and an exception summary) — never image bytes — so it is safe to log and
+    surface without leaking payload data.
+    """
+
+    code: str
+    item_id: str
+    detail: str
+
+
 ImageStreamEvent = ImagePartial | ImageFinal | NarrativeDelta | ImageUsage
