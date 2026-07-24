@@ -605,24 +605,28 @@ high-risk release.
 - Create: `scripts/verify_image_streaming_contract.py`
 - Modify: `tests/test_image_preview_stream.py`
 
-- [ ] Build a deterministic fake image provider that emits:
+- [x] Build a deterministic fake image provider that emits:
   one 128 KiB partial, one final image above 4,000,000 base64 characters, then
   narrative text.
-- [ ] Drive it through `MessageService.create_message_stream` and the actual
+- [x] Drive it through `MessageService.create_message_stream` and the actual
   FastAPI internal SSE route. Assert partial/final ordering and terminal state.
-- [ ] Drive the same fixture through `/api/chat/{conversation_id}` and parse the
+- [x] Drive the same fixture through `/api/chat/{conversation_id}` and parse the
   AI SDK wire protocol, including exactly one `[DONE]`.
-- [ ] Drive both streams through `client_backend.create_app()` with dependency
+- [x] Drive both streams through `client_backend.create_app()` with dependency
   overrides. Do not call adapter helpers directly.
-- [ ] Add a failing test showing `GET /chat-images/{id}` is absent from the
+- [x] Add a failing test showing `GET /chat-images/{id}` is absent from the
   sidecar and the streamed reference cannot be fetched through port 8100.
-- [ ] Add a failing test showing protected relative image URLs are not treated as
+- [x] Add a failing test showing protected relative image URLs are not treated as
   loose base64.
-- [ ] Add a failing resume-stream case in which image generation occurs after HITL.
-- [ ] Add mixed-catalog HTTP tests for both canonical and sidecar MCP apps:
+- [x] Add a failing resume-stream case in which image generation occurs after HITL.
+- [x] Add mixed-catalog HTTP tests for both canonical and sidecar MCP apps:
   `brave_image_search` must never return a `widgets` tool.
-- [ ] Record event ordering and payload byte sizes in the test failure messages.
-- [ ] Keep provider-network tests opt-in; the deterministic test is the CI gate.
+- [x] Record event ordering and payload byte sizes in the test failure messages.
+- [x] Keep provider-network tests opt-in; the deterministic test is the CI gate.
+
+> **T001 status (2026-07-24):** Done — 9 RED characterization assertions
+> committed (`a4c26a2`), 7 GREEN (2 regression locks + harness), 1 opt-in skip.
+> See Implementation Design Decisions Log at end of doc.
 
 Run:
 
@@ -1302,4 +1306,31 @@ These do not block the urgent image/MCP fixes:
 2. Whether Custom Agent missing local capabilities should always degrade and run
    (current/recommended) or optionally support a strict "all required" mode.
 3. The compatibility-window length for legacy Custom Agent refs and `skill_settings`.
+
+---
+
+## Implementation Design Decisions Log
+
+Decisions made while executing the plan (append-only; newest task last).
+
+### T001 — characterization tests (commit `a4c26a2`)
+
+- **Fake provider seam.** The deterministic fake is injected at the
+  `ai_service`/real-`MessageService` HTTP boundary, not at a graph-level provider
+  injection point, because that graph seam does not exist yet — it is a T002
+  deliverable. The tests still drive the real FastAPI internal SSE route, the real
+  AI SDK `/api/chat` route, and the real `client_backend.create_app()` sidecar proxy
+  end-to-end. **Follow-up:** re-point the resume and provider-injection tests at the
+  graph boundary once T002/T004/T005 create it.
+- **Two targets kept GREEN, not forced RED.** `/mcp/tools?serverName=` scoping (fixed
+  in `b55d83a`) and "exactly one `[DONE]` survives the proxy" are already correct on
+  current source, so they were committed as GREEN regression locks rather than forced
+  to fail. The genuinely-missing `GET /mcp/servers/{server_name}/tools` route is the
+  RED MCP characterization (canonical + sidecar).
+- **Verify script is force-added.** `scripts/` is gitignored, but sibling scripts are
+  tracked and the plan lists `scripts/verify_image_streaming_contract.py` as a tracked
+  deliverable referenced by the verification commands, so it was `git add -f`'d.
+- **RED committed as hard failures, not xfail.** Phase 0's intent is a failing
+  baseline; T002–T007 flip these green. The branch test suite is intentionally red
+  for the image/MCP contract tests until then.
 
