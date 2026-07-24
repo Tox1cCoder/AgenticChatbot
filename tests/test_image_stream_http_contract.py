@@ -337,6 +337,21 @@ def _types(payloads) -> list[str]:
     return out
 
 
+def _first_index_or_raise(payloads, predicate, *, label: str, order: list[str]) -> int:
+    """Return the index of the first payload matching ``predicate``.
+
+    Raises an informative ``AssertionError`` (not a bare ``ValueError``) when
+    no matching event exists at all, so an explicit FR-IMG-002 ordering
+    comparison (``index(final ref) < index(narrative completion)``) fails for
+    the defect reason — the event is simply never emitted — rather than for an
+    unrelated ``IndexError``/``TypeError``.
+    """
+    for i, p in enumerate(payloads):
+        if predicate(p):
+            return i
+    raise AssertionError(f"no {label} found in stream; event order={order}")
+
+
 @pytest.fixture(autouse=True)
 def _restore_wiring():
     setup_auto_injection(Container)
@@ -351,9 +366,13 @@ def _restore_wiring():
 
 def test_internal_sse_delivers_oversized_final_image_early_by_reference():
     """RED: the oversized FINAL image must still surface an early
-    reference-delivery ``image_preview`` (status=final) before the terminal
-    ``complete``. Current source drops it in ImagePreviewPublisher, so only the
-    128 KiB partial survives.
+    reference-delivery ``image_preview`` (status=final) strictly before the
+    terminal ``complete`` (FR-IMG-002: "an authenticated image reference is
+    emitted before narrative completion"), asserted as an explicit
+    ``index(final ref) < index(complete)`` comparison, not mere presence in
+    the payload list. Current source drops the final preview entirely in
+    ImagePreviewPublisher, so only the 128 KiB partial survives and the index
+    lookup for the final reference fails outright.
     """
     conversation_id = uuid4()
     user_id = uuid4()
@@ -382,19 +401,36 @@ def test_internal_sse_delivers_oversized_final_image_early_by_reference():
     order = _types(payloads)
 
     partial_seen = any(s == "partial" for s in statuses)
-    final_seen = any(s == "final" for s in statuses)
 
     assert partial_seen, (
         "expected the 128 KiB partial preview to be delivered.\n"
         f"{_sizes_banner()}\nevent order: {order}"
     )
-    # Characterized defect: oversized final is dropped -> no early final event.
-    assert final_seen, (
-        "DEFECT (emitter.py:70-78): the oversized FINAL image produced NO early "
-        "reference-delivery event; it only arrives with the terminal `complete`, "
-        "violating FR-IMG-002/FR-IMG-003.\n"
-        f"{_sizes_banner()}\n"
-        f"image_preview statuses seen: {statuses}\nevent order: {order}"
+
+    # FR-IMG-002 ("an authenticated image reference is emitted before
+    # narrative completion"), asserted as an explicit index comparison rather
+    # than mere presence. Characterized defect: emitter.py:70-78 drops the
+    # oversized final entirely, so this lookup itself fails/raises -- there is
+    # no early final-status reference event to find an index for at all.
+    final_ref_index = _first_index_or_raise(
+        payloads,
+        lambda p: isinstance(p, dict)
+        and p.get("type") == "image_preview"
+        and p.get("status") == "final",
+        label=(
+            "DEFECT (emitter.py:70-78): an early reference-delivery "
+            "image_preview (status=final); the oversized FINAL image only "
+            "arrives with the terminal `complete`, violating "
+            f"FR-IMG-002/FR-IMG-003. {_sizes_banner()} "
+            f"image_preview statuses seen: {statuses}"
+        ),
+        order=order,
+    )
+    complete_index = order.index("complete")
+    assert final_ref_index < complete_index, (
+        "FR-IMG-002 violated: final-status image_preview at index "
+        f"{final_ref_index} must precede the terminal complete at index "
+        f"{complete_index}; event order: {order}"
     )
 
 
@@ -491,8 +527,12 @@ def test_ai_sdk_emits_exactly_one_done_and_ends_with_it():
 def test_ai_sdk_delivers_oversized_final_image_early():
     """RED: an oversized FINAL image must produce an early
     ``data-image-preview`` with status=final (or an early reference file part)
-    before the terminal message. Current source drops it in the publisher, so
-    only the partial ``data-image-preview`` appears.
+    strictly before narrative completion (FR-IMG-002: "an authenticated image
+    reference is emitted before narrative completion"), asserted as an
+    explicit ``index(final ref) < index(text-end)`` comparison, not mere
+    presence in the payload list. Current source drops the oversized final
+    entirely in the publisher, so only the partial ``data-image-preview``
+    appears and the index lookup for the final reference fails outright.
     """
     conversation_id = uuid4()
     user_id = uuid4()
@@ -514,12 +554,29 @@ def test_ai_sdk_delivers_oversized_final_image_early():
         "expected the 128 KiB partial data-image-preview.\n"
         f"{_sizes_banner()}\nstatuses={statuses}\norder={order}"
     )
-    assert any(s == "final" for s in statuses), (
-        "DEFECT (emitter.py:70-78): the oversized FINAL image produced NO early "
-        "`data-image-preview` (status=final); it is dropped and never shown "
-        "before completion (FR-IMG-002/FR-IMG-003).\n"
-        f"{_sizes_banner()}\ndata-image-preview statuses seen: {statuses}\n"
-        f"event order: {order}"
+
+    # FR-IMG-002 ordering, asserted explicitly rather than by presence.
+    # Characterized defect: emitter.py:70-78 drops the oversized final
+    # entirely, so this lookup itself fails/raises -- there is no early
+    # final-status data-image-preview to find an index for at all.
+    final_ref_index = _first_index_or_raise(
+        payloads,
+        lambda p: isinstance(p, dict)
+        and p.get("type") == "data-image-preview"
+        and (p.get("data") or {}).get("status") == "final",
+        label=(
+            "DEFECT (emitter.py:70-78): an early final-status "
+            "data-image-preview; the oversized FINAL image is dropped and "
+            f"never shown before completion (FR-IMG-002/FR-IMG-003). "
+            f"{_sizes_banner()} data-image-preview statuses seen: {statuses}"
+        ),
+        order=order,
+    )
+    narrative_complete_index = order.index("text-end")
+    assert final_ref_index < narrative_complete_index, (
+        "FR-IMG-002 violated: final-status data-image-preview at index "
+        f"{final_ref_index} must precede narrative completion (text-end) at "
+        f"index {narrative_complete_index}; event order: {order}"
     )
 
 
