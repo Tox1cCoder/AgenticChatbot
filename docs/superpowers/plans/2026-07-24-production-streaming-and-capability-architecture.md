@@ -658,22 +658,27 @@ sidecar media read, resume preview, and any query-loss path found.
 - Modify: `tests/test_bot_metadata_image_externalization.py`
 - Modify: `tests/test_message_service_attachment_externalization.py`
 
-- [ ] Write a failing test proving a final image is stored before the next
+- [x] Write a failing test proving a final image is stored before the next
   narrative delta/terminal event.
-- [ ] Introduce an injected per-run media delivery service with
+- [x] Introduce an injected per-run media delivery service with
   `publish_partial(...)` and `persist_final(...)`.
-- [ ] Bind it with request user/conversation context at the graph boundary; do not
+- [x] Bind it with request user/conversation context at the graph boundary; do not
   let the provider or agent reach into the global DI container.
-- [ ] Make `persist_final` idempotent by request/item/content hash and return the
+- [x] Make `persist_final` idempotent by request/item/content hash and return the
   existing `image_id/url` descriptor.
-- [ ] Store the descriptor in graph/message metadata so terminal persistence reuses
+- [x] Store the descriptor in graph/message metadata so terminal persistence reuses
   it rather than decoding and writing the final bytes again.
-- [ ] Keep final image bytes subject to the storage byte cap, not the transient SSE
+- [x] Keep final image bytes subject to the storage byte cap, not the transient SSE
   character cap.
-- [ ] On storage failure, emit a typed image-delivery error and continue narrative
+- [x] On storage failure, emit a typed image-delivery error and continue narrative
   only if current product policy permits a text-only answer; record the failure.
-- [ ] Preserve legacy metadata reads while ensuring all new generated image writes
+- [x] Preserve legacy metadata reads while ensuring all new generated image writes
   contain references, never base64.
+
+> **T002 status (2026-07-24):** Done — `f107ce2`, reviewer Approved (0
+> Critical/Important, 3 Minor). `MediaDeliveryService` added; final images persist
+> early and idempotently; terminal reuse via `response_constants._reuse_stored_ref`.
+> See Implementation Design Decisions Log at end of doc.
 
 ### Task 3 (T003): Version the event and repair both public transports
 
@@ -1333,4 +1338,36 @@ Decisions made while executing the plan (append-only; newest task last).
 - **RED committed as hard failures, not xfail.** Phase 0's intent is a failing
   baseline; T002–T007 flip these green. The branch test suite is intentionally red
   for the image/MCP contract tests until then.
+
+### T002 — persist final images early (commit `f107ce2`)
+
+- **New abstraction `MediaDeliveryService`** (`app/ai/image_generation/emitter.py`):
+  `publish_partial(*, image_index, mime, data_b64, seq=0) -> bool` and
+  `persist_final(*, image_index, mime, data_b64) -> dict|None`, plus a `.failures`
+  list. Bound at the graph boundary via `use_media_delivery_service` /
+  `current_media_delivery_service` (a ContextVar), mirroring the existing
+  `use_image_preview_emitter` sink pattern. The image agent only READS the ContextVar
+  (`image_generator_agent.py`), with a `storage=None` fallback so non-streaming/resume/
+  test paths keep working without any global-container access.
+- **Idempotency key** = `(run_id, item_id="image-final-<idx>", sha256(data_b64))`,
+  checked before `store()`; repeat finals return the cached descriptor (no second
+  write). Within-run only (FR-IMG-009). **Cross-run/resume is NOT idempotent yet** —
+  a fresh service instance on resume creates a second ownership row (file bytes are
+  content-addressed/deduped, but the row is not). **Deferred to T005** (resume parity).
+- **Descriptor** stored at `metadata["images"][i]["stored_ref"] =
+  {image_id, url, mime, name, content_hash}` (reference only, no bytes). Terminal
+  persistence reuses it via `response_constants._reuse_stored_ref`, so
+  `message_service.py` needed no edit (it delegates through `externalize_metadata_images`).
+- **Final bytes** use the storage byte cap, never the transient SSE char cap
+  (FR-IMG-003). **Storage failure** → typed `MediaDeliveryError` recorded in
+  `.failures` + `logger.warning` (no base64), current narrative behavior preserved;
+  the failed final keeps its inline data so terminal externalization still runs.
+- **Scope boundary held:** no wire event emitted, no AI SDK projection touched — the
+  T001 wire-event characterization tests correctly stayed RED (verified: 12 known
+  characterization REDs, nothing else regressed; image-gen/ai_sdk_v6/demo suites 38/38).
+- **Minor (final-review triage):** (1) `response_constants.py` `store is None` branch
+  now `continue`s past non-dict entries (drops them) instead of returning the list
+  verbatim — test-only path, no production impact; (2) no single test exercises the
+  full agent→metadata→externalize chain (halves tested independently; connective
+  tissue verified by reading).
 
