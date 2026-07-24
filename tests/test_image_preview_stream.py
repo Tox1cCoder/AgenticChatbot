@@ -300,3 +300,82 @@ def test_graph_emitter_disabled_by_flag_or_missing_sink(monkeypatch):
     monkeypatch.setattr(settings, "enable_image_streaming", True)
     assert MultiAgentWorkflow._build_image_preview_emitter(None, {"context": {}}) is None
     assert MultiAgentWorkflow._build_image_preview_emitter(None, {}) is None
+
+
+# ---------------------------------------------------------------------------
+# Phase-0 RED characterization (T001): desired-but-unmet contracts
+#
+# These pin the *target* image-delivery contracts that Phase 1 (T002-T005)
+# will make GREEN. They intentionally FAIL on current source. The existing
+# ``test_publisher_drops_oversized_payloads`` above documents TODAY'S behavior;
+# the tests below document the intended behavior and must be flipped, not
+# deleted, when the fix lands.
+# ---------------------------------------------------------------------------
+
+
+def test_oversized_final_image_is_delivered_not_silently_dropped_CHARACTERIZATION():
+    """RED: an oversized FINAL image must still be delivered early (by
+    reference), never silently dropped.
+
+    Current ``ImagePreviewPublisher`` drops any payload whose base64 exceeds
+    ``max_b64_chars`` with only a ``logger.info`` — no metric, no event
+    (``emitter.py:70-78``). A real generated image commonly exceeds the cap, so
+    no early image event exists at all (FR-IMG-002/FR-IMG-003/FR-IMG-007).
+    """
+    emitted: list[dict] = []
+    with use_image_preview_emitter(emitted.append):
+        publisher = ImagePreviewPublisher(enabled=True, max_b64_chars=3)
+        oversized_b64 = "QUJDRA"  # 6 chars > cap of 3
+        publisher.publish(
+            image_index=0,
+            status="final",
+            mime="image/png",
+            data_b64=oversized_b64,
+            seq=1,
+        )
+    assert emitted, (
+        "DEFECT (emitter.py:70-78): oversized FINAL image was dropped with only "
+        "a logger.info; no stream event and no reference delivery were produced. "
+        f"[sizes] final_b64_len={len('QUJDRA')} chars > cap=3 chars"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ai_sdk_v6_terminal_file_part_preserves_protected_reference_CHARACTERIZATION():
+    """RED: a terminal ``file`` part sourced from a protected
+    ``/chat-images/{id}`` reference must preserve that URL verbatim so the
+    client can fetch it with credentials.
+
+    Current ``_normalize_image_item_to_file_part`` only special-cases ``data:``
+    and ``http/https/blob:`` URLs; a protected relative URL falls through to
+    ``base64.b64decode(..., validate=False)`` and is reinterpreted as loose
+    base64 into a corrupt ``data:`` URL (``ai_sdk_projection.py:104-154``).
+    """
+    protected_url = "/chat-images/11111111-1111-4111-8111-111111111111"
+
+    async def source():
+        yield make_event(
+            "complete",
+            sequence=1,
+            data={
+                "message": {
+                    "id": "m-1",
+                    "message_metadata": {
+                        "images": [{"url": protected_url, "mime": "image/png"}]
+                    },
+                }
+            },
+        )
+
+    payloads = await _collect_ai_sdk_payloads(source)
+    file_parts = [
+        payload
+        for payload in payloads
+        if isinstance(payload, dict) and payload.get("type") == "file"
+    ]
+    urls = [part.get("url") for part in file_parts]
+    assert protected_url in urls, (
+        "DEFECT (ai_sdk_projection.py:104-154): the protected relative image URL "
+        "was not preserved as a `file` url; it was reinterpreted as loose base64 "
+        f"and mangled (FR-IMG-006). expected {protected_url!r}; got file urls {urls}"
+    )
