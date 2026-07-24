@@ -11,7 +11,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from .events import SUBAGENT_PHASE_BY_EVENT, V3StreamEvent
+from app.core.config import settings
+
+from .events import (
+    SUBAGENT_PHASE_BY_EVENT,
+    V3StreamEvent,
+    apply_inline_preview_wire_budget,
+)
 
 
 def legacy_event_from_v3(event: V3StreamEvent) -> dict[str, Any] | None:
@@ -52,7 +58,13 @@ def legacy_event_from_v3(event: V3StreamEvent) -> dict[str, Any] | None:
             "items": list(event.data.get("items") or []),
         }
     if event.type == "image_preview":
-        payload = dict(event.data)
+        # Second-defense inline budget at serialization time (FR-IMG-007): an
+        # oversized inline preview is downgraded to a structured
+        # ``preview_skipped`` status rather than shipped or silently dropped.
+        # Reference (final) and skip deliveries pass through, exposing the same
+        # protected relative URL the AI SDK transport does.
+        budget = getattr(settings, "image_stream_preview_max_b64_chars", 0)
+        payload = dict(apply_inline_preview_wire_budget(event.data, budget=budget))
         payload["type"] = "image_preview"
         return payload
     if event.type == "agent_selected":

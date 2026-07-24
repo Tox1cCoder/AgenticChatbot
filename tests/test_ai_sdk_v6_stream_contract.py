@@ -114,6 +114,97 @@ async def test_heartbeat_stream_closes_source_in_its_own_context():
 
 
 @pytest.mark.asyncio
+async def test_image_preview_v2_reference_final_projects_reference_url():
+    """A schema-v2 reference-delivery FINAL image_preview projects to a
+    ``data-image-preview`` carrying the protected relative URL verbatim (no
+    base64), stable by ``item_id``."""
+
+    async def source():
+        yield make_event(
+            "image_preview",
+            sequence=1,
+            data={
+                "schema_version": 2,
+                "item_id": "image-preview-0",
+                "image_index": 0,
+                "status": "final",
+                "seq": 2,
+                "media_type": "image/png",
+                "delivery": {
+                    "kind": "reference",
+                    "image_id": "11111111-1111-4111-8111-111111111111",
+                    "url": "/chat-images/11111111-1111-4111-8111-111111111111",
+                },
+            },
+        )
+        yield make_event("complete", sequence=2, data={"message": {"id": "m-1"}})
+
+    payloads = await _collect_payloads(source)
+    previews = [
+        p
+        for p in payloads
+        if p != "[DONE]" and isinstance(p, dict) and p.get("type") == "data-image-preview"
+    ]
+    assert previews == [
+        {
+            "type": "data-image-preview",
+            "id": "image-preview-0",
+            "data": {
+                "imageIndex": 0,
+                "status": "final",
+                "mediaType": "image/png",
+                "url": "/chat-images/11111111-1111-4111-8111-111111111111",
+                "seq": 2,
+            },
+            "transient": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_image_preview_v2_inline_partial_projects_data_url():
+    """A schema-v2 inline-delivery PARTIAL image_preview projects to a
+    ``data-image-preview`` carrying the assembled ``data:`` URL."""
+
+    async def source():
+        yield make_event(
+            "image_preview",
+            sequence=1,
+            data={
+                "schema_version": 2,
+                "item_id": "image-preview-0",
+                "image_index": 0,
+                "status": "partial",
+                "seq": 1,
+                "media_type": "image/png",
+                "delivery": {"kind": "inline", "data_url": "data:image/png;base64,QUJD"},
+            },
+        )
+        yield make_event("complete", sequence=2, data={"message": {"id": "m-1"}})
+
+    payloads = await _collect_payloads(source)
+    previews = [
+        p
+        for p in payloads
+        if p != "[DONE]" and isinstance(p, dict) and p.get("type") == "data-image-preview"
+    ]
+    assert previews == [
+        {
+            "type": "data-image-preview",
+            "id": "image-preview-0",
+            "data": {
+                "imageIndex": 0,
+                "status": "partial",
+                "mediaType": "image/png",
+                "url": "data:image/png;base64,QUJD",
+                "seq": 1,
+            },
+            "transient": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_reasoning_stream_maps_to_ai_sdk_reasoning_chunks():
     async def source():
         yield make_event("reasoning_delta", sequence=1, data={"text": "plan"})

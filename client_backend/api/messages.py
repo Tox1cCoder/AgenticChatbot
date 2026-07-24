@@ -72,6 +72,7 @@ def _build_sse_response(
                 await queue.put(None)
 
         reader_task = asyncio.create_task(_upstream_reader())
+        proxied = 0
         try:
             while True:
                 try:
@@ -87,18 +88,26 @@ def _build_sse_response(
                 if event is None:
                     break
 
+                proxied += 1
                 if "raw" in event and len(event) == 1:
                     yield f"data: {event['raw']}\n\n"
                 else:
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except asyncio.CancelledError:
+            # Consumer (desktop client) disconnected mid-stream.
+            logger.debug("SSE consumer disconnected after %d proxied events", proxied)
             return
         finally:
             reader_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await reader_task
+            # Exactly one trailing [DONE] for the AI SDK wire: stream_sse never
+            # yields the upstream [DONE], so this is the only one the consumer
+            # sees, ending the stream even if the upstream sent junk after its
+            # own [DONE].
             if ai_sdk:
                 yield "data: [DONE]\n\n"
+            logger.debug("SSE proxy forwarded %d events to consumer", proxied)
 
     headers = {
         "Cache-Control": "no-cache",

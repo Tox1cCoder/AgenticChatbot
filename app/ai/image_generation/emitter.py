@@ -18,6 +18,11 @@ from contextvars import ContextVar
 from typing import Any
 from uuid import uuid4
 
+from app.services.event_streaming.events import (
+    build_image_preview_reference_data,
+    build_image_preview_skipped_data,
+)
+
 from .models import MediaDeliveryError
 
 logger = logging.getLogger(__name__)
@@ -60,6 +65,33 @@ class ImagePreviewPublisher:
         self._emitter = current_image_preview_emitter() if enabled else None
         self._max_b64_chars = max(0, int(max_b64_chars))
         self._final_indexes: set[int] = set()
+        self._counters: dict[str, int] = {
+            "emitted": 0,
+            "coalesced": 0,
+            "oversized": 0,
+        }
+
+    @property
+    def counters(self) -> dict[str, int]:
+        return dict(self._counters)
+
+    def _emit(self, payload: dict[str, Any]) -> bool:
+        """Hand a payload to the bound emitter, swallowing sink failures.
+
+        Never logs the payload — image base64 must never reach logs/traces.
+        """
+        if self._emitter is None:
+            return False
+        try:
+            self._emitter(payload)
+        except Exception as err:
+            logger.warning(
+                "Image preview emission failed (index=%s): %s",
+                payload.get("image_index"),
+                err,
+            )
+            return False
+        return True
 
     def publish(
         self,
@@ -73,16 +105,24 @@ class ImagePreviewPublisher:
         if self._emitter is None or not data_b64:
             return False
         if len(data_b64) > self._max_b64_chars:
-            logger.info(
-                "Skipping image preview %s/%s: payload %d chars exceeds cap %d",
-                image_index,
-                status,
-                len(data_b64),
-                self._max_b64_chars,
+            self._counters["oversized"] += 1
+            # First-defense budget: never a silent drop. Surface a structured
+            # ``preview_skipped`` status carrying no base64 (FR-IMG-007). The
+            # authoritative image still arrives (finals by reference through
+            # ``MediaDeliveryService.persist_final``; else with ``complete``).
+            self._emit(
+                build_image_preview_skipped_data(
+                    image_index=image_index,
+                    item_id=f"{PREVIEW_ITEM_ID_PREFIX}{image_index}",
+                    media_type=mime or "image/png",
+                    seq=seq,
+                    reason="oversized_inline_preview",
+                )
             )
             return False
         if status == "final":
             if image_index in self._final_indexes:
+                self._counters["coalesced"] += 1
                 return False
             self._final_indexes.add(image_index)
         payload = {
@@ -93,11 +133,39 @@ class ImagePreviewPublisher:
             "data_b64": data_b64,
             "seq": seq,
         }
-        try:
-            self._emitter(payload)
-        except Exception as err:
-            logger.warning("Image preview emission failed (index=%s): %s", image_index, err)
+        if not self._emit(payload):
             return False
+        self._counters["emitted"] += 1
+        return True
+
+    def emit_reference(
+        self,
+        *,
+        image_index: int,
+        image_id: Any,
+        url: str,
+        media_type: str,
+        seq: int,
+    ) -> bool:
+        """Emit a schema-v2 FINAL image_preview delivered by protected reference.
+
+        Bypasses the inline base64 budget entirely — a final is always by
+        reference, so its early delivery does not depend on the SSE cap
+        (FR-IMG-003). No-op when no emitter is bound (non-streaming/resume).
+        """
+        if self._emitter is None or not url:
+            return False
+        payload = build_image_preview_reference_data(
+            image_index=image_index,
+            item_id=f"{PREVIEW_ITEM_ID_PREFIX}{image_index}",
+            image_id=image_id,
+            url=url,
+            media_type=media_type,
+            seq=seq,
+        )
+        if not self._emit(payload):
+            return False
+        self._counters["emitted"] += 1
         return True
 
 
@@ -160,10 +228,22 @@ class MediaDeliveryService:
         self._run_id = request_id or uuid4().hex
         self._descriptors: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._failures: list[MediaDeliveryError] = []
+        self._max_seq = 0
+        self._referenced_item_ids: set[str] = set()
+        self._reference_emitted = 0
 
     @property
     def failures(self) -> list[MediaDeliveryError]:
         return list(self._failures)
+
+    @property
+    def counters(self) -> dict[str, int]:
+        counters = {
+            "reference_emitted": self._reference_emitted,
+            "storage_failed": len(self._failures),
+        }
+        counters.update({f"preview_{k}": v for k, v in self._preview.counters.items()})
+        return counters
 
     def publish_partial(
         self,
@@ -173,6 +253,7 @@ class MediaDeliveryService:
         data_b64: str,
         seq: int = 0,
     ) -> bool:
+        self._max_seq = max(self._max_seq, int(seq or 0))
         return self._preview.publish(
             image_index=image_index,
             status="partial",
@@ -188,15 +269,37 @@ class MediaDeliveryService:
         mime: str,
         data_b64: str,
     ) -> dict[str, Any] | None:
-        # Preserve the current transient-preview behavior for the final image
-        # (character-capped; oversized previews are dropped by the publisher).
-        self._preview.publish(
-            image_index=image_index,
-            status="final",
-            mime=mime,
-            data_b64=data_b64,
-        )
-        return self._store_final(image_index=image_index, mime=mime, data_b64=data_b64)
+        # Persist the bytes first (bounded by the storage byte cap, not the
+        # transient SSE preview char cap). When a durable reference exists, the
+        # final is delivered EARLY and ALWAYS by protected reference, so its
+        # early delivery does not depend on the base64 SSE cap (FR-IMG-002/003).
+        descriptor = self._store_final(image_index=image_index, mime=mime, data_b64=data_b64)
+        if descriptor is None:
+            # No durable reference (storage-less fallback for
+            # non-streaming/resume/tests, or a storage failure): preserve the
+            # transient inline-preview behavior — the terminal complete still
+            # carries the bytes. Oversized inline previews surface a structured
+            # ``preview_skipped`` status rather than being silently dropped.
+            self._preview.publish(
+                image_index=image_index,
+                status="final",
+                mime=mime,
+                data_b64=data_b64,
+            )
+            return None
+        item_id = f"{PREVIEW_ITEM_ID_PREFIX}{image_index}"
+        if item_id not in self._referenced_item_ids:
+            self._referenced_item_ids.add(item_id)
+            self._max_seq += 1
+            if self._preview.emit_reference(
+                image_index=image_index,
+                image_id=descriptor.get("image_id"),
+                url=descriptor.get("url"),
+                media_type=descriptor.get("mime") or mime,
+                seq=self._max_seq,
+            ):
+                self._reference_emitted += 1
+        return descriptor
 
     def _store_final(
         self,

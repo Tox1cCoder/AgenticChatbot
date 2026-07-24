@@ -47,7 +47,11 @@ from dependency_injector import providers
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.ai.image_generation import ImagePreviewPublisher, use_image_preview_emitter
+from app.ai.image_generation import (
+    ImagePreviewPublisher,
+    MediaDeliveryService,
+    use_image_preview_emitter,
+)
 from app.ai.image_generation.base import ImageGenerationProvider
 from app.ai.image_generation.models import (
     ImageFinal,
@@ -150,14 +154,38 @@ def _assistant_message_read(conversation_id: UUID, image_url: str) -> MessageRea
     )
 
 
+class _HarnessImageStorage:
+    """Deterministic ChatImageStorageService stand-in for the media delivery
+    seam. Returns a fixed protected reference (the test's ``image_url``) so the
+    early reference event and the terminal file part point at the same URL. No
+    byte cap is enforced — final persistence is bounded by the storage cap, not
+    the transient SSE preview cap.
+    """
+
+    def __init__(self, url: str):
+        self._url = url
+        self._image_id = url.rsplit("/", 1)[-1]
+
+    def store(self, *, conversation_id, user_id, mime, data_b64, name):
+        return {
+            "image_id": self._image_id,
+            "url": self._url,
+            "mime": mime,
+            "name": name or "generated-image",
+            "content_hash": "harness-hash",
+        }
+
+
 async def _main_image_event_source(_request):
     """Fake ai_service.execute_request_stream mirroring the graph main path.
 
-    Mirrors ``graph.execute_request_stream``: bind a real preview emitter to a
-    real ``SubagentEventSink`` and publish through the REAL
-    ``ImagePreviewPublisher`` policy. The 128 KiB partial is emitted; the
-    oversized final is dropped by the real policy (the defect). Then narrative
-    text + a terminal complete carrying a protected image reference.
+    Mirrors ``graph.execute_request_stream`` + the real
+    ``ImageGeneratorAgent._consume_image_stream``: bind a real preview emitter to
+    a real ``SubagentEventSink`` and drive the REAL per-run
+    ``MediaDeliveryService`` (T002). Partials go through the REAL
+    ``ImagePreviewPublisher`` policy; the FINAL is persisted and delivered early
+    by protected reference the moment it arrives (T003). Then narrative text +
+    a terminal complete carrying the same protected image reference.
     """
     image_url = _main_image_event_source.image_url
     sink = SubagentEventSink()
@@ -172,25 +200,25 @@ async def _main_image_event_source(_request):
             enabled=settings.enable_image_streaming,
             max_b64_chars=settings.image_stream_preview_max_b64_chars,
         )
-        seq = 0
+        media = MediaDeliveryService(
+            storage=_HarnessImageStorage(image_url),
+            conversation_id=uuid4(),
+            user_id=uuid4(),
+            preview_publisher=publisher,
+        )
         async for item in provider.stream_generate(request):
             if isinstance(item, ImagePartial):
-                seq += 1
-                publisher.publish(
+                media.publish_partial(
                     image_index=item.index,
-                    status="partial",
                     mime=item.mime,
                     data_b64=item.data_b64,
                     seq=item.seq,
                 )
             elif isinstance(item, ImageFinal):
-                seq += 1
-                publisher.publish(
+                media.persist_final(
                     image_index=item.index,
-                    status="final",
                     mime=item.mime,
                     data_b64=item.data_b64,
-                    seq=seq,
                 )
 
     for event in await sink.drain():

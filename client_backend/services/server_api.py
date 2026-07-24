@@ -334,9 +334,14 @@ class ServerAPIClient:
                 if response.status_code >= 400:
                     await self._handle_response(response)
 
+                proxied = 0
                 async for line in response.aiter_lines():
                     if line.startswith("data: "):
                         data = line[6:]
+                        # Break on the FIRST upstream [DONE] and never yield it:
+                        # the sidecar appends its own single trailing [DONE], so
+                        # exactly one survives the proxy boundary even when the
+                        # upstream emits [DONE] followed by trailing bytes.
                         if data.strip() == "[DONE]":
                             break
                         try:
@@ -344,6 +349,7 @@ class ServerAPIClient:
 
                             parsed = json.loads(data)
                         except Exception:
+                            proxied += 1
                             yield {"raw": data}
                             continue
 
@@ -352,7 +358,9 @@ class ServerAPIClient:
                         if isinstance(parsed, dict) and parsed.get("type") == "heartbeat":
                             continue
 
+                        proxied += 1
                         yield parsed
+                logger.debug("SSE proxied %d upstream events from %s", proxied, path)
 
         except httpx.ConnectError as e:
             raise ServerConnectionError(f"Cannot connect to server at {self.base_url}: {e}") from e

@@ -13,6 +13,7 @@ import json
 from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
+from app.core.config import settings
 from app.core.exceptions import CustomHTTPException
 from app.core.rich_response import select_transient_upsert_items
 
@@ -26,7 +27,14 @@ from .ai_sdk_projection import (
     project_ai_sdk_message_for_capability,
     visible_image_file_parts,
 )
-from .events import SUBAGENT_PHASE_BY_EVENT, V3StreamEvent, make_event
+from .events import (
+    IMAGE_PREVIEW_STATUS_SKIPPED,
+    SUBAGENT_PHASE_BY_EVENT,
+    V3StreamEvent,
+    apply_inline_preview_wire_budget,
+    make_event,
+    resolve_image_preview_delivery,
+)
 
 _AI_SDK_HEARTBEAT_INTERVAL_SECONDS = 15.0
 
@@ -358,24 +366,54 @@ class AISDKV6StreamAdapter:
         """Project an early-delivery image preview as a transient data part.
 
         The stable part ``id`` (one per image index) lets AI SDK clients
-        replace a partial preview with the next partial/final in place. The
-        authoritative image still arrives as a ``file`` part on ``complete``.
+        replace a partial/preview with the next partial/final in place. Reads
+        both schema-v1 (top-level ``data_b64``) and schema-v2 (``delivery``)
+        payloads. Inline deliveries carry an assembled ``data:`` URL; a final
+        reference carries the protected relative ``/chat-images/...`` URL
+        verbatim so a credentialed client can fetch it. The authoritative image
+        still arrives as a ``file`` part on ``complete`` for clients that ignore
+        preview events.
         """
-        data_b64 = data.get("data_b64")
         item_id = data.get("item_id")
-        if not data_b64 or not item_id:
+        if not item_id:
             return
-        media_type = data.get("mime") or "image/png"
+
+        # Second-defense inline budget at serialization time (FR-IMG-007).
+        budget = getattr(settings, "image_stream_preview_max_b64_chars", 0)
+        data = apply_inline_preview_wire_budget(data, budget=budget)
+
+        projection = resolve_image_preview_delivery(data)
+
+        if projection["status"] == IMAGE_PREVIEW_STATUS_SKIPPED:
+            # Structured status — never a silent drop.
+            yield _sse(
+                {
+                    "type": "data-image-preview",
+                    "id": str(item_id),
+                    "data": {
+                        "imageIndex": projection["image_index"],
+                        "status": IMAGE_PREVIEW_STATUS_SKIPPED,
+                        "seq": projection["seq"],
+                        "reason": projection["reason"],
+                    },
+                    "transient": True,
+                }
+            )
+            return
+
+        url = projection["url"]
+        if not url:
+            return
         yield _sse(
             {
                 "type": "data-image-preview",
                 "id": str(item_id),
                 "data": {
-                    "imageIndex": data.get("image_index"),
-                    "status": data.get("status") or "final",
-                    "mediaType": media_type,
-                    "url": f"data:{media_type};base64,{data_b64}",
-                    "seq": data.get("seq") or 0,
+                    "imageIndex": projection["image_index"],
+                    "status": projection["status"],
+                    "mediaType": projection["media_type"],
+                    "url": url,
+                    "seq": projection["seq"],
                 },
                 "transient": True,
             }

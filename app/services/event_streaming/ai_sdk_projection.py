@@ -91,6 +91,21 @@ def is_v1_rich_items_message(metadata: dict[str, Any] | None) -> bool:
     return metadata.get("rich_items_version") == 1
 
 
+_PROTECTED_IMAGE_URL_PREFIXES = ("/chat-images/", "/api/chat-images/")
+
+
+def _is_protected_relative_image_url(value: str) -> bool:
+    """Recognize a protected, credentialed image reference served relative to
+    the app origin (e.g. ``/chat-images/{id}``).
+
+    Such a URL must survive as a URL — never be reinterpreted as loose base64.
+    Kept prefix-specific on purpose: a leading ``/`` is a legal base64 byte
+    (a JPEG payload starts ``/9j/...``), so only known media-route prefixes
+    are treated as URLs.
+    """
+    return value.startswith(_PROTECTED_IMAGE_URL_PREFIXES)
+
+
 def _extract_mime_from_data_url(value: str) -> str | None:
     payload = value.strip()
     if not payload.startswith("data:"):
@@ -139,6 +154,12 @@ def _normalize_image_item_to_file_part(item: Any) -> dict[str, str] | None:
             return {"url": raw_value, "mediaType": mime}
 
         if raw_value.startswith(("http://", "https://", "blob:")):
+            return {"url": raw_value, "mediaType": mime}
+
+        if _is_protected_relative_image_url(raw_value):
+            # Protected credentialed reference — preserve verbatim as a URL so
+            # the client fetches it with its Bearer token (FR-IMG-006). Never
+            # reinterpret it as base64.
             return {"url": raw_value, "mediaType": mime}
 
         try:

@@ -10,7 +10,11 @@ import json
 
 import pytest
 
-from app.ai.image_generation import ImagePreviewPublisher, use_image_preview_emitter
+from app.ai.image_generation import (
+    ImagePreviewPublisher,
+    MediaDeliveryService,
+    use_image_preview_emitter,
+)
 from app.services.ai_service import AIService
 from app.services.event_streaming.ai_sdk_v6 import AISDKV6StreamAdapter, AISDKV6StreamState
 from app.services.event_streaming.events import make_event
@@ -78,12 +82,26 @@ def test_publisher_emits_final_once_per_index():
     assert len(emitted) == 2
 
 
-def test_publisher_drops_oversized_payloads():
+def test_publisher_skips_oversized_inline_with_structured_status():
+    """An oversized inline preview is NOT delivered inline (publish returns
+    False) but is never a silent drop: a structured ``preview_skipped`` status
+    is emitted instead, carrying no base64 (FR-IMG-007)."""
     emitted: list[dict] = []
     with use_image_preview_emitter(emitted.append):
         publisher = ImagePreviewPublisher(enabled=True, max_b64_chars=3)
         assert _publish(publisher, data_b64="QUJDRA") is False
-    assert emitted == []
+    assert emitted == [
+        {
+            "schema_version": 2,
+            "item_id": "image-preview-0",
+            "image_index": 0,
+            "status": "preview_skipped",
+            "seq": 0,
+            "media_type": "image/png",
+            "reason": "oversized_inline_preview",
+        }
+    ]
+    assert "QUJDRA" not in json.dumps(emitted)
 
 
 def test_publisher_swallows_emitter_failures():
@@ -93,6 +111,63 @@ def test_publisher_swallows_emitter_failures():
     with use_image_preview_emitter(_boom):
         publisher = ImagePreviewPublisher(enabled=True, max_b64_chars=100)
         assert _publish(publisher) is False
+
+
+class _StubImageStorage:
+    """Deterministic storage stand-in returning a fixed protected reference."""
+
+    def __init__(self, url: str):
+        self._url = url
+        self._image_id = url.rsplit("/", 1)[-1]
+
+    def store(self, *, conversation_id, user_id, mime, data_b64, name):
+        return {
+            "image_id": self._image_id,
+            "url": self._url,
+            "mime": mime,
+            "name": name,
+            "content_hash": "hash",
+        }
+
+
+def test_persist_final_emits_v2_reference_event_by_reference():
+    """persist_final publishes the FINAL image as an early schema-v2 REFERENCE
+    event (delivery.kind=reference) even when the base64 exceeds the inline
+    preview cap; the emitted event carries the protected URL and no base64."""
+    emitted: list[dict] = []
+    with use_image_preview_emitter(emitted.append):
+        publisher = ImagePreviewPublisher(enabled=True, max_b64_chars=3)
+        service = MediaDeliveryService(
+            storage=_StubImageStorage("/chat-images/ref-1"),
+            conversation_id="c-1",
+            user_id="u-1",
+            preview_publisher=publisher,
+        )
+        # publish one small partial first so the final reference seq follows it
+        service.publish_partial(image_index=0, mime="image/png", data_b64="QUJD", seq=1)
+        descriptor = service.persist_final(
+            image_index=0, mime="image/png", data_b64="QUJDRA"  # oversized for the inline cap
+        )
+
+    assert descriptor is not None
+    assert descriptor["url"] == "/chat-images/ref-1"
+    reference_events = [e for e in emitted if e.get("status") == "final"]
+    assert reference_events == [
+        {
+            "schema_version": 2,
+            "item_id": "image-preview-0",
+            "image_index": 0,
+            "status": "final",
+            "seq": 2,
+            "media_type": "image/png",
+            "delivery": {
+                "kind": "reference",
+                "image_id": "ref-1",
+                "url": "/chat-images/ref-1",
+            },
+        }
+    ]
+    assert "QUJDRA" not in json.dumps(emitted)
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +264,38 @@ def test_internal_sse_projects_image_preview():
         "image_index": 0,
         "data_b64": "QUJD",
     }
+
+
+def test_internal_sse_projects_v2_reference_final_with_protected_url():
+    """A schema-v2 reference-delivery FINAL image_preview surfaces on the
+    internal SSE wire with its status and protected relative URL intact and no
+    base64 anywhere."""
+    event = make_event(
+        "image_preview",
+        sequence=1,
+        data={
+            "schema_version": 2,
+            "item_id": "image-preview-0",
+            "image_index": 0,
+            "status": "final",
+            "seq": 2,
+            "media_type": "image/png",
+            "delivery": {
+                "kind": "reference",
+                "image_id": "abc",
+                "url": "/chat-images/abc",
+            },
+        },
+    )
+    projected = legacy_event_from_v3(event)
+    assert projected["type"] == "image_preview"
+    assert projected["status"] == "final"
+    assert projected["delivery"] == {
+        "kind": "reference",
+        "image_id": "abc",
+        "url": "/chat-images/abc",
+    }
+    assert "data_b64" not in projected
 
 
 async def _collect_ai_sdk_payloads(source):
