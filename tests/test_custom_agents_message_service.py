@@ -32,8 +32,16 @@ def test_workflow_request_defaults_custom_agents_to_empty():
 
 
 class _FakeModelConfig:
-    def validate_provider_model(self, user_id, provider_type, model, *, allow_custom_model=False):
-        return None
+    def validate_provider_model(
+        self,
+        user_id,
+        provider_type,
+        model,
+        *,
+        allow_custom_model=False,
+        reasoning_effort=None,
+    ):
+        return reasoning_effort
 
 
 @pytest.fixture

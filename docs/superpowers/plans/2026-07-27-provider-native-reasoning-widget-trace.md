@@ -377,7 +377,7 @@ except ValueError as exc:
 
 Run: `python -m pytest tests/test_model_config_reasoning.py tests/test_runtime_model_overrides.py -q`
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m alembic heads`
+Run: `python -m alembic heads`
 
 Expected: tests pass and the only head is `e8f9a0b1c2d3`.
 
@@ -686,11 +686,11 @@ Expected: all selected tests pass.
 
 - [ ] **Step 3: Validate the migration graph**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m alembic heads`
+Run: `python -m alembic heads`
 
 Expected: exactly `e8f9a0b1c2d3 (head)`.
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m alembic upgrade head`
+Run: `python -m alembic upgrade head`
 
 Expected: migration succeeds or reports the database is already at head.
 

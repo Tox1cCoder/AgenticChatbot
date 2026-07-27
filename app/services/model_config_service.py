@@ -191,7 +191,9 @@ class ModelConfigService(IRuntimeModelResolver):
 
         metadata = self._get_model_metadata(snapshot, model_id)
         if metadata is None and not allow_custom_model:
-            raise ValueError(f"Model '{model_id}' is not present in the current {provider} catalog.")
+            raise ValueError(
+                f"Model '{model_id}' is not present in the current {provider} catalog."
+            )
         return validate_reasoning_effort(
             provider,
             model_id,

@@ -12,7 +12,6 @@ from app.models.agent_model_config import AgentModelConfig
 from app.repositories.agent_model_config import AgentModelConfigRepository
 from app.services.model_config_service import ModelConfigService
 
-
 USER_ID = uuid4()
 
 

@@ -29,9 +29,18 @@ class _FakeProviderService:
 class _FakeModelConfig:
     provider_service = _FakeProviderService()
 
-    def validate_provider_model(self, user_id, provider_type, model, *, allow_custom_model=False):
+    def validate_provider_model(
+        self,
+        user_id,
+        provider_type,
+        model,
+        *,
+        allow_custom_model=False,
+        reasoning_effort=None,
+    ):
         if (provider_type, model) != ("openai", "gpt-4.1-mini"):
             raise ValueError(f"invalid {provider_type}/{model}")
+        return reasoning_effort
 
 
 def _build_app(user_id):

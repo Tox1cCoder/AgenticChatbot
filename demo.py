@@ -11115,6 +11115,8 @@ def render_models_view() -> None:
             if current_model not in catalog_ids:
                 current_model = catalog_ids[0] if catalog_ids else "(sync models first)"
             model_options = catalog_ids or ["(sync models first)"]
+            if st.session_state.get(f"model_cfg_model_select_{agent_key}") != current_model:
+                st.session_state[f"model_cfg_model_select_{agent_key}"] = current_model
             st.selectbox(
                 "Catalog model",
                 options=model_options,
@@ -11189,6 +11191,7 @@ def render_models_view() -> None:
                 current_reasoning = st.session_state.get(f"model_cfg_reasoning_{agent_key}")
                 if current_reasoning not in reasoning_options:
                     current_reasoning = None
+                    st.session_state[f"model_cfg_reasoning_{agent_key}"] = None
                 st.selectbox(
                     reasoning_label,
                     options=reasoning_options,
