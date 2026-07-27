@@ -979,12 +979,11 @@ Widgets are interactive UI elements rendered by the frontend but driven by the a
 
 Widget state is Redis-backed (see startup banner `"Widget runtime: Redis-backed storage active"`). Without Redis, widget flows degrade; a warning is logged at startup.
 
-### HTML widget contract
+### Interactive HTML contract
 
-Live widgets have one supported type: `html`. A widget is a self-contained,
-sandboxed-iframe micro-app — agents create it through the `widgets` MCP server with
-`widget_type="html"` and a minimal state envelope shared by the AI SDK frontend path and
-the Streamlit `demo.py` path:
+Each live widget is a self-contained, sandboxed-iframe HTML micro-app. Agents
+create it through the `widgets` MCP server with a minimal state envelope shared
+by the AI SDK frontend path and the Streamlit `demo.py` path:
 
 ```json
 { "html": "<!doctype html>...", "height": 620, "caption": "Optional short caption" }
@@ -994,9 +993,7 @@ Frontends render the state **only** as a sandboxed iframe from `state.html` — 
 `state.html` into the main chat DOM. `state.html` is untrusted, executable content.
 
 Contract validation happens at widget-tool time (`app/services/widget_contract.py`). The
-checks are shape, not editorial quality: unsupported widget type (anything but `html`,
-including the removed `table`/`chart`/`dashboard`/`form`/`list` and the `iframe`/`micro_app`
-aliases), non-object state, empty `html`, or a missing / non-numeric / out-of-range
+checks are shape, not editorial quality: non-object state, empty `html`, or a missing / non-numeric / out-of-range
 `height` (260–960) all block create/update with a clear, model-readable error. There is no
 `quality_guidance`.
 

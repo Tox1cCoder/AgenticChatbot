@@ -23,11 +23,7 @@ if _project_root not in sys.path:
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
-from app.services.widget_contract import (  # noqa: E402
-    SUPPORTED_WIDGET_TYPE,
-    assert_supported_widget_type,
-    validate_html_widget_state,
-)
+from app.services.widget_contract import validate_html_widget_state  # noqa: E402
 from app.services.widget_runtime import get_widget_store  # noqa: E402
 
 mcp = FastMCP("widgets")
@@ -66,14 +62,13 @@ def _parse_widget_state(raw: str, *, field: str = "initial_state") -> Any:
 @mcp.tool()
 async def widget_create(
     session_id: str,
-    widget_type: str,
     initial_state: str,
     title: str = "",
 ) -> str:
     """Create a live HTML widget that appears inside the chat conversation.
 
     A live widget is a self-contained, sandboxed iframe micro-app — the one
-    supported `widget_type` is `"html"`. Reach for it when a concept is easier to
+    supported experience is HTML. Reach for it when a concept is easier to
     *show* than to describe: motion, changing variables, systems, physics, math,
     processes, or any "show how it works" explanation. Build something the reader
     can poke at:
@@ -105,8 +100,8 @@ async def widget_create(
     Use the literal keys `html` and `height`; aliases such as `document`,
     `content`, `srcdoc`, `min_height`, or `minHeight` are not accepted. `height`
     must be a number between 260 and 960. Creation fails with a clear error for an
-    unsupported widget type, a non-object state, empty html, or a missing,
-    non-numeric, or out-of-range height.
+    non-object state, empty html, or a missing, non-numeric, or out-of-range
+    height.
 
     Example — "explain simple harmonic motion" (label in Vietnamese when asked in
     Vietnamese): animate the oscillator position `x(t)`, draw a time graph of
@@ -116,8 +111,6 @@ async def widget_create(
 
     Args:
         session_id: The conversation ID this widget belongs to.
-        widget_type: Must be `"html"`. Structured kinds (table, chart, dashboard,
-            form, list) and aliases (iframe, micro_app) are not supported.
         initial_state: JSON string with `{"html": "...", "height": 620,
             "caption": "..."}`. `caption` is optional. The whole experience —
             controls, animation, graphs — lives inside the `html` document.
@@ -126,13 +119,11 @@ async def widget_create(
     Returns:
         JSON object describing the created widget (widget_id, version, etc.).
     """
-    assert_supported_widget_type(widget_type)
     store = get_widget_store()
     state = _parse_widget_state(initial_state, field="initial_state")
     validate_html_widget_state(state)
     record = await store.create(
         session_id=session_id,
-        widget_type=SUPPORTED_WIDGET_TYPE,
         initial_state=state,
         title=title or None,
     )
@@ -150,9 +141,7 @@ async def widget_update(
     Use this when the micro-app's data needs to change — for example after
     fetching new numbers to re-render inside the iframe. Pass the complete new
     state (`html`, `height`, and optionally `caption`); the widget keeps its
-    original `html` type. The same minimal contract as `widget_create` applies,
-    and the update is rejected if the existing widget is a legacy structured type
-    rather than `html`.
+    original identity. The same minimal contract as `widget_create` applies.
 
     Args:
         widget_id: The widget to update (returned by widget_create).
@@ -168,7 +157,6 @@ async def widget_update(
     existing = await store.get(widget_id)
     if existing is None:
         raise KeyError(f"Widget {widget_id} not found")
-    assert_supported_widget_type(existing.widget_type)
     validate_html_widget_state(new_state)
     record = await store.update(
         widget_id=widget_id,

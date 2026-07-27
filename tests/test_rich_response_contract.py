@@ -123,7 +123,6 @@ def _make_widget(id_: str = "widget:w-1") -> LiveWidgetRichItem:
         payload={
             "widget_id": "w-1",
             "session_id": "conv-1",
-            "widget_type": "chart",
             "status": "active",
             "version": 1,
             "connection_endpoint": "/widgets/w-1/connection",
@@ -206,7 +205,6 @@ def test_transient_upserts_omit_null_keys_and_default_provenance():
         "payload": {
             "widget_id": "w-1",
             "session_id": "conv-1",
-            "widget_type": "html",
             "status": "active",
             "version": 1,
             "connection_endpoint": "/widgets/w-1/connection",

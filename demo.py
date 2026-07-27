@@ -5338,7 +5338,6 @@ def _build_live_widget_component_html(widget: dict[str, Any], auth_token: str | 
     config = {
         "widget": {
             "widget_id": widget_id,
-            "widget_type": str(widget.get("widget_type") or "html"),
             "title": widget.get("title"),
             "status": str(widget.get("status") or "active"),
             "version": widget.get("version", 1),
@@ -5426,9 +5425,8 @@ def _build_live_widget_component_html(widget: dict[str, Any], auth_token: str | 
       function resize(){document.body.style.margin="0";}
       function showError(msg){el.error.hidden=!msg;el.error.textContent=msg || "";resize();}
       function meta(){
-        const widgetType = String(cfg.widget.widget_type || "html");
         el.title.textContent = cfg.widget.title || "Live Widget";
-        el.sub.textContent = `${widgetType} · ${cfg.widget.widget_id || "pending"}`;
+        el.sub.textContent = cfg.widget.widget_id || "pending";
         el.status.textContent = state.status;
         el.status.dataset.state = state.status;
         el.version.textContent = `Version ${state.version || 0}`;
@@ -5586,8 +5584,7 @@ def render_live_widgets(
         if not widget_id:
             continue
 
-        widget_type = str(widget.get("widget_type") or "widget")
-        title = str(widget.get("title") or widget_type or f"Widget {index + 1}")
+        title = str(widget.get("title") or f"Widget {index + 1}")
         version = widget.get("version", 1)
         mount_key = f"{message_key}:{widget_id}" if message_key else widget_id
         if auto_mount and mount_key not in mount_state:
@@ -5596,7 +5593,7 @@ def render_live_widgets(
 
         if not inline:
             status = str(widget.get("status") or "active")
-            meta_suffix = f"{widget_type} · v{version} · {widget_id[:16]}…"
+            meta_suffix = f"v{version} · {widget_id[:16]}…"
             if status != "active":
                 meta_suffix = f"{meta_suffix} · {status}"
             st.markdown(
@@ -5660,7 +5657,6 @@ def render_live_widgets(
                     json.dumps(
                         {
                             "widget_id": widget_id,
-                            "widget_type": widget.get("widget_type"),
                             "status": widget.get("status"),
                             "version": widget.get("version"),
                             "connection_endpoint": widget.get(
@@ -5736,6 +5732,103 @@ def get_message_metadata(msg: dict[str, Any]) -> dict[str, Any]:
             return value
 
     return {}
+
+
+def _reconcile_terminal_trace(message: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Merge the live trace into a terminal message before stream state is cleared.
+
+    Persisted terminal metadata remains authoritative. Live entries only fill
+    gaps, which preserves server-side timing, redaction, and presentation data
+    while preventing Streamlit's immediate rerun from dropping the trace.
+    """
+    if not isinstance(message, dict):
+        return message
+
+    reconciled = dict(message)
+    metadata_key = next(
+        (
+            key
+            for key in ("messageMetadata", "message_metadata", "metadata")
+            if isinstance(message.get(key), dict)
+        ),
+        "messageMetadata",
+    )
+    metadata = dict(message.get(metadata_key) or {})
+    trace_items = [
+        item
+        for item in (st.session_state.get("stream_trace_items") or [])
+        if isinstance(item, dict)
+    ]
+
+    if not str(metadata.get("thinking_summary") or "").strip():
+        thinking = next(
+            (
+                str(item.get("content") or "").strip()
+                for item in trace_items
+                if item.get("kind") == "thinking" and str(item.get("content") or "").strip()
+            ),
+            "",
+        )
+        if thinking:
+            metadata["thinking_summary"] = thinking
+
+    existing_artifacts = [
+        dict(artifact)
+        for artifact in (metadata.get("tool_artifacts") or [])
+        if isinstance(artifact, dict)
+    ]
+    artifact_keys = {
+        (str(artifact.get("tool_call_id") or ""), str(artifact.get("tool") or ""))
+        for artifact in existing_artifacts
+    }
+    for item in trace_items:
+        if item.get("kind") != "tool":
+            continue
+        artifact = {
+            "tool_call_id": item.get("tool_call_id"),
+            "tool": item.get("name") or "unknown",
+            "args": item.get("args"),
+            "output": item.get("result"),
+            "error": item.get("error"),
+            "status": item.get("state") or "unknown",
+            "render": item.get("render"),
+        }
+        key = (str(artifact["tool_call_id"] or ""), str(artifact["tool"] or ""))
+        if key not in artifact_keys:
+            existing_artifacts.append(artifact)
+            artifact_keys.add(key)
+
+    if existing_artifacts:
+        metadata["tool_artifacts"] = existing_artifacts
+    reconciled[metadata_key] = metadata
+    return reconciled
+
+
+def _merge_terminal_message_into_session(message: dict[str, Any] | None) -> None:
+    """Restore richer streamed metadata after the authoritative history reload."""
+    if not isinstance(message, dict) or not message.get("id"):
+        return
+    message_id = str(message["id"])
+    terminal_metadata = get_message_metadata(message)
+    messages = list(st.session_state.get("messages") or [])
+    for index, stored in enumerate(messages):
+        if str(stored.get("id") or "") != message_id:
+            continue
+        merged = dict(stored)
+        metadata_key = next(
+            (
+                key
+                for key in ("messageMetadata", "message_metadata", "metadata")
+                if isinstance(stored.get(key), dict)
+            ),
+            "messageMetadata",
+        )
+        merged_metadata = dict(get_message_metadata(stored))
+        merged_metadata.update(terminal_metadata)
+        merged[metadata_key] = merged_metadata
+        messages[index] = merged
+        st.session_state.messages = messages
+        return
 
 
 def extract_interrupt_message(interrupt_payload: Any) -> str | None:
@@ -9031,8 +9124,9 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
                 break
 
             if event_type == "complete":
+                final_message = _reconcile_terminal_trace(event.get("message"))
                 image_preview_panel.finalize()
-                stream_renderer.finalize(event.get("message"))
+                stream_renderer.finalize(final_message)
                 status.update(label="Resume completed", state="complete")
                 resume_succeeded = True
                 break
@@ -9733,7 +9827,7 @@ def render_chat_view():
 
                         elif event_type == "complete":
                             # Store final message and complete
-                            final_message = event.get("message")
+                            final_message = _reconcile_terminal_trace(event.get("message"))
                             image_preview_panel.finalize()
                             stream_renderer.finalize(final_message)
                             status.update(label="Message sent!", state="complete")
@@ -9779,6 +9873,7 @@ def render_chat_view():
                         reset_conversation_state()
                         st.session_state.show_attachment_uploader = False
                         load_messages_page(1)
+                        _merge_terminal_message_into_session(final_message)
                         st.toast("Message sent!", icon=":material/check_circle:")
                         st.rerun()
                     elif event_type != "error" and not interrupt_data:

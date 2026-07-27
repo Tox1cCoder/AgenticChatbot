@@ -20,9 +20,7 @@ def _read(rel: str) -> str:
 # ---------------------------------------------------------------------------
 def test_ai_sdk_contract_live_widget_examples_use_html():
     doc = _read("plans/AI_SDK_FE_CONTRACT.md")
-    assert '"widget_type": "html"' in doc
-    assert '"widget_type": "table"' not in doc
-    assert '"widget_type": "chart"' not in doc
+    assert "widget_type" not in doc
 
 
 def test_ai_sdk_contract_documents_html_state_and_iframe():
@@ -51,9 +49,7 @@ def test_ai_sdk_contract_documents_embedded_rich_markers():
 # ---------------------------------------------------------------------------
 def test_frontend_integration_doc_is_html_only():
     doc = _read("plans/live-widgets-frontend-integration.md")
-    assert '"widget_type": "html"' in doc
-    assert '"widget_type": "chart"' not in doc
-    assert '"widget_type": "table"' not in doc
+    assert "widget_type" not in doc
     assert "sandboxed iframe" in doc
 
 

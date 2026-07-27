@@ -49,7 +49,6 @@ class WidgetStatus(str, Enum):
 class WidgetRecord:
     widget_id: str
     session_id: str
-    widget_type: str
     title: str | None
     state: dict[str, Any]
     status: WidgetStatus
@@ -62,7 +61,6 @@ class WidgetRecord:
         return {
             "widget_id": self.widget_id,
             "session_id": self.session_id,
-            "widget_type": self.widget_type,
             "title": self.title,
             "state": self.state,
             "status": self.status.value,
@@ -77,7 +75,6 @@ class WidgetRecord:
         return {
             "widget_id": self.widget_id,
             "session_id": self.session_id,
-            "widget_type": self.widget_type,
             "title": self.title,
             "status": self.status.value,
             "version": self.version,
@@ -99,7 +96,6 @@ class WidgetStore(Protocol):
     async def create(
         self,
         session_id: str,
-        widget_type: str,
         initial_state: dict[str, Any],
         title: str | None = None,
         ttl_seconds: int = DEFAULT_WIDGET_TTL_SECONDS,
@@ -129,7 +125,6 @@ class WidgetStore(Protocol):
         *,
         widget_id: str,
         session_id: str,
-        widget_type: str,
         state: dict[str, Any],
         title: str | None = None,
         status: str = WidgetStatus.ACTIVE.value,
@@ -151,7 +146,6 @@ class InMemoryWidgetStore:
     async def create(
         self,
         session_id: str,
-        widget_type: str,
         initial_state: dict[str, Any],
         title: str | None = None,
         ttl_seconds: int = DEFAULT_WIDGET_TTL_SECONDS,
@@ -162,7 +156,6 @@ class InMemoryWidgetStore:
         record_data = {
             "widget_id": widget_id,
             "session_id": session_id,
-            "widget_type": widget_type,
             "title": title,
             "state": initial_state,
             "status": WidgetStatus.ACTIVE.value,
@@ -260,7 +253,6 @@ class InMemoryWidgetStore:
         *,
         widget_id: str,
         session_id: str,
-        widget_type: str,
         state: dict[str, Any],
         title: str | None = None,
         status: str = WidgetStatus.ACTIVE.value,
@@ -272,7 +264,6 @@ class InMemoryWidgetStore:
         record_data = {
             "widget_id": widget_id,
             "session_id": session_id,
-            "widget_type": widget_type,
             "title": title,
             "state": state,
             "status": WidgetStatus(status).value,
@@ -291,7 +282,6 @@ class InMemoryWidgetStore:
         return WidgetRecord(
             widget_id=data["widget_id"],
             session_id=data["session_id"],
-            widget_type=data["widget_type"],
             title=data["title"],
             state=data["state"],
             status=WidgetStatus(data["status"]),
@@ -329,7 +319,6 @@ class RedisWidgetStore:
     async def create(
         self,
         session_id: str,
-        widget_type: str,
         initial_state: dict[str, Any],
         title: str | None = None,
         ttl_seconds: int = DEFAULT_WIDGET_TTL_SECONDS,
@@ -340,7 +329,6 @@ class RedisWidgetStore:
         record_data = {
             "widget_id": widget_id,
             "session_id": session_id,
-            "widget_type": widget_type,
             "title": title or "",
             "state": json.dumps(initial_state, separators=(",", ":")),
             "status": WidgetStatus.ACTIVE.value,
@@ -514,7 +502,6 @@ class RedisWidgetStore:
         *,
         widget_id: str,
         session_id: str,
-        widget_type: str,
         state: dict[str, Any],
         title: str | None = None,
         status: str = WidgetStatus.ACTIVE.value,
@@ -526,7 +513,6 @@ class RedisWidgetStore:
         record_data = {
             "widget_id": widget_id,
             "session_id": session_id,
-            "widget_type": widget_type,
             "title": title or "",
             "state": json.dumps(state, separators=(",", ":")),
             "status": WidgetStatus(status).value,
@@ -552,7 +538,6 @@ class RedisWidgetStore:
         return WidgetRecord(
             widget_id=str(data["widget_id"]),
             session_id=str(data["session_id"]),
-            widget_type=str(data["widget_type"]),
             title=data.get("title") or None,
             state=state,
             status=WidgetStatus(data.get("status", "active")),

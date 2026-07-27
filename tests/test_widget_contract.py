@@ -14,33 +14,10 @@ import pytest
 from app.services.widget_contract import (
     MAX_WIDGET_HEIGHT,
     MIN_WIDGET_HEIGHT,
-    assert_supported_widget_type,
     render_action_template,
     resolve_widget_action_message,
     validate_html_widget_state,
 )
-
-
-# ---------------------------------------------------------------------------
-# Supported widget type
-# ---------------------------------------------------------------------------
-def test_html_is_the_only_supported_widget_type():
-    assert_supported_widget_type("html")  # does not raise
-
-
-@pytest.mark.parametrize(
-    "widget_type",
-    ["table", "chart", "dashboard", "form", "list"],
-)
-def test_structured_widget_types_are_rejected(widget_type):
-    with pytest.raises(ValueError, match="unsupported widget type"):
-        assert_supported_widget_type(widget_type)
-
-
-@pytest.mark.parametrize("widget_type", ["iframe", "micro_app", "canvas", ""])
-def test_unsupported_aliases_and_unknown_types_are_rejected(widget_type):
-    with pytest.raises(ValueError, match="unsupported widget type"):
-        assert_supported_widget_type(widget_type)
 
 
 # ---------------------------------------------------------------------------

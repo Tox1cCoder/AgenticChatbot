@@ -235,15 +235,44 @@ class AIService:
 
     async def execute_request_stream(self, request: WorkflowExecutionRequest):
         prepared_request = self._prepare_request(request)
-        with bind_usage_context(self._workflow_usage_context(prepared_request)):
-            async for mapped_event in self._map_workflow_stream(
-                self.workflow.execute_request_stream(self._to_ai_request(prepared_request)),
-                emit_rich_items=bool(
-                    getattr(settings, "inline_rich_response_enabled", False)
-                    and getattr(prepared_request, "inline_rich_response_v1", False)
-                ),
-            ):
-                yield mapped_event
+        workflow_stream = self.workflow.execute_request_stream(
+            self._to_ai_request(prepared_request)
+        )
+        context_bound_stream = self._iterate_in_usage_context(
+            workflow_stream,
+            self._workflow_usage_context(prepared_request),
+        )
+        async for mapped_event in self._map_workflow_stream(
+            context_bound_stream,
+            emit_rich_items=bool(
+                getattr(settings, "inline_rich_response_enabled", False)
+                and getattr(prepared_request, "inline_rich_response_v1", False)
+            ),
+        ):
+            yield mapped_event
+
+    @staticmethod
+    async def _iterate_in_usage_context(workflow_stream, usage_context: UsageContext):
+        """Advance and close a workflow source inside its attribution context.
+
+        The binding deliberately ends before yielding to an API adapter. Async
+        generators may be closed by a different task/context when a client
+        disconnects, so a ContextVar token must never span that outward yield.
+        """
+        iterator = workflow_stream.__aiter__()
+        try:
+            while True:
+                try:
+                    with bind_usage_context(usage_context):
+                        event = await anext(iterator)
+                except StopAsyncIteration:
+                    break
+                yield event
+        finally:
+            aclose = getattr(iterator, "aclose", None)
+            if callable(aclose):
+                with bind_usage_context(usage_context):
+                    await aclose()
 
     async def resume_workflow(
         self,
@@ -419,18 +448,19 @@ class AIService:
             correlation_id=thread_id,
             operation="workflow",
         )
-        with bind_usage_context(resume_context):
-            async for mapped_event in self._map_workflow_stream(
-                self.workflow.resume_with_decisions_stream(
-                    thread_id=thread_id,
-                    decisions=self._to_ai_decisions(decisions),
-                ),
-                emit_rich_items=bool(
-                    getattr(settings, "inline_rich_response_enabled", False)
-                    and inline_rich_response_v1
-                ),
-            ):
-                yield mapped_event
+        workflow_stream = self.workflow.resume_with_decisions_stream(
+            thread_id=thread_id,
+            decisions=self._to_ai_decisions(decisions),
+        )
+        context_bound_stream = self._iterate_in_usage_context(workflow_stream, resume_context)
+        async for mapped_event in self._map_workflow_stream(
+            context_bound_stream,
+            emit_rich_items=bool(
+                getattr(settings, "inline_rich_response_enabled", False)
+                and inline_rich_response_v1
+            ),
+        ):
+            yield mapped_event
 
     def get_bot_response_sync(
         self,

@@ -89,7 +89,6 @@ def _sample_widget() -> dict[str, Any]:
     return {
         "widget_id": "w-1",
         "session_id": "conv-1",
-        "widget_type": "html",
         "title": "Harmonic Oscillation",
         "status": "active",
         "version": 1,
@@ -105,6 +104,7 @@ def test_live_widget_component_renders_sandboxed_iframe(monkeypatch):
     assert "<iframe" in markup
     assert 'sandbox="allow-scripts' in markup
     assert "srcdoc=" in markup
+    assert "widget_type" not in markup
 
 
 def test_live_widget_component_keeps_websocket_connection_path(monkeypatch):

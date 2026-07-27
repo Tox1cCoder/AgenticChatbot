@@ -233,9 +233,7 @@ def _widget_placement_entries(
         widget_id = widget.get("widget_id")
         if not widget_id:
             continue
-        text = " ".join(
-            str(part) for part in (widget.get("title"), widget.get("widget_type")) if part
-        )
+        text = str(widget.get("title") or "")
         entries.append((f"widget:{widget_id}", RichItemType.live_widget.value, text))
     return entries
 

@@ -83,8 +83,7 @@ def test_widget_connection_mints_token_and_ws_url(widget_test_client):
     created = asyncio.run(
         store.create(
             TEST_SESSION_ID,
-            "table",
-            {"columns": ["Name", "Price"], "rows": [["Widget", "$10"]]},
+            {"html": "<div>Comparison</div>", "height": 540},
             title="Comparison",
         )
     )
@@ -95,7 +94,7 @@ def test_widget_connection_mints_token_and_ws_url(widget_test_client):
     payload = response.json()
     assert payload["widget_id"] == created.widget_id
     assert payload["session_id"] == created.session_id
-    assert payload["widget_type"] == "table"
+    assert "widget_type" not in payload
     assert payload["title"] == "Comparison"
     assert payload["status"] == "active"
     assert payload["version"] == 1
@@ -119,8 +118,7 @@ def test_widget_connection_returns_403_when_access_denied(widget_test_client, mo
     created = asyncio.run(
         store.create(
             TEST_SESSION_ID,
-            "table",
-            {"columns": ["Name"], "rows": [["Widget"]]},
+            {"html": "<div>Restricted</div>", "height": 540},
             title="Restricted",
         )
     )
@@ -137,8 +135,7 @@ def test_widget_connection_recovers_invalid_session_id(widget_test_client, monke
     created = asyncio.run(
         store.create(
             "current_session",
-            "table",
-            {"columns": ["Name"], "rows": [["Widget"]]},
+            {"html": "<div>Recovered</div>", "height": 540},
             title="Recovered",
         )
     )
@@ -190,8 +187,8 @@ def test_widget_connection_restores_missing_widget_from_message_metadata(
                     "widget_type": "chart",
                     "title": "Recovered Chart",
                     "initial_state": (
-                        '{"chart_type":"line","labels":["A"],'
-                        '"datasets":[{"label":"Series","data":[1]}]}'
+                        '{"html":"<div>Recovered</div>","height":540,'
+                        '"caption":"Recovered experience"}'
                     ),
                 },
                 "output": (
@@ -221,9 +218,9 @@ def test_widget_connection_restores_missing_widget_from_message_metadata(
     assert payload["session_id"] == TEST_SESSION_ID
     restored = asyncio.run(store.get(widget_id))
     assert restored is not None
-    assert restored.widget_type == "chart"
+    assert not hasattr(restored, "widget_type")
     assert restored.version == 2
-    assert restored.state["chart_type"] == "line"
+    assert restored.state["html"] == "<div>Recovered</div>"
 
 
 def test_widget_connection_restores_widget_with_enriched_state(widget_test_client, monkeypatch):
@@ -232,6 +229,8 @@ def test_widget_connection_restores_widget_with_enriched_state(widget_test_clien
     client, store, _token_service = widget_test_client
     widget_id = "restored-enriched-widget"
     enriched_state = {
+        "html": "<!doctype html><div>Phase-space</div>",
+        "height": 540,
         "chart_type": "line",
         "labels": ["t0", "t1", "t2"],
         "datasets": [{"label": "Trajectory", "data": [0.1, 0.4, 0.9]}],
@@ -319,8 +318,12 @@ def test_widget_websocket_sync_and_user_patch(widget_test_client):
     created = asyncio.run(
         store.create(
             TEST_SESSION_ID_2,
-            "list",
-            {"items": [{"id": "alpha", "label": "Alpha"}], "selection": None},
+            {
+                "html": "<button>Alpha</button>",
+                "height": 540,
+                "items": [{"id": "alpha", "label": "Alpha"}],
+                "selection": None,
+            },
             title="Pick One",
         )
     )

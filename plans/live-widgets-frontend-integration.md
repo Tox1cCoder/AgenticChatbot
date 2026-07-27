@@ -3,10 +3,10 @@
 Live widgets are interactive in-chat UI components created by the backend during a normal assistant turn.
 They are delivered through assistant message metadata, then hydrated over HTTP + WebSocket.
 
-Live widgets have **one supported type: `html`**. A widget is a self-contained micro-app
+Live widgets are self-contained HTML micro-apps
 (animation, sliders, live readouts, a small diagram/graph) authored by the model as a single
 HTML document. The frontend renders the widget state **only as a sandboxed iframe** from
-`state.html` — it never builds structured React renderers from the widget type.
+`state.html` — it never selects between structured renderers.
 
 This guide is for frontend developers building against the AI SDK endpoints, including Next.js clients.
 
@@ -15,7 +15,7 @@ This guide is for frontend developers building against the AI SDK endpoints, inc
 ## Overview
 
 ```text
-AI agent calls widget_create(widget_type="html")
+AI agent calls widget_create(initial_state="{...}")
         │
         ▼
 Assistant message metadata contains live_widgets[]
@@ -66,7 +66,6 @@ This is the shape most frontend code should use after the AI SDK has materialize
       {
         "widget_id": "b3f2c1a0-...",
         "session_id": "sess-uuid",
-        "widget_type": "html",
         "title": "Harmonic Oscillation",
         "status": "active",
         "version": 1,
@@ -94,7 +93,6 @@ If you consume the raw stream directly, the widget metadata is nested under `dat
           {
             "widget_id": "b3f2c1a0-...",
             "session_id": "sess-uuid",
-            "widget_type": "html",
             "title": "Harmonic Oscillation",
             "status": "active",
             "version": 1,
@@ -122,16 +120,12 @@ Each widget entry has this shape:
 |---|---|---|
 | `widget_id` | `string` | Stable identifier for this widget instance |
 | `session_id` | `string` | Conversation / thread ID the widget belongs to |
-| `widget_type` | `string` | Always `"html"` for new widgets |
 | `title` | `string \| null` | Optional human-readable title |
 | `status` | `string` | `"active"` or `"closed"` |
 | `version` | `number` | Current widget version |
 | `connection_endpoint` | `string` | Relative API path used to mint a short-lived widget connection token |
 
-There is one supported `widget_type`: `html`. The removed structured types
-(`table`/`chart`/`dashboard`/`form`/`list`) and the former `iframe`/`micro_app` aliases are
-no longer created. Legacy persisted conversations may still surface a removed type — render
-those as an unsupported/legacy placeholder, not a structured renderer (see § 5).
+There is no type discriminator. Every entry uses the same interactive HTML state contract.
 
 ---
 
@@ -153,7 +147,6 @@ Request body is empty.
 {
   "widget_id": "b3f2c1a0-...",
   "session_id": "sess-uuid",
-  "widget_type": "html",
   "title": "Harmonic Oscillation",
   "status": "active",
   "version": 1,
@@ -204,7 +197,6 @@ For `widget_state_sync`, `widget_update`, and `widget_close`, the server sends:
 {
   "type": "widget_update",
   "widget_id": "b3f2c1a0-...",
-  "widget_type": "html",
   "title": "Harmonic Oscillation",
   "state": {
     "html": "<!doctype html>...",
@@ -238,7 +230,7 @@ Merge rule:
 
 There is one renderer: a **sandboxed iframe**.
 
-For `widget_type="html"`, render the widget state as a sandboxed iframe micro-app.
+Render the widget state as a sandboxed iframe micro-app.
 
 Expected state shape:
 
@@ -271,25 +263,12 @@ Important:
   internal iframe UI events back into widget state. If you need that later, define it
   explicitly as a follow-up feature.
 
-### Legacy structured widgets
-
-The structured types (`table`/`chart`/`dashboard`/`form`/`list`) are removed. New turns never
-create them. If a legacy conversation surfaces a widget whose `widget_type` is not `html`,
-render a small unsupported/legacy placeholder (e.g. "This widget type is no longer supported")
-rather than attempting a structured renderer. Do not branch the renderer on `widget_type`
-beyond this legacy guard.
-
----
-
 ## 6. End-to-end TypeScript example
 
 ```typescript
-type WidgetType = "html";
-
 interface LiveWidget {
   widget_id: string;
   session_id: string;
-  widget_type: string; // "html" for new widgets; legacy values may appear
   title: string | null;
   status: "active" | "closed";
   version: number;
@@ -305,7 +284,6 @@ interface HtmlWidgetState {
 interface WidgetRealtimeEvent {
   type: "widget_state_sync" | "widget_update" | "widget_close" | "ping" | "error";
   widget_id?: string;
-  widget_type?: string;
   title?: string | null;
   state?: HtmlWidgetState;
   status?: "active" | "closed";

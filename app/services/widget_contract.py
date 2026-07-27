@@ -1,7 +1,7 @@
-"""HTML-only live widget contract.
+"""Live interactive HTML experience contract.
 
-Live widgets have one supported type: ``html``. A widget renders as a
-self-contained, sandboxed iframe built from ``state.html``. The contract is
+Each widget renders as a self-contained, sandboxed iframe built from
+``state.html``. The contract is
 intentionally minimal — it validates shape, not editorial quality:
 
 - widget state must be a JSON object
@@ -10,9 +10,7 @@ intentionally minimal — it validates shape, not editorial quality:
   ``MAX_WIDGET_HEIGHT``
 
 No state-field aliases (``document``/``content``/``srcdoc``/``min_height``/
-``minHeight``) and no widget-type aliases (``iframe``/``micro_app``) are part of
-the contract. New widgets must use ``html`` and the ``html``/``height``/
-``caption`` state shape.
+``minHeight``) are part of the contract.
 
 This module also hosts the action-template helpers used by the widget action
 endpoint, which survives the HTML-only migration.
@@ -23,25 +21,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-SUPPORTED_WIDGET_TYPE = "html"
 MIN_WIDGET_HEIGHT = 260
 MAX_WIDGET_HEIGHT = 960
-
-
-def assert_supported_widget_type(widget_type: str) -> None:
-    """Raise ``ValueError`` unless ``widget_type`` is exactly ``html``.
-
-    Rejects the removed structured types (``table``/``chart``/``dashboard``/
-    ``form``/``list``), former aliases (``iframe``/``micro_app``), and any
-    unknown type with a clear, model-readable message.
-    """
-    normalized = str(widget_type or "").strip().lower()
-    if normalized != SUPPORTED_WIDGET_TYPE:
-        raise ValueError(
-            f"unsupported widget type {widget_type!r}; "
-            f"the only supported live widget type is {SUPPORTED_WIDGET_TYPE!r}. "
-            "Create a self-contained HTML micro-app in initial_state.html."
-        )
 
 
 def validate_html_widget_state(state: Any) -> None:

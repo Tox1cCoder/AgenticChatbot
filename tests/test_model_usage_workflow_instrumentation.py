@@ -673,6 +673,38 @@ async def test_execute_request_stream_binds_context_for_whole_body():
     assert captured.operation == "workflow"
 
 
+async def test_execute_request_stream_can_close_from_another_task_context():
+    closed = asyncio.Event()
+    captured: list[UsageContext] = []
+
+    async def source(_request):
+        try:
+            captured.append(current_usage_context())
+            yield make_event("message_delta", sequence=1, data={"content": "hello"})
+            await asyncio.Event().wait()
+        finally:
+            captured.append(current_usage_context())
+            closed.set()
+
+    workflow = SimpleNamespace(execute_request_stream=source, model_usage_recorder=None)
+    service = _ai_service(workflow)
+    user_id, conversation_id, user_message_id = uuid4(), uuid4(), uuid4()
+    stream = service.execute_request_stream(
+        _workflow_request(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            user_message_id=user_message_id,
+        )
+    )
+
+    assert (await anext(stream)).type == "message_delta"
+    await asyncio.create_task(stream.aclose())
+    await asyncio.wait_for(closed.wait(), timeout=0.1)
+
+    assert [context.operation for context in captured] == ["workflow", "workflow"]
+    assert current_usage_context().operation == "unknown"
+
+
 async def test_resume_workflow_rebuilds_ownership_from_arguments():
     workflow = CtxCapturingWorkflow()
     service = _ai_service(workflow, checkpointer=object())
@@ -708,6 +740,37 @@ async def test_resume_interrupted_stream_binds_context_from_authenticated_args()
     assert captured.user_id == user_id
     assert captured.conversation_id == conversation_id
     assert captured.operation == "workflow"
+
+
+async def test_resume_interrupted_stream_can_close_from_another_task_context():
+    closed = asyncio.Event()
+    captured: list[UsageContext] = []
+
+    async def source(**_kwargs):
+        try:
+            captured.append(current_usage_context())
+            yield make_event("message_delta", sequence=1, data={"content": "hello"})
+            await asyncio.Event().wait()
+        finally:
+            captured.append(current_usage_context())
+            closed.set()
+
+    workflow = SimpleNamespace(resume_with_decisions_stream=source, model_usage_recorder=None)
+    service = _ai_service(workflow, checkpointer=object())
+    user_id, conversation_id = uuid4(), uuid4()
+    stream = service.resume_interrupted_execution_stream(
+        thread_id=str(conversation_id),
+        decisions=[],
+        user_id=user_id,
+        conversation_id=conversation_id,
+    )
+
+    assert (await anext(stream)).type == "message_delta"
+    await asyncio.create_task(stream.aclose())
+    await asyncio.wait_for(closed.wait(), timeout=0.1)
+
+    assert [context.operation for context in captured] == ["workflow", "workflow"]
+    assert current_usage_context().operation == "unknown"
 
 
 async def test_execute_request_survives_non_uuid_identifiers():

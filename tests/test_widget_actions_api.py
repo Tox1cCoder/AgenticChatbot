@@ -101,7 +101,6 @@ def _seed_widget(store, *, actions=None, state_overrides=None):
     return asyncio.run(
         store.create(
             TEST_SESSION_ID,
-            "html",
             base_state,
             title="Oscillator",
         )

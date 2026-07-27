@@ -148,7 +148,6 @@ def extract_live_widgets_from_artifacts(
         widgets_by_id[str(widget_id)] = {
             "widget_id": widget_id,
             "session_id": parsed.get("session_id", ""),
-            "widget_type": parsed.get("widget_type", ""),
             "title": parsed.get("title"),
             "status": parsed.get("status", "active"),
             "version": parsed.get("version", 1),
@@ -175,7 +174,6 @@ def _widget_rich_item_from_live_widget(widget: dict[str, Any]) -> dict[str, Any]
         "payload": {
             "widget_id": widget_id,
             "session_id": widget.get("session_id", ""),
-            "widget_type": widget.get("widget_type", ""),
             "status": widget.get("status", "active"),
             "version": widget.get("version", 1),
             "connection_endpoint": widget.get(

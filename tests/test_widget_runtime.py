@@ -42,17 +42,17 @@ def token_service():
 # ---------------------------------------------------------------------------
 class TestInMemoryWidgetStoreCRUD:
     async def test_create_returns_record(self, store):
-        record = await store.create("session-1", "table", {"cols": ["a", "b"]}, title="T")
+        record = await store.create("session-1", {"cols": ["a", "b"]}, title="T")
         assert isinstance(record, WidgetRecord)
         assert record.session_id == "session-1"
-        assert record.widget_type == "table"
+        assert not hasattr(record, "widget_type")
         assert record.title == "T"
         assert record.state == {"cols": ["a", "b"]}
         assert record.status == WidgetStatus.ACTIVE
         assert record.version == 1
 
     async def test_get_returns_created_widget(self, store):
-        created = await store.create("s1", "chart", {})
+        created = await store.create("s1", {})
         fetched = await store.get(created.widget_id)
         assert fetched is not None
         assert fetched.widget_id == created.widget_id
@@ -61,23 +61,23 @@ class TestInMemoryWidgetStoreCRUD:
         assert await store.get("nonexistent") is None
 
     async def test_update_replaces_state_and_increments_version(self, store):
-        created = await store.create("s1", "table", {"v": 1})
+        created = await store.create("s1", {"v": 1})
         updated = await store.update(created.widget_id, {"v": 2})
         assert updated.state == {"v": 2}
         assert updated.version == 2
 
     async def test_update_with_correct_expected_version(self, store):
-        created = await store.create("s1", "table", {})
+        created = await store.create("s1", {})
         updated = await store.update(created.widget_id, {"x": 1}, expected_version=1)
         assert updated.version == 2
 
     async def test_update_with_wrong_expected_version_raises(self, store):
-        created = await store.create("s1", "table", {})
+        created = await store.create("s1", {})
         with pytest.raises(ValueError, match="Version mismatch"):
             await store.update(created.widget_id, {}, expected_version=999)
 
     async def test_update_closed_widget_raises(self, store):
-        created = await store.create("s1", "table", {})
+        created = await store.create("s1", {})
         await store.close(created.widget_id)
         with pytest.raises(ValueError, match="closed"):
             await store.update(created.widget_id, {})
@@ -90,7 +90,6 @@ class TestInMemoryWidgetStoreCRUD:
         restored = await store.restore(
             widget_id="w-restored",
             session_id="s-restored",
-            widget_type="chart",
             state={"labels": ["A"], "datasets": [{"data": [1]}]},
             title="Recovered Widget",
             status="active",
@@ -111,13 +110,13 @@ class TestInMemoryWidgetStoreCRUD:
 # ---------------------------------------------------------------------------
 class TestInMemoryWidgetStorePatch:
     async def test_patch_merges_shallow(self, store):
-        created = await store.create("s1", "table", {"a": 1, "b": 2})
+        created = await store.create("s1", {"a": 1, "b": 2})
         patched = await store.patch(created.widget_id, {"b": 99, "c": 3})
         assert patched.state == {"a": 1, "b": 99, "c": 3}
         assert patched.version == 2
 
     async def test_patch_closed_widget_raises(self, store):
-        created = await store.create("s1", "table", {})
+        created = await store.create("s1", {})
         await store.close(created.widget_id)
         with pytest.raises(ValueError, match="closed"):
             await store.patch(created.widget_id, {"x": 1})
@@ -132,7 +131,7 @@ class TestInMemoryWidgetStorePatch:
 # ---------------------------------------------------------------------------
 class TestInMemoryWidgetStoreClose:
     async def test_close_sets_status(self, store):
-        created = await store.create("s1", "table", {})
+        created = await store.create("s1", {})
         closed = await store.close(created.widget_id)
         assert closed.status == WidgetStatus.CLOSED
 
@@ -146,9 +145,9 @@ class TestInMemoryWidgetStoreClose:
 # ---------------------------------------------------------------------------
 class TestInMemoryWidgetStoreListBySession:
     async def test_list_returns_session_widgets(self, store):
-        await store.create("s1", "table", {})
-        await store.create("s1", "chart", {})
-        await store.create("s2", "form", {})
+        await store.create("s1", {})
+        await store.create("s1", {})
+        await store.create("s2", {})
         widgets = await store.list_by_session("s1")
         assert len(widgets) == 2
 
@@ -161,7 +160,7 @@ class TestInMemoryWidgetStoreListBySession:
 # ---------------------------------------------------------------------------
 class TestInMemoryWidgetStoreTTL:
     async def test_expired_widget_returns_none(self, store):
-        created = await store.create("s1", "table", {}, ttl_seconds=0)
+        created = await store.create("s1", {}, ttl_seconds=0)
         await asyncio.sleep(0.01)
         assert await store.get(created.widget_id) is None
 
@@ -182,7 +181,7 @@ class TestStateSizeValidation:
         store = InMemoryWidgetStore()
         huge = {"data": "x" * (MAX_WIDGET_STATE_BYTES + 1)}
         with pytest.raises(ValueError, match="exceeds maximum size"):
-            await store.create("s1", "table", huge)
+            await store.create("s1", huge)
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +192,6 @@ class TestWidgetRecordMetadata:
         record = WidgetRecord(
             widget_id="w-123",
             session_id="s-456",
-            widget_type="table",
             title="My Table",
             state={"rows": []},
             status=WidgetStatus.ACTIVE,
@@ -205,7 +203,7 @@ class TestWidgetRecordMetadata:
         meta = record.to_live_widget_metadata()
         assert meta["widget_id"] == "w-123"
         assert meta["session_id"] == "s-456"
-        assert meta["widget_type"] == "table"
+        assert "widget_type" not in meta
         assert meta["title"] == "My Table"
         assert meta["status"] == "active"
         assert meta["version"] == 3
@@ -216,7 +214,6 @@ class TestWidgetRecordMetadata:
         record = WidgetRecord(
             widget_id="w-1",
             session_id="s-1",
-            widget_type="chart",
             title=None,
             state={"data": [1, 2, 3]},
             status=WidgetStatus.ACTIVE,
@@ -909,26 +906,13 @@ _VALID_HTML_STATE = {
 # Widget tool HTML-only contract enforcement
 # ---------------------------------------------------------------------------
 class TestWidgetToolHtmlContract:
-    @pytest.mark.parametrize(
-        "widget_type",
-        ["table", "chart", "dashboard", "form", "list", "iframe", "micro_app", "bogus"],
-    )
-    async def test_widget_create_rejects_unsupported_types(self, monkeypatch, widget_type):
-        import app.services.widget_runtime as widget_runtime
+    def test_widget_create_schema_has_no_widget_type(self):
+        import inspect
+
         from app.ai.mcp_servers import widgets_server
 
-        store = InMemoryWidgetStore()
-        monkeypatch.setattr(widget_runtime, "_widget_store", store)
-
-        with pytest.raises(ValueError, match="unsupported widget type"):
-            await widgets_server.widget_create(
-                session_id="conv-1",
-                widget_type=widget_type,
-                initial_state=json.dumps(_VALID_HTML_STATE),
-                title="Nope",
-            )
-
-        assert await store.list_by_session("conv-1") == []
+        parameters = inspect.signature(widgets_server.widget_create).parameters
+        assert list(parameters) == ["session_id", "initial_state", "title"]
 
     async def test_widget_create_accepts_valid_html(self, monkeypatch):
         import app.services.widget_runtime as widget_runtime
@@ -939,13 +923,12 @@ class TestWidgetToolHtmlContract:
 
         result = await widgets_server.widget_create(
             session_id="conv-2",
-            widget_type="html",
             initial_state=json.dumps(_VALID_HTML_STATE),
             title="Oscillator",
         )
 
         payload = json.loads(result)
-        assert payload["widget_type"] == "html"
+        assert "widget_type" not in payload
         assert payload["status"] == "active"
         assert "quality_guidance" not in payload
 
@@ -970,7 +953,6 @@ class TestWidgetToolHtmlContract:
         with pytest.raises(ValueError, match=match):
             await widgets_server.widget_create(
                 session_id="conv-bad",
-                widget_type="html",
                 initial_state=bad_state,
             )
 
@@ -988,7 +970,6 @@ class TestWidgetToolHtmlContract:
         with pytest.raises(ValueError, match="html content"):
             await widgets_server.widget_create(
                 session_id="conv-alias",
-                widget_type="html",
                 initial_state=json.dumps({"document": "<div>hi</div>", "min_height": 540}),
             )
 
@@ -1005,12 +986,11 @@ class TestWidgetToolHtmlContract:
 
         result = await widgets_server.widget_create(
             session_id="conv-py",
-            widget_type="html",
             initial_state=python_style,
         )
 
         payload = json.loads(result)
-        assert payload["widget_type"] == "html"
+        assert "widget_type" not in payload
         assert payload["status"] == "active"
 
     async def test_widget_create_malformed_json_returns_helpful_error(self, monkeypatch):
@@ -1026,7 +1006,6 @@ class TestWidgetToolHtmlContract:
         with pytest.raises(ValueError) as exc_info:
             await widgets_server.widget_create(
                 session_id="conv-broken",
-                widget_type="html",
                 initial_state=broken,
             )
 
@@ -1046,7 +1025,6 @@ class TestWidgetToolHtmlContract:
 
         created = await widgets_server.widget_create(
             session_id="conv-3",
-            widget_type="html",
             initial_state=json.dumps(_VALID_HTML_STATE),
         )
         widget_id = json.loads(created)["widget_id"]
@@ -1057,7 +1035,7 @@ class TestWidgetToolHtmlContract:
                 state=json.dumps({"html": "", "height": 540}),
             )
 
-    async def test_widget_update_preserves_existing_html_type(self, monkeypatch):
+    async def test_widget_update_preserves_widget_identity(self, monkeypatch):
         import app.services.widget_runtime as widget_runtime
         from app.ai.mcp_servers import widgets_server
 
@@ -1066,7 +1044,6 @@ class TestWidgetToolHtmlContract:
 
         created = await widgets_server.widget_create(
             session_id="conv-4",
-            widget_type="html",
             initial_state=json.dumps(_VALID_HTML_STATE),
         )
         widget_id = json.loads(created)["widget_id"]
@@ -1076,26 +1053,24 @@ class TestWidgetToolHtmlContract:
             state=json.dumps({**_VALID_HTML_STATE, "caption": "updated"}),
         )
         payload = json.loads(result)
-        assert payload["widget_type"] == "html"
+        assert "widget_type" not in payload
         assert payload["version"] == 2
         assert "quality_guidance" not in payload
 
-    async def test_widget_update_rejects_legacy_structured_widget(self, monkeypatch):
+    async def test_widget_update_can_replace_legacy_state_with_valid_html(self, monkeypatch):
         import app.services.widget_runtime as widget_runtime
         from app.ai.mcp_servers import widgets_server
 
         store = InMemoryWidgetStore()
         monkeypatch.setattr(widget_runtime, "_widget_store", store)
 
-        # A legacy structured widget recovered into the store cannot be updated
-        # under the HTML-only contract.
-        legacy = await store.create("conv-5", "chart", {"labels": ["A", "B"]})
+        legacy = await store.create("conv-5", {"labels": ["A", "B"]})
 
-        with pytest.raises(ValueError, match="unsupported widget type"):
-            await widgets_server.widget_update(
-                widget_id=legacy.widget_id,
-                state=json.dumps(_VALID_HTML_STATE),
-            )
+        result = await widgets_server.widget_update(
+            widget_id=legacy.widget_id,
+            state=json.dumps(_VALID_HTML_STATE),
+        )
+        assert json.loads(result)["state"] == _VALID_HTML_STATE
 
 
 # ---------------------------------------------------------------------------

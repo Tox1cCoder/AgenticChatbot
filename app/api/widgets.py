@@ -23,11 +23,7 @@ from sqlalchemy import Text, cast, select
 
 from app.core.auth import get_current_user_id
 from app.models.message import Message
-from app.services.widget_contract import (
-    SUPPORTED_WIDGET_TYPE,
-    resolve_widget_action_message,
-    validate_html_widget_state,
-)
+from app.services.widget_contract import resolve_widget_action_message, validate_html_widget_state
 from app.services.widget_runtime import (
     get_widget_connection_manager,
     get_widget_store,
@@ -179,7 +175,6 @@ def _extract_widget_snapshot_from_metadata(
             break
 
     latest_state: dict[str, Any] | None = None
-    widget_type = str((live_widget or {}).get("widget_type") or "").strip()
     title = (live_widget or {}).get("title")
     status = str((live_widget or {}).get("status") or "active").strip().lower() or "active"
     version = int((live_widget or {}).get("version") or 1)
@@ -210,9 +205,6 @@ def _extract_widget_snapshot_from_metadata(
         if not isinstance(args, dict):
             args = {}
 
-        widget_type = str(
-            output_payload.get("widget_type") or args.get("widget_type") or widget_type
-        ).strip()
         title = output_payload.get("title") or args.get("title") or title
         status = str(output_payload.get("status") or status or "active").strip().lower() or "active"
         version = int(output_payload.get("version") or version or 1)
@@ -226,13 +218,17 @@ def _extract_widget_snapshot_from_metadata(
             if updated_state is not None:
                 latest_state = updated_state
 
-    if not latest_state or not widget_type:
+    if not latest_state:
+        return None
+    try:
+        validate_html_widget_state(latest_state)
+    except ValueError:
+        logger.warning("Ignoring persisted widget %s with invalid HTML state", widget_id)
         return None
 
     return {
         "widget_id": widget_id,
         "session_id": conversation_id,
-        "widget_type": widget_type,
         "title": title,
         "state": latest_state,
         "status": status,
@@ -260,7 +256,6 @@ async def _restore_widget_record_from_messages(
             restored = await store.restore(
                 widget_id=snapshot["widget_id"],
                 session_id=snapshot["session_id"],
-                widget_type=snapshot["widget_type"],
                 state=snapshot["state"],
                 title=snapshot.get("title"),
                 status=snapshot.get("status", "active"),
@@ -330,11 +325,8 @@ def _html_patch_contract_error(record: Any, patch: dict[str, Any]) -> str | None
     """Return an error string if shallow-merging ``patch`` into an HTML widget's
     state would break the minimal HTML contract; otherwise ``None``.
 
-    Legacy non-HTML widgets are out of scope — they are a read/restore-only
-    compatibility concern, so no contract is enforced on their patches.
+    Every live experience uses the same HTML state contract.
     """
-    if getattr(record, "widget_type", "") != SUPPORTED_WIDGET_TYPE:
-        return None
     base_state = record.state if isinstance(getattr(record, "state", None), dict) else {}
     try:
         validate_html_widget_state({**base_state, **patch})
@@ -347,7 +339,6 @@ def _widget_event_payload(event_type: str, record: Any) -> dict[str, Any]:
     return {
         "type": event_type,
         "widget_id": record.widget_id,
-        "widget_type": record.widget_type,
         "title": record.title,
         "state": record.state,
         "status": record.status.value,
@@ -469,7 +460,6 @@ async def widget_connection(
         content={
             "widget_id": record.widget_id,
             "session_id": session_id,
-            "widget_type": record.widget_type,
             "title": record.title,
             "status": record.status.value,
             "version": record.version,
@@ -660,18 +650,17 @@ async def widget_connect(
                 patch_data = msg.get("patch")
                 if not isinstance(patch_data, dict):
                     continue
-                if record.widget_type == SUPPORTED_WIDGET_TYPE:
-                    current = await store.get(widget_id)
-                    contract_error = _html_patch_contract_error(
-                        current if current is not None else record, patch_data
+                current = await store.get(widget_id)
+                contract_error = _html_patch_contract_error(
+                    current if current is not None else record, patch_data
+                )
+                if contract_error:
+                    await _send_widget_event(
+                        websocket,
+                        {"type": "error", "message": contract_error},
+                        send_lock,
                     )
-                    if contract_error:
-                        await _send_widget_event(
-                            websocket,
-                            {"type": "error", "message": contract_error},
-                            send_lock,
-                        )
-                        continue
+                    continue
                 try:
                     updated = await store.patch(widget_id, patch_data)
                     last_seen["value"] = _widget_record_signature(updated)

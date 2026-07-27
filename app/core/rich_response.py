@@ -122,7 +122,6 @@ class ImagePayload(PublicPayload):
 class LiveWidgetPayload(PublicPayload):
     widget_id: str
     session_id: str
-    widget_type: str
     status: str
     version: int
     connection_endpoint: str

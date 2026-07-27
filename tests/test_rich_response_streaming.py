@@ -40,7 +40,6 @@ SAFE_WIDGET_ITEM = {
     "payload": {
         "widget_id": "w-1",
         "session_id": "conv-1",
-        "widget_type": "chart",
         "status": "active",
         "version": 1,
         "connection_endpoint": "/widgets/w-1/connection",
@@ -70,7 +69,6 @@ def test_ai_service_builds_transient_item_for_live_widget_tool_result():
             {
                 "widget_id": "w-1",
                 "session_id": "conv-1",
-                "widget_type": "chart",
                 "status": "active",
                 "version": 1,
             }
@@ -96,7 +94,6 @@ def _widget_tool_end_event() -> Any:
                 {
                     "widget_id": "w-1",
                     "session_id": "conv-1",
-                    "widget_type": "chart",
                     "status": "active",
                     "version": 1,
                 }
@@ -464,7 +461,6 @@ def test_live_widget_rich_item_does_not_embed_state():
         {
             "widget_id": "w-1",
             "session_id": "conv-1",
-            "widget_type": "chart",
             "title": "Meaningful Chart",
             "status": "active",
             "version": 1,

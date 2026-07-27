@@ -5,6 +5,51 @@ from typing import Any
 from tests.test_demo_plan_widget import _import_demo_with_ui_stubs
 
 
+def test_terminal_message_reconciles_live_trace_without_losing_persisted_metadata(monkeypatch):
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    demo._reset_stream_trace_state()
+    streamlit_stub.session_state.stream_trace_items = [
+        {"kind": "thinking", "content": "Checked the interaction tool."},
+        {
+            "kind": "tool",
+            "tool_call_id": "call-1",
+            "name": "widget_create",
+            "state": "error",
+            "args": {"session_id": "conv-1"},
+            "result": None,
+            "error": "invalid HTML",
+            "render": {"type": "error", "error": "invalid HTML"},
+        },
+    ]
+
+    merged = demo._reconcile_terminal_trace(
+        {
+            "id": "m-1",
+            "messageMetadata": {
+                "provider": "google",
+                "tool_artifacts": [
+                    {
+                        "tool_call_id": "call-1",
+                        "tool": "widget_create",
+                        "status": "error",
+                        "error": "server detail",
+                        "execution_time": 0.25,
+                    }
+                ],
+            },
+        }
+    )
+
+    assert "messageMetadata" in merged
+    assert "metadata" not in merged
+    metadata = demo.get_message_metadata(merged)
+    assert metadata["provider"] == "google"
+    assert metadata["thinking_summary"] == "Checked the interaction tool."
+    assert len(metadata["tool_artifacts"]) == 1
+    assert metadata["tool_artifacts"][0]["error"] == "server detail"
+    assert metadata["tool_artifacts"][0]["execution_time"] == 0.25
+
+
 def test_live_tool_trace_renders_queued_start_and_retains_end_presentation(monkeypatch):
     demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
     demo._reset_stream_trace_state()

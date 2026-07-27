@@ -985,7 +985,6 @@ Display policies:
   "payload": {
     "widget_id": "widget-id",
     "session_id": "conversation-id",
-    "widget_type": "html",
     "status": "active",
     "version": 1,
     "connection_endpoint": "/widgets/widget-id/connection"
@@ -1108,11 +1107,9 @@ You will not receive them. RAG citations are delivered through
 
 ## Live Widgets
 
-The only widget type is `html`: a self-contained micro-app. Widget state
-renders exclusively as a sandboxed iframe from `state.html` — never inject it
-into the chat DOM. There are no structured widget renderers; do not pick a
-renderer by `widget_type`. Legacy persisted items carrying a removed
-structured type render as a legacy placeholder.
+Each widget is a self-contained HTML micro-app. Widget state renders
+exclusively as a sandboxed iframe from `state.html` — never inject it into the
+chat DOM. There is no renderer discriminator.
 
 Widget state (delivered over the WebSocket):
 
@@ -1136,7 +1133,6 @@ Connection response:
 {
   "widget_id": "widget-id",
   "session_id": "conversation-id",
-  "widget_type": "html",
   "title": "Widget title",
   "status": "active",
   "version": 1,
@@ -1147,7 +1143,7 @@ Connection response:
 ```
 
 Server WebSocket events — `widget_state_sync` (initial), `widget_update`,
-`widget_close`, each carrying `{type, widget_id, widget_type, title, state,
+`widget_close`, each carrying `{type, widget_id, title, state,
 status, version}`; plus:
 
 ```json

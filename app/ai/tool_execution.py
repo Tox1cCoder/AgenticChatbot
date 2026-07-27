@@ -331,7 +331,6 @@ def build_live_widget_candidate_from_tool_result(
         "payload": {
             "widget_id": widget_id,
             "session_id": str(parsed.get("session_id") or ""),
-            "widget_type": str(parsed.get("widget_type") or ""),
             "status": str(parsed.get("status") or "active"),
             "version": int(parsed.get("version") or 1),
             "connection_endpoint": f"/widgets/{widget_id}/connection",
@@ -597,7 +596,6 @@ def _compact_widget_artifact_output(output_text: str) -> str:
     compact = {
         "widget_id": parsed.get("widget_id"),
         "session_id": parsed.get("session_id", ""),
-        "widget_type": parsed.get("widget_type", ""),
         "title": parsed.get("title"),
         "status": parsed.get("status", "active"),
         "version": parsed.get("version", 1),

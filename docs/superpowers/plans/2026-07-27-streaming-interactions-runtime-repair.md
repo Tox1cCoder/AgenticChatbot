@@ -117,7 +117,7 @@ assert response.json()["widget_id"] == created.widget_id
 - [ ] **Step 5: Run RED**
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest -q `
+python -m pytest -q `
   tests/test_widget_runtime.py tests/test_widget_contract.py tests/test_widgets_api.py
 ```
 
@@ -256,7 +256,7 @@ assert "widget_type" not in rich_widget["payload"]
 Run the three primary modules and confirm RED:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest -q `
+python -m pytest -q `
   tests/test_widgets_api.py tests/test_rich_response_contract.py `
   tests/test_rich_response_metadata.py
 ```
@@ -302,7 +302,7 @@ text. A legacy input key may be present but must never be re-emitted.
 - [ ] **Step 4: Update active fixtures and run GREEN**
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest -q `
+python -m pytest -q `
   tests/test_widgets_api.py tests/test_rich_response_contract.py `
   tests/test_rich_response_metadata.py tests/test_rich_response_sources.py `
   tests/test_rich_response_streaming.py tests/test_rich_placement.py `
@@ -354,7 +354,7 @@ def test_live_widget_component_is_typeless_and_sandboxed():
 Run and confirm RED:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest -q `
+python -m pytest -q `
   tests/test_demo_meaningful_widgets.py tests/test_demo_rich_response.py
 ```
 
@@ -420,7 +420,7 @@ output, error status, and render payload.
 - [ ] **Step 3: Run RED**
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest -q `
+python -m pytest -q `
   tests/test_demo_live_ui_state.py tests/test_message_service_event_streaming.py
 ```
 
@@ -487,7 +487,7 @@ Repeat for `resume_interrupted_execution_stream`.
 - [ ] **Step 2: Run RED**
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest -q `
+python -m pytest -q `
   tests/test_model_usage_workflow_instrumentation.py `
   -k "close_from_another_task_context"
 ```
@@ -529,7 +529,7 @@ Retain the existing AI SDK producer-owner tests.
 - [ ] **Step 5: Run GREEN and commit**
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest -q `
+python -m pytest -q `
   tests/test_model_usage_workflow_instrumentation.py `
   tests/test_internal_sse_stream_contract.py `
   tests/test_ai_sdk_v6_stream_contract.py tests/test_message_stream_errors.py
@@ -574,7 +574,7 @@ Assert active interaction sections do not instruct clients/models to send
 - [ ] **Step 2: Run RED**
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest -q `
+python -m pytest -q `
   tests/test_widget_docs_html_only.py tests/test_rich_response_prompt_inventory.py
 ```
 
@@ -588,7 +588,7 @@ and legacy type keys are ignored.
 
 ```powershell
 $widgetTests = rg -l "widget_type" tests
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest -q $widgetTests
+python -m pytest -q $widgetTests
 ```
 
 Expected: PASS. Any remaining occurrence is an explicit legacy-read fixture or an
@@ -620,11 +620,11 @@ add each intended test path explicitly before this commit.
 - [ ] **Step 1: Run media regressions**
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest -q `
+python -m pytest -q `
   tests/client_backend/test_image_stream_proxy.py `
   tests/test_demo_image_reference_rendering.py tests/test_chat_images_api.py `
   tests/test_ai_sdk_v6_stream_contract.py
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' `
+python `
   scripts/verify_image_streaming_contract.py
 ```
 
@@ -647,7 +647,7 @@ those IDs.
 - [ ] **Step 3: Restart hidden from this workspace**
 
 ```powershell
-$python = 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe'
+$python = (Get-Command python).Source
 Start-Process $python -ArgumentList '-m','app.main' `
   -WorkingDirectory (Get-Location) -WindowStyle Hidden
 Start-Process $python -ArgumentList '-m','client_backend','run' `
@@ -682,7 +682,7 @@ authenticated image in the UI without printing its token or bytes.
 - [ ] **Step 1: Run focused suites**
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest -q `
+python -m pytest -q `
   tests/test_widget_runtime.py tests/test_widget_contract.py tests/test_widgets_api.py `
   tests/test_demo_meaningful_widgets.py tests/test_demo_rich_response.py `
   tests/test_demo_live_ui_state.py tests/test_message_service_event_streaming.py `
@@ -695,7 +695,7 @@ authenticated image in the UI without printing its token or bytes.
 - [ ] **Step 2: Run Ruff on changed Python files**
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m ruff check `
+python -m ruff check `
   app/ai/mcp_servers/widgets_server.py app/services/widget_contract.py `
   app/services/widget_runtime.py app/api/widgets.py app/ai/tool_execution.py `
   app/core/response_constants.py app/core/rich_response.py `
@@ -705,7 +705,7 @@ authenticated image in the UI without printing its token or bytes.
 - [ ] **Step 3: Run the full suite**
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest -q
+python -m pytest -q
 ```
 
 Expected: PASS with no unretrieved-task or context-token warnings.
