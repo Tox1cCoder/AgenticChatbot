@@ -90,58 +90,6 @@ _MODEL_REQUEST_SUPPORTED_AGENT_KEYS = {
     "custom",
 }
 
-# Provider-agnostic reasoning effort levels accepted by SubagentModelOverride.
-_REASONING_EFFORT_LEVELS = {"none", "minimal", "low", "medium", "high", "xhigh"}
-
-
-def _normalize_reasoning_effort(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    cleaned = value.strip().lower()
-    return cleaned if cleaned in _REASONING_EFFORT_LEVELS else None
-
-
-def _gemini_thinking_level_from_effort(model_name: str, effort: str) -> str | None:
-    """Normalize ``reasoning_effort`` to a Gemini thinking_level for the model.
-
-    - Gemini 3 Pro only supports ``low``/``high``: ``none``/``minimal`` -> ``low``,
-      ``medium``/``high``/``xhigh`` -> ``high``.
-    - Gemini 3 Flash supports ``minimal``/``low``/``medium``/``high``:
-      ``none`` -> ``minimal``, ``xhigh`` -> ``high``.
-    """
-    effort = (effort or "").strip().lower()
-    if effort not in _REASONING_EFFORT_LEVELS:
-        return None
-    lowered = (model_name or "").lower()
-    is_flash = "flash" in lowered
-    is_pro = "pro" in lowered
-
-    if is_pro and not is_flash:
-        if effort in {"none", "minimal", "low"}:
-            return "low"
-        return "high"
-
-    # Flash and other Gemini 3 family: keep minimal/low/medium/high, collapse
-    # ``none`` to ``minimal`` and ``xhigh`` to ``high``.
-    if effort == "none":
-        return "minimal"
-    if effort == "xhigh":
-        return "high"
-    return effort
-
-
-def _openai_effort_from_reasoning_effort(effort: str) -> str | None:
-    """Normalize ``reasoning_effort`` to OpenAI ``reasoning.effort`` values."""
-    if effort not in _REASONING_EFFORT_LEVELS:
-        return None
-    if effort == "xhigh":
-        return "high"
-    if effort == "none":
-        # OpenAI has no "none" effort. Treat as "minimal" for the lowest tier.
-        return "minimal"
-    return effort
-
-
 _OPENAI_REASONING_SUMMARY_DISABLED_USERS: set[str] = set()
 
 # Agents that must NOT receive widget tools.
@@ -758,25 +706,21 @@ class BaseAgent(ABC):
         user_id: str | None = None,
         enable_reasoning_summary: bool = True,
     ) -> tuple[Any, bool]:
-        normalized_effort = _normalize_reasoning_effort(
-            getattr(runtime_config, "reasoning_effort", None)
-        )
+        native_effort = getattr(runtime_config, "reasoning_effort", None)
 
         if runtime_config.provider == "gemini":
             if not runtime_config.api_key:
                 if (
                     self.langchain_model is not None
                     and runtime_config.model == self.model_name
-                    and not normalized_effort
+                    and not native_effort
                 ):
                     return self.langchain_model, False
                 raise ValueError("Gemini runtime config is missing an API key")
 
             thinking_level_override = None
-            if normalized_effort:
-                thinking_level_override = _gemini_thinking_level_from_effort(
-                    runtime_config.model, normalized_effort
-                )
+            if native_effort:
+                thinking_level_override = native_effort
 
             llm = create_langchain_model(
                 agent_type=self.agent_config_key,
@@ -804,10 +748,8 @@ class BaseAgent(ABC):
         }
 
         model_lower = runtime_config.model.lower()
-        if normalized_effort:
-            openai_effort = _openai_effort_from_reasoning_effort(normalized_effort)
-            if openai_effort:
-                openai_kwargs["reasoning"] = {"effort": openai_effort}
+        if native_effort:
+            openai_kwargs["reasoning"] = {"effort": native_effort}
         elif include_reasoning_summary:
             if "o1" in model_lower or "o3" in model_lower:
                 openai_kwargs["reasoning"] = {"effort": "medium"}

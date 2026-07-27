@@ -57,6 +57,15 @@ class ProviderResponse(CamelModel):
     )
 
 
+class ReasoningControlOption(CamelModel):
+    supported: bool = False
+    parameter_name: str | None = None
+    display_label: str = "Reasoning"
+    levels: list[str] = Field(default_factory=list)
+    default_level: str | None = None
+    source: str = "unknown"
+
+
 class ProviderModelOption(CamelModel):
     id: str
     display_name: str
@@ -65,6 +74,7 @@ class ProviderModelOption(CamelModel):
     supports_tool_calling: bool = False
     supports_streaming: bool = False
     supports_reasoning: bool = False
+    reasoning_control: ReasoningControlOption = Field(default_factory=ReasoningControlOption)
     recommended: bool = False
     context_window_tokens: int | None = None
     max_input_tokens: int | None = None

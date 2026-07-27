@@ -72,11 +72,10 @@ class SubagentModelOverride(BaseModel):
         default=True,
         description="Allow models outside the synced catalog (subagent overrides are explicit).",
     )
-    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] | None = Field(
+    reasoning_effort: str | None = Field(
         default=None,
         description=(
-            "Provider-agnostic reasoning intensity. Normalized to OpenAI "
-            "reasoning.effort or Gemini thinking_level per provider rules."
+            "Exact provider-native reasoning value. Omit for Provider default."
         ),
     )
 
@@ -95,6 +94,14 @@ class SubagentModelOverride(BaseModel):
         if not 0.0 <= float(value) <= 2.0:
             raise ValueError("SubagentModelOverride.temperature must be between 0.0 and 2.0.")
         return float(value)
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _normalize_reasoning_effort(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip().lower()
+        return cleaned or None
 
 
 class PlanningSubagentTask(BaseModel):

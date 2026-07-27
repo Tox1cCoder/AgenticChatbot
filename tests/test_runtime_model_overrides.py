@@ -77,6 +77,25 @@ def test_openai_explicit_reasoning_effort_reaches_model_factory(monkeypatch):
     assert reasoning.get("effort") == "high"
 
 
+def test_openai_max_reasoning_effort_is_not_truncated(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_create_model(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        "app.ai.model_factory.ModelFactory.create_model",
+        staticmethod(fake_create_model),
+    )
+    agent = _FakeAgent(model_name="gpt-5.6-sol")
+    base_module = __import__("app.ai.agents.base_agent", fromlist=["BaseAgent"])
+    base_module.BaseAgent._create_langchain_model_from_runtime(
+        agent, _runtime_config(model="gpt-5.6-sol", reasoning_effort="max")
+    )
+    assert captured["reasoning"] == {"effort": "max"}
+
+
 def test_openai_default_reasoning_summary_unchanged_when_no_explicit_effort(monkeypatch):
     """When the override has no ``reasoning_effort``, the previous
     default behavior must remain: summary='auto' for non-o-series models.
@@ -135,7 +154,7 @@ def test_gemini_reasoning_effort_low_maps_to_thinking_level_low(monkeypatch):
     assert captured.get("thinking_level_override") == "low"
 
 
-def test_gemini_reasoning_effort_high_maps_to_high(monkeypatch):
+def test_gemini_reasoning_effort_medium_is_passed_unchanged(monkeypatch):
     from app.ai.agents import base_agent as base_module
 
     captured: dict[str, Any] = {}
@@ -149,20 +168,19 @@ def test_gemini_reasoning_effort_high_maps_to_high(monkeypatch):
         fake_create,
     )
 
-    agent = _FakeAgent(agent_config_key="search", model_name="gemini-3-flash-preview")
+    agent = _FakeAgent(agent_config_key="search", model_name="gemini-3.6-flash")
     runtime = _runtime_config(
         provider="gemini",
-        model="gemini-3-flash-preview",
-        reasoning_effort="xhigh",
+        model="gemini-3.6-flash",
+        reasoning_effort="medium",
         api_key="gemini-key",
     )
     base_module.BaseAgent._create_langchain_model_from_runtime(agent, runtime)
 
-    assert captured.get("thinking_level_override") == "high"
+    assert captured.get("thinking_level_override") == "medium"
 
 
-def test_gemini_flash_reasoning_effort_none_normalizes_to_minimal(monkeypatch):
-    """Flash supports minimal/low/medium/high. ``none`` -> ``minimal``."""
+def test_gemini_flash_minimal_is_passed_unchanged(monkeypatch):
     from app.ai.agents import base_agent as base_module
 
     captured: dict[str, Any] = {}
@@ -180,7 +198,7 @@ def test_gemini_flash_reasoning_effort_none_normalizes_to_minimal(monkeypatch):
     runtime = _runtime_config(
         provider="gemini",
         model="gemini-3-flash-preview",
-        reasoning_effort="none",
+        reasoning_effort="minimal",
         api_key="gemini-key",
     )
     base_module.BaseAgent._create_langchain_model_from_runtime(agent, runtime)
@@ -188,8 +206,7 @@ def test_gemini_flash_reasoning_effort_none_normalizes_to_minimal(monkeypatch):
     assert captured.get("thinking_level_override") == "minimal"
 
 
-def test_gemini_pro_reasoning_effort_medium_normalizes_to_high(monkeypatch):
-    """Gemini 3 Pro only supports ``low``/``high``; ``medium`` -> ``high``."""
+def test_gemini_pro_reasoning_effort_medium_is_passed_unchanged(monkeypatch):
     from app.ai.agents import base_agent as base_module
 
     captured: dict[str, Any] = {}
@@ -212,7 +229,7 @@ def test_gemini_pro_reasoning_effort_medium_normalizes_to_high(monkeypatch):
     )
     base_module.BaseAgent._create_langchain_model_from_runtime(agent, runtime)
 
-    assert captured.get("thinking_level_override") == "high"
+    assert captured.get("thinking_level_override") == "medium"
 
 
 # ---------------------------------------------------------------------------

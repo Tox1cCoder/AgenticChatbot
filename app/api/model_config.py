@@ -46,6 +46,11 @@ class AgentModelConfigPatch(CamelModel):
         default=None,
         description="Allow saving a non-catalog custom model identifier for this agent",
     )
+    reasoning_effort: str | None = Field(
+        default=None,
+        description="Exact provider-native reasoning value, or null for Provider default",
+        max_length=32,
+    )
 
 
 class ModelConfigUpdateRequest(RootModel[dict[str, AgentModelConfigPatch]]):
@@ -59,6 +64,15 @@ class ModelConfigUpdateRequest(RootModel[dict[str, AgentModelConfigPatch]]):
     """
 
 
+class ReasoningControlOption(CamelModel):
+    supported: bool = False
+    parameter_name: str | None = None
+    display_label: str = "Reasoning"
+    levels: list[str] = Field(default_factory=list)
+    default_level: str | None = None
+    source: str = "unknown"
+
+
 class ProviderModelOption(CamelModel):
     id: str
     display_name: str
@@ -67,6 +81,7 @@ class ProviderModelOption(CamelModel):
     supports_tool_calling: bool = False
     supports_streaming: bool = False
     supports_reasoning: bool = False
+    reasoning_control: ReasoningControlOption = Field(default_factory=ReasoningControlOption)
     recommended: bool = False
     context_window_tokens: int | None = None
     max_input_tokens: int | None = None
@@ -94,6 +109,7 @@ class AgentModelConfigSnapshot(CamelModel):
     warnings: list[str] = Field(default_factory=list)
     key_source: str | None = None
     is_custom_model: bool = False
+    reasoning_effort: str | None = None
 
 
 class ModelConfigOptionsSnapshot(CamelModel):
@@ -144,7 +160,7 @@ async def patch_model_config(
         value_error_status=status.HTTP_400_BAD_REQUEST,
     ):
         updates = {
-            agent_key: patch.model_dump(exclude_none=True)
+            agent_key: patch.model_dump(exclude_unset=True)
             for agent_key, patch in (request.root or {}).items()
         }
         config = await model_config_service.patch_configs(current_user.id, updates)

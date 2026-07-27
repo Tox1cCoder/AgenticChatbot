@@ -185,9 +185,18 @@ def test_custom_agent_options_requires_explicit_device_snapshot():
 class _FakeModelConfig:
     VALID = {("openai", "gpt-4.1-mini"), ("gemini", "gemini-3-flash-preview")}
 
-    def validate_provider_model(self, user_id, provider_type, model, *, allow_custom_model=False):
+    def validate_provider_model(
+        self,
+        user_id,
+        provider_type,
+        model,
+        *,
+        allow_custom_model=False,
+        reasoning_effort=None,
+    ):
         if (provider_type, model) not in self.VALID:
             raise ValueError(f"invalid model {provider_type}/{model}")
+        return reasoning_effort
 
 
 def _fake_client_tools(user_id, device_id):

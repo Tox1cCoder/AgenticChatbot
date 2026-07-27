@@ -34,6 +34,7 @@ class AgentModelConfig(Base):
     model = Column(Text, nullable=False)
     allow_custom_model = Column(Boolean, default=False, nullable=False)
     temperature = Column(Float, nullable=True)
+    reasoning_effort = Column(Text, nullable=True)
 
     user = relationship("User", back_populates="agent_model_configs")
 

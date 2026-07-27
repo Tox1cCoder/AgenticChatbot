@@ -282,10 +282,10 @@ class PlanningAgent(BaseAgent):
                 - `gemini-3-flash-preview` — lower-cost frontier; supports
                   `minimal`/`low`/`medium`/`high` reasoning_effort.
 
-                ### `reasoning_effort` is a SEPARATE field
-                Allowed values: `none`, `minimal`, `low`, `medium`, `high`,
-                `xhigh`. Pass it as its own key — `reasoning_effort` is a
-                separate field. NEVER append it to the `model` id.
+                ### `reasoning_effort` is a SEPARATE optional field
+                Use only a provider-native value advertised for that exact model;
+                otherwise omit it for Provider default. NEVER append it to the
+                `model` id.
 
                 Correct:
                 ```json

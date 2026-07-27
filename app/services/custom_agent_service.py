@@ -207,9 +207,12 @@ class CustomAgentService:
         new_name = provided.get("name", existing.name)
         new_provider = provided.get("provider_type", existing.provider_type)
         new_model = provided.get("model", existing.model)
+        new_reasoning_effort = provided.get("reasoning_effort", existing.reasoning_effort)
 
-        if "provider_type" in provided or "model" in provided:
-            self._validate_model(owner_id, new_provider, new_model)
+        if {"provider_type", "model", "reasoning_effort"} & provided.keys():
+            new_reasoning_effort = self._validate_model(
+                owner_id, new_provider, new_model, new_reasoning_effort
+            )
 
         if "tool_refs" in provided:
             tool_refs = self._dedupe_tool_refs([r.model_dump() for r in (data.tool_refs or [])])
@@ -242,6 +245,8 @@ class CustomAgentService:
         ):
             if key in provided:
                 fields[key] = provided[key]
+        if {"provider_type", "model", "reasoning_effort"} & provided.keys():
+            fields["reasoning_effort"] = new_reasoning_effort
 
         if "name" in provided:
             new_slug = slugify(new_name)
@@ -430,7 +435,9 @@ class CustomAgentService:
     def _validated_fields(
         self, owner_id: UUID, data: CustomAgentCreate, *, device_id: str | None
     ) -> dict[str, Any]:
-        self._validate_model(owner_id, data.provider_type, data.model)
+        reasoning_effort = self._validate_model(
+            owner_id, data.provider_type, data.model, data.reasoning_effort
+        )
         tool_refs = self._dedupe_tool_refs([r.model_dump() for r in data.tool_refs])
         skill_refs = self._dedupe_skill_refs([r.model_dump() for r in data.skill_refs])
         self._validate_tool_refs(owner_id, tool_refs, device_id)
@@ -443,7 +450,7 @@ class CustomAgentService:
             "provider_type": data.provider_type,
             "model": data.model,
             "temperature": data.temperature,
-            "reasoning_effort": data.reasoning_effort,
+            "reasoning_effort": reasoning_effort,
             "tool_refs": tool_refs,
             "skill_refs": skill_refs,
             "enabled": data.enabled,
@@ -509,9 +516,20 @@ class CustomAgentService:
             deduped.append(ref)
         return deduped
 
-    def _validate_model(self, owner_id: UUID, provider_type: str, model: str) -> None:
+    def _validate_model(
+        self,
+        owner_id: UUID,
+        provider_type: str,
+        model: str,
+        reasoning_effort: str | None = None,
+    ) -> str | None:
         try:
-            self.model_config_service.validate_provider_model(owner_id, provider_type, model)
+            return self.model_config_service.validate_provider_model(
+                owner_id,
+                provider_type,
+                model,
+                reasoning_effort=reasoning_effort,
+            )
         except CustomAgentValidationError:
             raise
         except Exception as exc:

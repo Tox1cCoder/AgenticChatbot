@@ -19,6 +19,7 @@ from uuid import UUID
 
 from app.ai.agent_config import AGENT_CONFIG
 from app.ai.model_context import resolve_model_context_window
+from app.ai.reasoning_controls import validate_reasoning_effort
 from app.core.runtime_modeling import (
     ResolvedRuntimeModelConfig,
     RuntimeFallbackConfig,
@@ -64,15 +65,6 @@ def _normalize_runtime_agent_key(value: Any) -> str | None:
     return key if key in SUPPORTED_RUNTIME_AGENT_KEYS else None
 
 
-def _normalize_reasoning_effort(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    cleaned = value.strip().lower()
-    if cleaned in {"none", "minimal", "low", "medium", "high", "xhigh"}:
-        return cleaned
-    return None
-
-
 def _normalize_provider(value: Any) -> str:
     if not isinstance(value, str):
         return "gemini"
@@ -110,6 +102,7 @@ def _default_agent_config(agent_key: str) -> dict[str, Any]:
         "warnings": [],
         "key_source": None,
         "is_custom_model": False,
+        "reasoning_effort": None,
     }
 
 
@@ -170,7 +163,8 @@ class ModelConfigService(IRuntimeModelResolver):
         model: str,
         *,
         allow_custom_model: bool = False,
-    ) -> None:
+        reasoning_effort: Any = None,
+    ) -> str | None:
         """Validate a (provider_type, model) selection (e.g. for a custom agent).
 
         Applies the same provider-credential and catalog checks used for base
@@ -195,11 +189,15 @@ class ModelConfigService(IRuntimeModelResolver):
                 f"Provider '{provider}' is not configured. Configure it before saving this agent."
             )
 
-        if model_id in self._get_catalog_model_lookup(snapshot):
-            return
-        if allow_custom_model:
-            return
-        raise ValueError(f"Model '{model_id}' is not present in the current {provider} catalog.")
+        metadata = self._get_model_metadata(snapshot, model_id)
+        if metadata is None and not allow_custom_model:
+            raise ValueError(f"Model '{model_id}' is not present in the current {provider} catalog.")
+        return validate_reasoning_effort(
+            provider,
+            model_id,
+            reasoning_effort,
+            supports_reasoning=bool(metadata and metadata.get("supports_reasoning")),
+        )
 
     def _select_default_provider(self, provider_snapshots: Mapping[str, dict[str, Any]]) -> str:
         gemini_snapshot = provider_snapshots.get("gemini", {})
@@ -291,15 +289,34 @@ class ModelConfigService(IRuntimeModelResolver):
                 )
                 continue
 
+            resolved_model = model or self._pick_catalog_model(
+                provider_snapshot, effective[agent_key]["model"]
+            )
+            model_metadata = self._get_model_metadata(provider_snapshot, resolved_model)
+            try:
+                reasoning_effort = validate_reasoning_effort(
+                    provider,
+                    resolved_model,
+                    getattr(row, "reasoning_effort", None),
+                    supports_reasoning=bool(
+                        model_metadata and model_metadata.get("supports_reasoning")
+                    ),
+                )
+            except ValueError as exc:
+                reasoning_effort = None
+                effective[agent_key]["warnings"].append(
+                    f"{exc} Using Provider default."
+                )
+
             effective[agent_key].update(
                 {
                     "provider": provider,
-                    "model": model
-                    or self._pick_catalog_model(provider_snapshot, effective[agent_key]["model"]),
+                    "model": resolved_model,
                     "temperature": temperature,
                     "source": "persisted",
                     "key_source": provider_snapshot.get("key_source", "none"),
                     "is_custom_model": allow_custom_model,
+                    "reasoning_effort": reasoning_effort,
                 }
             )
 
@@ -362,6 +379,11 @@ class ModelConfigService(IRuntimeModelResolver):
             ),
             "allow_custom_model": (
                 bool(getattr(existing_row, "allow_custom_model", False)) if existing_row else False
+            ),
+            "reasoning_effort": (
+                getattr(existing_row, "reasoning_effort", None)
+                if existing_row
+                else fallback_config.get("reasoning_effort")
             ),
         }
 
@@ -426,11 +448,27 @@ class ModelConfigService(IRuntimeModelResolver):
                 "Enable the explicit custom model override to save it."
             )
 
+        model_metadata = self._get_model_metadata(provider_snapshot, model)
+        raw_effort = (
+            raw_patch.get("reasoning_effort")
+            if "reasoning_effort" in raw_patch
+            else defaults["reasoning_effort"]
+        )
+        reasoning_effort = validate_reasoning_effort(
+            provider,
+            model,
+            raw_effort,
+            supports_reasoning=bool(
+                model_metadata and model_metadata.get("supports_reasoning")
+            ),
+        )
+
         return {
             "provider_type": provider,
             "model": model,
             "temperature": temperature,
             "allow_custom_model": allow_custom_model,
+            "reasoning_effort": reasoning_effort,
         }
 
     def _get_model_metadata(
@@ -575,8 +613,11 @@ class ModelConfigService(IRuntimeModelResolver):
         )
         default_model = str(AGENT_CONFIG.get(normalized_agent_key, {}).get("model") or "").strip()
 
-        reasoning_effort = _normalize_reasoning_effort(
-            request_override.get("reasoning_effort") if request_override else None
+        requested_effort_is_explicit = bool(
+            request_override and "reasoning_effort" in request_override
+        )
+        requested_effort: Any = (
+            request_override.get("reasoning_effort") if requested_effort_is_explicit else None
         )
 
         if user_id is None:
@@ -595,7 +636,9 @@ class ModelConfigService(IRuntimeModelResolver):
                 source="default",
                 warnings=["User context is missing; using default Gemini runtime configuration."],
                 capabilities=self._build_capabilities("gemini", default_model, {}),
-                reasoning_effort=reasoning_effort,
+                reasoning_effort=validate_reasoning_effort(
+                    "gemini", default_model, requested_effort
+                ),
                 context_window=self._resolve_context_window_metadata("gemini", default_model, {}),
             )
 
@@ -617,6 +660,9 @@ class ModelConfigService(IRuntimeModelResolver):
         source = str(base_config.get("source") or "default")
         warnings = list(base_config.get("warnings") or [])
         is_custom_model = bool(base_config.get("is_custom_model"))
+        reasoning_effort: Any = base_config.get("reasoning_effort")
+        if requested_effort_is_explicit:
+            reasoning_effort = requested_effort
         provider_fallback: dict[str, Any] | None = None
 
         if request_override and isinstance(request_override, Mapping):
@@ -737,6 +783,19 @@ class ModelConfigService(IRuntimeModelResolver):
             provider_snapshots.get(provider, {}),
         )
 
+        try:
+            reasoning_effort = validate_reasoning_effort(
+                provider,
+                model,
+                reasoning_effort,
+                supports_reasoning=capabilities.get("supports_reasoning"),
+            )
+        except ValueError as exc:
+            if requested_effort_is_explicit and not provider_fallback:
+                raise
+            reasoning_effort = None
+            warnings.append(f"{exc} Using Provider default.")
+
         context_window = self._resolve_context_window_metadata(
             provider,
             model,
@@ -836,6 +895,7 @@ class ModelConfigService(IRuntimeModelResolver):
                 model=validated["model"],
                 allow_custom_model=validated["allow_custom_model"],
                 temperature=validated["temperature"],
+                reasoning_effort=validated["reasoning_effort"],
             )
 
             effective_config[agent_key] = {
@@ -852,6 +912,7 @@ class ModelConfigService(IRuntimeModelResolver):
                     user_id, validated["provider_type"]
                 ).get("key_source", "none"),
                 "is_custom_model": validated["allow_custom_model"],
+                "reasoning_effort": validated["reasoning_effort"],
             }
 
         return self.get_effective_model_config(user_id)

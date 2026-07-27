@@ -24,6 +24,7 @@ from app.ai.model_context import (
     normalize_context_window_metadata,
     resolve_model_context_window,
 )
+from app.ai.reasoning_controls import resolve_reasoning_control
 from app.core.config import settings
 from app.models.model_provider import ModelProvider
 from app.repositories.model_provider import ModelProviderRepository
@@ -143,7 +144,11 @@ class ProviderService:
             raw_catalog = {}
 
         raw_models = raw_catalog.get("models", [])
-        models = raw_models if isinstance(raw_models, list) else []
+        models = (
+            [self._enrich_model_reasoning_control(model) for model in raw_models]
+            if isinstance(raw_models, list)
+            else []
+        )
 
         sync_status = str(raw_catalog.get("sync_status") or "").strip().lower() or "never_synced"
         if sync_status not in {"never_synced", "ready", "error", "stale", "not_configured"}:
@@ -170,6 +175,22 @@ class ProviderService:
             "sync_error": sync_error,
             "catalog_version": catalog_version,
         }
+
+    @staticmethod
+    def _enrich_model_reasoning_control(model: Any) -> Any:
+        if not isinstance(model, dict):
+            return model
+        enriched = deepcopy(model)
+        model_id = str(enriched.get("id") or "").strip()
+        provider = str(enriched.get("provider_type") or "").strip().lower()
+        if not provider:
+            provider = "gemini" if model_id.lower().startswith("gemini") else "openai"
+        enriched["reasoning_control"] = resolve_reasoning_control(
+            provider,
+            model_id,
+            supports_reasoning=bool(enriched.get("supports_reasoning")),
+        ).to_dict()
+        return enriched
 
     def _build_provider_metadata_with_catalog(
         self,
@@ -653,6 +674,9 @@ class ProviderService:
             "supports_tool_calling": True,
             "supports_streaming": True,
             "supports_reasoning": supports_reasoning,
+            "reasoning_control": resolve_reasoning_control(
+                "openai", model_id, supports_reasoning=supports_reasoning
+            ).to_dict(),
             "recommended": False,
             **self._context_window_fields(context_window),
         }
@@ -702,6 +726,9 @@ class ProviderService:
             "supports_tool_calling": True,
             "supports_streaming": True,
             "supports_reasoning": supports_reasoning,
+            "reasoning_control": resolve_reasoning_control(
+                "gemini", model_id, supports_reasoning=supports_reasoning
+            ).to_dict(),
             "recommended": False,
             **self._context_window_fields(context_window),
         }

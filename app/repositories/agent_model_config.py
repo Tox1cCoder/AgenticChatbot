@@ -51,6 +51,7 @@ class AgentModelConfigRepository:
         model: str,
         allow_custom_model: bool = False,
         temperature: float | None = None,
+        reasoning_effort: str | None = None,
     ) -> AgentModelConfig:
         with self.session_factory() as session:
             existing = (
@@ -69,6 +70,7 @@ class AgentModelConfigRepository:
                 existing.model = model
                 existing.allow_custom_model = allow_custom_model
                 existing.temperature = temperature
+                existing.reasoning_effort = reasoning_effort
                 session.commit()
                 session.refresh(existing)
                 return existing
@@ -80,6 +82,7 @@ class AgentModelConfigRepository:
                 model=model,
                 allow_custom_model=allow_custom_model,
                 temperature=temperature,
+                reasoning_effort=reasoning_effort,
             )
             session.add(entity)
             session.commit()

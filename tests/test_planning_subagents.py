@@ -1115,10 +1115,11 @@ def test_planning_prompt_lists_official_subagent_model_ids():
     assert "gemini-3.1-pro-preview" in prompt
     assert "gemini-3-flash-preview" in prompt
 
-    # reasoning_effort values must be enumerated separately so the model
-    # doesn't paste them onto the model id.
-    for effort in ("none", "minimal", "low", "medium", "high", "xhigh"):
-        assert effort in prompt
+    # The supervisor must defer to the exact selected model instead of using a
+    # universal list that contains invalid provider/model combinations.
+    assert "provider-native" in prompt
+    assert "exact model" in prompt
+    assert "Provider default" in prompt
 
     # The exact failure modes must be explicitly called out (as "wrong"
     # examples). Showing both the right and wrong shapes is what stops the
@@ -1154,8 +1155,8 @@ def test_subagent_model_override_accepts_gemini_models():
     assert override.reasoning_effort == "low"
 
 
-def test_subagent_model_override_accepts_all_reasoning_effort_levels():
-    for level in ("none", "minimal", "low", "medium", "high", "xhigh"):
+def test_subagent_model_override_normalizes_provider_native_value_for_runtime_validation():
+    for level in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
         override = SubagentModelOverride.model_validate(
             {"model": "gpt-5.4", "reasoning_effort": level}
         )
@@ -1177,9 +1178,11 @@ def test_subagent_model_override_rejects_invalid_temperature():
         SubagentModelOverride.model_validate({"model": "gpt-5.4", "temperature": "hot"})
 
 
-def test_subagent_model_override_rejects_invalid_reasoning_effort():
-    with pytest.raises(ValidationError):
-        SubagentModelOverride.model_validate({"model": "gpt-5.4", "reasoning_effort": "extreme"})
+def test_subagent_model_override_defers_model_specific_reasoning_validation():
+    override = SubagentModelOverride.model_validate(
+        {"model": "gpt-5.4", "reasoning_effort": " EXTREME "}
+    )
+    assert override.reasoning_effort == "extreme"
 
 
 def test_subagent_task_accepts_model_override():
