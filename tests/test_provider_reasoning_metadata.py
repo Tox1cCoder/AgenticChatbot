@@ -19,12 +19,27 @@ def test_catalog_entries_share_reasoning_descriptor() -> None:
 
 
 def test_gemini_api_thinking_boolean_is_preserved_for_unknown_model() -> None:
-    entry = _service()._normalize_gemini_model(
-        "gemini-future", "Future", ["generateContent"], True
-    )
+    entry = _service()._normalize_gemini_model("gemini-future", "Future", ["generateContent"], True)
     assert entry["supports_reasoning"] is True
     assert entry["reasoning_control"]["supported"] is True
     assert entry["reasoning_control"]["levels"] == []
+
+
+def test_gemini_latest_alias_descriptor_survives_api_models() -> None:
+    entry = _service()._normalize_gemini_model(
+        "gemini-pro-latest", "Gemini Pro Latest", ["generateContent"], True
+    )
+    assert entry["reasoning_control"]["levels"] == ["low", "medium", "high"]
+    assert ConfigModelOption.model_validate(entry).reasoning_control.levels == [
+        "low",
+        "medium",
+        "high",
+    ]
+    assert ProviderModelOption.model_validate(entry).reasoning_control.levels == [
+        "low",
+        "medium",
+        "high",
+    ]
 
 
 def test_cached_legacy_catalog_is_enriched_without_provider_resync() -> None:

@@ -17,6 +17,25 @@ def test_gemini_31_pro_does_not_offer_minimal() -> None:
     assert control.levels == ("low", "medium", "high")
 
 
+@pytest.mark.parametrize(
+    ("model", "levels", "parameter"),
+    [
+        ("gemini-2.5-pro", ("low", "medium", "high"), "thinking_budget"),
+        ("gemini-2.5-flash", ("low", "medium", "high"), "thinking_budget"),
+        ("gemini-2.5-flash-lite", ("low", "medium", "high"), "thinking_budget"),
+        ("gemini-pro-latest", ("low", "medium", "high"), "thinking_level"),
+        ("gemini-flash-latest", ("low", "medium", "high"), "thinking_budget"),
+        ("gemini-flash-lite-latest", ("low", "medium", "high"), "thinking_budget"),
+    ],
+)
+def test_gemini_compatible_families_expose_native_levels(
+    model: str, levels: tuple[str, ...], parameter: str
+) -> None:
+    control = resolve_reasoning_control("gemini", model, supports_reasoning=True)
+    assert control.levels == levels
+    assert control.parameter_name == parameter
+
+
 def test_openai_56_retains_max() -> None:
     control = resolve_reasoning_control("openai", "gpt-5.6-sol")
     assert control.parameter_name == "reasoning.effort"
@@ -28,17 +47,31 @@ def test_openai_pro_rule_precedes_base_family() -> None:
     assert control.levels == ("medium", "high", "xhigh")
 
 
+@pytest.mark.parametrize("model", ["o1", "o3", "o3-mini", "o4-mini"])
+def test_openai_o_series_exposes_reasoning_effort(model: str) -> None:
+    control = resolve_reasoning_control("openai", model, supports_reasoning=True)
+    assert control.parameter_name == "reasoning.effort"
+    assert control.levels == ("low", "medium", "high")
+
+
+def test_openai_o1_pro_is_not_broadened_by_o1_family() -> None:
+    control = resolve_reasoning_control("openai", "o1-pro", supports_reasoning=True)
+    assert control.levels == ("high",)
+
+
 def test_unknown_reasoning_model_is_provider_default_only() -> None:
     control = resolve_reasoning_control("openai", "gpt-future", supports_reasoning=True)
     assert control.supported is True
     assert control.parameter_name is None
     assert control.levels == ()
-    assert (
-        validate_reasoning_effort(
-            "openai", "gpt-future", None, supports_reasoning=True
-        )
-        is None
-    )
+    assert validate_reasoning_effort("openai", "gpt-future", None, supports_reasoning=True) is None
+
+
+def test_unknown_gemini_reasoning_model_is_provider_default_only() -> None:
+    control = resolve_reasoning_control("gemini", "gemini-unknown-latest", supports_reasoning=True)
+    assert control.supported is True
+    assert control.parameter_name is None
+    assert control.levels == ()
 
 
 def test_invalid_native_value_is_not_remapped() -> None:

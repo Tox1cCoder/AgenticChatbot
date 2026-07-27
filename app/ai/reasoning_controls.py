@@ -27,6 +27,22 @@ class ReasoningControl:
         return value
 
 
+# Gemini 2.5 and the compatibility aliases below use the legacy numeric
+# transport even though the UI exposes Google's documented named effort levels.
+_GEMINI_BUDGET_RULES = (
+    (
+        ("gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"),
+        ("low", "medium", "high"),
+        None,
+    ),
+    (
+        ("gemini-flash-latest", "gemini-flash-lite-latest"),
+        ("low", "medium", "high"),
+        None,
+    ),
+)
+
+
 # Ordered most-specific-first so Pro variants never inherit a broader family.
 _GEMINI_RULES = (
     (("gemini-3.6-flash",), ("minimal", "low", "medium", "high"), "medium"),
@@ -36,9 +52,12 @@ _GEMINI_RULES = (
     (("gemini-3.1-flash-lite-image",), ("minimal", "high"), "minimal"),
     (("gemini-3-flash-preview",), ("minimal", "low", "medium", "high"), "high"),
     (("gemini-3-pro-preview",), ("low", "high"), "high"),
+    (("gemini-pro-latest",), ("low", "medium", "high"), None),
 )
 
 _OPENAI_RULES = (
+    (("o1-pro",), ("high",), "high"),
+    (("o1", "o3", "o4-mini"), ("low", "medium", "high"), "medium"),
     (("gpt-5.5-pro", "gpt-5.4-pro", "gpt-5.2-pro"), ("medium", "high", "xhigh"), "medium"),
     (("gpt-5-pro",), ("high",), "high"),
     (("gpt-5.6",), ("none", "low", "medium", "high", "xhigh", "max"), "medium"),
@@ -63,6 +82,16 @@ def resolve_reasoning_control(
     model_key = str(model or "").strip().lower()
 
     if provider_key == "gemini":
+        for prefixes, levels, default in _GEMINI_BUDGET_RULES:
+            if _matches(model_key, prefixes):
+                return ReasoningControl(
+                    supported=True,
+                    parameter_name="thinking_budget",
+                    display_label="Thinking level",
+                    levels=levels,
+                    default_level=default,
+                    source="official_registry",
+                )
         rules = _GEMINI_RULES
         label = "Thinking level"
         parameter = "thinking_level"
