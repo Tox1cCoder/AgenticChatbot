@@ -15,6 +15,7 @@ from google.genai import types
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from ..core.config import settings
+from .reasoning_controls import gemini_reasoning_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -227,7 +228,9 @@ def create_langchain_model(
         # Use thinking_budget for Gemini 2.5, thinking_level for Gemini 3.
         # NOTE: only ONE of the two is set so a per-request override cannot
         # accidentally enable both settings together.
-        if "2.5" in model_name or "flash-latest" in model_name.lower():
+        if thinking_level_override:
+            model_kwargs.update(gemini_reasoning_kwargs(model_name, thinking_level_override))
+        elif "2.5" in model_name or "flash-latest" in model_name.lower():
             thinking_budget = settings.thinking_budget
             if thinking_budget == -1:
                 thinking_budget = 8192

@@ -232,6 +232,52 @@ def test_gemini_pro_reasoning_effort_medium_is_passed_unchanged(monkeypatch):
     assert captured.get("thinking_level_override") == "medium"
 
 
+def test_gemini_25_reasoning_effort_is_passed_to_model_builder(monkeypatch):
+    from app.ai.agents import base_agent as base_module
+
+    captured: dict[str, Any] = {}
+
+    def fake_create(*args, **kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("app.ai.agents.base_agent.create_langchain_model", fake_create)
+    agent = _FakeAgent(agent_config_key="search", model_name="gemini-2.5-flash")
+    runtime = _runtime_config(
+        provider="gemini",
+        model="gemini-2.5-flash",
+        reasoning_effort="high",
+        api_key="gemini-key",
+    )
+
+    base_module.BaseAgent._create_langchain_model_from_runtime(agent, runtime)
+
+    assert captured.get("thinking_level_override") == "high"
+
+
+def test_gemini_25_model_builder_converts_level_to_budget(monkeypatch):
+    from app.ai import agent_config
+
+    captured: dict[str, Any] = {}
+
+    def fake_model(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(agent_config, "ChatGoogleGenerativeAI", fake_model)
+    monkeypatch.setattr(agent_config.settings, "enable_thinking", True)
+
+    agent_config.create_langchain_model(
+        "search",
+        model_override="gemini-2.5-flash",
+        api_key_override="gemini-key",
+        thinking_level_override="high",
+    )
+
+    assert captured["thinking_budget"] == 24576
+    assert "thinking_level" not in captured
+
+
 # ---------------------------------------------------------------------------
 # ResolvedRuntimeModelConfig.reasoning_effort exists
 # ---------------------------------------------------------------------------

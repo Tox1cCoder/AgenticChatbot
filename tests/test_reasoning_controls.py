@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from app.ai.reasoning_controls import resolve_reasoning_control, validate_reasoning_effort
+from app.ai.reasoning_controls import (
+    gemini_reasoning_kwargs,
+    resolve_reasoning_control,
+    validate_reasoning_effort,
+)
 
 
 def test_gemini_36_flash_uses_native_levels() -> None:
@@ -81,3 +85,11 @@ def test_invalid_native_value_is_not_remapped() -> None:
 
 def test_native_value_is_normalized_without_translation() -> None:
     assert validate_reasoning_effort("openai", "gpt-5.6", " MAX ") == "max"
+
+
+def test_gemini_25_named_level_uses_documented_budget() -> None:
+    assert gemini_reasoning_kwargs("gemini-2.5-flash", "medium") == {"thinking_budget": 8192}
+
+
+def test_gemini_3_named_level_is_unchanged() -> None:
+    assert gemini_reasoning_kwargs("gemini-3.6-flash", "high") == {"thinking_level": "high"}

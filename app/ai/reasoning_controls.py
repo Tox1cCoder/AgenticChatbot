@@ -67,6 +67,12 @@ _OPENAI_RULES = (
     (("gpt-5",), ("minimal", "low", "medium", "high"), None),
 )
 
+_GEMINI_LEVEL_BUDGETS = {
+    "low": 1024,
+    "medium": 8192,
+    "high": 24576,
+}
+
 
 def _matches(model: str, prefixes: tuple[str, ...]) -> bool:
     return any(model == prefix or model.startswith(f"{prefix}-") for prefix in prefixes)
@@ -148,3 +154,26 @@ def validate_reasoning_effort(
             f"{provider}:{model}. Accepted: {accepted}."
         )
     return native_value
+
+
+def gemini_reasoning_kwargs(model: str, value: str) -> dict[str, Any]:
+    """Build the one native Gemini transport control for a named level."""
+    native_value = validate_reasoning_effort(
+        "gemini",
+        model,
+        value,
+        supports_reasoning=True,
+    )
+    if native_value is None:
+        return {}
+
+    control = resolve_reasoning_control(
+        "gemini",
+        model,
+        supports_reasoning=True,
+    )
+    if control.parameter_name == "thinking_budget":
+        return {"thinking_budget": _GEMINI_LEVEL_BUDGETS[native_value]}
+    if control.parameter_name == "thinking_level":
+        return {"thinking_level": native_value}
+    return {}
