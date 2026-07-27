@@ -764,18 +764,28 @@ sidecar media read, resume preview, and any query-loss path found.
 - Modify: `scripts/verify_image_streaming_contract.py`
 - Modify: `docs/superpowers/specs/2026-07-17-image-streaming-design.md`
 
-- [ ] Install the same request-scoped media sink for new and resumed executions.
-- [ ] Preserve queue coalescing for partials but treat final references as lossless.
-- [ ] On backpressure, discard stale partials for the same item before unrelated
+- [x] Install the same request-scoped media sink for new and resumed executions.
+- [x] Preserve queue coalescing for partials but treat final references as lossless.
+- [x] On backpressure, discard stale partials for the same item before unrelated
   events; never discard the final reference.
-- [ ] Verify Streamlit and AI SDK event order:
+- [x] Verify Streamlit and AI SDK event order:
   partial (optional) -> final reference -> narrative deltas -> complete -> one done.
-- [ ] Verify generation, conversation reload, and a follow-up model turn all resolve
+- [x] Verify generation, conversation reload, and a follow-up model turn all resolve
   the same stored image.
 - [ ] Run the optional real-provider smoke test once for Gemini and once for OpenAI,
   recording provider behavior without placing API keys or image data in artifacts.
-- [ ] Update the old design's "oversized previews are dropped" and "resume has no
+  **DEFERRED — no running app or provider credentials in this environment; manual.**
+- [x] Update the old design's "oversized previews are dropped" and "resume has no
   sink" decisions to the new contract.
+
+> **T005 status (2026-07-24):** Done — code `600980f`, doc fixes `afd9fb2`, reviewer
+> Approved. Resume sink installed; final references lossless; cross-run image dedup at
+> the storage layer; verify script C1–C5 pass. **Full image phase gate green (T001–T005
+> complete).** Two open items carried forward: (1) an **Important** verification gap —
+> no CI test drives the real `graph.resume_with_decisions_stream` with an image agent
+> (wiring is correct by inspection; covered by manual acceptance step 4; deferred
+> because subagents are unavailable — see Design Decisions Log); (2) the real-provider
+> smoke test above (manual). See Design Decisions Log at end of doc.
 
 Image phase gate:
 
@@ -1453,4 +1463,35 @@ Decisions made while executing the plan (append-only; newest task last).
   single resolver (same auth path; cosmetic).
 - ⚠️ FR-IMG-005/006 also depend on the canonical `/chat-images` per-user scoping, which
   lives upstream (pre-existing `app/api/chat_images.py`) and is stubbed in these tests.
+
+### T005 — resume parity + backpressure + cross-run dedup (commits `600980f`, `afd9fb2`)
+
+- **Resume sink** installed in `graph.py resume_with_decisions_stream` (~2508-2578):
+  the request-scoped `MediaDeliveryService` is created, rebound under the checkpointed
+  token (`rebind_subagent_event_sink`) or injected via `Command(update=...)` when the
+  token is absent, then merged with `stream_with_subagent_events` — the same
+  token→`resolve_subagent_event_sink`→emitter mechanism as the main path. Solves the
+  dead-weakref-after-resume problem without mutating the checkpoint.
+- **Backpressure** (`subagents.py`): partials coalesce (evict stale SAME-item partials
+  first, never unrelated events); the final reference is LOSSLESS
+  (`build_image_preview_reference_data` hardcodes `status="final"`, so `_is_droppable`
+  is always False for it). Private `asyncio.Queue._queue` deque access is guarded
+  (`getattr` + `isinstance(deque)` fallback), runs only inside synchronous `emit_event`.
+- **Cross-run idempotency** (the T002-review carry): `ChatImageStorageService.store` is
+  now row-level idempotent on `(user_id, sha256)` via `ChatImageRepository.get_by_user_and_sha`
+  (approach a). A resumed run reuses the existing `chat_images` row instead of inserting
+  a duplicate. Query-then-insert (TOCTOU window, no unique index — noted in code + Minor).
+- **Design doc** `2026-07-17-image-streaming-design.md`: the "oversized previews are
+  dropped" and "resume has no sink" decisions are superseded.
+- **DEFERRED / OPEN (Important, verification-only):** no CI test drives the REAL
+  `resume_with_decisions_stream` with an image agent — every automated "resume" check
+  drives a re-pointed fake `ai_service` source that bypasses the graph resume path. The
+  reviewer confirmed the wiring is correct by inspection; runtime proof is manual
+  acceptance step 4. A graph-level resume test (resume a checkpoint whose selected agent
+  is the image generator, assert an early `image_preview`) should be added when subagent
+  dispatch is available again (blocked this session by the org spend limit). Tracked in
+  the ledger + final-review list.
+- **Minor (final-review triage):** test doubles `_Repo`/`_InMemoryChatImageRepo` don't
+  reproduce the repo's `ORDER BY created_at ASC`, so "earliest row wins" is untested at
+  unit level. (The docstring/TOCTOU Minors were fixed in `afd9fb2`.)
 
