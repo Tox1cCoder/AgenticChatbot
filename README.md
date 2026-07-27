@@ -531,15 +531,6 @@ LangGraph checkpoints are kept in the same database under `CHECKPOINT_SCHEMA` (d
 
 ### Schema ownership and cleanup
 
-> **Historical migration warning:** the original `6c6598a9eb26` revision could drop LangGraph checkpoint tables and `mcp_oauth_tokens`. For a deployment that may have run that revision, inspect these tables before upgrading and take a verified database backup. The forward `b5c6d7e8f9a0` repair cannot reconstruct deleted checkpoint or MCP OAuth data. Restore the affected tables from a pre-upgrade backup when available. Without a checkpoint backup, reinitialize LangGraph only after accepting the loss of resumable workflow/HITL state; users must reauthenticate affected MCP servers when OAuth rows cannot be restored.
->
-> The same repair normalizes legacy uppercase approval enum labels to lowercase.
-> Drain API and worker approval writers before applying `b5c6d7e8f9a0`, then
-> deploy code whose SQLAlchemy mapping persists `DecisionType.value`. Its
-> downgrade intentionally does not restore uppercase labels; rollback to an
-> older uppercase-mapped release requires a compatible backport or restoration
-> of the verified pre-upgrade backup.
-
 - **Alembic owns the application tables only.** Current autogenerate is filtered (`app/alembic/autogenerate_filters.py`) so it does not touch the LangGraph checkpoint tables or `alembic_version`.
 - **LangGraph owns the checkpoint tables** (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`). Corrected migration history and new application migrations leave them unchanged; pruning their rows is operational cleanup, not a schema migration.
 - Migrations are the **only** schema-mutation path — `Base.metadata.create_all()` is not called at application startup (the old `Database.create_database()` helper was removed).
@@ -1470,9 +1461,3 @@ If both runs show similar times, the service is restarting between requests
 | Batch upload returns 207 | Mixed accepted/rejected response. Inspect `data.files` for per-file status and `error_code` (e.g. `DUPLICATE_FILENAME`). Do not treat 207 as a hard failure. |
 | Reranker download slow / `ReadTimeoutError` from `huggingface.co` | The reranker loads offline-first from the local HF cache, so a cached model never blocks on the hub. The error means the model isn't cached yet (first run) or the one-time download timed out. Pre-fetch it with `python scripts/download_reranker.py`, then it loads with no network. Or disable with `ENABLE_RERANKING=false`. |
 | Client-device tool calls fail | Device offline or `CLIENT_RUNTIME_REQUIRE_CONNECTED_DEVICE_FOR_LOCAL_TOOLS=true`. Inspect `GET /device-runtime/connected-devices`. |
-
----
-
-## License
-
-Internal / unspecified. Add a `LICENSE` file before distribution.
