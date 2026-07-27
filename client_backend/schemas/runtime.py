@@ -41,6 +41,14 @@ class HealthCheckResponse(BaseModel):
     device_id: str | None = None
     device_identifier: str | None = None
     checks: dict[str, bool] = Field(default_factory=dict)
+    build_sha: str = Field(
+        default="unknown",
+        description="Commit/build this process is running (stale-process diagnostic)",
+    )
+    build_source: str = Field(
+        default="unknown",
+        description="Where build_sha came from: env | git | unknown",
+    )
 
 
 class DeviceInfo(BaseModel):

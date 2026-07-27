@@ -155,9 +155,14 @@ async def list_server_tools(
 async def get_tool_details(
     tool_name: str,
     mcp_service: MCPService,
+    server_name: str | None = Query(
+        None,
+        alias="serverName",
+        description="Owning server; required when several servers expose this name",
+    ),
 ) -> ApiResponse[MCPToolInfo]:
     """Get detailed information about a specific tool"""
-    result = await mcp_service.get_tool_info(tool_name)
+    result = await mcp_service.get_tool_info(tool_name, server_name)
     response_data = MCPToolInfo(**result)
     return ApiResponse(
         success=True,
@@ -174,7 +179,9 @@ async def execute_tool(
     mcp_service: MCPService,
 ) -> ApiResponse[MCPToolExecuteResponse]:
     """Execute a tool with provided arguments for testing"""
-    result = await mcp_service.execute_tool(tool_name, request.arguments)
+    result = await mcp_service.execute_tool(
+        tool_name, request.arguments, server_name=request.server_name
+    )
     response_data = MCPToolExecuteResponse(**result)
 
     if result["success"]:

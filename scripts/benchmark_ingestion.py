@@ -398,7 +398,8 @@ def main(argv: list[str] | None = None) -> int:
         elapsed = result["elapsed_s"]
         file_type = result["file_type"]
         logger.info(
-            f"  [{i}/{len(results)}] {result['filename']:<30} {status:<12} {elapsed:>7.1f}s  [{file_type}]"
+            f"  [{i}/{len(results)}] {result['filename']:<30} "
+            f"{status:<12} {elapsed:>7.1f}s  [{file_type}]"
         )
 
     if by_type_summary:

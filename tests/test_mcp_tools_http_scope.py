@@ -31,6 +31,7 @@ from fastapi.testclient import TestClient
 from app.api.mcp import router as canonical_mcp_router
 from app.core.auth import get_current_user
 from app.core.container import Container, setup_auto_injection
+from app.core.exceptions.mcp import ServerNotFoundError
 from app.services.mcp_service import MCPService
 from client_backend.api import mcp as sidecar_mcp
 from client_backend.core.auth import require_local_session
@@ -174,8 +175,15 @@ _SIDECAR_CATALOG = [
 
 
 class _FakeLocalManager:
-    def __init__(self, catalog):
+    def __init__(self, catalog, *, known_servers=None):
         self._catalog = catalog
+        names = (
+            known_servers
+            if known_servers is not None
+            else sorted({t.server_name for t in catalog})
+        )
+        # Mirrors LocalMCPManager.servers: only enabled servers are present.
+        self.servers = dict.fromkeys(names, SimpleNamespace())
 
     async def initialize(self, *args, **kwargs) -> None:
         return None
@@ -199,8 +207,8 @@ def _session() -> LocalSessionPayload:
     )
 
 
-def _sidecar_client(monkeypatch) -> TestClient:
-    manager = _FakeLocalManager(_SIDECAR_CATALOG)
+def _sidecar_client(monkeypatch, *, known_servers=None) -> TestClient:
+    manager = _FakeLocalManager(_SIDECAR_CATALOG, known_servers=known_servers)
     monkeypatch.setattr(sidecar_mcp, "get_mcp_manager", lambda scope=None: manager)
     app = create_app()
     app.dependency_overrides[require_local_session] = lambda: _session()
@@ -249,3 +257,69 @@ def test_sidecar_dedicated_scoped_route_exists(monkeypatch):
     assert data["scope"]["serverName"] == _BRAVE
     assert data["serversCount"] == 1
     assert str(data.get("catalogVersion", "")).startswith("sha256:")
+
+
+# ---------------------------------------------------------------------------
+# Unknown-server parity between the canonical route and the sidecar (T007
+# follow-up). The canonical route already 404s an unknown/disabled server via
+# ``ServerNotFoundError``; the sidecar used to answer 200 with an empty scoped
+# list, so a client could not tell "server does not exist here" from "server
+# exists and currently exposes nothing" (FR-MCP-005).
+# ---------------------------------------------------------------------------
+
+
+def test_canonical_scoped_route_404s_unknown_server():
+    service = _canonical_service()
+
+    async def _raise_unknown(server_name=None):
+        raise ServerNotFoundError(server_name)
+
+    service.mcp_manager.list_tool_descriptors = _raise_unknown
+
+    with Container.mcp_service.override(providers.Object(service)):
+        client = TestClient(_canonical_app())
+        resp = client.get("/mcp/servers/nope/tools")
+
+    assert resp.status_code == 404, resp.text
+
+
+def test_sidecar_scoped_route_404s_unknown_server(monkeypatch):
+    """An unknown server must 404, not read as a known-but-empty server."""
+    client = _sidecar_client(monkeypatch)
+    resp = client.get(
+        "/mcp/servers/nope/tools",
+        headers={"Authorization": "Bearer local-session-token"},
+    )
+    assert resp.status_code == 404, (
+        "sidecar returned a success response for an unknown MCP server, so a "
+        "client cannot distinguish it from a known server with zero tools. "
+        f"body={resp.text}"
+    )
+
+
+def test_sidecar_scoped_route_200s_known_server_with_no_tools(monkeypatch):
+    """A known server exposing zero tools is 200 with an empty scoped list and
+    ``serversCount == 1`` — distinct from the unknown-server 404."""
+    client = _sidecar_client(monkeypatch, known_servers=[_BRAVE, _WIDGETS, "quiet"])
+    resp = client.get(
+        "/mcp/servers/quiet/tools",
+        headers={"Authorization": "Bearer local-session-token"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["tools"] == []
+    assert data["totalCount"] == 0
+    assert data["serversCount"] == 1
+    assert data["scope"] == {"kind": "server", "serverName": "quiet"}
+
+
+def test_sidecar_scoped_query_404s_unknown_server(monkeypatch):
+    """The compatibility query form scopes to the same catalog operation, so it
+    reports an unknown server the same way."""
+    client = _sidecar_client(monkeypatch)
+    resp = client.get(
+        "/mcp/tools",
+        params={"serverName": "nope"},
+        headers={"Authorization": "Bearer local-session-token"},
+    )
+    assert resp.status_code == 404, resp.text

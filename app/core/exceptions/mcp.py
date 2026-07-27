@@ -37,6 +37,28 @@ class ToolNotFoundError(MCPException):
         )
 
 
+class AmbiguousToolNameError(MCPException):
+    """Raised when a bare tool name is exposed by more than one MCP server.
+
+    Duplicate bare names across servers are legal (FR-MCP-003), so resolution
+    must be explicit rather than first-indexed-wins: the caller has to qualify
+    the request with the owning server.
+    """
+
+    def __init__(self, tool_name: str, server_names: list[str]):
+        servers = ", ".join(sorted(server_names))
+        super().__init__(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"MCP tool '{tool_name}' is provided by multiple servers "
+                f"({servers}); specify serverName to disambiguate"
+            ),
+            error_code="AMBIGUOUS_TOOL_NAME",
+        )
+        self.tool_name = tool_name
+        self.server_names = sorted(server_names)
+
+
 class ToolExecutionError(MCPException):
     """Raised when MCP tool execution fails"""
 

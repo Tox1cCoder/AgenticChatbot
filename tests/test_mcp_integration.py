@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.ai.mcp_integration import MCPManager, compute_catalog_version
+from app.core.exceptions.mcp import AmbiguousToolNameError
 
 
 def _fake_tool(name: str, schema: dict | None = None) -> SimpleNamespace:
@@ -339,3 +340,197 @@ async def test_server_mcp_tool_cancellation_does_not_escape_as_unbound_local_err
         await task
 
     await manager.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# Execution-path provenance (T006 follow-up)
+#
+# FR-MCP-003: server ownership is attached when tools are loaded and retained in
+# a stable descriptor. The execution path previously resolved it through an
+# ``id(tool)``-keyed map, which is address-based: a tool the manager did not
+# personally index (a clone, a rebuilt binding, a tool handed back by another
+# layer) resolved to "unknown", and a recycled CPython id could attribute a tool
+# to the wrong server.
+# ---------------------------------------------------------------------------
+
+
+def _stamped_tool(name: str, server: str) -> SimpleNamespace:
+    """A tool as ``clone_mcp_tool`` produces it: provenance in metadata."""
+    return SimpleNamespace(
+        name=name,
+        description=f"{name} desc",
+        args_schema={"type": "object"},
+        metadata={
+            "tool_origin": "server_mcp",
+            "server_name": server,
+            "source_tool_name": name,
+            "qualified_tool_id": f"{server}::{name}",
+        },
+    )
+
+
+def test_get_server_for_tool_reads_stamped_provenance_not_identity():
+    """A stamped tool resolves to its server even when this manager instance
+    never indexed that exact object."""
+    manager = MCPManager.__new__(MCPManager)
+    manager._server_tools = {}
+    manager._tool_index = {}
+
+    tool = _stamped_tool("search", "brave_image_search")
+    assert manager.get_server_for_tool(tool) == "brave_image_search"
+
+
+def test_get_server_for_tool_falls_back_to_server_index_for_unstamped_tool():
+    """Tools without metadata (older adapters, test doubles) still resolve via
+    the per-server index by identity."""
+    manager = MCPManager.__new__(MCPManager)
+    tool = _fake_tool("legacy")
+    manager._server_tools = {"legacy_server": [tool]}
+    manager._tool_index = {"legacy": [tool]}
+
+    assert manager.get_server_for_tool(tool) == "legacy_server"
+    assert manager.get_server_for_tool(_fake_tool("unknown")) is None
+
+
+@pytest.mark.asyncio
+async def test_get_servers_for_tool_name_uses_stamped_provenance():
+    """The same bare name on two servers reports BOTH servers."""
+    manager = MCPManager.__new__(MCPManager)
+    alpha = _stamped_tool("inspect", "alpha")
+    beta = _stamped_tool("inspect", "beta")
+    manager._server_tools = {"alpha": [alpha], "beta": [beta]}
+    manager._tool_index = {"inspect": [alpha, beta]}
+
+    async def _noop_get_tools():
+        return []
+
+    manager.get_tools = _noop_get_tools  # type: ignore[method-assign]
+
+    assert sorted(await manager.get_servers_for_tool_name("inspect")) == ["alpha", "beta"]
+
+
+# ---------------------------------------------------------------------------
+# Ambiguous execution requires server qualification (T006 follow-up)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_bare_name_lookup_is_rejected_not_silently_first_wins():
+    """Two servers exposing the same bare name must not silently resolve to
+    whichever was indexed first — the caller has to qualify the server."""
+    manager = MCPManager.__new__(MCPManager)
+    alpha = _stamped_tool("inspect", "alpha")
+    beta = _stamped_tool("inspect", "beta")
+    manager._server_tools = {"alpha": [alpha], "beta": [beta]}
+    manager._tool_index = {"inspect": [alpha, beta]}
+
+    async def _noop_get_tools():
+        return []
+
+    manager.get_tools = _noop_get_tools  # type: ignore[method-assign]
+
+    with pytest.raises(AmbiguousToolNameError) as excinfo:
+        await manager.get_tool_by_name("inspect")
+
+    assert excinfo.value.status_code == 409
+    assert "alpha" in excinfo.value.detail and "beta" in excinfo.value.detail
+
+    assert await manager.get_tool_by_name("inspect", server_name="beta") is beta
+
+
+@pytest.mark.asyncio
+async def test_unambiguous_bare_name_lookup_still_resolves():
+    """One server owning the name keeps working without qualification."""
+    manager = MCPManager.__new__(MCPManager)
+    only = _stamped_tool("inspect", "alpha")
+    manager._server_tools = {"alpha": [only]}
+    manager._tool_index = {"inspect": [only]}
+
+    async def _noop_get_tools():
+        return []
+
+    manager.get_tools = _noop_get_tools  # type: ignore[method-assign]
+
+    assert await manager.get_tool_by_name("inspect") is only
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_accepts_server_qualification_for_duplicate_names():
+    """``execute_tool`` routes to the qualified server and reports it back."""
+    manager = MCPManager.__new__(MCPManager)
+
+    class _Invocable(SimpleNamespace):
+        async def ainvoke(self, arguments):
+            return f"{self.metadata['server_name']}:{arguments['q']}"
+
+    alpha = _Invocable(
+        name="inspect",
+        description="",
+        args_schema=None,
+        metadata={"server_name": "alpha", "qualified_tool_id": "alpha::inspect"},
+    )
+    beta = _Invocable(
+        name="inspect",
+        description="",
+        args_schema=None,
+        metadata={"server_name": "beta", "qualified_tool_id": "beta::inspect"},
+    )
+    manager._server_tools = {"alpha": [alpha], "beta": [beta]}
+    manager._tool_index = {"inspect": [alpha, beta]}
+
+    async def _noop_get_tools():
+        return []
+
+    manager.get_tools = _noop_get_tools  # type: ignore[method-assign]
+
+    result = await manager.execute_tool("inspect", {"q": "x"}, server_name="beta")
+    assert result["success"] is True
+    assert result["result"] == "beta:x"
+    assert result["server_name"] == "beta"
+
+
+def test_get_server_for_tool_ignores_device_local_tool_provenance():
+    """A device-local (client) MCP tool must NEVER be attributed to the backend
+    MCP catalog.
+
+    Client runtime tools carry their own ``metadata["server_name"]`` (the MCP
+    server name ON THE USER'S DEVICE) alongside ``tool_origin="client_mcp"``.
+    If ``MCPManager`` reported that name as backend provenance, a user could
+    name a local server after a backend one and have their local tools admitted
+    by a base agent's server allowlist
+    (``base_agent._filter_tools_by_allowlist``) — a scope-broadening fail-open
+    across the device boundary.
+    """
+    manager = MCPManager.__new__(MCPManager)
+    manager._server_tools = {}
+    manager._tool_index = {}
+
+    client_tool = SimpleNamespace(
+        name="tavily__search",
+        description="",
+        args_schema={"type": "object"},
+        metadata={
+            "tool_origin": "client_mcp",
+            "is_client_tool": True,
+            "server_name": "tavily",  # a LOCAL server that shadows a backend name
+            "qualified_tool_id": "tavily::search",
+        },
+    )
+    client_skill = SimpleNamespace(
+        name="do_thing",
+        description="",
+        args_schema={"type": "object"},
+        metadata={"tool_origin": "client_skill", "server_name": "widgets"},
+    )
+
+    assert manager.get_server_for_tool(client_tool) is None
+    assert manager.get_server_for_tool(client_skill) is None
+
+
+def test_get_server_for_tool_accepts_backend_mcp_provenance():
+    """The backend stamp (``tool_origin="server_mcp"``) still resolves."""
+    manager = MCPManager.__new__(MCPManager)
+    manager._server_tools = {}
+    manager._tool_index = {}
+
+    assert manager.get_server_for_tool(_stamped_tool("search", "tavily")) == "tavily"

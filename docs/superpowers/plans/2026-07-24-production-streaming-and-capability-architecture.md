@@ -781,11 +781,15 @@ sidecar media read, resume preview, and any query-loss path found.
 > **T005 status (2026-07-24):** Done — code `600980f`, doc fixes `afd9fb2`, reviewer
 > Approved. Resume sink installed; final references lossless; cross-run image dedup at
 > the storage layer; verify script C1–C5 pass. **Full image phase gate green (T001–T005
-> complete).** Two open items carried forward: (1) an **Important** verification gap —
-> no CI test drives the real `graph.resume_with_decisions_stream` with an image agent
-> (wiring is correct by inspection; covered by manual acceptance step 4; deferred
-> because subagents are unavailable — see Design Decisions Log); (2) the real-provider
-> smoke test above (manual). See Design Decisions Log at end of doc.
+> complete).**
+>
+> **T005 verification gap CLOSED (2026-07-27):** `tests/test_graph_resume_image_stream.py`
+> now drives the REAL `graph.resume_with_decisions_stream` with the REAL
+> `_image_generator_node` and asserts an early final-by-reference `image_preview`.
+> Mutation-verified against four production regressions (drop the sink rebind, drop the
+> fresh-token fallback, drop the `stream_with_subagent_events` merge, drop
+> `use_media_delivery_service`) — each makes it fail. Only the real-provider smoke test
+> above remains manual.
 
 Image phase gate:
 
@@ -833,11 +837,13 @@ Manual acceptance:
   backend manager. (Backend: `get_server_tools`; sidecar: `get_tools_by_server`.)
 - [x] Consume the server provenance already stamped at load
   (`metadata["server_name"]`, `qualified_tool_id`) for the LISTING (per-server index).
-  **DEFERRED:** replacing the execution-path `id()`-keyed `_tool_server_map` — a
-  higher-risk core-execution refactor, better done under independent review.
+  **DONE 2026-07-27:** the execution path now reads the same stamped provenance;
+  `_tool_server_map` (address-keyed, `id()`-recyclable) is deleted, with an identity
+  scan of `_server_tools` as the fallback for unstamped tools.
 - [x] Make duplicate bare names legal across servers (the listing keeps both with
-  distinct provenance — unit-tested). **DEFERRED:** requiring a server-qualified ID
-  for ambiguous *execution* (execution-path change, paired with the id()-map deferral).
+  distinct provenance — unit-tested). **DONE 2026-07-27:** ambiguous *execution* now
+  requires server qualification — `AmbiguousToolNameError` (409 `AMBIGUOUS_TOOL_NAME`)
+  on both apps, with `serverName` accepted on execute/details.
 - [x] Compute a deterministic catalog hash from sorted sanitized descriptors
   (`compute_catalog_version`, canonical + sidecar).
 - [x] Add unit tests for known-empty, duplicate-name, and same-name/different-server
@@ -865,8 +871,10 @@ Manual acceptance:
   `quote()`-encoded server segment).
 - [x] Add a test using the full sidecar app and mixed real-shaped descriptors:
   `brave_image_search` response set must equal `{"brave_image_search"}`.
-- [ ] Add a startup/build SHA to health diagnostics so a stale process is
-  immediately distinguishable from current source. **DEFERRED (ops diagnostic).**
+- [x] Add a startup/build SHA to health diagnostics so a stale process is
+  immediately distinguishable from current source. **DONE 2026-07-27:**
+  `app/core/build_info.py` (`BUILD_SHA` env → git HEAD → `"unknown"`), surfaced on
+  canonical `GET /health` and sidecar `GET /health` as `build_sha`/`build_source`.
 - [ ] Add a deployment smoke check that authenticates normally and compares
   scoped endpoint output with the selected server card. **DEFERRED (needs a live
   deploy; not runnable in this environment).**
@@ -876,9 +884,12 @@ Manual acceptance:
 
 > **T006–T007 status (2026-07-24):** Done — committed `2c93366`, implemented and
 > reviewed INLINE (subagent dispatch blocked by the org spend limit). MCP phase gate
-> green (27 passed); ruff clean. Deferred (to reviewed follow-ups): the execution-path
-> `id()`-map replacement + ambiguous-execution server-qualification, and the
-> build-SHA/deploy-smoke ops diagnostics. See Design Decisions Log.
+> green (27 passed); ruff clean.
+>
+> **Deferrals CLOSED (2026-07-27):** the execution-path `id()`-map replacement,
+> ambiguous-execution server qualification, strict sidecar 404 parity, and the build-SHA
+> health diagnostic all landed with mutation-verified tests. Only the live deployment
+> smoke check remains deferred (needs a real deploy). See Design Decisions Log.
 
 MCP phase gate:
 
@@ -1542,3 +1553,88 @@ limit lifts.
   the latter needs a real deploy). The sidecar does not enforce 404-on-unknown (returns
   an empty scoped list) — strict canonical/sidecar 404 parity also deferred.
 
+
+### Deferral closure pass (2026-07-27)
+
+Closes every deferred item from T005/T006/T007 that does not require a live deploy or
+real provider credentials, plus the two suite-level gaps the earlier sessions left open.
+Each change was written test-first and then **mutation-verified**: the production line
+was reverted and the new test confirmed to fail, so none of these tests pass vacuously.
+
+- **T005 resume verification gap (was Important).** New
+  `tests/test_graph_resume_image_stream.py` drives the REAL
+  `graph.resume_with_decisions_stream` over a checkpoint whose persisted
+  `subagent_event_sink_token` is already dead (weakref collected), with the REAL
+  `_image_generator_node`, the REAL `ImageGeneratorAgent._consume_image_stream`, the
+  REAL `MediaDeliveryService`/`ImagePreviewPublisher`, and the REAL
+  `stream_with_subagent_events` merge + public projector. Asserts partial → final
+  reference → `complete` ordering, `delivery.kind == "reference"` with no inline base64,
+  and durable persistence. Also covers the no-persisted-token path (fresh token via
+  `Command(update=...)`) and persistence with `enable_image_streaming` off.
+  Mutations caught: drop the rebind; drop the fresh-token fallback; drop the
+  subagent-event merge; drop `use_media_delivery_service`.
+- **T006 execution-path provenance.** `MCPManager.get_server_for_tool` now reads the
+  application-owned `metadata["server_name"]` stamped by `clone_mcp_tool`, falling back
+  to an identity scan of `_server_tools`. The `id()`-keyed `_tool_server_map` is deleted
+  everywhere (init/index/cleanup/remove/disable/reconnect). Motivation is not only
+  tidiness: `id()` is an address, so a tool the manager did not personally index
+  resolved to `unknown`, and a recycled id could attribute a tool to the WRONG server.
+  `get_servers_for_tool_name` and `reconnect_and_get_tool` use the same source, and
+  `reconnect_and_get_tool` now takes an optional `server_name` and returns the tool from
+  that server's list rather than a bare-name index hit.
+- **T006 ambiguous execution.** New `AmbiguousToolNameError` (409
+  `AMBIGUOUS_TOOL_NAME`). `MCPManager.get_tool_by_name` raises it when a bare name maps
+  to more than one server and no `server_name` is given; `execute_tool` /
+  `MCPService.execute_tool` / `MCPService.get_tool_info` accept `server_name`;
+  `MCPToolExecuteRequest.serverName` and a `serverName` query on
+  `GET /mcp/tools/{tool_name}` carry it over the wire. The sidecar's
+  `_resolve_manager_tool` mirrors the contract (`GET /mcp/tools/{name}` now honours
+  `serverName` too). **Behavior change:** the previous sidecar test locking
+  "bare name selects the first scoped match" was replaced — first-wins was a silent
+  wrong-server execution. The only real caller (the Streamlit tester) already sends
+  `serverName` + `qualifiedToolId`, so nothing in-tree regressed.
+- **T007 sidecar 404 parity.** `_require_known_server` 404s an unknown/disabled server
+  on both the sidecar's scoped route and its `?serverName=` compatibility query,
+  matching the canonical `ServerNotFoundError`. A KNOWN server with zero tools still
+  returns 200 + empty list + `serversCount == 1`, so the two cases stay distinguishable
+  (FR-MCP-005). `LocalMCPManager.servers` holds exactly the enabled servers for the
+  device scope, so unknown and disabled collapse to 404 — the same decision the
+  canonical side already locked.
+- **T007 build-SHA diagnostic.** New `app/core/build_info.py`: `BUILD_SHA` env (deploy
+  stamp) → git `HEAD` (dev; handles loose refs, `packed-refs`, detached HEAD, and
+  worktree `gitdir:` pointers) → `"unknown"`. Never raises; a missing identity is a
+  degraded diagnostic, not a health failure. Surfaced as `build_sha`/`build_source` on
+  canonical `GET /health` and sidecar `GET /health`.
+- **T004 unbounded-media Minor closed.** The 25 MiB media-proxy ceiling previously only
+  fired on a DECLARED `content-length`; a chunked upstream streamed without limit.
+  `proxy_media_request` now also counts bytes as it relays and raises
+  `MediaTooLargeError` past the cap (headers are already sent by then, so aborting the
+  body is the bounded failure mode).
+- **`demo.get_mcp_tools` locked.** The plan claimed URL-encoded scoped fetching but
+  nothing tested it; three tests now pin the dedicated route, the encoded segment, the
+  unscoped compatibility route, and graceful `None` on a 404.
+
+**Full-suite baseline (the comparison earlier sessions skipped):** `pytest -q` →
+**2669 passed, 71 skipped, 2 failed**, then both failures fixed:
+
+1. `test_terminal_model_calls_match_reviewed_manifest_exactly` — a **real regression
+   from T004**: `ServerAPIClient.stream_media` (added in `d6534fa`) is a `client.stream`
+   call site that was never added to the reviewed manifest. Added as
+   `workflow_stream`, consistent with the sibling `stream_sse` entry (an httpx binary
+   media read, not a provider model call). This is exactly the class of miss a full-suite
+   run catches and a scoped phase gate does not.
+2. `test_tracked_runtime_and_docs_do_not_embed_developer_home_paths` — unrelated to this
+   plan; fixed by the concurrent commit `bc25ef2` during this session.
+
+`ruff check app client_backend tests scripts` is now **clean** (one pre-existing E501 in
+`scripts/benchmark_ingestion.py:401`, untouched by this plan, was wrapped so the plan's
+documented verification command passes).
+
+**Still open — genuinely cannot be done here:**
+
+- Real-provider smoke tests (Gemini + OpenAI) and the HITL-resume UI check: need a
+  running app and provider credentials.
+- The live deployment smoke check comparing scoped endpoint output with the selected
+  server card: needs a real deploy.
+- T008–T019 (capability model, rollout, Phase 5 cleanup): out of scope by decision and
+  production-gated.

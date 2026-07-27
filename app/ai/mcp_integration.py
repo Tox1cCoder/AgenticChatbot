@@ -17,6 +17,7 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 
 from app.core.config import settings
 from app.core.exceptions.mcp import (
+    AmbiguousToolNameError,
     ServerConfigurationError,
     ServerNotFoundError,
     ToolNotFoundError,
@@ -74,6 +75,11 @@ _CONFIG_RELATIVE_SUFFIXES = {
 
 logging.getLogger("langchain_google_genai._function_utils").setLevel(logging.ERROR)
 
+# The only ``tool_origin`` this manager owns. Anything else (client_mcp,
+# client_skill, internal) belongs to a different catalog and must never be
+# reported as backend MCP provenance.
+_SERVER_MCP_ORIGIN = "server_mcp"
+
 
 class MCPManager:
     """Manages MCP server connections and tool loading"""
@@ -94,7 +100,6 @@ class MCPManager:
         self._session_contexts: dict[str, Any] = {}
         self._server_tools: dict[str, list[BaseTool]] = {}
         self._tool_index: dict[str, list[BaseTool]] = {}
-        self._tool_server_map: dict[int, str] = {}
 
     async def _run_session_owner(
         self,
@@ -376,7 +381,6 @@ class MCPManager:
         self._server_tools[server_name] = tool_list
 
         for tool in tool_list:
-            self._tool_server_map[id(tool)] = server_name
             indexed_tools = self._tool_index.setdefault(tool.name, [])
             if not any(existing is tool for existing in indexed_tools):
                 indexed_tools.append(tool)
@@ -386,16 +390,43 @@ class MCPManager:
         return sanitize_mcp_schema(getattr(tool, "args_schema", None))
 
     def get_server_for_tool(self, tool: BaseTool) -> str | None:
-        """Return the server name that provided the given tool, if known."""
-        return self._tool_server_map.get(id(tool))
+        """Return the BACKEND server that provided ``tool``, from stamped provenance.
+
+        Reads the application-owned ``metadata["server_name"]`` that
+        :func:`clone_mcp_tool` stamps at load time (FR-MCP-003), so a tool this
+        manager instance never personally indexed — a clone, a rebuilt binding,
+        a tool handed back by another layer — still resolves correctly. Tools
+        without metadata (older adapters, test doubles) fall back to an identity
+        scan of the per-server index.
+
+        The stamp is only honoured for ``tool_origin == "server_mcp"``. Device-local
+        client tools carry their OWN ``server_name`` (the MCP server on the user's
+        device); attributing that to the backend catalog would let a locally-named
+        server shadow a backend one and slip through a base agent's server allowlist
+        (``base_agent._filter_tools_by_allowlist``) — a scope-broadening fail-open
+        across the device boundary.
+        """
+        metadata = getattr(tool, "metadata", None)
+        if isinstance(metadata, dict):
+            origin = str(metadata.get("tool_origin") or "").strip()
+            if origin and origin != _SERVER_MCP_ORIGIN:
+                return None
+            stamped = metadata.get("server_name")
+            if isinstance(stamped, str) and stamped:
+                return stamped
+
+        for server_name, tools in self._server_tools.items():
+            if any(existing is tool for existing in tools):
+                return server_name
+        return None
 
     async def get_servers_for_tool_name(self, tool_name: str) -> list[str]:
         """Return all server names that expose a tool with the given name."""
         await self.get_tools()
         servers = []
         for tool in self._tool_index.get(tool_name, []):
-            server_name = self._tool_server_map.get(id(tool))
-            if server_name:
+            server_name = self.get_server_for_tool(tool)
+            if server_name and server_name not in servers:
                 servers.append(server_name)
         return servers
 
@@ -408,7 +439,6 @@ class MCPManager:
         self._tools = []
         self._server_tools.clear()
         self._tool_index.clear()
-        self._tool_server_map.clear()
 
         if self.client:
             self.client = None
@@ -449,7 +479,6 @@ class MCPManager:
         # Remove cached tools
         removed_tools = self._server_tools.pop(server_name, [])
         for tool in removed_tools:
-            self._tool_server_map.pop(id(tool), None)
             indexed = self._tool_index.get(tool.name)
             if indexed:
                 self._tool_index[tool.name] = [
@@ -490,7 +519,6 @@ class MCPManager:
         # Remove tools from caches
         removed_tools = self._server_tools.pop(server_name, [])
         for tool in removed_tools:
-            self._tool_server_map.pop(id(tool), None)
             indexed = self._tool_index.get(tool.name)
             if indexed:
                 self._tool_index[tool.name] = [
@@ -597,7 +625,6 @@ class MCPManager:
         # 2. Drop cached tools so get_server_tools re-creates everything
         removed_tools = self._server_tools.pop(server_name, [])
         for tool in removed_tools:
-            self._tool_server_map.pop(id(tool), None)
             indexed = self._tool_index.get(tool.name)
             if indexed:
                 self._tool_index[tool.name] = [t for t in indexed if t is not tool]
@@ -625,24 +652,27 @@ class MCPManager:
         )
         return fresh_tools
 
-    async def reconnect_and_get_tool(self, tool_name: str) -> BaseTool | None:
+    async def reconnect_and_get_tool(
+        self, tool_name: str, server_name: str | None = None
+    ) -> BaseTool | None:
         """
         Reconnect whichever server owns *tool_name* and return a fresh tool.
 
-        Returns ``None`` when the server cannot be determined or the tool no
-        longer appears after reconnect.
+        ``server_name`` pins the reconnect to a known owner; without it the
+        owner is discovered from the per-server index and then from stamped
+        provenance. Returns ``None`` when the server cannot be determined or the
+        tool no longer appears after reconnect.
         """
-        # Determine which server provided this tool
-        server_name: str | None = None
-        for sname, tools in self._server_tools.items():
-            if any(t.name == tool_name for t in tools):
-                server_name = sname
-                break
+        if not server_name:
+            for sname, tools in self._server_tools.items():
+                if any(t.name == tool_name for t in tools):
+                    server_name = sname
+                    break
 
         if not server_name:
-            # Fallback: look at tool_server_map via the stale index
+            # Fallback: read stamped provenance off the stale index
             for tool in self._tool_index.get(tool_name, []):
-                server_name = self._tool_server_map.get(id(tool))
+                server_name = self.get_server_for_tool(tool)
                 if server_name:
                     break
 
@@ -651,7 +681,10 @@ class MCPManager:
             return None
 
         await self.reconnect_server(server_name)
-        return self._tool_index.get(tool_name, [None])[0]
+        for tool in self._server_tools.get(server_name, []):
+            if tool.name == tool_name:
+                return tool
+        return None
 
     async def get_tool_by_name(
         self, tool_name: str, server_name: str | None = None
@@ -659,12 +692,20 @@ class MCPManager:
         """
         Get a specific tool by name
 
+        Duplicate bare names across servers are legal, so an unqualified lookup
+        that matches more than one server is an error rather than a silent
+        first-indexed-wins pick (FR-MCP-003/FR-CAP-010).
+
         Args:
             tool_name: Name of the tool to retrieve
             server_name: Optional server to restrict the lookup
 
         Returns:
             BaseTool instance or None if not found
+
+        Raises:
+            AmbiguousToolNameError: If several servers expose ``tool_name`` and
+                no ``server_name`` was supplied.
         """
         await self.get_tools()
 
@@ -675,29 +716,47 @@ class MCPManager:
             return None
 
         candidates = self._tool_index.get(tool_name, [])
-        return candidates[0] if candidates else None
+        if not candidates:
+            return None
 
-    async def execute_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        owners: list[str] = []
+        for tool in candidates:
+            owner = self.get_server_for_tool(tool)
+            if owner and owner not in owners:
+                owners.append(owner)
+        if len(owners) > 1:
+            raise AmbiguousToolNameError(tool_name, owners)
+        return candidates[0]
+
+    async def execute_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        server_name: str | None = None,
+    ) -> dict[str, Any]:
         """
         Execute a tool for testing purposes
 
         Args:
             tool_name: Name of the tool to execute
             arguments: Arguments to pass to the tool
+            server_name: Owning server, required when the bare name is exposed
+                by more than one server
 
         Returns:
             Dict with execution result and metadata
 
         Raises:
             ToolNotFoundError: If tool doesn't exist
+            AmbiguousToolNameError: If the unqualified name maps to several servers
             ToolExecutionError: If execution fails
         """
-        tool = await self.get_tool_by_name(tool_name)
+        tool = await self.get_tool_by_name(tool_name, server_name=server_name)
         if not tool:
             raise ToolNotFoundError(tool_name)
 
         # Determine server name
-        server_name = self.get_server_for_tool(tool) or "unknown"
+        server_name = server_name or self.get_server_for_tool(tool) or "unknown"
 
         start_time = time.time()
         try:
@@ -722,7 +781,10 @@ class MCPManager:
                 session_err,
             )
             try:
-                fresh_tool = await self.reconnect_and_get_tool(tool_name)
+                fresh_tool = await self.reconnect_and_get_tool(
+                    tool_name,
+                    server_name=None if server_name == "unknown" else server_name,
+                )
                 if fresh_tool:
                     result = await fresh_tool.ainvoke(arguments)
                     execution_time = time.time() - start_time

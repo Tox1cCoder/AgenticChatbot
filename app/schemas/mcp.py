@@ -91,6 +91,13 @@ class MCPToolExecuteRequest(BaseModel):
     arguments: dict[str, Any] = Field(
         default_factory=dict, description="Arguments to pass to the tool"
     )
+    server_name: str | None = Field(
+        None,
+        description=(
+            "Owning MCP server. Required when the same bare tool name is "
+            "exposed by more than one server (otherwise 409 AMBIGUOUS_TOOL_NAME)."
+        ),
+    )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 

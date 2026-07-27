@@ -85,6 +85,32 @@ async def _refresh_runtime_bridge_catalogs_if_connected(
     await bridge.refresh_catalogs()
 
 
+def _require_known_server(manager: LocalMCPManager, server_name: str) -> None:
+    """404 an unknown/disabled server, matching the canonical contract.
+
+    ``LocalMCPManager.servers`` holds exactly the enabled servers for this
+    device scope, so a name absent from it is either unknown or disabled — the
+    canonical route collapses both to 404 (``ServerNotFoundError``). Without
+    this, an unknown server answered 200 with an empty list and a client could
+    not tell it apart from a known server exposing zero tools (FR-MCP-005).
+    """
+    if server_name not in getattr(manager, "servers", {}):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"MCP server '{server_name}' not found",
+        )
+
+
+def _tool_payload(tool: Any) -> dict[str, Any]:
+    return {
+        "name": tool.name,
+        "description": tool.description,
+        "argsSchema": tool.input_schema,
+        "serverName": tool.server_name,
+        "qualifiedId": tool.qualified_id,
+    }
+
+
 def _manager_tool_lookup(manager: LocalMCPManager) -> dict[str, list[dict[str, Any]]]:
     lookup: dict[str, list[dict[str, Any]]] = {}
     for tool in manager.get_all_tools():
@@ -107,6 +133,13 @@ def _resolve_manager_tool(
     server_name: str | None = None,
     qualified_tool_id: str | None = None,
 ) -> dict[str, Any] | None:
+    """Resolve one device-local tool, refusing to guess between servers.
+
+    Duplicate bare names across servers are legal, so an unqualified request
+    matching more than one server raises 409 instead of silently taking the
+    first indexed match (FR-CAP-010; parity with the canonical
+    ``MCPManager.get_tool_by_name``).
+    """
     matches = _manager_tool_lookup(manager).get(tool_name) or []
     normalized_id = str(qualified_tool_id or "").strip()
     normalized_server = str(server_name or "").strip()
@@ -132,7 +165,18 @@ def _resolve_manager_tool(
             ),
             None,
         )
-    return matches[0] if matches else None
+    if not matches:
+        return None
+    owners = sorted({tool["serverName"] for tool in matches})
+    if len(owners) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"MCP tool '{tool_name}' is provided by multiple servers "
+                f"({', '.join(owners)}); specify serverName to disambiguate"
+            ),
+        )
+    return matches[0]
 
 
 def _server_info(
@@ -406,17 +450,12 @@ async def list_mcp_tools(
     await manager.initialize()
     # Scope the LOAD, not a response-layer filter: a scoped request reads only
     # the requested server's tools via the dedicated accessor.
-    source = manager.get_tools_by_server(server_name) if server_name else manager.get_all_tools()
-    tools = [
-        {
-            "name": tool.name,
-            "description": tool.description,
-            "argsSchema": tool.input_schema,
-            "serverName": tool.server_name,
-            "qualifiedId": tool.qualified_id,
-        }
-        for tool in source
-    ]
+    if server_name:
+        _require_known_server(manager, server_name)
+        source = manager.get_tools_by_server(server_name)
+    else:
+        source = manager.get_all_tools()
+    tools = [_tool_payload(tool) for tool in source]
     return make_api_response(
         success=True,
         message="MCP tools retrieved successfully",
@@ -438,20 +477,14 @@ async def list_mcp_server_tools(
 
     Loads only the named server's tools (never the full catalog) and returns the
     applied scope plus a deterministic catalog version, mirroring the canonical
-    ``GET /mcp/servers/{server_name}/tools`` contract.
+    ``GET /mcp/servers/{server_name}/tools`` contract — including 404 for an
+    unknown or disabled server, so it stays distinguishable from a known server
+    that currently exposes zero tools.
     """
     manager = get_mcp_manager(_scope(session))
     await manager.initialize()
-    tools = [
-        {
-            "name": tool.name,
-            "description": tool.description,
-            "argsSchema": tool.input_schema,
-            "serverName": tool.server_name,
-            "qualifiedId": tool.qualified_id,
-        }
-        for tool in manager.get_tools_by_server(server_name)
-    ]
+    _require_known_server(manager, server_name)
+    tools = [_tool_payload(tool) for tool in manager.get_tools_by_server(server_name)]
     return make_api_response(
         success=True,
         message=f"MCP tools for '{server_name}' retrieved successfully",
@@ -468,17 +501,21 @@ async def list_mcp_server_tools(
 @router.get("/tools/{tool_name}")
 async def get_mcp_tool(
     tool_name: str,
+    server_name: str | None = Query(
+        None,
+        alias="serverName",
+        description="Owning server; required when several servers expose this name",
+    ),
     session: LocalSessionPayload = Depends(require_local_session),
 ):
     manager = get_mcp_manager(_scope(session))
     await manager.initialize()
-    matches = _manager_tool_lookup(manager).get(tool_name) or []
-    if not matches:
+    tool = _resolve_manager_tool(manager, tool_name, server_name=server_name)
+    if tool is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="MCP tool not found",
         )
-    tool = matches[0]
     return make_api_response(
         success=True,
         message=f"Tool '{tool_name}' details retrieved successfully",

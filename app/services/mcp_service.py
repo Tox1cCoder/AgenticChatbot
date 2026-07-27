@@ -262,51 +262,64 @@ class MCPService:
             "scope": scope,
         }
 
-    async def get_tool_info(self, tool_name: str) -> dict[str, Any]:
+    async def get_tool_info(
+        self, tool_name: str, server_name: str | None = None
+    ) -> dict[str, Any]:
         """
         Get detailed information about a specific tool
 
         Args:
             tool_name: Name of the tool
+            server_name: Owning server; required when several servers expose
+                the same bare name
 
         Returns:
             Dict with tool information
 
         Raises:
             ToolNotFoundError: If tool doesn't exist
+            AmbiguousToolNameError: If the unqualified name maps to several servers
         """
-        tool = await self.mcp_manager.get_tool_by_name(tool_name)
+        tool = await self.mcp_manager.get_tool_by_name(tool_name, server_name=server_name)
         if not tool:
             raise ToolNotFoundError(tool_name)
 
         # Find server name and schema using manager utilities
-        server_name = self.mcp_manager.get_server_for_tool(tool) or "unknown"
+        resolved_server = server_name or self.mcp_manager.get_server_for_tool(tool) or "unknown"
         args_schema = self.mcp_manager.get_tool_args_schema(tool)
 
         return {
             "name": tool.name,
             "description": tool.description or "",
             "args_schema": args_schema,
-            "server_name": server_name,
+            "server_name": resolved_server,
         }
 
-    async def execute_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def execute_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        server_name: str | None = None,
+    ) -> dict[str, Any]:
         """
         Execute a tool for testing purposes
 
         Args:
             tool_name: Name of the tool to execute
             arguments: Arguments to pass to the tool
+            server_name: Owning server; required when several servers expose
+                the same bare name
 
         Returns:
             Dict with execution result and metadata
 
         Raises:
             ToolNotFoundError: If tool doesn't exist
+            AmbiguousToolNameError: If the unqualified name maps to several servers
             ToolExecutionError: If execution fails
         """
-        # Validate that tool exists
-        tool = await self.mcp_manager.get_tool_by_name(tool_name)
+        # Validate that tool exists (and that the bare name is unambiguous)
+        tool = await self.mcp_manager.get_tool_by_name(tool_name, server_name=server_name)
         if not tool:
             raise ToolNotFoundError(tool_name)
 
@@ -321,7 +334,9 @@ class MCPService:
                 # Continue anyway - let the tool handle invalid args
 
         # Execute tool
-        result = await self.mcp_manager.execute_tool(tool_name, arguments)
+        result = await self.mcp_manager.execute_tool(
+            tool_name, arguments, server_name=server_name
+        )
 
         if not result["success"]:
             logger.warning("Tool execution failed: %s - %s", tool_name, result["error"])

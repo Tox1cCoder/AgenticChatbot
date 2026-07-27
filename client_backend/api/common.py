@@ -192,9 +192,20 @@ async def proxy_server_request(
 # caller without buffering the whole payload, forwarding cache validators and
 # stamping hardening headers, while never leaking upstream internals.
 
-# Hard ceiling on a single proxied media read. The sidecar streams chunk by
-# chunk, so this only rejects an upstream that DECLARES an oversized body.
+# Hard ceiling on a single proxied media read. Enforced twice: up front against
+# a DECLARED content-length (clean 413, body never drained), and again as a
+# running byte count while streaming, so a chunked/undeclared upstream cannot
+# relay an unbounded body through the sidecar.
 MAX_MEDIA_PROXY_BYTES = 25 * 1024 * 1024  # 25 MiB
+
+
+class MediaTooLargeError(RuntimeError):
+    """Raised mid-stream when a proxied media body exceeds the hard ceiling.
+
+    The response headers are already sent by then, so this cannot become a 413;
+    aborting the body is the bounded failure mode, and the truncated read is
+    visible to the caller as a broken response rather than an unbounded one.
+    """
 
 # Response headers safe to forward verbatim: cache validators, caching policy,
 # and content framing. Deliberately excludes ``content-type`` (set explicitly
@@ -276,8 +287,19 @@ async def proxy_media_request(*, upstream_path: str) -> Response:
         _raise_media_error(status.HTTP_413_CONTENT_TOO_LARGE)
 
     async def _body() -> Any:
+        relayed = 0
         try:
             async for chunk in response.aiter_bytes():
+                relayed += len(chunk)
+                if relayed > MAX_MEDIA_PROXY_BYTES:
+                    # Undeclared/chunked upstream: the pre-check could not fire,
+                    # so bound it here instead of relaying without limit.
+                    logger.error(
+                        "Aborting proxied media read for %s: body exceeded %d bytes",
+                        upstream_path,
+                        MAX_MEDIA_PROXY_BYTES,
+                    )
+                    raise MediaTooLargeError(upstream_path)
                 yield chunk
         finally:
             await _close()

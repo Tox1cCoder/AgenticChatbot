@@ -32,6 +32,7 @@ from app.api import (
     users_router,
     widgets_router,
 )
+from app.core.build_info import resolve_build_info
 from app.core.config import settings
 from app.core.container import (
     get_container,
@@ -311,8 +312,12 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Basic health check"""
-    return {"status": "healthy", "message": "OK"}
+    """Basic health check, including the build this process is running.
+
+    The build identity makes a stale process immediately distinguishable from
+    current source when an endpoint's behavior is disputed.
+    """
+    return {"status": "healthy", "message": "OK", **resolve_build_info()}
 
 
 @app.get("/health/celery")

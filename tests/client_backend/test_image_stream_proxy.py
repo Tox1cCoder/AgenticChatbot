@@ -721,3 +721,52 @@ def test_media_route_payload_over_configured_maximum_is_413(monkeypatch):
 
     assert resp.status_code == 413
     assert fake.stream.exited is True, "oversized upstream stream must be closed, not drained"
+
+
+async def test_media_route_undeclared_oversized_body_is_bounded_mid_stream(monkeypatch):
+    """Closes the T004 review Minor: the size guard must not depend on the
+    upstream DECLARING a content-length.
+
+    A chunked/undeclared upstream response bypasses the pre-check entirely, so
+    without a running byte counter the sidecar would relay an unbounded body.
+    The proxy must stop reading once the cap is exceeded and close the upstream
+    stream.
+    """
+    monkeypatch.setattr(common_api, "MAX_MEDIA_PROXY_BYTES", 8)
+    response = _FakeMediaResponse(
+        status_code=200,
+        headers={"content-type": "image/png"},  # no content-length: chunked
+        chunks=[b"0123", b"4567", b"89ab", b"cdef"],
+    )
+    fake = _FakeMediaClient(response)
+    monkeypatch.setattr(common_api, "get_server_client", lambda: fake)
+
+    streaming = await common_api.proxy_media_request(upstream_path="/chat-images/abc")
+
+    relayed = bytearray()
+    with pytest.raises(common_api.MediaTooLargeError):
+        async for chunk in streaming.body_iterator:
+            relayed.extend(chunk)
+
+    assert len(relayed) <= 8, (
+        "the sidecar relayed more than the configured maximum from an upstream "
+        f"that declared no content-length; relayed={len(relayed)} bytes"
+    )
+    assert fake.stream.exited is True, "upstream stream must be closed when the cap trips"
+
+
+async def test_media_route_undeclared_body_within_cap_streams_fully(monkeypatch):
+    """The byte counter must not truncate a legitimate chunked body at the cap."""
+    monkeypatch.setattr(common_api, "MAX_MEDIA_PROXY_BYTES", 8)
+    response = _FakeMediaResponse(
+        status_code=200,
+        headers={"content-type": "image/png"},
+        chunks=[b"0123", b"4567"],  # exactly 8 bytes, undeclared
+    )
+    fake = _FakeMediaClient(response)
+    monkeypatch.setattr(common_api, "get_server_client", lambda: fake)
+
+    streaming = await common_api.proxy_media_request(upstream_path="/chat-images/abc")
+    relayed = b"".join([chunk async for chunk in streaming.body_iterator])
+
+    assert relayed == b"01234567"

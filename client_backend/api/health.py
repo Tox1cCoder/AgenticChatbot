@@ -6,6 +6,7 @@ import time
 
 from fastapi import APIRouter
 
+from app.core.build_info import resolve_build_info
 from client_backend import __version__
 from client_backend.core.config import client_settings
 from client_backend.schemas.runtime import (
@@ -60,6 +61,9 @@ async def health_check() -> HealthCheckResponse:
         device_id=device_info.device_id,
         device_identifier=device_info.device_identifier,
         checks=checks,
+        # Build identity: makes a stale sidecar process immediately
+        # distinguishable from current source when behavior is disputed.
+        **resolve_build_info(),
     )
 
 

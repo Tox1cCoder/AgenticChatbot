@@ -298,6 +298,12 @@
   },
   {
     "file": "client_backend/services/server_api.py",
+    "function": "ServerAPIClient.stream_media",
+    "call_chain": "client.stream",
+    "disposition": "workflow_stream"
+  },
+  {
+    "file": "client_backend/services/server_api.py",
     "function": "ServerAPIClient.stream_sse",
     "call_chain": "client.stream",
     "disposition": "workflow_stream"
