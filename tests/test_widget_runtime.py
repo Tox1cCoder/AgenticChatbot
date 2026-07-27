@@ -585,8 +585,7 @@ class TestWidgetToolExecutionBinding:
                     "name": "widget_create",
                     "args": {
                         "session_id": "current_session",
-                        "widget_type": "table",
-                        "initial_state": '{"rows":[]}',
+                        "initial_state": {"html": "<!doctype html><html></html>", "height": 320},
                     },
                 }
             ],
@@ -624,8 +623,7 @@ class TestWidgetToolExecutionBinding:
                     "name": "widget_create",
                     "args": {
                         "session_id": "manual-session",
-                        "widget_type": "table",
-                        "initial_state": '{"rows":[]}',
+                        "initial_state": {"html": "<!doctype html><html></html>", "height": 320},
                     },
                 }
             ],
@@ -641,8 +639,7 @@ class TestWidgetToolExecutionBinding:
 # ---------------------------------------------------------------------------
 class _WidgetCreateInput(BaseModel):
     session_id: str
-    widget_type: str
-    initial_state: str
+    initial_state: dict[str, Any]
 
 
 class TestWidgetToolBindingWrappers:
@@ -671,8 +668,7 @@ class TestWidgetToolBindingWrappers:
         await wrapped_tools[0].ainvoke(
             {
                 "session_id": "current_session",
-                "widget_type": "table",
-                "initial_state": '{"rows":[]}',
+                "initial_state": {"html": "<!doctype html><html></html>", "height": 320},
             }
         )
 
@@ -933,6 +929,21 @@ class TestWidgetToolHtmlContract:
         )
         assert json.loads(result)["state"]["html"] == html
 
+    async def test_widget_create_rejects_serialized_state(self, monkeypatch):
+        import app.services.widget_runtime as widget_runtime
+        from app.ai.mcp_servers import widgets_server
+
+        store = InMemoryWidgetStore()
+        monkeypatch.setattr(widget_runtime, "_widget_store", store)
+
+        with pytest.raises(ValueError, match="initial_state must be an object"):
+            await widgets_server.widget_create(
+                session_id="conv-serialized",
+                initial_state=json.dumps(_VALID_HTML_STATE),
+            )
+
+        assert await store.list_by_session("conv-serialized") == []
+
     async def test_widget_create_accepts_valid_html(self, monkeypatch):
         import app.services.widget_runtime as widget_runtime
         from app.ai.mcp_servers import widgets_server
@@ -942,7 +953,7 @@ class TestWidgetToolHtmlContract:
 
         result = await widgets_server.widget_create(
             session_id="conv-2",
-            initial_state=json.dumps(_VALID_HTML_STATE),
+            initial_state=_VALID_HTML_STATE,
             title="Oscillator",
         )
 
@@ -954,12 +965,12 @@ class TestWidgetToolHtmlContract:
     @pytest.mark.parametrize(
         "bad_state,match",
         [
-            ('"just-a-string"', "object"),
-            ('{"html": "", "height": 540}', "html content"),
-            ('{"html": "<div>hi</div>"}', "height"),
-            ('{"html": "<div>hi</div>", "height": "tall"}', "numeric"),
-            ('{"html": "<div>hi</div>", "height": 50}', "between"),
-            ('{"html": "<div>hi</div>", "height": 5000}', "between"),
+            ("just-a-string", "object"),
+            ({"html": "", "height": 540}, "html content"),
+            ({"html": "<div>hi</div>"}, "height"),
+            ({"html": "<div>hi</div>", "height": "tall"}, "numeric"),
+            ({"html": "<div>hi</div>", "height": 50}, "between"),
+            ({"html": "<div>hi</div>", "height": 5000}, "between"),
         ],
     )
     async def test_widget_create_rejects_invalid_html_state(self, monkeypatch, bad_state, match):
@@ -989,51 +1000,8 @@ class TestWidgetToolHtmlContract:
         with pytest.raises(ValueError, match="html content"):
             await widgets_server.widget_create(
                 session_id="conv-alias",
-                initial_state=json.dumps({"document": "<div>hi</div>", "min_height": 540}),
+                initial_state={"document": "<div>hi</div>", "min_height": 540},
             )
-
-    async def test_widget_create_accepts_python_style_literal_fallback(self, monkeypatch):
-        import app.services.widget_runtime as widget_runtime
-        from app.ai.mcp_servers import widgets_server
-
-        store = InMemoryWidgetStore()
-        monkeypatch.setattr(widget_runtime, "_widget_store", store)
-
-        # Python-style literal: True instead of true, single quotes. json.loads
-        # rejects this; ast.literal_eval recovers it.
-        python_style = "{'html': '<div>hi</div>', 'height': 540, 'is_demo': True}"
-
-        result = await widgets_server.widget_create(
-            session_id="conv-py",
-            initial_state=python_style,
-        )
-
-        payload = json.loads(result)
-        assert "widget_type" not in payload
-        assert payload["status"] == "active"
-
-    async def test_widget_create_malformed_json_returns_helpful_error(self, monkeypatch):
-        import app.services.widget_runtime as widget_runtime
-        from app.ai.mcp_servers import widgets_server
-
-        store = InMemoryWidgetStore()
-        monkeypatch.setattr(widget_runtime, "_widget_store", store)
-
-        # Truly malformed — neither valid JSON nor a valid Python literal
-        broken = '{"html": "<div>hi</div>" "height": 540}'  # missing comma
-
-        with pytest.raises(ValueError) as exc_info:
-            await widgets_server.widget_create(
-                session_id="conv-broken",
-                initial_state=broken,
-            )
-
-        message = str(exc_info.value)
-        assert "must be a valid JSON string" in message
-        assert "Context:" in message
-        # Common-fix nudge is present so the model can self-correct
-        assert "double-quoted" in message
-        assert "true/false/null" in message
 
     async def test_widget_update_rejects_invalid_html_state(self, monkeypatch):
         import app.services.widget_runtime as widget_runtime
@@ -1044,14 +1012,32 @@ class TestWidgetToolHtmlContract:
 
         created = await widgets_server.widget_create(
             session_id="conv-3",
-            initial_state=json.dumps(_VALID_HTML_STATE),
+            initial_state=_VALID_HTML_STATE,
         )
         widget_id = json.loads(created)["widget_id"]
 
         with pytest.raises(ValueError, match="html content"):
             await widgets_server.widget_update(
                 widget_id=widget_id,
-                state=json.dumps({"html": "", "height": 540}),
+                state={"html": "", "height": 540},
+            )
+
+    async def test_widget_update_rejects_serialized_state(self, monkeypatch):
+        import app.services.widget_runtime as widget_runtime
+        from app.ai.mcp_servers import widgets_server
+
+        store = InMemoryWidgetStore()
+        monkeypatch.setattr(widget_runtime, "_widget_store", store)
+        created = await widgets_server.widget_create(
+            session_id="conv-update-serialized",
+            initial_state=_VALID_HTML_STATE,
+        )
+        widget_id = json.loads(created)["widget_id"]
+
+        with pytest.raises(ValueError, match="state must be an object"):
+            await widgets_server.widget_update(
+                widget_id=widget_id,
+                state=json.dumps(_VALID_HTML_STATE),
             )
 
     async def test_widget_update_preserves_widget_identity(self, monkeypatch):
@@ -1063,13 +1049,13 @@ class TestWidgetToolHtmlContract:
 
         created = await widgets_server.widget_create(
             session_id="conv-4",
-            initial_state=json.dumps(_VALID_HTML_STATE),
+            initial_state=_VALID_HTML_STATE,
         )
         widget_id = json.loads(created)["widget_id"]
 
         result = await widgets_server.widget_update(
             widget_id=widget_id,
-            state=json.dumps({**_VALID_HTML_STATE, "caption": "updated"}),
+            state={**_VALID_HTML_STATE, "caption": "updated"},
         )
         payload = json.loads(result)
         assert "widget_type" not in payload
@@ -1087,7 +1073,7 @@ class TestWidgetToolHtmlContract:
 
         result = await widgets_server.widget_update(
             widget_id=legacy.widget_id,
-            state=json.dumps(_VALID_HTML_STATE),
+            state=_VALID_HTML_STATE,
         )
         assert json.loads(result)["state"] == _VALID_HTML_STATE
 

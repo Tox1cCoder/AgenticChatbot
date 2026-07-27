@@ -1537,7 +1537,7 @@ class BaseAgent(ABC):
             )
 
             if thinking:
-                metadata["thinking"] = thinking
+                metadata["thinking_summary"] = str(thinking).strip()
 
             # Image-capable models return generated images as content blocks that
             # ``coerce_response_text`` drops. Subclasses that can act on inline

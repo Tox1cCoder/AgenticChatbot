@@ -360,6 +360,31 @@ async def test_base_agent_reduces_before_emitting_provider_request(monkeypatch) 
 
 
 @pytest.mark.asyncio
+async def test_base_agent_persists_public_thinking_under_trace_summary_key(monkeypatch) -> None:
+    agent, model = _configure_boundary_agent(monkeypatch, max_input_tokens=10_000)
+
+    async def response_with_public_thinking(_messages, _config=None):
+        return AIMessage(
+            content=[
+                {"type": "thinking", "thinking": "Checking constraints."},
+                {"type": "text", "text": "Final answer"},
+            ]
+        )
+
+    model.ainvoke = response_with_public_thinking
+
+    response = await agent.invoke_model_with_history(
+        messages=[HumanMessage(content="current question")],
+        conversation_history=[],
+        persona=None,
+        disable_tools=True,
+    )
+
+    assert response.metadata["thinking_summary"] == "Checking constraints."
+    assert "thinking" not in response.metadata
+
+
+@pytest.mark.asyncio
 async def test_base_preflight_builds_default_durable_and_emergency_callbacks(monkeypatch) -> None:
     agent, _model = _configure_boundary_agent(monkeypatch, max_input_tokens=1_000)
     events = []

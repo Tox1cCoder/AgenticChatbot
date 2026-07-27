@@ -8,7 +8,6 @@ the same widget state.
 
 from __future__ import annotations
 
-import ast
 import json
 import os
 import sys
@@ -27,43 +26,6 @@ from app.services.widget_contract import validate_html_widget_state  # noqa: E40
 from app.services.widget_runtime import get_widget_store  # noqa: E402
 
 mcp = FastMCP("widgets")
-
-
-def _coerce_widget_state(raw: Any, *, field: str = "initial_state") -> dict[str, Any]:
-    """Accept native object state while tolerating legacy direct strings.
-
-    Falls back to ``ast.literal_eval`` for Python-style literals
-    (``True``/``False``/``None``/single-quoted keys) so a single common
-    formatting slip from the model doesn't lose the whole widget creation.
-    On true malformation, raise a ``ValueError`` whose message includes the
-    offending snippet so the model can self-correct on the next turn.
-    """
-    if isinstance(raw, dict):
-        return raw
-    if not isinstance(raw, str):
-        raise ValueError(f"{field} must be an object.")
-    try:
-        value = json.loads(raw)
-        if isinstance(value, dict):
-            return value
-        raise ValueError(f"{field} must be an object.")
-    except json.JSONDecodeError as exc:
-        try:
-            value = ast.literal_eval(raw)
-        except (ValueError, SyntaxError, MemoryError, RecursionError):
-            value = None
-        if value is not None and isinstance(value, (dict, list)):
-            return value
-        snippet_start = max(0, exc.pos - 30)
-        snippet_end = min(len(raw), exc.pos + 30)
-        snippet = raw[snippet_start:snippet_end].replace("\n", " ").replace("\r", " ")
-        raise ValueError(
-            f"{field} must be a valid JSON string "
-            f"({exc.msg} at character {exc.pos}). "
-            f"Context: ...{snippet}... "
-            "Use double-quoted keys and strings, lowercase true/false/null, "
-            "no trailing commas, and escape any embedded quotes."
-        ) from None
 
 
 @mcp.tool()
@@ -125,11 +87,12 @@ async def widget_create(
         JSON object describing the created widget (widget_id, version, etc.).
     """
     store = get_widget_store()
-    state = _coerce_widget_state(initial_state, field="initial_state")
-    validate_html_widget_state(state)
+    if not isinstance(initial_state, dict):
+        raise ValueError("initial_state must be an object.")
+    validate_html_widget_state(initial_state)
     record = await store.create(
         session_id=session_id,
-        initial_state=state,
+        initial_state=initial_state,
         title=title or None,
     )
     return json.dumps(record.to_dict(), default=str)
@@ -158,14 +121,15 @@ async def widget_update(
         JSON object with the updated widget record.
     """
     store = get_widget_store()
-    new_state = _coerce_widget_state(state, field="state")
+    if not isinstance(state, dict):
+        raise ValueError("state must be an object.")
     existing = await store.get(widget_id)
     if existing is None:
         raise KeyError(f"Widget {widget_id} not found")
-    validate_html_widget_state(new_state)
+    validate_html_widget_state(state)
     record = await store.update(
         widget_id=widget_id,
-        state=new_state,
+        state=state,
         expected_version=version if version > 0 else None,
     )
     return json.dumps(record.to_dict(), default=str)

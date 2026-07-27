@@ -11179,20 +11179,16 @@ def render_models_view() -> None:
                 or provider_snapshot.get("sync_status")
                 or "unknown"
             )
-            current_model = str(
-                st.session_state.get(f"model_cfg_model_select_{agent_key}") or ""
-            ).strip()
-            if current_model not in catalog_ids:
-                current_model = catalog_ids[0] if catalog_ids else "(sync models first)"
             model_options = catalog_ids or ["(sync models first)"]
-            if st.session_state.get(f"model_cfg_model_select_{agent_key}") != current_model:
-                st.session_state[f"model_cfg_model_select_{agent_key}"] = current_model
+            model_key = f"model_cfg_model_select_{agent_key}"
+            current_model = str(st.session_state.get(model_key) or "").strip()
+            if current_model not in model_options:
+                st.session_state[model_key] = model_options[0]
             with selection_cols[1]:
                 selected_model = st.selectbox(
                     "Catalog model",
                     options=model_options,
-                    index=model_options.index(current_model),
-                    key=f"model_cfg_model_select_{agent_key}",
+                    key=model_key,
                     disabled=not configured or not catalog_ids,
                 )
 

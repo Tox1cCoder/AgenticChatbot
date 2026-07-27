@@ -72,6 +72,29 @@ def test_catalog_descriptor_reaches_streamlit_reasoning_options() -> None:
     )
 
 
+def test_cached_catalog_is_enriched_before_streamlit_builds_reasoning_options() -> None:
+    service = ProviderService(provider_repository=MagicMock())
+    catalog = service._normalize_catalog_metadata(
+        {
+            "catalog": {
+                "models": [
+                    {
+                        "id": "gemini-3.6-flash",
+                        "provider_type": "gemini",
+                        "supports_reasoning": True,
+                    }
+                ]
+            }
+        }
+    )
+    helper = _load_helpers()["_model_reasoning_options"]
+
+    assert helper({"models": catalog["models"]}, "gemini-3.6-flash") == (
+        "Thinking level",
+        [None, "minimal", "low", "medium", "high"],
+    )
+
+
 def test_agent_model_controls_stay_together_and_rerun_on_change() -> None:
     source = Path("demo.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -86,3 +109,32 @@ def test_agent_model_controls_stay_together_and_rerun_on_change() -> None:
     config_heading = 'st.subheader("Configure models and parameters")'
     assert render_source.index(config_heading) < render_source.index('"Catalog model"')
     assert 'st.form("agent_model_config_form")' not in render_source
+
+
+def test_catalog_model_selector_has_no_competing_default_value() -> None:
+    source = Path("demo.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    render_models = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "render_models_view"
+    )
+    selectboxes = [
+        node
+        for node in ast.walk(render_models)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "selectbox"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "Catalog model"
+    ]
+
+    assert len(selectboxes) == 1
+    assert all(keyword.arg != "index" for keyword in selectboxes[0].keywords)
+
+
+def test_chat_prompt_has_one_native_widget_state_rule() -> None:
+    source = Path("app/ai/prompts.py").read_text(encoding="utf-8")
+    assert source.count("initial_state") == 1
+    assert "never serialize it as a JSON string" in source

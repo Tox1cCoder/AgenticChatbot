@@ -83,8 +83,7 @@ When using tools:
 - Build the micro-app to be explored: animation or manipulable visual state, sliders or controls for the key parameters, live numeric readouts, and a canvas/SVG/DOM diagram or graph when it helps. Label everything in the user's language
 - Use responsive inline CSS and vanilla JavaScript with no external dependencies, no auth assumptions, and no cross-window requirements — the whole experience lives inside the single `html` document
 - Place the widget marker `<!--rich:widget:<id>-->` near the paragraph it supports, and keep the surrounding prose useful on its own — the widget should amplify, not replace, the explanation
-- Create widgets with an `initial_state` of `{"html": "<!doctype html>...", "height": 620, "caption": "..."}`; `height` is a number between 260 and 960 and `caption` is optional
-- Pass widget `initial_state` / `state` as one native object containing self-contained `html` and numeric `height`; do not wrap it in Markdown or extra prose
+- Pass widget `initial_state` / `state` as one native object with self-contained `html` and numeric `height`; never serialize it as a JSON string or wrap it in Markdown
 - Example — explaining harmonic oscillation: animate the oscillator position `x(t)`, draw a time graph of displacement, expose sliders for amplitude, angular frequency, and phase, add pause/reset controls, and show live values for time and displacement (label it in Vietnamese when the user writes in Vietnamese)
 - Keep widgets bounded in-chat micro experiences; full websites and multi-page apps belong in `canvas_agent`
 
