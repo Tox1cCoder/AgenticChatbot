@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -28,6 +29,27 @@ from app.core.mcp_adapter_utils import (
 )
 
 from .utils import get_error_recovery_hint
+
+
+def compute_catalog_version(descriptors: list[dict[str, Any]]) -> str:
+    """Deterministic content hash of a set of sanitized tool descriptors.
+
+    Stable across workers/processes and independent of load order: descriptors are
+    canonicalized to ``(server_name, name, sorted-json args_schema)`` triples, sorted,
+    then hashed. Two workers observing the same catalog produce the same version, so
+    the value can be compared for cross-worker consistency (see FR-CAP-011). Returns a
+    ``sha256:<hex>`` string.
+    """
+    canonical = sorted(
+        (
+            str(d.get("server_name") or ""),
+            str(d.get("name") or ""),
+            json.dumps(d.get("args_schema") or {}, sort_keys=True, default=str),
+        )
+        for d in descriptors
+    )
+    digest = hashlib.sha256(json.dumps(canonical, sort_keys=True).encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
 
 if TYPE_CHECKING:
     pass
@@ -505,29 +527,52 @@ class MCPManager:
         # Notify registry of configuration change
         self._notify_registry_change()
 
-    async def get_all_tools_info(self) -> list[dict[str, Any]]:
-        """
-        Get information about all available tools
+    async def list_tool_descriptors(
+        self, server_name: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return sanitized tool descriptors, scoped to one server when given.
+
+        A scoped request loads ONLY that server's tools (via ``get_server_tools``)
+        instead of the whole catalog, and reads each tool's owning server from the
+        per-server index — never guessed from a bare tool name. An unknown or
+        disabled scoped server raises ``ServerNotFoundError``.
+
+        Args:
+            server_name: When provided, restrict the load and result to that one
+                server. When ``None``, return descriptors for every enabled server.
 
         Returns:
-            List of dicts with tool metadata (name, description, args_schema, server_name)
+            List of dicts with ``name``, ``description``, ``args_schema``, ``server_name``.
         """
-        await self.get_tools()
-        tools_info: list[dict[str, Any]] = []
+        if server_name is not None:
+            await self.get_server_tools(server_name)
+            server_items: list[tuple[str, list[BaseTool]]] = [
+                (server_name, self._server_tools.get(server_name, []))
+            ]
+        else:
+            await self.get_tools()
+            server_items = list(self._server_tools.items())
 
-        for server_name, tools in self._server_tools.items():
+        descriptors: list[dict[str, Any]] = []
+        for sname, tools in server_items:
             for tool in tools:
                 args_schema = sanitize_mcp_schema(getattr(tool, "args_schema", None))
-                tools_info.append(
+                descriptors.append(
                     {
                         "name": tool.name,
                         "description": tool.description or "",
                         "args_schema": args_schema,
-                        "server_name": server_name,
+                        "server_name": sname,
                     }
                 )
+        return descriptors
 
-        return tools_info
+    async def get_all_tools_info(self) -> list[dict[str, Any]]:
+        """Information about all available tools across every enabled server.
+
+        Thin back-compat wrapper over :meth:`list_tool_descriptors`.
+        """
+        return await self.list_tool_descriptors(None)
 
     @staticmethod
     def _is_session_error(error: Exception) -> bool:

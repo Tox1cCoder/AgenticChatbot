@@ -17,7 +17,7 @@ from functools import lru_cache
 from html.parser import HTMLParser
 from math import isclose, isfinite
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 import markdown as _markdown  # type: ignore
@@ -4141,10 +4141,15 @@ def _mcp_server_is_removable(server: dict[str, Any]) -> bool:
 
 
 def get_mcp_tools(server_name: str | None = None) -> dict[str, Any] | None:
-    """Fetch MCP tools, optionally filtered by server"""
-    endpoint = "/mcp/tools"
-    if server_name:
-        endpoint += f"?serverName={server_name}"
+    """Fetch MCP tools, optionally scoped to one server.
+
+    A scoped request uses the dedicated server-scoped route with a URL-encoded
+    server segment (no raw string concatenation of the name into the URL). The
+    response carries an explicit ``scope`` and ``catalogVersion``.
+    """
+    endpoint = (
+        f"/mcp/servers/{quote(server_name, safe='')}/tools" if server_name else "/mcp/tools"
+    )
     response = make_api_request("GET", endpoint)
     return response.get("data") if response else None
 

@@ -129,6 +129,27 @@ async def list_tools(
     return ApiResponse(success=True, message="MCP tools retrieved successfully", data=response_data)
 
 
+@router.get("/servers/{server_name}/tools")
+@AppAutoInjector.auto_inject()
+async def list_server_tools(
+    server_name: str,
+    mcp_service: MCPService,
+) -> ApiResponse[MCPToolListResponse]:
+    """List tools for exactly one MCP server (server-scoped).
+
+    Scoping happens in the catalog operation, not a response-layer filter. The
+    response carries the applied scope and a deterministic catalog version. An
+    unknown or disabled server yields 404 (ServerNotFoundError handler).
+    """
+    result = await mcp_service.list_tools(server_name)
+    response_data = MCPToolListResponse(**result)
+    return ApiResponse(
+        success=True,
+        message=f"MCP tools for '{server_name}' retrieved successfully",
+        data=response_data,
+    )
+
+
 @router.get("/tools/{tool_name}")
 @AppAutoInjector.auto_inject()
 async def get_tool_details(

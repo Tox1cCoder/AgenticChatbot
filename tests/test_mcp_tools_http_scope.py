@@ -74,6 +74,12 @@ class _FakeCanonicalManager:
     async def get_all_tools_info(self) -> list[dict]:
         return [dict(t) for t in self._catalog]
 
+    async def list_tool_descriptors(self, server_name: str | None = None) -> list[dict]:
+        items = [dict(t) for t in self._catalog]
+        if server_name is not None:
+            items = [t for t in items if t["server_name"] == server_name]
+        return items
+
 
 def _canonical_service() -> MCPService:
     service = MCPService.__new__(MCPService)
@@ -122,19 +128,27 @@ def test_canonical_scoped_query_returns_only_brave(monkeypatch):
 
 
 def test_canonical_dedicated_scoped_route_exists(monkeypatch):
-    """RED: the dedicated ``GET /mcp/servers/{server_name}/tools`` route (plan
-    T007) must exist and return only the requested server's tools. It is absent
-    on current source, so the canonical app 404s.
+    """GREEN (plan T007): the dedicated ``GET /mcp/servers/{server_name}/tools``
+    route exists and returns ONLY the requested server's tools, with the applied
+    scope and a deterministic catalog version.
     """
     service = _canonical_service()
     with Container.mcp_service.override(providers.Object(service)):
         client = TestClient(_canonical_app())
         resp = client.get(f"/mcp/servers/{_BRAVE}/tools")
 
-    assert resp.status_code != 404, (
-        "DEFECT (plan T007: no canonical GET /mcp/servers/{server_name}/tools "
-        f"route yet): scoped route 404s. status_code={resp.status_code}"
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    servers = {_server_of(t) for t in data["tools"]}
+    assert servers == {_BRAVE}, (
+        f"dedicated scoped route leaked other servers: "
+        f"{[t.get('name') for t in data['tools']]}"
     )
+    assert not any(_server_of(t) == _WIDGETS for t in data["tools"])
+    assert data["scope"]["kind"] == "server"
+    assert data["scope"]["serverName"] == _BRAVE
+    assert data["serversCount"] == 1
+    assert str(data.get("catalogVersion", "")).startswith("sha256:")
 
 
 # ---------------------------------------------------------------------------
@@ -216,14 +230,22 @@ def test_sidecar_scoped_query_returns_only_brave(monkeypatch):
 
 
 def test_sidecar_dedicated_scoped_route_exists(monkeypatch):
-    """RED: the dedicated sidecar ``GET /mcp/servers/{server_name}/tools`` route
-    (plan T007) must exist. It is absent on current source, so it 404s."""
+    """GREEN (plan T007): the dedicated sidecar ``GET /mcp/servers/{server_name}/tools``
+    route exists and returns ONLY the requested server's tools plus scope +
+    catalog version, mirroring the canonical contract."""
     client = _sidecar_client(monkeypatch)
     resp = client.get(
         f"/mcp/servers/{_BRAVE}/tools",
         headers={"Authorization": "Bearer local-session-token"},
     )
-    assert resp.status_code != 404, (
-        "DEFECT (plan T007: no sidecar GET /mcp/servers/{server_name}/tools "
-        f"route yet): scoped route 404s. status_code={resp.status_code}"
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    servers = {_server_of(t) for t in data["tools"]}
+    assert servers == {_BRAVE}, (
+        f"sidecar dedicated route leaked other servers: "
+        f"{[t.get('name') for t in data['tools']]}"
     )
+    assert data["scope"]["kind"] == "server"
+    assert data["scope"]["serverName"] == _BRAVE
+    assert data["serversCount"] == 1
+    assert str(data.get("catalogVersion", "")).startswith("sha256:")

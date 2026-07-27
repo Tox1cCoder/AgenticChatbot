@@ -37,6 +37,9 @@ class _ManagerStub:
     def get_all_tools(self) -> list[Any]:
         return self.tools
 
+    def get_tools_by_server(self, server_name: str) -> list[Any]:
+        return [t for t in self.tools if t.server_name == server_name]
+
     async def call_tool(
         self,
         qualified_tool_id: str,

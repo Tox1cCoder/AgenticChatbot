@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import shlex
 import sys
 import time
@@ -27,6 +29,25 @@ from client_backend.services.mcp_config_store import (
     MCPConfigStore,
 )
 from client_backend.services.runtime_bridge import get_runtime_bridge
+
+
+def _catalog_version(tools: list[dict[str, Any]]) -> str:
+    """Deterministic ``sha256:<hex>`` content hash of sidecar tool descriptors.
+
+    Order-independent (sorted by serverName+name with canonical arg schemas) so the
+    value can be compared across processes, mirroring the canonical server's
+    ``compute_catalog_version``.
+    """
+    canonical = sorted(
+        (
+            str(t.get("serverName") or ""),
+            str(t.get("name") or ""),
+            json.dumps(t.get("argsSchema") or {}, sort_keys=True, default=str),
+        )
+        for t in tools
+    )
+    digest = hashlib.sha256(json.dumps(canonical, sort_keys=True).encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 
@@ -383,6 +404,9 @@ async def list_mcp_tools(
 ):
     manager = get_mcp_manager(_scope(session))
     await manager.initialize()
+    # Scope the LOAD, not a response-layer filter: a scoped request reads only
+    # the requested server's tools via the dedicated accessor.
+    source = manager.get_tools_by_server(server_name) if server_name else manager.get_all_tools()
     tools = [
         {
             "name": tool.name,
@@ -391,8 +415,7 @@ async def list_mcp_tools(
             "serverName": tool.server_name,
             "qualifiedId": tool.qualified_id,
         }
-        for tool in manager.get_all_tools()
-        if not server_name or tool.server_name == server_name
+        for tool in source
     ]
     return make_api_response(
         success=True,
@@ -400,7 +423,44 @@ async def list_mcp_tools(
         data={
             "tools": tools,
             "totalCount": len(tools),
-            "serversCount": len({tool["serverName"] for tool in tools}),
+            "serversCount": (1 if server_name else len({tool["serverName"] for tool in tools})),
+            "catalogVersion": _catalog_version(tools),
+        },
+    )
+
+
+@router.get("/servers/{server_name}/tools")
+async def list_mcp_server_tools(
+    server_name: str,
+    session: LocalSessionPayload = Depends(require_local_session),
+):
+    """Server-scoped tool listing for exactly one local MCP server.
+
+    Loads only the named server's tools (never the full catalog) and returns the
+    applied scope plus a deterministic catalog version, mirroring the canonical
+    ``GET /mcp/servers/{server_name}/tools`` contract.
+    """
+    manager = get_mcp_manager(_scope(session))
+    await manager.initialize()
+    tools = [
+        {
+            "name": tool.name,
+            "description": tool.description,
+            "argsSchema": tool.input_schema,
+            "serverName": tool.server_name,
+            "qualifiedId": tool.qualified_id,
+        }
+        for tool in manager.get_tools_by_server(server_name)
+    ]
+    return make_api_response(
+        success=True,
+        message=f"MCP tools for '{server_name}' retrieved successfully",
+        data={
+            "tools": tools,
+            "totalCount": len(tools),
+            "serversCount": 1,
+            "scope": {"kind": "server", "serverName": server_name},
+            "catalogVersion": _catalog_version(tools),
         },
     )
 

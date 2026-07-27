@@ -3,7 +3,7 @@
 import logging
 from typing import Any
 
-from app.ai.mcp_integration import MCPManager
+from app.ai.mcp_integration import MCPManager, compute_catalog_version
 from app.core.exceptions.mcp import (
     ServerConfigurationError,
     ToolNotFoundError,
@@ -229,27 +229,37 @@ class MCPService:
 
     async def list_tools(self, server_name: str | None = None) -> dict[str, Any]:
         """
-        List all available tools or tools from a specific server
+        List all available tools, or tools from exactly one server when scoped.
+
+        Scoping is performed in the catalog operation itself
+        (``MCPManager.list_tool_descriptors``), NOT as a response-layer filter over
+        the full catalog. A scoped request for an unknown/disabled server raises
+        ``ServerNotFoundError`` (mapped to 404 at the API boundary).
 
         Args:
-            server_name: Optional server name to filter by
+            server_name: Optional server name to scope to.
 
         Returns:
-            Dict with tools list and summary statistics
+            Dict with the tools list, counts, the applied ``scope``, and a
+            deterministic ``catalog_version``.
         """
-        all_tools = await self.mcp_manager.get_all_tools_info()
+        descriptors = await self.mcp_manager.list_tool_descriptors(server_name)
 
-        # Filter by server if specified
-        if server_name:
-            all_tools = [t for t in all_tools if t["server_name"] == server_name]
-
-        # Count unique servers
-        servers = set(t["server_name"] for t in all_tools)
+        if server_name is not None:
+            # A known scoped server reports servers_count == 1 even when it
+            # currently exposes zero tools (per the MCP endpoint contract).
+            scope: dict[str, Any] = {"kind": "server", "serverName": server_name}
+            servers_count = 1
+        else:
+            scope = {"kind": "all"}
+            servers_count = len({t["server_name"] for t in descriptors})
 
         return {
-            "tools": all_tools,
-            "total_count": len(all_tools),
-            "servers_count": len(servers),
+            "tools": descriptors,
+            "total_count": len(descriptors),
+            "servers_count": servers_count,
+            "catalog_version": compute_catalog_version(descriptors),
+            "scope": scope,
         }
 
     async def get_tool_info(self, tool_name: str) -> dict[str, Any]:

@@ -73,6 +73,14 @@ class MCPToolListResponse(BaseModel):
     tools: list[MCPToolInfo] = Field(..., description="List of available tools")
     total_count: int = Field(..., description="Total number of tools")
     servers_count: int = Field(..., description="Number of servers providing tools")
+    scope: dict[str, Any] | None = Field(
+        None,
+        description="Applied scope, e.g. {'kind': 'server', 'serverName': ...} or {'kind': 'all'}",
+    )
+    catalog_version: str | None = Field(
+        None,
+        description="Deterministic content hash of the returned catalog (sha256:...)",
+    )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 

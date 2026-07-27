@@ -3,10 +3,88 @@ import json
 import logging
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from app.ai.mcp_integration import MCPManager
+from app.ai.mcp_integration import MCPManager, compute_catalog_version
+
+
+def _fake_tool(name: str, schema: dict | None = None) -> SimpleNamespace:
+    return SimpleNamespace(
+        name=name,
+        description=f"{name} desc",
+        args_schema=schema or {"type": "object"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_tool_descriptors_keeps_same_name_across_servers():
+    """Duplicate bare tool names on different servers both survive in the listing,
+    each stamped with its own server provenance (no collapse-by-name)."""
+    manager = MCPManager.__new__(MCPManager)
+    manager._server_tools = {
+        "alpha": [_fake_tool("inspect")],
+        "beta": [_fake_tool("inspect")],
+    }
+
+    async def _noop_get_tools():
+        return []
+
+    manager.get_tools = _noop_get_tools  # type: ignore[method-assign]
+
+    descriptors = await manager.list_tool_descriptors(None)
+    pairs = sorted((d["server_name"], d["name"]) for d in descriptors)
+    assert pairs == [("alpha", "inspect"), ("beta", "inspect")]
+
+
+@pytest.mark.asyncio
+async def test_list_tool_descriptors_scoped_loads_only_that_server():
+    """A scoped request loads only the requested server's tools (scoped LOAD, not
+    get-all-then-filter)."""
+    manager = MCPManager.__new__(MCPManager)
+    manager._server_tools = {"beta": [_fake_tool("inspect")]}
+    loaded: list[str] = []
+
+    async def _fake_get_server_tools(server_name):
+        loaded.append(server_name)
+        return manager._server_tools.get(server_name, [])
+
+    manager.get_server_tools = _fake_get_server_tools  # type: ignore[method-assign]
+
+    descriptors = await manager.list_tool_descriptors("beta")
+    assert loaded == ["beta"]
+    assert {d["server_name"] for d in descriptors} == {"beta"}
+
+
+@pytest.mark.asyncio
+async def test_list_tool_descriptors_scoped_known_empty_server_returns_empty():
+    """A known server currently exposing zero tools yields an empty list, not an error."""
+    manager = MCPManager.__new__(MCPManager)
+    manager._server_tools = {}
+
+    async def _fake_get_server_tools(server_name):
+        return []
+
+    manager.get_server_tools = _fake_get_server_tools  # type: ignore[method-assign]
+
+    assert await manager.list_tool_descriptors("brave") == []
+
+
+def test_compute_catalog_version_is_deterministic_and_order_independent():
+    a = [
+        {"server_name": "s1", "name": "t1", "args_schema": {"type": "object"}},
+        {"server_name": "s2", "name": "t2", "args_schema": {"type": "object"}},
+    ]
+    b = list(reversed(a))
+    assert compute_catalog_version(a) == compute_catalog_version(b)
+    assert compute_catalog_version(a).startswith("sha256:")
+
+
+def test_compute_catalog_version_changes_on_schema_change():
+    base = [{"server_name": "s1", "name": "t1", "args_schema": {"type": "object"}}]
+    changed = [{"server_name": "s1", "name": "t1", "args_schema": {"type": "string"}}]
+    assert compute_catalog_version(base) != compute_catalog_version(changed)
 
 
 def test_default_stdio_servers_resolve_from_outside_repository(tmp_path, monkeypatch):
