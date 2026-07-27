@@ -3805,14 +3805,8 @@ def _model_reasoning_options(
         if str(model.get("id") or "").strip() != str(model_id or "").strip():
             continue
         control = model.get("reasoningControl") or model.get("reasoning_control") or {}
-        label = str(
-            control.get("displayLabel") or control.get("display_label") or "Reasoning"
-        )
-        levels = [
-            str(value).strip()
-            for value in control.get("levels") or []
-            if str(value).strip()
-        ]
+        label = str(control.get("displayLabel") or control.get("display_label") or "Reasoning")
+        levels = [str(value).strip() for value in control.get("levels") or [] if str(value).strip()]
         return label, [None, *levels]
     return "Reasoning", [None]
 
@@ -7595,7 +7589,9 @@ class _StreamingImagePreviewPanel:
 
     def finalize(self) -> None:
         finals = {
-            index: entry for index, entry in self._by_index.items() if entry.get("status") == "final"
+            index: entry
+            for index, entry in self._by_index.items()
+            if entry.get("status") == "final"
         }
         if finals:
             self._by_index = finals
@@ -11086,54 +11082,29 @@ def render_models_view() -> None:
         ("planning", "Planning"),
     ]
 
-    st.markdown("#### Select providers and models for each agent")
-    provider_cols = st.columns(len(agents))
-    for idx, (agent_key, label) in enumerate(agents):
-        with provider_cols[idx]:
+    st.subheader("Configure models and parameters")
+    st.caption("Provider and model changes update their dependent controls immediately.")
+
+    for agent_key, label in agents:
+        cfg = agent_config.get(agent_key, {}) if isinstance(agent_config, dict) else {}
+        with st.container(border=True):
+            st.markdown(f"**{label}**")
             current_provider = _normalize_provider_type(
                 st.session_state.get(f"model_cfg_provider_{agent_key}")
             )
             if current_provider not in provider_order:
                 current_provider = provider_order[0]
 
-            selected_provider = st.selectbox(
-                label,
-                options=provider_order,
-                index=provider_order.index(current_provider),
-                key=f"model_cfg_provider_{agent_key}",
-                format_func=_provider_display_name,
-            )
-            provider_snapshot = provider_map.get(selected_provider, {})
-            provider_state = (
-                "Configured" if provider_snapshot.get("configured") else "Not configured"
-            )
-            st.caption(provider_state)
-            catalog_ids = _provider_model_ids(provider_snapshot)
-            current_model = str(
-                st.session_state.get(f"model_cfg_model_select_{agent_key}") or ""
-            ).strip()
-            if current_model not in catalog_ids:
-                current_model = catalog_ids[0] if catalog_ids else "(sync models first)"
-            model_options = catalog_ids or ["(sync models first)"]
-            if st.session_state.get(f"model_cfg_model_select_{agent_key}") != current_model:
-                st.session_state[f"model_cfg_model_select_{agent_key}"] = current_model
-            st.selectbox(
-                "Catalog model",
-                options=model_options,
-                index=model_options.index(current_model),
-                key=f"model_cfg_model_select_{agent_key}",
-                disabled=not provider_snapshot.get("configured") or not catalog_ids,
-            )
+            selection_cols = st.columns([1.2, 2.4])
+            with selection_cols[0]:
+                selected_provider = st.selectbox(
+                    "Provider",
+                    options=provider_order,
+                    index=provider_order.index(current_provider),
+                    key=f"model_cfg_provider_{agent_key}",
+                    format_func=_provider_display_name,
+                )
 
-    st.divider()
-    st.subheader("Configure models and parameters")
-
-    with st.form("agent_model_config_form"):
-        for agent_key, label in agents:
-            cfg = agent_config.get(agent_key, {}) if isinstance(agent_config, dict) else {}
-            selected_provider = _normalize_provider_type(
-                st.session_state.get(f"model_cfg_provider_{agent_key}")
-            )
             provider_snapshot = provider_map.get(selected_provider, {})
             catalog_ids = _provider_model_ids(provider_snapshot)
             configured = bool(provider_snapshot.get("configured"))
@@ -11145,9 +11116,23 @@ def render_models_view() -> None:
                 or provider_snapshot.get("sync_status")
                 or "unknown"
             )
-            current_selection = str(
+            current_model = str(
                 st.session_state.get(f"model_cfg_model_select_{agent_key}") or ""
             ).strip()
+            if current_model not in catalog_ids:
+                current_model = catalog_ids[0] if catalog_ids else "(sync models first)"
+            model_options = catalog_ids or ["(sync models first)"]
+            if st.session_state.get(f"model_cfg_model_select_{agent_key}") != current_model:
+                st.session_state[f"model_cfg_model_select_{agent_key}"] = current_model
+            with selection_cols[1]:
+                selected_model = st.selectbox(
+                    "Catalog model",
+                    options=model_options,
+                    index=model_options.index(current_model),
+                    key=f"model_cfg_model_select_{agent_key}",
+                    disabled=not configured or not catalog_ids,
+                )
+
             allow_custom_default = bool(
                 st.session_state.get(
                     f"model_cfg_allow_custom_{agent_key}",
@@ -11157,16 +11142,15 @@ def render_models_view() -> None:
             custom_value_default = str(
                 st.session_state.get(f"model_cfg_model_custom_{agent_key}") or ""
             ).strip()
-            st.markdown(f"**{label}**")
             st.caption(
-                f"Provider: {_provider_display_name(selected_provider)}"
+                f"{'Configured' if configured else 'Not configured'}"
                 f" • Key source: {key_source.upper()}"
                 f" • Sync: {sync_status.replace('_', ' ').title()}"
             )
 
             field_cols = st.columns([2.2, 1.4, 1.4, 1.2])
             with field_cols[0]:
-                st.text_input(
+                custom_model = st.text_input(
                     "Custom model ID",
                     key=f"model_cfg_model_custom_{agent_key}",
                     value=custom_value_default,
@@ -11176,7 +11160,7 @@ def render_models_view() -> None:
                 )
 
             with field_cols[1]:
-                st.checkbox(
+                allow_custom_model = st.checkbox(
                     "Allow custom model override",
                     key=f"model_cfg_allow_custom_{agent_key}",
                     value=allow_custom_default,
@@ -11184,7 +11168,7 @@ def render_models_view() -> None:
                 )
 
             with field_cols[2]:
-                reasoning_model = custom_value_default if allow_custom_default else current_selection
+                reasoning_model = custom_model if allow_custom_model else selected_model
                 reasoning_label, reasoning_options = _model_reasoning_options(
                     provider_snapshot, reasoning_model
                 )
@@ -11221,84 +11205,78 @@ def render_models_view() -> None:
                 if isinstance(warning, str) and warning.strip():
                     st.warning(warning.strip())
 
-        submitted = st.form_submit_button(
-            "Save agent model settings",
-            type="primary",
-            width="stretch",
-        )
+    submitted = st.button(
+        "Save agent model settings",
+        type="primary",
+        width="stretch",
+    )
 
-        if submitted:
-            payload: dict[str, Any] = {}
-            validation_errors: list[str] = []
+    if submitted:
+        payload: dict[str, Any] = {}
+        validation_errors: list[str] = []
 
-            for agent_key, label in agents:
-                selected_provider = _normalize_provider_type(
-                    st.session_state.get(f"model_cfg_provider_{agent_key}")
+        for agent_key, label in agents:
+            selected_provider = _normalize_provider_type(
+                st.session_state.get(f"model_cfg_provider_{agent_key}")
+            )
+            provider_snapshot = provider_map.get(selected_provider, {})
+            configured = bool(provider_snapshot.get("configured"))
+            selected_model = str(
+                st.session_state.get(f"model_cfg_model_select_{agent_key}") or ""
+            ).strip()
+            custom_model = str(
+                st.session_state.get(f"model_cfg_model_custom_{agent_key}") or ""
+            ).strip()
+            allow_custom_model = bool(st.session_state.get(f"model_cfg_allow_custom_{agent_key}"))
+            temperature = st.session_state.get(f"model_cfg_temperature_{agent_key}", 1.0)
+            if not isinstance(temperature, (int, float)):
+                temperature = 1.0
+
+            if not configured:
+                validation_errors.append(
+                    f"{label}: configure {_provider_display_name(selected_provider)} before saving."
                 )
-                provider_snapshot = provider_map.get(selected_provider, {})
-                configured = bool(provider_snapshot.get("configured"))
-                selected_model = str(
-                    st.session_state.get(f"model_cfg_model_select_{agent_key}") or ""
-                ).strip()
-                custom_model = str(
-                    st.session_state.get(f"model_cfg_model_custom_{agent_key}") or ""
-                ).strip()
-                allow_custom_model = bool(
-                    st.session_state.get(f"model_cfg_allow_custom_{agent_key}")
+                continue
+
+            model = custom_model if allow_custom_model else selected_model
+            if allow_custom_model and not custom_model:
+                validation_errors.append(
+                    f"{label}: enter a custom model ID or disable the custom override."
                 )
-                temperature = st.session_state.get(f"model_cfg_temperature_{agent_key}", 1.0)
-                if not isinstance(temperature, (int, float)):
-                    temperature = 1.0
+                continue
+            if not allow_custom_model and (not selected_model or selected_model.startswith("(")):
+                validation_errors.append(
+                    f"{label}: sync {_provider_display_name(selected_provider)} models before saving."
+                )
+                continue
 
-                if not configured:
-                    validation_errors.append(
-                        f"{label}: configure {_provider_display_name(selected_provider)} before saving."
+            payload[agent_key] = {
+                "provider": selected_provider,
+                "model": model,
+                "temperature": float(temperature),
+                "allow_custom_model": allow_custom_model,
+                "reasoning_effort": st.session_state.get(f"model_cfg_reasoning_{agent_key}"),
+            }
+
+        if validation_errors:
+            for error in validation_errors:
+                st.toast(error, icon=":material/warning:")
+        else:
+            with st.spinner("Saving model settings..."):
+                updated = patch_model_config(payload)
+                refreshed = (
+                    refresh_model_config_options_cache(
+                        force_refresh=True,
+                        defer_form_state_sync=True,
                     )
-                    continue
+                    if updated
+                    else {}
+                )
 
-                model = custom_model if allow_custom_model else selected_model
-                if allow_custom_model and not custom_model:
-                    validation_errors.append(
-                        f"{label}: enter a custom model ID or disable the custom override."
-                    )
-                    continue
-                if not allow_custom_model and (
-                    not selected_model or selected_model.startswith("(")
-                ):
-                    validation_errors.append(
-                        f"{label}: sync {_provider_display_name(selected_provider)} models before saving."
-                    )
-                    continue
-
-                payload[agent_key] = {
-                    "provider": selected_provider,
-                    "model": model,
-                    "temperature": float(temperature),
-                    "allow_custom_model": allow_custom_model,
-                    "reasoning_effort": st.session_state.get(
-                        f"model_cfg_reasoning_{agent_key}"
-                    ),
-                }
-
-            if validation_errors:
-                for error in validation_errors:
-                    st.toast(error, icon=":material/warning:")
-            else:
-                with st.spinner("Saving model settings..."):
-                    updated = patch_model_config(payload)
-                    refreshed = (
-                        refresh_model_config_options_cache(
-                            force_refresh=True,
-                            defer_form_state_sync=True,
-                        )
-                        if updated
-                        else {}
-                    )
-
-                if updated and refreshed:
-                    st.toast("Saved model settings", icon=":material/check_circle:")
-                    st.rerun()
-                st.toast("Failed to save model settings", icon=":material/cancel:")
+            if updated and refreshed:
+                st.toast("Saved model settings", icon=":material/check_circle:")
+                st.rerun()
+            st.toast("Failed to save model settings", icon=":material/cancel:")
 
 
 def _render_usage_chart(frame: list[dict[str, Any]], *, kind: str) -> None:

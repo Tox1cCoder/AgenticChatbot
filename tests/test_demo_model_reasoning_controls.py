@@ -41,3 +41,19 @@ def test_reasoning_options_use_selected_catalog_model() -> None:
 def test_unknown_model_only_offers_provider_default() -> None:
     helper = _load_helpers()["_model_reasoning_options"]
     assert helper({"models": []}, "custom-model") == ("Reasoning", [None])
+
+
+def test_agent_model_controls_stay_together_and_rerun_on_change() -> None:
+    source = Path("demo.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    render_models = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "render_models_view"
+    )
+    render_source = ast.get_source_segment(source, render_models)
+
+    assert render_source is not None
+    config_heading = 'st.subheader("Configure models and parameters")'
+    assert render_source.index(config_heading) < render_source.index('"Catalog model"')
+    assert 'st.form("agent_model_config_form")' not in render_source
