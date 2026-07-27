@@ -13,8 +13,12 @@ class ChatImage(Base):
     """A single stored chat image (user attachment or generated image).
 
     Bytes live on content-addressed disk under ``storage_path``; the message
-    metadata only carries an ``image_id`` reference. Rows are per-reference so
-    multiple messages may point at the same content-addressed file.
+    metadata only carries an ``image_id`` reference. Ownership rows are
+    deduplicated per ``(user_id, sha256)``: identical content re-stored by the
+    same owner (e.g. a resumed run re-persisting a generated image) reuses the
+    existing row rather than inserting a duplicate, so one row may be referenced
+    from several messages/conversations and keeps the first conversation's
+    ``conversation_id``. Distinct users still get distinct rows.
     """
 
     __tablename__ = "chat_images"

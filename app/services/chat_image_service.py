@@ -53,6 +53,13 @@ class ChatImageStorageService:
         # content-addressed on disk, so this keeps the DB row model consistent
         # with the deduplicated files. Scoped to the owner so the per-user read
         # endpoint's ownership guarantees are preserved.
+        #
+        # NOTE: query-then-insert with a TOCTOU window and NO backing DB unique
+        # constraint/index on (user_id, sha256). Correct for the sequential
+        # resume/retry scenario; two concurrent identical persists (multi-worker)
+        # could still double-insert. A partial unique index
+        # `(user_id, sha256) WHERE deleted_at IS NULL` + conflict handling would
+        # close that window if it ever matters.
         existing = self._existing_reference_for(user_id=user_id, sha=sha, name=name)
         if existing is not None:
             return existing
