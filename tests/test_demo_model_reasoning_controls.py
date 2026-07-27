@@ -3,6 +3,10 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
+
+from app.api.model_config import ProviderOptionsSnapshot
+from app.services.provider_service import ProviderService
 
 
 def _load_helpers() -> dict[str, Any]:
@@ -41,6 +45,31 @@ def test_reasoning_options_use_selected_catalog_model() -> None:
 def test_unknown_model_only_offers_provider_default() -> None:
     helper = _load_helpers()["_model_reasoning_options"]
     assert helper({"models": []}, "custom-model") == ("Reasoning", [None])
+
+
+def test_catalog_descriptor_reaches_streamlit_reasoning_options() -> None:
+    service = ProviderService(provider_repository=MagicMock())
+    raw_model = service._normalize_gemini_model(
+        "gemini-pro-latest",
+        "Gemini Pro Latest",
+        ["generateContent"],
+        True,
+    )
+    provider = ProviderOptionsSnapshot.model_validate(
+        {
+            "provider_type": "gemini",
+            "configured": True,
+            "key_source": "env",
+            "sync_status": "ready",
+            "models": [raw_model],
+        }
+    ).model_dump(by_alias=True)
+
+    helper = _load_helpers()["_model_reasoning_options"]
+    assert helper(provider, "gemini-pro-latest") == (
+        "Thinking level",
+        [None, "low", "medium", "high"],
+    )
 
 
 def test_agent_model_controls_stay_together_and_rerun_on_change() -> None:
