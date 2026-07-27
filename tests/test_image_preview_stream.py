@@ -6,7 +6,10 @@ AIService canonicalization → both wire adapters (internal SSE, AI SDK v6).
 
 from __future__ import annotations
 
+import base64
 import json
+from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -16,6 +19,7 @@ from app.ai.image_generation import (
     use_image_preview_emitter,
 )
 from app.services.ai_service import AIService
+from app.services.chat_image_service import ChatImageStorageService
 from app.services.event_streaming.ai_sdk_v6 import AISDKV6StreamAdapter, AISDKV6StreamState
 from app.services.event_streaming.events import make_event
 from app.services.event_streaming.graph_public_projection import (
@@ -128,6 +132,59 @@ class _StubImageStorage:
             "name": name,
             "content_hash": "hash",
         }
+
+
+class _InMemoryChatImageRepo:
+    """Row store with the (user_id, sha256) lookup the storage dedup needs."""
+
+    def __init__(self):
+        self.rows = {}
+        self.created = []
+
+    def create(self, data):
+        row = SimpleNamespace(deleted_at=None, **data)
+        self.rows[data["id"]] = row
+        self.created.append(data)
+        return row
+
+    def get_by_user_and_sha(self, user_id, sha256):
+        for row in self.rows.values():
+            if row.user_id == user_id and row.sha256 == sha256 and row.deleted_at is None:
+                return row
+        return None
+
+
+def test_resume_repersist_reuses_ownership_row_across_runs(tmp_path):
+    """A resumed run persisting the SAME generated image as the original run
+    must NOT create a second ownership row. The resumed MediaDeliveryService is
+    a fresh instance whose per-instance idempotency cache is empty, so dedup has
+    to hold at the storage row level (cross-run idempotency, FR-IMG-008)."""
+    repo = _InMemoryChatImageRepo()
+    storage = ChatImageStorageService(
+        repo, storage_root=str(tmp_path / "imgs"), max_bytes=10_000
+    )
+    conversation_id = uuid4()
+    user_id = uuid4()
+    run_id = str(conversation_id)
+    data_b64 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"g" * 64).decode()
+
+    def _persist_once():
+        service = MediaDeliveryService(
+            storage=storage,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            preview_publisher=ImagePreviewPublisher(enabled=True, max_b64_chars=10),
+            request_id=run_id,
+        )
+        return service.persist_final(image_index=0, mime="image/png", data_b64=data_b64)
+
+    first = _persist_once()  # original run
+    second = _persist_once()  # resumed run — fresh instance, empty cache
+
+    assert first is not None and second is not None
+    assert len(repo.created) == 1
+    assert first["image_id"] == second["image_id"]
+    assert first["url"] == second["url"]
 
 
 def test_persist_final_emits_v2_reference_event_by_reference():

@@ -30,3 +30,21 @@ class ChatImageRepository:
                 ChatImage.deleted_at.is_(None),
             )
             return db.execute(statement).scalars().first()
+
+    def get_by_user_and_sha(self, user_id: UUID, sha256: str) -> ChatImage | None:
+        """Earliest non-deleted row owned by ``user_id`` for this content hash.
+
+        Backs the storage layer's row-level idempotency: identical content
+        re-stored by the same owner (e.g. a resumed run re-persisting a
+        generated image) reuses this row instead of inserting a duplicate."""
+        with self.session_factory() as db:
+            statement = (
+                select(ChatImage)
+                .where(
+                    ChatImage.user_id == user_id,
+                    ChatImage.sha256 == sha256,
+                    ChatImage.deleted_at.is_(None),
+                )
+                .order_by(ChatImage.created_at.asc())
+            )
+            return db.execute(statement).scalars().first()

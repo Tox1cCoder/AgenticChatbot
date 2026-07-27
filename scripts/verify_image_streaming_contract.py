@@ -11,17 +11,20 @@ Usage (from the repo root)::
     .\\.venv\\Scripts\\python.exe scripts/verify_image_streaming_contract.py
 
 Exit status:
-    0  every checked contract holds (expected only after Phase 1: T002-T005)
-    1  one or more contracts are unmet (expected on current source — RED)
+    0  every checked contract holds (expected after Phase 1: T002-T005)
+    1  one or more contracts are unmet
 
 Contracts checked:
     C1  an oversized FINAL image is delivered early (internal SSE)
     C2  an oversized FINAL image is delivered early (AI SDK data-image-preview)
     C3  the AI SDK terminal `file` part preserves the protected /chat-images URL
-    C4  exactly one [DONE] terminates the AI SDK stream (already correct)
+    C4  exactly one [DONE] terminates the AI SDK stream
+    C5  a resumed (post-HITL) run delivers the same early image reference as a
+        fresh run — resume parity (FR-IMG-008, T005)
 
 Nothing here performs real network/provider I/O; the fake image source runs the
-REAL ``ImagePreviewPublisher`` so the emitter policy is genuinely exercised.
+REAL ``ImagePreviewPublisher`` + ``MediaDeliveryService`` so the emission policy
+and final-by-reference delivery are genuinely exercised.
 """
 
 from __future__ import annotations
@@ -81,6 +84,22 @@ def _drive_ai_sdk(conversation_id, user_id, service) -> list:
     return _parse_sse(resp.text)
 
 
+def _drive_resume_sse(conversation_id, user_id, service) -> list:
+    with Container.message_service.override(providers.Object(service)):
+        client = TestClient(_build_app(service, user_id))
+        resp = client.post(
+            "/messages/resume-interrupt",
+            json={
+                "thread_id": str(conversation_id),
+                "conversation_id": str(conversation_id),
+                "interrupt_id": "int-1",
+                "decisions": [],
+            },
+        )
+    resp.raise_for_status()
+    return _parse_sse(resp.text)
+
+
 def run_checks() -> list[_Result]:
     conversation_id = uuid4()
     user_id = uuid4()
@@ -110,6 +129,16 @@ def run_checks() -> list[_Result]:
     file_urls = [p.get("url") for p in ai if isinstance(p, dict) and p.get("type") == "file"]
     done_count = ai_order.count("[DONE]")
 
+    resume_service = _build_message_service(
+        conversation_id=conversation_id, user_id=user_id, image_url=image_url, resume=True
+    )
+    resume = _drive_resume_sse(conversation_id, user_id, resume_service)
+    resume_order = _types(resume)
+    resume_previews = [
+        p for p in resume if isinstance(p, dict) and p.get("type") == "image_preview"
+    ]
+    resume_final = any(p.get("status") == "final" for p in resume_previews)
+
     sizes = (
         f"partial_b64={len(PARTIAL_B64)} chars; final_b64={len(FINAL_B64)} chars; "
         f"preview_cap={_PREVIEW_CAP} chars"
@@ -137,6 +166,12 @@ def run_checks() -> list[_Result]:
             done_count == 1 and ai_order[-1:] == ["[DONE]"],
             f"done_count={done_count}; order tail={ai_order[-3:]}",
         ),
+        _Result(
+            "C5 resumed run delivers early image reference (resume parity)",
+            resume_final,
+            f"resume image_preview statuses={[p.get('status') for p in resume_previews]}; "
+            f"order={resume_order}",
+        ),
     ]
 
 
@@ -153,10 +188,7 @@ def main() -> int:
         print(f"        {r.detail}")
     print("=" * 60)
     if failed:
-        print(
-            f"{failed}/{len(results)} contract(s) UNMET (expected RED on current "
-            "source; Phase 1 T002-T005 makes these PASS)."
-        )
+        print(f"{failed}/{len(results)} contract(s) UNMET.")
         return 1
     print("All image-streaming contracts hold.")
     return 0

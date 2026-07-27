@@ -56,8 +56,18 @@ Reuse the existing live-merge infrastructure (`SubagentEventSink` +
 - `_image_generator_node` resolves the sink from
   `state.context.subagent_event_sink_token` and installs a per-request emitter
   via a `ContextVar` (`app/ai/image_generation/emitter.py`), so no agent
-  signature changes and concurrent requests stay isolated. Non-stream and
-  resumed runs resolve no sink → no previews, no errors.
+  signature changes and concurrent requests stay isolated. Non-stream runs
+  resolve no sink → no previews, no errors.
+
+  **Superseded (T005 — resume parity, FR-IMG-008):** resumed runs now install
+  the SAME request-scoped media sink as a fresh run. The token persisted in the
+  checkpoint outlives its original sink (its weakref dies with that stream and
+  resolves to None), so `resume_with_decisions_stream` creates a live
+  `SubagentEventSink`, rebinds it under the persisted token
+  (`rebind_subagent_event_sink`) — or injects a fresh token via the resume
+  state update when none was persisted — and merges it with
+  `stream_with_subagent_events`. An image generated after a HITL resume now
+  emits the same early preview / final-by-reference as a new run.
 
 ### 3. Canonical event + wire projection
 
@@ -78,10 +88,28 @@ New `StreamEventType`: `image_preview`. Payload:
 
 - Kill switch: `settings.enable_image_streaming` (default true).
 - Size cap: `settings.image_stream_preview_max_b64_chars` (default 4,000,000
-  ≈ 3 MB binary); oversized previews are dropped (image still arrives at
-  `complete`).
+  ≈ 3 MB binary) applies to INLINE (transient) previews only.
 - Emit-once per index for `final`; partials replace by `(index, seq)`.
 - Publisher failures never break generation (log + continue).
+
+**Superseded (T003/T005 — oversized delivery + lossless final):** an oversized
+image is never silently dropped.
+- A FINAL image is ALWAYS delivered EARLY and by protected reference
+  (`MediaDeliveryService.persist_final` → schema-v2 `image_preview` with
+  `delivery.kind = reference`), so its early delivery does not depend on the
+  inline SSE size cap. The bytes are bounded by the storage byte cap, not the
+  transient preview char cap.
+- An oversized INLINE partial is downgraded to a structured `preview_skipped`
+  status (carries no base64) rather than being silently dropped (FR-IMG-007).
+- Backpressure on the shared `SubagentEventSink` treats FINAL references as
+  LOSSLESS: only in-progress partials coalesce, a newer partial for an item
+  evicts the stale one before any unrelated frame, and a final reference is
+  never discarded.
+- Cross-run idempotency: `MediaDeliveryService.persist_final` is idempotent
+  per instance, and `ChatImageStorageService.store()` is idempotent at the
+  ownership-row level on `(user_id, sha256)`. A resumed run (fresh
+  `MediaDeliveryService`) that re-persists identical content reuses the existing
+  `chat_images` row instead of inserting a duplicate.
 
 ### 5. Demo (Streamlit)
 
@@ -104,5 +132,7 @@ RichStreamState/rich segments machinery untouched.
 - google-genai/openai streaming API surface drift → defensive parsing,
   provider tests use fakes, integration failures degrade to "no previews"
   (never to failed generation).
-- Oversized SSE frames → size cap + previews are single-shot (no re-send per
-  upsert like rich items).
+- Oversized SSE frames → the inline size cap now applies to transient previews
+  only; a FINAL image is delivered by protected reference (no multi-megabyte
+  base64 frame), and oversized inline partials degrade to a `preview_skipped`
+  status. Previews remain single-shot (no re-send per upsert like rich items).

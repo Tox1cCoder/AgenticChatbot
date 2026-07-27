@@ -29,6 +29,7 @@ from ..services.event_streaming.graph_public_projection import (
 from ..services.event_streaming.langchain_v3 import iter_v3_events_from_graph
 from ..services.event_streaming.subagents import (
     SubagentEventSink,
+    rebind_subagent_event_sink,
     register_subagent_event_sink,
     resolve_subagent_event_sink,
     stream_with_subagent_events,
@@ -2496,6 +2497,30 @@ class MultiAgentWorkflow(
         selected_agent = state_snapshot.values.get("selected_agent", "search_agent")
         conversation_id = state_snapshot.values.get("conversation_id")
 
+        # Resume parity: install the SAME request-scoped media sink as the main
+        # streaming path so an image generated AFTER a HITL resume still emits an
+        # early preview / final-by-reference. The checkpointed state already
+        # carries a ``subagent_event_sink_token`` from the original run, but its
+        # weakref died with that stream (resolves to None). Rebind this run's
+        # live sink under the persisted token so the resumed image node resolves
+        # it without mutating the checkpoint; if no token was persisted, fall
+        # back to injecting a fresh one through the resume state update.
+        subagent_event_sink = SubagentEventSink(maxsize=settings.subagent_event_queue_maxsize)
+        existing_context = state_snapshot.values.get("context")
+        persisted_token = (
+            existing_context.get("subagent_event_sink_token")
+            if isinstance(existing_context, dict)
+            else None
+        )
+        resume_state_update: dict[str, Any] | None = None
+        if isinstance(persisted_token, str) and persisted_token:
+            rebind_subagent_event_sink(persisted_token, subagent_event_sink)
+        else:
+            fresh_token = register_subagent_event_sink(subagent_event_sink)
+            merged_context = dict(existing_context) if isinstance(existing_context, dict) else {}
+            merged_context["subagent_event_sink_token"] = fresh_token
+            resume_state_update = {"context": merged_context}
+
         yield make_event(
             "agent_selected",
             sequence=0,
@@ -2519,13 +2544,10 @@ class MultiAgentWorkflow(
         continue_reason: str | None = "initial"
         total_iterations = 0
         start_time = time.monotonic()
-        current_state: Any = Command(resume=resume_data)
+        current_state: Any = Command(resume=resume_data, update=resume_state_update)
         # Rehydrate historical image references for the model on resume too,
         # otherwise a replayed turn drops prior images from context.
         chat_image_loader = self._build_chat_image_loader(state_snapshot.values.get("user_id"))
-        # No SubagentEventSink here by design: subagent dispatch on resume is rare
-        # and intentionally left unstreamed (see docs event_streaming.md). Only the
-        # main execute_request_stream path wires live subagent progress.
 
         while round_num <= max_rounds:
             if (
@@ -2551,10 +2573,12 @@ class MultiAgentWorkflow(
             continue_reason = None
 
             try:
+                merged = stream_with_subagent_events(
+                    iter_v3_events_from_graph(self.graph, current_state, config=config),
+                    subagent_event_sink,
+                )
                 with use_chat_image_loader(chat_image_loader):
-                    async for event in iter_v3_events_from_graph(
-                        self.graph, current_state, config=config
-                    ):
+                    async for event in merged:
                         for public_event in projector.map_event(event, ctx):
                             yield public_event
 

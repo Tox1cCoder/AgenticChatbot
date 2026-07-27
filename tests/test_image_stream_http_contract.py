@@ -14,21 +14,18 @@ override), the REAL internal-SSE / AI-SDK wire adapters, and the REAL
 ``ImagePreviewPublisher`` emission policy. No wire-adapter helper is called
 directly; every assertion is made against bytes produced by an HTTP route.
 
-Injection-seam note (documented for the controller): the production plan's
-per-run *media delivery service* injected at the graph boundary (T002) does
-not exist yet, so a fake ``ImageGenerationProvider`` cannot be threaded through
-the real multi-agent graph deterministically (that needs a live router LLM +
-checkpointer). The faithful full-HTTP-path seam available today is the
-``ai_service`` event source consumed by the real ``MessageService``; the fake
-source runs the REAL ``ImagePreviewPublisher`` so the emitter-drop defect
-(``app/ai/image_generation/emitter.py:70-78``) is exercised by real code, and
-emits a terminal ``complete`` carrying a protected ``/chat-images/{id}``
-reference so the projection defect
-(``app/services/event_streaming/ai_sdk_projection.py:104-154``) is exercised by
-real code.
+Injection-seam note (documented for the controller): threading a fake
+``ImageGenerationProvider`` through the real multi-agent graph deterministically
+would need a live router LLM + checkpointer, so the faithful full-HTTP-path seam
+is the ``ai_service`` event source consumed by the real ``MessageService``. Both
+the main and resume fake sources drive the REAL per-run ``MediaDeliveryService``
++ ``ImagePreviewPublisher`` (T002/T003) so the emission policy and final-by-
+reference delivery are exercised by real code, and emit a terminal ``complete``
+carrying a protected ``/chat-images/{id}`` reference so the AI-SDK projection is
+exercised by real code.
 
-Expected terminal state: RED. Each assertion documents a currently-broken
-contract that Phase-1 (T002-T005) will repair.
+Terminal state after Phase 1 (T002-T005): GREEN. Each assertion pins a repaired
+image-delivery contract, including resume parity (FR-IMG-008).
 """
 
 from __future__ import annotations
@@ -176,18 +173,17 @@ class _HarnessImageStorage:
         }
 
 
-async def _main_image_event_source(_request):
-    """Fake ai_service.execute_request_stream mirroring the graph main path.
+async def _stream_image_generation_events(image_url: str):
+    """Mirror graph image generation for BOTH the main and resume paths.
 
-    Mirrors ``graph.execute_request_stream`` + the real
-    ``ImageGeneratorAgent._consume_image_stream``: bind a real preview emitter to
-    a real ``SubagentEventSink`` and drive the REAL per-run
-    ``MediaDeliveryService`` (T002). Partials go through the REAL
-    ``ImagePreviewPublisher`` policy; the FINAL is persisted and delivered early
-    by protected reference the moment it arrives (T003). Then narrative text +
-    a terminal complete carrying the same protected image reference.
+    Binds a real preview emitter to a real ``SubagentEventSink`` and drives the
+    REAL per-run ``MediaDeliveryService`` (T002), exactly as
+    ``graph.execute_request_stream`` and (after T005) the resume path do.
+    Partials go through the REAL ``ImagePreviewPublisher`` policy; the FINAL is
+    persisted and delivered early by protected reference the moment it arrives
+    (T003), regardless of the inline preview cap. Then narrative text + a
+    terminal ``complete`` carrying the same protected image reference.
     """
-    image_url = _main_image_event_source.image_url
     sink = SubagentEventSink()
 
     def _emit(payload: dict) -> None:
@@ -237,39 +233,23 @@ async def _main_image_event_source(_request):
     )
 
 
+async def _main_image_event_source(_request):
+    """Fake ai_service.execute_request_stream mirroring the graph main path."""
+    async for event in _stream_image_generation_events(_main_image_event_source.image_url):
+        yield event
+
+
 async def _resume_image_event_source(**_kwargs):
     """Fake ai_service.resume_interrupted_execution_stream mirroring the graph
-    resume path, which installs NO preview sink (``graph.py:2488-2490``).
-
-    Because no emitter is bound (exactly as the current resume path leaves it),
-    the REAL ``ImagePreviewPublisher`` returns False even for a *small* final
-    image, so no early preview event is produced. This reproduces the
-    resume-parity defect (FR-IMG-008).
+    resume path AFTER T005: the resume path now installs the SAME request-scoped
+    media sink as a fresh run (``graph.resume_with_decisions_stream`` rebinds a
+    live ``SubagentEventSink`` under the checkpointed token and merges it via
+    ``stream_with_subagent_events``). An image generated after HITL resume
+    therefore surfaces the same early preview / final-by-reference as a fresh
+    run (FR-IMG-008 resume parity).
     """
-    image_url = _resume_image_event_source.image_url
-    small_b64 = base64.b64encode(b"\x00" * 4096).decode("ascii")
-
-    # NO use_image_preview_emitter(...) here, mirroring the resume path.
-    publisher = ImagePreviewPublisher(
-        enabled=settings.enable_image_streaming,
-        max_b64_chars=settings.image_stream_preview_max_b64_chars,
-    )
-    emitted = publisher.publish(
-        image_index=0, status="final", mime="image/png", data_b64=small_b64, seq=1
-    )
-    _resume_image_event_source.publisher_emitted = emitted  # False on current source
-
-    yield make_event("message_delta", sequence=0, data={"text": NARRATIVE})
-    yield make_event(
-        "complete",
-        sequence=0,
-        data={
-            "response": WorkflowResponse(
-                message=WorkflowResponseMessage(content=NARRATIVE),
-                metadata={"images": [{"url": image_url, "mime": "image/png"}]},
-            )
-        },
-    )
+    async for event in _stream_image_generation_events(_resume_image_event_source.image_url):
+        yield event
 
 
 def _build_message_service(*, conversation_id: UUID, user_id: UUID, image_url: str, resume: bool):
@@ -614,10 +594,10 @@ def test_ai_sdk_delivers_oversized_final_image_early():
 
 
 def test_resume_stream_emits_early_image_preview_after_hitl():
-    """RED: an image generated after a HITL resume must surface the same early
-    ``image_preview`` as a fresh run. Current source installs no preview sink
-    on the resume path (``graph.py:2488-2490``), so even a small image emits no
-    early preview.
+    """An image generated after a HITL resume surfaces the same early
+    ``image_preview`` as a fresh run. The resume path now installs the SAME
+    request-scoped media sink as ``execute_request_stream`` (T005), so resume
+    reaches parity with new runs (FR-IMG-008).
     """
     conversation_id = uuid4()
     user_id = uuid4()
@@ -643,11 +623,9 @@ def test_resume_stream_emits_early_image_preview_after_hitl():
     order = _types(payloads)
     previews = [p for p in payloads if isinstance(p, dict) and p.get("type") == "image_preview"]
     assert previews, (
-        "DEFECT (graph.py:2488-2490 resume path installs no preview sink): an "
-        "image generated after HITL resume produced NO early `image_preview` "
-        "event (FR-IMG-008). publisher.publish returned "
-        f"{getattr(_resume_image_event_source, 'publisher_emitted', 'n/a')} because no "
-        f"emitter was bound on resume.\nevent order: {order}"
+        "resume parity (FR-IMG-008): an image generated after HITL resume must "
+        "surface the same early `image_preview` as a fresh run once the resume "
+        f"path installs the request-scoped media sink.\nevent order: {order}"
     )
 
 

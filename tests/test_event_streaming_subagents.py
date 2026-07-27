@@ -13,6 +13,7 @@ from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from app.services.event_streaming.events import make_event
 from app.services.event_streaming.subagents import (
     SubagentEventSink,
+    rebind_subagent_event_sink,
     register_subagent_event_sink,
     resolve_subagent_event_sink,
     stream_with_subagent_events,
@@ -92,6 +93,19 @@ def test_resolve_sink_returns_none_for_dead_or_unknown_tokens():
     token = register_subagent_event_sink(SubagentEventSink())
     # The only strong reference was the local above — entry dies with it.
     assert resolve_subagent_event_sink(token) is None
+
+
+def test_rebind_makes_dead_resume_token_resolve_to_live_sink():
+    """On resume the persisted token's original weakref has died (its stream is
+    gone), so it resolves to None. Rebinding the run's live sink under that SAME
+    persisted token lets the checkpointed graph state resolve to a live sink
+    without mutating the checkpoint (FR-IMG-008 resume parity)."""
+    persisted_token = register_subagent_event_sink(SubagentEventSink())
+    assert resolve_subagent_event_sink(persisted_token) is None  # weakref died
+
+    live_sink = SubagentEventSink()
+    rebind_subagent_event_sink(persisted_token, live_sink)
+    assert resolve_subagent_event_sink(persisted_token) is live_sink
 
 
 @pytest.mark.asyncio

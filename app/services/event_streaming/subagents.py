@@ -14,11 +14,12 @@ import asyncio
 import contextlib
 import logging
 import weakref
+from collections import deque
 from collections.abc import AsyncGenerator
 from typing import Any
 from uuid import uuid4
 
-from .events import SubagentRef, V3StreamEvent, make_event
+from .events import IMAGE_PREVIEW_STATUS_PARTIAL, SubagentRef, V3StreamEvent, make_event
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,26 @@ _SINK_CLOSED = object()
 # the activity view (message deltas). These are dropped first under backpressure;
 # lifecycle events (start / tool / end) are always kept.
 _TRANSIENT_EVENT_TYPES = frozenset({"image_preview", "subagent_message_delta"})
+
+
+def _event_item_id(event: V3StreamEvent) -> Any:
+    return (event.data or {}).get("item_id")
+
+
+def _is_droppable(event: V3StreamEvent) -> bool:
+    """Whether an event may be discarded/coalesced under backpressure.
+
+    Lifecycle events (start / tool / end) are never droppable. An
+    ``image_preview`` is droppable ONLY while it is an in-progress ``partial``:
+    a FINAL image delivered by protected reference is lossless (never dropped),
+    and any other preview status (e.g. ``preview_skipped``) is kept because it
+    carries no bulky base64 and is a structured observability signal.
+    """
+    if event.type not in _TRANSIENT_EVENT_TYPES:
+        return False
+    if event.type == "image_preview":
+        return (event.data or {}).get("status") == IMAGE_PREVIEW_STATUS_PARTIAL
+    return True
 
 
 class SubagentEventSink:
@@ -74,24 +95,81 @@ class SubagentEventSink:
         """Enqueue a prebuilt canonical event (e.g. ``image_preview``).
 
         Synchronous on purpose: producers inside graph nodes must not await the
-        stream. When the queue is saturated (``maxsize`` reached) a transient
-        frame is dropped rather than growing memory without bound; lifecycle
-        events are always enqueued.
+        stream. Backpressure policy when the soft ``maxsize`` cap is reached:
+
+        - Lossless events (lifecycle, FINAL image references) are ALWAYS
+          enqueued; a stale transient is evicted first to keep memory bounded.
+        - An in-progress ``partial`` prefers to REPLACE an already-queued stale
+          partial for the SAME item (freshest preview wins) before any frame is
+          discarded; only when no same-item frame exists is the incoming partial
+          coalesced away. Unrelated events are never displaced by a partial.
         """
-        if (
-            self._maxsize > 0
-            and event.type in _TRANSIENT_EVENT_TYPES
-            and self._queue.qsize() >= self._maxsize
-        ):
-            self.dropped_transient_count += 1
-            if self.dropped_transient_count == 1:
-                logger.info(
-                    "subagent event queue saturated (maxsize=%d); dropping transient "
-                    "frames code=subagent_event_queue_saturated",
-                    self._maxsize,
-                )
+        if self._maxsize <= 0 or not _is_droppable(event):
+            if self._maxsize > 0 and self._queue.qsize() >= self._maxsize:
+                self._evict_stale_transient(prefer_item_id=_event_item_id(event))
+            self._enqueue(event)
             return
+
+        if self._queue.qsize() < self._maxsize:
+            self._enqueue(event)
+            return
+
+        item_id = _event_item_id(event)
+        if item_id is not None and self._evict_stale_partial(item_id):
+            self._enqueue(event)
+            return
+        self._record_transient_drop()
+
+    def _enqueue(self, event: V3StreamEvent) -> None:
         self._queue.put_nowait(event.model_copy(update={"sequence": self._next_sequence()}))
+
+    def _pending(self) -> deque | None:
+        """The queue's backing deque, or None if the runtime shape changed."""
+        pending = getattr(self._queue, "_queue", None)
+        return pending if isinstance(pending, deque) else None
+
+    def _evict_stale_partial(self, item_id: Any) -> bool:
+        """Discard the oldest queued in-progress partial for ``item_id``."""
+        pending = self._pending()
+        if pending is None:
+            return False
+        for index, queued in enumerate(pending):
+            if (
+                queued.type == "image_preview"
+                and (queued.data or {}).get("status") == IMAGE_PREVIEW_STATUS_PARTIAL
+                and (queued.data or {}).get("item_id") == item_id
+            ):
+                del pending[index]
+                self._record_transient_drop()
+                return True
+        return False
+
+    def _evict_stale_transient(self, *, prefer_item_id: Any) -> bool:
+        """Make room for a lossless event by dropping one stale transient.
+
+        Prefers a same-item partial (so an in-flight preview yields to its own
+        final), otherwise the oldest droppable frame; lifecycle/final events are
+        never candidates."""
+        if prefer_item_id is not None and self._evict_stale_partial(prefer_item_id):
+            return True
+        pending = self._pending()
+        if pending is None:
+            return False
+        for index, queued in enumerate(pending):
+            if _is_droppable(queued):
+                del pending[index]
+                self._record_transient_drop()
+                return True
+        return False
+
+    def _record_transient_drop(self) -> None:
+        self.dropped_transient_count += 1
+        if self.dropped_transient_count == 1:
+            logger.info(
+                "subagent event queue saturated (maxsize=%d); dropping/replacing "
+                "transient frames code=subagent_event_queue_saturated",
+                self._maxsize,
+            )
 
     async def drain(self) -> list[V3StreamEvent]:
         events: list[V3StreamEvent] = []
@@ -125,6 +203,19 @@ def register_subagent_event_sink(sink: SubagentEventSink) -> str:
     token = uuid4().hex
     _SINK_REGISTRY[token] = sink
     return token
+
+
+def rebind_subagent_event_sink(token: str, sink: SubagentEventSink) -> None:
+    """Bind a live sink under an EXISTING token (resume parity).
+
+    The token persisted in a checkpoint outlives the sink it was created for:
+    after the original stream ends its sink is garbage-collected and the token
+    weakly resolves to None. On resume the same checkpointed graph state still
+    carries that token, so rebinding this run's live sink under it lets the
+    resumed image node resolve a live sink WITHOUT mutating the checkpoint. The
+    caller must hold a strong reference for the stream's lifetime (the registry
+    only holds a weak one)."""
+    _SINK_REGISTRY[token] = sink
 
 
 def resolve_subagent_event_sink(token: Any) -> SubagentEventSink | None:

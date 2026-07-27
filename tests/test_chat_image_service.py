@@ -14,7 +14,7 @@ class _Repo:
         self.created = []
 
     def create(self, data):
-        row = SimpleNamespace(**data)
+        row = SimpleNamespace(deleted_at=None, **data)
         self.rows[data["id"]] = row
         self.created.append(data)
         return row
@@ -23,6 +23,16 @@ class _Repo:
         row = self.rows.get(image_id)
         if row and row.user_id == user_id:
             return row
+        return None
+
+    def get_by_user_and_sha(self, user_id, sha256):
+        for row in self.rows.values():
+            if (
+                row.user_id == user_id
+                and row.sha256 == sha256
+                and getattr(row, "deleted_at", None) is None
+            ):
+                return row
         return None
 
 
@@ -74,3 +84,39 @@ def test_store_rejects_invalid_base64(tmp_path):
 def test_load_data_url_missing_returns_none(tmp_path):
     svc = _svc(tmp_path)
     assert svc.load_data_url(uuid4(), uuid4()) is None
+
+
+def test_store_is_idempotent_per_user_and_content(tmp_path):
+    """Re-storing identical content for the same user reuses the existing
+    ownership row instead of inserting a duplicate (resume re-persist parity)."""
+    repo = _Repo()
+    svc = ChatImageStorageService(
+        repo, storage_root=str(tmp_path / "chat_images"), max_bytes=1024
+    )
+    raw = b"\x89PNG\r\n\x1a\n" + b"z" * 32
+    b64 = base64.b64encode(raw).decode()
+    conv, user = uuid4(), uuid4()
+
+    first = svc.store(conversation_id=conv, user_id=user, mime="image/png", data_b64=b64, name="a")
+    second = svc.store(conversation_id=conv, user_id=user, mime="image/png", data_b64=b64, name="a")
+
+    assert len(repo.created) == 1
+    assert first["image_id"] == second["image_id"]
+    assert first["url"] == second["url"]
+
+
+def test_store_separate_users_keep_distinct_rows(tmp_path):
+    """Dedup is scoped to the owner: two users storing identical content each
+    keep their own ownership row."""
+    repo = _Repo()
+    svc = ChatImageStorageService(
+        repo, storage_root=str(tmp_path / "chat_images"), max_bytes=1024
+    )
+    raw = b"\x89PNG\r\n\x1a\n" + b"q" * 32
+    b64 = base64.b64encode(raw).decode()
+    conv = uuid4()
+
+    svc.store(conversation_id=conv, user_id=uuid4(), mime="image/png", data_b64=b64, name="a")
+    svc.store(conversation_id=conv, user_id=uuid4(), mime="image/png", data_b64=b64, name="a")
+
+    assert len(repo.created) == 2

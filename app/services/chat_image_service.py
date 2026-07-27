@@ -46,6 +46,17 @@ class ChatImageStorageService:
 
         sha = hashlib.sha256(raw).hexdigest()
         content_type = mime if mime.startswith("image/") else "image/png"
+
+        # Idempotent at the ownership-row level on (user_id, sha256): a resumed
+        # run (or any retry) that re-persists identical content reuses the
+        # existing row instead of inserting a duplicate. The bytes are already
+        # content-addressed on disk, so this keeps the DB row model consistent
+        # with the deduplicated files. Scoped to the owner so the per-user read
+        # endpoint's ownership guarantees are preserved.
+        existing = self._existing_reference_for(user_id=user_id, sha=sha, name=name)
+        if existing is not None:
+            return existing
+
         rel_path = self._write_content_addressed(sha, content_type, raw)
 
         record = self.repository.create(
@@ -60,6 +71,24 @@ class ChatImageStorageService:
             }
         )
         image_id = record["id"] if isinstance(record, dict) else record.id
+        return {
+            "name": name or "image",
+            "mime": content_type,
+            "image_id": str(image_id),
+            "url": f"{CHAT_IMAGE_URL_PREFIX}{image_id}",
+            "content_hash": sha,
+        }
+
+    def _existing_reference_for(
+        self, *, user_id: UUID, sha: str, name: str
+    ) -> dict[str, str] | None:
+        existing = self.repository.get_by_user_and_sha(user_id, sha)
+        if existing is None:
+            return None
+        image_id = existing["id"] if isinstance(existing, dict) else existing.id
+        content_type = (
+            existing["content_type"] if isinstance(existing, dict) else existing.content_type
+        )
         return {
             "name": name or "image",
             "mime": content_type,
