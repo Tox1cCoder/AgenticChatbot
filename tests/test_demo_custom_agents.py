@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import sys
 import types
 from typing import Any
@@ -149,6 +150,47 @@ def test_custom_agent_edit_defaults_include_current_tools_and_skills(monkeypatch
         demo._custom_agent_tool_option_key(client_tool),
     ]
     assert selected_skill_keys == [("server", "data-analysis")]
+
+
+def test_custom_agent_reasoning_options_follow_selected_model(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    options = {
+        "providers": [
+            {
+                "provider_type": "gemini",
+                "models": [
+                    {
+                        "id": "gemini-3.6-flash",
+                        "reasoning_control": {
+                            "display_label": "Thinking level",
+                            "levels": ["minimal", "low", "medium", "high"],
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+
+    assert demo._custom_agent_reasoning_options(options, "gemini", "gemini-3.6-flash") == (
+        "Thinking level",
+        [None, "minimal", "low", "medium", "high"],
+    )
+
+
+def test_custom_agent_unknown_model_is_default_only(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    assert demo._custom_agent_reasoning_options({"providers": []}, "gemini", "custom-model") == (
+        "Reasoning",
+        [None],
+    )
+
+
+def test_custom_agent_create_and_edit_submit_live_reasoning(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    source = inspect.getsource(demo.render_custom_agents_manager)
+
+    assert source.count('"reasoning_effort"') >= 2
+    assert source.index('key="ca_new_model"') < source.index('st.form("create_custom_agent_form"')
 
 
 def test_build_tool_refs_expands_selected_mcp_server_to_all_server_tools(monkeypatch):

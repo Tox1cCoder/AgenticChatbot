@@ -375,6 +375,29 @@ def test_update_applies_live_config(env):
     assert env.service.get_agent(env.owner_id, created.id).prompt == "Updated prompt"
 
 
+def test_create_update_and_clear_reasoning_effort(env):
+    created = env.service.create_agent(
+        env.owner_id,
+        _payload(reasoning_effort="high"),
+    )
+    assert created.reasoning_effort == "high"
+
+    updated = env.service.update_agent(
+        env.owner_id,
+        created.id,
+        CustomAgentUpdate(reasoning_effort="low"),
+    )
+    assert updated.reasoning_effort == "low"
+
+    cleared = env.service.update_agent(
+        env.owner_id,
+        created.id,
+        CustomAgentUpdate(reasoning_effort=None),
+    )
+    assert cleared.reasoning_effort is None
+    assert env.service.get_agent(env.owner_id, created.id).reasoning_effort is None
+
+
 def test_update_rejects_invalid_model(env):
     created = env.service.create_agent(env.owner_id, _payload())
     with pytest.raises(CustomAgentValidationError):

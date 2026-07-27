@@ -1268,7 +1268,7 @@ def set_conversation_custom_agents(
 def _provider_model_options(options: dict[str, Any]) -> dict[str, list[str]]:
     providers: dict[str, list[str]] = {}
     for entry in options.get("providers") or []:
-        provider_type = entry.get("provider_type")
+        provider_type = entry.get("provider_type") or entry.get("providerType")
         if not provider_type:
             continue
         models = [
@@ -1278,6 +1278,24 @@ def _provider_model_options(options: dict[str, Any]) -> dict[str, list[str]]:
         ]
         providers[provider_type] = models
     return providers
+
+
+def _custom_agent_provider_map(
+    options: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    return {
+        str(entry.get("provider_type") or entry.get("providerType") or "").strip(): entry
+        for entry in options.get("providers") or []
+        if isinstance(entry, dict)
+        and str(entry.get("provider_type") or entry.get("providerType") or "").strip()
+    }
+
+
+def _custom_agent_reasoning_options(
+    options: dict[str, Any], provider_type: str, model_id: str
+) -> tuple[str, list[str | None]]:
+    provider = _custom_agent_provider_map(options).get(str(provider_type or "").strip(), {})
+    return _model_reasoning_options(provider, model_id)
 
 
 def render_custom_agents_view() -> None:
@@ -1360,7 +1378,10 @@ def render_custom_agents_manager() -> None:
         st.caption("No custom agents yet. Create one below.")
     for agent in agents:
         with st.expander(agent.get("name", "Custom Agent"), expanded=False):
-            st.caption(f"{agent.get('providerType')} / {agent.get('model')}")
+            agent_provider = str(
+                agent.get("providerType") or agent.get("provider_type") or ""
+            ).strip()
+            st.caption(f"{agent_provider} / {agent.get('model')}")
             edit_name = st.text_input(
                 "Name", value=agent.get("name", ""), key=f"ca_edit_name_{agent['id']}"
             )
@@ -1374,6 +1395,28 @@ def render_custom_agents_manager() -> None:
             )
             edit_model = st.text_input(
                 "Model", value=agent.get("model", ""), key=f"ca_edit_model_{agent['id']}"
+            )
+            reasoning_label, reasoning_options = _custom_agent_reasoning_options(
+                options,
+                agent_provider,
+                edit_model,
+            )
+            reasoning_key = f"ca_edit_reasoning_{agent['id']}"
+            saved_reasoning = agent.get("reasoningEffort")
+            if saved_reasoning is None:
+                saved_reasoning = agent.get("reasoning_effort")
+            if reasoning_key not in st.session_state:
+                st.session_state[reasoning_key] = (
+                    saved_reasoning if saved_reasoning in reasoning_options else None
+                )
+            elif st.session_state.get(reasoning_key) not in reasoning_options:
+                st.session_state[reasoning_key] = None
+            edit_reasoning = st.selectbox(
+                reasoning_label,
+                reasoning_options,
+                key=reasoning_key,
+                format_func=lambda value: "Provider default" if value is None else str(value),
+                help="Values are specific to this provider model.",
             )
             current_tool_refs = agent.get("toolRefs") or agent.get("tool_refs") or []
             current_skill_refs = agent.get("skillRefs") or agent.get("skill_refs") or []
@@ -1442,6 +1485,7 @@ def render_custom_agents_manager() -> None:
                         "description": edit_desc or None,
                         "prompt": edit_prompt,
                         "model": edit_model,
+                        "reasoning_effort": edit_reasoning,
                     }
                     rebuilt_tool_refs = _build_tool_refs(
                         edit_tool_ids,
@@ -1494,6 +1538,28 @@ def render_custom_agents_manager() -> None:
     # which would otherwise leave the model list stale). Matches the Models tab.
     provider_type = st.selectbox("Provider", provider_names, key="ca_new_provider")
     model_choices = providers.get(provider_type, [])
+    if model_choices:
+        current_model = str(st.session_state.get("ca_new_model") or "").strip()
+        if current_model not in model_choices:
+            st.session_state.ca_new_model = model_choices[0]
+        model = st.selectbox("Model", model_choices, key="ca_new_model")
+    else:
+        model = st.text_input("Model", key="ca_new_model_text")
+
+    reasoning_label, reasoning_options = _custom_agent_reasoning_options(
+        options,
+        provider_type,
+        model,
+    )
+    if st.session_state.get("ca_new_reasoning") not in reasoning_options:
+        st.session_state.ca_new_reasoning = None
+    reasoning_effort = st.selectbox(
+        reasoning_label,
+        reasoning_options,
+        key="ca_new_reasoning",
+        format_func=lambda value: "Provider default" if value is None else str(value),
+        help="Values are specific to the selected provider model.",
+    )
     # The server-group selector lives OUTSIDE the form (like Provider): st.form
     # defers reruns until submit, but the individual-tool list must drop a
     # server's tools the moment that whole server is selected.
@@ -1511,13 +1577,6 @@ def render_custom_agents_manager() -> None:
         name = st.text_input("Name", key="ca_new_name")
         description = st.text_input("Description", key="ca_new_desc")
         prompt = st.text_area("System prompt", key="ca_new_prompt")
-        # No persistent key on Model: options change with Provider, and a stale
-        # stored selection would raise "value not in options" on switch.
-        model = (
-            st.selectbox("Model", model_choices)
-            if model_choices
-            else st.text_input("Model", key="ca_new_model_text")
-        )
         temperature = st.slider("Temperature", 0.0, 2.0, 1.0, 0.1, key="ca_new_temp")
         selected_tool_ids = st.multiselect(
             "Individual tools",
@@ -1548,6 +1607,7 @@ def render_custom_agents_manager() -> None:
                 "provider_type": provider_type,
                 "model": model,
                 "temperature": temperature,
+                "reasoning_effort": reasoning_effort,
                 "tool_refs": tool_refs,
                 "skill_refs": skill_refs,
             }
@@ -4147,9 +4207,7 @@ def get_mcp_tools(server_name: str | None = None) -> dict[str, Any] | None:
     server segment (no raw string concatenation of the name into the URL). The
     response carries an explicit ``scope`` and ``catalogVersion``.
     """
-    endpoint = (
-        f"/mcp/servers/{quote(server_name, safe='')}/tools" if server_name else "/mcp/tools"
-    )
+    endpoint = f"/mcp/servers/{quote(server_name, safe='')}/tools" if server_name else "/mcp/tools"
     response = make_api_request("GET", endpoint)
     return response.get("data") if response else None
 
