@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Populate Streamlit's reasoning selector with model-compatible provider-native levels for exact models and safe family aliases, while keeping unknown models default-only.
+**Goal:** Populate primary-agent and custom-agent Streamlit reasoning selectors with model-compatible provider-native levels for exact models and safe family aliases, while keeping unknown models default-only.
 
-**Architecture:** Extend the backend reasoning registry, which already enriches provider catalogs and validates saved values, rather than duplicating compatibility logic in Streamlit. Add one Gemini transport helper so named Gemini 2.5 levels are converted to the documented `thinking_budget` used by the current generateContent client; Gemini 3 and OpenAI values remain unchanged.
+**Architecture:** Extend the backend reasoning registry, which already enriches provider catalogs and validates saved values, rather than duplicating compatibility logic in Streamlit. Both the Models page and custom-agent editor consume the enriched catalog descriptor. Add one Gemini transport helper so named Gemini 2.5 levels are converted to the documented `thinking_budget` used by the current generateContent client; Gemini 3 and OpenAI values remain unchanged.
 
 **Tech Stack:** Python 3.11+, FastAPI, Pydantic v2, Streamlit, LangChain Google GenAI/OpenAI, pytest, Ruff
 
@@ -173,7 +173,155 @@ git add app/ai/reasoning_controls.py app/ai/agent_config.py tests/test_reasoning
 git commit -m "fix: apply compatible Gemini reasoning controls"
 ```
 
-### Task 3: Verify the Streamlit contract and refresh the running services
+### Task 3: Add reasoning controls to custom-agent create and edit
+
+**Files:**
+- Modify: `demo.py`
+- Modify: `tests/test_demo_custom_agents.py`
+- Modify: `tests/test_custom_agents_service.py`
+
+- [ ] **Step 1: Write failing custom-agent catalog and payload tests**
+
+Add pure helper tests to `tests/test_demo_custom_agents.py`:
+
+```python
+def test_custom_agent_reasoning_options_follow_selected_model(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    options = {
+        "providers": [
+            {
+                "provider_type": "gemini",
+                "models": [
+                    {
+                        "id": "gemini-3.6-flash",
+                        "reasoning_control": {
+                            "display_label": "Thinking level",
+                            "levels": ["minimal", "low", "medium", "high"],
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+    assert demo._custom_agent_reasoning_options(
+        options, "gemini", "gemini-3.6-flash"
+    ) == ("Thinking level", [None, "minimal", "low", "medium", "high"])
+
+
+def test_custom_agent_unknown_model_is_default_only(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    assert demo._custom_agent_reasoning_options(
+        {"providers": []}, "gemini", "custom-model"
+    ) == ("Reasoning", [None])
+```
+
+Add an AST/source contract test for `render_custom_agents_manager` asserting
+that both the edit body and create body contain `"reasoning_effort"`, and that
+the custom-agent creation model selector is rendered before
+`st.form("create_custom_agent_form"...)` so a model change can rerun and refresh
+the compatible list.
+
+Add service tests to `tests/test_custom_agents_service.py` that create an agent
+with `reasoning_effort="high"`, update it to `"low"`, and explicitly update it
+to `None`. Assert the fake `validate_provider_model` receives the value and the
+stored/read model preserves or clears it respectively.
+
+- [ ] **Step 2: Run the tests and verify the UI failures**
+
+```powershell
+& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_demo_custom_agents.py tests/test_custom_agents_service.py -q
+```
+
+Expected: helper/import and UI source-contract failures show that Streamlit
+does not expose or submit custom-agent reasoning yet. Existing backend service
+plumbing may already satisfy some persistence assertions.
+
+- [ ] **Step 3: Preserve full provider snapshots for custom-agent controls**
+
+Add these helpers near `_provider_model_options` in `demo.py`:
+
+```python
+def _custom_agent_provider_map(options: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(entry.get("provider_type") or entry.get("providerType") or "").strip(): entry
+        for entry in options.get("providers") or []
+        if isinstance(entry, dict)
+    }
+
+
+def _custom_agent_reasoning_options(
+    options: dict[str, Any], provider_type: str, model_id: str
+) -> tuple[str, list[str | None]]:
+    provider = _custom_agent_provider_map(options).get(provider_type, {})
+    return _model_reasoning_options(provider, model_id)
+```
+
+Keep `_provider_model_options` for existing model-ID callers, but derive both
+helpers from the same `providers` payload returned by `/custom-agents/options`.
+Do not add model IDs or level names to `demo.py`.
+
+- [ ] **Step 4: Add a model-aware reasoning selector to existing-agent editing**
+
+After `edit_model` is rendered, compute the label/options with
+`_custom_agent_reasoning_options(options, agent["providerType"], edit_model)`.
+Initialize `ca_edit_reasoning_<id>` from
+`agent["reasoningEffort"]`/`agent["reasoning_effort"]`; if the stored value is
+not compatible with the currently typed model, set it to `None` before creating
+the widget. Render:
+
+```python
+edit_reasoning = st.selectbox(
+    reasoning_label,
+    reasoning_options,
+    key=f"ca_edit_reasoning_{agent['id']}",
+    format_func=lambda value: "Provider default" if value is None else str(value),
+    help="Values are specific to this provider model.",
+)
+```
+
+Include `"reasoning_effort": edit_reasoning` in the update body. Sending an
+explicit `None` is required so an existing override can be cleared.
+
+- [ ] **Step 5: Add live model and reasoning selectors to custom-agent creation**
+
+Keep the Provider selector outside the form. Move the catalog Model selector
+outside the form as well, give it key `ca_new_model`, and normalize its session
+value before rendering whenever Provider changes. Immediately render the
+reasoning selector from the chosen provider/model:
+
+```python
+reasoning_label, reasoning_options = _custom_agent_reasoning_options(
+    options, provider_type, model
+)
+if st.session_state.get("ca_new_reasoning") not in reasoning_options:
+    st.session_state.ca_new_reasoning = None
+reasoning_effort = st.selectbox(
+    reasoning_label,
+    reasoning_options,
+    key="ca_new_reasoning",
+    format_func=lambda value: "Provider default" if value is None else str(value),
+)
+```
+
+Leave name, description, prompt, temperature, tools, skills, and the Create
+submit button inside the existing form. Include
+`"reasoning_effort": reasoning_effort` in the create body.
+
+- [ ] **Step 6: Run custom-agent tests**
+
+Run the Step 2 command again.
+
+Expected: all tests pass; create, edit, and clear operations use the selected
+provider-native value.
+
+- [ ] **Step 7: Commit custom-agent reasoning editing**
+
+```powershell
+git add demo.py tests/test_demo_custom_agents.py tests/test_custom_agents_service.py
+git commit -m "feat: edit custom agent reasoning controls"
+```
+
+### Task 4: Verify the Streamlit contract and refresh the running services
 
 **Files:**
 - Modify: `tests/test_demo_model_reasoning_controls.py`
@@ -221,7 +369,7 @@ Run:
 & 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_demo_model_reasoning_controls.py tests/test_provider_reasoning_metadata.py -q
 ```
 
-Expected after Tasks 1-2: PASS without adding a second compatibility table to
+Expected after Tasks 1-3: PASS without adding a second compatibility table to
 `demo.py`. If it fails because `_model_reasoning_options` drops the serialized
 descriptor, first add a failing helper-only assertion for that exact shape,
 then change only `_model_reasoning_options`; do not hardcode model names in
@@ -230,9 +378,9 @@ Streamlit.
 - [ ] **Step 3: Run formatting and the complete focused suite**
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m ruff check app/ai/reasoning_controls.py app/ai/agent_config.py demo.py tests/test_reasoning_controls.py tests/test_provider_reasoning_metadata.py tests/test_runtime_model_overrides.py tests/test_demo_model_reasoning_controls.py
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m ruff format --check app/ai/reasoning_controls.py app/ai/agent_config.py demo.py tests/test_reasoning_controls.py tests/test_provider_reasoning_metadata.py tests/test_runtime_model_overrides.py tests/test_demo_model_reasoning_controls.py
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_reasoning_controls.py tests/test_provider_reasoning_metadata.py tests/test_model_config_reasoning.py tests/test_runtime_model_overrides.py tests/test_demo_model_reasoning_controls.py tests/test_demo_usage_dashboard.py -q
+& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m ruff check app/ai/reasoning_controls.py app/ai/agent_config.py demo.py tests/test_reasoning_controls.py tests/test_provider_reasoning_metadata.py tests/test_runtime_model_overrides.py tests/test_demo_model_reasoning_controls.py tests/test_demo_custom_agents.py tests/test_custom_agents_service.py
+& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m ruff format --check app/ai/reasoning_controls.py app/ai/agent_config.py demo.py tests/test_reasoning_controls.py tests/test_provider_reasoning_metadata.py tests/test_runtime_model_overrides.py tests/test_demo_model_reasoning_controls.py tests/test_demo_custom_agents.py tests/test_custom_agents_service.py
+& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_reasoning_controls.py tests/test_provider_reasoning_metadata.py tests/test_model_config_reasoning.py tests/test_runtime_model_overrides.py tests/test_demo_model_reasoning_controls.py tests/test_demo_custom_agents.py tests/test_custom_agents_service.py tests/test_demo_usage_dashboard.py -q
 ```
 
 Expected: Ruff exits zero and all selected tests pass.
