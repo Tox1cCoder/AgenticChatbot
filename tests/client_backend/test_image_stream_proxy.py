@@ -58,6 +58,7 @@ from fastapi.testclient import TestClient
 from app.core.container import Container
 from client_backend.api import common as common_api
 from client_backend.api import messages as messages_api
+from client_backend.core import auth as client_auth
 from client_backend.core.auth import require_local_session
 from client_backend.core.security import LocalSessionPayload
 from client_backend.main import create_app
@@ -164,11 +165,58 @@ class _BridgeStub:
         return "device-1"
 
 
+class _FakeMediaResponse:
+    """Minimal stand-in for the upstream ``httpx.Response`` of a media read.
+
+    Exposes only the surface the sidecar media proxy consumes: a status code,
+    a header mapping, and a chunked ``aiter_bytes`` body — so the proxy streams
+    rather than buffering the whole payload.
+    """
+
+    def __init__(
+        self,
+        *,
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+        chunks: list[bytes] | None = None,
+    ):
+        self.status_code = status_code
+        self.headers = headers if headers is not None else {"content-type": "image/png"}
+        self._chunks = chunks if chunks is not None else [b"image-bytes"]
+
+    async def aiter_bytes(self):
+        for chunk in self._chunks:
+            yield chunk
+
+
+class _FakeMediaStream:
+    """Async context manager the fake upstream client returns for a media read.
+
+    Records ``__aexit__`` so a test can prove the upstream stream is closed on
+    cancellation or early error (no dangling upstream connection / no leak).
+    """
+
+    def __init__(self, response: _FakeMediaResponse):
+        self._response = response
+        self.entered = False
+        self.exited = False
+
+    async def __aenter__(self) -> _FakeMediaResponse:
+        self.entered = True
+        return self._response
+
+    async def __aexit__(self, *exc) -> bool:
+        self.exited = True
+        return False
+
+
 class _FakeServerClient:
     def __init__(self, events: list[dict]):
         self._events = events
         self.ai_sdk_calls: list[tuple[str, dict]] = []
         self.internal_calls: list[dict] = []
+        self.media_calls: list[tuple[str, str]] = []
+        self.last_media_stream: _FakeMediaStream | None = None
 
     async def stream_ai_sdk_chat(self, conversation_id: str, payload: dict):
         self.ai_sdk_calls.append((conversation_id, payload))
@@ -179,6 +227,46 @@ class _FakeServerClient:
         self.internal_calls.append(payload)
         for event in self._events:
             yield event
+
+    def stream_media(self, path: str, *, method: str = "GET", headers: dict | None = None):
+        # Default: a proxied 200 read so route-existence checks see a non-404
+        # without any real network. Dedicated media tests use _FakeMediaClient
+        # for precise status/header/chunk control.
+        self.media_calls.append((method, path))
+        stream = _FakeMediaStream(_FakeMediaResponse())
+        self.last_media_stream = stream
+        return stream
+
+
+class _FakeMediaClient:
+    """Upstream client stub exposing only the media streaming seam, with full
+    control over the upstream status, headers, and body chunks."""
+
+    def __init__(self, response: _FakeMediaResponse):
+        self._response = response
+        self.requested: list[tuple[str, str]] = []
+        self.stream: _FakeMediaStream | None = None
+
+    def stream_media(self, path: str, *, method: str = "GET", headers: dict | None = None):
+        self.requested.append((method, path))
+        self.stream = _FakeMediaStream(self._response)
+        return self.stream
+
+
+class _UnauthedAuthStub:
+    """Upstream auth service with no active session (rejects every session)."""
+
+    def is_authenticated(self) -> bool:
+        return False
+
+    def get_current_user_id(self):
+        return None
+
+    def get_current_access_token(self):
+        return None
+
+    async def restore_session(self, _user_id: str) -> bool:
+        return False
 
 
 def _session() -> LocalSessionPayload:
@@ -203,6 +291,7 @@ def _sidecar_app_with_server_client(monkeypatch, server_client) -> TestClient:
     monkeypatch.setattr(messages_api, "get_upstream_auth_service", lambda: _AuthStub())
     monkeypatch.setattr(messages_api, "get_runtime_bridge", lambda: _BridgeStub())
     monkeypatch.setattr(common_api, "get_runtime_bridge", lambda: _BridgeStub())
+    monkeypatch.setattr(common_api, "get_server_client", lambda: server_client)
     app = create_app()
     app.dependency_overrides[require_local_session] = lambda: _session()
     return TestClient(app)
@@ -414,17 +503,22 @@ def test_internal_sse_proxy_delivers_oversized_final_image_early_by_reference(mo
     )
 
     # Companion of test_sidecar_exposes_chat_image_read_route: through this
-    # same internal-SSE path, the streamed protected reference is unusable
-    # because the sidecar has no /chat-images route (plan T004).
+    # same internal-SSE path, the streamed protected reference is now fetchable
+    # because plan T004 added the sidecar /chat-images media proxy. The route
+    # forwards the credentialed upstream read, so the reference no longer 404s
+    # at the local origin.
     image_resp = client.get(
         image_url,
         headers={"Authorization": "Bearer local-session-token"},
     )
-    assert image_resp.status_code == 404, (
-        "DEFECT (client_backend has no /chat-images route or proxy - plan T004): "
-        f"GET {image_url} through the sidecar was expected to 404 (no media "
-        f"route exists yet) but returned {image_resp.status_code}; if a route "
-        "now exists, test_sidecar_exposes_chat_image_read_route should also flip."
+    assert image_resp.status_code != 404, (
+        "The sidecar /chat-images media proxy (plan T004) must let a streamed "
+        f"protected reference be fetched through port 8100; GET {image_url} "
+        f"returned {image_resp.status_code}."
+    )
+    assert fake.media_calls == [("GET", image_url)], (
+        "the sidecar media route must proxy the exact upstream chat-image path; "
+        f"media_calls={fake.media_calls}"
     )
 
     # Characterized defect: oversized final is dropped upstream -> no early
@@ -464,3 +558,166 @@ def test_sidecar_exposes_chat_image_read_route(monkeypatch, path_prefix):
         "reference cannot be fetched through the local origin (port 8100). "
         f"status_code={resp.status_code}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Protected media read route — behavioural contracts (plan T004)
+# ---------------------------------------------------------------------------
+
+
+def _media_sidecar(monkeypatch, response: _FakeMediaResponse, *, authed: bool = True):
+    """Build the sidecar wired to a fake upstream media client.
+
+    When ``authed`` is True the local-session gate is satisfied so the route
+    body runs; when False the real ``require_local_session`` gate stays in
+    place (with an unauthenticated upstream auth service) so its 401 semantics
+    can be exercised.
+    """
+    fake = _FakeMediaClient(response)
+    monkeypatch.setattr(common_api, "get_server_client", lambda: fake)
+    monkeypatch.setattr(client_auth, "get_upstream_auth_service", lambda: _UnauthedAuthStub())
+    app = create_app()
+    if authed:
+        app.dependency_overrides[require_local_session] = lambda: _session()
+    return TestClient(app), fake
+
+
+def test_media_route_streams_owner_image_with_mime_and_cache_headers(monkeypatch):
+    """Owner success: the route streams the upstream bytes, preserves the exact
+    upstream content-type, forwards cache validators, and stamps hardening
+    headers (nosniff + a restrictive CSP)."""
+    response = _FakeMediaResponse(
+        status_code=200,
+        headers={
+            "content-type": "image/webp",
+            "etag": '"v1-abc"',
+            "last-modified": "Wed, 23 Jul 2026 10:00:00 GMT",
+            "cache-control": "private, max-age=60",
+        },
+        chunks=[b"WEBP-", b"chunk-", b"tail"],
+    )
+    client, fake = _media_sidecar(monkeypatch, response)
+    image_id = uuid4()
+
+    resp = client.get(f"/chat-images/{image_id}", headers={"Authorization": "Bearer x"})
+
+    assert resp.status_code == 200
+    assert resp.content == b"WEBP-chunk-tail"
+    assert resp.headers["content-type"] == "image/webp"
+    assert resp.headers["etag"] == '"v1-abc"'
+    assert resp.headers["last-modified"] == "Wed, 23 Jul 2026 10:00:00 GMT"
+    assert resp.headers["cache-control"] == "private, max-age=60"
+    assert resp.headers["x-content-type-options"] == "nosniff"
+    assert "content-security-policy" in resp.headers
+    assert fake.requested == [("GET", f"/chat-images/{image_id}")]
+
+
+def test_media_route_other_user_gets_404_without_existence_leak(monkeypatch):
+    """Attacker direction: the canonical server scopes reads per user and 404s
+    another user's image. The sidecar must forward the 404 and NEVER leak the
+    upstream body / internal storage path (no existence oracle)."""
+    response = _FakeMediaResponse(
+        status_code=404,
+        headers={"content-type": "application/json"},
+        chunks=[b'{"detail":"/srv/app/var/storage/chat_images/other-user-secret.png missing"}'],
+    )
+    client, _fake = _media_sidecar(monkeypatch, response)
+
+    resp = client.get(f"/chat-images/{uuid4()}", headers={"Authorization": "Bearer x"})
+
+    assert resp.status_code == 404
+    body = resp.text
+    assert "/srv/" not in body and "storage" not in body, (
+        f"upstream internal path must not leak to the caller; body={body!r}"
+    )
+    assert resp.json()["detail"] == "Image not found"
+
+
+def test_media_route_missing_token_is_401_and_never_contacts_upstream(monkeypatch):
+    """A caller with no local session token is rejected by the sidecar gate
+    BEFORE any upstream fetch — so an unauthenticated caller cannot even probe
+    whether an image id exists."""
+    fake = _FakeMediaClient(_FakeMediaResponse())
+    monkeypatch.setattr(common_api, "get_server_client", lambda: fake)
+    monkeypatch.setattr(client_auth, "get_upstream_auth_service", lambda: _UnauthedAuthStub())
+    client = TestClient(create_app())
+
+    resp = client.get(f"/chat-images/{uuid4()}")
+
+    assert resp.status_code == 401
+    assert fake.stream is None, "upstream must not be contacted for an unauthenticated read"
+
+
+def test_media_route_invalid_bearer_is_401_and_never_contacts_upstream(monkeypatch):
+    """A bogus (non-session, non-JWT) bearer with no active upstream session is
+    rejected without contacting upstream."""
+    fake = _FakeMediaClient(_FakeMediaResponse())
+    monkeypatch.setattr(common_api, "get_server_client", lambda: fake)
+    monkeypatch.setattr(client_auth, "get_upstream_auth_service", lambda: _UnauthedAuthStub())
+    client = TestClient(create_app())
+
+    resp = client.get(
+        f"/chat-images/{uuid4()}",
+        headers={"Authorization": "Bearer not-a-valid-session-token"},
+    )
+
+    assert resp.status_code == 401
+    assert fake.stream is None, "upstream must not be contacted for an invalid session token"
+
+
+async def test_media_route_cancellation_closes_upstream_stream(monkeypatch):
+    """Consumer disconnect mid-stream: closing the response body iterator (what
+    Starlette does when the client goes away) must close the upstream stream so
+    no upstream connection is leaked."""
+    response = _FakeMediaResponse(
+        status_code=200,
+        headers={"content-type": "image/png"},
+        chunks=[b"a", b"b", b"c", b"d"],
+    )
+    fake = _FakeMediaClient(response)
+    monkeypatch.setattr(common_api, "get_server_client", lambda: fake)
+
+    streaming = await common_api.proxy_media_request(upstream_path="/chat-images/abc")
+    body = streaming.body_iterator
+    first = await body.__anext__()
+    assert first == b"a"
+    assert fake.stream.exited is False
+
+    await body.aclose()  # simulate consumer disconnect before the body drains
+
+    assert fake.stream.exited is True, "upstream media stream must be closed on cancellation"
+
+
+def test_media_route_payload_at_configured_maximum_succeeds(monkeypatch):
+    """A body whose declared length is exactly the configured maximum streams
+    through unchanged — the size guard rejects only what EXCEEDS the max."""
+    monkeypatch.setattr(common_api, "MAX_MEDIA_PROXY_BYTES", 8)
+    body = b"01234567"  # exactly 8 bytes
+    response = _FakeMediaResponse(
+        status_code=200,
+        headers={"content-type": "image/png", "content-length": "8"},
+        chunks=[body],
+    )
+    client, _fake = _media_sidecar(monkeypatch, response)
+
+    resp = client.get(f"/chat-images/{uuid4()}", headers={"Authorization": "Bearer x"})
+
+    assert resp.status_code == 200
+    assert resp.content == body
+
+
+def test_media_route_payload_over_configured_maximum_is_413(monkeypatch):
+    """A declared length over the configured maximum is rejected with 413
+    without draining the oversized body (the upstream stream is closed)."""
+    monkeypatch.setattr(common_api, "MAX_MEDIA_PROXY_BYTES", 8)
+    response = _FakeMediaResponse(
+        status_code=200,
+        headers={"content-type": "image/png", "content-length": "9"},
+        chunks=[b"012345678"],
+    )
+    client, fake = _media_sidecar(monkeypatch, response)
+
+    resp = client.get(f"/chat-images/{uuid4()}", headers={"Authorization": "Bearer x"})
+
+    assert resp.status_code == 413
+    assert fake.stream.exited is True, "oversized upstream stream must be closed, not drained"

@@ -369,6 +369,48 @@ class ServerAPIClient:
                 "SSE stream read timeout on %s (this should not happen with read=None)", path
             )
 
+    @contextlib.asynccontextmanager
+    async def stream_media(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        headers: dict[str, str] | None = None,
+    ) -> AsyncIterator[httpx.Response]:
+        """Open an authenticated streaming response to an upstream binary route.
+
+        Yields the live ``httpx.Response`` so the caller can forward the status,
+        headers, and body chunks without buffering the whole payload into memory.
+        The response context stays open for the duration of the ``async with``
+        block (and any body iteration inside it) and is torn down on exit.
+        """
+        client = await self._get_client()
+        request_headers = self._get_auth_headers()
+        if headers:
+            request_headers.update(headers)
+
+        # Bounded connect/write, unbounded read: a large image body may take a
+        # while to arrive, but the sidecar must never hang forever on a dead peer.
+        stream_timeout = httpx.Timeout(
+            connect=min(self.timeout, 30),
+            read=None,
+            write=min(self.timeout, 30),
+            pool=min(self.timeout, 30),
+        )
+
+        try:
+            async with client.stream(
+                method,
+                path,
+                headers=request_headers,
+                timeout=stream_timeout,
+            ) as response:
+                yield response
+        except httpx.ConnectError as e:
+            raise ServerConnectionError(f"Cannot connect to server at {self.base_url}: {e}") from e
+        except httpx.TimeoutException as e:
+            raise ServerConnectionError(f"Server request timed out: {e}") from e
+
     # ── Authentication Methods ──────────────────────────────────────────
 
     async def login(self, email: str, password: str) -> TokenPair:

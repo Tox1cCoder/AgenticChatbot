@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from client_backend import __version__
 from client_backend.api.auth import router as auth_router
+from client_backend.api.chat_images import router as chat_images_router
 from client_backend.api.conversations import router as conversations_router
 from client_backend.api.documents import router as documents_router
 from client_backend.api.health import router as health_router
@@ -92,6 +93,7 @@ def create_app() -> FastAPI:
         runtime_router,
         mcp_router,
         skills_router,
+        chat_images_router,
         proxy_router,
     ]
 

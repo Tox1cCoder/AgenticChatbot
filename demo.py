@@ -5037,6 +5037,40 @@ def _fetch_chat_image_data_uri(relative_url: str, auth_token: str | None) -> str
     return f"data:{mime};base64,{encoded}"
 
 
+def _resolve_displayable_image_src(
+    url: Any = None,
+    data: Any = None,
+    mime: str | None = None,
+) -> str | None:
+    """Return a browser-displayable image ``src`` for an image reference.
+
+    The single authenticated image resolver shared by live-stream, finalized,
+    and history rendering. A protected relative ``/chat-images/<id>`` reference
+    is pulled server-side with the app Bearer token and inlined as a ``data:``
+    URI, because a browser cannot attach that token to a bare ``<img src>``.
+    Absolute and ``data:`` URLs pass through unchanged. Falls back to inline
+    base64 ``data`` when the reference cannot be fetched. Returns ``None`` when
+    nothing displayable is available.
+    """
+    if isinstance(url, str) and url.strip():
+        candidate = url.strip()
+        if candidate.startswith("/"):
+            resolved = _fetch_chat_image_data_uri(candidate, st.session_state.get("auth_token"))
+            if resolved:
+                return resolved
+            # Fall through to any inline data before giving up.
+        else:
+            return candidate
+
+    if isinstance(data, str) and data.strip():
+        payload = data.strip()
+        if payload.startswith("data:"):
+            return payload
+        return f"data:{mime or 'image/png'};base64,{payload}"
+
+    return None
+
+
 def _normalize_image_for_gallery(image: Any, fallback_name: str) -> dict[str, str] | None:
     """Extract `{src, name}` from an attachment-style dict.
 
@@ -5048,26 +5082,13 @@ def _normalize_image_for_gallery(image: Any, fallback_name: str) -> dict[str, st
         return None
 
     name = image.get("name") or image.get("description") or image.get("caption") or fallback_name
-
-    url_value = image.get("url")
-    if isinstance(url_value, str) and url_value.strip():
-        url_value = url_value.strip()
-        if url_value.startswith("/"):
-            resolved = _fetch_chat_image_data_uri(url_value, st.session_state.get("auth_token"))
-            if resolved:
-                return {"src": resolved, "name": name}
-            # Fall through to any legacy inline data before giving up.
-        else:
-            return {"src": url_value, "name": name}
-
-    data_b64 = image.get("data") or image.get("b64_data")
-    if isinstance(data_b64, str) and data_b64.strip():
-        payload = data_b64.strip()
-        if payload.startswith("data:"):
-            return {"src": payload, "name": name}
-        mime = image.get("mime") or image.get("mime_type") or "image/png"
-        return {"src": f"data:{mime};base64,{payload}", "name": name}
-
+    src = _resolve_displayable_image_src(
+        image.get("url"),
+        image.get("data") or image.get("b64_data"),
+        image.get("mime") or image.get("mime_type") or "image/png",
+    )
+    if src:
+        return {"src": src, "name": name}
     return None
 
 
@@ -7398,9 +7419,13 @@ class _StreamingRichResponseRenderer:
 class _StreamingImagePreviewPanel:
     """Render early-delivery `image_preview` events during an active stream.
 
-    Keeps the latest payload per image index; a partial preview is replaced by
-    the next partial/final for the same index. `clear()` runs at `complete` —
-    the finalized message owns the authoritative image rendering.
+    Consumes the schema-v2 ``delivery`` union (inline data URL or protected
+    reference), with v1 read-compat, and keeps the latest delivery per image
+    index — a partial is replaced in place by the next partial/final for the
+    same index. `finalize()` runs at `complete`: transient partial/skipped
+    previews are dropped, but a FINAL image delivered by protected reference
+    stays visible so the completed turn never blanks the image while the
+    finalized message re-renders it from history.
     """
 
     def __init__(self, placeholder: Any) -> None:
@@ -7408,30 +7433,58 @@ class _StreamingImagePreviewPanel:
         self._by_index: dict[int, dict[str, Any]] = {}
 
     def apply(self, event: dict[str, Any]) -> None:
-        data_b64 = event.get("data_b64")
-        image_index = event.get("image_index")
-        if not data_b64 or not isinstance(image_index, int):
+        from app.services.event_streaming.events import resolve_image_preview_delivery
+
+        resolved = resolve_image_preview_delivery(event)
+        image_index = resolved.get("image_index")
+        if not isinstance(image_index, int) or not resolved.get("url"):
             return
-        self._by_index[image_index] = event
+        self._by_index[image_index] = resolved
         self._render()
 
     def _render(self) -> None:
         with self.placeholder.container():
             for index in sorted(self._by_index):
-                event = self._by_index[index]
-                try:
-                    raw = base64.b64decode(event.get("data_b64") or "")
-                except Exception:
+                raw = self._entry_bytes(self._by_index[index])
+                if raw is None:
                     continue
                 caption = (
-                    "Generating image... (preview)"
-                    if event.get("status") == "partial"
-                    else "Generated image"
+                    "Generated image"
+                    if self._by_index[index].get("status") == "final"
+                    else "Generating image... (preview)"
                 )
                 st.image(raw, caption=caption)
 
-    def clear(self) -> None:
-        if self._by_index:
+    def _entry_bytes(self, entry: dict[str, Any]) -> bytes | None:
+        # A reference delivery carries a relative /chat-images/<id> URL that the
+        # shared authenticated helper resolves to a data: URI; an inline
+        # delivery already carries a data: URL. Either way, decode to bytes for
+        # st.image (which does not fetch protected relative URLs itself).
+        src = self._entry_data_uri(entry)
+        if not src or not src.startswith("data:") or "," not in src:
+            return None
+        try:
+            return base64.b64decode(src.split(",", 1)[1])
+        except Exception:
+            return None
+
+    @staticmethod
+    def _entry_data_uri(entry: dict[str, Any]) -> str | None:
+        url = entry.get("url")
+        if not isinstance(url, str) or not url:
+            return None
+        if url.startswith("/"):
+            return _fetch_chat_image_data_uri(url, st.session_state.get("auth_token"))
+        return url
+
+    def finalize(self) -> None:
+        finals = {
+            index: entry for index, entry in self._by_index.items() if entry.get("status") == "final"
+        }
+        if finals:
+            self._by_index = finals
+            self._render()
+        elif self._by_index:
             self._by_index = {}
             self.placeholder.empty()
 
@@ -7475,7 +7528,10 @@ def _render_inline_rich_item(
         if alt_text == GENERIC_IMAGE_ALT_TEXT:
             alt_text = None
         caption = item.get("title") or alt_text
-        src = url if url else (f"data:{mime};base64,{data}" if data else None)
+        # A protected relative reference must be resolved through the shared
+        # authenticated fetch helper: a bare /chat-images/<id> in an <img src>
+        # can't carry the app Bearer token, so the browser would 401/404 it.
+        src = _resolve_displayable_image_src(url, data, mime)
         if src:
             # Render at a capped article width without upscaling (st.image
             # width="stretch" blew small images up to full width and blurred
@@ -8975,7 +9031,7 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
                 break
 
             if event_type == "complete":
-                image_preview_panel.clear()
+                image_preview_panel.finalize()
                 stream_renderer.finalize(event.get("message"))
                 status.update(label="Resume completed", state="complete")
                 resume_succeeded = True
@@ -9678,7 +9734,7 @@ def render_chat_view():
                         elif event_type == "complete":
                             # Store final message and complete
                             final_message = event.get("message")
-                            image_preview_panel.clear()
+                            image_preview_panel.finalize()
                             stream_renderer.finalize(final_message)
                             status.update(label="Message sent!", state="complete")
 

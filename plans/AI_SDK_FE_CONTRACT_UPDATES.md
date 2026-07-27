@@ -1,3 +1,45 @@
+# AI_SDK_FE_CONTRACT.md — Contract Updates
+
+## 2026-07-27 (plan T004) — protected media references + consumer renderers
+
+**Status: APPLIED 2026-07-27 — in the contract.** Kept as the audit record;
+do not re-apply.
+
+Since schema-v2 (`build_image_preview_reference_data` /
+`resolve_image_preview_delivery` in `app/services/event_streaming/events.py`),
+a `final` image is delivered by **protected reference** — the AI SDK
+`data-image-preview.data.url` and the terminal `file.url` carry a relative
+`/chat-images/{id}` served by the local origin's authenticated media route
+(new sidecar route `client_backend/api/chat_images.py`, verified by
+`tests/client_backend/test_image_stream_proxy.py`). The prior contract only
+documented the inline `data:` form and gave no consumer guidance for
+credentialed media, so a browser dropping the token onto a bare `<img src>`
+would 401/404 the image.
+
+Applied to `plans/AI_SDK_FE_CONTRACT.md`:
+
+1. **`file` (image) part** (Stream Events) — documents the two `url` forms
+   (protected relative reference vs absolute/`data:`) and requires an
+   authenticated fetch + Blob URL for the relative form.
+2. **`data-image-preview`** (Stream Events) — `data.url` may be a protected
+   relative reference (finals always are); added `preview_skipped` handling
+   and the authenticated-fetch requirement.
+3. **Assistant Images + new "Protected Media Rendering" subsection** — one
+   shared authenticated `resolveImageSrc` helper (used by `file` parts,
+   previews, and history `rich_items`); the `useChat({ onData })` preview
+   handler that fetches reference URLs, builds a Blob URL, replaces by
+   `id`/`seq`, and **revokes stale Blob URLs on replacement / finish /
+   unmount**; the custom terminal `file` renderer for protected relative URLs;
+   and the `401/404/413/5xx` semantics (other-user reads return `404`, no
+   existence oracle, no upstream-path leak).
+4. **Renderer Algorithm** — steps 8–9 reference the shared handler and the
+   terminal `file` renderer with Blob-URL revocation.
+
+The React app is not in this repo; this is a documentation-only specification
+of the required frontend behavior.
+
+---
+
 # AI_SDK_FE_CONTRACT.md — Contract Updates (2026-07-17)
 
 **Status: APPLIED 2026-07-17 — all 5 items are now in the contract.**

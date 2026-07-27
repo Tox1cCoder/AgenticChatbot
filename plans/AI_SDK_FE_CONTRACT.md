@@ -212,8 +212,23 @@ produced a structured render payload (see Tool Artifacts).
 File (image) part:
 
 ```json
+{ "type": "file", "url": "/chat-images/2b3c...", "mediaType": "image/png" }
 { "type": "file", "url": "data:image/png;base64,...", "mediaType": "image/png" }
 ```
+
+`url` is one of two forms:
+
+- A **protected relative reference** (`/chat-images/{id}`) — the durable,
+  per-user delivery for generated/final images. It is served by the local
+  origin's authenticated media route and **requires the app Bearer token**; a
+  browser cannot attach that token to a bare `<img src>`, so a relative `url`
+  MUST be fetched through the authenticated transport (see the custom `file`
+  renderer under Protected Media Rendering) and rendered from a Blob URL. Never
+  place a relative `url` directly into `src`.
+- An absolute `http(s)://…` or `data:` URL — render directly.
+
+Distinguish by prefix: a leading `/` (and not `data:` / `http`) means a
+protected reference that must be fetched with credentials.
 
 User message echo — a wire-safe projection. Database fields
 (`conversation_id`, `sender`, `updated_at`) are never included:
@@ -272,6 +287,11 @@ Image preview (early delivery, independent of the rich-items registry):
   "data": { "imageIndex": 0, "status": "partial", "mediaType": "image/png",
             "url": "data:image/png;base64,...", "seq": 1 },
   "transient": true }
+{ "type": "data-image-preview",
+  "id": "image-preview-0",
+  "data": { "imageIndex": 0, "status": "final", "mediaType": "image/png",
+            "url": "/chat-images/2b3c...", "seq": 2 },
+  "transient": true }
 ```
 
 Emitted per generated image as soon as the provider produces it — before the
@@ -279,11 +299,26 @@ narrative text and the terminal message. `status` is `"partial"` for
 provider progress previews (OpenAI `gpt-image-1`) and `"final"` for the
 completed image (emitted at most once per `imageIndex`). The part `id` is
 stable per image index, so each event replaces the previous preview for that
-index. Previews are ephemeral display state: the authoritative image still
-arrives as `file` parts / `metadata.rich_items` on the final
-`data-assistant-message`, and previews are never persisted to history.
-Disabled server-side via `ENABLE_IMAGE_STREAMING=false`; oversized payloads
-(`IMAGE_STREAM_PREVIEW_MAX_B64_CHARS`) skip the preview.
+index.
+
+`data.url` comes in the same two forms as a `file` part's `url`: an inline
+`data:` URL (transient provider partials) **or** a protected relative
+reference (`/chat-images/{id}`) — a `final` is always delivered by protected
+reference, never inline base64. A relative `url` MUST be fetched through the
+authenticated transport and rendered from a Blob URL exactly like a `file`
+part (see Protected Media Rendering); it cannot be placed directly in `src`.
+
+A `data.status` of `"preview_skipped"` (no `url`) means a transient partial
+exceeded the inline wire budget and was intentionally dropped — show a
+"generating…" affordance and wait for the `final` reference; do not treat it
+as an error.
+
+Previews are ephemeral display state: the authoritative image still arrives as
+`file` parts / `metadata.rich_items` on the final `data-assistant-message`,
+and previews are never persisted to history. Disabled server-side via
+`ENABLE_IMAGE_STREAMING=false`; oversized inline partials
+(`IMAGE_STREAM_PREVIEW_MAX_B64_CHARS`) surface as `preview_skipped` while the
+`final` still arrives by reference.
 
 Emitted only on `POST /api/chat/{conversationId}` streams. Resume streams
 (`POST /ai/resume-interrupt`) do not emit image previews — the completed
@@ -775,6 +810,78 @@ Selected images are represented twice for v1 rich messages: `image` entries in
 are exactly the selected images; unselected candidates are never exposed. Do not
 build an image gallery from legacy metadata.
 
+Generated/final image media (`file` parts, `data-image-preview` finals, and
+`rich_items[].payload.url` for stored images) is delivered as a **protected
+relative reference** (`/chat-images/{id}`), not inline base64. Render every
+protected reference through the shared authenticated-fetch path below.
+
+### Protected Media Rendering
+
+`/chat-images/{id}` is served by the **local origin's** authenticated media
+route (the sidecar proxies it to the canonical server). It requires the app
+Bearer token; a browser cannot attach that token to a bare `<img src>`, so a
+protected reference must be fetched over the same authenticated transport used
+for chat requests and rendered from an object URL.
+
+**One shared authenticated fetch.** Reference URLs from `file` parts,
+`data-image-preview` events, and history `rich_items` all resolve through the
+same helper — never fork the auth logic per surface:
+
+```ts
+// Resolve a protected relative reference to a Blob URL (authenticated).
+// Absolute / data: URLs pass through unchanged.
+async function resolveImageSrc(url: string, signal?: AbortSignal): Promise<string> {
+  if (!url.startsWith("/")) return url;                 // data: or absolute
+  const res = await fetch(url, {                        // same origin as chat
+    headers: { Authorization: `Bearer ${getAuthToken()}` },
+    signal,
+  });
+  if (!res.ok) throw new Error(`image ${res.status}`);  // 401/404/413 → no leak
+  return URL.createObjectURL(await res.blob());         // caller revokes later
+}
+```
+
+Response semantics (mirrors the canonical route): `401` (missing/expired
+session), `404` (unknown **or another user's** image — no existence oracle),
+`413` (oversized), `5xx` (upstream failure). The body never carries upstream
+internal paths. Responses forward `ETag`/`Last-Modified`/`Cache-Control` and
+carry `X-Content-Type-Options: nosniff` and a restrictive CSP.
+
+**`useChat({ onData })` preview handler.** Keep the latest preview per part
+`id`; on each replacement fetch the (possibly reference) `url`, build a Blob
+URL, swap it in, and **revoke the previous Blob URL**. Track by `id` and prefer
+the higher `seq`. Revoke every outstanding Blob URL on unmount and when the
+stream ends.
+
+```ts
+const previews = new Map<string, { seq: number; src: string; objectUrl?: string }>();
+
+function onData(part) {
+  if (part.type !== "data-image-preview") return;
+  const { status, url, seq } = part.data;
+  if (status === "preview_skipped" || !url) return;      // wait for the final
+  const prev = previews.get(part.id);
+  if (prev && seq < prev.seq) return;                    // stale/out-of-order
+  resolveImageSrc(url).then((src) => {
+    const current = previews.get(part.id);
+    if (current?.objectUrl) URL.revokeObjectURL(current.objectUrl);  // revoke stale
+    previews.set(part.id, { seq, src, objectUrl: src.startsWith("blob:") ? src : undefined });
+    renderPreview(part.id, src);
+  });
+}
+
+function onFinishOrUnmount() {
+  for (const { objectUrl } of previews.values()) if (objectUrl) URL.revokeObjectURL(objectUrl);
+  previews.clear();                                      // finals own the render from here
+}
+```
+
+**Custom terminal `file` renderer.** For the final message's `file` parts (and
+history), render each protected reference the same way: resolve to a Blob URL,
+render, and revoke it when the component unmounts or the `url` changes. A
+relative `url` never goes into `src` directly. Absolute/`data:` URLs render
+without a fetch.
+
 ## Rich Response v1
 
 Activation: the request sends `inlineRichResponseV1: true` **and** the server
@@ -989,9 +1096,15 @@ You will not receive them. RAG citations are delivered through
 7. Append unreferenced `inline_or_append` items below the answer. Never
    append `inline_only` images.
 8. In `useChat({ onData })`, keep the latest `data-image-preview` payload per
-   part `id` and render it under the streaming text; discard all previews at
-   `data-assistant-message` / `finish` — the final message's `file` parts and
-   `rich_items` are authoritative.
+   part `id` and render it under the streaming text, resolving any protected
+   reference `url` through the shared authenticated fetch and revoking stale
+   Blob URLs on replacement (see Protected Media Rendering). Discard and revoke
+   all previews at `data-assistant-message` / `finish` — the final message's
+   `file` parts and `rich_items` are authoritative.
+9. Render final `file` parts and history image `rich_items` through the custom
+   terminal `file` renderer: protected relative URLs (`/chat-images/{id}`) are
+   fetched with credentials and rendered from a Blob URL (revoked on unmount /
+   `url` change); absolute and `data:` URLs render directly.
 
 ## Live Widgets
 

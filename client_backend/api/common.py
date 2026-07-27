@@ -2,13 +2,14 @@
 Shared API helpers for the client backend.
 """
 
+import contextlib
 import json
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from client_backend.core.logging import get_logger
 from client_backend.services.runtime_bridge import get_runtime_bridge
@@ -183,4 +184,107 @@ async def proxy_server_request(
         content=response.content,
         status_code=response.status_code,
         media_type=response.headers.get("content-type"),
+    )
+
+
+# ── Protected media (binary) proxy ─────────────────────────────────────────
+# Streams a protected upstream read (e.g. ``/chat-images/{id}``) to the local
+# caller without buffering the whole payload, forwarding cache validators and
+# stamping hardening headers, while never leaking upstream internals.
+
+# Hard ceiling on a single proxied media read. The sidecar streams chunk by
+# chunk, so this only rejects an upstream that DECLARES an oversized body.
+MAX_MEDIA_PROXY_BYTES = 25 * 1024 * 1024  # 25 MiB
+
+# Response headers safe to forward verbatim: cache validators, caching policy,
+# and content framing. Deliberately excludes ``content-type`` (set explicitly
+# as the media type) and any upstream server/identity headers.
+_FORWARDED_MEDIA_RESPONSE_HEADERS = (
+    "etag",
+    "last-modified",
+    "cache-control",
+    "expires",
+    "vary",
+    "content-disposition",
+    "content-length",
+)
+
+# Generic, non-leaking details keyed by the canonical status we preserve.
+_MEDIA_ERROR_DETAIL = {
+    status.HTTP_401_UNAUTHORIZED: "Authentication required",
+    status.HTTP_404_NOT_FOUND: "Image not found",
+    status.HTTP_413_CONTENT_TOO_LARGE: "Image too large",
+}
+
+# Defense-in-depth for a directly-served binary: never let a browser sniff the
+# body into an active type, and fully sandbox it.
+_MEDIA_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; img-src 'self' data:; sandbox",
+}
+
+
+def _raise_media_error(status_code: int) -> None:
+    """Map an upstream media failure to a local ``HTTPException``.
+
+    Preserves the canonical status (401/404/413/5xx) but replaces the body with
+    a generic detail so upstream internals (storage paths, existence oracles)
+    never reach the caller.
+    """
+    detail = _MEDIA_ERROR_DETAIL.get(status_code, "Upstream media request failed")
+    raise HTTPException(status_code=status_code, detail=detail)
+
+
+def _safe_media_headers(upstream_headers: Any) -> dict[str, str]:
+    """Forward whitelisted cache/content headers and add hardening headers."""
+    headers: dict[str, str] = {}
+    for name in _FORWARDED_MEDIA_RESPONSE_HEADERS:
+        value = upstream_headers.get(name)
+        if value:
+            headers[name] = value
+    headers.update(_MEDIA_SECURITY_HEADERS)
+    return headers
+
+
+async def proxy_media_request(*, upstream_path: str) -> Response:
+    """Stream a protected binary read from the canonical server to the caller.
+
+    The caller must already have passed the local-session gate (the route
+    dependency), so this never re-checks auth; it attaches the upstream
+    credentials via the server client, streams the body chunk by chunk (never
+    buffering the whole payload), forwards cache validators plus hardening
+    headers, and maps upstream failures onto local status codes without
+    exposing upstream internals.
+    """
+    stream_cm = get_server_client().stream_media(upstream_path, method="GET")
+    try:
+        response = await stream_cm.__aenter__()
+    except Exception as exc:
+        raise_server_error(exc)
+
+    async def _close() -> None:
+        with contextlib.suppress(Exception):
+            await stream_cm.__aexit__(None, None, None)
+
+    if response.status_code >= 400:
+        await _close()
+        _raise_media_error(response.status_code)
+
+    content_length = response.headers.get("content-length")
+    if content_length and content_length.isdigit() and int(content_length) > MAX_MEDIA_PROXY_BYTES:
+        await _close()
+        _raise_media_error(status.HTTP_413_CONTENT_TOO_LARGE)
+
+    async def _body() -> Any:
+        try:
+            async for chunk in response.aiter_bytes():
+                yield chunk
+        finally:
+            await _close()
+
+    return StreamingResponse(
+        _body(),
+        status_code=response.status_code,
+        media_type=response.headers.get("content-type"),
+        headers=_safe_media_headers(response.headers),
     )
