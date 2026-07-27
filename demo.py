@@ -3797,6 +3797,26 @@ def _provider_model_ids(provider_snapshot: dict[str, Any]) -> list[str]:
     return model_ids
 
 
+def _model_reasoning_options(
+    provider_snapshot: dict[str, Any], model_id: str
+) -> tuple[str, list[str | None]]:
+    """Return the selected model's exact native reasoning choices."""
+    for model in _provider_models(provider_snapshot):
+        if str(model.get("id") or "").strip() != str(model_id or "").strip():
+            continue
+        control = model.get("reasoningControl") or model.get("reasoning_control") or {}
+        label = str(
+            control.get("displayLabel") or control.get("display_label") or "Reasoning"
+        )
+        levels = [
+            str(value).strip()
+            for value in control.get("levels") or []
+            if str(value).strip()
+        ]
+        return label, [None, *levels]
+    return "Reasoning", [None]
+
+
 def _sync_model_config_form_state(snapshot: dict[str, Any]) -> None:
     provider_map = _snapshot_provider_map(snapshot)
     agent_config = _snapshot_agent_config(snapshot)
@@ -3823,6 +3843,9 @@ def _sync_model_config_form_state(snapshot: dict[str, Any]) -> None:
         st.session_state[f"model_cfg_allow_custom_{agent_key}"] = is_custom_model
         st.session_state[f"model_cfg_temperature_{agent_key}"] = (
             float(current_temperature) if isinstance(current_temperature, (int, float)) else 1.0
+        )
+        st.session_state[f"model_cfg_reasoning_{agent_key}"] = cfg.get(
+            "reasoningEffort", cfg.get("reasoning_effort")
         )
 
 
@@ -11063,7 +11086,7 @@ def render_models_view() -> None:
         ("planning", "Planning"),
     ]
 
-    st.markdown("#### Select providers for each agent")
+    st.markdown("#### Select providers and models for each agent")
     provider_cols = st.columns(len(agents))
     for idx, (agent_key, label) in enumerate(agents):
         with provider_cols[idx]:
@@ -11085,6 +11108,20 @@ def render_models_view() -> None:
                 "Configured" if provider_snapshot.get("configured") else "Not configured"
             )
             st.caption(provider_state)
+            catalog_ids = _provider_model_ids(provider_snapshot)
+            current_model = str(
+                st.session_state.get(f"model_cfg_model_select_{agent_key}") or ""
+            ).strip()
+            if current_model not in catalog_ids:
+                current_model = catalog_ids[0] if catalog_ids else "(sync models first)"
+            model_options = catalog_ids or ["(sync models first)"]
+            st.selectbox(
+                "Catalog model",
+                options=model_options,
+                index=model_options.index(current_model),
+                key=f"model_cfg_model_select_{agent_key}",
+                disabled=not provider_snapshot.get("configured") or not catalog_ids,
+            )
 
     st.divider()
     st.subheader("Configure models and parameters")
@@ -11118,12 +11155,6 @@ def render_models_view() -> None:
             custom_value_default = str(
                 st.session_state.get(f"model_cfg_model_custom_{agent_key}") or ""
             ).strip()
-            model_options = list(catalog_ids)
-            if current_selection and current_selection not in model_options:
-                model_options.insert(0, current_selection)
-            if not model_options:
-                model_options = ["(sync models first)"]
-
             st.markdown(f"**{label}**")
             st.caption(
                 f"Provider: {_provider_display_name(selected_provider)}"
@@ -11131,15 +11162,8 @@ def render_models_view() -> None:
                 f" • Sync: {sync_status.replace('_', ' ').title()}"
             )
 
-            field_cols = st.columns([2.2, 1.4, 1.2])
+            field_cols = st.columns([2.2, 1.4, 1.4, 1.2])
             with field_cols[0]:
-                st.selectbox(
-                    "Catalog model",
-                    options=model_options,
-                    index=0,
-                    key=f"model_cfg_model_select_{agent_key}",
-                    disabled=not configured or not catalog_ids,
-                )
                 st.text_input(
                     "Custom model ID",
                     key=f"model_cfg_model_custom_{agent_key}",
@@ -11158,6 +11182,24 @@ def render_models_view() -> None:
                 )
 
             with field_cols[2]:
+                reasoning_model = custom_value_default if allow_custom_default else current_selection
+                reasoning_label, reasoning_options = _model_reasoning_options(
+                    provider_snapshot, reasoning_model
+                )
+                current_reasoning = st.session_state.get(f"model_cfg_reasoning_{agent_key}")
+                if current_reasoning not in reasoning_options:
+                    current_reasoning = None
+                st.selectbox(
+                    reasoning_label,
+                    options=reasoning_options,
+                    index=reasoning_options.index(current_reasoning),
+                    key=f"model_cfg_reasoning_{agent_key}",
+                    format_func=lambda value: "Provider default" if value is None else str(value),
+                    disabled=not configured,
+                    help="Values are specific to the selected provider model.",
+                )
+
+            with field_cols[3]:
                 st.slider(
                     "Temperature",
                     min_value=0.0,
@@ -11230,6 +11272,9 @@ def render_models_view() -> None:
                     "model": model,
                     "temperature": float(temperature),
                     "allow_custom_model": allow_custom_model,
+                    "reasoning_effort": st.session_state.get(
+                        f"model_cfg_reasoning_{agent_key}"
+                    ),
                 }
 
             if validation_errors:

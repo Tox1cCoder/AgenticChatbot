@@ -68,6 +68,7 @@ from ..utils import (
     extract_inline_images_from_content,
     extract_openai_reasoning_summary,
     extract_openai_reasoning_tokens,
+    extract_public_thinking_summary,
 )
 
 logger = logging.getLogger(__name__)
@@ -1484,6 +1485,10 @@ class BaseAgent(ABC):
             thinking = None
             if hasattr(response, "thinking") and response.thinking:
                 thinking = response.thinking
+            if not thinking:
+                thinking = extract_public_thinking_summary(
+                    response.content, block_types={"thinking"}
+                )
 
             response_text = coerce_response_text(response.content)
 

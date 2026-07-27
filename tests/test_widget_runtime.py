@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from typing import Any, get_type_hints
 
 import jwt as pyjwt
 import pytest
@@ -913,6 +914,24 @@ class TestWidgetToolHtmlContract:
 
         parameters = inspect.signature(widgets_server.widget_create).parameters
         assert list(parameters) == ["session_id", "initial_state", "title"]
+        assert get_type_hints(widgets_server.widget_create)["initial_state"] == dict[str, Any]
+
+    async def test_widget_create_accepts_quote_heavy_native_object(self, monkeypatch):
+        import app.services.widget_runtime as widget_runtime
+        from app.ai.mcp_servers import widgets_server
+
+        store = InMemoryWidgetStore()
+        monkeypatch.setattr(widget_runtime, "_widget_store", store)
+        html = (
+            "<!doctype html><script>const state = "
+            + json.dumps({"label": 'He said "hello"', "rows": list(range(500))})
+            + ";</script>"
+        )
+        result = await widgets_server.widget_create(
+            session_id="conv-native",
+            initial_state={"html": html, "height": 620},
+        )
+        assert json.loads(result)["state"]["html"] == html
 
     async def test_widget_create_accepts_valid_html(self, monkeypatch):
         import app.services.widget_runtime as widget_runtime
@@ -935,7 +954,7 @@ class TestWidgetToolHtmlContract:
     @pytest.mark.parametrize(
         "bad_state,match",
         [
-            ('"just-a-string"', "JSON object"),
+            ('"just-a-string"', "object"),
             ('{"html": "", "height": 540}', "html content"),
             ('{"html": "<div>hi</div>"}', "height"),
             ('{"html": "<div>hi</div>", "height": "tall"}', "numeric"),

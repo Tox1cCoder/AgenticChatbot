@@ -151,57 +151,52 @@ def extract_inline_images_from_content(content: Any) -> list[dict[str, str]]:
     return images
 
 
-def extract_openai_reasoning_summary(content: Any) -> str | None:
-    """
-    Extract OpenAI reasoning *summary* text from LangChain content blocks.
-
-    When `reasoning={"summary": ...}` is set, ChatOpenAI may return content like:
-      [
-        {"type": "reasoning", "summary": [{"type": "text", "text": "..."}]},
-        {"type": "text", "text": "final answer"}
-      ]
-    """
+def extract_public_thinking_summary(
+    content: Any,
+    *,
+    block_types: set[str] | None = None,
+) -> str | None:
+    """Extract only provider-designated public thought/reasoning summaries."""
     if not content:
         return None
-
-    blocks: list[Any]
-    if isinstance(content, list):
-        blocks = content
-    elif isinstance(content, dict):
-        blocks = [content]
-    else:
+    if not isinstance(content, (list, dict)):
         return None
 
+    allowed = block_types or {"thinking", "reasoning"}
+    blocks = content if isinstance(content, list) else [content]
     parts: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, str):
+            if value.strip():
+                parts.append(value.strip())
+            return
+        if isinstance(value, list):
+            for item in value:
+                collect(item)
+            return
+        if not isinstance(value, dict):
+            return
+        for key in ("thinking", "summary", "text"):
+            if key in value:
+                collect(value[key])
+
     for block in blocks:
         if not isinstance(block, dict):
             continue
-        if str(block.get("type") or "").strip().lower() != "reasoning":
+        if str(block.get("type") or "").strip().lower() not in allowed:
             continue
+        for key in ("thinking", "summary", "text"):
+            if key in block:
+                collect(block[key])
 
-        summary = block.get("summary")
-        if isinstance(summary, str):
-            parts.append(summary)
-            continue
-
-        if isinstance(summary, dict):
-            text = summary.get("text")
-            if isinstance(text, str) and text.strip():
-                parts.append(text)
-            continue
-
-        if isinstance(summary, list):
-            for item in summary:
-                if isinstance(item, dict):
-                    text = item.get("text")
-                    if isinstance(text, str) and text.strip():
-                        parts.append(text)
-                elif isinstance(item, str) and item.strip():
-                    parts.append(item)
-            continue
-
-    cleaned = "\n".join(p.strip() for p in parts if isinstance(p, str) and p.strip())
+    cleaned = "\n".join(parts)
     return cleaned or None
+
+
+def extract_openai_reasoning_summary(content: Any) -> str | None:
+    """Compatibility wrapper for OpenAI reasoning summary blocks."""
+    return extract_public_thinking_summary(content, block_types={"reasoning"})
 
 
 def _get_nested(data: Any, path: Sequence[str]) -> Any:

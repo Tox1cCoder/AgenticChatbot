@@ -29,8 +29,8 @@ from app.services.widget_runtime import get_widget_store  # noqa: E402
 mcp = FastMCP("widgets")
 
 
-def _parse_widget_state(raw: str, *, field: str = "initial_state") -> Any:
-    """Parse a widget state JSON string with a clear error on failure.
+def _coerce_widget_state(raw: Any, *, field: str = "initial_state") -> dict[str, Any]:
+    """Accept native object state while tolerating legacy direct strings.
 
     Falls back to ``ast.literal_eval`` for Python-style literals
     (``True``/``False``/``None``/single-quoted keys) so a single common
@@ -38,8 +38,15 @@ def _parse_widget_state(raw: str, *, field: str = "initial_state") -> Any:
     On true malformation, raise a ``ValueError`` whose message includes the
     offending snippet so the model can self-correct on the next turn.
     """
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str):
+        raise ValueError(f"{field} must be an object.")
     try:
-        return json.loads(raw)
+        value = json.loads(raw)
+        if isinstance(value, dict):
+            return value
+        raise ValueError(f"{field} must be an object.")
     except json.JSONDecodeError as exc:
         try:
             value = ast.literal_eval(raw)
@@ -62,7 +69,7 @@ def _parse_widget_state(raw: str, *, field: str = "initial_state") -> Any:
 @mcp.tool()
 async def widget_create(
     session_id: str,
-    initial_state: str,
+    initial_state: dict[str, Any],
     title: str = "",
 ) -> str:
     """Create a live HTML widget that appears inside the chat conversation.
@@ -84,10 +91,8 @@ async def widget_create(
     Place the widget's `<!--rich:widget:<id>-->` marker near the paragraph it
     supports so it reads like an inline figure in an article.
 
-    `initial_state` must be a valid JSON string — double-quoted keys and strings,
-    lowercase `true`/`false`/`null`, no trailing commas, embedded quotes escaped
-    as `\\"`. If the parser rejects the input, the error message includes the
-    offending snippet so you can fix and retry on the next turn.
+    Pass `initial_state` as one native object. Do not wrap it in Markdown or
+    additional prose.
 
     The state contract is minimal and strict:
 
@@ -111,7 +116,7 @@ async def widget_create(
 
     Args:
         session_id: The conversation ID this widget belongs to.
-        initial_state: JSON string with `{"html": "...", "height": 620,
+        initial_state: Object with `{"html": "...", "height": 620,
             "caption": "..."}`. `caption` is optional. The whole experience —
             controls, animation, graphs — lives inside the `html` document.
         title: Optional short human-readable title for the widget.
@@ -120,7 +125,7 @@ async def widget_create(
         JSON object describing the created widget (widget_id, version, etc.).
     """
     store = get_widget_store()
-    state = _parse_widget_state(initial_state, field="initial_state")
+    state = _coerce_widget_state(initial_state, field="initial_state")
     validate_html_widget_state(state)
     record = await store.create(
         session_id=session_id,
@@ -133,7 +138,7 @@ async def widget_create(
 @mcp.tool()
 async def widget_update(
     widget_id: str,
-    state: str,
+    state: dict[str, Any],
     version: int = 0,
 ) -> str:
     """Replace the full state of an existing live HTML widget.
@@ -145,7 +150,7 @@ async def widget_update(
 
     Args:
         widget_id: The widget to update (returned by widget_create).
-        state: JSON string with the new complete widget state
+        state: Object with the new complete widget state
             (`{"html": "...", "height": 620, "caption": "..."}`).
         version: Expected current version for optimistic concurrency (0 = skip check).
 
@@ -153,7 +158,7 @@ async def widget_update(
         JSON object with the updated widget record.
     """
     store = get_widget_store()
-    new_state = _parse_widget_state(state, field="state")
+    new_state = _coerce_widget_state(state, field="state")
     existing = await store.get(widget_id)
     if existing is None:
         raise KeyError(f"Widget {widget_id} not found")

@@ -84,7 +84,7 @@ When using tools:
 - Use responsive inline CSS and vanilla JavaScript with no external dependencies, no auth assumptions, and no cross-window requirements — the whole experience lives inside the single `html` document
 - Place the widget marker `<!--rich:widget:<id>-->` near the paragraph it supports, and keep the surrounding prose useful on its own — the widget should amplify, not replace, the explanation
 - Create widgets with an `initial_state` of `{"html": "<!doctype html>...", "height": 620, "caption": "..."}`; `height` is a number between 260 and 960 and `caption` is optional
-- The widget tools expect `initial_state` / `state` as a valid JSON string — double-quoted keys and strings, lowercase `true`/`false`/`null`, no trailing commas; if a parse error comes back, read the snippet in the error and fix the bad spot
+- Pass widget `initial_state` / `state` as one native object containing self-contained `html` and numeric `height`; do not wrap it in Markdown or extra prose
 - Example — explaining harmonic oscillation: animate the oscillator position `x(t)`, draw a time graph of displacement, expose sliders for amplitude, angular frequency, and phase, add pause/reset controls, and show live values for time and displacement (label it in Vietnamese when the user writes in Vietnamese)
 - Keep widgets bounded in-chat micro experiences; full websites and multi-page apps belong in `canvas_agent`
 
