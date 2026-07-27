@@ -63,7 +63,7 @@ Add a provider catalog assertion to `tests/test_provider_reasoning_metadata.py` 
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_reasoning_controls.py tests/test_provider_reasoning_metadata.py -q
+python -m pytest tests/test_reasoning_controls.py tests/test_provider_reasoning_metadata.py -q
 ```
 
 Expected: the new Gemini 2.5, Gemini alias, and OpenAI o-series cases fail because their descriptors currently have no levels.
@@ -133,7 +133,7 @@ Add to `tests/test_runtime_model_overrides.py` a Gemini 2.5 case that invokes `B
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_reasoning_controls.py tests/test_runtime_model_overrides.py -q
+python -m pytest tests/test_reasoning_controls.py tests/test_runtime_model_overrides.py -q
 ```
 
 Expected: import or assertion failures show that Gemini 2.5 explicit selections are not yet converted into a budget.
@@ -229,7 +229,7 @@ stored/read model preserves or clears it respectively.
 - [ ] **Step 2: Run the tests and verify the UI failures**
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_demo_custom_agents.py tests/test_custom_agents_service.py -q
+python -m pytest tests/test_demo_custom_agents.py tests/test_custom_agents_service.py -q
 ```
 
 Expected: helper/import and UI source-contract failures show that Streamlit
@@ -366,7 +366,7 @@ extraction rather than hand-authoring the levels.
 Run:
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_demo_model_reasoning_controls.py tests/test_provider_reasoning_metadata.py -q
+python -m pytest tests/test_demo_model_reasoning_controls.py tests/test_provider_reasoning_metadata.py -q
 ```
 
 Expected after Tasks 1-3: PASS without adding a second compatibility table to
@@ -378,9 +378,9 @@ Streamlit.
 - [ ] **Step 3: Run formatting and the complete focused suite**
 
 ```powershell
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m ruff check app/ai/reasoning_controls.py app/ai/agent_config.py demo.py tests/test_reasoning_controls.py tests/test_provider_reasoning_metadata.py tests/test_runtime_model_overrides.py tests/test_demo_model_reasoning_controls.py tests/test_demo_custom_agents.py tests/test_custom_agents_service.py
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m ruff format --check app/ai/reasoning_controls.py app/ai/agent_config.py demo.py tests/test_reasoning_controls.py tests/test_provider_reasoning_metadata.py tests/test_runtime_model_overrides.py tests/test_demo_model_reasoning_controls.py tests/test_demo_custom_agents.py tests/test_custom_agents_service.py
-& 'C:\Users\ADMIN\miniconda3\envs\agents\python.exe' -m pytest tests/test_reasoning_controls.py tests/test_provider_reasoning_metadata.py tests/test_model_config_reasoning.py tests/test_runtime_model_overrides.py tests/test_demo_model_reasoning_controls.py tests/test_demo_custom_agents.py tests/test_custom_agents_service.py tests/test_demo_usage_dashboard.py -q
+python -m ruff check app/ai/reasoning_controls.py app/ai/agent_config.py demo.py tests/test_reasoning_controls.py tests/test_provider_reasoning_metadata.py tests/test_runtime_model_overrides.py tests/test_demo_model_reasoning_controls.py tests/test_demo_custom_agents.py tests/test_custom_agents_service.py
+python -m ruff format --check app/ai/reasoning_controls.py app/ai/agent_config.py demo.py tests/test_reasoning_controls.py tests/test_provider_reasoning_metadata.py tests/test_runtime_model_overrides.py tests/test_demo_model_reasoning_controls.py tests/test_demo_custom_agents.py tests/test_custom_agents_service.py
+python -m pytest tests/test_reasoning_controls.py tests/test_provider_reasoning_metadata.py tests/test_model_config_reasoning.py tests/test_runtime_model_overrides.py tests/test_demo_model_reasoning_controls.py tests/test_demo_custom_agents.py tests/test_custom_agents_service.py tests/test_demo_usage_dashboard.py -q
 ```
 
 Expected: Ruff exits zero and all selected tests pass.
