@@ -8,7 +8,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
-from anyio import ClosedResourceError
+from anyio import BrokenResourceError, ClosedResourceError
 
 from app.ai.client_runtime_errors import ClientRuntimeToolError
 from app.ai.tool_execution import (
@@ -814,7 +814,55 @@ async def test_retries_share_one_total_deadline(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unsafe_session_failure_does_not_reconnect_and_repeat(monkeypatch):
+async def test_closed_session_before_mcp_write_reconnects_unsafe_widget_create(monkeypatch):
+    invocations = 0
+    reconnect_calls = 0
+
+    class _WidgetCreateTool:
+        name = "widget_create"
+        metadata = {
+            "tool_origin": "server_mcp",
+            "server_name": "widgets",
+            "source_tool_name": "widget_create",
+            "qualified_tool_id": "widgets::widget_create",
+        }
+
+        async def ainvoke(self, args):
+            nonlocal invocations
+            invocations += 1
+            raise ClosedResourceError
+
+    class _FreshWidgetCreateTool(_WidgetCreateTool):
+        async def ainvoke(self, args):
+            nonlocal invocations
+            invocations += 1
+            return "created"
+
+    class _Manager:
+        async def reconnect_and_get_tool(self, tool_name):
+            nonlocal reconnect_calls
+            reconnect_calls += 1
+            assert tool_name == "widget_create"
+            return _FreshWidgetCreateTool()
+
+    async def _manager():
+        return _Manager()
+
+    monkeypatch.setattr("app.ai.mcp_registry.get_global_mcp_manager", _manager)
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-1", "name": "widget_create", "args": {}}],
+        tool_map={"widget_create": _WidgetCreateTool()},
+    )
+
+    assert invocations == 2
+    assert reconnect_calls == 1
+    assert outputs[0]["content"] == "created"
+    assert artifacts[0]["attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_unsafe_broken_session_does_not_reconnect_and_repeat(monkeypatch):
     invocations = 0
     reconnect_calls = 0
 
@@ -830,7 +878,7 @@ async def test_unsafe_session_failure_does_not_reconnect_and_repeat(monkeypatch)
         async def ainvoke(self, args):
             nonlocal invocations
             invocations += 1
-            raise ClosedResourceError
+            raise BrokenResourceError
 
     class _Manager:
         async def reconnect_and_get_tool(self, tool_name):

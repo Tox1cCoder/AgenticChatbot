@@ -9,6 +9,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from anyio import ClosedResourceError
+
 from ..core.config import settings
 from ..core.rich_response import (
     GENERIC_IMAGE_ALT_TEXT,
@@ -1307,7 +1309,14 @@ async def invoke_tool_with_policy(
     attempt_history: list[dict[str, Any]] = []
     current_tool = tool
 
-    while attempts < policy.max_attempts:
+    # A closed in-memory MCP send stream rejects the request before it can be
+    # handed to the server. It is therefore safe to refresh that transport once
+    # even for a mutating tool whose ordinary retry policy is intentionally
+    # disabled. This is distinct from ``BrokenResourceError``, which can occur
+    # after transport progress and must still respect retry_safe/idempotent.
+    pre_send_session_retry_limit = policy.max_attempts + 1
+
+    while attempts < pre_send_session_retry_limit:
         remaining_total_seconds = (
             None
             if policy.outer_timeout_disabled
@@ -1354,12 +1363,21 @@ async def invoke_tool_with_policy(
             0.0,
             policy.total_timeout_seconds - (time.monotonic() - started_at),
         )
-        auto_retry_allowed = (
+        ordinary_retry_allowed = (
             summary.failure_retryable
             and policy_retry_allowed
             and attempts < policy.max_attempts
             and remaining_after_attempt > 0
         )
+        pre_send_session_retry_allowed = (
+            isinstance(outcome.exception, ClosedResourceError)
+            and policy.identity.tool_origin == "server_mcp"
+            and not policy_retry_allowed
+            and attempts == 1
+            and attempts < pre_send_session_retry_limit
+            and remaining_after_attempt > 0
+        )
+        auto_retry_allowed = ordinary_retry_allowed or pre_send_session_retry_allowed
         attempt_history.append(
             _attempt_record(
                 policy=policy,
