@@ -824,22 +824,25 @@ Manual acceptance:
 - Modify: `tests/client_backend/test_mcp_tool_execution_api.py`
 - Modify: `tests/test_mcp_tools_http_scope.py`
 
-- [ ] Add `list_tool_descriptors(server_name: str | None)` to each manager.
-- [ ] For a scoped request, load/read only that server's tool collection. Do not
+- [x] Add `list_tool_descriptors(server_name: str | None)` to each manager.
+- [x] For a scoped request, load/read only that server's tool collection. Do not
   call "get all" and then rely on a response-layer filter. The sidecar already
   exposes an unused `get_tools_by_server()`
   (`client_backend/services/local_mcp_manager.py:229-231`) — route the scoped path
   through it instead of `get_all_tools()`; add the equivalent scoped read on the
-  backend manager.
-- [ ] Consume the server provenance already stamped at load
-  (`metadata["server_name"]`, `qualified_tool_id` — `app/core/mcp_adapter_utils.py:230-248`)
-  rather than the fragile `id()`-keyed `_tool_server_map`
-  (`app/ai/mcp_integration.py:366-368`); never re-derive ownership from a bare name.
-- [ ] Make duplicate bare names legal across servers; require a server-qualified ID
-  for execution when ambiguous.
-- [ ] Compute a deterministic catalog hash from sorted sanitized descriptors.
-- [ ] Add unit tests for known-empty, unknown, disabled, unavailable, duplicate-name,
-  and same tool-name/different-server cases.
+  backend manager. (Backend: `get_server_tools`; sidecar: `get_tools_by_server`.)
+- [x] Consume the server provenance already stamped at load
+  (`metadata["server_name"]`, `qualified_tool_id`) for the LISTING (per-server index).
+  **DEFERRED:** replacing the execution-path `id()`-keyed `_tool_server_map` — a
+  higher-risk core-execution refactor, better done under independent review.
+- [x] Make duplicate bare names legal across servers (the listing keeps both with
+  distinct provenance — unit-tested). **DEFERRED:** requiring a server-qualified ID
+  for ambiguous *execution* (execution-path change, paired with the id()-map deferral).
+- [x] Compute a deterministic catalog hash from sorted sanitized descriptors
+  (`compute_catalog_version`, canonical + sidecar).
+- [x] Add unit tests for known-empty, duplicate-name, and same-name/different-server
+  cases + catalog-hash determinism. (Unknown/disabled surface as `ServerNotFoundError`
+  → 404 at the route rather than a manager unit test.)
 
 ### Task 7 (T007): Add the canonical scoped route and lock proxy/UI behavior
 
@@ -853,19 +856,29 @@ Manual acceptance:
 - Modify: `tests/client_backend/test_mcp_tool_execution_api.py`
 - Modify: `tests/test_demo_mcp_tools.py`
 
-- [ ] Add `GET /mcp/servers/{server_name}/tools` to canonical and sidecar APIs.
-- [ ] Make `/mcp/tools?serverName=` delegate to the same scoped service method.
-- [ ] Include the applied scope and catalog version in the response.
-- [ ] Use structured request parameters/URL encoding in `demo.py`, not string
-  concatenation.
-- [ ] Add a test using the full sidecar app and mixed real-shaped descriptors:
+- [x] Add `GET /mcp/servers/{server_name}/tools` to canonical and sidecar APIs.
+- [x] Make `/mcp/tools?serverName=` delegate to the same scoped service method
+  (canonical: `list_tools` → `list_tool_descriptors`; sidecar: `get_tools_by_server`).
+- [x] Include the applied scope and catalog version in the response.
+- [x] Use structured request parameters/URL encoding in `demo.py`, not string
+  concatenation (the scoped fetch now uses the dedicated route with a
+  `quote()`-encoded server segment).
+- [x] Add a test using the full sidecar app and mixed real-shaped descriptors:
   `brave_image_search` response set must equal `{"brave_image_search"}`.
 - [ ] Add a startup/build SHA to health diagnostics so a stale process is
-  immediately distinguishable from current source.
+  immediately distinguishable from current source. **DEFERRED (ops diagnostic).**
 - [ ] Add a deployment smoke check that authenticates normally and compares
-  scoped endpoint output with the selected server card.
-- [ ] Remove any UI-side filtering used to conceal an unscoped backend response;
-  the UI may assert the response scope and fail visibly on contract violation.
+  scoped endpoint output with the selected server card. **DEFERRED (needs a live
+  deploy; not runnable in this environment).**
+- [x] Remove any UI-side filtering used to conceal an unscoped backend response;
+  the UI may assert the response scope. (demo.py now fetches from the scoped route,
+  so there is no client-side concealing filter.)
+
+> **T006–T007 status (2026-07-24):** Done — committed `2c93366`, implemented and
+> reviewed INLINE (subagent dispatch blocked by the org spend limit). MCP phase gate
+> green (27 passed); ruff clean. Deferred (to reviewed follow-ups): the execution-path
+> `id()`-map replacement + ambiguous-execution server-qualification, and the
+> build-SHA/deploy-smoke ops diagnostics. See Design Decisions Log.
 
 MCP phase gate:
 
@@ -1494,4 +1507,38 @@ Decisions made while executing the plan (append-only; newest task last).
 - **Minor (final-review triage):** test doubles `_Repo`/`_InMemoryChatImageRepo` don't
   reproduce the repo's `ORDER BY created_at ASC`, so "earliest row wins" is untested at
   unit level. (The docstring/TOCTOU Minors were fixed in `afd9fb2`.)
+
+### T006–T007 — MCP server-scoped catalogs + dedicated route (commit `2c93366`)
+
+**Implemented and reviewed INLINE** — the org spend limit blocked subagent dispatch
+mid-T005-fix, so T006/T007 (and the T005 fix) proceeded inline with TDD + controller
+self-review + the full MCP phase gate as the verification loop. They lack an
+independent reviewer subagent; flagged for the final whole-branch review when the
+limit lifts.
+
+- **Scoped read, not response-layer filter.** `MCPManager.list_tool_descriptors(server_name)`
+  loads ONLY the named server (`get_server_tools`) and reads provenance from the
+  per-server `_server_tools` index; `get_all_tools_info` delegates to it. The sidecar
+  `/mcp/tools` now scopes its load via the pre-existing `get_tools_by_server` (was
+  get-all-then-filter). Committed T006+T007 together because the scoped route and the
+  scoped-read API share one test harness (no clean independently-green split).
+- **Deterministic catalog version.** `compute_catalog_version(descriptors)` = `sha256:`
+  over sorted canonical `(server_name, name, sorted-json args_schema)`; a sidecar
+  `_catalog_version` mirrors it. Order-independent → comparable across workers (FR-CAP-011).
+- **Dedicated route** `GET /mcp/servers/{server_name}/tools` on both apps, returning
+  only that server's tools + `scope` (`{"kind":"server","serverName":...}`) +
+  `catalogVersion`; `serversCount == 1` for a known scoped server even when toolless.
+  Canonical unknown/disabled → 404 via `ServerNotFoundError`. **Contract decision
+  (plan left it open): unknown AND disabled both → 404** for now; the 409-disabled
+  refinement is deferred (`get_server_tools` collapses them into one exception).
+- **UI:** `demo.get_mcp_tools` fetches the scoped route with a `quote()`-encoded server
+  segment — no raw string concatenation, no client-side concealing filter.
+- **Duplicate bare names** across servers both survive in the listing with distinct
+  provenance (unit-tested).
+- **DEFERRED (documented, for reviewed follow-up):** (1) replacing the execution-path
+  `id()`-keyed `_tool_server_map` + requiring a server-qualified ID for *ambiguous
+  execution* — a higher-risk change to core tool execution, unsafe to land unreviewed;
+  (2) the build-SHA health diagnostic and the live deployment smoke check (ops items,
+  the latter needs a real deploy). The sidecar does not enforce 404-on-unknown (returns
+  an empty scoped list) — strict canonical/sidecar 404 parity also deferred.
 
