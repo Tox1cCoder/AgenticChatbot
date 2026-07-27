@@ -694,18 +694,24 @@ sidecar media read, resume preview, and any query-loss path found.
 - Modify: `tests/test_image_preview_stream.py`
 - Modify: `tests/test_ai_sdk_v6_stream_contract.py`
 
-- [ ] Write wire snapshots for v1 inline partial and v2 reference final events.
-- [ ] Emit the versioned canonical delivery union exactly as specified above.
-- [ ] Keep AI SDK partial/final updates as `data-image-preview`, stable by
+- [x] Write wire snapshots for v1 inline partial and v2 reference final events.
+- [x] Emit the versioned canonical delivery union exactly as specified above.
+- [x] Keep AI SDK partial/final updates as `data-image-preview`, stable by
   `item_id`, and document that transient parts require `useChat({ onData })`.
-- [ ] Ensure terminal AI SDK `file` parts preserve protected relative URLs as URLs;
+- [x] Ensure terminal AI SDK `file` parts preserve protected relative URLs as URLs;
   never reinterpret them as base64.
-- [ ] Preserve one upstream `[DONE]` across the canonical/sidecar proxy boundary.
-- [ ] Enforce a small configurable inline-partial budget at serialization time as a
+- [x] Preserve one upstream `[DONE]` across the canonical/sidecar proxy boundary.
+- [x] Enforce a small configurable inline-partial budget at serialization time as a
   second defense, with a structured `preview_skipped` status.
-- [ ] Add counters for emitted, coalesced, oversized, storage-failed, proxied, and
+- [x] Add counters for emitted, coalesced, oversized, storage-failed, proxied, and
   consumer-disconnected events.
-- [ ] Never include raw image base64 in logs, traces, or exception payloads.
+- [x] Never include raw image base64 in logs, traces, or exception payloads.
+
+> **T003 status (2026-07-24):** Done — `a2b1417`, reviewer Approved (0
+> Critical/Important, 3 Minor). Schema-v2 `delivery` union emitted; final always by
+> reference; `_normalize_image_item_to_file_part` repaired; single `[DONE]` preserved;
+> configurable inline budget + `preview_skipped`; v1 read-compat kept. 7 Task-1
+> characterization tests flipped GREEN. See Design Decisions Log at end of doc.
 
 ### Task 4 (T004): Add the protected sidecar media route and consumer renderers
 
@@ -1370,4 +1376,37 @@ Decisions made while executing the plan (append-only; newest task last).
   verbatim — test-only path, no production impact; (2) no single test exercises the
   full agent→metadata→externalize chain (halves tested independently; connective
   tissue verified by reading).
+
+### T003 — version event + repair transports (commit `a2b1417`)
+
+- **Versioned union in one seam.** `events.py` gained `resolve_image_preview_delivery`
+  + builders (`build_image_preview_inline_data` / reference / `build_image_preview_skipped_data`)
+  emitting `schema_version:2` with a `delivery` union; both transports
+  (`internal_sse.py`, `ai_sdk_v6.py`) share it and tolerate v1 (top-level `data_b64`)
+  for read-compat. No rollout feature flag (that is T013) — v2 is the default.
+- **Final always by reference.** `emitter.emit_reference` / `persist_final` emit the
+  final with `delivery.kind=reference` (`image_id`+`url` from T002's stored descriptor),
+  bypassing the inline char budget (FR-IMG-003). **Exception (resilience):** if
+  `_store_final` returns no descriptor (storage failed), the final stays inline and a
+  typed `MediaDeliveryError` is recorded (`storage_failed` counter, no base64) — the
+  authoritative bytes still arrive with terminal `complete`.
+- **Two-layer budget.** First defense in `ImagePreviewPublisher.publish`; second at
+  serialization (`apply_inline_preview_wire_budget`) in both transports. Over-budget →
+  structured `preview_skipped` status (FR-IMG-007), never a silent drop. Budget =
+  existing `settings.image_stream_preview_max_b64_chars` (configurable).
+- **Projection repair.** `_normalize_image_item_to_file_part` (`ai_sdk_projection.py`)
+  gained a protected-URL branch (after `data:`/`http(s)`/`blob:`, before the base64
+  fallback) so `/chat-images/{id}` survives as a `file` url verbatim, direct and through
+  the sidecar proxy. `graph_public_projection.py` left untouched — its `dict(data)`
+  passthrough already carries v2 verbatim (locked by a passthrough test).
+- **Single `[DONE]`.** `server_api.stream_sse` breaks on the first upstream `[DONE]`
+  and never forwards it; the sidecar appends exactly one. Dedup lock stayed green.
+- **Scope held:** 7 Task-1 characterization tests flipped GREEN; resume (T005), sidecar
+  `/chat-images` (T004), and MCP scope (T006/T007) stayed RED by design. Broad run 628
+  passed; sidecar proxy suites 12/12; image-gen/demo 38/38; ruff clean.
+- **Minor (final-review triage):** (1) `consumer-disconnected` is a debug-log event,
+  not an incrementing counter (stream disconnects once; `proxied` is co-logged);
+  (2) deterministic `store()` stub duplicated across two test files (extract a fixture
+  if a third copy appears); (3) storage-failed inline-final fallback uses `seq=0`
+  (preserved pre-existing degraded-path behavior; revisit if seq semantics tighten).
 
