@@ -727,24 +727,31 @@ sidecar media read, resume preview, and any query-loss path found.
 - Modify: `plans/AI_SDK_FE_CONTRACT.md`
 - Modify: `plans/AI_SDK_FE_CONTRACT_UPDATES.md`
 
-- [ ] Add `GET /chat-images/{image_id}` and `/api/chat-images/{image_id}` to the
+- [x] Add `GET /chat-images/{image_id}` and `/api/chat-images/{image_id}` to the
   sidecar. Require the local session, attach upstream auth, stream the upstream
   body/content type, and do not buffer unbounded data.
-- [ ] Forward cache validators and safe content headers; add `nosniff` and a
+- [x] Forward cache validators and safe content headers; add `nosniff` and a
   restrictive content security policy where applicable.
-- [ ] Preserve canonical `401/404/413/5xx` semantics without exposing upstream
+- [x] Preserve canonical `401/404/413/5xx` semantics without exposing upstream
   internal paths.
-- [ ] Update Streamlit preview state to replace partial -> final by item/index and
+- [x] Update Streamlit preview state to replace partial -> final by item/index and
   keep the final reference visible across `complete`; do not clear first and hope a
   later gallery fetch succeeds.
-- [ ] Use a shared authenticated image fetch helper for live and history rendering.
-- [ ] Specify the AI SDK frontend handler:
+- [x] Use a shared authenticated image fetch helper for live and history rendering.
+- [x] Specify the AI SDK frontend handler:
   consume `data-image-preview` in `onData`, fetch reference URLs using the same
   authenticated transport, create a Blob URL, replace by `id/seq`, and revoke stale
   Blob URLs on replacement/unmount.
-- [ ] Specify a custom terminal `file` renderer for protected relative URLs.
-- [ ] Add tests for owner success, other-user 404, missing/expired token, correct
+- [x] Specify a custom terminal `file` renderer for protected relative URLs.
+- [x] Add tests for owner success, other-user 404, missing/expired token, correct
   MIME, cancellation, and a payload at the configured maximum.
+
+> **T004 status (2026-07-24):** Done — `d6534fa`, reviewer Approved (0
+> Critical/Important, 4 Minor). Sidecar `/chat-images` + `/api/chat-images` proxy
+> route (auth-before-upstream, other-user→404 no oracle, streamed, 413 on over-max);
+> Streamlit keeps the final reference across `complete` via one shared fetch helper;
+> AI SDK handler + terminal renderer specified in the FE contract. Flips the 2 sidecar
+> route characterization tests + 7 media + 3 demo tests green. See Design Decisions Log.
 
 ### Task 5 (T005): Restore resume parity and prove end-to-end behavior
 
@@ -1409,4 +1416,41 @@ Decisions made while executing the plan (append-only; newest task last).
   (2) deterministic `store()` stub duplicated across two test files (extract a fixture
   if a third copy appears); (3) storage-failed inline-final fallback uses `seq=0`
   (preserved pre-existing degraded-path behavior; revisit if seq semantics tighten).
+
+### T004 — protected sidecar media route + renderers (commit `d6534fa`)
+
+- **New sidecar router** `client_backend/api/chat_images.py` (`GET /chat-images/{id}`),
+  registered in `client_backend/main.py` `compatibility_routers` (mounted at root AND
+  `/api`), placed BEFORE the catch-all `proxy_router` so the dedicated streaming route
+  wins. `client_backend/api/proxy.py` was NOT modified (brief-listed) — the catch-all
+  would only buffer and add no hardening; skipping it dropped nothing.
+- **Security model:** `Depends(require_local_session)` gates before the handler body, so
+  an unauthenticated read returns 401 WITHOUT any upstream contact (proven by asserting
+  the upstream stream seam was never opened). The sidecar forwards ONLY the desktop
+  user's own access token (`server_api._get_auth_headers`) — no broader credential —
+  so cross-user isolation is enforced by the canonical route's per-user scoping and the
+  404 is forwarded generically. `common.proxy_media_request` raises on any upstream
+  `>=400` WITHOUT reading the body, so no upstream detail/path leaks. Path typed as UUID
+  (removes SSRF/path-steering surface).
+- **Streaming:** `StreamingResponse` over `aiter_bytes()`; `.content` never touched;
+  upstream stream closed in the generator `finally` (cancellation-safe). Header
+  whitelist forwards cache validators + content-disposition/length; adds `nosniff` +
+  CSP. 413 forwarded, plus a proactive declared-content-length pre-check.
+- **Streamlit:** partial→final replaced by image index; `finalize()` keeps
+  `status=="final"` across `complete` (no clear-and-hope); one shared authenticated
+  fetch primitive for live + history.
+- **FE contract (doc-only, React app not in repo):** specified the `onData`
+  `data-image-preview` handler (authenticated fetch → Blob URL, replace-by-id/seq,
+  revoke on replace/unmount) + the terminal protected-`file` renderer.
+- **Minor (final-review triage):** (1) the 25 MiB guard only fires on a DECLARED
+  content-length — an undeclared/chunked oversized upstream would stream unbounded
+  (canonical always declares length + upstream trusted; add a running byte-counter abort
+  in `common._body()` for a hard local bound); (2) the CSP on a raw image response is
+  largely inert (`nosniff` is the effective control — don't over-credit CSP);
+  (3) `events.resolve_image_preview_delivery` defaults a missing `status` to `"final"`,
+  which the panel trusts (emitter always sets it, so not exploitable);
+  (4) panel `_entry_data_uri` calls the fetch primitive directly rather than through the
+  single resolver (same auth path; cosmetic).
+- ⚠️ FR-IMG-005/006 also depend on the canonical `/chat-images` per-user scoping, which
+  lives upstream (pre-existing `app/api/chat_images.py`) and is stubbed in these tests.
 
