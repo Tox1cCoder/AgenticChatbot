@@ -2831,6 +2831,76 @@ def reset_conversation_state() -> None:
 
 
 _MANAGER_PAGE_SIZE = 100
+_MANAGER_SEARCH_STATE_KEYS = (
+    "manager_search_query",
+    "manager_search_conversations",
+    "manager_search_page",
+    "manager_search_has_more",
+    "manager_search_total",
+)
+
+
+def _deduplicate_conversations(
+    conversations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return conversations with duplicate IDs removed, preserving order."""
+    seen: set[str] = set()
+    deduplicated: list[dict[str, Any]] = []
+    for conversation in conversations:
+        conversation_id = str(conversation.get("id") or "")
+        if not conversation_id or conversation_id in seen:
+            continue
+        seen.add(conversation_id)
+        deduplicated.append(conversation)
+    return deduplicated
+
+
+def _reset_manager_search_state(query: str = "") -> None:
+    """Reset only the server-backed search result cache."""
+    st.session_state.manager_search_query = query
+    st.session_state.manager_search_conversations = []
+    st.session_state.manager_search_page = 0
+    st.session_state.manager_search_has_more = False
+    st.session_state.manager_search_total = 0
+
+
+def _load_manager_page(page: int, *, search: str | None = None) -> None:
+    """Fetch and merge one unfiltered or server-search conversation page."""
+    normalized_search = search.strip() if isinstance(search, str) and search.strip() else None
+    is_search = normalized_search is not None
+    items_key = "manager_search_conversations" if is_search else "manager_conversations"
+    page_key = "manager_search_page" if is_search else "manager_conv_page"
+    has_more_key = "manager_search_has_more" if is_search else "manager_conv_has_more"
+    total_key = "manager_search_total" if is_search else "manager_conv_total"
+
+    st.session_state.setdefault(items_key, [])
+    st.session_state.setdefault(page_key, 0)
+    st.session_state.setdefault(has_more_key, False)
+    st.session_state.setdefault(total_key, 0)
+
+    response = get_conversations(
+        page=page,
+        limit=_MANAGER_PAGE_SIZE,
+        include_messages=True,
+        latest_messages=3,
+        fetch_all_pages=False,
+        search=normalized_search,
+    )
+    if not response or not response.get("data"):
+        st.session_state[has_more_key] = False
+        return
+
+    data = response["data"]
+    meta = data.get("meta") or {}
+    current_page = int(meta.get("currentPage", page) or page)
+    last_page = int(meta.get("lastPage", current_page) or current_page)
+    existing = list(st.session_state.get(items_key, []))
+    st.session_state[items_key] = _deduplicate_conversations(
+        [*existing, *(data.get("items") or [])]
+    )
+    st.session_state[page_key] = current_page
+    st.session_state[has_more_key] = current_page < last_page
+    st.session_state[total_key] = int(meta.get("total", len(st.session_state[items_key])) or 0)
 
 
 def open_conversation_manager() -> None:
@@ -2841,6 +2911,8 @@ def open_conversation_manager() -> None:
     st.session_state.pop("manager_conv_page", None)
     st.session_state.pop("manager_conv_has_more", None)
     st.session_state.pop("manager_conv_total", None)
+    for key in _MANAGER_SEARCH_STATE_KEYS:
+        st.session_state.pop(key, None)
 
 
 def close_conversation_manager() -> None:
@@ -2851,6 +2923,8 @@ def close_conversation_manager() -> None:
     st.session_state.pop("manager_conv_page", None)
     st.session_state.pop("manager_conv_has_more", None)
     st.session_state.pop("manager_conv_total", None)
+    for key in _MANAGER_SEARCH_STATE_KEYS:
+        st.session_state.pop(key, None)
 
 
 def find_conversation_in_state(
@@ -3648,6 +3722,7 @@ def get_conversations(
     include_messages: bool = False,
     latest_messages: int = 3,
     fetch_all_pages: bool = False,
+    search: str | None = None,
 ) -> dict[str, Any]:
     """Retrieve conversations with controlled pagination."""
     current_page = page
@@ -3656,9 +3731,12 @@ def get_conversations(
     last_response: dict[str, Any] | None = None
 
     while True:
-        endpoint = f"/conversations/?page={current_page}&limit={limit}"
+        params: list[tuple[str, Any]] = [("page", current_page), ("limit", limit)]
         if include_messages:
-            endpoint += f"&include=messages&latestMessages={latest_messages}"
+            params.extend([("include", "messages"), ("latestMessages", latest_messages)])
+        if isinstance(search, str) and search.strip():
+            params.append(("search", search.strip()))
+        endpoint = f"/conversations/?{urlencode(params, doseq=True)}"
 
         response = make_api_request("GET", endpoint)
         if not response:
@@ -3669,15 +3747,14 @@ def get_conversations(
 
         data = response.get("data") or {}
         items = data.get("items") or []
+        aggregated_meta = data.get("meta") or {}
+        last_response = response
 
         if not items:
             break
 
         aggregated_items.extend(items)
-
-        meta = data.get("meta") or {}
-        aggregated_meta = meta
-        last_response = response
+        meta = aggregated_meta
 
         if not fetch_all_pages:
             break
@@ -9972,42 +10049,6 @@ def render_manage_modal():
         width="large",
     )
     def manage_dialog():
-        def _deduplicate_conversations(
-            conversations: list[dict[str, Any]],
-        ) -> list[dict[str, Any]]:
-            """Return conversations with duplicate IDs removed, preserving order."""
-            seen = set()
-            deduped: list[dict[str, Any]] = []
-            for conv in conversations:
-                conv_id = str(conv.get("id", ""))
-                if not conv_id or conv_id in seen:
-                    continue
-                seen.add(conv_id)
-                deduped.append(conv)
-            return deduped
-
-        def _load_manager_page(page: int) -> None:
-            """Fetch one page of conversations and append to session state."""
-            resp = get_conversations(
-                page=page,
-                limit=_MANAGER_PAGE_SIZE,
-                include_messages=True,
-                latest_messages=3,
-                fetch_all_pages=False,
-            )
-            if resp and resp.get("data"):
-                items = resp["data"]["items"]
-                meta = resp["data"].get("meta") or {}
-                current_page = meta.get("currentPage", page)
-                last_page = meta.get("lastPage", 1)
-                total = meta.get("total", 0)
-                st.session_state.manager_conversations.extend(items)
-                st.session_state.manager_conv_page = current_page
-                st.session_state.manager_conv_has_more = current_page < last_page
-                st.session_state.manager_conv_total = total
-            else:
-                st.session_state.manager_conv_has_more = False
-
         # ------- initial / lazy load -------
         if st.session_state.current_user_id:
             if "manager_conversations" not in st.session_state:
@@ -10020,165 +10061,158 @@ def render_manage_modal():
                 with st.status("Loading conversations...", expanded=False):
                     _load_manager_page(1)
 
-            manager_conversations = list(st.session_state.manager_conversations)
-        else:
-            manager_conversations = []
-
         # Search
         search_term = st.text_input("Search conversations", placeholder="Type to search...")
-
-        if manager_conversations:
-            manager_conversations = _deduplicate_conversations(manager_conversations)
-
-            if search_term:
-                filtered_map: dict[str, dict[str, Any]] = {}
-                search_lower = search_term.lower()
-
-                for conv in manager_conversations:
-                    conv_id = str(conv.get("id", ""))
-                    if not conv_id:
-                        continue
-
-                    if search_lower in (conv.get("title") or "").lower():
-                        filtered_map.setdefault(conv_id, conv)
-                        continue
-
-                    messages = conv.get("messages") or []
-                    for msg in messages:
-                        if search_lower in (msg.get("content") or "").lower():
-                            filtered_map.setdefault(conv_id, conv)
-                            break
-
-                filtered_convs = list(filtered_map.values())
-            else:
-                filtered_convs = manager_conversations
-
-            display_conversations = _deduplicate_conversations(filtered_convs)
-
-            if display_conversations:
-                total_known = st.session_state.get("manager_conv_total", len(display_conversations))
-                loaded_count = len(manager_conversations)
-                if total_known > loaded_count:
-                    st.caption(
-                        f"Showing {len(display_conversations)} of {total_known} conversation(s) "
-                    )
-                else:
-                    st.caption(f"Found {len(display_conversations)} conversation(s)")
-
-                for idx, conv in enumerate(display_conversations):
-                    conv_id = conv.get("id")
-                    conv_id_str = str(conv_id) if conv_id is not None else ""
-                    conv_title = conv.get("title") or "Untitled conversation"
-                    with st.expander(conv_title, expanded=False):
-                        # Show stats
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            messages = conv.get("messages") or []
-                            message_count = conv.get("messageCount", len(messages))
-                            st.metric("Messages", message_count)
-                        with col2:
-                            created = format_time(conv.get("createdAt", ""))
-                            st.metric("Created", created)
-                        with col3:
-                            persona = conv.get("personaPrompt")
-                            st.metric("Persona", "Yes" if persona else "No")
-
-                        # Show latest 3 message previews
-                        if conv.get("messages"):
-                            st.markdown("**Recent messages:**")
-                            for msg in conv["messages"][:3]:
-                                sender_value = msg.get("sender")
-                                sender_tag = (
-                                    "USER"
-                                    if sender_value in (1, "user", "USER", "User")
-                                    else "ASSISTANT"
-                                )
-                                preview = msg.get("content", "")[:80]
-                                st.caption(f"{sender_tag}: {preview}...")
-                        else:
-                            st.caption("No messages")
-
-                        # Actions
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            open_button_key = (
-                                f"conversation_manager_open_{conv_id_str}_{idx}"
-                                if conv_id_str
-                                else f"conversation_manager_open_{idx}"
-                            )
-                            if st.button(
-                                "Open",
-                                key=open_button_key,
-                                width="stretch",
-                                type="primary",
-                            ):
-                                if conv_id is not None:
-                                    st.session_state.current_conversation_id = conv_id
-                                    close_conversation_manager()
-                                    reset_conversation_state()
-                                    st.rerun()
-                                else:
-                                    st.toast(
-                                        "Conversation is missing an ID",
-                                        icon=":material/warning:",
-                                    )
-                        with col2:
-                            delete_button_key = (
-                                f"conversation_manager_delete_{conv_id_str}_{idx}"
-                                if conv_id_str
-                                else f"conversation_manager_delete_{idx}"
-                            )
-                            if st.button(
-                                "Delete",
-                                key=delete_button_key,
-                                width="stretch",
-                            ):
-                                if conv_id is None:
-                                    st.toast(
-                                        "Conversation is missing an ID",
-                                        icon=":material/warning:",
-                                    )
-                                else:
-                                    result = make_api_request("DELETE", f"/conversations/{conv_id}")
-                                    if result:
-                                        st.session_state.conversations_list = []
-                                        # Remove from manager cache
-                                        st.session_state.manager_conversations = [
-                                            c
-                                            for c in st.session_state.get(
-                                                "manager_conversations", []
-                                            )
-                                            if c.get("id") != conv_id
-                                        ]
-                                        if st.session_state.current_conversation_id == conv_id:
-                                            st.session_state.current_conversation_id = None
-                                            reset_conversation_state()
-                                        refresh_conversations_list()
-                                        st.toast(
-                                            f"Deleted '{conv.get('title', 'Conversation')}'",
-                                            icon=":material/check_circle:",
-                                        )
-                                        st.rerun()
-
-                # ------- Load-more button -------
-                has_more = st.session_state.get("manager_conv_has_more", False)
-                if has_more and not search_term:
-                    remaining = max(
-                        0,
-                        st.session_state.get("manager_conv_total", 0)
-                        - len(st.session_state.get("manager_conversations", [])),
-                    )
-                    if st.button(
-                        f"Load more conversations ({remaining} remaining)",
-                        key="manager_load_more",
-                        width="stretch",
-                    ):
-                        next_page = st.session_state.manager_conv_page + 1
-                        _load_manager_page(next_page)
-            else:
-                st.info("No conversations found matching your search.")
+        normalized_search = search_term.strip()
+        if normalized_search:
+            if st.session_state.get("manager_search_query") != normalized_search:
+                _reset_manager_search_state(normalized_search)
+                _load_manager_page(1, search=normalized_search)
+            active_items_key = "manager_search_conversations"
+            active_page_key = "manager_search_page"
+            active_has_more_key = "manager_search_has_more"
+            active_total_key = "manager_search_total"
         else:
-            st.info("No conversations available.")
+            active_items_key = "manager_conversations"
+            active_page_key = "manager_conv_page"
+            active_has_more_key = "manager_conv_has_more"
+            active_total_key = "manager_conv_total"
+
+        display_conversations = _deduplicate_conversations(
+            list(st.session_state.get(active_items_key, []))
+        )
+
+        if display_conversations:
+            total_known = st.session_state.get(active_total_key, len(display_conversations))
+            loaded_count = len(display_conversations)
+            if total_known > loaded_count:
+                st.caption(
+                    f"Showing {len(display_conversations)} of {total_known} conversation(s) "
+                )
+            else:
+                st.caption(f"Found {len(display_conversations)} conversation(s)")
+
+            for idx, conv in enumerate(display_conversations):
+                conv_id = conv.get("id")
+                conv_id_str = str(conv_id) if conv_id is not None else ""
+                conv_title = conv.get("title") or "Untitled conversation"
+                with st.expander(conv_title, expanded=False):
+                    # Show stats
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        messages = conv.get("messages") or []
+                        message_count = conv.get("messageCount", len(messages))
+                        st.metric("Messages", message_count)
+                    with col2:
+                        created = format_time(conv.get("createdAt", ""))
+                        st.metric("Created", created)
+                    with col3:
+                        persona = conv.get("personaPrompt")
+                        st.metric("Persona", "Yes" if persona else "No")
+
+                    # Show latest 3 message previews
+                    if conv.get("messages"):
+                        st.markdown("**Recent messages:**")
+                        for msg in conv["messages"][:3]:
+                            sender_value = msg.get("sender")
+                            sender_tag = (
+                                "USER"
+                                if sender_value in (1, "user", "USER", "User")
+                                else "ASSISTANT"
+                            )
+                            preview = msg.get("content", "")[:80]
+                            st.caption(f"{sender_tag}: {preview}...")
+                    else:
+                        st.caption("No messages")
+
+                    # Actions
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        open_button_key = (
+                            f"conversation_manager_open_{conv_id_str}_{idx}"
+                            if conv_id_str
+                            else f"conversation_manager_open_{idx}"
+                        )
+                        if st.button(
+                            "Open",
+                            key=open_button_key,
+                            width="stretch",
+                            type="primary",
+                        ):
+                            if conv_id is not None:
+                                st.session_state.current_conversation_id = conv_id
+                                close_conversation_manager()
+                                reset_conversation_state()
+                                st.rerun()
+                            else:
+                                st.toast(
+                                    "Conversation is missing an ID",
+                                    icon=":material/warning:",
+                                )
+                    with col2:
+                        delete_button_key = (
+                            f"conversation_manager_delete_{conv_id_str}_{idx}"
+                            if conv_id_str
+                            else f"conversation_manager_delete_{idx}"
+                        )
+                        if st.button(
+                            "Delete",
+                            key=delete_button_key,
+                            width="stretch",
+                        ):
+                            if conv_id is None:
+                                st.toast(
+                                    "Conversation is missing an ID",
+                                    icon=":material/warning:",
+                                )
+                            else:
+                                result = make_api_request("DELETE", f"/conversations/{conv_id}")
+                                if result:
+                                    st.session_state.conversations_list = []
+                                    # Remove from manager cache
+                                    st.session_state.manager_conversations = [
+                                        c
+                                        for c in st.session_state.get("manager_conversations", [])
+                                        if c.get("id") != conv_id
+                                    ]
+                                    st.session_state.manager_search_conversations = [
+                                        c
+                                        for c in st.session_state.get(
+                                            "manager_search_conversations", []
+                                        )
+                                        if c.get("id") != conv_id
+                                    ]
+                                    if st.session_state.current_conversation_id == conv_id:
+                                        st.session_state.current_conversation_id = None
+                                        reset_conversation_state()
+                                    refresh_conversations_list()
+                                    st.toast(
+                                        f"Deleted '{conv.get('title', 'Conversation')}'",
+                                        icon=":material/check_circle:",
+                                    )
+                                    st.rerun()
+
+            # ------- Load-more button -------
+            has_more = st.session_state.get(active_has_more_key, False)
+            if has_more:
+                remaining = max(
+                    0,
+                    st.session_state.get(active_total_key, 0)
+                    - len(st.session_state.get(active_items_key, [])),
+                )
+                if st.button(
+                    f"Load more conversations ({remaining} remaining)",
+                    key="manager_search_load_more" if normalized_search else "manager_load_more",
+                    width="stretch",
+                ):
+                    next_page = int(st.session_state.get(active_page_key, 0)) + 1
+                    _load_manager_page(next_page, search=normalized_search or None)
+                    st.rerun()
+        else:
+            if normalized_search:
+                st.info("No conversations found matching your search.")
+            else:
+                st.info("No conversations available.")
         if st.button("Close", width="stretch"):
             close_conversation_manager()
             st.rerun()
