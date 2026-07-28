@@ -259,6 +259,10 @@ def build(output_root: Path) -> tuple[Path, Path]:
         app_dir / "core" / "config.py",
     )
     shutil.copy2(
+        REPO_ROOT / "app" / "core" / "build_info.py",
+        app_dir / "core" / "build_info.py",
+    )
+    shutil.copy2(
         REPO_ROOT / "app" / "core" / "mcp_adapter_utils.py",
         app_dir / "core" / "mcp_adapter_utils.py",
     )

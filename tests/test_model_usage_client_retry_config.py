@@ -193,25 +193,6 @@ def test_provider_service_gemini_client_disables_retries(monkeypatch):
     _assert_genai_no_retry(capture.kwargs)
 
 
-# --- MCP form filler server ----------------------------------------------
-
-
-def test_form_filler_gemini_client_disables_retries(monkeypatch):
-    from app.ai.mcp_servers import form_filler_server
-
-    captured: dict = {}
-
-    class _Client:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            raise RuntimeError("stop after construction")
-
-    monkeypatch.setattr(form_filler_server.genai, "Client", _Client)
-    monkeypatch.setattr(form_filler_server.settings, "gemini_api_key", "k")
-    form_filler_server.fill_form("hello")
-    _assert_genai_no_retry(captured)
-
-
 # --- OpenAI image provider -----------------------------------------------
 
 

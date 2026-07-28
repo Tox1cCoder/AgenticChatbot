@@ -141,11 +141,30 @@ def make_relative_to_root(path: Path, root: Path) -> str:
         return str(path)
 
 
-def get_profile_subdir(user_id: str, subdir: str) -> Path:
+def profile_subdir_path(user_id: str, subdir: str) -> Path:
     """
-    Get a user-specific subdirectory within the profile root.
+    Resolve a user-specific profile subdirectory without touching the filesystem.
 
     The structure follows: {profile_root}/{server_hash}/{user_id}/{subdir}
+
+    Use this from read paths. Callers that are about to write should use
+    :func:`get_profile_subdir`, which also creates the directory.
+
+    Args:
+        user_id: The user's ID.
+        subdir: The subdirectory name (e.g., "session", "mcp", "skills").
+
+    Returns:
+        The path to the subdirectory, whether or not it exists.
+    """
+    server_hash = hashlib.sha256(client_settings.server_api_base_url.encode()).hexdigest()[:12]
+
+    return Path(client_settings.profile_root) / server_hash / user_id / subdir
+
+
+def get_profile_subdir(user_id: str, subdir: str) -> Path:
+    """
+    Get a user-specific profile subdirectory, creating it if needed.
 
     Args:
         user_id: The user's ID.
@@ -154,9 +173,7 @@ def get_profile_subdir(user_id: str, subdir: str) -> Path:
     Returns:
         The path to the subdirectory, created if it doesn't exist.
     """
-    server_hash = hashlib.sha256(client_settings.server_api_base_url.encode()).hexdigest()[:12]
-
-    path = Path(client_settings.profile_root) / server_hash / user_id / subdir
+    path = profile_subdir_path(user_id, subdir)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -198,12 +215,15 @@ def get_installed_skills_root(user_id: str) -> Path:
 
     Single source of truth for the installed-bundle location so the installer
     (which writes here) and the registry scanner (which reads here) cannot
-    drift. Note: ``get_profile_subdir`` creates the parent ``skills`` dir as a
-    side effect, so only call this once a user id is actually available.
+    drift. Resolution only: the directory legitimately does not exist until the
+    first bundle is installed, and the installer creates it then.
     """
-    return get_profile_subdir(user_id, "skills") / "installed"
+    return profile_subdir_path(user_id, "skills") / "installed"
 
 
 def get_skill_runtimes_root(user_id: str) -> Path:
-    """Return the profile directory that holds prepared skill runtimes."""
-    return get_profile_subdir(user_id, "skills") / "runtimes"
+    """Return the profile directory that holds prepared skill runtimes.
+
+    Resolution only; the runtime preparer creates it when it first needs it.
+    """
+    return profile_subdir_path(user_id, "skills") / "runtimes"

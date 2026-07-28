@@ -1,19 +1,14 @@
-"""Task 11: conversation-compaction and form-fill usage recording.
+"""Task 11: conversation-compaction usage recording.
 
 Compaction records one ``conversation_compaction`` event per generation
-attempt, attributed to the verified conversation owner. The form-filler MCP
-tool records a ``form_fill`` event with ``user_id=NULL`` (its stdio transport
-carries no verified identity). Credential source (user vs server) is never
-exposed in analytics.
+attempt, attributed to the verified conversation owner. Credential source
+(user vs server) is never exposed in analytics.
 """
 
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
-import logging
-import sys
 from dataclasses import asdict
 from types import SimpleNamespace
 from uuid import uuid4
@@ -294,85 +289,6 @@ async def test_langchain_generate_callsite_records_compaction_operation(monkeypa
     assert command.status == "success"
     assert command.usage.input_tokens == 200
     assert command.usage.output_tokens == 50
-
-
-# ---------------------------------------------------------------------------
-# Form-filler MCP tool (unattributed form_fill)
-# ---------------------------------------------------------------------------
-
-
-def test_form_fill_records_unattributed_event():
-    from app.ai.mcp_servers.form_filler_server import _generate_form_content
-
-    repo = _FakeRepo()
-    client = SimpleNamespace(
-        models=SimpleNamespace(generate_content=lambda **_kwargs: _gemini_generated('{"ok": true}'))
-    )
-
-    response = _generate_form_content(
-        client, "gemini-3-flash-preview", "prompt", recorder=_recorder(repo)
-    )
-
-    assert response.content == '{"ok": true}'
-    assert len(repo.commands) == 1
-    command = repo.commands[0]
-    assert command.status == "success"
-    assert command.provider == "gemini"
-    assert command.model == "gemini-3-flash-preview"
-    assert command.context.operation == "form_fill"
-    assert command.context.user_id is None
-
-
-def test_form_fill_uses_configured_model(monkeypatch):
-    from app.ai.mcp_servers import form_filler_server
-
-    captured = {}
-
-    class _Models:
-        @staticmethod
-        def generate_content(**kwargs):
-            captured.update(kwargs)
-            return SimpleNamespace(text="{}")
-
-    class _Client:
-        def __init__(self, **_kwargs):
-            self.models = _Models()
-
-    monkeypatch.setattr(form_filler_server.genai, "Client", _Client)
-    monkeypatch.setattr(form_filler_server.settings, "gemini_api_key", "key")
-    monkeypatch.setattr(
-        form_filler_server.settings,
-        "form_filler_model",
-        "gemini-configured-form-model",
-        raising=False,
-    )
-    monkeypatch.setattr(form_filler_server, "_build_form_fill_recorder", lambda: None)
-
-    assert json.loads(form_filler_server.fill_form("water leak")) == {}
-    assert captured["model"] == "gemini-configured-form-model"
-
-
-def test_form_fill_accepts_no_user_controlled_identity_fields():
-    from app.ai.mcp_servers.form_filler_server import fill_form
-
-    assert tuple(inspect.signature(fill_form).parameters) == ("natural_language_input",)
-
-
-def test_form_fill_recorder_failure_warns_with_exception_class_only(monkeypatch, caplog):
-    from app.ai.mcp_servers import form_filler_server
-
-    def _raise():
-        raise RuntimeError("database secret must not be logged")
-
-    fake_container_module = SimpleNamespace(get_container=_raise)
-    monkeypatch.setitem(sys.modules, "app.core.container", fake_container_module)
-
-    with caplog.at_level(logging.WARNING, logger=form_filler_server.__name__):
-        assert form_filler_server._build_form_fill_recorder() is None
-
-    messages = [record.getMessage() for record in caplog.records]
-    assert messages == ["Form-fill usage recorder unavailable error=RuntimeError"]
-    assert "database secret" not in caplog.text
 
 
 @pytest.mark.asyncio

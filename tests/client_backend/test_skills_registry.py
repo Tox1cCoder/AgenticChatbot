@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -7,7 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 from client_backend.core.config import client_settings
-from client_backend.core.paths import get_profile_subdir
+from client_backend.core.paths import (
+    get_installed_skills_root,
+    get_profile_subdir,
+    profile_subdir_path,
+)
 from client_backend.services import local_skills_registry as local_skills_registry_module
 from client_backend.services.local_skills_registry import LocalSkillsRegistry, SkillMetadata
 from client_backend.services.skill_runtime.install import _compute_source_hash as install_hash
@@ -316,6 +321,61 @@ def test_install_metadata_never_leaks_absolute_paths_in_sync_dict(tmp_path):
     assert "install_root" not in sync_dict["install"]
     assert "source" not in sync_dict["install"]
     assert sync_dict["install"]["installed"] is True
+
+
+@pytest.mark.asyncio
+async def test_absent_installed_root_is_silent_while_missing_configured_root_warns(
+    tmp_path, monkeypatch, caplog
+):
+    """The implicit installed root is absent until the first bundle install.
+
+    Only roots the user actually configured should warn when missing.
+    """
+    missing_configured_root = tmp_path / "configured-but-absent"
+    original_profile_root = client_settings.profile_root
+    client_settings.profile_root = str(tmp_path / "profiles")
+    monkeypatch.setattr(
+        local_skills_registry_module,
+        "get_upstream_auth_service",
+        lambda: SimpleNamespace(get_current_user_id=lambda: "user-a"),
+    )
+
+    try:
+        registry = LocalSkillsRegistry(skill_roots=[str(missing_configured_root)])
+        with caplog.at_level(logging.WARNING):
+            await registry.initialize()
+        installed_root = str(get_installed_skills_root("user-a"))
+    finally:
+        client_settings.profile_root = original_profile_root
+
+    assert not Path(installed_root).exists()
+    missing_root_warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if "Skill root does not exist" in record.getMessage()
+    ]
+    assert any(str(missing_configured_root) in message for message in missing_root_warnings)
+    assert not any(installed_root in message for message in missing_root_warnings)
+
+
+def test_read_only_profile_access_does_not_create_skill_directories(tmp_path, monkeypatch):
+    """Resolving a profile path must not be what creates it on disk."""
+    original_profile_root = client_settings.profile_root
+    client_settings.profile_root = str(tmp_path / "profiles")
+    monkeypatch.setattr(
+        local_skills_registry_module,
+        "get_upstream_auth_service",
+        lambda: SimpleNamespace(get_current_user_id=lambda: "user-a"),
+    )
+
+    try:
+        registry = LocalSkillsRegistry(skill_roots=[])
+        assert registry._load_persisted_skill_state() == {}
+        assert registry._resolve_skill_roots()
+
+        assert not profile_subdir_path("user-a", "skills").exists()
+    finally:
+        client_settings.profile_root = original_profile_root
 
 
 def test_install_metadata_defaults_to_not_installed_when_absent(tmp_path):

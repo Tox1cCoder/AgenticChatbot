@@ -1582,6 +1582,16 @@ was reverted and the new test confirmed to fail, so none of these tests pass vac
   `get_servers_for_tool_name` and `reconnect_and_get_tool` use the same source, and
   `reconnect_and_get_tool` now takes an optional `server_name` and returns the tool from
   that server's list rather than a bare-name index hit.
+  **Device-boundary guard (found while reviewing this very change):** the stamp is only
+  honoured for `tool_origin == "server_mcp"`. Device-local client tools
+  (`app/ai/client_runtime_tools.py:331`) carry their OWN `metadata["server_name"]` — the
+  MCP server on the user's machine. A naive "just read the stamp" implementation would
+  report that as backend provenance, letting a user name a local server after a backend
+  one (`tavily`, `widgets`, …) and have their local tools admitted by a base agent's
+  server allowlist in `base_agent._filter_tools_by_allowlist`. That is a
+  scope-broadening fail-open across the device boundary and is now covered by a test.
+  The old `id()`-map had no such exposure only because it silently returned `None` for
+  everything it had not indexed itself.
 - **T006 ambiguous execution.** New `AmbiguousToolNameError` (409
   `AMBIGUOUS_TOOL_NAME`). `MCPManager.get_tool_by_name` raises it when a bare name maps
   to more than one server and no `server_name` is given; `execute_tool` /

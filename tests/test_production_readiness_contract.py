@@ -218,7 +218,6 @@ def test_model_env_example_matches_runtime_defaults() -> None:
         "rag_agent_model",
         "chat_agent_model",
         "search_agent_model",
-        "form_filler_model",
         "router_model",
         "image_generator_tool_model",
         "canvas_agent_model",

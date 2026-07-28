@@ -36,15 +36,6 @@
       ],
       "enabledByDefault": true,
       "description": "Image search using Brave Search API for visual references and article-style inline image candidates"
-    },
-    "form_filler": {
-      "transport": "stdio",
-      "command": "python",
-      "args": [
-        "app/ai/mcp_servers/form_filler_server.py"
-      ],
-      "enabledByDefault": false,
-      "description": "Natural language incident report form filler - extracts structured data from Vietnamese/English descriptions"
     }
   }
 }

@@ -118,7 +118,7 @@ Both services speak the same schemas (`app/schemas/`). The **client backend** ex
 ├── app/                              Canonical server backend (FastAPI)
 │   ├── ai/                           LangGraph workflow, agents, MCP, skills, tools
 │   │   ├── agents/                   chat / rag / search / image / planning / canvas / router
-│   │   ├── mcp_servers/              Built-in MCP servers (calculator, tavily, brave_image_search, time, widgets, form_filler)
+│   │   ├── mcp_servers/              Built-in MCP servers (calculator, tavily, brave_image_search, time, widgets)
 │   │   ├── graph.py                  MultiAgentWorkflow + streaming + HITL
 │   │   ├── history.py                Canonical compacted-memory + transcript assembly
 │   │   ├── conversation_compactor.py Durable compaction orchestration
@@ -291,7 +291,6 @@ The full schema lives in [`app/core/config.py`](app/core/config.py). Selected hi
 | `RAG_AGENT_MODEL` | `gemini-3.1-pro-preview` | |
 | `CHAT_AGENT_MODEL` | `gemini-3-flash-preview` | |
 | `SEARCH_AGENT_MODEL` | `gemini-3-flash-preview` | |
-| `FORM_FILLER_MODEL` | `gemini-3-flash-preview` | Form-filler MCP tool |
 | `ROUTER_MODEL` | `gemini-3-flash-preview` | Request routing |
 | `IMAGE_GENERATOR_TOOL_MODEL` | `gemini-3-flash-preview` | Image-agent tool calling |
 | `CANVAS_AGENT_MODEL` | `gemini-3.1-pro-preview` | Canvas agent default |
@@ -743,7 +742,6 @@ The bundled in-process MCP servers are under [`app/ai/mcp_servers/`](app/ai/mcp_
 | `tavily_server.py` | Tavily Search, Extract, Map, and Crawl web retrieval tools |
 | `brave_image_search_server.py` | Brave Image Search adapter — normalized inline image candidates |
 | `widgets_server.py` | Emits interactive widget state + mints tokens |
-| `form_filler_server.py` | Structured-form population |
 
 The same endpoints are exposed by `client_backend` at `/mcp/*` so a desktop UI can configure MCP both globally (server) and per-device (client).
 

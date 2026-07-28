@@ -144,21 +144,6 @@
     "disposition": "non_provider_tool_dispatch"
   },
   {
-    "file": "app/ai/mcp_servers/form_filler_server.py",
-    "function": "_generate_form_content._call",
-    "call_chain": "client.models.generate_content",
-    "disposition": "instrumented",
-    "operation": "form_fill",
-    "exercising_test": "tests/test_model_usage_compaction.py::test_form_fill_records_unattributed_event",
-    "exercise_symbol": "_generate_form_content"
-  },
-  {
-    "file": "app/ai/mcp_servers/form_filler_server.py",
-    "function": "fill_form",
-    "call_chain": "genai.Client",
-    "disposition": "startup_validation"
-  },
-  {
     "file": "app/ai/model_factory.py",
     "function": "ModelFactory._create_gemini_model",
     "call_chain": "ChatGoogleGenerativeAI",

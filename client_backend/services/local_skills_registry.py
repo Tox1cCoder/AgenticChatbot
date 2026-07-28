@@ -14,8 +14,8 @@ from client_backend.core.config import client_settings
 from client_backend.core.logging import get_logger
 from client_backend.core.paths import (
     get_installed_skills_root,
-    get_profile_subdir,
     is_under_root,
+    profile_subdir_path,
 )
 from client_backend.services.upstream_auth import get_upstream_auth_service
 from shared.skills.commands import is_link_like, is_supported_bundle_command
@@ -184,6 +184,9 @@ class LocalSkillsRegistry:
         self._initialized = False
         self._active_user_id: str | None = None
         self._active_skill_roots: tuple[str, ...] = ()
+        # Roots this class adds on its own behalf rather than ones the user
+        # configured. Their absence is normal and must not be warned about.
+        self._implicit_skill_roots: set[str] = set()
 
     async def initialize(self) -> None:
         """
@@ -231,7 +234,10 @@ class LocalSkillsRegistry:
                 root_path = Path(root).expanduser().resolve()
 
                 if not root_path.exists():
-                    logger.warning(f"Skill root does not exist: {root}")
+                    if root in self._implicit_skill_roots:
+                        logger.debug("Installed-skills root not created yet: %s", root)
+                    else:
+                        logger.warning(f"Skill root does not exist: {root}")
                     continue
 
                 if not root_path.is_dir():
@@ -650,20 +656,24 @@ class LocalSkillsRegistry:
 
         # Installed bundles (Task 4's SkillBundleInstaller) live under the
         # active user's profile, not CLIENT_SKILLS_ROOTS, so they must be
-        # scanned unconditionally here. get_profile_subdir() creates the
-        # directory as a side effect, so it is only called once a user id is
-        # actually available.
+        # scanned unconditionally here. The directory only exists once a bundle
+        # has actually been installed, so it is tracked as implicit and its
+        # absence is not reported as a misconfiguration.
+        implicit: set[str] = set()
         current_user_id = self._resolve_current_user_id()
         if current_user_id:
-            roots.append(str(get_installed_skills_root(current_user_id)))
+            installed_root = str(get_installed_skills_root(current_user_id))
+            roots.append(installed_root)
+            implicit.add(installed_root)
 
+        self._implicit_skill_roots = implicit
         return roots
 
     def _get_skill_state_path(self) -> Path | None:
         current_user_id = self._resolve_current_user_id()
         if not current_user_id:
             return None
-        return get_profile_subdir(current_user_id, "skills") / "state.json"
+        return profile_subdir_path(current_user_id, "skills") / "state.json"
 
     def _load_persisted_skill_state(self) -> dict[str, bool]:
         path = self._get_skill_state_path()

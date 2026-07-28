@@ -10,7 +10,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from client_backend.core.logging import get_logger
-from client_backend.core.paths import get_profile_subdir
+from client_backend.core.paths import profile_subdir_path
 from client_backend.core.security import (
     LocalSecretStorageError,
     decrypt_local_secret,
@@ -19,6 +19,7 @@ from client_backend.core.security import (
 from client_backend.services.upstream_auth import get_upstream_auth_service
 
 logger = get_logger(__name__)
+
 
 _SECRETS_FILENAME = "secrets.json"
 _STORAGE_VERSION = 1
@@ -98,7 +99,7 @@ class SkillSecretStore:
 
     @staticmethod
     def _secrets_path(user_id: str) -> Path:
-        return get_profile_subdir(user_id, "skills") / _SECRETS_FILENAME
+        return profile_subdir_path(user_id, "skills") / _SECRETS_FILENAME
 
     def _read_bindings(self, user_id: str | None = None) -> dict[str, dict[str, str]]:
         user_id = user_id or self._resolve_user_id()
@@ -141,6 +142,7 @@ class SkillSecretStore:
         payload = {"version": _STORAGE_VERSION, "skills": bindings}
         envelope = encrypt_local_secret(json.dumps(payload).encode("utf-8"))
         path = self._secrets_path(user_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(envelope), encoding="utf-8")
         with contextlib.suppress(OSError):
             os.chmod(path, 0o600)

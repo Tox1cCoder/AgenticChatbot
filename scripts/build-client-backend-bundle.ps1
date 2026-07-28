@@ -69,6 +69,7 @@ New-Item -ItemType Directory -Path (Join-Path $bundleRoot "app\\services") -Forc
 Copy-Item -LiteralPath (Join-Path $repoRoot "app\\ai\\mcp_config.json") -Destination (Join-Path $bundleRoot "app\\ai\\mcp_config.json") -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "app\\ai\\mcp_servers") -Destination (Join-Path $bundleRoot "app\\ai") -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "app\\core\\config.py") -Destination (Join-Path $bundleRoot "app\\core\\config.py") -Force
+Copy-Item -LiteralPath (Join-Path $repoRoot "app\\core\\build_info.py") -Destination (Join-Path $bundleRoot "app\\core\\build_info.py") -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "app\\core\\mcp_adapter_utils.py") -Destination (Join-Path $bundleRoot "app\\core\\mcp_adapter_utils.py") -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "app\\schemas\\runtime_protocol.py") -Destination (Join-Path $bundleRoot "app\\schemas\\runtime_protocol.py") -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "app\\services\\widget_contract.py") -Destination (Join-Path $bundleRoot "app\\services\\widget_contract.py") -Force
