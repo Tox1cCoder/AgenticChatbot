@@ -58,8 +58,10 @@ class MessageCRUDStrategy(
         if include_feedback:
             statement = statement.options(joinedload(Message.feedback))
 
-        # Apply ordering if specified
-        if hasattr(Message, order_by):
+        # Apply ordering if specified. ``order_by`` is Optional at the
+        # repository boundary, so the None check must come first — this mirrors
+        # DefaultQueryStrategy, which this class overrides.
+        if order_by and hasattr(Message, order_by):
             order_column = getattr(Message, order_by)
             statement = statement.order_by(
                 asc(order_column) if order_direction.lower() == "asc" else desc(order_column)
@@ -119,8 +121,10 @@ class MessageCRUDStrategy(
         if include_feedback:
             statement = statement.options(joinedload(Message.feedback))
 
-        # Apply ordering if specified
-        if hasattr(Message, order_by):
+        # Apply ordering if specified. ``order_by`` is Optional at the
+        # repository boundary, so the None check must come first — this mirrors
+        # DefaultQueryStrategy, which this class overrides.
+        if order_by and hasattr(Message, order_by):
             order_column = getattr(Message, order_by)
             statement = statement.order_by(
                 asc(order_column) if order_direction.lower() == "asc" else desc(order_column)
