@@ -171,6 +171,7 @@ class ConversationRepository:
         order_direction: str = "desc",
         include: list[str] = None,
         latest_messages: int = 3,
+        search: str | None = None,
     ) -> Paginator[Conversation]:
         """Get conversations by owner ID with optional includes"""
         if include is None:

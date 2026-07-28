@@ -43,6 +43,7 @@ class IConversationService(ABC):
         order_direction: str = "desc",
         include: list[str] = None,
         latest_messages: int = 3,
+        search: str | None = None,
     ) -> Paginator[ConversationRead]:
         """Get all conversations for a user with optional includes"""
         pass

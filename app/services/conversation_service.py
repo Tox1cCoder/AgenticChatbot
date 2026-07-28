@@ -113,6 +113,7 @@ class ConversationService(IConversationService):
         order_direction: str = "desc",
         include: list[str] = None,
         latest_messages: int = 3,
+        search: str | None = None,
     ) -> Paginator[ConversationRead]:
         """Get user conversations with optional includes"""
         if include is None:
@@ -131,6 +132,8 @@ class ConversationService(IConversationService):
         if order_direction.lower() not in valid_directions:
             raise ValueError(f"Invalid order_direction. Must be one of: {valid_directions}")
 
+        normalized_search = search.strip().lower() if isinstance(search, str) else ""
+
         self.user_validation_utils.validate_user_exists(owner_id)
         paginated_conversations = self.repository.get_by_owner_id(
             owner_id,
@@ -140,6 +143,7 @@ class ConversationService(IConversationService):
             order_direction=order_direction,
             include=include,
             latest_messages=latest_messages,
+            search=normalized_search or None,
         )
         # Convert items to ConversationRead schemas
         conversation_reads = [

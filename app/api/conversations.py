@@ -87,6 +87,11 @@ async def get_conversations(
         alias="latestMessages",
         description="Number of latest messages to include",
     ),
+    search: str | None = Query(
+        default=None,
+        max_length=200,
+        description="Case-insensitive conversation title or message search",
+    ),
 ) -> PaginatedApiResponse[ConversationRead]:
     """Get all conversations for authenticated user"""
     paginated_result = conversation_service.get_by_user_id(
@@ -97,6 +102,7 @@ async def get_conversations(
         order_direction=pagination.order_direction.value,
         include=include,
         latest_messages=latest_messages,
+        search=search,
     )
     return PaginatedApiResponse.from_paginator(
         paginated_result, "Conversations retrieved successfully"

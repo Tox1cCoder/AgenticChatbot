@@ -21,6 +21,7 @@ async def list_conversations(
     order_direction: str = Query(default="desc", alias="orderDirection"),
     include: list[str] = Query(default=[]),  # noqa: B008
     latest_messages: int = Query(default=3, alias="latestMessages"),
+    search: str | None = Query(default=None, max_length=200),
     _session: LocalSessionPayload = Depends(require_local_session),  # noqa: B008
 ) -> Response:
     """Proxy conversation listing to the canonical server."""
@@ -34,6 +35,8 @@ async def list_conversations(
         params["orderBy"] = order_by
     if "orderDirection" in request.query_params:
         params["orderDirection"] = order_direction
+    if search is not None:
+        params["search"] = search
 
     return await proxy_server_request(
         request,

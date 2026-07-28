@@ -113,6 +113,7 @@ def test_list_conversations_forwards_pagination_sorting(monkeypatch):
             "/conversations/"
             "?page=2&limit=5&orderBy=createdAt&orderDirection=asc"
             "&latestMessages=7&include=messages&include=feedback"
+            "&search=Roadmap%20Q3"
         )
 
     assert response.status_code == 200
@@ -126,6 +127,7 @@ def test_list_conversations_forwards_pagination_sorting(monkeypatch):
                 "orderDirection": "asc",
                 "include": ["messages", "feedback"],
                 "latestMessages": 7,
+                "search": "Roadmap Q3",
             },
         }
     ]
