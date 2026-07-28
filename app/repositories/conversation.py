@@ -53,9 +53,7 @@ def _build_owned_conversation_queries(
         ordering = (relevance.asc(), Conversation.updated_at.desc(), Conversation.id.asc())
     else:
         order_column = getattr(Conversation, order_by, Conversation.updated_at)
-        ordering = (
-            asc(order_column) if order_direction.lower() == "asc" else desc(order_column),
-        )
+        ordering = (asc(order_column) if order_direction.lower() == "asc" else desc(order_column),)
 
     count_statement = select(func.count(Conversation.id)).where(*conditions)
     page_statement = (
