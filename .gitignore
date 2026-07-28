@@ -88,6 +88,7 @@ scripts/
 /skills/
 .codex_logs
 .conda
+.superpowers
 
 # Legacy offloaded tool results (pre-Postgres blobs)
 data/
