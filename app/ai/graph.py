@@ -950,7 +950,7 @@ class MultiAgentWorkflow(
         last_message = messages[-1]
         content = last_message.content if hasattr(last_message, "content") else str(last_message)
         conversation_id = state.get("conversation_id")
-        has_documents = self._conversation_has_documents(conversation_id)
+        has_documents = await self._aconversation_has_documents(conversation_id)
 
         planning_mode_enabled, has_existing_plan = self._get_planning_flags(state)
 
@@ -1036,6 +1036,20 @@ class MultiAgentWorkflow(
             return False
         try:
             return self.document_repository.count_by_conversation(UUID(conversation_id)) > 0
+        except (ValueError, Exception):
+            return False
+
+    async def _aconversation_has_documents(self, conversation_id: str | None) -> bool:
+        """Async twin of :meth:`_conversation_has_documents`.
+
+        Routing runs before the first token, so this COUNT must not block the
+        event loop and stall other in-flight streams.
+        """
+        if not conversation_id or not self.document_repository:
+            return False
+        try:
+            count = await self.document_repository.acount_by_conversation(UUID(conversation_id))
+            return count > 0
         except (ValueError, Exception):
             return False
 
