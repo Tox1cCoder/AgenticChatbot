@@ -3,6 +3,7 @@ import logging
 import sys
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
@@ -87,7 +88,7 @@ def _log_widget_runtime_status():
     redis_url = settings.redis_url or settings.celery_broker_url
     if not redis_url:
         logger.warning(
-            "Widget runtime: no Redis URL configured — "
+            "Widget runtime: no Redis URL configured - "
             "live widget flows require Redis when the widgets MCP server runs out-of-process"
         )
         return
@@ -97,7 +98,7 @@ def _log_widget_runtime_status():
         r.close()
         logger.info("Widget runtime: Redis-backed storage active (%s)", redis_url.split("@")[-1])
     except Exception as e:
-        logger.warning("Widget runtime: Redis unavailable (%s) — widget flows will be degraded", e)
+        logger.warning("Widget runtime: Redis unavailable (%s) - widget flows will be degraded", e)
 
 
 def _ensure_qdrant_collection():
@@ -123,29 +124,85 @@ def _ensure_qdrant_collection():
         )
 
 
+def _selector_loop_error(loop: Any, *, platform: str = sys.platform) -> str | None:
+    """Return an operator-facing error if ``loop`` cannot serve psycopg async pools.
+
+    Pure so it can be tested without owning the running loop.
+
+    uvicorn (0.46+) hard-codes ``ProactorEventLoop`` for non-subprocess launches
+    on Windows, ignoring the policy set at the top of this module. psycopg's
+    async mode refuses that loop, and the application now opens an async
+    SQLAlchemy engine unconditionally (``app.database.async_session``), so on
+    that loop *every* request's database call fails while the server still
+    reports healthy. ``reload``/``workers`` launches are unaffected — subprocess
+    launches get a ``SelectorEventLoop``.
+    """
+    if platform != "win32":
+        return None
+    if not isinstance(loop, asyncio.ProactorEventLoop):
+        return None
+    return (
+        "This server is running on a ProactorEventLoop, which psycopg async "
+        "pools cannot use. Every database call on the async engine would fail. "
+        "Launch with reload/workers (subprocess mode), or start via the uvicorn "
+        "Server API after setting asyncio.WindowsSelectorEventLoopPolicy(), e.g.:\n"
+        "  asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())\n"
+        "  asyncio.run(uvicorn.Server(uvicorn.Config('app.main:app')).serve())"
+    )
+
+
 def _ensure_selector_event_loop():
     """Fail fast when the server loop cannot run psycopg async pools.
 
-    uvicorn (0.46+) hard-codes ``ProactorEventLoop`` for non-subprocess
-    launches on Windows, ignoring the policy set at the top of this module.
-    On that loop the LangGraph checkpointer's psycopg pool fails on every
-    connection, so HITL/planning silently breaks while the server appears
-    healthy. ``reload``/``workers`` launches are unaffected (subprocess
-    launches use ``SelectorEventLoop``).
+    Applies on every Windows launch. It is deliberately not gated on
+    ``enable_langgraph_checkpoints``: the async engine that serves ordinary
+    requests needs the selector loop even when checkpoints are disabled.
     """
-    if sys.platform != "win32" or not settings.enable_langgraph_checkpoints:
-        return
-    loop = asyncio.get_running_loop()
-    if isinstance(loop, asyncio.ProactorEventLoop):
+    error = _selector_loop_error(asyncio.get_running_loop())
+    if error:
+        raise RuntimeError(error)
+
+
+async def _verify_async_database_ready() -> None:
+    """Probe the async engine and check the connection budget at startup.
+
+    Ordinary requests are served by the async engine, so an unusable async pool
+    means every request fails while the process still answers ``/health``.
+    Failing here — before migrations, agents, and MCP servers start — makes that
+    a single clear message instead of a flood of per-request errors.
+    """
+    from app.database.readiness import resolve_connection_budget, verify_async_engine_ready
+    from app.database.session import engine as sync_engine
+
+    readiness = await verify_async_engine_ready()
+    if not readiness.ok:
         raise RuntimeError(
-            "This server is running on a ProactorEventLoop, which psycopg async "
-            "pools cannot use. Launch with reload/workers (subprocess mode), or "
-            "start via the uvicorn Server API after setting "
-            "asyncio.WindowsSelectorEventLoopPolicy(), e.g.:\n"
-            "  asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())\n"
-            "  asyncio.run(uvicorn.Server(uvicorn.Config('app.main:app')).serve())\n"
-            "Alternatively disable LangGraph checkpoints (ENABLE_LANGGRAPH_CHECKPOINTS=false)."
+            "The async database engine is not usable, so no request could be "
+            f"served: {readiness.error}. Check DATABASE_URL, database "
+            "reachability, and (on Windows) that the server runs on a "
+            "SelectorEventLoop."
         )
+
+    # Reported per worker on purpose. The real worker count belongs to the
+    # launch command (uvicorn --workers), and mirroring it into a setting here
+    # would create a second number that can silently disagree with it.
+    budget = resolve_connection_budget(
+        sync_pool=sync_engine.pool.size(),
+        sync_overflow=sync_engine.pool._max_overflow,  # noqa: SLF001 - no public accessor
+        async_pool=settings.db_pool_size,
+        async_overflow=settings.db_max_overflow,
+        workers=1,
+    )
+    description = budget.describe(max_connections=readiness.max_connections)
+    if budget.exceeds(max_connections=readiness.max_connections):
+        # A warning, not a failure: the worst case is rarely reached, and
+        # refusing to boot over a capacity estimate would be worse than serving.
+        logger.warning(
+            "Over-subscribed %s. Lower DB_POOL_SIZE/DB_MAX_OVERFLOW or raise max_connections.",
+            description,
+        )
+    else:
+        logger.info("Verified %s", description)
 
 
 @asynccontextmanager
@@ -154,6 +211,7 @@ async def lifespan(app: FastAPI):
     global _client_runtime_cleanup_task
     # Startup
     _ensure_selector_event_loop()
+    await _verify_async_database_ready()
     await init_database_migrations()
     await init_checkpoint_tables()
     await init_agents()
