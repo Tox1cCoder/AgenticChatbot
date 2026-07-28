@@ -6038,6 +6038,16 @@ def _reset_stream_trace_state(expanded: bool = True) -> None:
     st.session_state.stream_subagent_activity = None
 
 
+def _update_stream_status(
+    status: Any,
+    *,
+    label: str,
+    state: str = "running",
+) -> None:
+    """Update a live stream status without collapsing its contents."""
+    status.update(label=label, state=state, expanded=True)
+
+
 def _rebuild_stream_tool_index(trace_items: list[dict[str, Any]]) -> dict[str, int]:
     tool_index: dict[str, int] = {}
     for index, item in enumerate(trace_items):
@@ -6969,6 +6979,12 @@ def render_live_trace_panel(trace_placeholder: Any) -> None:
             expanded=bool(st.session_state.get("stream_trace_expanded", True)),
             live=True,
         )
+
+
+def _refresh_live_trace_panel(trace_placeholder: Any) -> None:
+    """Render the latest live trace while preserving expanded visibility."""
+    st.session_state.stream_trace_expanded = True
+    render_live_trace_panel(trace_placeholder)
 
 
 def render_citations(
@@ -9224,7 +9240,10 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
             if event_type == "agent_selected":
                 selected_agent = event.get("agent", "unknown")
                 display_name = event.get("agent_name") or get_agent_display_name(selected_agent)
-                status.update(label=f"{display_name} is processing...", state="running")
+                _update_stream_status(
+                    status,
+                    label=f"{display_name} is processing...",
+                )
                 continue
 
             if event_type == "thinking":
@@ -9232,39 +9251,38 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
                 accumulated_thinking += content
                 _upsert_stream_thinking_trace(accumulated_thinking)
                 st.session_state.stream_trace_expanded = True
-                render_live_trace_panel(trace_placeholder)
-                status.update(label="Working...", state="running")
+                _refresh_live_trace_panel(trace_placeholder)
+                _update_stream_status(status, label="Working...")
                 continue
 
             if event_type == "tool":
                 _upsert_stream_tool_trace(event)
-                render_live_trace_panel(trace_placeholder)
-                status.update(
+                _refresh_live_trace_panel(trace_placeholder)
+                _update_stream_status(
+                    status,
                     label=_format_stream_tool_status_label(event),
-                    state="running",
                 )
                 continue
 
             if event_type == "node_complete":
                 if _upsert_stream_subagent_activity(event):
-                    render_live_trace_panel(trace_placeholder)
-                    status.update(label="Subagents: dispatching...", state="running")
+                    _refresh_live_trace_panel(trace_placeholder)
+                    _update_stream_status(status, label="Subagents: dispatching...")
                 continue
 
             if event_type == "subagent":
                 if _upsert_stream_subagent_activity(event):
-                    render_live_trace_panel(trace_placeholder)
-                    status.update(label="Subagents: working...", state="running")
+                    _refresh_live_trace_panel(trace_placeholder)
+                    _update_stream_status(status, label="Subagents: working...")
                 continue
 
             if event_type == "token":
                 content = event.get("content", "")
                 accumulated_content += content
                 if _has_live_trace_panel_content():
-                    st.session_state.stream_trace_expanded = False
-                    render_live_trace_panel(trace_placeholder)
+                    _refresh_live_trace_panel(trace_placeholder)
                 stream_renderer.append_text(content)
-                status.update(label="Resuming response...", state="running")
+                _update_stream_status(status, label="Resuming response...")
                 continue
 
             if event_type == "rich_items":
@@ -9273,7 +9291,7 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
 
             if event_type == "image_preview":
                 image_preview_panel.apply(event)
-                status.update(label="Image ready — finishing response...", state="running")
+                _update_stream_status(status, label="Image ready — finishing response...")
                 continue
 
             if event_type == "interrupt":
@@ -9288,20 +9306,20 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
                 )
                 interrupt_message = extract_interrupt_message(next_interrupt)
                 if interrupt_message:
-                    status.update(label=interrupt_message, state="running")
+                    _update_stream_status(status, label=interrupt_message)
                 break
 
             if event_type == "error":
                 resume_error_event = event
                 resume_error = event.get("error") or "Failed to resume execution"
-                status.update(label=f"Error: {resume_error}", state="error")
+                _update_stream_status(status, label=f"Error: {resume_error}", state="error")
                 break
 
             if event_type == "complete":
                 final_message = _reconcile_terminal_trace(event.get("message"))
                 image_preview_panel.finalize()
                 stream_renderer.finalize(final_message)
-                status.update(label="Resume completed", state="complete")
+                _update_stream_status(status, label="Resume completed", state="complete")
                 resume_succeeded = True
                 break
 
@@ -9914,7 +9932,7 @@ def render_chat_view():
                             # Store user_message_id for stop endpoint
                             user_msg = event.get("message", {})
                             st.session_state.stream_user_message_id = str(user_msg.get("id", ""))
-                            status.update(label="Generating response...", state="running")
+                            _update_stream_status(status, label="Generating response...")
 
                         elif event_type == "agent_selected":
                             # Track which agent was selected for processing
@@ -9923,9 +9941,9 @@ def render_chat_view():
                             display_name = event.get("agent_name") or get_agent_display_name(
                                 selected_agent
                             )
-                            status.update(
+                            _update_stream_status(
+                                status,
                                 label=f"{display_name} is processing...",
-                                state="running",
                             )
 
                         elif event_type == "thinking":
@@ -9933,25 +9951,23 @@ def render_chat_view():
                             accumulated_thinking += content
                             st.session_state.stream_partial_thinking = accumulated_thinking
                             _upsert_stream_thinking_trace(accumulated_thinking)
-                            st.session_state.stream_trace_expanded = True
-                            render_live_trace_panel(trace_placeholder)
-                            status.update(label="Working...", state="running")
+                            _refresh_live_trace_panel(trace_placeholder)
+                            _update_stream_status(status, label="Working...")
 
                         elif event_type == "token":
                             content = event.get("content", "")
                             accumulated_content += content  # Append each token chunk
                             st.session_state.stream_partial_text = accumulated_content
                             if _has_live_trace_panel_content():
-                                st.session_state.stream_trace_expanded = False
-                                render_live_trace_panel(trace_placeholder)
+                                _refresh_live_trace_panel(trace_placeholder)
                             stream_renderer.append_text(content)
 
                         elif event_type == "tool":
                             _upsert_stream_tool_trace(event)
-                            render_live_trace_panel(trace_placeholder)
-                            status.update(
+                            _refresh_live_trace_panel(trace_placeholder)
+                            _update_stream_status(
+                                status,
                                 label=_format_stream_tool_status_label(event),
-                                state="running",
                             )
 
                         elif event_type == "rich_items":
@@ -9959,27 +9975,27 @@ def render_chat_view():
 
                         elif event_type == "image_preview":
                             image_preview_panel.apply(event)
-                            status.update(
+                            _update_stream_status(
+                                status,
                                 label="Image ready — finishing response...",
-                                state="running",
                             )
 
                         elif event_type == "node_complete":
                             if _upsert_stream_subagent_activity(event):
-                                render_live_trace_panel(trace_placeholder)
-                                status.update(label="Subagents: dispatching...", state="running")
+                                _refresh_live_trace_panel(trace_placeholder)
+                                _update_stream_status(status, label="Subagents: dispatching...")
 
                         elif event_type == "subagent":
                             if _upsert_stream_subagent_activity(event):
-                                render_live_trace_panel(trace_placeholder)
-                                status.update(label="Subagents: working...", state="running")
+                                _refresh_live_trace_panel(trace_placeholder)
+                                _update_stream_status(status, label="Subagents: working...")
 
                         elif event_type == "interrupt":
                             # Workflow paused for human approval
                             interrupt_data = event.get("interrupt")
                             interrupt_message = extract_interrupt_message(interrupt_data)
                             if interrupt_message:
-                                status.update(label=interrupt_message, state="running")
+                                _update_stream_status(status, label=interrupt_message)
 
                             # Store interrupt state in session for the approval UI.
                             # Carry the reasoning/partial answer streamed before the
@@ -10004,12 +10020,16 @@ def render_chat_view():
                             final_message = _reconcile_terminal_trace(event.get("message"))
                             image_preview_panel.finalize()
                             stream_renderer.finalize(final_message)
-                            status.update(label="Message sent!", state="complete")
+                            _update_stream_status(status, label="Message sent!", state="complete")
 
                         elif event_type == "error":
                             # Handle error
                             error_msg = event.get("error", "Unknown error")
-                            status.update(label=f"Error: {error_msg}", state="error")
+                            _update_stream_status(
+                                status,
+                                label=f"Error: {error_msg}",
+                                state="error",
+                            )
                             st.toast(f"Error: {error_msg}", icon=":material/cancel:")
                             _clear_inflight_state()
                             break

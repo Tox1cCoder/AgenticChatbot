@@ -5,6 +5,41 @@ from typing import Any
 from tests.test_demo_plan_widget import _import_demo_with_ui_stubs
 
 
+def test_running_stream_status_update_remains_expanded(monkeypatch):
+    demo, _streamlit = _import_demo_with_ui_stubs(monkeypatch)
+
+    class Status:
+        def __init__(self) -> None:
+            self.updates: list[dict[str, Any]] = []
+
+        def update(self, **kwargs: Any) -> None:
+            self.updates.append(kwargs)
+
+    status = Status()
+
+    demo._update_stream_status(status, label="Working...", state="running")
+
+    assert status.updates == [{"label": "Working...", "state": "running", "expanded": True}]
+
+
+def test_live_trace_refresh_restores_expansion_before_render(monkeypatch):
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    streamlit_stub.session_state.stream_trace_expanded = False
+    observed: list[tuple[object, bool]] = []
+    placeholder = object()
+    monkeypatch.setattr(
+        demo,
+        "render_live_trace_panel",
+        lambda received: observed.append(
+            (received, streamlit_stub.session_state.stream_trace_expanded)
+        ),
+    )
+
+    demo._refresh_live_trace_panel(placeholder)
+
+    assert observed == [(placeholder, True)]
+
+
 def test_terminal_message_reconciles_live_trace_without_losing_persisted_metadata(monkeypatch):
     demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
     demo._reset_stream_trace_state()
@@ -155,14 +190,17 @@ def test_successful_hitl_resume_clears_original_pending_images(monkeypatch):
     demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
 
     class Status:
+        def __init__(self):
+            self.updates: list[dict[str, Any]] = []
+
         def __enter__(self):
             return self
 
         def __exit__(self, *_args):
             return False
 
-        def update(self, **_kwargs):
-            return None
+        def update(self, **kwargs):
+            self.updates.append(kwargs)
 
     class Renderer:
         def __init__(self, *_args, **_kwargs):
@@ -182,7 +220,8 @@ def test_successful_hitl_resume_clears_original_pending_images(monkeypatch):
     )
     streamlit_stub.session_state[demo._hitl_resume_lock_key("interrupt-1")] = True
     reruns: list[bool] = []
-    streamlit_stub.status = lambda *_args, **_kwargs: Status()
+    status = Status()
+    streamlit_stub.status = lambda *_args, **_kwargs: status
     streamlit_stub.empty = lambda: object()
     streamlit_stub.rerun = lambda: reruns.append(True)
 
@@ -204,6 +243,11 @@ def test_successful_hitl_resume_clears_original_pending_images(monkeypatch):
 
     assert streamlit_stub.session_state.pending_image_attachments == []
     assert reruns == [True]
+    assert status.updates[-1] == {
+        "label": "Resume completed",
+        "state": "complete",
+        "expanded": True,
+    }
 
 
 def test_attachment_toggle_draft_is_preserved_for_exactly_one_rerun(monkeypatch):
