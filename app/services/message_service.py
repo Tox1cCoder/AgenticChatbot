@@ -480,14 +480,65 @@ class MessageService(IMessageService):
         metadata: dict[str, Any],
         message_id: UUID | None = None,
     ) -> MessageRead:
-        """Create and persist a bot response message."""
-        bot_response_entity = MessageFactory.create_bot_response(
+        """Create and persist a bot response message.
+
+        Retained deliberately for two kinds of caller:
+
+        * synchronous callers such as :meth:`_persist_interrupt_bot_message`; and
+        * ``except``/``finally`` handlers on the cancellation and error paths.
+          Awaiting inside a handler whose task is already being cancelled raises
+          ``CancelledError`` at the ``await``, which would silently skip
+          persisting the error message the user is waiting for. Those paths are
+          rare, so blocking briefly is the right trade for completing reliably.
+
+        Normal terminal persistence uses
+        :meth:`_acreate_bot_response_message`.
+        """
+        bot_response_entity = self._bot_response_entity(
+            conversation_id, content, metadata, message_id
+        )
+        bot_message = self.repository.create(bot_response_entity)
+        return self._finalize_bot_response_message(conversation_id, bot_message)
+
+    async def _acreate_bot_response_message(
+        self,
+        conversation_id: UUID,
+        content: str,
+        metadata: dict[str, Any],
+        message_id: UUID | None = None,
+    ) -> MessageRead:
+        """Async twin of :meth:`_create_bot_response_message`.
+
+        Used on the terminal paths that run for every turn, so the assistant
+        insert does not block the event loop mid-stream and delay other
+        in-flight streams. Not for use inside exception handlers — see the sync
+        method's docstring.
+        """
+        bot_response_entity = self._bot_response_entity(
+            conversation_id, content, metadata, message_id
+        )
+        bot_message = await self.repository.acreate(bot_response_entity)
+        return self._finalize_bot_response_message(conversation_id, bot_message)
+
+    @staticmethod
+    def _bot_response_entity(
+        conversation_id: UUID,
+        content: str,
+        metadata: dict[str, Any],
+        message_id: UUID | None,
+    ) -> dict[str, Any]:
+        """Build the assistant row. No database access."""
+        return MessageFactory.create_bot_response(
             conversation_id=conversation_id,
             content=content,
             message_metadata=metadata,
             id=message_id,
         )
-        bot_message = self.repository.create(bot_response_entity)
+
+    def _finalize_bot_response_message(
+        self, conversation_id: UUID, bot_message: Any
+    ) -> MessageRead:
+        """Invalidate cached prompt history and project the persisted row."""
         with contextlib.suppress(Exception):
             self.ai_service.invalidate_history_cache(str(conversation_id))
         return MessageRead.model_validate(bot_message)
@@ -1207,7 +1258,7 @@ class MessageService(IMessageService):
                             inflight.selected_agent,
                             workflow_request.custom_agents,
                         )
-                        bot_message = self._create_bot_response_message(
+                        bot_message = await self._acreate_bot_response_message(
                             conversation_id=message_create_data.conversation_id,
                             content=partial,
                             metadata=metadata,
@@ -1935,7 +1986,7 @@ class MessageService(IMessageService):
                     self._mark_claimed_interrupt_failed(interrupt_id, "stream_error")
 
                     error_msg = event.data.get("error", UNKNOWN_ERROR)
-                    error_message = self._create_bot_response_message(
+                    error_message = await self._acreate_bot_response_message(
                         conversation_id=conversation_id,
                         content=f"Error generating response: {error_msg}",
                         metadata={"error": error_msg},
@@ -1968,7 +2019,7 @@ class MessageService(IMessageService):
             if not bot_message_persisted:
                 get_generation_registry().clear_paused_for_conversation(user_id, conversation_id)
                 self._mark_claimed_interrupt_failed(interrupt_id, "stream_incomplete")
-                fallback_message = self._create_bot_response_message(
+                fallback_message = await self._acreate_bot_response_message(
                     conversation_id=conversation_id,
                     content=ERROR_RESPONSE_AFTER_RESUME,
                     metadata={"error": ERROR_RESPONSE_AFTER_RESUME},
@@ -2208,7 +2259,7 @@ class MessageService(IMessageService):
         ):
             bot_metadata["todos_synced"] = True
 
-        bot_message = self._create_bot_response_message(
+        bot_message = await self._acreate_bot_response_message(
             conversation_id=conversation_id,
             content=bot_response_content,
             metadata=bot_metadata,
@@ -2687,7 +2738,7 @@ class MessageService(IMessageService):
                 request_message_id=reply_to_user_message_id,
             )
 
-        bot_message = self._create_bot_response_message(
+        bot_message = await self._acreate_bot_response_message(
             conversation_id=conversation_id,
             content=bot_response_content,
             metadata=bot_metadata,

@@ -22,6 +22,8 @@ from app.ai.schemas import (
     WorkflowExecutionRequest,
 )
 
+from .conftest import async_double
+
 
 def _make_workflow() -> MultiAgentWorkflow:
     """Construct a workflow shell without invoking heavy ``__init__`` deps."""
@@ -248,6 +250,7 @@ async def test_message_service_compacts_checkpoint_after_persist(monkeypatch):
         return SimpleNamespace(id=kwargs.get("message_id"))
 
     service._create_bot_response_message = fake_create_bot_response_message
+    service._acreate_bot_response_message = async_double(fake_create_bot_response_message)
 
     workflow_request = ServiceWorkflowExecutionRequest(
         message="hello",
@@ -307,6 +310,7 @@ async def test_capable_widget_response_does_not_invent_missing_marker(monkeypatc
         return SimpleNamespace(id=uuid4())
 
     service._create_bot_response_message = fake_create_bot_response_message
+    service._acreate_bot_response_message = async_double(fake_create_bot_response_message)
     workflow_request = ServiceWorkflowExecutionRequest(
         message="Explain compound interest with a chart.",
         conversation_id=str(uuid4()),

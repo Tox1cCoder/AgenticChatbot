@@ -1443,7 +1443,71 @@ but the strategy it delegates to does `hasattr(Message, order_by)`, so calling i
 with its own default raises `TypeError`. This fails identically on the sync path.
 The strategy's own default is the correct `"created_at"`.
 
-## Phase 2 Preview (separate plan)
+## Phase 2 Results (streaming path complete, 2026-07-28)
+
+Phase 2 was driven by measurement rather than by sweeping repositories, because
+an async twin nobody awaits is untested surface. `tests/conftest.py` gained a
+`forbid_sync_db_on_event_loop` fixture: a pool-checkout listener that records
+every sync-engine connection taken while an event loop is running. It catches a
+blocking call anywhere on a path instead of one call site at a time.
+
+| Path | Before | After |
+|---|---|---|
+| Workflow-request assembly (pre-first-token) | 7 blocking checkouts | 0 |
+| A whole streaming turn | 1 | 0 |
+
+The 7 were the task-plan service (`get_conversation_tasks`,
+`get_active_or_next_task`) and the custom-agent service (`build_runtime_state`),
+each preceded by its own sync `validate_conversation_access` — two queries
+apiece, which is how three calls became seven. The last one was the terminal
+assistant insert.
+
+Both counts are now locked by tests, each paired with an inverse assertion so
+the guard cannot rot into a tautology.
+
+### Production hardening
+
+- **The selector-loop guard was gated on `enable_langgraph_checkpoints`.** That
+  was correct when only the checkpointer used an async psycopg pool. The async
+  engine is now unconditional, so with that flag off on Windows the server
+  booted healthy on a ProactorEventLoop and failed on every request's database
+  call — and the message advised disabling checkpoints, which made it worse. The
+  check is unconditional; the decision is extracted as the pure
+  `_selector_loop_error` so it is testable without owning the running loop.
+- **Startup probes the async engine and logs the connection budget.** An
+  unusable async pool now aborts startup with one actionable message. The budget
+  exists because the two engines have independent pools whose maxima add: 45
+  worst-case connections per web worker against `max_connections=100`, so a
+  two-worker launch over-subscribes. It warns rather than refuses, and is
+  reported *per worker* deliberately — the real count belongs to
+  `uvicorn --workers`, and mirroring it into a setting would create a second
+  number that can silently disagree.
+- **Error and cancellation handlers deliberately stay synchronous.** Six of the
+  eleven `_create_bot_response_message` call sites are inside `except`/`finally`
+  blocks. Awaiting inside a handler whose task is already being cancelled raises
+  `CancelledError` at the `await`, which would silently skip persisting the
+  error message the user is waiting for. Those paths are rare, so blocking
+  briefly is the right trade for completing reliably; the five happy-path sites
+  that run every turn use the async twin. Both docstrings state which is which.
+- Two pre-existing widget-runtime log messages were made ASCII: an em-dash in a
+  log string can raise `UnicodeEncodeError` under a cp1252 Windows console.
+
+### Verification
+
+2801 passed, 71 skipped; the only failure remains the pre-existing README
+migration-head drift. Ruff clean across `app/` and `tests/`. Celery imports with
+9 tasks and `alembic current` reports `e8f9a0b1c2d3`, both on the untouched sync
+engine. Live boot reports `_WindowsSelectorEventLoop`, `/health` 200, and a
+container-built repository querying through `run_sync`.
+
+### Still synchronous
+
+The read endpoints (conversations, messages, documents, feedback) and the
+remaining ~19 repositories. Lower impact per call than the streaming path, and
+now trivially measurable: point `forbid_sync_db_on_event_loop` at any path and
+it names the offenders.
+
+## Phase 3 Preview (separate plan)
 
 Phase 1 leaves 22 repositories sync-only and their async callers still blocking.
 Phase 2 sweeps them module by module, one commit per module, in descending

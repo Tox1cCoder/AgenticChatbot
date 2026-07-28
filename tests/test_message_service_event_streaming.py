@@ -207,9 +207,12 @@ def _claimed_resume_service(*, source, lifecycle_events):
     service._resolve_custom_agents_state = lambda *_args: {}
     service._clear_redis_interrupt = lambda *_args: None
     service._sync_response_plan_state = lambda **_kwargs: False
-    service._create_bot_response_message = lambda **_kwargs: SimpleNamespace(
-        model_dump=lambda **_kwargs: {},
-    )
+
+    def _bot_message(**_kwargs):
+        return SimpleNamespace(model_dump=lambda **_kwargs: {})
+
+    service._create_bot_response_message = _bot_message
+    service._acreate_bot_response_message = async_double(_bot_message)
     service.ai_service = SimpleNamespace(
         invalidate_history_cache=lambda *_args: None,
         resume_interrupted_execution_stream=source,
@@ -408,9 +411,12 @@ async def test_claimed_resume_completion_persistence_failure_marks_failed_before
     service._resolve_custom_agents_state = lambda *_args: {}
     service._clear_redis_interrupt = lambda *_args: None
     service._sync_response_plan_state = lambda **_kwargs: False
-    service._create_bot_response_message = lambda **_kwargs: SimpleNamespace(
-        model_dump=lambda **_kwargs: {},
-    )
+
+    def _bot_message(**_kwargs):
+        return SimpleNamespace(model_dump=lambda **_kwargs: {})
+
+    service._create_bot_response_message = _bot_message
+    service._acreate_bot_response_message = async_double(_bot_message)
     service.ai_service = SimpleNamespace(
         invalidate_history_cache=lambda *_args: None,
         resume_interrupted_execution_stream=source,
@@ -503,6 +509,7 @@ async def test_claimed_nested_interrupt_durable_creation_failure_marks_failed_no
         )
 
     service._create_bot_response_message = create_bot_response_message
+    service._acreate_bot_response_message = async_double(create_bot_response_message)
     service.redis_client = None
     service.task_plan_service = None
     service.ai_service = SimpleNamespace(

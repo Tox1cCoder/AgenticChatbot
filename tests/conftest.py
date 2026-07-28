@@ -200,7 +200,15 @@ def seeded_conversation_id(require_async_db):
 
     yield conversation_id
 
+    # Persisting an assistant message also enqueues a compaction job whose
+    # foreign key targets (conversation_id, sequence), so dependents must go
+    # before the messages they reference.
+    from app.models.conversation_memory_summary import ConversationMemorySummary
+    from app.models.conversation_summary_job import ConversationSummaryJob
+
     with SessionLocal() as session:
+        for model in (ConversationSummaryJob, ConversationMemorySummary):
+            session.query(model).filter(model.conversation_id == conversation_id).delete()
         session.query(Message).filter(Message.conversation_id == conversation_id).delete()
         session.query(Conversation).filter(Conversation.id == conversation_id).delete()
         session.query(User).filter(User.id == owner_id).delete()

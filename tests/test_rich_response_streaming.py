@@ -436,11 +436,16 @@ async def test_message_service_forwards_rich_items_during_resume_stream():
     service._get_conversation_context = lambda *_args: (user_id, None)
     service._audit_interrupt_resume_decisions = lambda **_kwargs: None
     service._clear_redis_interrupt = lambda *_args: None
-    service._create_bot_response_message = lambda **_kwargs: _message_row(
-        conversation_id=conversation_id,
-        sender=MessageRole.assistant.value,
-        content="error",
-    )
+
+    def _bot_message(**_kwargs):
+        return _message_row(
+            conversation_id=conversation_id,
+            sender=MessageRole.assistant.value,
+            content="error",
+        )
+
+    service._create_bot_response_message = _bot_message
+    service._acreate_bot_response_message = async_double(_bot_message)
 
     async def source(*_args, **_kwargs):
         yield _rich_items_event()

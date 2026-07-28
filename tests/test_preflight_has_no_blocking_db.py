@@ -66,3 +66,57 @@ async def test_guard_detects_a_deliberate_sync_call(forbid_sync_db_on_event_loop
         session.execute(text("select 1"))
 
     assert forbid_sync_db_on_event_loop, "guard failed to notice a sync session on the loop"
+
+
+async def test_a_whole_streaming_turn_makes_no_sync_db_calls(
+    message_service, seeded_conversation_id, forbid_sync_db_on_event_loop
+):
+    """The end-to-end guard: request assembly, the user insert, and the terminal
+    assistant persist all run on the async transport.
+
+    The AI service is replaced with a deterministic event source — the model call
+    is not what this asserts — but every database call is the real one.
+    """
+    from types import SimpleNamespace
+
+    from app.schemas.workflow import WorkflowResponse, WorkflowResponseMessage
+    from app.services.event_streaming.events import make_event
+
+    conversation = (
+        await message_service.conversation_validation_utils.conversation_repository.aget_by_id(
+            seeded_conversation_id
+        )
+    )
+
+    async def fake_stream(_request):
+        yield make_event("message_delta", sequence=1, data={"text": "hello"})
+        yield make_event(
+            "complete",
+            sequence=2,
+            data={
+                "response": WorkflowResponse(
+                    message=WorkflowResponseMessage(content="hello"), metadata={}
+                )
+            },
+        )
+
+    message_service.ai_service = SimpleNamespace(
+        invalidate_history_cache=lambda *_args: None,
+        execute_request_stream=fake_stream,
+    )
+
+    forbid_sync_db_on_event_loop.clear()
+
+    events = [
+        event
+        async for event in message_service.create_message_stream(
+            MessageCreate(conversation_id=seeded_conversation_id, content="hello"),
+            conversation.owner_id,
+        )
+    ]
+
+    assert events[-1].type == "complete", "the turn must actually have completed"
+    assert forbid_sync_db_on_event_loop == [], (
+        "a streaming turn still blocks the event loop on the sync engine at:\n  "
+        + "\n  ".join(dict.fromkeys(forbid_sync_db_on_event_loop))
+    )
