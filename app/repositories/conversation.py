@@ -1,6 +1,7 @@
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import asc, desc, func, select
+from sqlalchemy import asc, case, desc, exists, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.models.conversation import Conversation
@@ -11,6 +12,60 @@ from app.repositories.query_strategy import DefaultQueryStrategy
 from app.repositories.utils.pagination import Paginator
 from app.schemas.conversation import ConversationCreate, ConversationUpdate
 from app.utils.validation.pagination_validation import validate_pagination_params
+
+
+def _build_owned_conversation_queries(
+    *,
+    owner_id: UUID,
+    page: int,
+    limit: int,
+    order_by: str,
+    order_direction: str,
+    search: str | None,
+) -> tuple[Any, Any]:
+    """Build matching count and page queries for one owner's conversations."""
+    conditions = [
+        Conversation.owner_id == owner_id,
+        Conversation.deleted_at.is_(None),
+    ]
+    normalized_search = search.strip().lower() if isinstance(search, str) else ""
+
+    if normalized_search:
+        title = func.lower(Conversation.title)
+        title_exact = title == normalized_search
+        title_prefix = title.startswith(normalized_search, autoescape=True)
+        title_contains = title.contains(normalized_search, autoescape=True)
+        message_match = exists(
+            select(Message.id).where(
+                Message.conversation_id == Conversation.id,
+                Message.deleted_at.is_(None),
+                func.lower(Message.content).contains(normalized_search, autoescape=True),
+            )
+        ).correlate(Conversation)
+        conditions.append(or_(title_contains, message_match))
+        relevance = case(
+            (title_exact, 0),
+            (title_prefix, 1),
+            (title_contains, 2),
+            (message_match, 3),
+            else_=4,
+        )
+        ordering = (relevance.asc(), Conversation.updated_at.desc(), Conversation.id.asc())
+    else:
+        order_column = getattr(Conversation, order_by, Conversation.updated_at)
+        ordering = (
+            asc(order_column) if order_direction.lower() == "asc" else desc(order_column),
+        )
+
+    count_statement = select(func.count(Conversation.id)).where(*conditions)
+    page_statement = (
+        select(Conversation)
+        .where(*conditions)
+        .order_by(*ordering)
+        .offset((page - 1) * limit)
+        .limit(limit)
+    )
+    return count_statement, page_statement
 
 
 class ConversationCRUDStrategy(
@@ -31,39 +86,40 @@ class ConversationCRUDStrategy(
         limit: int = 10,
         order_by: str = "updated_at",
         order_direction: str = "desc",
+        search: str | None = None,
     ) -> Paginator[Conversation]:
         """Get conversations by owner ID with page-based pagination and ordering"""
 
         validate_pagination_params(page, limit)
-        # Get total count first
-        total = self.count_by_owner_id(db, owner_id)
-
-        # Get paginated items
-        offset = (page - 1) * limit
-        statement = select(Conversation).where(
-            Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None)
+        count_statement, page_statement = _build_owned_conversation_queries(
+            owner_id=owner_id,
+            page=page,
+            limit=limit,
+            order_by=order_by,
+            order_direction=order_direction,
+            search=search,
         )
-        # Apply ordering if specified
-        if hasattr(Conversation, order_by):
-            order_column = getattr(Conversation, order_by)
-            statement = statement.order_by(
-                asc(order_column) if order_direction.lower() == "asc" else desc(order_column)
-            )
-        else:
-            # Default ordering
-            statement = statement.order_by(Conversation.updated_at.desc())
-
-        statement = statement.offset(offset).limit(limit)
-        items = list(db.execute(statement).scalars().all())
+        total = int(db.execute(count_statement).scalar() or 0)
+        items = list(db.execute(page_statement).scalars().all())
 
         return Paginator.create(items, total, page, limit)
 
-    def count_by_owner_id(self, db: Session, owner_id: UUID) -> int:
+    def count_by_owner_id(
+        self,
+        db: Session,
+        owner_id: UUID,
+        search: str | None = None,
+    ) -> int:
         """Count conversations by owner ID"""
-        statement = select(Conversation).where(
-            Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None)
+        count_statement, _ = _build_owned_conversation_queries(
+            owner_id=owner_id,
+            page=1,
+            limit=1,
+            order_by="updated_at",
+            order_direction="desc",
+            search=search,
         )
-        return len(list(db.execute(statement).scalars().all()))
+        return int(db.execute(count_statement).scalar() or 0)
 
     def get_with_messages(self, db: Session, conversation_id: UUID) -> Conversation | None:
         """Get conversation with its messages"""
@@ -83,28 +139,18 @@ class ConversationCRUDStrategy(
         order_direction: str = "desc",
         page: int = 1,
         limit: int = 10,
+        search: str | None = None,
     ) -> list[Conversation]:
         """Get conversations with limited recent messages and total message count"""
-        # Get paginated conversations for the user
-        statement = select(Conversation).where(
-            Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None)
+        _, page_statement = _build_owned_conversation_queries(
+            owner_id=owner_id,
+            page=page,
+            limit=limit,
+            order_by=order_by,
+            order_direction=order_direction,
+            search=search,
         )
-
-        # Apply ordering if specified
-        if hasattr(Conversation, order_by):
-            order_column = getattr(Conversation, order_by)
-            statement = statement.order_by(
-                asc(order_column) if order_direction.lower() == "asc" else desc(order_column)
-            )
-        else:
-            # Default ordering
-            statement = statement.order_by(Conversation.updated_at.desc())
-
-        # Apply pagination
-        offset = (page - 1) * limit
-        statement = statement.offset(offset).limit(limit)
-
-        conversations = list(db.execute(statement).scalars().all())
+        conversations = list(db.execute(page_statement).scalars().all())
 
         # Load recent messages and count total messages for each conversation
         for conversation in conversations:
@@ -188,19 +234,26 @@ class ConversationRepository:
                     order_direction,
                     page,
                     limit,
+                    search,
                 )
                 # Get total count for pagination
-                total = self._crud_strategy.count_by_owner_id(session, owner_id)
+                total = self._crud_strategy.count_by_owner_id(session, owner_id, search)
                 return Paginator.create(conversations, total, page, limit)
             else:
                 return self._crud_strategy.get_by_owner_id(
-                    session, owner_id, page, limit, order_by, order_direction
+                    session,
+                    owner_id,
+                    page,
+                    limit,
+                    order_by,
+                    order_direction,
+                    search,
                 )
 
-    def count_by_owner_id(self, owner_id: UUID) -> int:
+    def count_by_owner_id(self, owner_id: UUID, search: str | None = None) -> int:
         """Count conversations by owner ID"""
         with self.session_factory() as session:
-            return self._crud_strategy.count_by_owner_id(session, owner_id)
+            return self._crud_strategy.count_by_owner_id(session, owner_id, search)
 
     def get_with_messages(self, conversation_id: UUID) -> Conversation | None:
         """Get conversation with its messages"""
