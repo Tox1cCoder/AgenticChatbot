@@ -1,3 +1,5 @@
+from collections.abc import Callable
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import desc
@@ -6,15 +8,23 @@ from sqlalchemy.exc import IntegrityError, MultipleResultsFound
 from app.core.exceptions.validation import DuplicateDocumentFilenameError
 from app.models.conversation import Conversation
 from app.models.document import Document
+from app.repositories.session_transport import RepositorySessionMixin
 from app.schemas.document import DocumentCreate, DocumentUpdate
 
 
-class DocumentRepository:
+class DocumentRepository(RepositorySessionMixin):
     """Repository for document operations"""
 
-    def __init__(self, session_factory: callable):
+    def __init__(
+        self,
+        session_factory: callable,
+        async_session_factory: Callable[[], Any] | None = None,
+    ):
         """Initialize repository with session factory for dependency injection."""
-        self.session_factory = session_factory
+        super().__init__(
+            session_factory=session_factory,
+            async_session_factory=async_session_factory,
+        )
 
     def create(self, document_data: DocumentCreate) -> Document:
         """Create a new document.
@@ -159,10 +169,24 @@ class DocumentRepository:
         with self.session_factory() as db:
             return db.query(Document).count()
 
+    @staticmethod
+    def _count_by_conversation_in_session(db, conversation_id: UUID) -> int:
+        """Counting body shared by both transports.
+
+        This repository queries directly rather than through a strategy, so the
+        query itself lives here.
+        """
+        return db.query(Document).filter(Document.conversation_id == conversation_id).count()
+
     def count_by_conversation(self, conversation_id: UUID) -> int:
         """Count documents for a conversation"""
-        with self.session_factory() as db:
-            return db.query(Document).filter(Document.conversation_id == conversation_id).count()
+        return self._run(lambda db: self._count_by_conversation_in_session(db, conversation_id))
+
+    async def acount_by_conversation(self, conversation_id: UUID) -> int:
+        """Async twin of :meth:`count_by_conversation`."""
+        return await self._arun(
+            lambda db: self._count_by_conversation_in_session(db, conversation_id)
+        )
 
     # Authorization helpers
     def exists(self, document_id: UUID) -> bool:

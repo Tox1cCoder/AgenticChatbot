@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -9,6 +10,7 @@ from app.models.enums import PlanLifecycle
 from app.models.message import Message
 from app.repositories.command_strategy import DefaultCommandStrategy
 from app.repositories.query_strategy import DefaultQueryStrategy
+from app.repositories.session_transport import RepositorySessionMixin
 from app.repositories.utils.pagination import Paginator
 from app.schemas.conversation import ConversationCreate, ConversationUpdate
 from app.utils.validation.pagination_validation import validate_pagination_params
@@ -198,12 +200,19 @@ class ConversationCRUDStrategy(
         return list(db.execute(statement).scalars().all())
 
 
-class ConversationRepository:
+class ConversationRepository(RepositorySessionMixin):
     """Repository for Conversation model using session factory pattern"""
 
-    def __init__(self, session_factory: callable):
+    def __init__(
+        self,
+        session_factory: callable,
+        async_session_factory: Callable[[], Any] | None = None,
+    ):
         """Initialize repository with session factory for dependency injection."""
-        self.session_factory = session_factory
+        super().__init__(
+            session_factory=session_factory,
+            async_session_factory=async_session_factory,
+        )
         self._crud_strategy = ConversationCRUDStrategy(Conversation)
 
     def get_by_owner_id(
@@ -273,18 +282,35 @@ class ConversationRepository:
         with self.session_factory() as session:
             return self._crud_strategy.get_by_id(session, id)
 
+    async def aget_by_id(self, id: UUID) -> Conversation | None:
+        """Async twin of :meth:`get_by_id`."""
+        return await self._arun(lambda session: self._crud_strategy.get_by_id(session, id))
+
     def get_all(self, page: int = 1, limit: int = 10) -> list[Conversation]:
         """Get all conversations with page-based pagination"""
         with self.session_factory() as session:
             return self._crud_strategy.get_all(session, page, limit)
 
+    def _update_in_session(
+        self, session: Session, id: UUID, input_schema: ConversationUpdate
+    ) -> Conversation | None:
+        """Load-then-update body shared by both transports.
+
+        Both statements must share one transaction, which is why this is a
+        single session-taking function rather than two calls.
+        """
+        db_obj = self._crud_strategy.get_by_id(session, id)
+        if db_obj is None:
+            return None
+        return self._crud_strategy.update(session, db_obj, input_schema)
+
     def update(self, id: UUID, input_schema: ConversationUpdate) -> Conversation | None:
         """Update conversation by ID"""
-        with self.session_factory() as session:
-            db_obj = self._crud_strategy.get_by_id(session, id)
-            if db_obj is None:
-                return None
-            return self._crud_strategy.update(session, db_obj, input_schema)
+        return self._run(lambda session: self._update_in_session(session, id, input_schema))
+
+    async def aupdate(self, id: UUID, input_schema: ConversationUpdate) -> Conversation | None:
+        """Async twin of :meth:`update`."""
+        return await self._arun(lambda session: self._update_in_session(session, id, input_schema))
 
     def set_plan_lifecycle(self, id: UUID, lifecycle: PlanLifecycle | None) -> Conversation | None:
         """Persist the internal plan lifecycle state."""

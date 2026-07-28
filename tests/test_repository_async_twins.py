@@ -105,6 +105,68 @@ async def test_aget_latest_by_conversation_matches_sync(
         assert actual.id == expected.id
 
 
+@pytest.fixture
+def conversation_repository():
+    from app.repositories.conversation import ConversationRepository
+
+    return ConversationRepository(
+        session_factory=SessionLocal,
+        async_session_factory=AsyncSessionLocal,
+    )
+
+
+@pytest.fixture
+def document_repository():
+    from app.repositories.document import DocumentRepository
+
+    return DocumentRepository(
+        session_factory=SessionLocal,
+        async_session_factory=AsyncSessionLocal,
+    )
+
+
+async def test_conversation_aget_by_id_matches_sync(
+    conversation_repository, seeded_conversation_id
+):
+    expected = conversation_repository.get_by_id(seeded_conversation_id)
+    actual = await conversation_repository.aget_by_id(seeded_conversation_id)
+    assert actual is not None
+    assert actual.id == expected.id
+    assert actual.title == expected.title
+
+
+async def test_conversation_aget_by_id_returns_none_for_missing(
+    conversation_repository, require_async_db
+):
+    assert await conversation_repository.aget_by_id(uuid4()) is None
+
+
+async def test_conversation_aupdate_persists(conversation_repository, seeded_conversation_id):
+    from app.schemas.conversation import ConversationUpdate
+
+    updated = await conversation_repository.aupdate(
+        seeded_conversation_id, ConversationUpdate(title="renamed by async twin")
+    )
+    assert updated is not None
+    assert updated.title == "renamed by async twin"
+    assert conversation_repository.get_by_id(seeded_conversation_id).title == (
+        "renamed by async twin"
+    )
+
+
+async def test_conversation_aupdate_returns_none_for_missing(
+    conversation_repository, require_async_db
+):
+    from app.schemas.conversation import ConversationUpdate
+
+    assert await conversation_repository.aupdate(uuid4(), ConversationUpdate(title="x")) is None
+
+
+async def test_document_acount_matches_sync(document_repository, seeded_conversation_id):
+    expected = document_repository.count_by_conversation(seeded_conversation_id)
+    assert await document_repository.acount_by_conversation(seeded_conversation_id) == expected
+
+
 async def test_aget_by_conversation_id_matches_sync(
     message_repository, seeded_message_id, seeded_conversation_id
 ):
