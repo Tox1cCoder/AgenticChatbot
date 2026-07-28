@@ -28,11 +28,14 @@ filter searches only those loaded rows and only the three recent messages includ
 preview. Conversations outside that page and matches in older messages are invisible. Results
 retain load order rather than relevance order.
 
-### Persistent loading row
+### First conversation element replaced by loading state
 
-The initial synchronous fetch is wrapped in `st.status("Loading conversations...")`. A status
-component is a durable UI element, so after the fetch it remains as the first collapsed item in
-the dialog even though it has no useful body.
+The initial synchronous fetch conditionally inserts
+`st.status("Loading conversations...")` as the dialog's first element. On the next dialog rerun,
+that status is omitted because the first page is cached, shifting the positions of all later
+Streamlit elements. The first real conversation expander/statistics element can therefore be
+reconciled against the prior loading component and appear to have been replaced by the Loading
+conversations label.
 
 ### Collapsing live status and trace
 
@@ -84,10 +87,13 @@ rows.
 
 ### Conversation manager loading state
 
-Initial and load-more fetches use a transient spinner or no durable wrapper. A completed fetch
-therefore leaves no empty component above the search input. API failures leave the cache in a
-retryable state and show the existing empty/error feedback rather than a misleading successful
-loading row.
+The dialog creates the same dedicated loading placeholder at the same position on every render.
+During an initial or load-more fetch, a transient spinner is rendered inside that placeholder;
+after the fetch, only the placeholder's contents are cleared. Keeping the structural slot stable
+prevents later widgets from shifting identity between reruns, while clearing its contents ensures
+that no Loading conversations label remains visible and the first conversation retains its real
+title and statistics. API failures leave the cache in a retryable state and show the existing
+empty/error feedback rather than a misleading successful loading row.
 
 ### Stable live expansion
 
@@ -157,7 +163,9 @@ Tests are written before production changes and must fail for the intended reaso
   the first page, deterministic ranking, deduplication, pagination metadata, ownership isolation,
   soft-delete exclusion, and unchanged blank-search behavior.
 - Streamlit tests prove query parameters are encoded correctly, search results are server-backed,
-  unfiltered lazy paging remains available, and no durable loading status is rendered.
+  unfiltered lazy paging remains available, the loading placeholder exists at a stable render
+  position, and its transient contents are cleared after loading without replacing the first
+  conversation expander/statistics element.
 - Streaming UI tests prove every running label update explicitly remains expanded in both send and
   resume flows and token transitions do not force the trace closed.
 - Characterization tests cover helpers affected by consolidation before code is rearranged.
@@ -177,7 +185,8 @@ Tests are written before production changes and must fail for the intended reaso
 ## Acceptance Criteria
 
 - `demo.py` remains a single file and its supported behavior is preserved.
-- Manage Conversations opens without a persistent empty Loading conversations row.
+- Manage Conversations preserves the first conversation title/statistics element across reruns
+  and shows no stale Loading conversations label after the fetch completes.
 - A search can find any owned conversation by title or any of its messages, regardless of manager
   pagination or message age.
 - Exact and title matches rank above message-only matches, with stable pagination.
