@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Any
+from typing import Annotated, Any
 
 # Ensure the project root is on sys.path so `app.*` imports resolve
 # when this file is launched as a subprocess by MCPManager.
@@ -21,17 +21,40 @@ if _project_root not in sys.path:
 
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
+from pydantic import BeforeValidator, WithJsonSchema  # noqa: E402
 
-from app.services.widget_contract import validate_html_widget_state  # noqa: E402
+from app.services.widget_contract import (  # noqa: E402
+    coerce_widget_state_object,
+    validate_html_widget_state,
+)
 from app.services.widget_runtime import get_widget_store  # noqa: E402
 
 mcp = FastMCP("widgets")
 
 
+def _coerce_initial_state(raw: Any) -> Any:
+    return coerce_widget_state_object(raw, field="initial_state")
+
+
+def _coerce_state(raw: Any) -> Any:
+    return coerce_widget_state_object(raw, field="state")
+
+
+# The advertised schema stays object-only, so the model is still told to send
+# one native object. The BeforeValidator repairs the common slip — a stringified
+# object, usually pretty-printed JSON with raw newlines inside ``html`` — which
+# pydantic would otherwise reject before the tool body ever runs.
+_OBJECT_SCHEMA = WithJsonSchema({"type": "object", "additionalProperties": True})
+InitialWidgetState = Annotated[
+    dict[str, Any], BeforeValidator(_coerce_initial_state), _OBJECT_SCHEMA
+]
+WidgetState = Annotated[dict[str, Any], BeforeValidator(_coerce_state), _OBJECT_SCHEMA]
+
+
 @mcp.tool()
 async def widget_create(
     session_id: str,
-    initial_state: dict[str, Any],
+    initial_state: InitialWidgetState,
     title: str = "",
 ) -> str:
     """Create a live HTML widget that appears inside the chat conversation.
@@ -87,12 +110,13 @@ async def widget_create(
         JSON object describing the created widget (widget_id, version, etc.).
     """
     store = get_widget_store()
-    if not isinstance(initial_state, dict):
-        raise ValueError("initial_state must be an object.")
-    validate_html_widget_state(initial_state)
+    # Coerced again here (idempotent for a dict) because direct in-process
+    # callers bypass the argument validator above.
+    state = coerce_widget_state_object(initial_state, field="initial_state")
+    validate_html_widget_state(state)
     record = await store.create(
         session_id=session_id,
-        initial_state=initial_state,
+        initial_state=state,
         title=title or None,
     )
     return json.dumps(record.to_dict(), default=str)
@@ -101,7 +125,7 @@ async def widget_create(
 @mcp.tool()
 async def widget_update(
     widget_id: str,
-    state: dict[str, Any],
+    state: WidgetState,
     version: int = 0,
 ) -> str:
     """Replace the full state of an existing live HTML widget.
@@ -121,15 +145,16 @@ async def widget_update(
         JSON object with the updated widget record.
     """
     store = get_widget_store()
-    if not isinstance(state, dict):
-        raise ValueError("state must be an object.")
+    # Coerced again here (idempotent for a dict) because direct in-process
+    # callers bypass the argument validator above.
+    new_state = coerce_widget_state_object(state, field="state")
     existing = await store.get(widget_id)
     if existing is None:
         raise KeyError(f"Widget {widget_id} not found")
-    validate_html_widget_state(state)
+    validate_html_widget_state(new_state)
     record = await store.update(
         widget_id=widget_id,
-        state=state,
+        state=new_state,
         expected_version=version if version > 0 else None,
     )
     return json.dumps(record.to_dict(), default=str)

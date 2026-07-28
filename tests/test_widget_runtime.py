@@ -929,20 +929,40 @@ class TestWidgetToolHtmlContract:
         )
         assert json.loads(result)["state"]["html"] == html
 
-    async def test_widget_create_rejects_serialized_state(self, monkeypatch):
+    async def test_widget_create_recovers_serialized_state(self, monkeypatch):
+        """A stringified state is repaired rather than failing the first call.
+
+        The schema still advertises an object, but models routinely serialize
+        this argument; rejecting it cost a whole tool round-trip.
+        """
         import app.services.widget_runtime as widget_runtime
         from app.ai.mcp_servers import widgets_server
 
         store = InMemoryWidgetStore()
         monkeypatch.setattr(widget_runtime, "_widget_store", store)
 
-        with pytest.raises(ValueError, match="initial_state must be an object"):
+        result = await widgets_server.widget_create(
+            session_id="conv-serialized",
+            initial_state=json.dumps(_VALID_HTML_STATE),
+        )
+
+        assert json.loads(result)["state"] == _VALID_HTML_STATE
+        assert len(await store.list_by_session("conv-serialized")) == 1
+
+    async def test_widget_create_rejects_unrecoverable_state_string(self, monkeypatch):
+        import app.services.widget_runtime as widget_runtime
+        from app.ai.mcp_servers import widgets_server
+
+        store = InMemoryWidgetStore()
+        monkeypatch.setattr(widget_runtime, "_widget_store", store)
+
+        with pytest.raises(ValueError, match="initial_state must be one JSON object"):
             await widgets_server.widget_create(
-                session_id="conv-serialized",
-                initial_state=json.dumps(_VALID_HTML_STATE),
+                session_id="conv-broken",
+                initial_state='{"html": "unterminated',
             )
 
-        assert await store.list_by_session("conv-serialized") == []
+        assert await store.list_by_session("conv-broken") == []
 
     async def test_widget_create_accepts_valid_html(self, monkeypatch):
         import app.services.widget_runtime as widget_runtime
@@ -1022,7 +1042,7 @@ class TestWidgetToolHtmlContract:
                 state={"html": "", "height": 540},
             )
 
-    async def test_widget_update_rejects_serialized_state(self, monkeypatch):
+    async def test_widget_update_recovers_serialized_state(self, monkeypatch):
         import app.services.widget_runtime as widget_runtime
         from app.ai.mcp_servers import widgets_server
 
@@ -1034,10 +1054,30 @@ class TestWidgetToolHtmlContract:
         )
         widget_id = json.loads(created)["widget_id"]
 
-        with pytest.raises(ValueError, match="state must be an object"):
+        updated_state = {**_VALID_HTML_STATE, "height": 400}
+        result = await widgets_server.widget_update(
+            widget_id=widget_id,
+            state=json.dumps(updated_state),
+        )
+
+        assert json.loads(result)["state"] == updated_state
+
+    async def test_widget_update_rejects_unrecoverable_state_string(self, monkeypatch):
+        import app.services.widget_runtime as widget_runtime
+        from app.ai.mcp_servers import widgets_server
+
+        store = InMemoryWidgetStore()
+        monkeypatch.setattr(widget_runtime, "_widget_store", store)
+        created = await widgets_server.widget_create(
+            session_id="conv-update-broken",
+            initial_state=_VALID_HTML_STATE,
+        )
+        widget_id = json.loads(created)["widget_id"]
+
+        with pytest.raises(ValueError, match="state must be one JSON object"):
             await widgets_server.widget_update(
                 widget_id=widget_id,
-                state=json.dumps(_VALID_HTML_STATE),
+                state='{"html": "unterminated',
             )
 
     async def test_widget_update_preserves_widget_identity(self, monkeypatch):

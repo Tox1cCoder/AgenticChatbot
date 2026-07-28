@@ -23,7 +23,11 @@ from sqlalchemy import Text, cast, select
 
 from app.core.auth import get_current_user_id
 from app.models.message import Message
-from app.services.widget_contract import resolve_widget_action_message, validate_html_widget_state
+from app.services.widget_contract import (
+    coerce_widget_state_object,
+    resolve_widget_action_message,
+    validate_html_widget_state,
+)
 from app.services.widget_runtime import (
     get_widget_connection_manager,
     get_widget_store,
@@ -148,14 +152,19 @@ def _recover_widget_session_id_from_messages(
 
 
 def _parse_json_dict(value: Any) -> dict[str, Any] | None:
+    """Read a persisted object that may have been stored as a string.
+
+    Uses the same recovery ladder as the widget tools so a widget created from
+    a stringified state (raw newlines inside ``html`` included) still restores
+    from message metadata instead of silently disappearing.
+    """
     if isinstance(value, dict):
         return value
     if isinstance(value, str):
         try:
-            parsed = json.loads(value)
-        except (json.JSONDecodeError, TypeError):
+            return coerce_widget_state_object(value)
+        except ValueError:
             return None
-        return parsed if isinstance(parsed, dict) else None
     return None
 
 

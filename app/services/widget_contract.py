@@ -18,11 +18,77 @@ endpoint, which survives the HTML-only migration.
 
 from __future__ import annotations
 
+import ast
+import json
 import re
 from typing import Any
 
 MIN_WIDGET_HEIGHT = 260
 MAX_WIDGET_HEIGHT = 960
+
+_FENCE_RE = re.compile(r"^\s*```(?:json|javascript|js)?\s*\n(?P<body>.*?)\n?\s*```\s*$", re.S)
+
+
+def _strip_markdown_fence(raw: str) -> str:
+    match = _FENCE_RE.match(raw)
+    return match.group("body") if match else raw
+
+
+def coerce_widget_state_object(raw: Any, *, field: str = "initial_state") -> dict[str, Any]:
+    """Return widget state as a native object, tolerating a stringified one.
+
+    The tool schema advertises an object, but models still serialize this
+    argument — most often as pretty-printed JSON whose ``html`` value carries
+    raw, unescaped newlines. Strict ``json.loads`` rejects that with "Invalid
+    control character", so the recovery ladder is:
+
+    1. already a dict -> use it;
+    2. strip a Markdown code fence the model wrapped it in;
+    3. strict JSON;
+    4. JSON with ``strict=False`` (allows literal control characters inside
+       string values, which is exactly the observed failure);
+    5. ``ast.literal_eval`` for Python-style literals (single quotes,
+       ``True``/``None``).
+
+    On true malformation, raise a ``ValueError`` naming the field and the
+    offending position so the model can self-correct on the next turn.
+    """
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"{field} must be an object.")
+
+    candidate = _strip_markdown_fence(raw).strip()
+    decode_error: json.JSONDecodeError | None = None
+
+    for strict in (True, False):
+        try:
+            parsed = json.loads(candidate, strict=strict)
+        except json.JSONDecodeError as exc:
+            decode_error = exc
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+        raise ValueError(f"{field} must be an object, not a {type(parsed).__name__}.")
+
+    try:
+        literal = ast.literal_eval(candidate)
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
+        literal = None
+    if isinstance(literal, dict):
+        return literal
+
+    position = decode_error.pos if decode_error is not None else 0
+    message = decode_error.msg if decode_error is not None else "could not be parsed"
+    snippet_start = max(0, position - 30)
+    snippet = candidate[snippet_start : position + 30].replace("\n", " ").replace("\r", " ")
+    raise ValueError(
+        f"{field} must be one JSON object ({message} at character {position}). "
+        f"Context: ...{snippet}... "
+        "Prefer sending it as a native object. If you serialize it, use "
+        "double-quoted keys and strings, lowercase true/false/null, no trailing "
+        "commas, and escape embedded quotes and newlines."
+    )
 
 
 def validate_html_widget_state(state: Any) -> None:
