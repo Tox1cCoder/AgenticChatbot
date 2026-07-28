@@ -186,6 +186,13 @@ async def lifespan(app: FastAPI):
         await close_client_runtime_store()
     except Exception as e:
         logger.debug(f"Client runtime store cleanup during shutdown (non-fatal): {e}")
+    try:
+        from app.database.async_session import dispose_async_engine
+
+        await dispose_async_engine()
+        logger.info("Async database connections closed cleanly")
+    except Exception as e:
+        logger.debug(f"Async engine disposal during shutdown (non-fatal): {e}")
 
 
 def create_app() -> FastAPI:

@@ -219,6 +219,7 @@ class Container(containers.DeclarativeContainer):
     conversation_repository = providers.Factory(
         ConversationRepository,
         session_factory=db.provided.session,
+        async_session_factory=db.provided.async_session,
     )
 
     model_usage_service: providers.Provider[IModelUsageService] = providers.Factory(
@@ -238,14 +239,19 @@ class Container(containers.DeclarativeContainer):
         session_factory=db.provided.session,
     )
 
+    # Async twins exist on the four repositories the streaming path touches.
+    # The compaction repository is included because MessageRepository.acreate
+    # delegates its transaction to it.
     conversation_compaction_repository = providers.Factory(
         ConversationCompactionRepository,
         session_factory=db.provided.session,
+        async_session_factory=db.provided.async_session,
     )
 
     message_repository = providers.Factory(
         MessageRepository,
         session_factory=db.provided.session,
+        async_session_factory=db.provided.async_session,
         compaction_repository=conversation_compaction_repository,
         compaction_publisher=providers.Object(publish_conversation_compaction),
     )
@@ -258,6 +264,7 @@ class Container(containers.DeclarativeContainer):
     document_repository = providers.Factory(
         DocumentRepository,
         session_factory=db.provided.session,
+        async_session_factory=db.provided.async_session,
     )
 
     document_image_repository = providers.Factory(
