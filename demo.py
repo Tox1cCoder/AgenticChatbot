@@ -2864,7 +2864,12 @@ def _reset_manager_search_state(query: str = "") -> None:
     st.session_state.manager_search_total = 0
 
 
-def _load_manager_page(page: int, *, search: str | None = None) -> None:
+def _load_manager_page(
+    page: int,
+    *,
+    search: str | None = None,
+    loading_slot: Any | None = None,
+) -> None:
     """Fetch and merge one unfiltered or server-search conversation page."""
     normalized_search = search.strip() if isinstance(search, str) and search.strip() else None
     is_search = normalized_search is not None
@@ -2878,14 +2883,24 @@ def _load_manager_page(page: int, *, search: str | None = None) -> None:
     st.session_state.setdefault(has_more_key, False)
     st.session_state.setdefault(total_key, 0)
 
-    response = get_conversations(
-        page=page,
-        limit=_MANAGER_PAGE_SIZE,
-        include_messages=True,
-        latest_messages=3,
-        fetch_all_pages=False,
-        search=normalized_search,
-    )
+    def fetch_page() -> dict[str, Any]:
+        return get_conversations(
+            page=page,
+            limit=_MANAGER_PAGE_SIZE,
+            include_messages=True,
+            latest_messages=3,
+            fetch_all_pages=False,
+            search=normalized_search,
+        )
+
+    if loading_slot is None:
+        response = fetch_page()
+    else:
+        try:
+            with loading_slot.container(), st.spinner("Loading conversations..."):
+                response = fetch_page()
+        finally:
+            loading_slot.empty()
     if not response or not response.get("data"):
         st.session_state[has_more_key] = False
         return
@@ -10049,6 +10064,9 @@ def render_manage_modal():
         width="large",
     )
     def manage_dialog():
+        manager_loading_slot = st.empty()
+        loading_slot_used = False
+
         # ------- initial / lazy load -------
         if st.session_state.current_user_id:
             if "manager_conversations" not in st.session_state:
@@ -10058,8 +10076,11 @@ def render_manage_modal():
                 st.session_state.manager_conv_total = 0
 
             if st.session_state.manager_conv_page == 0:
-                with st.status("Loading conversations...", expanded=False):
-                    _load_manager_page(1)
+                _load_manager_page(1, loading_slot=manager_loading_slot)
+                loading_slot_used = True
+
+        if not loading_slot_used:
+            manager_loading_slot.empty()
 
         # Search
         search_term = st.text_input("Search conversations", placeholder="Type to search...")
@@ -10067,7 +10088,11 @@ def render_manage_modal():
         if normalized_search:
             if st.session_state.get("manager_search_query") != normalized_search:
                 _reset_manager_search_state(normalized_search)
-                _load_manager_page(1, search=normalized_search)
+                _load_manager_page(
+                    1,
+                    search=normalized_search,
+                    loading_slot=manager_loading_slot,
+                )
             active_items_key = "manager_search_conversations"
             active_page_key = "manager_search_page"
             active_has_more_key = "manager_search_has_more"
@@ -10206,7 +10231,11 @@ def render_manage_modal():
                     width="stretch",
                 ):
                     next_page = int(st.session_state.get(active_page_key, 0)) + 1
-                    _load_manager_page(next_page, search=normalized_search or None)
+                    _load_manager_page(
+                        next_page,
+                        search=normalized_search or None,
+                        loading_slot=manager_loading_slot,
+                    )
                     st.rerun()
         else:
             if normalized_search:

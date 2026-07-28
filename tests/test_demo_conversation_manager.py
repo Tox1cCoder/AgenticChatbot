@@ -5,6 +5,32 @@ from typing import Any
 from tests.test_demo_plan_widget import _import_demo_with_ui_stubs
 
 
+class _RecordingContext:
+    def __init__(self, on_enter=None) -> None:
+        self.on_enter = on_enter
+
+    def __enter__(self):
+        if self.on_enter is not None:
+            self.on_enter()
+        return self
+
+    def __exit__(self, *_args) -> bool:
+        return False
+
+
+class _Placeholder:
+    def __init__(self) -> None:
+        self.empty_calls = 0
+        self.container_calls = 0
+        self.rendered_labels: list[str] = []
+
+    def container(self):
+        return _RecordingContext(lambda: setattr(self, "container_calls", self.container_calls + 1))
+
+    def empty(self) -> None:
+        self.empty_calls += 1
+
+
 def _conversation_response(
     items: list[dict[str, Any]],
     *,
@@ -163,3 +189,43 @@ def test_later_search_pages_merge_without_duplicate_rows(monkeypatch) -> None:
         {"id": "one", "title": "first"},
         {"id": "two", "title": "second"},
     ]
+
+
+def test_manager_loader_always_clears_transient_loading_content(monkeypatch) -> None:
+    demo, streamlit = _import_demo_with_ui_stubs(monkeypatch)
+    placeholder = _Placeholder()
+    streamlit.spinner = lambda label: _RecordingContext(
+        lambda: placeholder.rendered_labels.append(label)
+    )
+    monkeypatch.setattr(
+        demo,
+        "get_conversations",
+        lambda **_kwargs: _conversation_response(
+            [{"id": "first", "title": "Actual first conversation"}]
+        ),
+    )
+
+    demo._load_manager_page(1, search=None, loading_slot=placeholder)
+
+    assert placeholder.empty_calls == 1
+    assert placeholder.container_calls == 1
+    assert placeholder.rendered_labels == ["Loading conversations..."]
+
+
+def test_manager_dialog_allocates_stable_loading_slot_on_cached_rerun(monkeypatch) -> None:
+    demo, streamlit = _import_demo_with_ui_stubs(monkeypatch)
+    placeholder = _Placeholder()
+    streamlit.session_state.current_user_id = "user-1"
+    streamlit.session_state[demo.CONVERSATION_MANAGER_DIALOG_KEY] = True
+    streamlit.session_state.manager_conversations = []
+    streamlit.session_state.manager_conv_page = 1
+    streamlit.session_state.manager_conv_has_more = False
+    streamlit.session_state.manager_conv_total = 0
+    streamlit.dialog = lambda *_args, **_kwargs: lambda function: function
+    streamlit.empty = lambda: placeholder
+    streamlit.text_input = lambda *_args, **_kwargs: ""
+    streamlit.button = lambda *_args, **_kwargs: False
+
+    demo.render_manage_modal()
+
+    assert placeholder.empty_calls == 1
