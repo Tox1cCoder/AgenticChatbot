@@ -105,3 +105,61 @@ def require_async_db(_async_db_available: bool) -> None:
     """Skip a test that needs a reachable PostgreSQL."""
     if not _async_db_available:
         pytest.skip("async PostgreSQL is not reachable")
+
+
+@pytest.fixture
+def seeded_conversation_id(require_async_db):
+    """Insert a throwaway owner and conversation, then remove them.
+
+    Seeding goes through the sync engine so these fixtures stay usable by tests
+    that are verifying the async path — the fixture is never the thing under
+    test. Messages cascade with the conversation.
+    """
+    from uuid import uuid4
+
+    from app.database.session import SessionLocal
+    from app.models.conversation import Conversation
+    from app.models.message import Message
+    from app.models.user import User
+
+    suffix = uuid4().hex[:12]
+    with SessionLocal() as session:
+        owner = User(
+            username=f"async-fixture-{suffix}",
+            email=f"async-fixture-{suffix}@example.invalid",
+            password_hash="not-a-real-hash",
+        )
+        session.add(owner)
+        session.flush()
+        conversation = Conversation(owner_id=owner.id, title="async-twin-fixture")
+        session.add(conversation)
+        session.commit()
+        conversation_id = conversation.id
+        owner_id = owner.id
+
+    yield conversation_id
+
+    with SessionLocal() as session:
+        session.query(Message).filter(Message.conversation_id == conversation_id).delete()
+        session.query(Conversation).filter(Conversation.id == conversation_id).delete()
+        session.query(User).filter(User.id == owner_id).delete()
+        session.commit()
+
+
+@pytest.fixture
+def seeded_message_id(seeded_conversation_id):
+    """Persist one message in the seeded conversation via the sync path."""
+    from app.database.session import SessionLocal
+    from app.models.enums import MessageRole
+    from app.repositories.message import MessageRepository
+    from app.schemas.message import MessageCreate
+
+    repository = MessageRepository(session_factory=SessionLocal)
+    message = repository.create(
+        MessageCreate(
+            conversation_id=seeded_conversation_id,
+            role=MessageRole.user,
+            content="seeded",
+        )
+    )
+    return message.id

@@ -18,6 +18,7 @@ from app.models.conversation_memory_summary import ConversationMemorySummary
 from app.models.conversation_summary_job import ConversationSummaryJob, SummaryJobStatus
 from app.models.enums import MessageRole
 from app.models.message import Message
+from app.repositories.session_transport import RepositorySessionMixin
 
 
 class SummaryJobClaim(NamedTuple):
@@ -41,11 +42,18 @@ class CompactionInput:
     messages: tuple[Message, ...]
 
 
-class ConversationCompactionRepository:
+class ConversationCompactionRepository(RepositorySessionMixin):
     """Own every short transaction in the compaction durability protocol."""
 
-    def __init__(self, session_factory: Callable[[], Session]):
-        self.session_factory = session_factory
+    def __init__(
+        self,
+        session_factory: Callable[[], Session],
+        async_session_factory: Callable[[], Any] | None = None,
+    ):
+        super().__init__(
+            session_factory=session_factory,
+            async_session_factory=async_session_factory,
+        )
 
     @staticmethod
     def _utcnow() -> datetime:
@@ -177,37 +185,53 @@ class ConversationCompactionRepository:
             )
         )
 
-    def persist_message(self, message_data: Mapping[str, Any]) -> Message:
-        """Allocate a sequence, insert a message, and request assistant work once."""
+    def _persist_message_in_session(
+        self, session: Session, message_data: Mapping[str, Any]
+    ) -> Message:
+        """Allocate a sequence, insert the message, and request assistant work once.
+
+        Session-taking body shared by :meth:`persist_message` and
+        :meth:`apersist_message`. Runs unchanged under ``AsyncSession.run_sync``.
+        """
         data = dict(message_data)
         conversation_id = data["conversation_id"]
         data.pop("sequence", None)
         now = self._utcnow()
-        with self.session_factory() as session:
-            allocated = session.execute(
-                update(Conversation)
-                .where(Conversation.id == conversation_id)
-                .values(next_message_sequence=Conversation.next_message_sequence + 1)
-                .returning(Conversation.next_message_sequence - 1)
-            ).scalar_one_or_none()
-            if allocated is None:
-                session.rollback()
-                raise ValueError("conversation_not_found")
 
-            message = Message(**data, sequence=int(allocated), feedback=None)
-            session.add(message)
-            session.flush()
-            if message.sender == MessageRole.assistant.value:
-                session.execute(
-                    self._job_upsert_statement(
-                        conversation_id=conversation_id,
-                        requested_through_sequence=message.sequence,
-                        now=now,
-                    )
+        allocated = session.execute(
+            update(Conversation)
+            .where(Conversation.id == conversation_id)
+            .values(next_message_sequence=Conversation.next_message_sequence + 1)
+            .returning(Conversation.next_message_sequence - 1)
+        ).scalar_one_or_none()
+        if allocated is None:
+            session.rollback()
+            raise ValueError("conversation_not_found")
+
+        message = Message(**data, sequence=int(allocated), feedback=None)
+        session.add(message)
+        session.flush()
+        if message.sender == MessageRole.assistant.value:
+            session.execute(
+                self._job_upsert_statement(
+                    conversation_id=conversation_id,
+                    requested_through_sequence=message.sequence,
+                    now=now,
                 )
-            session.commit()
-            session.expunge(message)
-            return message
+            )
+        session.commit()
+        session.expunge(message)
+        return message
+
+    def persist_message(self, message_data: Mapping[str, Any]) -> Message:
+        """Allocate a sequence, insert a message, and request assistant work once."""
+        return self._run(lambda session: self._persist_message_in_session(session, message_data))
+
+    async def apersist_message(self, message_data: Mapping[str, Any]) -> Message:
+        """Async twin of :meth:`persist_message`."""
+        return await self._arun(
+            lambda session: self._persist_message_in_session(session, message_data)
+        )
 
     def request_backfill(
         self,

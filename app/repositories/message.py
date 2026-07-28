@@ -12,6 +12,7 @@ from app.models.message import Message
 from app.repositories.command_strategy import DefaultCommandStrategy
 from app.repositories.conversation_compaction import ConversationCompactionRepository
 from app.repositories.query_strategy import DefaultQueryStrategy
+from app.repositories.session_transport import RepositorySessionMixin
 from app.repositories.utils.pagination import Paginator
 from app.schemas.message import MessageCreate, MessageUpdate
 from app.utils.validation.pagination_validation import validate_pagination_params
@@ -289,7 +290,7 @@ class MessageCRUDStrategy(
         return db.execute(statement).scalars().first()
 
 
-class MessageRepository:
+class MessageRepository(RepositorySessionMixin):
     """Repository for Message model using session factory pattern"""
 
     def __init__(
@@ -297,12 +298,19 @@ class MessageRepository:
         session_factory: callable,
         compaction_repository: ConversationCompactionRepository | None = None,
         compaction_publisher: Callable[[UUID], Any] | None = None,
+        async_session_factory: Callable[[], Any] | None = None,
     ):
         """Initialize repository with session factory for dependency injection."""
-        self.session_factory = session_factory
+        super().__init__(
+            session_factory=session_factory,
+            async_session_factory=async_session_factory,
+        )
         self._crud_strategy = MessageCRUDStrategy(Message)
+        # The fallback delegate must be async-capable too, or acreate() would
+        # raise for any caller that did not inject a compaction repository.
         self._compaction_repository = compaction_repository or ConversationCompactionRepository(
-            session_factory
+            session_factory,
+            async_session_factory=async_session_factory,
         )
         self._compaction_publisher = compaction_publisher
 
@@ -327,10 +335,38 @@ class MessageRepository:
                 include_feedback,
             )
 
+    async def aget_by_conversation_id(
+        self,
+        conversation_id: UUID,
+        page: int = 1,
+        limit: int = 10,
+        order_by: str | None = None,
+        order_direction: str = "asc",
+        include_feedback: bool = False,
+    ) -> Paginator[Message]:
+        """Async twin of :meth:`get_by_conversation_id`."""
+        return await self._arun(
+            lambda session: self._crud_strategy.get_by_conversation_id(
+                session,
+                conversation_id,
+                page,
+                limit,
+                order_by,
+                order_direction,
+                include_feedback,
+            )
+        )
+
     def count_by_conversation_id(self, conversation_id: UUID) -> int:
         """Count messages by conversation ID"""
         with self.session_factory() as session:
             return self._crud_strategy.count_by_conversation_id(session, conversation_id)
+
+    async def acount_by_conversation_id(self, conversation_id: UUID) -> int:
+        """Async twin of :meth:`count_by_conversation_id`."""
+        return await self._arun(
+            lambda session: self._crud_strategy.count_by_conversation_id(session, conversation_id)
+        )
 
     def get_by_user_id(
         self,
@@ -368,21 +404,46 @@ class MessageRepository:
                 input_schema.role,
             )
         message = self._compaction_repository.persist_message(message_data)
-        if message.sender == MessageRole.assistant.value and self._compaction_publisher is not None:
-            try:
-                self._compaction_publisher(message.conversation_id)
-            except Exception:
-                # The message and coalesced database job are already committed.
-                # Reconciliation recovers a lost notification.
-                logger.warning(
-                    "Conversation compaction notification failed code=broker_publish_failed"
-                )
+        self._publish_compaction_notification(message)
         return message
+
+    async def acreate(self, input_schema: MessageCreate) -> Message:
+        """Async twin of :meth:`create`.
+
+        Building ``message_data`` touches no database, so only the persistence
+        step is awaited; the post-commit notification stays outside the
+        transaction exactly as in the sync path.
+        """
+        if isinstance(input_schema, dict):
+            message_data = input_schema
+        else:
+            message_data = MessageFactory.create_from_schema_with_role(
+                input_schema,
+                input_schema.role,
+            )
+        message = await self._compaction_repository.apersist_message(message_data)
+        self._publish_compaction_notification(message)
+        return message
+
+    def _publish_compaction_notification(self, message: Message) -> None:
+        """Request compaction for a durable assistant message, best effort."""
+        if message.sender != MessageRole.assistant.value or self._compaction_publisher is None:
+            return
+        try:
+            self._compaction_publisher(message.conversation_id)
+        except Exception:
+            # The message and coalesced database job are already committed.
+            # Reconciliation recovers a lost notification.
+            logger.warning("Conversation compaction notification failed code=broker_publish_failed")
 
     def get_by_id(self, id: UUID) -> Message | None:
         """Get message by ID"""
         with self.session_factory() as session:
             return self._crud_strategy.get_by_id(session, id)
+
+    async def aget_by_id(self, id: UUID) -> Message | None:
+        """Async twin of :meth:`get_by_id`."""
+        return await self._arun(lambda session: self._crud_strategy.get_by_id(session, id))
 
     def get_all(self, page: int = 1, limit: int = 10) -> list[Message]:
         """Get all messages with page-based pagination"""
@@ -429,16 +490,30 @@ class MessageRepository:
                 limit=limit,
             )
 
+    @staticmethod
+    def _latest_by_conversation_statement(conversation_id: UUID):
+        return (
+            select(Message)
+            .where(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.desc())
+            .limit(1)
+        )
+
     def get_latest_by_conversation(self, conversation_id: UUID) -> Message | None:
         """Retrieve the most recent message in a conversation."""
         with self.session_factory() as session:
-            statement = (
-                select(Message)
-                .where(Message.conversation_id == conversation_id)
-                .order_by(Message.created_at.desc())
-                .limit(1)
-            )
+            statement = self._latest_by_conversation_statement(conversation_id)
             return session.execute(statement).scalars().first()
+
+    async def aget_latest_by_conversation(self, conversation_id: UUID) -> Message | None:
+        """Async twin of :meth:`get_latest_by_conversation`."""
+        return await self._arun(
+            lambda session: (
+                session.execute(self._latest_by_conversation_statement(conversation_id))
+                .scalars()
+                .first()
+            )
+        )
 
     def get_canvas_artifact_candidates(
         self,
