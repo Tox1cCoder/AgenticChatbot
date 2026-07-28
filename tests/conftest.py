@@ -41,8 +41,22 @@ class FakePopen:
         return 0
 
 
-# Export FakePopen for use in test modules
-__all__ = ["FakePopen"]
+def async_double(fn):
+    """Wrap a sync test-double callable so it can stand in for an async twin.
+
+    Repositories expose ``a``-prefixed async twins alongside their sync methods.
+    Test doubles are built from plain lambdas, which cannot be async, so this
+    adapts one lambda to serve both call styles without duplicating it.
+    """
+
+    async def _wrapped(*args, **kwargs):
+        return fn(*args, **kwargs)
+
+    return _wrapped
+
+
+# Export helpers for use in test modules
+__all__ = ["FakePopen", "async_double"]
 
 
 def pytest_configure(config):

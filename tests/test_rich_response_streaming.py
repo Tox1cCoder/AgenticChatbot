@@ -33,6 +33,8 @@ from app.services.event_streaming.events import make_event
 from app.services.event_streaming.internal_sse import legacy_event_from_v3
 from app.services.message_service import MessageService
 
+from .conftest import async_double
+
 SAFE_WIDGET_ITEM = {
     "id": "widget:w-1",
     "type": "live_widget",
@@ -358,17 +360,23 @@ async def test_message_service_forwards_rich_items_during_new_message_stream():
     conversation_id = uuid4()
     user_id = uuid4()
     service = MessageService.__new__(MessageService)
-    service.repository = SimpleNamespace(
-        create=lambda _entity: _message_row(
+
+    def _create(_entity):
+        return _message_row(
             conversation_id=conversation_id,
             sender=MessageRole.user.value,
             content="show a widget",
         )
-    )
+
+    def _get_by_id(_conversation_id):
+        return SimpleNamespace(title="Existing chat")
+
+    service.repository = SimpleNamespace(create=_create, acreate=async_double(_create))
     service.conversation_validation_utils = SimpleNamespace(
         validate_conversation_access=lambda *_args: None,
+        avalidate_conversation_access=async_double(lambda *_args: None),
         conversation_repository=SimpleNamespace(
-            get_by_id=lambda _conversation_id: SimpleNamespace(title="Existing chat")
+            get_by_id=_get_by_id, aget_by_id=async_double(_get_by_id)
         ),
     )
 

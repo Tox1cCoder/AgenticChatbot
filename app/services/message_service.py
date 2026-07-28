@@ -958,7 +958,10 @@ class MessageService(IMessageService):
         cancelled via ``POST /messages/stop`` or HTTP disconnect without
         persisting cancellation/disconnect artifacts as error messages.
         """
-        self.conversation_validation_utils.validate_conversation_access(
+        # Everything before the first streamed event runs on the async
+        # transport: a blocking query here delays not just this response's first
+        # token but every other in-flight stream sharing the event loop.
+        await self.conversation_validation_utils.avalidate_conversation_access(
             user_id, message_create_data.conversation_id
         )
 
@@ -966,7 +969,7 @@ class MessageService(IMessageService):
         message_entity = MessageFactory.create_from_schema_with_role(
             message_create_data, message_create_data.role
         )
-        created_message = self.repository.create(message_entity)
+        created_message = await self.repository.acreate(message_entity)
         user_message_id = created_message.id  # stable key for registry
         # Drop any stale prompt-history cache before the workflow reads it.
         with contextlib.suppress(Exception):
@@ -1000,8 +1003,10 @@ class MessageService(IMessageService):
         title_task = None
         if message_create_data.role == MessageRole.user:
             # Load conversation once — reused for title check, context, and planning mode
-            conversation = self.conversation_validation_utils.conversation_repository.get_by_id(
-                message_create_data.conversation_id
+            conversation = (
+                await self.conversation_validation_utils.conversation_repository.aget_by_id(
+                    message_create_data.conversation_id
+                )
             )
             default_titles = {"New Conversation", "Untitled", ""}
             needs_title = conversation is not None and (

@@ -352,6 +352,7 @@ class Container(containers.DeclarativeContainer):
     conversation_validation_utils = providers.Factory(
         ConversationValidationUtils,
         session_factory=db.provided.session,
+        async_session_factory=db.provided.async_session,
     )
     message_validation_utils = providers.Factory(
         MessageValidationUtils,

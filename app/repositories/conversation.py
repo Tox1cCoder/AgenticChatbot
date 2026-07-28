@@ -272,6 +272,14 @@ class ConversationRepository(RepositorySessionMixin):
         with self.session_factory() as session:
             return self._crud_strategy.user_owns_conversation(session, owner_id, conversation_id)
 
+    async def auser_owns_conversation(self, owner_id: UUID, conversation_id: UUID) -> bool:
+        """Async twin of :meth:`user_owns_conversation`."""
+        return await self._arun(
+            lambda session: self._crud_strategy.user_owns_conversation(
+                session, owner_id, conversation_id
+            )
+        )
+
     def create(self, input_schema: ConversationCreate) -> Conversation:
         """Create a new conversation"""
         with self.session_factory() as session:
@@ -333,6 +341,10 @@ class ConversationRepository(RepositorySessionMixin):
         """Check if conversation exists"""
         with self.session_factory() as session:
             return self._crud_strategy.exists(session, id)
+
+    async def aexists(self, id: UUID) -> bool:
+        """Async twin of :meth:`exists`."""
+        return await self._arun(lambda session: self._crud_strategy.exists(session, id))
 
     def get_soft_deleted(self) -> list[Conversation]:
         """Get all soft-deleted conversations (used by checkpoint retention cleanup)."""

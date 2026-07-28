@@ -75,6 +75,8 @@ from app.services.event_streaming.subagents import SubagentEventSink
 from app.services.message_service import MessageService
 from app.utils.exception_handler import register_exception_handlers
 
+from .conftest import async_double
+
 # ---------------------------------------------------------------------------
 # Deterministic fake image payloads
 # ---------------------------------------------------------------------------
@@ -255,18 +257,24 @@ async def _resume_image_event_source(**_kwargs):
 def _build_message_service(*, conversation_id: UUID, user_id: UUID, image_url: str, resume: bool):
     """A REAL ``MessageService`` with stubbed persistence/validation only."""
     service = MessageService.__new__(MessageService)
-    service.repository = SimpleNamespace(
-        create=lambda entity: _message_row(
+
+    def _create(entity):
+        return _message_row(
             conversation_id=conversation_id,
             sender=MessageRole.user.value,
             content=entity["content"],
             metadata={},
         )
-    )
+
+    def _get_by_id(_cid):
+        return SimpleNamespace(title="Existing chat")
+
+    service.repository = SimpleNamespace(create=_create, acreate=async_double(_create))
     service.conversation_validation_utils = SimpleNamespace(
         validate_conversation_access=lambda *_a: None,
+        avalidate_conversation_access=async_double(lambda *_a: None),
         conversation_repository=SimpleNamespace(
-            get_by_id=lambda _cid: SimpleNamespace(title="Existing chat")
+            get_by_id=_get_by_id, aget_by_id=async_double(_get_by_id)
         ),
     )
     workflow_request = WorkflowExecutionRequest(
@@ -402,9 +410,7 @@ def test_internal_sse_delivers_oversized_final_image_early_by_reference():
 
     assert resp.status_code == 200
     payloads = _parse_sse(resp.text)
-    previews = [
-        p for p in payloads if isinstance(p, dict) and p.get("type") == "image_preview"
-    ]
+    previews = [p for p in payloads if isinstance(p, dict) and p.get("type") == "image_preview"]
     statuses = [p.get("status") for p in previews]
     order = _types(payloads)
 
@@ -422,9 +428,9 @@ def test_internal_sse_delivers_oversized_final_image_early_by_reference():
     # no early final-status reference event to find an index for at all.
     final_ref_index = _first_index_or_raise(
         payloads,
-        lambda p: isinstance(p, dict)
-        and p.get("type") == "image_preview"
-        and p.get("status") == "final",
+        lambda p: (
+            isinstance(p, dict) and p.get("type") == "image_preview" and p.get("status") == "final"
+        ),
         label=(
             "DEFECT (emitter.py:70-78): an early reference-delivery "
             "image_preview (status=final); the oversized FINAL image only "
@@ -552,9 +558,7 @@ def test_ai_sdk_delivers_oversized_final_image_early():
     payloads = _parse_sse(body)
     order = _types(payloads)
     previews = [
-        p
-        for p in payloads
-        if isinstance(p, dict) and p.get("type") == "data-image-preview"
+        p for p in payloads if isinstance(p, dict) and p.get("type") == "data-image-preview"
     ]
     statuses = [(p.get("data") or {}).get("status") for p in previews]
 
@@ -569,9 +573,11 @@ def test_ai_sdk_delivers_oversized_final_image_early():
     # final-status data-image-preview to find an index for at all.
     final_ref_index = _first_index_or_raise(
         payloads,
-        lambda p: isinstance(p, dict)
-        and p.get("type") == "data-image-preview"
-        and (p.get("data") or {}).get("status") == "final",
+        lambda p: (
+            isinstance(p, dict)
+            and p.get("type") == "data-image-preview"
+            and (p.get("data") or {}).get("status") == "final"
+        ),
         label=(
             "DEFECT (emitter.py:70-78): an early final-status "
             "data-image-preview; the oversized FINAL image is dropped and "
