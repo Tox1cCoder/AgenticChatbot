@@ -15,6 +15,7 @@ from google.genai import types
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from ..core.config import settings
+from .gemini_content import ReasoningNormalizedChatGoogleGenerativeAI
 from .reasoning_controls import gemini_reasoning_kwargs
 
 logger = logging.getLogger(__name__)
@@ -239,4 +240,4 @@ def create_langchain_model(
             model_kwargs["thinking_level"] = _resolve_thinking_level(
                 agent_type, thinking_level_override
             )
-    return ChatGoogleGenerativeAI(**model_kwargs)
+    return ReasoningNormalizedChatGoogleGenerativeAI(**model_kwargs)

@@ -8,7 +8,7 @@
   {
     "file": "app/ai/agent_config.py",
     "function": "create_langchain_model",
-    "call_chain": "ChatGoogleGenerativeAI",
+    "call_chain": "ReasoningNormalizedChatGoogleGenerativeAI",
     "disposition": "startup_validation"
   },
   {

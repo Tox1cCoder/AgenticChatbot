@@ -116,6 +116,32 @@ def _has_approval_interrupt(next_nodes: Any) -> bool:
     return bool(set(next_nodes or ()) & _APPROVAL_INTERRUPT_NODES)
 
 
+def apply_accumulated_thinking(response: Any, accumulated_thinking: str) -> None:
+    """Carry streamed thought text onto a terminal response as a fallback.
+
+    ``accumulated_thinking`` is assembled from canonical ``reasoning_delta``
+    events. For OpenAI those deltas *are* the reasoning summary the agent
+    already stored under ``reasoning_summary``, so copying them into
+    ``thinking_summary`` would make the trace panel show the same text twice.
+    Persisted agent metadata stays authoritative in both fields.
+    """
+    if not accumulated_thinking:
+        return
+
+    metadata = response.metadata
+    if metadata.get("thinking_summary"):
+        return
+
+    reasoning_summary = metadata.get("reasoning_summary")
+    if (
+        isinstance(reasoning_summary, str)
+        and reasoning_summary.strip() == accumulated_thinking.strip()
+    ):
+        return
+
+    metadata["thinking_summary"] = accumulated_thinking
+
+
 def _build_inline_rich_inventory_for_state(context: dict[str, Any] | None) -> str:
     """Compute the bounded rich-item inventory block for the current turn.
 
@@ -2696,12 +2722,8 @@ class MultiAgentWorkflow(
                     selected_agent=selected_agent,
                 )
             if response:
-                if (
-                    accumulated_thinking
-                    and not _internal_content_only
-                    and not response.metadata.get("thinking_summary")
-                ):
-                    response.metadata["thinking_summary"] = accumulated_thinking
+                if not _internal_content_only:
+                    apply_accumulated_thinking(response, accumulated_thinking)
 
                 response_state = final_state if final_state else last_state_values
                 final_selected_agent = (
@@ -2950,12 +2972,8 @@ class MultiAgentWorkflow(
                         selected_agent=selected_agent,
                     )
                 if response:
-                    if (
-                        accumulated_thinking
-                        and not _internal_content_only
-                        and not response.metadata.get("thinking_summary")
-                    ):
-                        response.metadata["thinking_summary"] = accumulated_thinking
+                    if not _internal_content_only:
+                        apply_accumulated_thinking(response, accumulated_thinking)
 
                     response_state = final_state if final_state else last_state_values
                     final_selected_agent = (
@@ -2986,12 +3004,8 @@ class MultiAgentWorkflow(
                 selected_agent=selected_agent,
             )
             if response:
-                if (
-                    accumulated_thinking
-                    and not _internal_content_only
-                    and not response.metadata.get("thinking_summary")
-                ):
-                    response.metadata["thinking_summary"] = accumulated_thinking
+                if not _internal_content_only:
+                    apply_accumulated_thinking(response, accumulated_thinking)
 
                 response_state = last_state_values
                 final_selected_agent = (

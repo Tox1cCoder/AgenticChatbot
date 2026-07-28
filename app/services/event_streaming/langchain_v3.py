@@ -221,6 +221,7 @@ class V3ProtocolTranslator:
         self._sequence = 0
         self._seen_tool_message_ids: set[str] = set()
         self._seen_message_keys: set[int] = set()
+        self._emitted_non_standard_reasoning: set[str] = set()
 
     def _next(self) -> int:
         self._sequence += 1
@@ -308,10 +309,21 @@ class V3ProtocolTranslator:
                         tool_name=fields.get("name"),
                         data={"args_delta": fields.get("args") or ""},
                     )
+                else:
+                    yield from self._reasoning_from_non_standard(
+                        fields, node=node, namespace=namespace, run_id=run_id
+                    )
         elif event_name == "content-block-finish":
             content = message_event.get("content") or {}
             ctype = content.get("type")
-            if ctype == "tool_call":
+            if ctype == "non_standard":
+                # A provider-specific thought block (e.g. Gemini ``thinking``)
+                # that reached the wire unnormalized emits no delta at all, so
+                # the terminal block is the only chance to surface it.
+                yield from self._reasoning_from_non_standard(
+                    content, node=node, namespace=namespace, run_id=run_id
+                )
+            elif ctype == "tool_call":
                 call_id = content.get("id")
                 yield make_event(
                     "tool_call_available",
@@ -345,6 +357,52 @@ class V3ProtocolTranslator:
                 run_id=run_id,
                 data={"usage": message_event.get("usage")},
             )
+
+    def _reasoning_from_non_standard(
+        self,
+        block: Any,
+        *,
+        node: str | None,
+        namespace: list[str],
+        run_id: Any,
+    ) -> Iterable[V3StreamEvent]:
+        """Recover a thought summary from a ``non_standard`` content block.
+
+        ``langchain-core`` wraps any provider-specific block it does not
+        recognize — Gemini's ``{"type": "thinking"}`` among them — as
+        ``{"type": "non_standard", "value": {...}}``. The model boundary
+        normalizes these into standard ``reasoning`` blocks; this is the
+        backstop for anything that slips through, so a summary degrades to
+        one late delta rather than vanishing.
+
+        Text already surfaced for the same value is not re-emitted, because the
+        bridge can deliver the same accumulated block twice (delta + finish).
+        """
+        if not isinstance(block, dict) or block.get("type") != "non_standard":
+            return
+        value = block.get("value")
+        if not isinstance(value, dict) or value.get("type") not in {"thinking", "reasoning"}:
+            return
+
+        text = ""
+        for key in ("thinking", "reasoning", "summary", "text"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate:
+                text = candidate
+                break
+        if not text or text in self._emitted_non_standard_reasoning:
+            return
+        self._emitted_non_standard_reasoning.add(text)
+
+        yield make_event(
+            "reasoning_delta",
+            sequence=self._next(),
+            node=node,
+            agent=node,
+            namespace=namespace,
+            run_id=run_id,
+            data={"text": text},
+        )
 
     def _translate_subagent_delta(
         self,

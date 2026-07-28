@@ -35,6 +35,10 @@ COMPOUND_TERMINALS = {
 }
 CONSTRUCTORS = {
     "ChatGoogleGenerativeAI",
+    # Thin ChatGoogleGenerativeAI subclass that normalizes Gemini thought
+    # blocks into standard reasoning blocks; still a provider client
+    # constructor and so still inventoried.
+    "ReasoningNormalizedChatGoogleGenerativeAI",
     "ChatOpenAI",
     "genai.Client",
     "OpenAI",
@@ -78,6 +82,9 @@ class _CallsiteVisitor(ast.NodeVisitor):
             "google.genai.Client": "genai.Client",
             "langchain_google_genai.ChatGoogleGenerativeAI": "ChatGoogleGenerativeAI",
             "langchain_openai.ChatOpenAI": "ChatOpenAI",
+            "gemini_content.ReasoningNormalizedChatGoogleGenerativeAI": (
+                "ReasoningNormalizedChatGoogleGenerativeAI"
+            ),
         }
         return aliases.get(chain, chain)
 
@@ -362,6 +369,7 @@ def test_startup_validation_disposition_is_never_used_for_generation_calls():
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     constructor_leaves = {
         "ChatGoogleGenerativeAI",
+        "ReasoningNormalizedChatGoogleGenerativeAI",
         "ChatOpenAI",
         "Client",
         "OpenAI",

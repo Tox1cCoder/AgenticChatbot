@@ -264,7 +264,7 @@ def test_gemini_25_model_builder_converts_level_to_budget(monkeypatch):
         captured.update(kwargs)
         return object()
 
-    monkeypatch.setattr(agent_config, "ChatGoogleGenerativeAI", fake_model)
+    monkeypatch.setattr(agent_config, "ReasoningNormalizedChatGoogleGenerativeAI", fake_model)
     monkeypatch.setattr(agent_config.settings, "enable_thinking", True)
 
     agent_config.create_langchain_model(

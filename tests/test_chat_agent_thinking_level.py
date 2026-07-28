@@ -37,7 +37,7 @@ def test_create_langchain_model_builds_chat_with_lower_thinking(monkeypatch):
         captured.update(kwargs)
         return object()
 
-    monkeypatch.setattr(agent_config, "ChatGoogleGenerativeAI", fake_cgg)
+    monkeypatch.setattr(agent_config, "ReasoningNormalizedChatGoogleGenerativeAI", fake_cgg)
     monkeypatch.setattr(agent_config, "get_api_key", lambda **kw: "fake-key")
     monkeypatch.setattr(agent_config.settings, "enable_thinking", True)
     monkeypatch.setitem(agent_config.AGENT_CONFIG["chat"], "thinking_level", "low")
@@ -53,7 +53,7 @@ def test_create_langchain_model_leaves_search_at_global_thinking(monkeypatch):
         captured.update(kwargs)
         return object()
 
-    monkeypatch.setattr(agent_config, "ChatGoogleGenerativeAI", fake_cgg)
+    monkeypatch.setattr(agent_config, "ReasoningNormalizedChatGoogleGenerativeAI", fake_cgg)
     monkeypatch.setattr(agent_config, "get_api_key", lambda **kw: "fake-key")
     monkeypatch.setattr(agent_config.settings, "enable_thinking", True)
 

@@ -100,6 +100,18 @@ def _consume_stream_text_chunk(accumulated_content: str, text_chunk: Any) -> tup
     return accumulated_content + chunk_text, chunk_text
 
 
+def _thinking_from_non_standard_block(block: dict[str, Any]) -> str:
+    """Return thought text from a ``non_standard``-wrapped provider block."""
+    value = block.get("value")
+    if not isinstance(value, dict) or value.get("type") not in {"thinking", "reasoning"}:
+        return ""
+    for key in ("thinking", "reasoning", "summary", "text"):
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    return ""
+
+
 class GraphPublicStreamProjector:
     """Curates the graph's canonical v3 stream into the canonical v3 stream the
     service layer consumes.
@@ -330,6 +342,17 @@ class GraphPublicStreamProjector:
                         ctx.accumulated_thinking += reasoning_content
                         yield make_event(
                             "reasoning_delta", sequence=0, data={"text": reasoning_content}
+                        )
+                elif block_type == "non_standard":
+                    # ``content_blocks`` wraps unrecognized provider blocks
+                    # (Gemini's ``thinking`` among them). Without this branch a
+                    # chunk that has any content_blocks skips the raw-content
+                    # branch below and loses its thought summary entirely.
+                    non_standard_thinking = _thinking_from_non_standard_block(block)
+                    if non_standard_thinking:
+                        ctx.accumulated_thinking += non_standard_thinking
+                        yield make_event(
+                            "reasoning_delta", sequence=0, data={"text": non_standard_thinking}
                         )
                 elif block_type == "tool_call_chunk":
                     tool_index = block.get("index", 0)

@@ -67,7 +67,7 @@ def test_agent_config_langchain_model_disables_retries(monkeypatch):
     from app.ai import agent_config
 
     capture = _Capture()
-    monkeypatch.setattr(agent_config, "ChatGoogleGenerativeAI", capture)
+    monkeypatch.setattr(agent_config, "ReasoningNormalizedChatGoogleGenerativeAI", capture)
     agent_config.create_langchain_model("chat", api_key_override="k")
     assert capture.kwargs["max_retries"] == 0
 

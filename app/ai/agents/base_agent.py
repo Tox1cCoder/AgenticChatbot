@@ -1486,8 +1486,16 @@ class BaseAgent(ABC):
             if hasattr(response, "thinking") and response.thinking:
                 thinking = response.thinking
             if not thinking:
+                # Gemini thought blocks are normalized to standard ``reasoning``
+                # blocks so they survive the streaming pipeline, so accept both
+                # shapes here. OpenAI ``reasoning`` blocks are excluded: they are
+                # harvested into ``reasoning_summary`` below and must not also
+                # land in ``thinking_summary``.
+                thinking_block_types = {"thinking"}
+                if runtime_config.provider != "openai":
+                    thinking_block_types.add("reasoning")
                 thinking = extract_public_thinking_summary(
-                    response.content, block_types={"thinking"}
+                    response.content, block_types=thinking_block_types
                 )
 
             response_text = coerce_response_text(response.content)

@@ -30,8 +30,12 @@ def coerce_response_text(content: Any) -> str:
         for item in content:
             if isinstance(item, dict):
                 item_type = item.get("type", "")
-                # Skip thinking/reasoning blocks - they should not be in text output
-                if item_type == "thinking":
+                # Skip thinking/reasoning blocks - they should not be in text
+                # output. ``reasoning`` must be checked before the generic
+                # ``text`` extraction below: a standard reasoning block can
+                # carry its summary under ``text``, which would otherwise leak
+                # the model's reasoning into the visible answer.
+                if item_type in ("thinking", "reasoning"):
                     continue
                 # Extract text from text blocks
                 if "text" in item:
@@ -55,8 +59,8 @@ def coerce_response_text(content: Any) -> str:
         return "".join(text_parts)
     elif isinstance(content, dict):
         content_type = content.get("type", "")
-        # Skip thinking blocks
-        if content_type == "thinking":
+        # Skip thinking/reasoning blocks
+        if content_type in ("thinking", "reasoning"):
             return ""
         if "text" in content:
             return content["text"]
