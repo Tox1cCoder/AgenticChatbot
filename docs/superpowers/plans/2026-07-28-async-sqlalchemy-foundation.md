@@ -55,7 +55,7 @@ Phase 1 delivers working software and the measurable latency win, then stops. Th
 - Consumes: `settings.database_url` (existing).
 - Produces: `async_engine`, `AsyncSessionLocal` (an `async_sessionmaker[AsyncSession]`), `async_database_url() -> URL`, `get_async_session_factory()`. Later tasks import `AsyncSessionLocal` and `get_async_session_factory`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_async_session.py
@@ -124,12 +124,12 @@ async def test_concurrent_sessions_do_not_serialize():
     assert elapsed < 0.9
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_async_session.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'app.database.async_session'`
 
-- [ ] **Step 3: Add pool settings to config**
+- [x] **Step 3: Add pool settings to config**
 
 In `app/core/config.py`, directly after the `database_url` field (line ~217-220):
 
@@ -147,7 +147,7 @@ In `app/core/config.py`, directly after the `database_url` field (line ~217-220)
     )
 ```
 
-- [ ] **Step 4: Write the async session module**
+- [x] **Step 4: Write the async session module**
 
 ```python
 # app/database/async_session.py
@@ -214,12 +214,12 @@ async def dispose_async_engine() -> None:
     await async_engine.dispose()
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_async_session.py -v`
 Expected: PASS (all 6). If every test errors with `psycopg.InterfaceError ... ProactorEventLoop`, do Task 2 first and re-run.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/database/async_session.py app/core/config.py tests/test_async_session.py
@@ -238,12 +238,12 @@ git commit -m "feat: add async SQLAlchemy engine and session factory"
 - Consumes: nothing.
 - Produces: a session-scoped autouse fixture guaranteeing every async test runs on a `SelectorEventLoop`. Every later async-DB test depends on this.
 
-- [ ] **Step 1: Confirm the failure mode is real**
+- [x] **Step 1: Confirm the failure mode is real**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_async_session.py::test_async_session_executes_a_query -v`
 Expected on Windows: FAIL with `psycopg.InterfaceError: Psycopg cannot use the 'ProactorEventLoop' to run in async mode`
 
-- [ ] **Step 2: Add the policy fixture to conftest**
+- [x] **Step 2: Add the policy fixture to conftest**
 
 Append to `tests/conftest.py`:
 
@@ -275,12 +275,12 @@ def _selector_event_loop_policy():
         asyncio.set_event_loop_policy(previous)
 ```
 
-- [ ] **Step 3: Run the async tests to verify they pass**
+- [x] **Step 3: Run the async tests to verify they pass**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_async_session.py -v`
 Expected: PASS (all 6)
 
-- [ ] **Step 4: Verify the existing suite is unaffected**
+- [x] **Step 4: Verify the existing suite is unaffected**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/ -q`
 Expected: 2729 passed, 1 failed. The one failure must be
@@ -288,7 +288,7 @@ Expected: 2729 passed, 1 failed. The one failure must be
 which is a pre-existing README/migration-head drift unrelated to this work. Any
 *other* failure is a regression from this task — stop and fix it.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tests/conftest.py
@@ -313,7 +313,7 @@ git commit -m "test: force SelectorEventLoop so async psycopg works under pytest
     `__init__`-injected `session_factory` and optional `async_session_factory`.
   Tasks 4-5 inherit this mixin; Task 6 injects `async_session_factory`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_repository_session_transport.py
@@ -366,12 +366,12 @@ async def test_async_transport_propagates_work_exceptions():
         await probe._arun(boom)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_repository_session_transport.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'app.repositories.session_transport'`
 
-- [ ] **Step 3: Write the mixin**
+- [x] **Step 3: Write the mixin**
 
 ```python
 # app/repositories/session_transport.py
@@ -430,7 +430,7 @@ class RepositorySessionMixin:
             return await session.run_sync(work)
 ```
 
-- [ ] **Step 4: Add the async session context manager to Database**
+- [x] **Step 4: Add the async session context manager to Database**
 
 In `app/database/database.py`, add the import and the method:
 
@@ -465,12 +465,12 @@ and inside `class Database`, after `session()`:
 
 Add `AsyncIterator` to the `collections.abc` import at the top of the file.
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_repository_session_transport.py -v`
 Expected: PASS (all 4)
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/repositories/session_transport.py app/database/database.py tests/test_repository_session_transport.py
@@ -508,7 +508,7 @@ git commit -m "feat: add sync and async repository session transports"
 
 Do not convert all 26 methods at once — an unused twin is untested surface.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_repository_async_twins.py
@@ -618,12 +618,12 @@ If `UserRepository` has no `get_or_create_test_user`, read
 `app/repositories/user.py` and use whatever creation method exists, or insert a
 `User` row directly the same way the conversation is inserted above.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_repository_async_twins.py -v`
 Expected: FAIL — `AttributeError: 'MessageRepository' object has no attribute 'acount_by_conversation_id'`
 
-- [ ] **Step 3: Make MessageRepository use the mixin**
+- [x] **Step 3: Make MessageRepository use the mixin**
 
 Change the class declaration and `__init__` in `app/repositories/message.py`.
 Replace:
@@ -689,7 +689,7 @@ with:
         )
 ```
 
-- [ ] **Step 4: Add the six async twins**
+- [x] **Step 4: Add the six async twins**
 
 Add directly after each corresponding sync method so the pair stays together.
 Each twin delegates to the *same* strategy call the sync method uses:
@@ -738,7 +738,7 @@ Each twin delegates to the *same* strategy call the sync method uses:
         )
 ```
 
-- [ ] **Step 4b: Extract the persist transaction so both transports share it**
+- [x] **Step 4b: Extract the persist transaction so both transports share it**
 
 In `app/repositories/conversation_compaction.py`, `persist_message` owns a
 multi-statement transaction. Split it into a session-taking body plus two thin
@@ -798,7 +798,7 @@ wrappers, so the transaction exists exactly once. Replace the existing
 Apply the Step 3 mixin change to `ConversationCompactionRepository` as well, and
 add `from sqlalchemy.orm import Session` if it is not already imported.
 
-- [ ] **Step 4c: Add MessageRepository.acreate**
+- [x] **Step 4c: Add MessageRepository.acreate**
 
 `create` builds `message_data` with no database access, then delegates. Mirror
 that exactly, awaiting the compaction twin and keeping the publisher side effect
@@ -832,18 +832,18 @@ failure must stay swallowed rather than propagating.
 Note there is no `aget_prompt_history`: that method takes `db: Session` from its
 caller and owns no session.
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_repository_async_twins.py -v`
 Expected: PASS (all 4)
 
-- [ ] **Step 6: Verify no sync regression**
+- [x] **Step 6: Verify no sync regression**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/ -q -k "message or repository or conversation"`
 Expected: all pass. The mixin changed how `session_factory` is assigned, so this
 proves every existing sync caller still works.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add app/repositories/message.py app/repositories/conversation_compaction.py \
@@ -865,7 +865,7 @@ git commit -m "feat: add async twins for the message repository hot path"
   `DocumentRepository.acount_by_conversation`. Task 7 uses the conversation
   twins; Task 8 uses the document twin.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_repository_async_twins.py`:
 
@@ -907,12 +907,12 @@ async def test_document_acount_matches_sync(document_repository, seeded_conversa
     assert await document_repository.acount_by_conversation(seeded_conversation_id) == expected
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_repository_async_twins.py -v -k "conversation_aget or document_acount"`
 Expected: FAIL — `AttributeError: ... has no attribute 'aget_by_id'`
 
-- [ ] **Step 3: Apply the mixin and add the twins**
+- [x] **Step 3: Apply the mixin and add the twins**
 
 For each of the two repositories, make the same three edits as Task 4 Step 3:
 add `from app.repositories.session_transport import RepositorySessionMixin`,
@@ -957,12 +957,12 @@ while adding the `async_session_factory` parameter. Then add:
         )
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_repository_async_twins.py -v`
 Expected: PASS (all 6)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/repositories/conversation.py app/repositories/document.py tests/test_repository_async_twins.py
@@ -985,7 +985,7 @@ git commit -m "feat: add async twins for conversation and document repositories"
   `async_session_factory`. Tasks 7-8 rely on the app's real wiring, not
   hand-built repositories.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_container_async_wiring.py
@@ -1031,12 +1031,12 @@ async def test_container_repository_can_query_asynchronously(container):
     assert await repository._arun(lambda s: s.execute(text("select 1")).scalar_one()) == 1
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_container_async_wiring.py -v`
 Expected: FAIL — `assert None is not None`
 
-- [ ] **Step 3: Wire the async factory for the four repositories**
+- [x] **Step 3: Wire the async factory for the four repositories**
 
 In `app/core/container.py`, add one line to each of the four affected
 `providers.Factory(...)` declarations. `conversation_compaction_repository` is
@@ -1062,7 +1062,7 @@ Do the same one-line addition for `conversation_repository` and
 `document_repository`. Leave the other ~21 repository providers untouched — they
 have no async twins yet, and `async_session_factory` defaults to `None`.
 
-- [ ] **Step 4: Dispose the async engine on shutdown**
+- [x] **Step 4: Dispose the async engine on shutdown**
 
 In `app/main.py`, inside the existing lifespan/shutdown handler, add:
 
@@ -1076,12 +1076,12 @@ Place it alongside the other shutdown cleanup. If the app uses
 `@app.on_event("shutdown")` rather than a lifespan context manager, add it to
 that handler instead.
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_container_async_wiring.py -v`
 Expected: PASS (all 4)
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/core/container.py app/main.py tests/test_container_async_wiring.py
@@ -1106,7 +1106,7 @@ git commit -m "feat: wire async session factory into hot-path repositories"
 `conversation_repository.get_by_id` (~1003). Each currently stalls the whole
 event loop, so one slow query delays *every* concurrent stream's first token.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_stream_path_is_non_blocking.py
@@ -1170,14 +1170,14 @@ async def test_sync_session_does_stall_the_loop_for_contrast():
     assert ticks <= 2, f"expected the sync session to block the loop, got {ticks} ticks"
 ```
 
-- [ ] **Step 2: Run test to verify the contrast holds**
+- [x] **Step 2: Run test to verify the contrast holds**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_stream_path_is_non_blocking.py -v`
 Expected: both PASS. The second test failing means the sync engine is not
 actually blocking and the premise of this plan needs rechecking — stop and
 investigate before continuing.
 
-- [ ] **Step 3: Await the async twins in create_message_stream**
+- [x] **Step 3: Await the async twins in create_message_stream**
 
 In `app/services/message_service.py`, in `create_message_stream`:
 
@@ -1212,13 +1212,13 @@ identical order (raising the same exceptions), then call it here:
 
 Keep the sync method — other callers still use it.
 
-- [ ] **Step 4: Verify the streaming tests still pass**
+- [x] **Step 4: Verify the streaming tests still pass**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/ -q -k "stream or message_service or conversation_access"`
 Expected: all pass. Watch specifically for an unawaited-coroutine warning, which
 means a call site was missed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/services/message_service.py app/services/utils/conversation_validation_utils.py tests/test_stream_path_is_non_blocking.py
@@ -1238,7 +1238,7 @@ git commit -m "perf: make the streaming pre-flight database calls non-blocking"
 - Produces: `MultiAgentWorkflow._aconversation_has_documents(conversation_id) -> bool`,
   replacing the sync call inside `_route_node`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_graph_route_node_async_documents.py
@@ -1288,12 +1288,12 @@ async def test_returns_false_for_a_malformed_conversation_id():
     assert await workflow._aconversation_has_documents("not-a-uuid") is False
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_graph_route_node_async_documents.py -v`
 Expected: FAIL — `AttributeError: 'MultiAgentWorkflow' object has no attribute '_aconversation_has_documents'`
 
-- [ ] **Step 3: Add the async helper and use it**
+- [x] **Step 3: Add the async helper and use it**
 
 In `app/ai/graph.py`, directly after `_conversation_has_documents`:
 
@@ -1321,18 +1321,18 @@ Then in `_route_node`:
 
 Keep the sync method — non-streaming paths still call it.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_graph_route_node_async_documents.py -v`
 Expected: PASS (all 3)
 
-- [ ] **Step 5: Verify routing tests still pass**
+- [x] **Step 5: Verify routing tests still pass**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/ -q -k "route or graph or stickiness"`
 Expected: all pass. Existing router tests build `MultiAgentWorkflow` with
 `document_repository = None`, which the new helper handles.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/ai/graph.py tests/test_graph_route_node_async_documents.py
@@ -1346,14 +1346,14 @@ git commit -m "perf: make routing's document lookup non-blocking"
 **Files:**
 - Modify: `docs/superpowers/plans/2026-07-28-async-sqlalchemy-foundation.md` (this file — record results)
 
-- [ ] **Step 1: Run the full suite**
+- [x] **Step 1: Run the full suite**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/ -q`
 Expected: every test passes except the known pre-existing
 `test_alembic_full_chain_postgres.py::test_readme_tracks_migration_head_and_current_graph_contract`.
 Any other failure blocks the phase.
 
-- [ ] **Step 2: Lint and format the changed files**
+- [x] **Step 2: Lint and format the changed files**
 
 ```bash
 .venv/Scripts/python.exe -m ruff check app/ tests/
@@ -1361,7 +1361,7 @@ Any other failure blocks the phase.
 ```
 Expected: no new findings versus the pre-existing baseline.
 
-- [ ] **Step 3: Confirm Celery and Alembic still work on the sync engine**
+- [x] **Step 3: Confirm Celery and Alembic still work on the sync engine**
 
 ```bash
 .venv/Scripts/python.exe -c "from app.workers.celery_app import celery_app; print('celery imports ok')"
@@ -1369,19 +1369,19 @@ Expected: no new findings versus the pre-existing baseline.
 ```
 Expected: both succeed. This proves the sync engine was not disturbed.
 
-- [ ] **Step 4: Verify the app boots and serves a request**
+- [x] **Step 4: Verify the app boots and serves a request**
 
 Start the app the documented way (selector-loop launch, see `app/main.py:440`)
 and confirm `GET /health` responds, then send one chat message end-to-end and
 confirm tokens still stream.
 
-- [ ] **Step 5: Record the measured outcome in this file**
+- [x] **Step 5: Record the measured outcome in this file**
 
 Append a "Results" section stating: full-suite result, whether the loop-stall
 test passes, and observed behavior under two concurrent streams (previously one
 stream's DB work delayed the other's first token).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add docs/superpowers/plans/2026-07-28-async-sqlalchemy-foundation.md
@@ -1389,6 +1389,59 @@ git commit -m "docs: record async foundation phase 1 results"
 ```
 
 ---
+
+## Results (Phase 1 complete, 2026-07-28)
+
+Commits `a5ca702..fc66ddb` on `Thai-Postgre-FastAPI`.
+
+**Test suite:** 2776 passed, 71 skipped, 1 failed. The single failure is
+`test_alembic_full_chain_postgres.py::test_readme_tracks_migration_head_and_current_graph_contract`,
+confirmed pre-existing by re-running it with all Phase 1 work stashed. It is
+README/migration-head drift: the README names `6c6598a9eb26` while
+`alembic current` reports `e8f9a0b1c2d3`. Unrelated to this phase.
+
+**Non-blocking proof** (`tests/test_stream_path_is_non_blocking.py`): during a
+0.4s `pg_sleep`, a 20ms heartbeat records ≥10 event-loop ticks on the async
+transport and ≤2 on the sync one. The inverse assertion is deliberate — without
+it, the non-blocking claim could silently become vacuous. Two concurrent
+repository calls complete in under 1.8× a single call's duration rather than
+serializing.
+
+**Sync engine undisturbed:** `celery_app` imports with 9 registered tasks and
+`alembic current` reports head `e8f9a0b1c2d3`.
+
+**Live application:** booted through the documented Windows launch and reported
+`server loop: _WindowsSelectorEventLoop`; `GET /health` returned 200; the
+in-app async engine executed `select 1`; and a container-built
+`message_repository` ran `COUNT(*)` over `messages` (7312 rows) through
+`run_sync` with `async_session_factory` wired.
+
+**Deviations from the plan as written**, all discovered during execution:
+
+1. *Event-loop selection is per test, not global.* A session-scoped autouse
+   fixture runs too late — pytest-asyncio has already built the loop. Overriding
+   the `event_loop_policy` fixture works but is deprecated in pytest-asyncio 1.4.
+   The `pytest_asyncio_loop_factories` hook is the supported route and adds no
+   test-id churn for a single factory. Critically, a global Selector loop broke
+   16 tests in `tests/client_backend/test_skill_execution_engine.py`, which spawn
+   real subprocesses that Windows Selector loops cannot: Proactor therefore stays
+   the default and database tests opt in via `pytest.mark.selector_event_loop`.
+2. *Task 4 spans two repositories.* `MessageRepository.create` owns no session;
+   it delegates to `ConversationCompactionRepository.persist_message`.
+3. *No `aget_prompt_history`.* That method takes `db: Session` from its caller.
+4. *Four container providers, not three* — the compaction repository is required
+   because `acreate` delegates into it.
+5. *Task 7 grew two twins.* `validate_conversation_access` calls `exists` and
+   `user_owns_conversation`, so both needed twins; the checks stay separate and
+   ordered so a missing conversation still raises `ResourceNotFoundException`.
+6. *Test doubles needed async members.* Nine tests stubbed only the sync methods;
+   a shared `async_double` helper in `conftest.py` adapts one lambda to both.
+
+**Pre-existing defect found, not fixed** (out of scope, worth its own change):
+`MessageRepository.get_by_conversation_id` declares `order_by: str | None = None`,
+but the strategy it delegates to does `hasattr(Message, order_by)`, so calling it
+with its own default raises `TypeError`. This fails identically on the sync path.
+The strategy's own default is the correct `"created_at"`.
 
 ## Phase 2 Preview (separate plan)
 
