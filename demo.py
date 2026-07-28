@@ -11192,15 +11192,19 @@ def render_models_view() -> None:
                     disabled=not configured or not catalog_ids,
                 )
 
-            allow_custom_default = bool(
-                st.session_state.get(
-                    f"model_cfg_allow_custom_{agent_key}",
-                    cfg.get("isCustomModel") or cfg.get("is_custom_model") or False,
+            allow_custom_key = f"model_cfg_allow_custom_{agent_key}"
+            if allow_custom_key not in st.session_state:
+                st.session_state[allow_custom_key] = bool(
+                    cfg.get("isCustomModel") or cfg.get("is_custom_model") or False
                 )
-            )
-            custom_value_default = str(
-                st.session_state.get(f"model_cfg_model_custom_{agent_key}") or ""
-            ).strip()
+            custom_model_key = f"model_cfg_model_custom_{agent_key}"
+            if custom_model_key not in st.session_state:
+                is_custom_model = bool(
+                    cfg.get("isCustomModel") or cfg.get("is_custom_model") or False
+                )
+                st.session_state[custom_model_key] = (
+                    str(cfg.get("model") or "").strip() if is_custom_model else ""
+                )
             st.caption(
                 f"{'Configured' if configured else 'Not configured'}"
                 f" • Key source: {key_source.upper()}"
@@ -11211,8 +11215,7 @@ def render_models_view() -> None:
             with field_cols[0]:
                 custom_model = st.text_input(
                     "Custom model ID",
-                    key=f"model_cfg_model_custom_{agent_key}",
-                    value=custom_value_default,
+                    key=custom_model_key,
                     placeholder="Enter a provider-specific model ID",
                     disabled=not configured,
                     help="Only used when custom override is enabled below.",
@@ -11221,8 +11224,7 @@ def render_models_view() -> None:
             with field_cols[1]:
                 allow_custom_model = st.checkbox(
                     "Allow custom model override",
-                    key=f"model_cfg_allow_custom_{agent_key}",
-                    value=allow_custom_default,
+                    key=allow_custom_key,
                     disabled=not configured,
                 )
 
@@ -11231,33 +11233,39 @@ def render_models_view() -> None:
                 reasoning_label, reasoning_options = _model_reasoning_options(
                     provider_snapshot, reasoning_model
                 )
-                current_reasoning = st.session_state.get(f"model_cfg_reasoning_{agent_key}")
+                reasoning_key = f"model_cfg_reasoning_{agent_key}"
+                if reasoning_key not in st.session_state:
+                    st.session_state[reasoning_key] = cfg.get(
+                        "reasoningEffort", cfg.get("reasoning_effort")
+                    )
+                current_reasoning = st.session_state.get(reasoning_key)
                 if current_reasoning not in reasoning_options:
                     current_reasoning = None
-                    st.session_state[f"model_cfg_reasoning_{agent_key}"] = None
+                    st.session_state[reasoning_key] = None
                 st.selectbox(
                     reasoning_label,
                     options=reasoning_options,
-                    index=reasoning_options.index(current_reasoning),
-                    key=f"model_cfg_reasoning_{agent_key}",
+                    key=reasoning_key,
                     format_func=lambda value: "Provider default" if value is None else str(value),
                     disabled=not configured,
                     help="Values are specific to the selected provider model.",
                 )
 
             with field_cols[3]:
+                temperature_key = f"model_cfg_temperature_{agent_key}"
+                if temperature_key not in st.session_state:
+                    current_temperature = cfg.get("temperature", 1.0)
+                    st.session_state[temperature_key] = (
+                        float(current_temperature)
+                        if isinstance(current_temperature, (int, float))
+                        else 1.0
+                    )
                 st.slider(
                     "Temperature",
                     min_value=0.0,
                     max_value=2.0,
-                    value=float(
-                        st.session_state.get(
-                            f"model_cfg_temperature_{agent_key}",
-                            cfg.get("temperature", 1.0),
-                        )
-                    ),
                     step=0.05,
-                    key=f"model_cfg_temperature_{agent_key}",
+                    key=temperature_key,
                 )
 
             for warning in cfg.get("warnings") or []:

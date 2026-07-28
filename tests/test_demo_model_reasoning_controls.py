@@ -134,6 +134,98 @@ def test_catalog_model_selector_has_no_competing_default_value() -> None:
     assert all(keyword.arg != "index" for keyword in selectboxes[0].keywords)
 
 
+def test_temperature_slider_has_no_competing_default_value() -> None:
+    source = Path("demo.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    render_models = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "render_models_view"
+    )
+    sliders = [
+        node
+        for node in ast.walk(render_models)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "slider"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "Temperature"
+    ]
+
+    assert len(sliders) == 1
+    assert all(keyword.arg != "value" for keyword in sliders[0].keywords)
+
+
+def test_custom_model_input_has_no_competing_default_value() -> None:
+    source = Path("demo.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    render_models = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "render_models_view"
+    )
+    inputs = [
+        node
+        for node in ast.walk(render_models)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "text_input"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "Custom model ID"
+    ]
+
+    assert len(inputs) == 1
+    assert all(keyword.arg != "value" for keyword in inputs[0].keywords)
+
+
+def test_custom_model_checkbox_has_no_competing_default_value() -> None:
+    source = Path("demo.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    render_models = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "render_models_view"
+    )
+    checkboxes = [
+        node
+        for node in ast.walk(render_models)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "checkbox"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "Allow custom model override"
+    ]
+
+    assert len(checkboxes) == 1
+    assert all(keyword.arg != "value" for keyword in checkboxes[0].keywords)
+
+
+def test_reasoning_selector_has_no_competing_default_index() -> None:
+    source = Path("demo.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    render_models = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "render_models_view"
+    )
+    selectors = [
+        node
+        for node in ast.walk(render_models)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "selectbox"
+        and node.args
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "reasoning_label"
+    ]
+
+    assert len(selectors) == 1
+    assert all(keyword.arg != "index" for keyword in selectors[0].keywords)
+
+
 def test_chat_prompt_has_one_native_widget_state_rule() -> None:
     source = Path("app/ai/prompts.py").read_text(encoding="utf-8")
     assert source.count("initial_state") == 1
