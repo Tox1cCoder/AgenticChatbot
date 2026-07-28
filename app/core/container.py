@@ -232,6 +232,7 @@ class Container(containers.DeclarativeContainer):
     custom_agent_repository = providers.Factory(
         CustomAgentRepository,
         session_factory=db.provided.session,
+        async_session_factory=db.provided.async_session,
     )
 
     tool_approval_setting_repository = providers.Factory(
@@ -285,6 +286,7 @@ class Container(containers.DeclarativeContainer):
     task_plan_repository = providers.Factory(
         TaskPlanRepository,
         session_factory=db.provided.session,
+        async_session_factory=db.provided.async_session,
     )
 
     model_provider_repository = providers.Factory(

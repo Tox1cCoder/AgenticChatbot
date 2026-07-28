@@ -220,6 +220,10 @@ async def test_ai_sdk_chat_uses_attached_custom_agents():
                 }
             }
 
+        # The streaming path awaits the async twin.
+        async def abuild_runtime_state(self, owner_id, conversation_id):
+            return self.build_runtime_state(owner_id, conversation_id)
+
     svc = MessageService.__new__(MessageService)
     svc.custom_agent_service = _FakeCustomAgentSvc()
 

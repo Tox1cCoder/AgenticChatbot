@@ -2,6 +2,7 @@
 TaskPlan repository for database operations.
 """
 
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -13,6 +14,7 @@ from app.models.enums import TaskStatus
 from app.models.task_plan import TaskPlan
 from app.repositories.command_strategy import DefaultCommandStrategy
 from app.repositories.query_strategy import DefaultQueryStrategy
+from app.repositories.session_transport import RepositorySessionMixin
 from app.schemas.task_plan import TaskPlanCreate, TaskPlanUpdate
 
 
@@ -183,12 +185,19 @@ class TaskPlanCRUDStrategy(
         return db.execute(statement).scalar() is not None
 
 
-class TaskPlanRepository:
+class TaskPlanRepository(RepositorySessionMixin):
     """Repository for TaskPlan model using session factory pattern."""
 
-    def __init__(self, session_factory: callable):
+    def __init__(
+        self,
+        session_factory: callable,
+        async_session_factory: Callable[[], Any] | None = None,
+    ):
         """Initialize repository with session factory for dependency injection."""
-        self.session_factory = session_factory
+        super().__init__(
+            session_factory=session_factory,
+            async_session_factory=async_session_factory,
+        )
         self._crud_strategy = TaskPlanCRUDStrategy(TaskPlan)
 
     def create(self, input_data: dict) -> TaskPlan:
@@ -236,6 +245,18 @@ class TaskPlanRepository:
                 session, conversation_id, include_completed
             )
 
+    async def aget_by_conversation_id(
+        self,
+        conversation_id: UUID,
+        include_completed: bool = True,
+    ) -> list[TaskPlan]:
+        """Async twin of :meth:`get_by_conversation_id`."""
+        return await self._arun(
+            lambda session: self._crud_strategy.get_by_conversation_id(
+                session, conversation_id, include_completed
+            )
+        )
+
     def get_active_or_next_task(self, conversation_id: UUID) -> TaskPlan | None:
         """Get the first in-progress task, otherwise the first pending task.
 
@@ -247,6 +268,12 @@ class TaskPlanRepository:
         """
         with self.session_factory() as session:
             return self._crud_strategy.get_active_or_next_task(session, conversation_id)
+
+    async def aget_active_or_next_task(self, conversation_id: UUID) -> TaskPlan | None:
+        """Async twin of :meth:`get_active_or_next_task`."""
+        return await self._arun(
+            lambda session: self._crud_strategy.get_active_or_next_task(session, conversation_id)
+        )
 
     def mark_completed(self, task_id: UUID) -> TaskPlan | None:
         """Update task status to completed and set completed_at timestamp.

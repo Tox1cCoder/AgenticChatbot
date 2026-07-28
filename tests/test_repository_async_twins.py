@@ -167,6 +167,70 @@ async def test_document_acount_matches_sync(document_repository, seeded_conversa
     assert await document_repository.acount_by_conversation(seeded_conversation_id) == expected
 
 
+# ── Phase 2: repositories on the rest of the pre-first-token path ───────────
+
+
+@pytest.fixture
+def task_plan_repository():
+    from app.repositories.task_plan import TaskPlanRepository
+
+    return TaskPlanRepository(
+        session_factory=SessionLocal,
+        async_session_factory=AsyncSessionLocal,
+    )
+
+
+@pytest.fixture
+def custom_agent_repository():
+    from app.repositories.custom_agent import CustomAgentRepository
+
+    return CustomAgentRepository(
+        session_factory=SessionLocal,
+        async_session_factory=AsyncSessionLocal,
+    )
+
+
+async def test_task_plan_aget_by_conversation_id_matches_sync(
+    task_plan_repository, seeded_conversation_id
+):
+    expected = task_plan_repository.get_by_conversation_id(seeded_conversation_id)
+    actual = await task_plan_repository.aget_by_conversation_id(seeded_conversation_id)
+    assert [row.id for row in actual] == [row.id for row in expected]
+
+
+async def test_task_plan_aget_by_conversation_id_honors_include_completed(
+    task_plan_repository, seeded_conversation_id
+):
+    expected = task_plan_repository.get_by_conversation_id(
+        seeded_conversation_id, include_completed=False
+    )
+    actual = await task_plan_repository.aget_by_conversation_id(
+        seeded_conversation_id, include_completed=False
+    )
+    assert [row.id for row in actual] == [row.id for row in expected]
+
+
+async def test_task_plan_aget_active_or_next_matches_sync(
+    task_plan_repository, seeded_conversation_id
+):
+    expected = task_plan_repository.get_active_or_next_task(seeded_conversation_id)
+    actual = await task_plan_repository.aget_active_or_next_task(seeded_conversation_id)
+    assert (actual is None) == (expected is None)
+    if expected is not None:
+        assert actual.id == expected.id
+
+
+async def test_custom_agent_alist_attachments_matches_sync(
+    custom_agent_repository, seeded_conversation_id
+):
+    conversation_owner = uuid4()
+    expected = custom_agent_repository.list_attachments(conversation_owner, seeded_conversation_id)
+    actual = await custom_agent_repository.alist_attachments(
+        conversation_owner, seeded_conversation_id
+    )
+    assert [row[0].id for row in actual] == [row[0].id for row in expected]
+
+
 async def test_aget_by_conversation_id_matches_sync(
     message_repository, seeded_message_id, seeded_conversation_id
 ):

@@ -10,13 +10,21 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models.custom_agent import ConversationCustomAgent, CustomAgent
+from app.repositories.session_transport import RepositorySessionMixin
 
 
-class CustomAgentRepository:
+class CustomAgentRepository(RepositorySessionMixin):
     """Session-factory backed repository for custom agents."""
 
-    def __init__(self, session_factory: Callable[[], Any]):
-        self.session_factory = session_factory
+    def __init__(
+        self,
+        session_factory: Callable[[], Any],
+        async_session_factory: Callable[[], Any] | None = None,
+    ):
+        super().__init__(
+            session_factory=session_factory,
+            async_session_factory=async_session_factory,
+        )
 
     # ----------------------------------------------------------------- reads
 
@@ -99,25 +107,41 @@ class CustomAgentRepository:
 
     # ----------------------------------------------------------- attachments
 
+    @staticmethod
+    def _list_attachments_in_session(
+        session: Session, owner_id: UUID, conversation_id: UUID
+    ) -> list[tuple[ConversationCustomAgent, CustomAgent]]:
+        """Attachment-listing body shared by both transports."""
+        stmt = (
+            select(ConversationCustomAgent, CustomAgent)
+            .join(CustomAgent, CustomAgent.id == ConversationCustomAgent.custom_agent_id)
+            .where(
+                ConversationCustomAgent.conversation_id == conversation_id,
+                ConversationCustomAgent.owner_id == owner_id,
+                CustomAgent.deleted_at.is_(None),
+            )
+            .order_by(ConversationCustomAgent.agent_order.asc())
+        )
+        rows = session.execute(stmt).all()
+        for _attachment, agent in rows:
+            session.expunge(agent)
+        return [(attachment, agent) for attachment, agent in rows]
+
     def list_attachments(
         self, owner_id: UUID, conversation_id: UUID
     ) -> list[tuple[ConversationCustomAgent, CustomAgent]]:
         """Ordered (attachment, agent) pairs for a conversation, live agents only."""
-        with self.session_factory() as session:
-            stmt = (
-                select(ConversationCustomAgent, CustomAgent)
-                .join(CustomAgent, CustomAgent.id == ConversationCustomAgent.custom_agent_id)
-                .where(
-                    ConversationCustomAgent.conversation_id == conversation_id,
-                    ConversationCustomAgent.owner_id == owner_id,
-                    CustomAgent.deleted_at.is_(None),
-                )
-                .order_by(ConversationCustomAgent.agent_order.asc())
-            )
-            rows = session.execute(stmt).all()
-            for _attachment, agent in rows:
-                session.expunge(agent)
-            return [(attachment, agent) for attachment, agent in rows]
+        return self._run(
+            lambda session: self._list_attachments_in_session(session, owner_id, conversation_id)
+        )
+
+    async def alist_attachments(
+        self, owner_id: UUID, conversation_id: UUID
+    ) -> list[tuple[ConversationCustomAgent, CustomAgent]]:
+        """Async twin of :meth:`list_attachments`."""
+        return await self._arun(
+            lambda session: self._list_attachments_in_session(session, owner_id, conversation_id)
+        )
 
     def replace_attachments(
         self, owner_id: UUID, conversation_id: UUID, custom_agent_ids: list[UUID]

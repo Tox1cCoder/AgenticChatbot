@@ -399,6 +399,18 @@ class CustomAgentService:
     ) -> dict[str, dict[str, Any]]:
         """Build the ``custom_agents`` graph-state map keyed by runtime id."""
         attachments = self.repository.list_attachments(owner_id, conversation_id)
+        return self._runtime_state_from_attachments(attachments)
+
+    async def abuild_runtime_state(
+        self, owner_id: UUID, conversation_id: UUID
+    ) -> dict[str, dict[str, Any]]:
+        """Async twin of :meth:`build_runtime_state`."""
+        attachments = await self.repository.alist_attachments(owner_id, conversation_id)
+        return self._runtime_state_from_attachments(attachments)
+
+    @staticmethod
+    def _runtime_state_from_attachments(attachments) -> dict[str, dict[str, Any]]:
+        """Pure projection of attachment rows into graph state. No database access."""
         state: dict[str, dict[str, Any]] = {}
         for attachment, agent in attachments:
             runtime_id = runtime_agent_id_for(agent.id)

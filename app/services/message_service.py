@@ -2322,7 +2322,7 @@ class MessageService(IMessageService):
             return result
 
         try:
-            existing_tasks = self.task_plan_service.get_conversation_tasks(
+            existing_tasks = await self.task_plan_service.aget_conversation_tasks(
                 conversation_id, user_id, include_completed=True
             )
             result.has_existing_plan = len(existing_tasks) > 0
@@ -2334,7 +2334,7 @@ class MessageService(IMessageService):
                 )
                 result.has_existing_plan = len(created_tasks) > 0
                 if result.has_existing_plan:
-                    existing_tasks = self.task_plan_service.get_conversation_tasks(
+                    existing_tasks = await self.task_plan_service.aget_conversation_tasks(
                         conversation_id, user_id, include_completed=True
                     )
 
@@ -2353,7 +2353,9 @@ class MessageService(IMessageService):
                 result.planning_mode_enabled = True
 
             # Get current task for execution context
-            current_task = self.task_plan_service.get_active_or_next_task(conversation_id, user_id)
+            current_task = await self.task_plan_service.aget_active_or_next_task(
+                conversation_id, user_id
+            )
             result.current_task = self._build_task_context_dict(current_task)
 
             # Convert existing tasks to dict for planning agent
@@ -2400,7 +2402,7 @@ class MessageService(IMessageService):
             ),
         )
         attachments, model_request = self._extract_message_execution_inputs(message_create_data)
-        custom_agents_state = self._resolve_custom_agents_state(
+        custom_agents_state = await self._aresolve_custom_agents_state(
             resolved_user_id, message_create_data.conversation_id
         )
         validated_device_id = self._validate_request_device_id(
@@ -2461,14 +2463,27 @@ class MessageService(IMessageService):
 
         Best-effort: returns ``{}`` when no service is wired or none are
         attached, preserving all behavior for conversations without custom
-        agents. Used by streaming, non-streaming, and AI SDK paths alike since
-        they all build the request through this method.
+        agents. Retained for the resume and non-streaming paths;
+        :meth:`_aresolve_custom_agents_state` serves the streaming path.
         """
         service = getattr(self, "custom_agent_service", None)
         if service is None or not owner_id or not conversation_id:
             return {}
         try:
             return service.build_runtime_state(owner_id, conversation_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logging.warning("Failed to resolve custom agents for conversation: %s", exc)
+            return {}
+
+    async def _aresolve_custom_agents_state(
+        self, owner_id: UUID | None, conversation_id: UUID | None
+    ) -> dict[str, Any]:
+        """Async twin of :meth:`_resolve_custom_agents_state`."""
+        service = getattr(self, "custom_agent_service", None)
+        if service is None or not owner_id or not conversation_id:
+            return {}
+        try:
+            return await service.abuild_runtime_state(owner_id, conversation_id)
         except Exception as exc:  # pragma: no cover - defensive
             logging.warning("Failed to resolve custom agents for conversation: %s", exc)
             return {}

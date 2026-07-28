@@ -462,6 +462,35 @@ class TaskPlanService(ITaskPlanService):
             return TaskPlanRead.model_validate(task)
         return None
 
+    async def aget_conversation_tasks(
+        self,
+        conversation_id: UUID,
+        user_id: UUID,
+        include_completed: bool = False,
+    ) -> list[TaskPlanRead]:
+        """Async twin of :meth:`get_conversation_tasks`."""
+        await self.conversation_validation_utils.avalidate_conversation_access(
+            user_id, conversation_id
+        )
+
+        tasks = await self.task_plan_repository.aget_by_conversation_id(
+            conversation_id, include_completed=include_completed
+        )
+        return [TaskPlanRead.model_validate(task) for task in tasks]
+
+    async def aget_active_or_next_task(
+        self, conversation_id: UUID, user_id: UUID
+    ) -> TaskPlanRead | None:
+        """Async twin of :meth:`get_active_or_next_task`."""
+        await self.conversation_validation_utils.avalidate_conversation_access(
+            user_id, conversation_id
+        )
+
+        task = await self.task_plan_repository.aget_active_or_next_task(conversation_id)
+        if task:
+            return TaskPlanRead.model_validate(task)
+        return None
+
     def update_task(
         self,
         task_id: UUID,

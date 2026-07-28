@@ -122,6 +122,53 @@ def require_async_db(_async_db_available: bool) -> None:
 
 
 @pytest.fixture
+def forbid_sync_db_on_event_loop():
+    """Record every sync-engine connection checked out while a loop is running.
+
+    This is the invariant the async migration exists to enforce: no code reached
+    from an ``async def`` may touch the sync engine, because that blocks the
+    event loop and stalls every other in-flight request. Counting event-loop
+    ticks proves a single call is non-blocking; this proves a whole code path is.
+
+    Yields the list of offending call sites so a test can assert it is empty, or
+    assert a known count while a migration is still in progress.
+    """
+    import os
+    import traceback
+
+    from sqlalchemy import event
+
+    from app.database.session import engine
+
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    offenders: list[str] = []
+
+    def _on_checkout(_dbapi_connection, _connection_record, _connection_proxy):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return  # off-loop use (Celery, Alembic, fixtures) is fine
+        frames = [
+            frame
+            for frame in traceback.extract_stack()
+            if frame.filename.startswith(project_root) and "site-packages" not in frame.filename
+        ]
+        offenders.append(
+            " <- ".join(
+                f"{os.path.relpath(frame.filename, project_root)}:{frame.lineno}"
+                for frame in frames[-2:]
+            )
+            or "<unknown>"
+        )
+
+    event.listen(engine.pool, "checkout", _on_checkout)
+    try:
+        yield offenders
+    finally:
+        event.remove(engine.pool, "checkout", _on_checkout)
+
+
+@pytest.fixture
 def seeded_conversation_id(require_async_db):
     """Insert a throwaway owner and conversation, then remove them.
 

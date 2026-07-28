@@ -80,6 +80,14 @@ async def test_prepare_planning_context_carries_created_plan_rubric_metadata():
         def get_active_or_next_task(self, *_args, **_kwargs):
             return None
 
+        # The streaming path awaits the async twins; delegate so the double has
+        # one source of truth per behavior.
+        async def aget_conversation_tasks(self, *args, **kwargs):
+            return self.get_conversation_tasks(*args, **kwargs)
+
+        async def aget_active_or_next_task(self, *args, **kwargs):
+            return self.get_active_or_next_task(*args, **kwargs)
+
         def consume_last_planning_runtime_metadata(self):
             return {"planning_rubric": {"status": "satisfied", "iterations": 1}}
 

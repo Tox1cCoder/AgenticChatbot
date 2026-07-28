@@ -122,6 +122,27 @@ class ITaskPlanService(ABC):
         pass
 
     @abstractmethod
+    async def aget_conversation_tasks(
+        self,
+        conversation_id: UUID,
+        user_id: UUID,
+        include_completed: bool = False,
+    ) -> list[TaskPlanRead]:
+        """Async twin of :meth:`get_conversation_tasks`.
+
+        Required because this runs on the streaming path before the first token,
+        where a blocking query stalls every other in-flight request.
+        """
+        pass
+
+    @abstractmethod
+    async def aget_active_or_next_task(
+        self, conversation_id: UUID, user_id: UUID
+    ) -> TaskPlanRead | None:
+        """Async twin of :meth:`get_active_or_next_task`."""
+        pass
+
+    @abstractmethod
     def set_plan_lifecycle(
         self,
         conversation_id: UUID,
