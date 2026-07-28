@@ -218,6 +218,17 @@ class Settings(BaseSettings):
         default="postgresql://localhost:5432/chatbot",
         description="Database URL for PostgreSQL connection",
     )
+    db_pool_size: int = Field(
+        default=20,
+        description=(
+            "Async engine connection pool size. Sized for concurrent streaming "
+            "requests; SQLAlchemy's default of 5 is a concurrency ceiling."
+        ),
+    )
+    db_max_overflow: int = Field(
+        default=10,
+        description="Additional async connections allowed above db_pool_size under burst.",
+    )
 
     # API settings
     api_host: str = Field(
