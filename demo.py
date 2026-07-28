@@ -1960,36 +1960,6 @@ def _custom_agent_selected_server_group_keys(
     return selected
 
 
-def _custom_agent_tool_refs_available(
-    tool_refs: list[dict[str, Any]],
-    server_tools: list[dict[str, Any]],
-    client_tools: list[dict[str, Any]],
-) -> bool:
-    server_qids = {
-        str(_custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId"))
-        for tool in server_tools
-        if _custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId")
-    }
-    client_stable_keys = {
-        stable_key
-        for tool in client_tools
-        if (stable_key := _custom_agent_client_tool_stable_key(tool)) is not None
-    }
-
-    for ref in tool_refs or []:
-        ref_type = str(_custom_agent_value(ref, "type") or "")
-        if ref_type == "client":
-            if _custom_agent_client_tool_stable_key(ref) not in client_stable_keys:
-                return False
-            continue
-
-        qid = _custom_agent_value(ref, "qualified_tool_id", "qualifiedToolId")
-        if str(qid) not in server_qids:
-            return False
-
-    return True
-
-
 def _custom_agent_selected_skill_keys(
     skill_refs: list[dict[str, Any]],
     skills: list[dict[str, Any]],
@@ -3013,8 +2983,8 @@ def sync_conversation_title_from_server(conversation_id: str | None) -> None:
     upsert_conversation_in_state(server_conversation)
 
 
-def refresh_conversations_list(*, fallback_conversation: dict[str, Any] | None = None) -> None:
-    """Reload conversations list from the API, optionally seeding with a fallback."""
+def refresh_conversations_list() -> None:
+    """Reload the complete conversations list from the API."""
     st.session_state.conversations_loaded = False
     refreshed = get_conversations(include_messages=False, fetch_all_pages=True)
     if refreshed and refreshed.get("data"):
@@ -3024,10 +2994,6 @@ def refresh_conversations_list(*, fallback_conversation: dict[str, Any] | None =
             "include_messages": False,
             "fetch_all_pages": True,
         }
-        return
-
-    if fallback_conversation:
-        upsert_conversation_in_state(fallback_conversation)
 
 
 @st.cache_resource(show_spinner=False)
@@ -7234,11 +7200,6 @@ def _get_context_window_metadata(message_metadata: dict[str, Any]) -> dict[str, 
     return cw if isinstance(cw, dict) else None
 
 
-def _format_context_window_label(context_window: dict[str, Any]) -> str:
-    """Build the accessible tooltip for a context-window gauge."""
-    return str(_context_window_presentation(context_window).get("tooltip") or "")
-
-
 def _format_context_tokens(value: Any) -> str:
     if isinstance(value, bool):
         return "?"
@@ -9897,7 +9858,6 @@ def render_chat_view():
                     accumulated_thinking = ""  # Accumulate thinking content
                     final_message = None
                     interrupt_data = None
-                    selected_agent = None  # Track which agent is processing
                     received_title_update = False
 
                     # Mark stream as in-flight BEFORE starting (survives rerun)

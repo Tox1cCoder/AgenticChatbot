@@ -515,7 +515,6 @@ def test_custom_agent_edit_matches_reconnected_client_tool_by_stable_identity(mo
         "tool_instance_id": "instance-1",
     }
 
-    assert demo._custom_agent_tool_refs_available([saved_client_tool], [], [current_client_tool])
     selected_keys = demo._custom_agent_selected_tool_keys(
         [saved_client_tool], [], [current_client_tool]
     )
@@ -543,7 +542,6 @@ def test_custom_agent_edit_matches_same_logical_tool_on_another_device(monkeypat
         tool_instance_id="instance-b",
     )
 
-    assert demo._custom_agent_tool_refs_available([saved], [], [current])
     assert demo._custom_agent_selected_tool_keys([saved], [], [current]) == [
         demo._custom_agent_tool_option_key(current)
     ]
@@ -624,31 +622,11 @@ def test_custom_agent_build_skill_refs_filters_stale_selection(monkeypatch):
     assert refs == [{"source": "server", "lookup_name": "data-analysis", "name": "data-analysis"}]
 
 
-def test_custom_agent_edit_detects_unavailable_existing_refs(monkeypatch):
+def test_custom_agent_edit_detects_unavailable_existing_skill_refs(monkeypatch):
     demo = _import_demo_with_ui_stubs(monkeypatch)
-    server_tool = {
-        "type": "server_mcp",
-        "server_name": "calculator",
-        "tool_name": "calculate",
-        "qualified_tool_id": "calculator::calculate",
-    }
-    stale_client_tool = {
-        "type": "client",
-        "device_id": "device-1",
-        "session_id": "old-session",
-        "catalog_version": "2",
-        "tool_instance_id": "old-instance",
-        "server_name": "csv",
-        "qualified_tool_id": "client__csv__profile",
-        "tool_name": "profile",
-    }
     skill = {"source": "server", "lookup_name": "data-analysis", "name": "data-analysis"}
     stale_skill = {"source": "client", "lookup_name": "missing", "name": "missing"}
 
-    assert demo._custom_agent_tool_refs_available([server_tool], [server_tool], [])
-    assert not demo._custom_agent_tool_refs_available(
-        [server_tool, stale_client_tool], [server_tool], []
-    )
     assert demo._custom_agent_skill_refs_available([skill], [skill])
     assert not demo._custom_agent_skill_refs_available([skill, stale_skill], [skill])
 
