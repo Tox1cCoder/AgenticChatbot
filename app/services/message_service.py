@@ -852,7 +852,9 @@ class MessageService(IMessageService):
     async def create_message(
         self, message_create_data: MessageCreate, user_id: UUID
     ) -> MessageRead:
-        self.conversation_validation_utils.validate_conversation_access(
+        # This is an async endpoint path, so its database work uses the async
+        # transport; a sync call here blocks the loop for every other request.
+        await self.conversation_validation_utils.avalidate_conversation_access(
             user_id, message_create_data.conversation_id
         )
 
@@ -864,7 +866,7 @@ class MessageService(IMessageService):
             if refs is not None and isinstance(message_entity.get("message_metadata"), dict):
                 message_entity["message_metadata"]["attachments"] = refs
 
-        created_message = self.repository.create(message_entity)
+        created_message = await self.repository.acreate(message_entity)
         # Reserve the assistant DB id up-front so the graph can stamp the
         # outgoing AIMessage with the same id we will later persist.
         assistant_message_id = uuid4()
