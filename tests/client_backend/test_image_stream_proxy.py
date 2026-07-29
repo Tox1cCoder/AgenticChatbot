@@ -612,6 +612,30 @@ def test_media_route_streams_owner_image_with_mime_and_cache_headers(monkeypatch
     assert fake.requested == [("GET", f"/chat-images/{image_id}")]
 
 
+@pytest.mark.parametrize("path_prefix", ["/web-images", "/api/web-images"])
+def test_web_image_route_streams_owned_visual_from_canonical_path(monkeypatch, path_prefix):
+    """Selected web-image references must remain usable through port 8100."""
+    response = _FakeMediaResponse(
+        status_code=200,
+        headers={"content-type": "image/jpeg", "cache-control": "private, max-age=300"},
+        chunks=[b"JPEG-", b"bytes"],
+    )
+    client, fake = _media_sidecar(monkeypatch, response)
+    image_id = uuid4()
+
+    resp = client.get(
+        f"{path_prefix}/{image_id}",
+        headers={"Authorization": "Bearer local-session-token"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.content == b"JPEG-bytes"
+    assert resp.headers["content-type"] == "image/jpeg"
+    assert resp.headers["cache-control"] == "private, max-age=300"
+    assert resp.headers["x-content-type-options"] == "nosniff"
+    assert fake.requested == [("GET", f"/web-images/{image_id}")]
+
+
 def test_media_route_other_user_gets_404_without_existence_leak(monkeypatch):
     """Attacker direction: the canonical server scopes reads per user and 404s
     another user's image. The sidecar must forward the 404 and NEVER leak the
