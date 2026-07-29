@@ -267,6 +267,12 @@
     "exercise_symbol": "embed_content"
   },
   {
+    "file": "app/services/web_image_service.py",
+    "function": "WebImageService._fetch_once",
+    "call_chain": "client.stream",
+    "disposition": "workflow_stream"
+  },
+  {
     "file": "app/workers/conversation_compaction.py",
     "function": "_langchain_generate",
     "call_chain": "client.ainvoke",
