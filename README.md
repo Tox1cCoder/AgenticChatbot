@@ -281,6 +281,7 @@ The full schema lives in [`app/core/config.py`](app/core/config.py). Selected hi
 |---|---|---|
 | `GEMINI_API_KEY` | — | Default provider; still supported via env |
 | `TAVILY_API_KEY` | — | Tavily Search, Extract, Map, and Crawl |
+| `TAVILY_SEARCH_INCLUDE_IMAGES` | `true` | Default when `tavily_search.include_images` is omitted |
 | `BRAVE_SEARCH_API_KEY` | — | Brave Image Search (visual references) |
 | `BRAVE_IMAGE_SEARCH_DEFAULT_COUNT` | `6` | Default image results per call |
 | `BRAVE_IMAGE_SEARCH_MAX_COUNT` | `10` | Hard cap on image results per call |
@@ -1209,8 +1210,6 @@ The pressure differential causes lift over the upper wing surface.
 
 <!--rich:image:tool:call_7:0-->
 
-*Figure 1. Streamlines around an airfoil.*
-
 This pattern helps explain why the pressure is lower above the wing.
 ```
 
@@ -1247,7 +1246,13 @@ Capable assistant messages persist:
       "source": "web_search",
       "display_policy": "inline_only",
       "alt_text": "Airflow around an airfoil",
-      "payload": {"url": "https://example.org/airfoil.png", "mime_type": "image/png"}
+      "payload": {
+        "url": "/web-images/55d170b5-b0f0-44fc-9155-af8af484513d",
+        "mime_type": "image/png",
+        "source_url": "https://example.org/airfoil-study",
+        "width": 1200,
+        "height": 800
+      }
     }
   ],
   "rich_reference_warnings": []
@@ -1292,6 +1297,18 @@ Capable AI SDK streams emit additive `data-rich-items` parts as safe non-image r
 ```
 
 Image candidates are **never** streamed transiently — they only surface in the final `data-assistant-message.data.message.metadata.rich_items` after marker selection. Canvas source is excluded from transient upserts. Transient data parts ride in `useChat({ onData })`, not in `message.parts`. The AI SDK response retains the `x-vercel-ai-ui-message-stream: v1` header.
+
+### Rich image provider, latency, and failure policy
+
+Brave Image Search is the preferred adapter for focused visual discovery because it supplies dedicated thumbnail and image metadata. Tavily serves a different job: web research that can return source-bound images, and an orchestrated alternative when appropriate. Brave is not universally better, and the adapters do not perform an unconditional serial Brave-to-Tavily retry.
+
+For `tavily_search`, omitting `include_images` (the internal `None` case) preserves `TAVILY_SEARCH_INCLUDE_IMAGES`; passing `include_images=false` disables images for that call and intentionally returns an empty image list. This does not change the deployment default for later calls.
+
+Candidate filtering is deterministic and bounded by `RICH_IMAGE_CANDIDATE_MAX_COUNT` (default `8`), `RICH_IMAGE_MIN_WIDTH_PX` (`320`), and `RICH_IMAGE_MIN_HEIGHT_PX` (`180`). The model chooses placement from this bounded inventory; there is no model-based image evaluator, labeled-dataset dependency, or additional evaluation latency.
+
+Creating `/web-images/{id}` references is a persistence-time database-only operation. Upstream image bytes are fetched later, only when an authenticated client requests the media route, so the configured connect/read timeouts do not extend text time-to-first-token or assistant completion. A fetch failure affects only the optional figure; reference-registration failure removes the item and its exact marker while preserving the complete text answer.
+
+Operational metrics are exposed at `GET /metrics/rich-images`. Labels are bounded to provider and fixed outcome codes; queries, URLs, captions, tenant IDs, and other user content are never labels. `INLINE_RICH_RESPONSE_ENABLED` remains the server-side rollback switch. Frontend teams should implement the full [rich image rendering contract](docs/frontend/rich-image-rendering.md), including Bearer fetch, object-URL cleanup, file-part deduplication, one-footer ownership, and whole-figure failure replacement.
 
 ### Client renderer algorithm
 
