@@ -1533,6 +1533,18 @@ class Settings(BaseSettings):
             "Oversized inline data is rejected at finalization rather than persisted or streamed."
         ),
     )
+    rich_image_candidate_max_count: int = Field(
+        default=8,
+        description="Maximum normalized web-image candidates retained per tool result.",
+    )
+    rich_image_min_width_px: int = Field(
+        default=320,
+        description="Reject provider images with a known width below this value.",
+    )
+    rich_image_min_height_px: int = Field(
+        default=180,
+        description="Reject provider images with a known height below this value.",
+    )
     rich_auto_place_enabled: bool = Field(
         default=True,
         description=(
@@ -1593,6 +1605,9 @@ class Settings(BaseSettings):
         "model_usage_failure_store_ttl_seconds",
         "chat_image_max_bytes",
         "subagent_event_queue_maxsize",
+        "rich_image_candidate_max_count",
+        "rich_image_min_width_px",
+        "rich_image_min_height_px",
         mode="before",
     )
     @classmethod

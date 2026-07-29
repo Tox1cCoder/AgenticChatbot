@@ -68,11 +68,69 @@ def test_search_uses_configured_basic_depth_and_preserves_images(monkeypatch):
 
     assert client.calls[0]["search_depth"] == "basic"
     assert client.calls[0]["max_results"] == 10
+    assert client.calls[0]["include_images"] is True
     assert payload["provider"] == "tavily"
     assert payload["operation"] == "search"
     assert payload["images"][0]["url"] == "https://example.com/a.jpg"
     assert payload["results"][0]["raw_content"] == "Full text"
     assert payload["usage"] == {"credits": 1}
+
+
+def test_search_explicit_false_suppresses_provider_images(monkeypatch):
+    client = _FakeTavilyClient(
+        {
+            "images": [{"url": "https://example.com/unexpected.jpg"}],
+            "results": [],
+        }
+    )
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: client)
+
+    payload = json.loads(tavily_server.tavily_search("text research", include_images=False))
+
+    assert client.calls[0]["include_images"] is False
+    assert client.calls[0]["include_image_descriptions"] is False
+    assert payload["images"] == []
+
+
+def test_search_normalizes_result_bound_images_with_parent_provenance(monkeypatch):
+    client = _FakeTavilyClient(
+        {
+            "images": [
+                "https://cdn.example/query.jpg",
+                {"url": "https://cdn.example/rover.jpg", "description": "duplicate"},
+            ],
+            "results": [
+                {
+                    "title": "Rover story",
+                    "url": "https://publisher.example/rover",
+                    "content": "Story",
+                    "score": 0.91,
+                    "images": [
+                        {
+                            "url": "https://cdn.example/rover.jpg",
+                            "description": "Mars rover",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: client)
+
+    payload = json.loads(tavily_server.tavily_search("mars rover", include_images=True))
+
+    assert [image["url"] for image in payload["images"]] == [
+        "https://cdn.example/rover.jpg",
+        "https://cdn.example/query.jpg",
+    ]
+    result_image = payload["images"][0]
+    assert result_image["source_url"] == "https://publisher.example/rover"
+    assert result_image["source_title"] == "Rover story"
+    assert result_image["source_domain"] == "publisher.example"
+    assert result_image["result_rank"] == 0
+    assert result_image["result_score"] == 0.91
+    assert result_image["provider"] == "tavily"
+    assert payload["images"][1]["query_level"] is True
 
 
 class _FakeExtractClient:

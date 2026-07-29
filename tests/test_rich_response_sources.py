@@ -157,23 +157,68 @@ def test_brave_image_candidate_identity_and_payload():
     assert cand["provenance"]["tool"] == "brave_image_search"
     assert cand["source"] == "tool_image"
     # source_url stays in the public payload (ImagePayload accepts it).
-    assert cand["payload"]["url"] == "https://img.test/direct-1.jpg"
+    assert cand["payload"]["url"] == "https://img.test/thumb-1.jpg"
     assert cand["payload"]["source_url"] == "https://example.com/page"
+    assert cand["payload"]["width"] == 1200
+    assert cand["payload"]["height"] == 800
 
 
-def test_brave_image_candidate_keeps_extra_metadata_in_provenance_only():
+def test_brave_image_candidate_keeps_provider_urls_in_provenance():
     [cand] = build_image_candidates_from_tool_result(
         _brave_payload(), tool_call_id="call_b", tool_name="brave_image_search"
     )
     prov = cand["provenance"]
     assert prov["thumbnail_url"] == "https://img.test/thumb-1.jpg"
-    assert prov["width"] == 1200
-    assert prov["height"] == 800
+    assert prov["original_image_url"] == "https://img.test/direct-1.jpg"
     assert prov["source_domain"] == "example.com"
     assert prov["provider"] == "brave_image_search"
-    # These must never leak into the public payload (ImagePayload forbids extras).
-    for forbidden in ("thumbnail_url", "width", "height", "source_domain", "provider"):
+    for forbidden in ("thumbnail_url", "original_image_url", "source_domain", "provider"):
         assert forbidden not in cand["payload"]
+
+
+def test_remote_candidates_reject_insecure_duplicate_and_known_tiny_images(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "rich_image_min_width_px", 320)
+    monkeypatch.setattr(settings, "rich_image_min_height_px", 180)
+    payload = json.dumps(
+        {
+            "images": [
+                {"url": "http://img.test/insecure.jpg", "width": 800, "height": 600},
+                {"url": "https://img.test/tiny.jpg", "width": 100, "height": 100},
+                {"url": "https://img.test/good.jpg", "width": 800, "height": 600},
+                {"url": "https://img.test/good.jpg", "width": 800, "height": 600},
+            ]
+        }
+    )
+
+    candidates = build_image_candidates_from_tool_result(
+        payload, tool_call_id="call_filter", tool_name="brave_image_search"
+    )
+
+    assert [candidate["payload"]["url"] for candidate in candidates] == [
+        "https://img.test/good.jpg"
+    ]
+
+
+def test_remote_candidates_obey_configured_candidate_cap(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "rich_image_candidate_max_count", 2)
+    payload = json.dumps(
+        {
+            "images": [
+                {"url": f"https://img.test/{index}.jpg", "width": 800, "height": 600}
+                for index in range(4)
+            ]
+        }
+    )
+
+    candidates = build_image_candidates_from_tool_result(
+        payload, tool_call_id="call_cap", tool_name="brave_image_search"
+    )
+
+    assert len(candidates) == 2
 
 
 def test_brave_image_candidate_validates_against_public_schema():

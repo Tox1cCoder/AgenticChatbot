@@ -8,6 +8,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from anyio import ClosedResourceError
 
@@ -107,6 +108,10 @@ def build_image_candidates_from_tool_result(
         return []
 
     candidates: list[dict[str, Any]] = []
+    seen_display_urls: set[str] = set()
+    candidate_cap = max(1, int(getattr(settings, "rich_image_candidate_max_count", 8)))
+    minimum_width = max(1, int(getattr(settings, "rich_image_min_width_px", 320)))
+    minimum_height = max(1, int(getattr(settings, "rich_image_min_height_px", 180)))
     for index, image in enumerate(images):
         if not isinstance(image, dict):
             continue
@@ -114,12 +119,28 @@ def build_image_candidates_from_tool_result(
         data = image.get("data") or image.get("b64_data")
         if not url and not data:
             continue
+        provider = str(image.get("provider") or "").strip().lower()
+        original_url = str(url or "").strip()
+        thumbnail_url = str(image.get("thumbnail_url") or "").strip()
+        is_brave = provider.startswith("brave") or tool_name == "brave_image_search"
+        display_url = thumbnail_url if is_brave and thumbnail_url else original_url
+        width = image.get("width")
+        height = image.get("height")
+        if display_url:
+            if urlsplit(display_url).scheme.lower() != "https":
+                continue
+            if display_url in seen_display_urls:
+                continue
+            if isinstance(width, int) and width < minimum_width:
+                continue
+            if isinstance(height, int) and height < minimum_height:
+                continue
         payload: dict[str, Any] = {}
         mime_type = image.get("mime_type") or image.get("mimeType")
-        if url:
-            payload["url"] = str(url)
+        if display_url:
+            payload["url"] = display_url
             if not mime_type:
-                mime_type = _guess_mime_from_url(str(url))
+                mime_type = _guess_mime_from_url(display_url)
         elif data:
             payload["data"] = str(data)
             if not mime_type:
@@ -131,6 +152,10 @@ def build_image_candidates_from_tool_result(
         description = image.get("description")
         if description:
             payload["description"] = str(description)
+        if isinstance(width, int) and width > 0:
+            payload["width"] = width
+        if isinstance(height, int) and height > 0:
+            payload["height"] = height
         candidate_id_base = tool_call_id or tool_name or "tool"
         provenance: dict[str, Any] = {
             "tool_call_id": tool_call_id,
@@ -140,10 +165,19 @@ def build_image_candidates_from_tool_result(
         # Provider-specific metadata (Brave thumbnails/dimensions/source domain)
         # is not part of the narrow public ImagePayload schema, so it is kept in
         # provenance rather than risking forbidden payload extras.
-        for meta_key in ("thumbnail_url", "width", "height", "source_domain", "provider"):
+        for meta_key in (
+            "thumbnail_url",
+            "source_domain",
+            "provider",
+            "result_rank",
+            "result_score",
+            "query_level",
+        ):
             meta_value = image.get(meta_key)
             if meta_value is not None:
                 provenance[meta_key] = meta_value
+        if original_url:
+            provenance["original_image_url"] = original_url
         candidates.append(
             {
                 "id": f"image:tool:{candidate_id_base}:{index}",
@@ -156,6 +190,10 @@ def build_image_candidates_from_tool_result(
                 "provenance": provenance,
             }
         )
+        if display_url:
+            seen_display_urls.add(display_url)
+        if len(candidates) >= candidate_cap:
+            break
     return candidates
 
 
