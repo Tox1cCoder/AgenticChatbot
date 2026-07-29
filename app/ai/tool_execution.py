@@ -305,7 +305,47 @@ def build_image_candidates_from_tool_result(
             rich_image_metrics.record_candidate(provider=metric_provider, outcome="eligible")
         if len(candidates) >= candidate_cap:
             break
+    if metric_provider == "brave" and len(candidates) >= 2:
+        return [_group_image_candidates(candidates, tool_call_id=tool_call_id, query=result_query)]
     return candidates
+
+
+def _group_image_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    tool_call_id: str | None,
+    query: str,
+) -> dict[str, Any]:
+    """Collapse eligible image-search candidates into one image_group item."""
+    cap = max(2, int(getattr(settings, "rich_image_group_max_items", 3)))
+    selected = candidates[:cap]
+    cells: list[dict[str, Any]] = []
+    for candidate in selected:
+        payload = candidate.get("payload") or {}
+        cell: dict[str, Any] = {
+            "url": payload.get("url"),
+            "mime_type": payload.get("mime_type") or "image/jpeg",
+        }
+        for key in ("source_url", "description", "width", "height"):
+            value = payload.get(key)
+            if value is not None:
+                cell[key] = value
+        cells.append(cell)
+    first_provenance = selected[0].get("provenance") or {}
+    return {
+        "id": f"imagegroup:tool:{tool_call_id or 'tool'}",
+        "type": RichItemType.image_group.value,
+        "source": "image_search",
+        "display_policy": RichDisplayPolicy.inline_only.value,
+        "alt_text": f"Images of {query}" if query else GENERIC_IMAGE_ALT_TEXT,
+        "payload": {"items": cells},
+        "provenance": {
+            "tool_call_id": tool_call_id,
+            "tool": first_provenance.get("tool"),
+            "provider": first_provenance.get("provider"),
+            "query": query,
+        },
+    }
 
 
 def _extract_image_content_blocks(result: Any) -> list[dict[str, Any]]:

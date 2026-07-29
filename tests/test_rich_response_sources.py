@@ -309,6 +309,10 @@ def test_wide_strip_candidate_is_rejected_end_to_end():
 
 
 def test_remote_candidates_obey_configured_candidate_cap(monkeypatch):
+    """The per-image candidate_cap still bounds the loop's output even though a
+    Brave result with 2+ eligible candidates now collapses into one group
+    (Task 8): the 4 source images are trimmed to 2 candidates before grouping,
+    so surplus images never reach the group's cells."""
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "rich_image_candidate_max_count", 2)
@@ -325,7 +329,9 @@ def test_remote_candidates_obey_configured_candidate_cap(monkeypatch):
         payload, tool_call_id="call_cap", tool_name="brave_image_search"
     )
 
-    assert len(candidates) == 2
+    assert len(candidates) == 1
+    assert candidates[0]["type"] == "image_group"
+    assert len(candidates[0]["payload"]["items"]) == 2
 
 
 def test_candidate_selection_records_bounded_provider_counts(monkeypatch):
@@ -405,6 +411,104 @@ def test_brave_image_candidate_validates_against_public_schema():
     # Passes the discriminated-union validation only if payload has no forbidden
     # extras and the mime/url contract holds.
     validate_public_rich_item(cand)
+
+
+# ---------------------------------------------------------------------------
+# Image group collapsing (Task 8)
+# ---------------------------------------------------------------------------
+
+
+def _brave_group_payload(count):
+    return json.dumps(
+        {
+            "provider": "brave_image_search",
+            "query": "red panda photo",
+            "images": [
+                {
+                    "url": f"https://e.com/{n}.jpg",
+                    "thumbnail_url": f"https://cdn.brave.com/{n}.jpg",
+                    "mime_type": "image/jpeg",
+                    "width": 1200,
+                    "height": 800,
+                    "source_url": f"https://e.com/page-{n}",
+                    "description": f"red panda {n}",
+                }
+                for n in range(count)
+            ],
+        }
+    )
+
+
+def test_single_eligible_brave_candidate_stays_an_image_item():
+    candidates = build_image_candidates_from_tool_result(
+        _brave_group_payload(1), tool_call_id="c1", tool_name="brave_image_search"
+    )
+    assert len(candidates) == 1
+    assert candidates[0]["type"] == "image"
+
+
+def test_multiple_brave_candidates_collapse_into_one_group():
+    candidates = build_image_candidates_from_tool_result(
+        _brave_group_payload(4), tool_call_id="c1", tool_name="brave_image_search"
+    )
+    assert len(candidates) == 1
+    group = candidates[0]
+    assert group["type"] == "image_group"
+    assert group["id"] == "imagegroup:tool:c1"
+    assert group["source"] == "image_search"
+    assert len(group["payload"]["items"]) == 3  # capped
+    assert group["provenance"]["query"] == "red panda photo"
+
+
+def test_group_cells_prefer_brave_thumbnails():
+    candidates = build_image_candidates_from_tool_result(
+        _brave_group_payload(2), tool_call_id="c1", tool_name="brave_image_search"
+    )
+    urls = [cell["url"] for cell in candidates[0]["payload"]["items"]]
+    assert all(url.startswith("https://cdn.brave.com/") for url in urls)
+
+
+def test_group_alt_text_comes_from_the_image_query():
+    candidates = build_image_candidates_from_tool_result(
+        _brave_group_payload(2), tool_call_id="c1", tool_name="brave_image_search"
+    )
+    assert "red panda photo" in candidates[0]["alt_text"]
+
+
+def test_tavily_images_are_never_grouped():
+    payload = json.dumps(
+        {
+            "provider": "tavily",
+            "query": "chip rules",
+            "images": [
+                {"url": "https://e.com/a.jpg", "description": "a", "source_url": "https://e.com/1"},
+                {"url": "https://e.com/b.jpg", "description": "b", "source_url": "https://e.com/2"},
+            ],
+        }
+    )
+    candidates = build_image_candidates_from_tool_result(
+        payload, tool_call_id="c1", tool_name="tavily_search"
+    )
+    assert {c["type"] for c in candidates} == {"image"}
+
+
+def test_group_is_not_emitted_when_all_candidates_are_ineligible():
+    payload = json.dumps(
+        {
+            "provider": "brave_image_search",
+            "query": "x",
+            "images": [
+                {"url": "http://e.com/a.jpg"},
+                {"url": "https://e.com/favicon.ico"},
+            ],
+        }
+    )
+    assert (
+        build_image_candidates_from_tool_result(
+            payload, tool_call_id="c1", tool_name="brave_image_search"
+        )
+        == []
+    )
 
 
 # ---------------------------------------------------------------------------

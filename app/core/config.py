@@ -1567,6 +1567,15 @@ class Settings(BaseSettings):
             "gates miss; still admits panoramas and wide charts."
         ),
     )
+    rich_image_group_max_items: int = Field(
+        default=3,
+        ge=2,
+        le=6,
+        description=(
+            "Maximum cells in one image_group. A deliberate image search collapses "
+            "into a single rich item so the model copies one marker, not N."
+        ),
+    )
     web_image_fetch_connect_timeout_seconds: float = Field(
         default=2.0,
         gt=0,
