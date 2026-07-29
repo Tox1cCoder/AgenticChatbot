@@ -269,6 +269,7 @@ def test_candidate_selection_records_bounded_provider_counts(monkeypatch):
         {
             "record_discovery": Mock(),
             "record_selection": Mock(),
+            "record_candidate": Mock(),
         },
     )()
     monkeypatch.setattr(tool_execution, "rich_image_metrics", metrics)
@@ -279,6 +280,7 @@ def test_candidate_selection_records_bounded_provider_counts(monkeypatch):
 
     metrics.record_discovery.assert_called_once_with(provider="brave", result_count=1)
     metrics.record_selection.assert_called_once_with(provider="brave", outcome="selected")
+    metrics.record_candidate.assert_called_once_with(provider="brave", outcome="eligible")
 
 
 def test_brave_image_candidate_validates_against_public_schema():

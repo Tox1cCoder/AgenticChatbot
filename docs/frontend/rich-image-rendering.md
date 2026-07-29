@@ -102,3 +102,11 @@ If no structured caption exists, show source attribution alone. The assistant bo
 The backend selects candidates, persists only selected images, converts remote URLs to owned opaque references, and performs bounded SSRF-safe retrieval when the media route is called. It does not fetch remote bytes while generating or persisting the answer. The frontend owns authenticated loading, object-URL lifetime, per-attempt display state, and deduplication.
 
 Before release, verify: one rendered visual per selected marker; no candidate dump; no duplicate AI SDK file part; one footer; alt text is not visible; a failed attempt produces no unavailable label or fallback source action; failed media leaves the answer intact; and all object URLs are revoked.
+
+## Deprecated metrics
+
+`rich_image_selections_total` is superseded by the stage-specific
+`rich_image_candidates_total` (eligibility outcome by reason) and
+`rich_image_final_selection_total` (images persisted with the message). The old
+counter still emits during the compatibility window but is removed in Task 17.
+Dashboards and alerts must migrate to the new counters before then.

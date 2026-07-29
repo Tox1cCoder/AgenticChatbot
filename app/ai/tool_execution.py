@@ -128,22 +128,20 @@ def build_image_candidates_from_tool_result(
     candidate_cap = max(1, int(getattr(settings, "rich_image_candidate_max_count", 8)))
     minimum_width = max(1, int(getattr(settings, "rich_image_min_width_px", 320)))
     minimum_height = max(1, int(getattr(settings, "rich_image_min_height_px", 180)))
+
+    def _reject(reason: str) -> None:
+        with suppress(Exception):
+            rich_image_metrics.record_candidate(provider=metric_provider, outcome=reason)
+            rich_image_metrics.record_selection(provider=metric_provider, outcome="rejected")
+
     for index, image in enumerate(images):
         if not isinstance(image, dict):
-            with suppress(Exception):
-                rich_image_metrics.record_selection(
-                    provider=metric_provider,
-                    outcome="rejected",
-                )
+            _reject("rejected_malformed")
             continue
         url = image.get("url")
         data = image.get("data") or image.get("b64_data")
         if not url and not data:
-            with suppress(Exception):
-                rich_image_metrics.record_selection(
-                    provider=metric_provider,
-                    outcome="rejected",
-                )
+            _reject("rejected_malformed")
             continue
         provider = str(image.get("provider") or "").strip().lower()
         original_url = str(url or "").strip()
@@ -154,32 +152,16 @@ def build_image_candidates_from_tool_result(
         height = image.get("height")
         if display_url:
             if urlsplit(display_url).scheme.lower() != "https":
-                with suppress(Exception):
-                    rich_image_metrics.record_selection(
-                        provider=metric_provider,
-                        outcome="rejected",
-                    )
+                _reject("rejected_scheme")
                 continue
             if display_url in seen_display_urls:
-                with suppress(Exception):
-                    rich_image_metrics.record_selection(
-                        provider=metric_provider,
-                        outcome="rejected",
-                    )
+                _reject("rejected_duplicate")
                 continue
             if isinstance(width, int) and width < minimum_width:
-                with suppress(Exception):
-                    rich_image_metrics.record_selection(
-                        provider=metric_provider,
-                        outcome="rejected",
-                    )
+                _reject("rejected_dimensions")
                 continue
             if isinstance(height, int) and height < minimum_height:
-                with suppress(Exception):
-                    rich_image_metrics.record_selection(
-                        provider=metric_provider,
-                        outcome="rejected",
-                    )
+                _reject("rejected_dimensions")
                 continue
         payload: dict[str, Any] = {}
         mime_type = image.get("mime_type") or image.get("mimeType")
@@ -242,10 +224,8 @@ def build_image_candidates_from_tool_result(
         if display_url:
             seen_display_urls.add(display_url)
         with suppress(Exception):
-            rich_image_metrics.record_selection(
-                provider=metric_provider,
-                outcome="selected",
-            )
+            rich_image_metrics.record_candidate(provider=metric_provider, outcome="eligible")
+            rich_image_metrics.record_selection(provider=metric_provider, outcome="selected")
         if len(candidates) >= candidate_cap:
             break
     return candidates

@@ -41,3 +41,29 @@ def test_health_router_exposes_rich_image_metrics():
 
     assert response.status_code == 200
     assert "rich_image_fetches_total" in response.text
+
+
+def test_stage_counters_are_bounded_and_content_free():
+    metrics = RichImageMetrics()
+    metrics.record_candidate(provider="tavily", outcome="rejected_aspect_ratio")
+    metrics.record_candidate(provider="brave", outcome="not-a-real-outcome")
+    metrics.record_presentation(provider="brave", count=3)
+    metrics.record_anchor(provider="brave", outcome="fallback_anchored")
+    metrics.record_anchor(provider="brave", outcome="unplaced")
+    metrics.record_final_selection(provider="brave", count=1)
+    body = metrics.render().decode()
+
+    assert 'outcome="rejected_aspect_ratio"' in body
+    assert 'outcome="other"' in body
+    assert 'outcome="fallback_anchored"' in body
+    assert 'outcome="unplaced"' in body
+    assert "rich_image_presented_total" in body
+    assert "rich_image_final_selection_total" in body
+    for forbidden in ("query", "caption", "http", "conversation"):
+        assert f'{forbidden}="' not in body
+
+
+def test_old_selection_counter_still_emits_during_compatibility_window():
+    metrics = RichImageMetrics()
+    metrics.record_selection(provider="tavily", outcome="selected")
+    assert "rich_image_selections_total" in metrics.render().decode()

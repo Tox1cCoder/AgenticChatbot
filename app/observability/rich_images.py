@@ -8,6 +8,16 @@ from prometheus_client import CollectorRegistry, Counter, Histogram, generate_la
 
 _PROVIDERS = {"brave", "tavily"}
 _SELECTION_OUTCOMES = {"selected", "rejected", "omitted"}
+_CANDIDATE_OUTCOMES = {
+    "eligible",
+    "rejected_malformed",
+    "rejected_scheme",
+    "rejected_duplicate",
+    "rejected_dimensions",
+    "rejected_aspect_ratio",
+    "rejected_junk_url",
+}
+_ANCHOR_OUTCOMES = {"marker", "query_anchored", "fallback_anchored", "unplaced"}
 _FETCH_OUTCOMES = {
     "success",
     "timeout",
@@ -54,6 +64,30 @@ class RichImageMetrics:
             ("provider", "outcome"),
             registry=self.registry,
         )
+        self.candidates = Counter(
+            "rich_image_candidates_total",
+            "Deterministic rich-image eligibility outcomes by reason.",
+            ("provider", "outcome"),
+            registry=self.registry,
+        )
+        self.presented = Counter(
+            "rich_image_presented_total",
+            "Image items included in the model-facing inventory.",
+            ("provider",),
+            registry=self.registry,
+        )
+        self.anchors = Counter(
+            "rich_image_anchor_outcomes_total",
+            "How each image item reached (or failed to reach) the answer body.",
+            ("provider", "outcome"),
+            registry=self.registry,
+        )
+        self.final_selections = Counter(
+            "rich_image_final_selection_total",
+            "Image items surviving finalization and persisted with the message.",
+            ("provider",),
+            registry=self.registry,
+        )
 
     def record_discovery(self, *, provider: str, result_count: int) -> None:
         self.discovery_results.labels(provider=_provider(provider)).observe(
@@ -65,6 +99,26 @@ class RichImageMetrics:
             provider=_provider(provider),
             outcome=_bounded(outcome, _SELECTION_OUTCOMES),
         ).inc()
+
+    def record_candidate(self, *, provider: str, outcome: str) -> None:
+        self.candidates.labels(
+            provider=_provider(provider),
+            outcome=_bounded(outcome, _CANDIDATE_OUTCOMES),
+        ).inc()
+
+    def record_presentation(self, *, provider: str, count: int) -> None:
+        if count > 0:
+            self.presented.labels(provider=_provider(provider)).inc(int(count))
+
+    def record_anchor(self, *, provider: str, outcome: str) -> None:
+        self.anchors.labels(
+            provider=_provider(provider),
+            outcome=_bounded(outcome, _ANCHOR_OUTCOMES),
+        ).inc()
+
+    def record_final_selection(self, *, provider: str, count: int) -> None:
+        if count > 0:
+            self.final_selections.labels(provider=_provider(provider)).inc(int(count))
 
     def record_fetch(self, *, provider: str, outcome: str, duration_seconds: float) -> None:
         labels = {
