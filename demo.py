@@ -4672,7 +4672,7 @@ def _render_resource_tool_result(render: dict[str, Any]) -> bool:
 
 def _render_image_tool_result(render: dict[str, Any]) -> bool:
     """Render MCP image content blocks instead of falling back to raw JSON."""
-    from app.ui.rich_response import build_inline_image_group_html, build_inline_image_html
+    from app.ui.rich_response import build_inline_image_html
 
     raw_content = render.get("content")
     if isinstance(raw_content, dict):
@@ -4691,22 +4691,6 @@ def _render_image_tool_result(render: dict[str, Any]) -> bool:
             text = block.get("text")
             if isinstance(text, str) and text.strip():
                 st.markdown(text.strip())
-                rendered = True
-            continue
-        # Content-block extraction is a type-agnostic passthrough (see
-        # tool_result_rendering._extract_content_blocks), so a non-standard
-        # MCP server or tool integration could emit a grouped-image block
-        # shaped like the app's own image_group rich item. No first-party
-        # producer does this today, but handle it the same way the inline
-        # rich-item renderer does rather than silently dropping it below.
-        if block_type == "image_group":
-            cells = (block.get("payload") or {}).get("items") or []
-            group_html = build_inline_image_group_html(
-                cells,
-                alt_text=block.get("alt_text"),
-            )
-            if group_html:
-                st.markdown(group_html, unsafe_allow_html=True)
                 rendered = True
             continue
         if block_type != "image":
