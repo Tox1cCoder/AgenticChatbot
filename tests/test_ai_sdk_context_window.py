@@ -26,6 +26,9 @@ from fastapi.params import Depends
 from app.api.ai_sdk import get_conversation_messages_ai_sdk
 from app.repositories.utils.pagination import PaginationMeta
 from app.schemas.pagination import MessagePaginationParams
+from app.services.event_streaming.ai_sdk_projection import (
+    selected_image_file_parts_from_rich_items,
+)
 
 
 def _build_assistant_message_with_context_window() -> SimpleNamespace:
@@ -372,3 +375,61 @@ def test_ai_sdk_messages_preserve_rich_v1_fields_with_capability():
     assert "<!--rich:widget:w-1-->" in payload["content"]
     assert payload["metadata"]["rich_items_version"] == 1
     assert payload["metadata"]["rich_items"][0]["id"] == "widget:w-1"
+
+
+def test_group_cells_become_file_parts_in_order():
+    metadata = {
+        "rich_items_version": 1,
+        "rich_items": [
+            {
+                "id": "imagegroup:tool:c1",
+                "type": "image_group",
+                "payload": {
+                    "items": [
+                        {"url": "/web-images/1", "mime_type": "image/jpeg"},
+                        {"url": "/web-images/2", "mime_type": "image/png"},
+                    ]
+                },
+            }
+        ],
+    }
+    parts = selected_image_file_parts_from_rich_items(metadata)
+    assert [p["url"] for p in parts] == ["/web-images/1", "/web-images/2"]
+    assert [p["mediaType"] for p in parts] == ["image/jpeg", "image/png"]
+
+
+def test_group_and_image_duplicates_are_deduplicated():
+    metadata = {
+        "rich_items_version": 1,
+        "rich_items": [
+            {
+                "id": "image:tool:c1:0",
+                "type": "image",
+                "payload": {"url": "/web-images/1", "mime_type": "image/jpeg"},
+            },
+            {
+                "id": "imagegroup:tool:c2",
+                "type": "image_group",
+                "payload": {"items": [{"url": "/web-images/1", "mime_type": "image/jpeg"}]},
+            },
+        ],
+    }
+    assert len(selected_image_file_parts_from_rich_items(metadata)) == 1
+
+
+def test_unknown_rich_type_is_skipped_not_rendered():
+    metadata = {
+        "rich_items_version": 1,
+        "rich_items": [{"id": "future:1", "type": "future_thing", "payload": {"x": 1}}],
+    }
+    assert selected_image_file_parts_from_rich_items(metadata) == []
+
+
+def test_pre_v1_message_still_yields_image_file_parts():
+    from app.services.event_streaming.ai_sdk_projection import visible_image_file_parts
+
+    message = {
+        "content": "old answer",
+        "metadata": {"images": [{"url": "/chat-images/9", "mime_type": "image/png"}]},
+    }
+    assert visible_image_file_parts(message) != []

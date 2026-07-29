@@ -218,23 +218,38 @@ def selected_image_file_parts_from_rich_items(
     file_parts: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for item in rich_items:
-        if not isinstance(item, dict) or item.get("type") != "image":
+        if not isinstance(item, dict):
             continue
+        item_type = item.get("type")
         payload = item.get("payload") or {}
-        url = payload.get("url")
-        data = payload.get("data")
-        mime_type = payload.get("mime_type") or "image/png"
-        if url:
-            file_part = {"url": str(url), "mediaType": str(mime_type)}
-        elif data:
-            file_part = {"url": f"data:{mime_type};base64,{data}", "mediaType": str(mime_type)}
+        if item_type == "image":
+            sources = [payload]
+        elif item_type == "image_group":
+            raw_cells = payload.get("items")
+            sources = (
+                [c for c in raw_cells if isinstance(c, dict)]
+                if isinstance(raw_cells, list)
+                else []
+            )
         else:
+            # Unknown/never-rendered types are skipped so a future item type
+            # degrades to text rather than leaking raw payload to a client.
             continue
-        key = (file_part["url"], file_part["mediaType"])
-        if key in seen:
-            continue
-        seen.add(key)
-        file_parts.append(file_part)
+        for source in sources:
+            url = source.get("url")
+            data = source.get("data")
+            mime_type = source.get("mime_type") or "image/png"
+            if url:
+                file_part = {"url": str(url), "mediaType": str(mime_type)}
+            elif data:
+                file_part = {"url": f"data:{mime_type};base64,{data}", "mediaType": str(mime_type)}
+            else:
+                continue
+            key = (file_part["url"], file_part["mediaType"])
+            if key in seen:
+                continue
+            seen.add(key)
+            file_parts.append(file_part)
     return file_parts
 
 
