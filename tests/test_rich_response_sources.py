@@ -271,6 +271,7 @@ def test_aspect_ratio_gate(width, height, expected):
         "https://e.com/t/1x1.png",
         "https://e.com/pixel.gif",
         "https://e.com/users/avatar/12.jpg",
+        "https://e.com/avatars/me.png",
     ],
 )
 def test_junk_urls_are_rejected(url):
@@ -283,6 +284,8 @@ def test_junk_urls_are_rejected(url):
         "https://e.com/new-logo-reveal.jpg",
         "https://e.com/logos/brand.png",
         "https://e.com/photos/apple-park.jpg",
+        "https://e.com/movies/avatar-poster.jpg",
+        "https://e.com/diagram-1x100.jpg",
     ],
 )
 def test_legitimate_urls_including_logos_are_accepted(url):

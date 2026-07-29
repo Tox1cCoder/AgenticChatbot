@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 import time
 from contextlib import suppress
 from dataclasses import dataclass
@@ -80,17 +81,23 @@ def _guess_mime_from_url(url: str) -> str:
     return "image/png"
 
 
-#: Unambiguous non-content markers in an image path. Kept as a module constant
-#: rather than a setting so no unvalidated pattern arrives through config.
-#: "logo" is deliberately absent — "what does the new X logo look like" is a
-#: legitimate visual query.
-_JUNK_IMAGE_URL_MARKERS: tuple[str, ...] = (
-    "favicon",
-    "sprite",
-    "spacer",
-    "1x1",
-    "pixel.gif",
-    "avatar",
+#: Non-content asset markers matched against an image URL's path. Kept as a
+#: module constant rather than a setting so no unvalidated pattern arrives
+#: through config. "logo" is deliberately absent — "what does the new X logo
+#: look like" is a legitimate visual query.
+#:
+#: "avatar" and "1x1" are ambiguous as bare substrings (they collide with
+#: real filenames like "avatar-poster.jpg" or "diagram-1x100.jpg"), so those
+#: two are anchored: "avatar"/"avatars" only matches as a full path segment
+#: or exact filename stem, and "1x1" only matches when not immediately
+#: followed by another digit. The rest keep plain substring behavior.
+_JUNK_IMAGE_URL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"favicon"),
+    re.compile(r"sprite"),
+    re.compile(r"spacer"),
+    re.compile(r"pixel\.gif"),
+    re.compile(r"(?:^|/)avatars?(?:/|\.|$)"),
+    re.compile(r"1x1(?!\d)"),
 )
 
 
@@ -113,7 +120,7 @@ def is_junk_image_url(url: str) -> bool:
     path = urlsplit(str(url or "")).path.lower()
     if not path:
         return False
-    return any(marker in path for marker in _JUNK_IMAGE_URL_MARKERS)
+    return any(pattern.search(path) for pattern in _JUNK_IMAGE_URL_PATTERNS)
 
 
 def order_tavily_images(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
