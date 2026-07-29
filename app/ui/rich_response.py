@@ -10,9 +10,11 @@ See response_format.md Task 6.
 
 from __future__ import annotations
 
+import hashlib
 import html as _html
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.core.rich_response import (
     RICH_ITEMS_VERSION,
@@ -29,38 +31,108 @@ INLINE_IMAGE_MAX_WIDTH_PX: int = 480
 def build_inline_image_html(
     src: str,
     *,
+    alt_text: str | None = None,
     caption: str | None = None,
+    source_url: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
     max_width_px: int = INLINE_IMAGE_MAX_WIDTH_PX,
 ) -> str:
-    """Return responsive HTML for one inline article image.
-
-    The image is shown at its intrinsic width (``width:auto``) capped at
-    ``max_width_px`` (and never wider than the container). Because there is no
-    forced ``width:100%`` and no width/height attribute, a small source image is
-    never upscaled — fixing the oversized, blurry rendering produced by
-    ``st.image(..., width="stretch")``. The ``img-thumb`` class wires the image
-    into the page-level lightbox so the native-resolution source is one click
-    away.
-    """
+    """Return one responsive loading/loaded/failed article-image component."""
     escaped_src = _html.escape(src or "", quote=True)
     escaped_caption = _html.escape(caption, quote=True) if caption else ""
-    img_style = (
-        f"max-width:min({int(max_width_px)}px, 100%);width:auto;height:auto;"
-        "display:block;margin-left:auto;margin-right:auto;"
-        "border-radius:8px;cursor:zoom-in;"
-    )
-    img = (
-        f'<img src="{escaped_src}" alt="{escaped_caption}" class="img-thumb" '
-        f'loading="lazy" title="Click to view full size" style="{img_style}" '
-        "onerror=\"this.style.display='none'\" />"
-    )
-    caption_html = (
-        f'<figcaption style="color:#64748b;font-size:13px;margin-top:4px;">'
-        f"{escaped_caption}</figcaption>"
-        if escaped_caption
+    escaped_alt = _html.escape(alt_text or caption or "", quote=True)
+    source_link = _source_link_html(source_url)
+    footer_parts = []
+    if escaped_caption:
+        footer_parts.append(f'<span class="rich-image-caption">{escaped_caption}</span>')
+    if source_link:
+        footer_parts.append(source_link)
+    footer = (
+        '<figcaption style="color:#64748b;font-size:13px;margin-top:4px;">'
+        + " · ".join(footer_parts)
+        + "</figcaption>"
+        if footer_parts
         else ""
     )
-    return f'<figure style="margin:8px 0;text-align:center;">{img}{caption_html}</figure>'
+    known_width = width if isinstance(width, int) and width > 0 else None
+    known_height = height if isinstance(height, int) and height > 0 else None
+    display_width = min(known_width, int(max_width_px)) if known_width else int(max_width_px)
+    aspect_style = (
+        f"aspect-ratio:{known_width} / {known_height};"
+        if known_width and known_height
+        else "min-height:120px;"
+    )
+    wrapper_style = (
+        f"position:relative;display:inline-block;width:min({display_width}px, 100%);"
+        f"{aspect_style}"
+    )
+    img_style = (
+        f"max-width:min({int(max_width_px)}px, 100%);width:auto;height:auto;"
+        "position:relative;display:block;margin-left:auto;margin-right:auto;"
+        "border-radius:8px;cursor:zoom-in;"
+    )
+    component_id = hashlib.sha256((src or "").encode("utf-8")).hexdigest()[:12]
+    skeleton = (
+        '<div data-role="skeleton" aria-hidden="true" style="position:absolute;inset:0;'
+        "border-radius:8px;background:linear-gradient(90deg,#f1f5f9,#e2e8f0,#f1f5f9);"
+        '"></div>'
+    )
+    onload = (
+        "const f=this.closest('figure');f.dataset.state='loaded';"
+        "const s=f.querySelector('[data-role=skeleton]');if(s)s.remove();"
+        "if(!this.dataset.ratio)this.parentElement.style.minHeight='0'"
+    )
+    onerror = (
+        "const f=this.closest('figure'),t=f.querySelector('template');"
+        "f.dataset.state='failed';f.replaceChildren(t.content.cloneNode(true))"
+    )
+    img = (
+        f'<img src="{escaped_src}" alt="{escaped_alt}" class="img-thumb" '
+        f'data-ratio="{"known" if known_width and known_height else ""}" '
+        f'loading="lazy" title="Click to view full size" style="{img_style}" '
+        f'onload="{onload}" onerror="{onerror}" />'
+    )
+    fallback = _unavailable_inner_html(source_url)
+    return (
+        f'<figure id="rich-image-{component_id}" data-state="loading" '
+        'style="margin:8px 0;text-align:center;">'
+        f'<div class="rich-image-media" style="{wrapper_style}">{skeleton}{img}</div>'
+        f"{footer}<template>{fallback}</template></figure>"
+    )
+
+
+def build_inline_image_unavailable_html(*, source_url: str | None = None) -> str:
+    """Return the compact whole-figure fallback for an unavailable visual."""
+    return (
+        '<figure data-state="failed" style="margin:8px 0;text-align:center;">'
+        f"{_unavailable_inner_html(source_url)}</figure>"
+    )
+
+
+def _unavailable_inner_html(source_url: str | None) -> str:
+    source_link = _source_link_html(source_url, label="Open source")
+    suffix = f" {source_link}" if source_link else ""
+    return (
+        '<div role="status" class="rich-image-unavailable" '
+        'style="display:inline-flex;gap:8px;align-items:center;border:1px solid #e2e8f0;'
+        'border-radius:8px;padding:8px 10px;color:#64748b;font-size:13px;">'
+        f"<span>Visual unavailable</span>{suffix}</div>"
+    )
+
+
+def _source_link_html(source_url: str | None, *, label: str | None = None) -> str:
+    if not isinstance(source_url, str) or not source_url.strip():
+        return ""
+    parsed = urlsplit(source_url.strip())
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return ""
+    escaped_url = _html.escape(source_url.strip(), quote=True)
+    escaped_label = _html.escape(label or f"Source: {parsed.hostname}")
+    return (
+        f'<a href="{escaped_url}" target="_blank" rel="noopener noreferrer">'
+        f"{escaped_label}</a>"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +368,8 @@ __all__ = [
     "RichResponseView",
     "RichSegment",
     "RichStreamState",
+    "build_inline_image_html",
+    "build_inline_image_unavailable_html",
     "build_rich_response_view",
     "parse_inline_rich_references",
 ]

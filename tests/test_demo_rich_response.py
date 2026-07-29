@@ -4,7 +4,11 @@
 
 from __future__ import annotations
 
-from app.ui.rich_response import build_inline_image_html, build_rich_response_view
+from app.ui.rich_response import (
+    build_inline_image_html,
+    build_inline_image_unavailable_html,
+    build_rich_response_view,
+)
 
 # ---------------------------------------------------------------------------
 # Inline image HTML (fixes oversized/blurry Streamlit inline images)
@@ -51,6 +55,50 @@ def test_inline_image_html_escapes_src_and_caption():
 def test_inline_image_html_supports_data_uri_and_omits_empty_caption():
     out = build_inline_image_html("data:image/png;base64,QUJD", caption=None)
     assert "data:image/png;base64,QUJD" in out
+    assert "figcaption" not in out
+
+
+def test_web_image_footer_uses_source_and_keeps_alt_accessibility_only():
+    out = build_inline_image_html(
+        "https://img.test/a.png",
+        alt_text="A generated description",
+        caption=None,
+        source_url="https://publisher.example/story",
+        width=800,
+        height=450,
+    )
+
+    assert 'alt="A generated description"' in out
+    assert "A generated description</figcaption>" not in out
+    assert "publisher.example" in out
+    assert "https://publisher.example/story" in out
+
+
+def test_image_loading_reserves_known_aspect_ratio_and_error_replaces_figure():
+    out = build_inline_image_html(
+        "https://img.test/a.png",
+        alt_text="Example",
+        caption="Trusted caption",
+        source_url="https://publisher.example/story",
+        width=640,
+        height=360,
+    )
+
+    assert 'data-state="loading"' in out
+    assert "aspect-ratio:640 / 360" in out
+    assert "Visual unavailable" in out
+    assert "replaceChildren" in out
+    assert "this.style.display='none'" not in out
+
+
+def test_unavailable_image_is_compact_escaped_and_has_no_caption():
+    out = build_inline_image_unavailable_html(
+        source_url='https://publisher.example/story?q="unsafe"'
+    )
+
+    assert "Visual unavailable" in out
+    assert "Open source" in out
+    assert "&quot;unsafe&quot;" in out
     assert "figcaption" not in out
 
 

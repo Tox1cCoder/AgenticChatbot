@@ -25,7 +25,7 @@ def test_relative_reference_resolved_to_data_uri(monkeypatch):
         seen["token"] = token
         return "data:image/png;base64,QUJD"
 
-    monkeypatch.setattr(demo, "_fetch_chat_image_data_uri", fake_fetch)
+    monkeypatch.setattr(demo, "_fetch_protected_image_data_uri", fake_fetch)
     out = demo._normalize_image_for_gallery(
         {"url": "/chat-images/abc", "name": "shot"}, "img"
     )
@@ -35,7 +35,7 @@ def test_relative_reference_resolved_to_data_uri(monkeypatch):
 
 def test_relative_reference_falls_back_to_inline_data(monkeypatch):
     _patch_st(monkeypatch)
-    monkeypatch.setattr(demo, "_fetch_chat_image_data_uri", lambda *_: None)
+    monkeypatch.setattr(demo, "_fetch_protected_image_data_uri", lambda *_: None)
     out = demo._normalize_image_for_gallery(
         {"url": "/chat-images/abc", "data": "QUJD", "mime": "image/png"}, "img"
     )
@@ -69,7 +69,7 @@ def test_inline_rich_image_resolves_protected_reference_via_shared_helper(monkey
         seen["token"] = token
         return "data:image/png;base64,QUJD"
 
-    monkeypatch.setattr(demo, "_fetch_chat_image_data_uri", fake_fetch)
+    monkeypatch.setattr(demo, "_fetch_protected_image_data_uri", fake_fetch)
 
     demo._render_inline_rich_item(
         {"type": "image", "payload": {"url": "/chat-images/abc"}},
@@ -84,6 +84,77 @@ def test_inline_rich_image_resolves_protected_reference_via_shared_helper(monkey
         "a bare protected relative reference must never reach the <img src>; "
         "the browser cannot authenticate it"
     )
+
+
+def test_inline_web_image_uses_one_source_footer_not_title_or_alt(monkeypatch):
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(
+        demo,
+        "st",
+        SimpleNamespace(
+            session_state={"auth_token": "tok"},
+            markdown=lambda html, **_kwargs: captured.__setitem__("html", html),
+        ),
+    )
+    monkeypatch.setattr(
+        demo,
+        "_fetch_protected_image_data_uri",
+        lambda *_: "data:image/jpeg;base64,QUJD",
+    )
+
+    demo._render_inline_rich_item(
+        {
+            "type": "image",
+            "title": "Provider title that is not a caption",
+            "alt_text": "Accessibility description",
+            "payload": {
+                "url": "/web-images/abc",
+                "mime_type": "image/jpeg",
+                "source_url": "https://publisher.example/story",
+                "width": 640,
+                "height": 360,
+            },
+        },
+        message_metadata={},
+        message_key="m1",
+        auto_mount=False,
+    )
+
+    assert 'alt="Accessibility description"' in captured["html"]
+    assert "Provider title that is not a caption" not in captured["html"]
+    assert "publisher.example" in captured["html"]
+
+
+def test_failed_protected_fetch_renders_complete_unavailable_state(monkeypatch):
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(
+        demo,
+        "st",
+        SimpleNamespace(
+            session_state={"auth_token": "tok"},
+            markdown=lambda html, **_kwargs: captured.__setitem__("html", html),
+        ),
+    )
+    monkeypatch.setattr(demo, "_fetch_protected_image_data_uri", lambda *_: None)
+
+    demo._render_inline_rich_item(
+        {
+            "type": "image",
+            "alt_text": "Must not remain as a caption",
+            "payload": {
+                "url": "/web-images/missing",
+                "mime_type": "image/jpeg",
+                "source_url": "https://publisher.example/story",
+            },
+        },
+        message_metadata={},
+        message_key="m1",
+        auto_mount=False,
+    )
+
+    assert "Visual unavailable" in captured["html"]
+    assert "Must not remain as a caption" not in captured["html"]
+    assert "Open source" in captured["html"]
 
 
 class _PlaceholderStub:
@@ -127,7 +198,9 @@ def test_streaming_preview_panel_replaces_partial_with_final_by_index(monkeypatc
             image=lambda raw, **_kwargs: images.append(raw),
         ),
     )
-    monkeypatch.setattr(demo, "_fetch_chat_image_data_uri", lambda *_: "data:image/png;base64,QUJD")
+    monkeypatch.setattr(
+        demo, "_fetch_protected_image_data_uri", lambda *_: "data:image/png;base64,QUJD"
+    )
 
     panel = demo._StreamingImagePreviewPanel(_PlaceholderStub())
     panel.apply(
@@ -166,7 +239,9 @@ def test_streaming_preview_panel_keeps_final_reference_across_complete(monkeypat
             image=lambda *a, **k: None,
         ),
     )
-    monkeypatch.setattr(demo, "_fetch_chat_image_data_uri", lambda *_: "data:image/png;base64,QUJD")
+    monkeypatch.setattr(
+        demo, "_fetch_protected_image_data_uri", lambda *_: "data:image/png;base64,QUJD"
+    )
 
     placeholder = _PlaceholderStub()
     panel = demo._StreamingImagePreviewPanel(placeholder)

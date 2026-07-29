@@ -5153,11 +5153,12 @@ def render_sidebar():
 
 
 @st.cache_data(show_spinner=False)
-def _fetch_chat_image_data_uri(relative_url: str, auth_token: str | None) -> str | None:
-    """Fetch an authenticated `/chat-images/<id>` reference and return a
-    `data:` URI. The browser cannot send the app's Bearer token on a bare
-    `<img src>`, so image bytes for the protected endpoint are pulled here
-    (server-side) and inlined. Cached per (url, token)."""
+def _fetch_protected_image_data_uri(relative_url: str, auth_token: str | None) -> str | None:
+    """Fetch an authenticated chat/web-image reference as a cached data URI."""
+    from app.core.rich_response import PROTECTED_IMAGE_URL_PREFIXES
+
+    if not relative_url.startswith(PROTECTED_IMAGE_URL_PREFIXES):
+        return None
     headers = {}
     if auth_token:
         headers["Authorization"] = f"Bearer {auth_token}"
@@ -5183,20 +5184,27 @@ def _resolve_displayable_image_src(
     """Return a browser-displayable image ``src`` for an image reference.
 
     The single authenticated image resolver shared by live-stream, finalized,
-    and history rendering. A protected relative ``/chat-images/<id>`` reference
-    is pulled server-side with the app Bearer token and inlined as a ``data:``
-    URI, because a browser cannot attach that token to a bare ``<img src>``.
-    Absolute and ``data:`` URLs pass through unchanged. Falls back to inline
-    base64 ``data`` when the reference cannot be fetched. Returns ``None`` when
-    nothing displayable is available.
+    and history rendering. Protected relative chat/web-image references are
+    pulled server-side with the app Bearer token and inlined as a ``data:`` URI,
+    because a browser cannot attach that token to a bare ``<img src>``. Absolute
+    and ``data:`` URLs pass through unchanged. Falls back to inline base64 data
+    when a protected reference cannot be fetched. Returns ``None`` when nothing
+    displayable is available.
     """
+    from app.core.rich_response import PROTECTED_IMAGE_URL_PREFIXES
+
     if isinstance(url, str) and url.strip():
         candidate = url.strip()
-        if candidate.startswith("/"):
-            resolved = _fetch_chat_image_data_uri(candidate, st.session_state.get("auth_token"))
+        if candidate.startswith(PROTECTED_IMAGE_URL_PREFIXES):
+            resolved = _fetch_protected_image_data_uri(
+                candidate, st.session_state.get("auth_token")
+            )
             if resolved:
                 return resolved
             # Fall through to any inline data before giving up.
+        elif candidate.startswith("/"):
+            # Never turn arbitrary relative application paths into image fetches.
+            pass
         else:
             return candidate
 
@@ -7716,7 +7724,7 @@ class _StreamingImagePreviewPanel:
         if not isinstance(url, str) or not url:
             return None
         if url.startswith("/"):
-            return _fetch_chat_image_data_uri(url, st.session_state.get("auth_token"))
+            return _fetch_protected_image_data_uri(url, st.session_state.get("auth_token"))
         return url
 
     def finalize(self) -> None:
@@ -7760,7 +7768,10 @@ def _render_inline_rich_item(
 ) -> None:
     """Render a single rich-item record at its inline marker position."""
     from app.core.rich_response import GENERIC_IMAGE_ALT_TEXT
-    from app.ui.rich_response import build_inline_image_html
+    from app.ui.rich_response import (
+        build_inline_image_html,
+        build_inline_image_unavailable_html,
+    )
 
     item_type = item.get("type")
     payload = item.get("payload") or {}
@@ -7771,7 +7782,8 @@ def _render_inline_rich_item(
         alt_text = item.get("alt_text")
         if alt_text == GENERIC_IMAGE_ALT_TEXT:
             alt_text = None
-        caption = item.get("title") or alt_text
+        caption = payload.get("caption")
+        source_url = payload.get("source_url")
         # A protected relative reference must be resolved through the shared
         # authenticated fetch helper: a bare /chat-images/<id> in an <img src>
         # can't carry the app Bearer token, so the browser would 401/404 it.
@@ -7782,7 +7794,19 @@ def _render_inline_rich_item(
             # them). The img-thumb class opens the full-resolution source in the
             # page-level lightbox on click.
             st.markdown(
-                build_inline_image_html(src, caption=caption),
+                build_inline_image_html(
+                    src,
+                    alt_text=alt_text,
+                    caption=caption,
+                    source_url=source_url,
+                    width=payload.get("width"),
+                    height=payload.get("height"),
+                ),
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                build_inline_image_unavailable_html(source_url=source_url),
                 unsafe_allow_html=True,
             )
     elif item_type == "live_widget":
