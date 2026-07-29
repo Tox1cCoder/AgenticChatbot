@@ -125,14 +125,14 @@ def test_inline_web_image_uses_one_source_footer_not_title_or_alt(monkeypatch):
     assert "publisher.example" in captured["html"]
 
 
-def test_failed_protected_fetch_renders_complete_unavailable_state(monkeypatch):
-    captured: dict[str, str] = {}
+def test_failed_protected_fetch_renders_no_fallback(monkeypatch):
+    rendered: list[str] = []
     monkeypatch.setattr(
         demo,
         "st",
         SimpleNamespace(
             session_state={"auth_token": "tok"},
-            markdown=lambda html, **_kwargs: captured.__setitem__("html", html),
+            markdown=lambda html, **_kwargs: rendered.append(html),
         ),
     )
     monkeypatch.setattr(demo, "_fetch_protected_image_data_uri", lambda *_: None)
@@ -140,7 +140,7 @@ def test_failed_protected_fetch_renders_complete_unavailable_state(monkeypatch):
     demo._render_inline_rich_item(
         {
             "type": "image",
-            "alt_text": "Must not remain as a caption",
+            "alt_text": "Example",
             "payload": {
                 "url": "/web-images/missing",
                 "mime_type": "image/jpeg",
@@ -152,9 +152,7 @@ def test_failed_protected_fetch_renders_complete_unavailable_state(monkeypatch):
         auto_mount=False,
     )
 
-    assert "Visual unavailable" in captured["html"]
-    assert "Must not remain as a caption" not in captured["html"]
-    assert "Open source" in captured["html"]
+    assert rendered == []
 
 
 class _PlaceholderStub:

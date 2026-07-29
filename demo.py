@@ -7768,10 +7768,7 @@ def _render_inline_rich_item(
 ) -> None:
     """Render a single rich-item record at its inline marker position."""
     from app.core.rich_response import GENERIC_IMAGE_ALT_TEXT
-    from app.ui.rich_response import (
-        build_inline_image_html,
-        build_inline_image_unavailable_html,
-    )
+    from app.ui.rich_response import build_inline_image_html
 
     item_type = item.get("type")
     payload = item.get("payload") or {}
@@ -7802,11 +7799,6 @@ def _render_inline_rich_item(
                     width=payload.get("width"),
                     height=payload.get("height"),
                 ),
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                build_inline_image_unavailable_html(source_url=source_url),
                 unsafe_allow_html=True,
             )
     elif item_type == "live_widget":

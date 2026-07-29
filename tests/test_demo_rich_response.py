@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from app.ui.rich_response import (
     build_inline_image_html,
-    build_inline_image_unavailable_html,
     build_rich_response_view,
 )
 
@@ -74,7 +73,7 @@ def test_web_image_footer_uses_source_and_keeps_alt_accessibility_only():
     assert "https://publisher.example/story" in out
 
 
-def test_image_loading_reserves_known_aspect_ratio_and_error_replaces_figure():
+def test_image_loading_has_no_unavailable_fallback_and_removes_failed_figure():
     out = build_inline_image_html(
         "https://img.test/a.png",
         alt_text="Example",
@@ -86,20 +85,11 @@ def test_image_loading_reserves_known_aspect_ratio_and_error_replaces_figure():
 
     assert 'data-state="loading"' in out
     assert "aspect-ratio:640 / 360" in out
-    assert "Visual unavailable" in out
-    assert "replaceChildren" in out
-    assert "this.style.display='none'" not in out
-
-
-def test_unavailable_image_is_compact_escaped_and_has_no_caption():
-    out = build_inline_image_unavailable_html(
-        source_url='https://publisher.example/story?q="unsafe"'
-    )
-
-    assert "Visual unavailable" in out
-    assert "Open source" in out
-    assert "&quot;unsafe&quot;" in out
-    assert "figcaption" not in out
+    assert "Visual unavailable" not in out
+    assert "Open source" not in out
+    assert "<template>" not in out
+    assert "replaceChildren" not in out
+    assert "this.closest('figure').remove()" in out
 
 
 metadata_with_selected_image = {

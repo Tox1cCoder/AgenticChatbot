@@ -83,52 +83,29 @@ def build_inline_image_html(
         "const s=f.querySelector('[data-role=skeleton]');if(s)s.remove();"
         "if(!this.dataset.ratio)this.parentElement.style.minHeight='0'"
     )
-    onerror = (
-        "const f=this.closest('figure'),t=f.querySelector('template');"
-        "f.dataset.state='failed';f.replaceChildren(t.content.cloneNode(true))"
-    )
+    onerror = "this.closest('figure').remove()"
     img = (
         f'<img src="{escaped_src}" alt="{escaped_alt}" class="img-thumb" '
         f'data-ratio="{"known" if known_width and known_height else ""}" '
         f'loading="lazy" title="Click to view full size" style="{img_style}" '
         f'onload="{onload}" onerror="{onerror}" />'
     )
-    fallback = _unavailable_inner_html(source_url)
     return (
         f'<figure id="rich-image-{component_id}" data-state="loading" '
         'style="margin:8px 0;text-align:center;">'
         f'<div class="rich-image-media" style="{wrapper_style}">{skeleton}{img}</div>'
-        f"{footer}<template>{fallback}</template></figure>"
+        f"{footer}</figure>"
     )
 
 
-def build_inline_image_unavailable_html(*, source_url: str | None = None) -> str:
-    """Return the compact whole-figure fallback for an unavailable visual."""
-    return (
-        '<figure data-state="failed" style="margin:8px 0;text-align:center;">'
-        f"{_unavailable_inner_html(source_url)}</figure>"
-    )
-
-
-def _unavailable_inner_html(source_url: str | None) -> str:
-    source_link = _source_link_html(source_url, label="Open source")
-    suffix = f" {source_link}" if source_link else ""
-    return (
-        '<div role="status" class="rich-image-unavailable" '
-        'style="display:inline-flex;gap:8px;align-items:center;border:1px solid #e2e8f0;'
-        'border-radius:8px;padding:8px 10px;color:#64748b;font-size:13px;">'
-        f"<span>Visual unavailable</span>{suffix}</div>"
-    )
-
-
-def _source_link_html(source_url: str | None, *, label: str | None = None) -> str:
+def _source_link_html(source_url: str | None) -> str:
     if not isinstance(source_url, str) or not source_url.strip():
         return ""
     parsed = urlsplit(source_url.strip())
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         return ""
     escaped_url = _html.escape(source_url.strip(), quote=True)
-    escaped_label = _html.escape(label or f"Source: {parsed.hostname}")
+    escaped_label = _html.escape(f"Source: {parsed.hostname}")
     return (
         f'<a href="{escaped_url}" target="_blank" rel="noopener noreferrer">'
         f"{escaped_label}</a>"
@@ -369,7 +346,6 @@ __all__ = [
     "RichSegment",
     "RichStreamState",
     "build_inline_image_html",
-    "build_inline_image_unavailable_html",
     "build_rich_response_view",
     "parse_inline_rich_references",
 ]
