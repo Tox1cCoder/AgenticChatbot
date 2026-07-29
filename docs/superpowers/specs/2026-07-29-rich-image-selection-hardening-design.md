@@ -458,6 +458,16 @@ evaluation harness, or scoring threshold. No test requires a model call.
 - Metrics labels stay bounded and content-free, including the new anchor
   outcomes.
 
+### Cleanup
+
+- Widget auto-placement behavior is byte-identical before and after
+  `auto_place_rich_items` is narrowed to widgets only.
+- A pre-v1 message fixture, with images in `metadata["images"]` and no
+  `rich_items`, still produces image file parts.
+- An MCP image content block with no description still receives the generic alt
+  text fallback.
+- The deprecated selection counter no longer appears in rendered metrics output.
+
 ## Rollout
 
 1. Fix the Tavily `auto_parameters` resolver and add its tests. No production
@@ -472,13 +482,64 @@ evaluation harness, or scoring threshold. No test requires a model call.
    delivery behind `RICH_QUERY_ANCHORED_IMAGES_ENABLED`, shipped disabled.
 5. Ship the `demo.py` group renderer and the AI SDK flattening fix.
 6. Enable query-anchored placement. Watch `unplaced`, `fallback_anchored`,
-   provider latency, registration, and fetch failures. Remove the legacy
-   description-anchored path in a separate change.
+   provider latency, registration, and fetch failures.
+7. Cleanup, per the section below. This phase is not optional and does not get
+   deferred: a rollback flag that outlives its rollback window becomes a second
+   permanent code path.
 
 Rollback controls: the global `INLINE_RICH_RESPONSE_ENABLED` kill switch,
 `RICH_QUERY_ANCHORED_IMAGES_ENABLED`, and `rich_auto_place_enabled`. If
 `rich_auto_place_enabled` is false, nothing auto-anchors regardless of the
 query-anchoring flag.
+
+## Cleanup (Phase 7)
+
+Entry condition: query-anchored placement has run enabled in production for one
+full observation window with `unplaced` at or below its pre-change level, and the
+dashboards and alerts named below have been migrated off the deprecated counter.
+Until that holds, Phase 7 does not start. Once it holds, everything in the
+removal list goes in one change, with no partial retention.
+
+### Removed completely
+
+| Item | Location | Why it is dead |
+|---|---|---|
+| `_image_placement_entries` | `app/core/rich_placement.py:241-268` | description-anchored image matching is fully replaced by query anchoring |
+| Its `GENERIC_IMAGE_ALT_TEXT` sentinel comparison | `app/core/rich_placement.py:254` | only existed to stop generic alt text being used as a match signal |
+| `max_images` parameter and the `is_image` branch of `auto_place_rich_items` | `app/core/rich_placement.py:119-171` | with image entries gone, this function places widgets only; the per-answer image cap lives in the anchoring path |
+| `RICH_QUERY_ANCHORED_IMAGES_ENABLED` and every branch reading it | config plus call sites | rollback flag, retired with its rollback window |
+| `rich_image_selections_total` counter | `app/observability/rich_images.py` | superseded by the stage-specific counters in Decision 9 |
+| `_SELECTION_OUTCOMES` and its unused `omitted` label | `app/observability/rich_images.py:10` | label set of the removed counter; `omitted` never had an emitter |
+| Stale `RICH_AUTO_PLACE_*` image guidance | `.env.example`, `README.md` | documents behavior that no longer exists |
+
+`docs/frontend/rich-image-rendering.md` is updated in the same change to describe
+`image_group` and per-cell failure, so no published contract outlives the code.
+
+### Deliberately retained, with reasons
+
+A cleanup phase invites deletion of anything that looks old. These are not dead
+and must survive:
+
+| Item | Why it stays |
+|---|---|
+| `_extract_image_file_parts_from_metadata` and the `metadata["images"]` reader (`ai_sdk_projection.py:175-207`) | serves messages persisted before rich items v1. Removing it silently breaks image rendering in existing conversation history. Legacy data is not legacy code. |
+| `has_images`, `images_count`, `agentic_images_count` (`chat_agent.py:89`, `rag_agent.py:903-906`, `graph.py:607-611`) | actively written on every turn today; they are current renderer fields, not deprecated ones, and are outside this scope |
+| `GENERIC_IMAGE_ALT_TEXT` and its use at `tool_execution.py:335` | MCP image content blocks carry no image query, so they still need a fallback |
+| `_repair_unprefixed_markers` | models still author markers; repair still applies to widgets and to explicitly selected images |
+| `rich_auto_place_min_score`, `rich_auto_place_enabled` | still govern widget auto-placement |
+| `rich_auto_place_max_images` | repurposed by Decision 5 as the per-answer image-item cap and the inventory image-entry cap; it must be read by the new path, not merely left defined |
+
+### Verification
+
+- A grep for each removed symbol returns no hits outside the design docs.
+- `rich_auto_place_max_images` has at least one live reader after removal; a
+  setting that survives cleanup unread is itself a cleanup failure.
+- Widget auto-placement tests pass unchanged, proving the shared function was
+  narrowed without behavior change.
+- A pre-v1 message fixture still yields image file parts, proving the retained
+  legacy reader was not swept up.
+- The deprecated counter is absent from `/metrics/rich-images` output and no
+  dashboard or alert references it.
 
 ## Acceptance Criteria
 
@@ -502,6 +563,10 @@ query-anchoring flag.
   registration, and delivery without content-bearing labels.
 - No offline dataset, evaluation pipeline, vision call, embedding service,
   additional intent classifier, or second model pass is required.
+- After Phase 7, exactly one image-placement path exists in the codebase, the
+  rollback flag and deprecated counter are gone, every retained legacy item in the
+  Cleanup table still has a live reader, and pre-v1 message history still renders
+  its images.
 
 ## Deferred
 
