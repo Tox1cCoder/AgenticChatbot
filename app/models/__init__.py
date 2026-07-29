@@ -27,6 +27,7 @@ from app.models.tool_approval_setting import ToolApprovalSetting
 from app.models.tool_result_blob import ToolResultBlob
 from app.models.user import User
 from app.models.user_memory import UserMemory
+from app.models.web_image_reference import WebImageReference
 
 __all__ = [
     "MessageRole",
@@ -63,4 +64,5 @@ __all__ = [
     "AgentModelConfig",
     "ModelUsageEvent",
     "ModelUsageMinute",
+    "WebImageReference",
 ]

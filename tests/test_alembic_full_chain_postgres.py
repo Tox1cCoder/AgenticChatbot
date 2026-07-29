@@ -23,8 +23,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _SCRATCH_DATABASE_PREFIX = "chatbot_migration_smoke_"
 _SCRATCH_DATABASE_RE = re.compile(r"chatbot_migration_smoke_[0-9a-f]{32}")
 _OLD_HEAD = "a4b5c6d7e8f9"
-_HEAD = "e8f9a0b1c2d3"
-_PREVIOUS_HEAD = "z3a4b5c6d7e8"
+_HEAD = "f9a0b1c2d3e4"
+_PREVIOUS_HEAD = "e8f9a0b1c2d3"
 _PRE_RECONCILIATION_HEAD = "1ce64a959f7d"
 _PARALLEL_ALLOW_CUSTOM_MODEL_HEAD = "0f1e2d3c4b5a"
 _RECONCILIATION_REVISION = "6c6598a9eb26"
@@ -123,6 +123,14 @@ def _without_indexes(schema_snapshot: dict, index_names: set[str]) -> dict:
             index for index in table["indexes"] if index["name"] not in index_names
         )
     return expected
+
+
+def _without_tables(schema_snapshot: dict, table_names: set[str]) -> dict:
+    return {
+        table_name: snapshot
+        for table_name, snapshot in schema_snapshot.items()
+        if table_name not in table_names
+    }
 
 
 def _decision_type_labels(connection) -> list[str]:
@@ -308,6 +316,7 @@ def _assert_head_schema(scratch_url: URL) -> None:
                 "tool_approval_settings",
                 "model_usage_events",
                 "model_usage_minute",
+                "web_image_references",
             } <= tables
 
             settings_columns = {
@@ -376,6 +385,7 @@ def _assert_previous_head_schema(scratch_url: URL) -> None:
                 "model_usage_events",
                 "model_usage_minute",
             } <= tables
+            assert "web_image_references" not in tables
             assert {"device_id", "tool_origin"} <= {
                 column["name"] for column in schema.get_columns("tool_approval_settings")
             }
@@ -654,7 +664,7 @@ def test_full_alembic_chain_from_empty_postgres_database() -> None:
                 previous_snapshot = _public_table_schema_snapshot(connection)
         finally:
             engine.dispose()
-        assert previous_snapshot == _without_indexes(head_snapshot, _TIMESTAMP_INDEXES)
+        assert previous_snapshot == _without_tables(head_snapshot, {"web_image_references"})
 
         _run_alembic(scratch_url, "upgrade", "head")
         _assert_head_schema(scratch_url)
