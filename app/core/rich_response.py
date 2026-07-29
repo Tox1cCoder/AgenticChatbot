@@ -714,7 +714,7 @@ def build_rich_item_inventory_block(
     max_items: int,
     max_chars: int,
     summary_chars: int,
-    image_max_items: int | None = None,
+    image_max_items: int,
 ) -> str:
     """Return a bounded human-readable inventory block listing rich items
     available for inline placement.
@@ -725,8 +725,9 @@ def build_rich_item_inventory_block(
     that an agent's created widget/tool/canvas record is never dropped before
     optional image candidates. ``image_max_items`` additionally caps how many
     image entries (an ``image_group`` counts as one) are offered at all; this
-    module deliberately reads no config, so callers pass the per-answer image
-    cap explicitly. ``None`` leaves image entries uncapped by this parameter.
+    module deliberately reads no config, so the caller must pass the
+    per-answer image cap explicitly — there is no uncapped mode, since the
+    parameter exists specifically to bound what reaches the model.
     """
     materialized = list(items)
     if not materialized:
@@ -737,8 +738,7 @@ def build_rich_item_inventory_block(
     # trimming before image candidates.
     non_image = [item for item in materialized if not _is_image_item(item)]
     image_items = [item for item in materialized if _is_image_item(item)]
-    if image_max_items is not None:
-        image_items = image_items[: max(0, int(image_max_items))]
+    image_items = image_items[: max(0, int(image_max_items))]
     ordered = [*non_image, *image_items]
     if max_items > 0:
         ordered = ordered[:max_items]

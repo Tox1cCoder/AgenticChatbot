@@ -78,8 +78,10 @@ def test_image_candidate_inventory_view_excludes_base64():
     # bounded summary line returned for inventory must not include it.
     from app.core.rich_response import build_rich_item_inventory_block
 
+    # Single candidate: image_max_items is generous so it never interferes
+    # with the base64-exclusion behavior this test actually exercises.
     block = build_rich_item_inventory_block(
-        candidates, max_items=5, max_chars=2400, summary_chars=180
+        candidates, max_items=5, max_chars=2400, summary_chars=180, image_max_items=10
     )
     assert "QUJDRA==" not in block
 

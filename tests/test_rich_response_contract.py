@@ -311,7 +311,11 @@ def test_inventory_omits_payload_data_and_respects_budget():
         title="A" * 300,
         payload={"data": "QUJDRA==", "mime_type": "image/png"},
     )
-    block = build_rich_item_inventory_block([image], max_items=1, max_chars=220, summary_chars=30)
+    # Single image item: image_max_items is generous so it never interferes
+    # with the char-budget behavior this test actually exercises.
+    block = build_rich_item_inventory_block(
+        [image], max_items=1, max_chars=220, summary_chars=30, image_max_items=10
+    )
     assert "QUJDRA==" not in block
     assert len(block) <= 220
 
@@ -328,7 +332,11 @@ def test_inventory_truncates_summary_to_summary_chars():
             "description": "Z" * 400,
         },
     )
-    block = build_rich_item_inventory_block([image], max_items=1, max_chars=2400, summary_chars=20)
+    # Single image item: image_max_items is generous so it never interferes
+    # with the summary-truncation behavior this test actually exercises.
+    block = build_rich_item_inventory_block(
+        [image], max_items=1, max_chars=2400, summary_chars=20, image_max_items=10
+    )
     # The 'Z' repeat should not appear in full because of summary truncation.
     assert "Z" * 21 not in block
 
@@ -336,15 +344,25 @@ def test_inventory_truncates_summary_to_summary_chars():
 def test_inventory_prefers_non_image_items_when_trimming():
     widget = _make_widget()
     images = [_make_image(f"image:tool:c1:{i}") for i in range(20)]
+    # image_max_items is set to the full candidate count so the image cap
+    # itself never trims the list; this test exercises max_items ordering
+    # (non-image survives ahead of image candidates), not the image cap.
     block = build_rich_item_inventory_block(
-        [*images, widget], max_items=1, max_chars=2400, summary_chars=80
+        [*images, widget],
+        max_items=1,
+        max_chars=2400,
+        summary_chars=80,
+        image_max_items=len(images),
     )
     assert widget.id in block
 
 
 def test_inventory_block_is_empty_when_no_items():
     assert (
-        build_rich_item_inventory_block([], max_items=12, max_chars=2400, summary_chars=180) == ""
+        build_rich_item_inventory_block(
+            [], max_items=12, max_chars=2400, summary_chars=180, image_max_items=2
+        )
+        == ""
     )
 
 
