@@ -312,7 +312,14 @@ def build_image_candidates_from_tool_result(
         if len(candidates) >= candidate_cap:
             break
     if metric_provider == "brave" and len(candidates) >= 2:
-        return [_group_image_candidates(candidates, tool_call_id=tool_call_id, query=result_query)]
+        return [
+            _group_image_candidates(
+                candidates,
+                tool_call_id=tool_call_id,
+                query=result_query,
+                metric_provider=metric_provider,
+            )
+        ]
     return candidates
 
 
@@ -321,8 +328,18 @@ def _group_image_candidates(
     *,
     tool_call_id: str | None,
     query: str,
+    metric_provider: str,
 ) -> dict[str, Any]:
-    """Collapse eligible image-search candidates into one image_group item."""
+    """Collapse eligible image-search candidates into one image_group item.
+
+    ``metric_provider`` is the caller's already-classified provider label
+    ("brave"/"tavily"/"other"), not the raw per-image ``provider`` string.
+    Grouping is only reached when it is "brave", so it is used directly for
+    the group's ``provenance["provider"]`` rather than copying from the first
+    candidate's provenance, which may not carry a per-image "provider" key at
+    all (that copy is conditional; a missing key would otherwise silently
+    degrade to a None provider for the whole group).
+    """
     cap = max(2, int(getattr(settings, "rich_image_group_max_items", 3)))
     selected = candidates[:cap]
     cells: list[dict[str, Any]] = []
@@ -348,7 +365,7 @@ def _group_image_candidates(
         "provenance": {
             "tool_call_id": tool_call_id,
             "tool": first_provenance.get("tool"),
-            "provider": first_provenance.get("provider"),
+            "provider": metric_provider,
             "query": query,
         },
     }

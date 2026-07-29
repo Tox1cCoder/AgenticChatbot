@@ -475,6 +475,20 @@ def test_group_alt_text_comes_from_the_image_query():
     assert "red panda photo" in candidates[0]["alt_text"]
 
 
+def test_group_provenance_provider_is_never_none():
+    """_brave_group_payload() images carry no per-image "provider" key, so a
+    group built from ``first_provenance.get("provider")`` would silently get
+    None here. The group's provenance must instead carry the caller's
+    reliable, already-classified ``metric_provider`` value ("brave"), which
+    is guaranteed non-None whenever a group is emitted."""
+    candidates = build_image_candidates_from_tool_result(
+        _brave_group_payload(2), tool_call_id="c1", tool_name="brave_image_search"
+    )
+    provider = candidates[0]["provenance"]["provider"]
+    assert provider
+    assert provider == "brave"
+
+
 def test_tavily_images_are_never_grouped():
     payload = json.dumps(
         {
