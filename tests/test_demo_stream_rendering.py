@@ -70,3 +70,34 @@ def test_normalize_stream_markdown_text_keeps_inline_marker_in_code():
     raw = "See `<!--rich:foo-->` for the contract grammar."
 
     assert normalize_stream_markdown_text(raw) == raw
+
+
+def test_group_segment_renders_group_html():
+    """Characterization test: the view model already routes an
+    ``image_group`` rich item as a ``rich`` segment via plain id lookup, with
+    no special-casing by type. This pins existing behavior in
+    ``build_rich_response_view`` — it is not new behavior added by this test
+    — so that a later reader does not mistake it for a regression guard on
+    the Streamlit rendering branch (which is exercised separately)."""
+    from app.ui.rich_response import build_rich_response_view
+
+    metadata = {
+        "rich_items_version": 1,
+        "rich_items": [
+            {
+                "id": "imagegroup:tool:c1",
+                "type": "image_group",
+                "alt_text": "Images of red panda",
+                "payload": {
+                    "items": [
+                        {"url": "/web-images/1", "mime_type": "image/jpeg"},
+                        {"url": "/web-images/2", "mime_type": "image/jpeg"},
+                    ]
+                },
+            }
+        ],
+    }
+    view = build_rich_response_view("Body\n\n<!--rich:imagegroup:tool:c1-->\n", metadata)
+    rich_segments = [s for s in view.segments if s.kind == "rich"]
+    assert len(rich_segments) == 1
+    assert rich_segments[0].item["type"] == "image_group"
