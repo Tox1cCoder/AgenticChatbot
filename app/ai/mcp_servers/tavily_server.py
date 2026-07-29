@@ -88,6 +88,49 @@ def _clean_string_list(values: list[str] | None) -> list[str] | None:
     return cleaned or None
 
 
+#: Maximum accepted query length. Longer queries are an argument error rather
+#: than a silent truncation, so the model learns to split the research.
+TAVILY_QUERY_MAX_LENGTH: int = 400
+
+
+def validate_tavily_query(query: str) -> str:
+    """Return the stripped query or raise for an empty/overlong one."""
+    cleaned = str(query or "").strip()
+    if not cleaned:
+        raise ValueError("query must not be empty")
+    if len(cleaned) > TAVILY_QUERY_MAX_LENGTH:
+        raise ValueError(
+            f"query exceeds {TAVILY_QUERY_MAX_LENGTH} characters; "
+            "split complex research into focused subqueries"
+        )
+    return cleaned
+
+
+def resolve_tavily_search_params(
+    *,
+    search_depth: str | None,
+    auto_parameters: bool | None,
+    default_depth: str,
+    default_auto: bool,
+) -> dict[str, Any]:
+    """Resolve depth and automatic parameters into a mutually consistent pair.
+
+    Tavily ignores automatic parameters when an explicit ``search_depth`` is
+    present, so the two can never both be active. A ``None`` ``search_depth`` in
+    the result means the caller must omit the key from the request entirely.
+    """
+    effective_auto = default_auto if auto_parameters is None else bool(auto_parameters)
+    explicit_depth = str(search_depth or "").strip().lower()
+    if explicit_depth in SUPPORTED_SEARCH_DEPTHS:
+        return {"search_depth": explicit_depth, "auto_parameters": False}
+    if effective_auto:
+        return {"search_depth": None, "auto_parameters": True}
+    return {
+        "search_depth": _choice(None, default=default_depth, allowed=SUPPORTED_SEARCH_DEPTHS),
+        "auto_parameters": False,
+    }
+
+
 @mcp.tool()
 def tavily_search(
     query: str,
@@ -95,6 +138,7 @@ def tavily_search(
     search_depth: str | None = None,
     include_raw_content: bool = False,
     include_images: bool | None = None,
+    auto_parameters: bool | None = None,
 ) -> str:
     """Search the web for current facts, news, recent information, or source discovery.
 
@@ -106,6 +150,10 @@ def tavily_search(
     """
     operation = "search"
     try:
+        cleaned_query = validate_tavily_query(query)
+    except ValueError as exc:
+        return _error(str(exc), operation=operation)
+    try:
         client = _make_client()
     except Exception as exc:
         return _error(str(exc), operation=operation)
@@ -116,27 +164,29 @@ def tavily_search(
         minimum=1,
         maximum=min(int(getattr(settings, "tavily_search_max_results", 10) or 10), 20),
     )
-    depth = _choice(
-        search_depth,
-        default=str(getattr(settings, "tavily_search_default_depth", "basic") or "basic"),
-        allowed=SUPPORTED_SEARCH_DEPTHS,
+    resolved = resolve_tavily_search_params(
+        search_depth=search_depth,
+        auto_parameters=auto_parameters,
+        default_depth=str(getattr(settings, "tavily_search_default_depth", "basic") or "basic"),
+        default_auto=bool(getattr(settings, "tavily_search_auto_parameters", False)),
     )
     images_enabled = (
-        bool(getattr(settings, "tavily_search_include_images", True))
+        bool(getattr(settings, "tavily_search_include_images", False))
         if include_images is None
         else bool(include_images)
     )
     params: dict[str, Any] = {
-        "query": query,
+        "query": cleaned_query,
         "max_results": result_count,
-        "search_depth": depth,
         "include_images": images_enabled,
         "include_image_descriptions": images_enabled
         and bool(getattr(settings, "tavily_search_include_image_descriptions", True)),
         "include_raw_content": include_raw_content,
-        "auto_parameters": bool(getattr(settings, "tavily_search_auto_parameters", False)),
+        "auto_parameters": resolved["auto_parameters"],
         "include_usage": True,
     }
+    if resolved["search_depth"] is not None:
+        params["search_depth"] = resolved["search_depth"]
     try:
         response = client.search(**params)
     except TimeoutError as exc:
@@ -145,7 +195,7 @@ def tavily_search(
         return _error(f"Search failed: {exc}", operation=operation)
     return _json(
         _normalize_search_response(
-            query=query,
+            query=cleaned_query,
             response=response,
             include_images=images_enabled,
         )

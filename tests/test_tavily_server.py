@@ -2,7 +2,73 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.ai.mcp_servers import tavily_server
+from app.ai.mcp_servers.tavily_server import (
+    resolve_tavily_search_params,
+    validate_tavily_query,
+)
+
+
+def test_explicit_depth_wins_and_disables_auto_parameters():
+    resolved = resolve_tavily_search_params(
+        search_depth="advanced",
+        auto_parameters=True,
+        default_depth="basic",
+        default_auto=True,
+    )
+    assert resolved == {"search_depth": "advanced", "auto_parameters": False}
+
+
+def test_auto_mode_omits_search_depth():
+    resolved = resolve_tavily_search_params(
+        search_depth=None,
+        auto_parameters=True,
+        default_depth="basic",
+        default_auto=False,
+    )
+    assert resolved == {"search_depth": None, "auto_parameters": True}
+
+
+def test_no_depth_and_auto_disabled_sends_default_depth():
+    resolved = resolve_tavily_search_params(
+        search_depth=None,
+        auto_parameters=None,
+        default_depth="basic",
+        default_auto=False,
+    )
+    assert resolved == {"search_depth": "basic", "auto_parameters": False}
+
+
+def test_omitted_auto_parameters_falls_back_to_configured_default():
+    resolved = resolve_tavily_search_params(
+        search_depth=None,
+        auto_parameters=None,
+        default_depth="basic",
+        default_auto=True,
+    )
+    assert resolved == {"search_depth": None, "auto_parameters": True}
+
+
+def test_unsupported_depth_falls_back_to_default_depth():
+    resolved = resolve_tavily_search_params(
+        search_depth="turbo",
+        auto_parameters=None,
+        default_depth="basic",
+        default_auto=False,
+    )
+    assert resolved == {"search_depth": "basic", "auto_parameters": False}
+
+
+def test_validate_query_strips_and_returns():
+    assert validate_tavily_query("  red panda habitat  ") == "red panda habitat"
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "x" * 401])
+def test_validate_query_rejects_empty_and_overlong(bad):
+    with pytest.raises(ValueError):
+        validate_tavily_query(bad)
 
 
 def test_tavily_clamp_count_uses_default_and_cap(monkeypatch):
@@ -131,6 +197,27 @@ def test_search_normalizes_result_bound_images_with_parent_provenance(monkeypatc
     assert result_image["result_score"] == 0.91
     assert result_image["provider"] == "tavily"
     assert payload["images"][1]["query_level"] is True
+
+
+def test_tavily_search_omits_depth_in_auto_mode(monkeypatch):
+    captured = {}
+
+    class _FakeClient:
+        def search(self, **params):
+            captured.update(params)
+            return {"results": [], "images": []}
+
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: _FakeClient())
+    tavily_server.tavily_search(query="red panda", auto_parameters=True)
+    assert "search_depth" not in captured
+    assert captured["auto_parameters"] is True
+
+
+def test_tavily_search_rejects_empty_query(monkeypatch):
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: object())
+    result = json.loads(tavily_server.tavily_search(query="   "))
+    assert result["error"]
+    assert result.get("retryable") is not True
 
 
 class _FakeExtractClient:
