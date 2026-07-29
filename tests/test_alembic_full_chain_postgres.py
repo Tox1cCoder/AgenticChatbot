@@ -23,7 +23,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _SCRATCH_DATABASE_PREFIX = "chatbot_migration_smoke_"
 _SCRATCH_DATABASE_RE = re.compile(r"chatbot_migration_smoke_[0-9a-f]{32}")
 _OLD_HEAD = "a4b5c6d7e8f9"
-_HEAD = "c6d7e8f9a0b1"
+_HEAD = "e8f9a0b1c2d3"
 _PREVIOUS_HEAD = "z3a4b5c6d7e8"
 _PRE_RECONCILIATION_HEAD = "1ce64a959f7d"
 _PARALLEL_ALLOW_CUSTOM_MODEL_HEAD = "0f1e2d3c4b5a"
@@ -602,6 +602,22 @@ def test_inspection_migrations_fail_clearly_offline(monkeypatch, module_name: st
             migration.downgrade()
     else:
         assert migration.downgrade() is None
+
+
+def test_head_constant_matches_the_real_alembic_head() -> None:
+    """``_HEAD`` and the README both hardcode the head revision.
+
+    Without this check they drift together silently: the README assertion below
+    compares documentation against the constant, not against Alembic, and the
+    ``alembic_version`` assertion that would catch it only runs when a live
+    PostgreSQL is configured.
+    """
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    script_directory = ScriptDirectory.from_config(Config(str(_PROJECT_ROOT / "alembic.ini")))
+
+    assert script_directory.get_heads() == [_HEAD]
 
 
 def test_readme_tracks_migration_head_and_current_graph_contract() -> None:

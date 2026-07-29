@@ -497,7 +497,7 @@ The server accepts either a fully-formed URL (`REDIS_URL`) or a hostname + conve
 
 ## Database Migrations
 
-Migrations are Alembic-managed (single head, currently `c6d7e8f9a0b1`). They are applied **automatically** at application startup via `app.database.migrations.upgrade_database` inside the lifespan hook, so manual migration is only required for dev or out-of-process tooling:
+Migrations are Alembic-managed (single head, currently `e8f9a0b1c2d3`). They are applied **automatically** at application startup via `app.database.migrations.upgrade_database` inside the lifespan hook, so manual migration is only required for dev or out-of-process tooling:
 
 ```bash
 alembic upgrade head
@@ -529,6 +529,15 @@ Key schemas:
 LangGraph checkpoints are kept in the same database under `CHECKPOINT_SCHEMA` (default `public`) by `langgraph-checkpoint-postgres`.
 
 ### Schema ownership and cleanup
+
+> **Historical migration warning:** the original `6c6598a9eb26` revision could drop LangGraph checkpoint tables and `mcp_oauth_tokens`. For a deployment that may have run that revision, inspect these tables before upgrading and take a verified database backup. The forward `b5c6d7e8f9a0` repair cannot reconstruct deleted checkpoint or MCP OAuth data. Restore the affected tables from a pre-upgrade backup when available. Without a checkpoint backup, reinitialize LangGraph only after accepting the loss of resumable workflow/HITL state; users must reauthenticate affected MCP servers when OAuth rows cannot be restored.
+>
+> The same repair normalizes legacy uppercase approval enum labels to lowercase.
+> Drain API and worker approval writers before applying `b5c6d7e8f9a0`, then
+> deploy code whose SQLAlchemy mapping persists `DecisionType.value`. Its
+> downgrade intentionally does not restore uppercase labels; rollback to an
+> older uppercase-mapped release requires a compatible backport or restoration
+> of the verified pre-upgrade backup.
 
 - **Alembic owns the application tables only.** Current autogenerate is filtered (`app/alembic/autogenerate_filters.py`) so it does not touch the LangGraph checkpoint tables or `alembic_version`.
 - **LangGraph owns the checkpoint tables** (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`). Corrected migration history and new application migrations leave them unchanged; pruning their rows is operational cleanup, not a schema migration.
