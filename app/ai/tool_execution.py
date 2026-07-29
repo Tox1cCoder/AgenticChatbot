@@ -122,6 +122,7 @@ def build_image_candidates_from_tool_result(
             result_count=len(images),
         )
 
+    result_query = str(parsed.get("query") or "").strip()
     candidates: list[dict[str, Any]] = []
     seen_display_urls: set[str] = set()
     candidate_cap = max(1, int(getattr(settings, "rich_image_candidate_max_count", 8)))
@@ -213,6 +214,7 @@ def build_image_candidates_from_tool_result(
         for meta_key in (
             "thumbnail_url",
             "source_domain",
+            "source_title",
             "provider",
             "result_rank",
             "result_score",
@@ -221,6 +223,8 @@ def build_image_candidates_from_tool_result(
             meta_value = image.get(meta_key)
             if meta_value is not None:
                 provenance[meta_key] = meta_value
+        if result_query:
+            provenance["query"] = result_query
         if original_url:
             provenance["original_image_url"] = original_url
         candidates.append(

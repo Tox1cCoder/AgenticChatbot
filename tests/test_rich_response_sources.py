@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from app.ai.mcp_servers import tavily_server
 from app.ai.tool_execution import (
     build_image_candidates_from_tool_result,
     build_live_widget_candidate_from_tool_result,
@@ -116,6 +117,43 @@ def test_image_candidates_default_mime_when_absent():
     )
     assert candidates[0]["payload"]["mime_type"] == "image/png"
     assert candidates[1]["payload"]["mime_type"] == "image/jpeg"
+
+
+def test_candidate_provenance_keeps_source_title_and_query():
+    payload = json.dumps(
+        {
+            "provider": "tavily",
+            "query": "apple park cupertino aerial",
+            "images": [
+                {
+                    "url": "https://cdn.example.com/park.jpg",
+                    "description": "Aerial view of Apple Park",
+                    "source_url": "https://example.com/apple-park",
+                    "source_title": "Inside Apple Park",
+                    "source_domain": "example.com",
+                    "result_rank": 0,
+                    "result_score": 0.91,
+                    "width": 1200,
+                    "height": 800,
+                }
+            ],
+        }
+    )
+    candidates = build_image_candidates_from_tool_result(
+        payload, tool_call_id="call_1", tool_name="tavily_search"
+    )
+    provenance = candidates[0]["provenance"]
+    assert provenance["source_title"] == "Inside Apple Park"
+    assert provenance["query"] == "apple park cupertino aerial"
+
+
+def test_missing_tavily_score_is_none_not_zero():
+    normalized = tavily_server._normalize_search_response(
+        query="q",
+        response={"results": [{"url": "https://e.com/a", "title": "A", "images": ["https://e.com/i.jpg"]}]},
+        include_images=True,
+    )
+    assert normalized["images"][0]["result_score"] is None
 
 
 # ---------------------------------------------------------------------------

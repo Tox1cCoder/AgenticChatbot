@@ -243,13 +243,16 @@ def _normalize_search_response(
                 image = _normalize_search_image(raw_image)
                 if image is None or image["url"] in seen_urls:
                     continue
+                raw_score = result.get("score")
                 image.update(
                     {
                         "source_url": source_url,
                         "source_title": source_title,
                         "source_domain": source_domain,
                         "result_rank": result_rank,
-                        "result_score": result.get("score", 0),
+                        "result_score": (
+                            float(raw_score) if isinstance(raw_score, (int, float)) else None
+                        ),
                     }
                 )
                 images.append(image)
