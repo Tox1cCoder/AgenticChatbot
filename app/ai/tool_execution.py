@@ -149,6 +149,12 @@ def build_image_candidates_from_tool_result(
     ``RichItem`` schema) with deterministic id, source, provenance, and
     payload. The candidate dicts are safe to forward to
     ``build_bot_metadata()`` as transient `_rich_item_candidates`.
+
+    A Brave result with 2+ eligible candidates collapses into a single
+    ``image_group`` item (see ``_group_image_candidates``) so the model has
+    one marker id to copy instead of choosing among several. Tavily results
+    and single-candidate Brave results are returned as individual ``image``
+    items.
     """
     if not result_text:
         return []
