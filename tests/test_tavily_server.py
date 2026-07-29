@@ -130,7 +130,9 @@ def test_search_uses_configured_basic_depth_and_preserves_images(monkeypatch):
         tavily_server.settings, "tavily_search_auto_parameters", False, raising=False
     )
 
-    payload = json.loads(tavily_server.tavily_search("openai news", max_results=25))
+    payload = json.loads(
+        tavily_server.tavily_search("openai news", max_results=25, include_images=True)
+    )
 
     assert client.calls[0]["search_depth"] == "basic"
     assert client.calls[0]["max_results"] == 10
@@ -197,6 +199,33 @@ def test_search_normalizes_result_bound_images_with_parent_provenance(monkeypatc
     assert result_image["result_score"] == 0.91
     assert result_image["provider"] == "tavily"
     assert payload["images"][1]["query_level"] is True
+
+
+def test_default_search_does_not_request_images(monkeypatch):
+    captured = {}
+
+    class _FakeClient:
+        def search(self, **params):
+            captured.update(params)
+            return {"results": [], "images": []}
+
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: _FakeClient())
+    tavily_server.tavily_search(query="chip export rules 2026")
+    assert captured["include_images"] is False
+    assert captured["include_image_descriptions"] is False
+
+
+def test_explicit_include_images_still_requests_them(monkeypatch):
+    captured = {}
+
+    class _FakeClient:
+        def search(self, **params):
+            captured.update(params)
+            return {"results": [], "images": []}
+
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: _FakeClient())
+    tavily_server.tavily_search(query="apple park", include_images=True)
+    assert captured["include_images"] is True
 
 
 def test_tavily_search_omits_depth_in_auto_mode(monkeypatch):

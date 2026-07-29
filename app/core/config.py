@@ -324,8 +324,12 @@ class Settings(BaseSettings):
         description="Default Tavily search depth: basic, fast, ultra-fast, or advanced.",
     )
     tavily_search_include_images: bool = Field(
-        default=True,
-        description="Include Tavily search image candidates by default.",
+        default=False,
+        description=(
+            "Include Tavily search image candidates by default. Off by default: "
+            "ordinary text research must not manufacture image candidates. "
+            "Callers pass include_images=True for source-bound visuals."
+        ),
     )
     tavily_search_include_image_descriptions: bool = Field(
         default=True,

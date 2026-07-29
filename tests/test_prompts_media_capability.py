@@ -23,7 +23,9 @@ TAXONOMY_WORDS = ("architecture", "fashion", "cuisine", "brutalist", "gothic")
 def test_snippet_defined_once_and_compact():
     snippet = prompts.MEDIA_CAPABILITY_SNIPPET
     assert "Media and visuals:" in snippet
-    assert len(snippet) < 900, "media snippet must stay compact — do not bloat prompts"
+    # Raised from 900 when the snippet gained brave_image_search routing and
+    # disambiguated-query guidance (rich-image-selection-hardening Task 2).
+    assert len(snippet) < 1300, "media snippet must stay compact — do not bloat prompts"
 
 
 def test_snippet_uses_available_ids_only_and_forbids_invention():

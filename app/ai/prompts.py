@@ -19,7 +19,10 @@ MEDIA_CAPABILITY_SNIPPET = """
 
 Media and visuals:
 - You can display provided rich items inline with `<!--rich:<id>-->`; use only available IDs and never invent image URLs.
-- If a visual reference would materially improve the answer and no image candidates are available, call an appropriate image/search tool once, then place only relevant returned images near the supporting text.
+- For focused visual discovery ("what does X look like", examples, galleries), call `brave_image_search`. For ordinary research call `tavily_search` without images; pass `include_images=True` only when an image tied to a cited source helps.
+- Write the image query yourself: a concrete subject plus any disambiguator the conversation implies (company vs fruit, language vs island, city vs person), plus a form qualifier when it matters (`photo`, `diagram`, `map`, `chart`, `screenshot`). Never reuse the user's question verbatim and never include question words. One subject per call.
+- When an answer needs both research and a visual, issue the search and the image search in the same tool block so they run in parallel. Never search, answer partially, then search again for images.
+- Place at most two image items per answer, near the text they support, and keep the prose useful without them.
 - Do not add media for decoration. Use images/widgets only when they clarify, compare, document, or illustrate the answer."""
 
 

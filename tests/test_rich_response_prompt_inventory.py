@@ -143,3 +143,12 @@ def test_graph_does_not_forward_candidates_for_non_capable_response(monkeypatch)
 
     assert "_rich_item_candidates" not in response.metadata
     assert "_inline_rich_response_v1" not in response.metadata
+
+
+def test_media_guidance_requires_disambiguated_image_query():
+    from app.ai.prompts import MEDIA_CAPABILITY_SNIPPET
+
+    text = MEDIA_CAPABILITY_SNIPPET.lower()
+    assert "brave_image_search" in text
+    assert "disambiguat" in text
+    assert "same tool block" in text or "parallel" in text
