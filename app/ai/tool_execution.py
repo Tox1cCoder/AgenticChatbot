@@ -130,9 +130,14 @@ def build_image_candidates_from_tool_result(
     minimum_height = max(1, int(getattr(settings, "rich_image_min_height_px", 180)))
 
     def _reject(reason: str) -> None:
+        # Each counter gets its own suppress block: a fault in the new,
+        # untested-in-production record_candidate metric must never be able
+        # to prevent the deprecated record_selection compatibility counter
+        # from firing, and vice versa.
+        with suppress(Exception):
+            rich_image_metrics.record_selection(provider=metric_provider, outcome="rejected")
         with suppress(Exception):
             rich_image_metrics.record_candidate(provider=metric_provider, outcome=reason)
-            rich_image_metrics.record_selection(provider=metric_provider, outcome="rejected")
 
     for index, image in enumerate(images):
         if not isinstance(image, dict):
@@ -224,8 +229,9 @@ def build_image_candidates_from_tool_result(
         if display_url:
             seen_display_urls.add(display_url)
         with suppress(Exception):
-            rich_image_metrics.record_candidate(provider=metric_provider, outcome="eligible")
             rich_image_metrics.record_selection(provider=metric_provider, outcome="selected")
+        with suppress(Exception):
+            rich_image_metrics.record_candidate(provider=metric_provider, outcome="eligible")
         if len(candidates) >= candidate_cap:
             break
     return candidates

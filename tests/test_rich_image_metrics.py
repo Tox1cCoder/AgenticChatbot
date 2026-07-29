@@ -67,3 +67,28 @@ def test_old_selection_counter_still_emits_during_compatibility_window():
     metrics = RichImageMetrics()
     metrics.record_selection(provider="tavily", outcome="selected")
     assert "rich_image_selections_total" in metrics.render().decode()
+
+
+def test_presentation_and_final_selection_ignore_non_positive_counts():
+    metrics = RichImageMetrics()
+    metrics.record_presentation(provider="brave", count=0)
+    metrics.record_presentation(provider="brave", count=-1)
+    metrics.record_final_selection(provider="brave", count=0)
+    metrics.record_final_selection(provider="brave", count=-1)
+
+    body = metrics.render().decode()
+
+    # Non-positive counts must never touch .labels(): no sample line is
+    # created for the label combination at all (not even a 0.0 one).
+    assert 'rich_image_presented_total{provider="brave"}' not in body
+    assert 'rich_image_final_selection_total{provider="brave"}' not in body
+
+
+def test_record_anchor_bounds_unknown_outcome_to_other():
+    metrics = RichImageMetrics()
+    metrics.record_anchor(provider="brave", outcome="not-a-real-outcome")
+
+    body = metrics.render().decode()
+
+    assert 'outcome="other"' in body
+    assert "not-a-real-outcome" not in body

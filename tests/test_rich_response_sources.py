@@ -283,6 +283,51 @@ def test_candidate_selection_records_bounded_provider_counts(monkeypatch):
     metrics.record_candidate.assert_called_once_with(provider="brave", outcome="eligible")
 
 
+def test_record_selection_survives_record_candidate_raising_on_acceptance(monkeypatch):
+    """The deprecated compatibility counter must not go dark if the new one breaks."""
+    from app.ai import tool_execution
+
+    metrics = type(
+        "Metrics",
+        (),
+        {
+            "record_discovery": Mock(),
+            "record_selection": Mock(),
+            "record_candidate": Mock(side_effect=RuntimeError("boom")),
+        },
+    )()
+    monkeypatch.setattr(tool_execution, "rich_image_metrics", metrics)
+
+    build_image_candidates_from_tool_result(
+        _brave_payload(), tool_call_id="call_metrics", tool_name="brave_image_search"
+    )
+
+    metrics.record_selection.assert_called_once_with(provider="brave", outcome="selected")
+
+
+def test_record_selection_survives_record_candidate_raising_on_rejection(monkeypatch):
+    """Same guarantee on the reject path (_reject helper), not just acceptance."""
+    from app.ai import tool_execution
+
+    metrics = type(
+        "Metrics",
+        (),
+        {
+            "record_discovery": Mock(),
+            "record_selection": Mock(),
+            "record_candidate": Mock(side_effect=RuntimeError("boom")),
+        },
+    )()
+    monkeypatch.setattr(tool_execution, "rich_image_metrics", metrics)
+    payload = json.dumps({"images": [{"url": "http://insecure.test/a.jpg"}]})
+
+    build_image_candidates_from_tool_result(
+        payload, tool_call_id="call_metrics", tool_name="brave_image_search"
+    )
+
+    metrics.record_selection.assert_called_once_with(provider="brave", outcome="rejected")
+
+
 def test_brave_image_candidate_validates_against_public_schema():
     from app.core.rich_response import validate_public_rich_item
 
