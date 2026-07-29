@@ -74,7 +74,7 @@ async function loadProtectedImage(
 }
 ```
 
-Keep the object URL in component state. On URL/token change or component unmount, abort an active request and call `URL.revokeObjectURL(objectUrl)`. Do not put tokens in query strings, logs, persistent browser storage, or shared cache keys. A Retry action may repeat the authenticated fetch.
+Keep the object URL in component state. On URL/token change or component unmount, abort an active request and call `URL.revokeObjectURL(objectUrl)`. Do not put tokens in query strings, logs, persistent browser storage, or shared cache keys.
 
 ## Figure states
 
@@ -82,9 +82,9 @@ Render the whole figure as one stateful component:
 
 - `loading`: reserve `aspect-ratio: width / height` when both values are positive; otherwise use a modest skeleton placeholder. Keep the text answer interactive.
 - `loaded`: show the image at natural size, capped by the answer column; do not upscale small images.
-- `failed`: replace the entire figure, including skeleton and footer, with a compact `Visual unavailable` state. Keep optional `Open source` and Retry actions. Do not leave a broken-image icon or stale caption.
+- A failed fetch or decode attempt does not establish that the visual is permanently unavailable. Remove the current figure without rendering an unavailable label or fallback source action. A later message render may make another attempt according to the client's request-cache policy.
 
-The image request is independent of message completion. A timeout, 401/404, blocked publisher, invalid MIME, oversized file, corrupt image, DNS rejection, or offline browser changes only the figure state.
+The image request is independent of message completion. Network, authentication, publisher, MIME, size, decoding, and DNS failures are transport outcomes for one request. They must not replace or fail the assistant text and must not be presented as a permanent property of the image.
 
 ## Accessibility and footer ownership
 
@@ -99,6 +99,6 @@ If no structured caption exists, show source attribution alone. The assistant bo
 
 ## Backend/frontend responsibility boundary
 
-The backend selects candidates, persists only selected images, converts remote URLs to owned opaque references, and performs bounded SSRF-safe retrieval when the media route is called. It does not fetch remote bytes while generating or persisting the answer. The frontend owns authenticated loading, object-URL lifetime, visual states, deduplication, and local Retry behavior.
+The backend selects candidates, persists only selected images, converts remote URLs to owned opaque references, and performs bounded SSRF-safe retrieval when the media route is called. It does not fetch remote bytes while generating or persisting the answer. The frontend owns authenticated loading, object-URL lifetime, per-attempt display state, and deduplication.
 
-Before release, verify: one rendered visual per selected marker; no candidate dump; no duplicate AI SDK file part; one footer; alt text is not visible; failed media leaves the answer intact; and all object URLs are revoked.
+Before release, verify: one rendered visual per selected marker; no candidate dump; no duplicate AI SDK file part; one footer; alt text is not visible; a failed attempt produces no unavailable label or fallback source action; failed media leaves the answer intact; and all object URLs are revoked.
