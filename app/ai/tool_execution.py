@@ -116,6 +116,27 @@ def is_junk_image_url(url: str) -> bool:
     return any(marker in path for marker in _JUNK_IMAGE_URL_MARKERS)
 
 
+def order_tavily_images(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order Tavily image dicts by provenance strength.
+
+    Source-bound before query-level, then higher parent score, then lower parent
+    rank, with original provider order as the stable tie-breaker. Ordering never
+    rejects a candidate.
+    """
+
+    def sort_key(indexed: tuple[int, dict[str, Any]]) -> tuple[int, int, float, int, int]:
+        index, image = indexed
+        query_level = 1 if image.get("query_level") else 0
+        raw_score = image.get("result_score")
+        has_score = 0 if isinstance(raw_score, (int, float)) else 1
+        score = -float(raw_score) if isinstance(raw_score, (int, float)) else 0.0
+        raw_rank = image.get("result_rank")
+        rank = int(raw_rank) if isinstance(raw_rank, int) and raw_rank >= 0 else 10**6
+        return (query_level, has_score, score, rank, index)
+
+    return [image for _, image in sorted(enumerate(images), key=sort_key)]
+
+
 def build_image_candidates_from_tool_result(
     result_text: str,
     *,
@@ -157,6 +178,9 @@ def build_image_candidates_from_tool_result(
             provider=metric_provider,
             result_count=len(images),
         )
+
+    if metric_provider == "tavily":
+        images = order_tavily_images([i for i in images if isinstance(i, dict)])
 
     result_query = str(parsed.get("query") or "").strip()
     candidates: list[dict[str, Any]] = []

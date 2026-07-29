@@ -18,6 +18,7 @@ from app.ai.tool_execution import (
     extract_images_from_tool_result,
     image_aspect_ratio_ok,
     is_junk_image_url,
+    order_tavily_images,
 )
 
 # ---------------------------------------------------------------------------
@@ -641,3 +642,54 @@ async def test_execute_tool_calls_attaches_dedicated_widget_candidate_to_artifac
     assert candidate["id"] == "widget:w-created"
     assert candidate["type"] == "live_widget"
     assert "private-state-not-in-candidate" not in str(candidate)
+
+
+# ---------------------------------------------------------------------------
+# Tavily image ordering (Task 5)
+# ---------------------------------------------------------------------------
+
+
+def test_source_bound_images_precede_query_level():
+    ordered = order_tavily_images(
+        [
+            {"url": "q", "query_level": True},
+            {"url": "s", "result_rank": 3, "result_score": 0.1},
+        ]
+    )
+    assert [i["url"] for i in ordered] == ["s", "q"]
+
+
+def test_higher_score_then_lower_rank_wins():
+    ordered = order_tavily_images(
+        [
+            {"url": "a", "result_rank": 2, "result_score": 0.5},
+            {"url": "b", "result_rank": 0, "result_score": 0.9},
+            {"url": "c", "result_rank": 1, "result_score": 0.9},
+        ]
+    )
+    assert [i["url"] for i in ordered] == ["b", "c", "a"]
+
+
+def test_absent_score_sorts_after_any_numeric_score():
+    ordered = order_tavily_images(
+        [
+            {"url": "none", "result_rank": 0, "result_score": None},
+            {"url": "low", "result_rank": 9, "result_score": 0.01},
+        ]
+    )
+    assert [i["url"] for i in ordered] == ["low", "none"]
+
+
+def test_ordering_is_stable_for_equivalent_candidates():
+    ordered = order_tavily_images(
+        [
+            {"url": "first", "result_rank": 1, "result_score": 0.5},
+            {"url": "second", "result_rank": 1, "result_score": 0.5},
+        ]
+    )
+    assert [i["url"] for i in ordered] == ["first", "second"]
+
+
+def test_ordering_never_drops_a_candidate():
+    images = [{"url": str(n)} for n in range(7)]
+    assert len(order_tavily_images(images)) == 7
