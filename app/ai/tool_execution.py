@@ -18,6 +18,7 @@ from ..core.rich_response import (
     RichDisplayPolicy,
     RichItemType,
 )
+from ..observability.rich_images import rich_image_metrics
 from .client_runtime_tools import (
     CLIENT_TOOL_PREFIX,
     get_active_client_runtime_session,
@@ -107,6 +108,20 @@ def build_image_candidates_from_tool_result(
     if not isinstance(images, list):
         return []
 
+    result_provider = str(parsed.get("provider") or "").strip().lower()
+    metric_provider = (
+        "brave"
+        if result_provider.startswith("brave") or tool_name == "brave_image_search"
+        else "tavily"
+        if result_provider == "tavily" or tool_name == "tavily_search"
+        else "other"
+    )
+    with suppress(Exception):
+        rich_image_metrics.record_discovery(
+            provider=metric_provider,
+            result_count=len(images),
+        )
+
     candidates: list[dict[str, Any]] = []
     seen_display_urls: set[str] = set()
     candidate_cap = max(1, int(getattr(settings, "rich_image_candidate_max_count", 8)))
@@ -114,10 +129,20 @@ def build_image_candidates_from_tool_result(
     minimum_height = max(1, int(getattr(settings, "rich_image_min_height_px", 180)))
     for index, image in enumerate(images):
         if not isinstance(image, dict):
+            with suppress(Exception):
+                rich_image_metrics.record_selection(
+                    provider=metric_provider,
+                    outcome="rejected",
+                )
             continue
         url = image.get("url")
         data = image.get("data") or image.get("b64_data")
         if not url and not data:
+            with suppress(Exception):
+                rich_image_metrics.record_selection(
+                    provider=metric_provider,
+                    outcome="rejected",
+                )
             continue
         provider = str(image.get("provider") or "").strip().lower()
         original_url = str(url or "").strip()
@@ -128,12 +153,32 @@ def build_image_candidates_from_tool_result(
         height = image.get("height")
         if display_url:
             if urlsplit(display_url).scheme.lower() != "https":
+                with suppress(Exception):
+                    rich_image_metrics.record_selection(
+                        provider=metric_provider,
+                        outcome="rejected",
+                    )
                 continue
             if display_url in seen_display_urls:
+                with suppress(Exception):
+                    rich_image_metrics.record_selection(
+                        provider=metric_provider,
+                        outcome="rejected",
+                    )
                 continue
             if isinstance(width, int) and width < minimum_width:
+                with suppress(Exception):
+                    rich_image_metrics.record_selection(
+                        provider=metric_provider,
+                        outcome="rejected",
+                    )
                 continue
             if isinstance(height, int) and height < minimum_height:
+                with suppress(Exception):
+                    rich_image_metrics.record_selection(
+                        provider=metric_provider,
+                        outcome="rejected",
+                    )
                 continue
         payload: dict[str, Any] = {}
         mime_type = image.get("mime_type") or image.get("mimeType")
@@ -192,6 +237,11 @@ def build_image_candidates_from_tool_result(
         )
         if display_url:
             seen_display_urls.add(display_url)
+        with suppress(Exception):
+            rich_image_metrics.record_selection(
+                provider=metric_provider,
+                outcome="selected",
+            )
         if len(candidates) >= candidate_cap:
             break
     return candidates

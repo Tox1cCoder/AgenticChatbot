@@ -6,6 +6,7 @@ deduplication, RAG document image candidates).
 from __future__ import annotations
 
 import json
+from unittest.mock import Mock
 
 import pytest
 
@@ -219,6 +220,27 @@ def test_remote_candidates_obey_configured_candidate_cap(monkeypatch):
     )
 
     assert len(candidates) == 2
+
+
+def test_candidate_selection_records_bounded_provider_counts(monkeypatch):
+    from app.ai import tool_execution
+
+    metrics = type(
+        "Metrics",
+        (),
+        {
+            "record_discovery": Mock(),
+            "record_selection": Mock(),
+        },
+    )()
+    monkeypatch.setattr(tool_execution, "rich_image_metrics", metrics)
+
+    build_image_candidates_from_tool_result(
+        _brave_payload(), tool_call_id="call_metrics", tool_name="brave_image_search"
+    )
+
+    metrics.record_discovery.assert_called_once_with(provider="brave", result_count=1)
+    metrics.record_selection.assert_called_once_with(provider="brave", outcome="selected")
 
 
 def test_brave_image_candidate_validates_against_public_schema():

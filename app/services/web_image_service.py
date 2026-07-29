@@ -6,7 +6,9 @@ import asyncio
 import inspect
 import ipaddress
 import socket
+import time
 import warnings
+from contextlib import suppress
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Any
@@ -82,6 +84,7 @@ class WebImageService:
         max_pixels: int,
         resolver: Any | None = None,
         transport_factory: Any | None = None,
+        metrics: Any | None = None,
     ) -> None:
         self.repository = repository
         self.connect_timeout_seconds = max(0.001, float(connect_timeout_seconds))
@@ -91,6 +94,7 @@ class WebImageService:
         self.max_pixels = max(1, int(max_pixels))
         self.resolver = resolver or self._resolve_hostname
         self.transport_factory = transport_factory or PinnedAsyncTransport
+        self.metrics = metrics
 
     async def register(
         self,
@@ -116,6 +120,24 @@ class WebImageService:
         )
 
     async def fetch(self, record: Any) -> FetchedWebImage:
+        started = time.perf_counter()
+        provider = self._record_value(record, "provider") or "other"
+        outcome = "success"
+        try:
+            return await self._fetch_redirects(record)
+        except (WebImageRejected, WebImageUpstreamFailure) as exc:
+            outcome = exc.reason
+            raise
+        finally:
+            if self.metrics is not None:
+                with suppress(Exception):
+                    self.metrics.record_fetch(
+                        provider=provider,
+                        outcome=outcome,
+                        duration_seconds=time.perf_counter() - started,
+                    )
+
+    async def _fetch_redirects(self, record: Any) -> FetchedWebImage:
         current_url = self._record_value(record, "upstream_url")
         for redirect_count in range(self.max_redirects + 1):
             outcome = await self._fetch_once(current_url)

@@ -46,6 +46,7 @@ def _service(
     max_pixels=1_000_000,
     max_redirects=3,
     transport_factory=None,
+    metrics=None,
 ):
     response_queue = list(responses or [])
     seen_ips: list[str] = []
@@ -68,6 +69,7 @@ def _service(
         max_pixels=max_pixels,
         resolver=resolver or _resolver(),
         transport_factory=transport_factory or make_transport,
+        metrics=metrics,
     )
     return service, seen_ips
 
@@ -267,3 +269,49 @@ async def test_valid_png_returns_verified_bytes_dimensions_and_pinned_ip():
         height=10,
     )
     assert seen_ips == ["93.184.216.34"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_records_bounded_success_and_failure_metrics():
+    metrics = Mock()
+    content = _png_bytes()
+    success_service, _ = _service(
+        metrics=metrics,
+        responses=[
+            httpx.Response(200, headers={"Content-Type": "image/png"}, content=content)
+        ],
+    )
+
+    await success_service.fetch(_record("https://img.example/image.png"))
+
+    metrics.record_fetch.assert_called_once()
+    assert metrics.record_fetch.call_args.kwargs["provider"] == "tavily"
+    assert metrics.record_fetch.call_args.kwargs["outcome"] == "success"
+
+    metrics.reset_mock()
+
+    async def timeout_handler(request):
+        raise httpx.ReadTimeout("slow", request=request)
+
+    failing_service, _ = _service(metrics=metrics, handler=timeout_handler)
+    with pytest.raises(WebImageUpstreamFailure):
+        await failing_service.fetch(_record("https://img.example/image.png"))
+
+    assert metrics.record_fetch.call_args.kwargs["outcome"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_metrics_failure_cannot_break_a_valid_image_fetch():
+    metrics = Mock()
+    metrics.record_fetch.side_effect = RuntimeError("metrics unavailable")
+    content = _png_bytes()
+    service, _ = _service(
+        metrics=metrics,
+        responses=[
+            httpx.Response(200, headers={"Content-Type": "image/png"}, content=content)
+        ],
+    )
+
+    result = await service.fetch(_record("https://img.example/image.png"))
+
+    assert result.content == content

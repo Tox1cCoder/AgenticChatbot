@@ -27,6 +27,7 @@ from app.interfaces import (
 from app.interfaces.planning_runtime_interface import IPlanningRuntimeService
 from app.interfaces.task_plan_service_interface import ITaskPlanService
 from app.observability.model_usage import model_usage_metrics as model_usage_metrics_singleton
+from app.observability.rich_images import rich_image_metrics as rich_image_metrics_singleton
 from app.repositories.agent_model_config import AgentModelConfigRepository
 from app.repositories.chat_image import ChatImageRepository
 from app.repositories.conversation import ConversationRepository
@@ -47,6 +48,7 @@ from app.repositories.tool_approval_setting import ToolApprovalSettingRepository
 from app.repositories.tool_result_blob import ToolResultBlobRepository
 from app.repositories.user import UserRepository
 from app.repositories.user_memory import UserMemoryRepository
+from app.repositories.web_image_reference import WebImageReferenceRepository
 from app.services.ai_service import AIService
 from app.services.auth_service import AuthService
 from app.services.chat_image_service import ChatImageStorageService
@@ -73,6 +75,7 @@ from app.services.rag_embedding_service import (
 from app.services.task_plan_service import TaskPlanService
 from app.services.tool_result_blob_service import ToolResultBlobService
 from app.services.user_service import UserService
+from app.services.web_image_service import WebImageService
 from app.usage.recorder import ModelUsageRecorder
 from app.utils.validation.conversation_validation import ConversationValidationUtils
 from app.utils.validation.document_validation import DocumentValidationUtils
@@ -327,6 +330,25 @@ class Container(containers.DeclarativeContainer):
         repository=chat_image_repository,
         storage_root=providers.Object(settings.chat_images_storage_path),
         max_bytes=providers.Object(settings.chat_image_max_bytes),
+    )
+
+    web_image_reference_repository = providers.Factory(
+        WebImageReferenceRepository,
+        session_factory=db.provided.session,
+        async_session_factory=db.provided.async_session,
+    )
+
+    web_image_service = providers.Singleton(
+        WebImageService,
+        repository=web_image_reference_repository,
+        connect_timeout_seconds=providers.Object(
+            settings.web_image_fetch_connect_timeout_seconds
+        ),
+        read_timeout_seconds=providers.Object(settings.web_image_fetch_read_timeout_seconds),
+        max_redirects=providers.Object(settings.web_image_fetch_max_redirects),
+        max_bytes=providers.Object(settings.web_image_fetch_max_bytes),
+        max_pixels=providers.Object(settings.web_image_fetch_max_pixels),
+        metrics=providers.Object(rich_image_metrics_singleton),
     )
 
     user_memory_repository = providers.Factory(

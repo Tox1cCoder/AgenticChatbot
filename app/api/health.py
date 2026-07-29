@@ -20,6 +20,8 @@ from app.observability.model_usage import (
 from app.observability.model_usage import (
     model_usage_metrics as model_usage_metrics_singleton,
 )
+from app.observability.rich_images import RichImageMetrics
+from app.observability.rich_images import rich_image_metrics as rich_image_metrics_singleton
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +59,12 @@ def create_health_router(
     metrics: ConversationCompactionMetrics | None = None,
     model_usage_service: ModelUsageHealthService | None = None,
     model_usage_metrics: ModelUsageMetrics | None = None,
+    rich_image_metrics: RichImageMetrics | None = None,
 ) -> APIRouter:
     router = APIRouter(tags=["health"])
     selected_metrics = metrics or conversation_compaction_metrics
     selected_usage_metrics = model_usage_metrics or model_usage_metrics_singleton
+    selected_rich_image_metrics = rich_image_metrics or rich_image_metrics_singleton
 
     @router.get("/health/conversation-compaction")
     def conversation_compaction_health():
@@ -101,6 +105,13 @@ def create_health_router(
             )
         return Response(
             content=selected_usage_metrics.render(),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
+
+    @router.get("/metrics/rich-images")
+    def rich_image_metrics_endpoint():
+        return Response(
+            content=selected_rich_image_metrics.render(),
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
 

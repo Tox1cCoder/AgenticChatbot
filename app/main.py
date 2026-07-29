@@ -31,6 +31,7 @@ from app.api import (
     task_plans_router,
     tool_result_blobs_router,
     users_router,
+    web_images_router,
     widgets_router,
 )
 from app.core.build_info import resolve_build_info
@@ -341,6 +342,7 @@ def create_app() -> FastAPI:
     app.include_router(device_runtime_router)
     app.include_router(tool_result_blobs_router)
     app.include_router(chat_images_router)
+    app.include_router(web_images_router)
     app.include_router(widgets_router)
 
     # Initialize and register event listeners
