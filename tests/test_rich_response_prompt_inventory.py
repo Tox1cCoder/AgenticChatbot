@@ -92,6 +92,18 @@ def test_build_rich_response_guidance_includes_suffix_and_inventory():
     assert "image:tool:c1:0" in block
 
 
+def test_image_guidance_assigns_visible_caption_to_renderer():
+    block = build_rich_response_guidance(
+        candidates=[_image_candidate("image:tool:c1:0")],
+        enabled=True,
+        capability=True,
+    )
+
+    assert "Do not write a Markdown caption" in block
+    assert "caption as normal markdown" not in block
+    assert "add a useful caption" not in block
+
+
 def test_build_rich_response_guidance_omits_base64_data():
     candidate = _image_candidate("image:doc:1")
     candidate["payload"] = {"data": "QUJDRA==", "mime_type": "image/png"}

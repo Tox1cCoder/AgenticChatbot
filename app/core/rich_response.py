@@ -54,6 +54,16 @@ ALLOWED_IMAGE_MIME_TYPES: frozenset[str] = frozenset(
 #: to ``https`` via a separate policy.
 ALLOWED_URL_SCHEMES: frozenset[str] = frozenset({"https", "http"})
 
+#: Same-origin authenticated image routes accepted by the public image
+#: contract.  The ``/api`` forms are kept for deployments that mount the
+#: application behind an API prefix.
+PROTECTED_IMAGE_URL_PREFIXES: tuple[str, ...] = (
+    "/chat-images/",
+    "/api/chat-images/",
+    "/web-images/",
+    "/api/web-images/",
+)
+
 
 _ITEM_ID_PATTERN = re.compile(r"^[A-Za-z0-9_\-.:]+$")
 
@@ -98,12 +108,25 @@ def _validate_url_scheme(url: str | None) -> None:
         raise ValueError(f"unsupported url scheme {scheme!r}")
 
 
+def _validate_image_url(url: str | None) -> None:
+    if url is None:
+        return
+    if url.startswith(PROTECTED_IMAGE_URL_PREFIXES):
+        return
+    if url.startswith("/"):
+        raise ValueError(f"unsupported protected image url: {url!r}")
+    _validate_url_scheme(url)
+
+
 class ImagePayload(PublicPayload):
     url: str | None = None
     data: str | None = None
     mime_type: str
     source_url: str | None = None
     description: str | None = None
+    width: int | None = Field(default=None, ge=1)
+    height: int | None = Field(default=None, ge=1)
+    caption: str | None = Field(default=None, max_length=500)
 
     @model_validator(mode="after")
     def _has_exactly_one_source(self) -> ImagePayload:
@@ -114,7 +137,7 @@ class ImagePayload(PublicPayload):
                 f"unsupported image mime_type {self.mime_type!r}; allowed: "
                 f"{sorted(ALLOWED_IMAGE_MIME_TYPES)}"
             )
-        _validate_url_scheme(self.url)
+        _validate_image_url(self.url)
         _validate_url_scheme(self.source_url)
         return self
 
@@ -574,8 +597,8 @@ _INVENTORY_FOOTER = (
     "To display an item, copy its `<!--rich:...-->` marker (shown for that item) onto\n"
     "its own line, keeping the `rich:` prefix exactly — do not shorten it to\n"
     "`<!--<id>-->`. Use only items that materially support the answer. For an image,\n"
-    "write a concise caption as normal markdown immediately after the marker. Do not\n"
-    "invent item IDs."
+    "do not write a Markdown caption after the marker; the renderer owns the single\n"
+    "structured figure footer. Do not invent item IDs."
 )
 
 

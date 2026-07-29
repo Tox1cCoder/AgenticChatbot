@@ -8,8 +8,9 @@ _PROMPT_TOKEN_COUNTER = TokenCounter()
 
 INLINE_RICH_RESPONSE_SUFFIX = (
     "Use `<!--rich:<id>-->` on its own line only for an available rich item that improves\n"
-    "the answer. Never invent an ID. For selected images, add a useful caption in\n"
-    "ordinary markdown after the marker. Created live widgets must be placed with their\n"
+    "the answer. Never invent an ID. Do not write a Markdown caption after an image\n"
+    "marker; the renderer owns the single structured figure footer. Created live widgets must be placed\n"
+    "with their\n"
     "available marker in the answer. Do not tell the user a widget is inline unless its\n"
     "marker appears in the response. Do not mention hidden candidates."
 )

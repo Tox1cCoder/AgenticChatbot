@@ -115,6 +115,41 @@ def _make_image(id_: str, url: str = "https://img.test/a.png") -> ImageRichItem:
     )
 
 
+def test_image_payload_accepts_display_metadata_and_protected_web_reference():
+    image = ImageRichItem(
+        id="image:web:1",
+        type=RichItemType.image,
+        display_policy=RichDisplayPolicy.inline_only,
+        alt_text="A red panda in a tree",
+        payload={
+            "url": "/web-images/55d170b5-b0f0-44fc-9155-af8af484513d",
+            "mime_type": "image/jpeg",
+            "source_url": "https://publisher.example/story",
+            "width": 640,
+            "height": 360,
+            "caption": "Publisher-supplied figure caption",
+        },
+    )
+
+    assert image.payload.width == 640
+    assert image.payload.height == 360
+    assert image.payload.caption == "Publisher-supplied figure caption"
+
+
+def test_image_payload_accepts_existing_api_protected_route_forms():
+    for url in (
+        "/chat-images/55d170b5-b0f0-44fc-9155-af8af484513d",
+        "/api/chat-images/55d170b5-b0f0-44fc-9155-af8af484513d",
+        "/api/web-images/55d170b5-b0f0-44fc-9155-af8af484513d",
+    ):
+        assert _make_image("image:web:1", url=url).payload.url == url
+
+
+def test_image_payload_rejects_unknown_relative_url():
+    with pytest.raises(ValidationError, match="protected image url"):
+        _make_image("image:web:1", url="/proxy?url=https://internal.example")
+
+
 def _make_widget(id_: str = "widget:w-1") -> LiveWidgetRichItem:
     return LiveWidgetRichItem(
         id=id_,
