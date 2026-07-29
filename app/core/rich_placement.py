@@ -375,6 +375,62 @@ def _image_placement_entries(metadata: dict[str, Any]) -> list[tuple[str, str, s
     return entries
 
 
+def _image_anchor_entries(metadata: dict[str, Any]) -> list[ImageAnchorEntry]:
+    """Map turn-scoped image candidates to anchoring entries.
+
+    Origin decides fallback eligibility: a deliberate image search may anchor
+    without a keyword match, a source-bound web-search image may not, and a
+    query-level image is never anchored because it carries no page provenance.
+    """
+    image_types = {RichItemType.image.value, RichItemType.image_group.value}
+    entries: list[ImageAnchorEntry] = []
+    for candidate in metadata.get("_rich_item_candidates") or []:
+        if not isinstance(candidate, dict) or candidate.get("type") not in image_types:
+            continue
+        item_id = candidate.get("id")
+        if not isinstance(item_id, str) or not item_id:
+            continue
+        provenance = candidate.get("provenance")
+        provenance = provenance if isinstance(provenance, dict) else {}
+        query = str(provenance.get("query") or "").strip()
+        if candidate.get("source") == "image_search":
+            origin, anchorable = "image_search", True
+        elif provenance.get("query_level"):
+            origin, anchorable = "web_search_query_level", False
+        else:
+            origin, anchorable = "web_search_source_bound", bool(query)
+        entries.append(
+            ImageAnchorEntry(
+                item_id=item_id, query=query, origin=origin, anchorable=anchorable
+            )
+        )
+    return entries
+
+
+def _record_anchor_outcomes(metadata: dict[str, Any], outcomes: dict[str, str]) -> None:
+    """Record anchor outcomes. Never raises: telemetry must not fail an answer."""
+    if not outcomes:
+        return
+    try:
+        from app.observability.rich_images import rich_image_metrics
+
+        providers = {}
+        for candidate in metadata.get("_rich_item_candidates") or []:
+            if isinstance(candidate, dict) and isinstance(candidate.get("id"), str):
+                provenance = candidate.get("provenance")
+                providers[candidate["id"]] = (
+                    str(provenance.get("provider") or "other")
+                    if isinstance(provenance, dict)
+                    else "other"
+                )
+        for item_id, outcome in outcomes.items():
+            rich_image_metrics.record_anchor(
+                provider=providers.get(item_id, "other"), outcome=outcome
+            )
+    except Exception:  # noqa: BLE001  # telemetry is best-effort by contract
+        return
+
+
 def finalize_article_content(response: Any, content: str) -> str:
     """Apply article-style auto-placement to the final assistant markdown.
 
@@ -395,20 +451,32 @@ def finalize_article_content(response: Any, content: str) -> str:
         return content
 
     items = _widget_placement_entries(metadata, getattr(response, "tool_artifacts", None))
-    items.extend(_image_placement_entries(metadata))
-    if not items:
+    query_anchored = bool(getattr(settings, "rich_query_anchored_images_enabled", False))
+    anchor_entries = _image_anchor_entries(metadata) if query_anchored else []
+    if not query_anchored:
+        items.extend(_image_placement_entries(metadata))
+    if not items and not anchor_entries:
         return content
 
     # Repair markers the model authored without the ``rich:`` prefix first, so
     # the now-canonical marker is recognized as a reference (the item renders
     # inline) and auto-placement does not place a second copy of it.
-    repaired = _repair_unprefixed_markers(content, {entry[0] for entry in items})
+    known_ids = {entry[0] for entry in items} | {e.item_id for e in anchor_entries}
+    repaired = _repair_unprefixed_markers(content, known_ids)
     new_content, _placed = auto_place_rich_items(
         repaired,
         items=items,
         max_images=settings.rich_auto_place_max_images,
         min_score=settings.rich_auto_place_min_score,
     )
+    if anchor_entries:
+        new_content, outcomes = anchor_image_items_by_query(
+            new_content,
+            entries=anchor_entries,
+            min_score=float(getattr(settings, "rich_image_anchor_min_score", 0.34)),
+            max_images=int(getattr(settings, "rich_auto_place_max_images", 2)),
+        )
+        _record_anchor_outcomes(metadata, outcomes)
     if new_content == content:
         return content
 

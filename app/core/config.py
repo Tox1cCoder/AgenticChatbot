@@ -1610,8 +1610,11 @@ class Settings(BaseSettings):
         ),
     )
     rich_auto_place_max_images: int = Field(
-        default=3,
-        description="Maximum number of image markers auto-placement may insert per answer.",
+        default=2,
+        description=(
+            "Maximum image items per answer. Governs both the model-facing "
+            "inventory (a group counts as one) and the anchoring path."
+        ),
     )
     rich_auto_place_min_score: float = Field(
         default=0.25,

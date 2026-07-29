@@ -512,3 +512,71 @@ def test_invalid_item_id_is_never_inserted():
     )
     assert content == BODY
     assert outcomes["bad id!"] == "unplaced"
+
+
+# ---------------------------------------------------------------------------
+# Wiring: finalize_article_content branches to query anchoring behind the
+# rollback flag. Off means the legacy description-anchored image path runs
+# unchanged; on means image items move to anchor_image_items_by_query while
+# widgets keep flowing through auto_place_rich_items untouched.
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_uses_query_anchoring_when_enabled(monkeypatch):
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
+    monkeypatch.setattr(settings, "rich_query_anchored_images_enabled", True)
+    candidate = {
+        "id": "imagegroup:tool:c1",
+        "type": "image_group",
+        "source": "image_search",
+        "payload": {"items": []},
+        "provenance": {
+            "query": "Apple Park Cupertino headquarters",
+            "provider": "brave_image_search",
+        },
+    }
+    response = _make_response(BODY, candidates=[candidate])
+    content = finalize_article_content(response, BODY)
+    assert "<!--rich:imagegroup:tool:c1-->" in content
+    assert response.message.content == content
+
+
+def test_finalize_never_anchors_when_the_flag_is_off(monkeypatch):
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
+    monkeypatch.setattr(settings, "rich_query_anchored_images_enabled", False)
+    candidate = {
+        "id": "imagegroup:tool:c1",
+        "type": "image_group",
+        "source": "image_search",
+        "payload": {"items": []},
+        "provenance": {"query": "Apple Park Cupertino headquarters"},
+    }
+    response = _make_response(BODY, candidates=[candidate])
+    assert "imagegroup" not in finalize_article_content(response, BODY)
+
+
+def test_widgets_still_auto_place_when_query_anchoring_is_on(monkeypatch):
+    import json
+
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
+    monkeypatch.setattr(settings, "rich_query_anchored_images_enabled", True)
+    artifact = {
+        "tool": "widget_create",
+        "status": "success",
+        "output": json.dumps(
+            {
+                "widget_id": "w1",
+                "session_id": "s1",
+                "widget_type": "chart",
+                "title": "Apple Park cost breakdown",
+                "status": "active",
+                "version": 1,
+            }
+        ),
+    }
+    content = "Apple Park in Cupertino cost about five billion dollars to build."
+    response = _make_response(content, artifacts=[artifact])
+    assert "<!--rich:widget:w1-->" in finalize_article_content(response, content)

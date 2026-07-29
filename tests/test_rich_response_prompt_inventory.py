@@ -14,6 +14,7 @@ from app.core.config import settings
 from app.core.rich_response import (
     RichDisplayPolicy,
     RichItemType,
+    build_rich_item_inventory_block,
 )
 
 
@@ -152,3 +153,56 @@ def test_media_guidance_requires_disambiguated_image_query():
     assert "brave_image_search" in text
     assert "disambiguat" in text
     assert "same tool block" in text or "parallel" in text
+
+
+# ---------------------------------------------------------------------------
+# Inventory image cap: an image_group counts as one image entry against the
+# per-answer image cap, same as a single image item.
+# ---------------------------------------------------------------------------
+
+
+def test_inventory_caps_image_entries_and_counts_a_group_as_one():
+    items = [
+        {"id": "widget:w1", "type": "live_widget", "title": "W"},
+        {"id": "imagegroup:tool:c1", "type": "image_group", "title": "G1"},
+        {"id": "imagegroup:tool:c2", "type": "image_group", "title": "G2"},
+        {"id": "image:tool:c3:0", "type": "image", "title": "I3"},
+    ]
+    block = build_rich_item_inventory_block(
+        items, max_items=12, max_chars=4000, summary_chars=180, image_max_items=2
+    )
+    assert "widget:w1" in block
+    assert block.count("image_group") + block.count("| image |") == 2
+    assert "image:tool:c3:0" not in block
+
+
+# ---------------------------------------------------------------------------
+# Presentation counter: record_presentation was defined in an earlier task
+# with no caller. It must be wired where items actually enter the model-facing
+# inventory, counting once per candidate offered (before item/char trimming).
+# ---------------------------------------------------------------------------
+
+
+def test_presentation_counter_records_each_presented_image(monkeypatch):
+    from app.ai import prompts
+
+    recorded = []
+
+    class _Metrics:
+        def record_presentation(self, *, provider, count):
+            recorded.append((provider, count))
+
+    monkeypatch.setattr(prompts, "rich_image_metrics", _Metrics(), raising=False)
+    prompts.build_rich_response_guidance(
+        candidates=[
+            {
+                "id": "imagegroup:tool:c1",
+                "type": "image_group",
+                "title": "G",
+                "provenance": {"provider": "brave_image_search"},
+            }
+        ],
+        enabled=True,
+        capability=True,
+    )
+    assert recorded == [("brave_image_search", 1)]
