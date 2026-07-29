@@ -80,6 +80,42 @@ def _guess_mime_from_url(url: str) -> str:
     return "image/png"
 
 
+#: Unambiguous non-content markers in an image path. Kept as a module constant
+#: rather than a setting so no unvalidated pattern arrives through config.
+#: "logo" is deliberately absent — "what does the new X logo look like" is a
+#: legitimate visual query.
+_JUNK_IMAGE_URL_MARKERS: tuple[str, ...] = (
+    "favicon",
+    "sprite",
+    "spacer",
+    "1x1",
+    "pixel.gif",
+    "avatar",
+)
+
+
+def image_aspect_ratio_ok(width: Any, height: Any, *, minimum: float, maximum: float) -> bool:
+    """Return False only when both dimensions are known and the ratio is extreme.
+
+    Unknown or nonsense dimensions are not a rejection signal. Tavily supplies no
+    dimensions at all, so this gate applies in practice only to Brave results.
+    """
+    if not isinstance(width, int) or not isinstance(height, int):
+        return True
+    if width <= 0 or height <= 0:
+        return True
+    ratio = width / height
+    return minimum <= ratio <= maximum
+
+
+def is_junk_image_url(url: str) -> bool:
+    """Return True when the URL path names a known non-content asset."""
+    path = urlsplit(str(url or "")).path.lower()
+    if not path:
+        return False
+    return any(marker in path for marker in _JUNK_IMAGE_URL_MARKERS)
+
+
 def build_image_candidates_from_tool_result(
     result_text: str,
     *,
@@ -161,6 +197,17 @@ def build_image_candidates_from_tool_result(
                 continue
             if display_url in seen_display_urls:
                 _reject("rejected_duplicate")
+                continue
+            if is_junk_image_url(display_url):
+                _reject("rejected_junk_url")
+                continue
+            if not image_aspect_ratio_ok(
+                width,
+                height,
+                minimum=float(getattr(settings, "rich_image_min_aspect_ratio", 0.2)),
+                maximum=float(getattr(settings, "rich_image_max_aspect_ratio", 5.0)),
+            ):
+                _reject("rejected_aspect_ratio")
                 continue
             if isinstance(width, int) and width < minimum_width:
                 _reject("rejected_dimensions")

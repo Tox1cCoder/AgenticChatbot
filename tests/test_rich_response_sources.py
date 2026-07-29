@@ -16,6 +16,8 @@ from app.ai.tool_execution import (
     build_live_widget_candidate_from_tool_result,
     build_tool_render_candidate,
     extract_images_from_tool_result,
+    image_aspect_ratio_ok,
+    is_junk_image_url,
 )
 
 # ---------------------------------------------------------------------------
@@ -238,6 +240,71 @@ def test_remote_candidates_reject_insecure_duplicate_and_known_tiny_images(monke
     assert [candidate["payload"]["url"] for candidate in candidates] == [
         "https://img.test/good.jpg"
     ]
+
+
+@pytest.mark.parametrize(
+    "width,height,expected",
+    [
+        (2000, 200, False),   # wide hero strip, ratio 10.0
+        (300, 1600, False),   # ratio 0.1875, strictly below the minimum
+        (300, 1500, True),    # lower boundary (ratio 0.2) is accepted
+        (1000, 200, True),    # upper boundary (ratio 5.0) is accepted
+        (1200, 800, True),    # ordinary photo
+        (800, 2600, True),    # tall infographic, ratio ~0.31
+        (2200, 500, True),    # panorama, ratio 4.4
+        (None, 800, True),    # unknown dimensions never reject
+        (1200, None, True),
+        (0, 0, True),         # nonsense dimensions are not a rejection signal
+    ],
+)
+def test_aspect_ratio_gate(width, height, expected):
+    assert image_aspect_ratio_ok(width, height, minimum=0.2, maximum=5.0) is expected
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://e.com/favicon.ico",
+        "https://e.com/assets/sprite-v2.png",
+        "https://e.com/img/spacer.gif",
+        "https://e.com/t/1x1.png",
+        "https://e.com/pixel.gif",
+        "https://e.com/users/avatar/12.jpg",
+    ],
+)
+def test_junk_urls_are_rejected(url):
+    assert is_junk_image_url(url) is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://e.com/new-logo-reveal.jpg",
+        "https://e.com/logos/brand.png",
+        "https://e.com/photos/apple-park.jpg",
+    ],
+)
+def test_legitimate_urls_including_logos_are_accepted(url):
+    assert is_junk_image_url(url) is False
+
+
+def test_wide_strip_candidate_is_rejected_end_to_end():
+    payload = json.dumps(
+        {
+            "provider": "brave_image_search",
+            "query": "apple park",
+            "images": [
+                {"url": "https://e.com/strip.jpg", "width": 2000, "height": 200},
+                {"url": "https://e.com/ok.jpg", "width": 1200, "height": 800},
+            ],
+        }
+    )
+    candidates = build_image_candidates_from_tool_result(
+        payload, tool_call_id="c1", tool_name="brave_image_search"
+    )
+    urls = json.dumps(candidates)
+    assert "strip.jpg" not in urls
+    assert "ok.jpg" in urls
 
 
 def test_remote_candidates_obey_configured_candidate_cap(monkeypatch):

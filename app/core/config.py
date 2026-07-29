@@ -1549,6 +1549,24 @@ class Settings(BaseSettings):
         default=180,
         description="Reject provider images with a known height below this value.",
     )
+    rich_image_min_aspect_ratio: float = Field(
+        default=0.2,
+        gt=0,
+        description=(
+            "Reject provider images narrower than this width/height ratio when both "
+            "dimensions are known. Deliberately loose: a tight photo-shaped band "
+            "rejects tall infographics, screenshots, and flowcharts."
+        ),
+    )
+    rich_image_max_aspect_ratio: float = Field(
+        default=5.0,
+        gt=0,
+        description=(
+            "Reject provider images wider than this width/height ratio when both "
+            "dimensions are known. Catches hero strips the minimum-dimension "
+            "gates miss; still admits panoramas and wide charts."
+        ),
+    )
     web_image_fetch_connect_timeout_seconds: float = Field(
         default=2.0,
         gt=0,
