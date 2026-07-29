@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from app.ui.rich_response import (
+    build_inline_image_group_html,
     build_inline_image_html,
     build_rich_response_view,
 )
@@ -90,6 +91,60 @@ def test_image_loading_has_no_unavailable_fallback_and_removes_failed_figure():
     assert "<template>" not in out
     assert "replaceChildren" not in out
     assert "this.closest('figure').remove()" in out
+
+
+# ---------------------------------------------------------------------------
+# Inline image group HTML (grouped image_group cells render as one figure)
+# ---------------------------------------------------------------------------
+
+
+def _cells(n=3):
+    return [
+        {
+            "url": f"/web-images/{i}",
+            "mime_type": "image/jpeg",
+            "source_url": f"https://e{i}.com/page",
+            "description": f"cell {i}",
+        }
+        for i in range(n)
+    ]
+
+
+def test_group_renders_one_figure_per_cell_in_a_row():
+    html = build_inline_image_group_html(_cells(3), alt_text="Images of red panda")
+    assert html.count("<img") == 3
+    assert "display:flex" in html or "grid-template-columns" in html
+
+
+def test_each_cell_links_its_own_source():
+    html = build_inline_image_group_html(_cells(2), alt_text="x")
+    assert "https://e0.com/page" in html
+    assert "https://e1.com/page" in html
+
+
+def test_single_cell_group_renders_as_one_image():
+    html = build_inline_image_group_html(_cells(1), alt_text="x")
+    assert html.count("<img") == 1
+
+
+def test_cell_failure_replaces_only_that_cell():
+    html = build_inline_image_group_html(_cells(2), alt_text="x")
+    assert 'data-role="cell-fallback"' in html
+    assert "onerror" in html
+
+
+def test_group_escapes_hostile_metadata():
+    hostile = [
+        {"url": '/web-images/1" onload="alert(1)', "description": "<script>x</script>"},
+        {"url": "/web-images/2"},
+    ]
+    html = build_inline_image_group_html(hostile, alt_text='"><script>')
+    assert "<script>" not in html
+    assert 'onload="alert(1)"' not in html
+
+
+def test_empty_cells_render_nothing():
+    assert build_inline_image_group_html([], alt_text="x") == ""
 
 
 metadata_with_selected_image = {

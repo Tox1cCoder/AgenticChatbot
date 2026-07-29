@@ -98,6 +98,73 @@ def build_inline_image_html(
     )
 
 
+#: Maximum cells rendered in one inline group row. Beyond this the row stops
+#: being readable at chat width.
+INLINE_IMAGE_GROUP_MAX_CELLS: int = 3
+
+
+def build_inline_image_group_html(
+    cells: list[dict[str, Any]],
+    *,
+    alt_text: str | None = None,
+    max_width_px: int = INLINE_IMAGE_MAX_WIDTH_PX,
+) -> str:
+    """Return one responsive figure holding a row of source-linked image cells.
+
+    A single-cell group renders as one ordinary image. A cell whose image fails
+    to load is swapped for a neutral in-place block, so sibling cells and the
+    surrounding prose are unaffected.
+    """
+    usable = [cell for cell in (cells or []) if isinstance(cell, dict) and cell.get("url")]
+    if not usable:
+        return ""
+    usable = usable[:INLINE_IMAGE_GROUP_MAX_CELLS]
+    if len(usable) == 1:
+        cell = usable[0]
+        return build_inline_image_html(
+            str(cell.get("url") or ""),
+            alt_text=str(cell.get("description") or alt_text or ""),
+            source_url=cell.get("source_url"),
+            width=cell.get("width"),
+            height=cell.get("height"),
+            max_width_px=max_width_px,
+        )
+
+    group_alt = _html.escape(alt_text or "", quote=True)
+    onerror = (
+        "const c=this.closest('[data-role=cell]');"
+        "c.querySelector('[data-role=cell-fallback]').style.display='block';"
+        "this.remove()"
+    )
+    rendered: list[str] = []
+    for cell in usable:
+        src = _html.escape(str(cell.get("url") or ""), quote=True)
+        cell_alt = _html.escape(str(cell.get("description") or alt_text or ""), quote=True)
+        link = _source_link_html(cell.get("source_url"))
+        fallback = (
+            '<div data-role="cell-fallback" style="display:none;padding:12px;'
+            "border-radius:8px;background:#f1f5f9;color:#64748b;font-size:12px;"
+            'text-align:center;">Visual unavailable</div>'
+        )
+        caption = (
+            f'<div style="color:#64748b;font-size:12px;margin-top:4px;">{link}</div>'
+            if link
+            else ""
+        )
+        rendered.append(
+            f'<div data-role="cell" style="flex:1 1 0;min-width:0;">'
+            f'<img src="{src}" alt="{cell_alt}" class="img-thumb" loading="lazy" '
+            f'style="width:100%;height:auto;border-radius:8px;cursor:zoom-in;" '
+            f'onerror="{onerror}" />{fallback}{caption}</div>'
+        )
+    row = "".join(rendered)
+    return (
+        f'<figure data-state="loaded" aria-label="{group_alt}" '
+        f'style="margin:8px 0;display:flex;gap:8px;align-items:flex-start;'
+        f'width:min({int(max_width_px) * 2}px, 100%);">{row}</figure>'
+    )
+
+
 def _source_link_html(source_url: str | None) -> str:
     if not isinstance(source_url, str) or not source_url.strip():
         return ""
@@ -342,9 +409,11 @@ class RichStreamState:
 
 # Re-export the parser for clients that want raw reference IDs.
 __all__ = [
+    "INLINE_IMAGE_GROUP_MAX_CELLS",
     "RichResponseView",
     "RichSegment",
     "RichStreamState",
+    "build_inline_image_group_html",
     "build_inline_image_html",
     "build_rich_response_view",
     "parse_inline_rich_references",
