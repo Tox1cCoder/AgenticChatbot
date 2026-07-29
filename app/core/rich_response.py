@@ -75,6 +75,7 @@ _ITEM_ID_PATTERN = re.compile(r"^[A-Za-z0-9_\-.:]+$")
 
 class RichItemType(str, Enum):
     image = "image"
+    image_group = "image_group"
     live_widget = "live_widget"
     tool_render = "tool_render"
     canvas_artifact = "canvas_artifact"
@@ -140,6 +141,36 @@ class ImagePayload(PublicPayload):
         _validate_image_url(self.url)
         _validate_url_scheme(self.source_url)
         return self
+
+
+class ImageGroupItem(PublicPayload):
+    """One cell of an image group. Cells are always remote or protected URLs;
+    inline base64 cells are not supported because a group is only ever built
+    from provider search results."""
+
+    url: str
+    mime_type: str
+    source_url: str | None = None
+    description: str | None = None
+    width: int | None = Field(default=None, ge=1)
+    height: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _validate_cell(self) -> ImageGroupItem:
+        if not self.url:
+            raise ValueError("image group cell requires a url")
+        if self.mime_type not in ALLOWED_IMAGE_MIME_TYPES:
+            raise ValueError(
+                f"unsupported image mime_type {self.mime_type!r}; allowed: "
+                f"{sorted(ALLOWED_IMAGE_MIME_TYPES)}"
+            )
+        _validate_image_url(self.url)
+        _validate_url_scheme(self.source_url)
+        return self
+
+
+class ImageGroupPayload(PublicPayload):
+    items: list[ImageGroupItem] = Field(min_length=2)
 
 
 class LiveWidgetPayload(PublicPayload):
@@ -217,6 +248,13 @@ class ImageRichItem(RichItemBase):
     payload: ImagePayload
 
 
+class ImageGroupRichItem(RichItemBase):
+    type: Literal[RichItemType.image_group]
+    display_policy: Literal[RichDisplayPolicy.inline_only] = RichDisplayPolicy.inline_only
+    alt_text: str
+    payload: ImageGroupPayload
+
+
 class LiveWidgetRichItem(RichItemBase):
     type: Literal[RichItemType.live_widget]
     payload: LiveWidgetPayload
@@ -244,6 +282,7 @@ class ResourceLinkRichItem(RichItemBase):
 
 RichItem = Annotated[
     ImageRichItem
+    | ImageGroupRichItem
     | LiveWidgetRichItem
     | ToolRenderRichItem
     | CanvasRichItem
@@ -727,6 +766,9 @@ __all__ = [
     "GENERIC_IMAGE_ALT_TEXT",
     "CitationPayload",
     "CitationRichItem",
+    "ImageGroupItem",
+    "ImageGroupPayload",
+    "ImageGroupRichItem",
     "ImagePayload",
     "ImageRichItem",
     "LiveWidgetPayload",

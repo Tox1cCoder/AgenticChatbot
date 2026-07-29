@@ -19,6 +19,7 @@ from app.core.rich_response import (
     remove_inline_rich_reference,
     select_append_fallback_items,
     select_transient_upsert_items,
+    validate_public_rich_item,
     validate_rich_references,
 )
 
@@ -394,3 +395,56 @@ def test_image_payload_rejects_invalid_url_scheme():
             alt_text="Bad",
             payload={"url": "ftp://img.test/x.png", "mime_type": "image/png"},
         )
+
+
+# ---------------------------------------------------------------------------
+# image_group schema
+# ---------------------------------------------------------------------------
+
+
+def _group(cells):
+    return {
+        "id": "imagegroup:tool:call_1",
+        "type": "image_group",
+        "source": "image_search",
+        "display_policy": "inline_only",
+        "alt_text": "Photos of a red panda",
+        "payload": {"items": cells},
+        "provenance": {"provider": "brave_image_search", "query": "red panda photo"},
+    }
+
+
+def _cell(url="https://e.com/a.jpg"):
+    return {"url": url, "mime_type": "image/jpeg"}
+
+
+def test_image_group_validates_with_two_cells():
+    item = validate_public_rich_item(_group([_cell(), _cell("https://e.com/b.jpg")]))
+    assert item.type.value == "image_group"
+    assert len(item.payload.items) == 2
+
+
+def test_image_group_rejects_fewer_than_two_cells():
+    with pytest.raises(ValidationError):
+        validate_public_rich_item(_group([_cell()]))
+
+
+def test_image_group_rejects_unsupported_mime():
+    with pytest.raises(ValidationError):
+        validate_public_rich_item(
+            _group([{"url": "https://e.com/a.svg", "mime_type": "image/svg+xml"}, _cell()])
+        )
+
+
+def test_image_group_accepts_protected_relative_cell_url():
+    item = validate_public_rich_item(
+        _group([{"url": "/web-images/abc", "mime_type": "image/jpeg"}, _cell()])
+    )
+    assert item.payload.items[0].url == "/web-images/abc"
+
+
+def test_image_group_rejects_unknown_payload_field():
+    bad = _group([_cell(), _cell("https://e.com/b.jpg")])
+    bad["payload"]["carousel"] = True
+    with pytest.raises(ValidationError):
+        validate_public_rich_item(bad)
