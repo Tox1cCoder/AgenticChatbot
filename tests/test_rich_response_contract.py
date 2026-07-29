@@ -397,6 +397,25 @@ def test_image_payload_rejects_invalid_url_scheme():
         )
 
 
+def test_shared_mime_and_url_validation_helper_is_reused_by_both_models():
+    """ImagePayload._has_exactly_one_source and ImageGroupItem._validate_cell
+    duplicated the mime-type check and the two URL validation calls
+    line-for-line. Both must delegate to one shared helper instead."""
+    from app.core.rich_response import _validate_image_mime_and_urls
+
+    # Valid input never raises.
+    _validate_image_mime_and_urls("image/jpeg", "https://img.test/a.jpg", "https://img.test/src")
+
+    with pytest.raises(ValueError, match="unsupported image mime_type"):
+        _validate_image_mime_and_urls("image/svg+xml", "https://img.test/a.svg", None)
+
+    with pytest.raises(ValueError, match="unsupported url scheme"):
+        _validate_image_mime_and_urls("image/png", "ftp://img.test/a.png", None)
+
+    with pytest.raises(ValueError, match="unsupported url scheme"):
+        _validate_image_mime_and_urls("image/png", "https://img.test/a.png", "ftp://img.test/src")
+
+
 # ---------------------------------------------------------------------------
 # image_group schema
 # ---------------------------------------------------------------------------

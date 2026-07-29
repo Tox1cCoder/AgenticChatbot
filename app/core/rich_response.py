@@ -119,6 +119,23 @@ def _validate_image_url(url: str | None) -> None:
     _validate_url_scheme(url)
 
 
+def _validate_image_mime_and_urls(
+    mime_type: str, url: str | None, source_url: str | None
+) -> None:
+    """Shared mime-type/URL validation for ``ImagePayload`` and
+    ``ImageGroupItem``. Both models accept the same image mime categories and
+    validate ``url``/``source_url`` the same way; keep that logic in one
+    place instead of duplicating it per model.
+    """
+    if mime_type not in ALLOWED_IMAGE_MIME_TYPES:
+        raise ValueError(
+            f"unsupported image mime_type {mime_type!r}; allowed: "
+            f"{sorted(ALLOWED_IMAGE_MIME_TYPES)}"
+        )
+    _validate_image_url(url)
+    _validate_url_scheme(source_url)
+
+
 class ImagePayload(PublicPayload):
     url: str | None = None
     data: str | None = None
@@ -133,13 +150,7 @@ class ImagePayload(PublicPayload):
     def _has_exactly_one_source(self) -> ImagePayload:
         if (self.url is None) == (self.data is None):
             raise ValueError("image payload requires exactly one of url or data")
-        if self.mime_type not in ALLOWED_IMAGE_MIME_TYPES:
-            raise ValueError(
-                f"unsupported image mime_type {self.mime_type!r}; allowed: "
-                f"{sorted(ALLOWED_IMAGE_MIME_TYPES)}"
-            )
-        _validate_image_url(self.url)
-        _validate_url_scheme(self.source_url)
+        _validate_image_mime_and_urls(self.mime_type, self.url, self.source_url)
         return self
 
 
@@ -159,13 +170,7 @@ class ImageGroupItem(PublicPayload):
     def _validate_cell(self) -> ImageGroupItem:
         if not self.url:
             raise ValueError("image group cell requires a url")
-        if self.mime_type not in ALLOWED_IMAGE_MIME_TYPES:
-            raise ValueError(
-                f"unsupported image mime_type {self.mime_type!r}; allowed: "
-                f"{sorted(ALLOWED_IMAGE_MIME_TYPES)}"
-            )
-        _validate_image_url(self.url)
-        _validate_url_scheme(self.source_url)
+        _validate_image_mime_and_urls(self.mime_type, self.url, self.source_url)
         return self
 
 
