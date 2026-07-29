@@ -1545,6 +1545,32 @@ class Settings(BaseSettings):
         default=180,
         description="Reject provider images with a known height below this value.",
     )
+    web_image_fetch_connect_timeout_seconds: float = Field(
+        default=2.0,
+        gt=0,
+        description="Connect timeout for render-time selected web-image retrieval.",
+    )
+    web_image_fetch_read_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description="Read timeout for render-time selected web-image retrieval.",
+    )
+    web_image_fetch_max_redirects: int = Field(
+        default=3,
+        ge=0,
+        le=5,
+        description="Maximum independently validated redirects for selected web images.",
+    )
+    web_image_fetch_max_bytes: int = Field(
+        default=5 * 1024 * 1024,
+        gt=0,
+        description="Maximum response bytes accepted from a selected web-image upstream.",
+    )
+    web_image_fetch_max_pixels: int = Field(
+        default=25_000_000,
+        gt=0,
+        description="Maximum decoded pixel count accepted for a selected web image.",
+    )
     rich_auto_place_enabled: bool = Field(
         default=True,
         description=(
