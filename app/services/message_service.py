@@ -32,6 +32,7 @@ from app.core.response_constants import (
 from app.core.rich_placement import finalize_article_content
 from app.core.rich_response import (
     PROTECTED_IMAGE_URL_PREFIXES,
+    RichItemType,
     remove_inline_rich_reference,
     validate_rich_references,
 )
@@ -40,6 +41,7 @@ from app.interfaces.message_service_interface import IMessageService
 from app.models.enums import MessageRole, PlanLifecycle
 from app.models.hitl_interrupt import HITLInterruptStatus
 from app.models.tool_approval import DecisionType
+from app.observability.rich_images import rich_image_metrics
 from app.repositories.hitl_interrupt import HITLInterruptRepository
 from app.repositories.message import MessageRepository
 from app.repositories.tool_approval import ToolApprovalRepository
@@ -2343,53 +2345,64 @@ class MessageService(IMessageService):
         kept_items: list[dict[str, Any]] = []
         updated_content = content
         for item in updated.get("rich_items") or []:
-            if not isinstance(item, dict) or item.get("type") != "image":
+            if not isinstance(item, dict):
+                kept_items.append(item)
+                continue
+
+            if item.get("type") == RichItemType.image_group.value:
+                payload = item.get("payload")
+                cells = payload.get("items") if isinstance(payload, dict) else None
+                if not isinstance(cells, list):
+                    kept_items.append(item)
+                    continue
+                kept_cells: list[dict[str, Any]] = []
+                for cell in cells:
+                    if not isinstance(cell, dict):
+                        continue
+                    reference_url = await self._register_web_image_url(
+                        cell.get("url"),
+                        expected_mime=cell.get("mime_type"),
+                        provider=self._provider_of(item),
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                    )
+                    if reference_url is None:
+                        continue
+                    cell["url"] = reference_url
+                    kept_cells.append(cell)
+                if not kept_cells:
+                    updated_content = remove_inline_rich_reference(
+                        updated_content, str(item.get("id") or "")
+                    )
+                    continue
+                payload["items"] = kept_cells
+                kept_items.append(item)
+                continue
+
+            if item.get("type") != RichItemType.image.value:
                 kept_items.append(item)
                 continue
             payload = item.get("payload")
             if not isinstance(payload, dict):
                 kept_items.append(item)
                 continue
-            raw_url = payload.get("url")
-            if payload.get("data") or not isinstance(raw_url, str) or not raw_url.strip():
-                kept_items.append(item)
-                continue
-            image_url = raw_url.strip()
-            if image_url.startswith(PROTECTED_IMAGE_URL_PREFIXES):
+            if payload.get("data"):
                 kept_items.append(item)
                 continue
 
-            item_id = str(item.get("id") or "")
-            if urlsplit(image_url).scheme.lower() != "https":
-                logging.warning("Web image reference skipped code=web_image_reference_failed")
-                updated_content = remove_inline_rich_reference(updated_content, item_id)
-                continue
-            provenance = item.get("provenance")
-            provider = (
-                str(provenance.get("provider") or "other")
-                if isinstance(provenance, dict)
-                else "other"
+            reference_url = await self._register_web_image_url(
+                payload.get("url"),
+                expected_mime=payload.get("mime_type"),
+                provider=self._provider_of(item),
+                conversation_id=conversation_id,
+                user_id=user_id,
             )
-            try:
-                reference = await service.register(
-                    conversation_id=conversation_id,
-                    user_id=user_id,
-                    upstream_url=image_url,
-                    expected_mime=payload.get("mime_type"),
-                    provider=provider,
+            if reference_url is None:
+                updated_content = remove_inline_rich_reference(
+                    updated_content, str(item.get("id") or "")
                 )
-                reference_id = (
-                    reference.get("id")
-                    if isinstance(reference, dict)
-                    else getattr(reference, "id", None)
-                )
-                if reference_id is None:
-                    raise ValueError("missing reference id")
-            except Exception:
-                logging.warning("Web image reference skipped code=web_image_reference_failed")
-                updated_content = remove_inline_rich_reference(updated_content, item_id)
                 continue
-            payload["url"] = f"/web-images/{reference_id}"
+            payload["url"] = reference_url
             kept_items.append(item)
 
         updated["rich_items"] = kept_items
@@ -2397,7 +2410,69 @@ class MessageService(IMessageService):
             updated_content,
             kept_items,
         )
+        with contextlib.suppress(Exception):
+            surviving: dict[str, int] = {}
+            for kept in kept_items:
+                if not isinstance(kept, dict):
+                    continue
+                if kept.get("type") not in {
+                    RichItemType.image.value,
+                    RichItemType.image_group.value,
+                }:
+                    continue
+                provider = self._provider_of(kept)
+                surviving[provider] = surviving.get(provider, 0) + 1
+            for provider, count in surviving.items():
+                rich_image_metrics.record_final_selection(provider=provider, count=count)
         return updated_content, updated
+
+    @staticmethod
+    def _provider_of(item: dict[str, Any]) -> str:
+        provenance = item.get("provenance")
+        if isinstance(provenance, dict):
+            return str(provenance.get("provider") or "other")
+        return "other"
+
+    async def _register_web_image_url(
+        self,
+        raw_url: Any,
+        *,
+        expected_mime: Any,
+        provider: str,
+        conversation_id: UUID,
+        user_id: UUID,
+    ) -> str | None:
+        """Return a protected reference URL, or None when it cannot be made.
+
+        Registration is metadata-only and performs no upstream request.
+        """
+        if not isinstance(raw_url, str) or not raw_url.strip():
+            return None
+        image_url = raw_url.strip()
+        if image_url.startswith(PROTECTED_IMAGE_URL_PREFIXES):
+            return image_url
+        if urlsplit(image_url).scheme.lower() != "https":
+            logging.warning("Web image reference skipped code=web_image_reference_failed")
+            return None
+        try:
+            reference = await self.web_image_service.register(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                upstream_url=image_url,
+                expected_mime=expected_mime,
+                provider=provider,
+            )
+            reference_id = (
+                reference.get("id")
+                if isinstance(reference, dict)
+                else getattr(reference, "id", None)
+            )
+            if reference_id is None:
+                raise ValueError("missing reference id")
+        except Exception:
+            logging.warning("Web image reference skipped code=web_image_reference_failed")
+            return None
+        return f"/web-images/{reference_id}"
 
     def _externalize_attachments_for_persist(
         self, message_create_data: MessageCreate, user_id: UUID

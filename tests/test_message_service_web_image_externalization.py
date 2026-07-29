@@ -57,6 +57,27 @@ def _service(web_image_service) -> MessageService:
     return service
 
 
+def _group_metadata() -> dict:
+    return {
+        "rich_items": [
+            {
+                "id": "imagegroup:tool:c1",
+                "type": "image_group",
+                "source": "image_search",
+                "display_policy": "inline_only",
+                "alt_text": "Images of a red panda",
+                "payload": {
+                    "items": [
+                        {"url": "https://img.example/a.jpg", "mime_type": "image/jpeg"},
+                        {"url": "https://img.example/b.jpg", "mime_type": "image/jpeg"},
+                    ]
+                },
+                "provenance": {"provider": "brave_image_search"},
+            }
+        ]
+    }
+
+
 @pytest.mark.asyncio
 async def test_selected_remote_image_becomes_protected_reference_without_fetch():
     image_reference_id = uuid4()
@@ -168,6 +189,96 @@ async def test_missing_optional_service_keeps_backward_compatible_metadata():
 
     assert content == body
     assert externalized == metadata
+
+
+@pytest.mark.asyncio
+async def test_group_cells_each_become_protected_references():
+    web_images = AsyncMock()
+    web_images.register.side_effect = [
+        SimpleNamespace(id=uuid4()),
+        SimpleNamespace(id=uuid4()),
+    ]
+    service = _service(web_images)
+    conversation_id = uuid4()
+    user_id = uuid4()
+    metadata = _group_metadata()
+    content = "Body\n\n<!--rich:imagegroup:tool:c1-->\n"
+
+    new_content, new_metadata = await service._externalize_remote_rich_images(
+        content, metadata, conversation_id, user_id
+    )
+
+    urls = [c["url"] for c in new_metadata["rich_items"][0]["payload"]["items"]]
+    assert all(u.startswith("/web-images/") for u in urls)
+    assert len(set(urls)) == 2
+    assert "<!--rich:imagegroup:tool:c1-->" in new_content
+
+
+@pytest.mark.asyncio
+async def test_one_failing_cell_keeps_the_group_and_its_marker():
+    reference_id = uuid4()
+
+    async def _register(**kwargs):
+        if kwargs["upstream_url"].endswith("b.jpg"):
+            raise RuntimeError("upstream rejected")
+        return SimpleNamespace(id=reference_id)
+
+    web_images = AsyncMock()
+    web_images.register.side_effect = _register
+    service = _service(web_images)
+    content, externalized = await service._externalize_remote_rich_images(
+        "Body\n\n<!--rich:imagegroup:tool:c1-->\n",
+        _group_metadata(),
+        uuid4(),
+        uuid4(),
+    )
+
+    cells = externalized["rich_items"][0]["payload"]["items"]
+    assert [c["url"] for c in cells] == [f"/web-images/{reference_id}"]
+    assert "<!--rich:imagegroup:tool:c1-->" in content
+
+
+@pytest.mark.asyncio
+async def test_group_losing_every_cell_drops_the_item_and_marker():
+    web_images = AsyncMock()
+    web_images.register.side_effect = RuntimeError("upstream rejected")
+    service = _service(web_images)
+    content, externalized = await service._externalize_remote_rich_images(
+        "Body\n\n<!--rich:imagegroup:tool:c1-->\n\nAfter",
+        _group_metadata(),
+        uuid4(),
+        uuid4(),
+    )
+
+    assert externalized["rich_items"] == []
+    assert "<!--rich:imagegroup:tool:c1-->" not in content
+    assert "After" in content
+
+
+@pytest.mark.asyncio
+async def test_final_selection_counter_records_surviving_images(monkeypatch):
+    from app.services import message_service as module
+
+    recorded = []
+
+    class _Metrics:
+        def record_final_selection(self, *, provider, count):
+            recorded.append((provider, count))
+
+    monkeypatch.setattr(module, "rich_image_metrics", _Metrics(), raising=False)
+    web_images = AsyncMock()
+    web_images.register.side_effect = [
+        SimpleNamespace(id=uuid4()),
+        SimpleNamespace(id=uuid4()),
+    ]
+    service = _service(web_images)
+    await service._externalize_remote_rich_images(
+        "Body\n\n<!--rich:imagegroup:tool:c1-->\n",
+        _group_metadata(),
+        uuid4(),
+        uuid4(),
+    )
+    assert recorded == [("brave_image_search", 1)]
 
 
 def _patch_response_builders(monkeypatch, body, metadata):
