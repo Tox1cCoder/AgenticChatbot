@@ -402,6 +402,47 @@ def test_record_selection_survives_record_candidate_raising_on_rejection(monkeyp
     metrics.record_selection.assert_called_once_with(provider="brave", outcome="rejected")
 
 
+def test_tavily_malformed_entry_is_counted_as_rejected(monkeypatch):
+    """The Tavily-only pre-filter used to drop non-dict entries silently
+    before the counting loop ran, so a Brave malformed entry was counted but
+    an equivalent Tavily one was not. Both providers must record the same
+    outcome for the same shape of bad input, exactly once (no double count)."""
+    from app.ai import tool_execution
+
+    metrics = type(
+        "Metrics",
+        (),
+        {
+            "record_discovery": Mock(),
+            "record_selection": Mock(),
+            "record_candidate": Mock(),
+        },
+    )()
+    monkeypatch.setattr(tool_execution, "rich_image_metrics", metrics)
+    payload = json.dumps(
+        {
+            "provider": "tavily",
+            "images": [
+                "not-a-dict",
+                {"url": "https://img.test/good.jpg", "description": "ok"},
+            ],
+        }
+    )
+
+    candidates = build_image_candidates_from_tool_result(
+        payload, tool_call_id="call_1", tool_name="tavily_search"
+    )
+
+    assert len(candidates) == 1
+    malformed_calls = [
+        call
+        for call in metrics.record_candidate.call_args_list
+        if call.kwargs.get("outcome") == "rejected_malformed"
+    ]
+    assert len(malformed_calls) == 1
+    assert malformed_calls[0].kwargs["provider"] == "tavily"
+
+
 def test_brave_image_candidate_validates_against_public_schema():
     from app.core.rich_response import validate_public_rich_item
 

@@ -185,16 +185,6 @@ def build_image_candidates_from_tool_result(
             result_count=len(images),
         )
 
-    if metric_provider == "tavily":
-        images = order_tavily_images([i for i in images if isinstance(i, dict)])
-
-    result_query = str(parsed.get("query") or "").strip()
-    candidates: list[dict[str, Any]] = []
-    seen_display_urls: set[str] = set()
-    candidate_cap = max(1, int(getattr(settings, "rich_image_candidate_max_count", 8)))
-    minimum_width = max(1, int(getattr(settings, "rich_image_min_width_px", 320)))
-    minimum_height = max(1, int(getattr(settings, "rich_image_min_height_px", 180)))
-
     def _reject(reason: str) -> None:
         # Each counter gets its own suppress block: a fault in the new,
         # untested-in-production record_candidate metric must never be able
@@ -204,6 +194,27 @@ def build_image_candidates_from_tool_result(
             rich_image_metrics.record_selection(provider=metric_provider, outcome="rejected")
         with suppress(Exception):
             rich_image_metrics.record_candidate(provider=metric_provider, outcome=reason)
+
+    if metric_provider == "tavily":
+        # This pre-filter runs before the candidate loop below, so a non-dict
+        # entry must be counted here (once) rather than silently dropped —
+        # otherwise Tavily malformed entries would never reach the loop's own
+        # `rejected_malformed` branch and the counters would diverge by
+        # provider for no reason.
+        dict_images: list[dict[str, Any]] = []
+        for image in images:
+            if isinstance(image, dict):
+                dict_images.append(image)
+            else:
+                _reject("rejected_malformed")
+        images = order_tavily_images(dict_images)
+
+    result_query = str(parsed.get("query") or "").strip()
+    candidates: list[dict[str, Any]] = []
+    seen_display_urls: set[str] = set()
+    candidate_cap = max(1, int(getattr(settings, "rich_image_candidate_max_count", 8)))
+    minimum_width = max(1, int(getattr(settings, "rich_image_min_width_px", 320)))
+    minimum_height = max(1, int(getattr(settings, "rich_image_min_height_px", 180)))
 
     for index, image in enumerate(images):
         if not isinstance(image, dict):
