@@ -1620,6 +1620,23 @@ class Settings(BaseSettings):
             "found in a paragraph) required to auto-place the item after that paragraph."
         ),
     )
+    rich_query_anchored_images_enabled: bool = Field(
+        default=False,
+        description=(
+            "Anchor unreferenced image items on the model's own image-search query "
+            "instead of the provider description. While False, the legacy "
+            "description-anchored path runs, so this is a straight rollback control."
+        ),
+    )
+    rich_image_anchor_min_score: float = Field(
+        default=0.34,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum fraction of image-query tokens a paragraph must contain to "
+            "receive that image's marker."
+        ),
+    )
 
     # ── Validators ──────────────────────────────────────────────────────
 

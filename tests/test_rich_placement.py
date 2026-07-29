@@ -4,7 +4,9 @@ from types import SimpleNamespace
 
 from app.core.config import settings
 from app.core.rich_placement import (
+    ImageAnchorEntry,
     _repair_unprefixed_markers,
+    anchor_image_items_by_query,
     auto_place_rich_items,
     finalize_article_content,
 )
@@ -356,3 +358,157 @@ def test_finalize_repairs_model_authored_bare_widget_marker(monkeypatch):
     assert "\n<!--widget:w1-->\n" not in new_content
     assert response.message.content == new_content
     assert parse_inline_rich_references(new_content) == ["widget:w1"]
+
+
+# ---------------------------------------------------------------------------
+# Query-anchored placement: anchors an unreferenced image item on the model's
+# own image-search query instead of the provider description. A model-authored
+# marker still wins; anchoring only fills in when the model wrote none.
+# ---------------------------------------------------------------------------
+
+BODY = (
+    "Apple Inc reported record services revenue this quarter, driven by "
+    "subscriptions, advertising, and payments across its installed base of "
+    "active devices.\n"
+    "\n"
+    "Apple Park in Cupertino remains the company headquarters and cost "
+    "about five billion dollars to build.\n"
+    "\n"
+    "The fruit industry is unrelated to this discussion entirely.\n"
+)
+
+
+def test_anchors_after_the_block_matching_the_image_query():
+    content, outcomes = anchor_image_items_by_query(
+        BODY,
+        entries=[
+            ImageAnchorEntry(
+                item_id="imagegroup:tool:c1",
+                query="Apple Park Cupertino headquarters",
+                origin="image_search",
+            )
+        ],
+        min_score=0.34,
+        max_images=2,
+    )
+    lines = content.split("\n")
+    marker_index = lines.index("<!--rich:imagegroup:tool:c1-->")
+    assert "Cupertino" in lines[marker_index - 2]
+    assert outcomes["imagegroup:tool:c1"] == "query_anchored"
+
+
+def test_image_search_falls_back_to_first_prose_block_when_nothing_matches():
+    content, outcomes = anchor_image_items_by_query(
+        BODY,
+        entries=[
+            ImageAnchorEntry(
+                item_id="imagegroup:tool:c1",
+                query="quantum chromodynamics lattice diagram",
+                origin="image_search",
+            )
+        ],
+        min_score=0.34,
+        max_images=2,
+    )
+    assert "<!--rich:imagegroup:tool:c1-->" in content
+    assert outcomes["imagegroup:tool:c1"] == "fallback_anchored"
+
+
+def test_source_bound_tavily_image_has_no_fallback():
+    content, outcomes = anchor_image_items_by_query(
+        BODY,
+        entries=[
+            ImageAnchorEntry(
+                item_id="image:tool:c1:0",
+                query="quantum chromodynamics lattice diagram",
+                origin="web_search_source_bound",
+            )
+        ],
+        min_score=0.34,
+        max_images=2,
+    )
+    assert content == BODY
+    assert outcomes["image:tool:c1:0"] == "unplaced"
+
+
+def test_query_level_image_is_never_anchored():
+    content, outcomes = anchor_image_items_by_query(
+        BODY,
+        entries=[
+            ImageAnchorEntry(
+                item_id="image:tool:c1:0",
+                query="Apple Park Cupertino headquarters",
+                origin="web_search_query_level",
+                anchorable=False,
+            )
+        ],
+        min_score=0.34,
+        max_images=2,
+    )
+    assert content == BODY
+    assert outcomes["image:tool:c1:0"] == "unplaced"
+
+
+def test_existing_marker_wins_and_is_never_duplicated():
+    body = BODY + "\n<!--rich:imagegroup:tool:c1-->\n"
+    content, outcomes = anchor_image_items_by_query(
+        body,
+        entries=[
+            ImageAnchorEntry(
+                item_id="imagegroup:tool:c1",
+                query="Apple Park Cupertino headquarters",
+                origin="image_search",
+            )
+        ],
+        min_score=0.34,
+        max_images=2,
+    )
+    assert content == body
+    assert content.count("<!--rich:imagegroup:tool:c1-->") == 1
+    assert outcomes["imagegroup:tool:c1"] == "marker"
+
+
+def test_max_images_cap_is_respected():
+    entries = [
+        ImageAnchorEntry(
+            item_id=f"imagegroup:tool:c{n}",
+            query="Apple Park Cupertino",
+            origin="image_search",
+        )
+        for n in range(3)
+    ]
+    content, outcomes = anchor_image_items_by_query(
+        BODY, entries=entries, min_score=0.34, max_images=2
+    )
+    assert sum(1 for v in outcomes.values() if v != "unplaced") == 2
+
+
+def test_never_anchors_inside_a_fenced_code_block():
+    body = "```\nApple Park Cupertino headquarters\n```\n"
+    content, outcomes = anchor_image_items_by_query(
+        body,
+        entries=[
+            ImageAnchorEntry(
+                item_id="imagegroup:tool:c1",
+                query="Apple Park Cupertino headquarters",
+                origin="image_search",
+            )
+        ],
+        min_score=0.34,
+        max_images=2,
+    )
+    assert content == body
+    assert outcomes["imagegroup:tool:c1"] == "unplaced"
+
+
+def test_invalid_item_id_is_never_inserted():
+    content, outcomes = anchor_image_items_by_query(
+        BODY,
+        entries=[
+            ImageAnchorEntry(item_id="bad id!", query="Apple Park Cupertino", origin="image_search")
+        ],
+        min_score=0.34,
+        max_images=2,
+    )
+    assert content == BODY
+    assert outcomes["bad id!"] == "unplaced"

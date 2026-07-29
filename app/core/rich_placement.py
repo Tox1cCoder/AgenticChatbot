@@ -182,6 +182,113 @@ def auto_place_rich_items(
     return "\n".join(out), placed
 
 
+#: Origins allowed to anchor without a scoring match. Running an image search is
+#: itself the intent to display, so a missed keyword match must not silently
+#: discard the result.
+_FALLBACK_ANCHOR_ORIGINS = frozenset({"image_search"})
+
+#: Minimum post-stopword token count for a block to accept a fallback anchor, so
+#: the image never lands under a bare heading or a two-word line.
+_FALLBACK_MIN_BLOCK_TOKENS = 8
+
+
+@dataclass(frozen=True)
+class ImageAnchorEntry:
+    """One unreferenced image item eligible for query anchoring."""
+
+    item_id: str
+    query: str
+    origin: str
+    anchorable: bool = True
+
+
+def _first_fallback_block_line(blocks: list[_Block], insertions: dict[int, str]) -> int:
+    for block in blocks:
+        if block.end_line in insertions:
+            continue
+        if len(block.tokens) >= _FALLBACK_MIN_BLOCK_TOKENS:
+            return block.end_line
+    return -1
+
+
+def anchor_image_items_by_query(
+    content: str,
+    *,
+    entries: list[ImageAnchorEntry],
+    min_score: float,
+    max_images: int,
+) -> tuple[str, dict[str, str]]:
+    """Insert markers for unreferenced image items using their image query.
+
+    Returns ``(new_content, outcomes)`` where ``outcomes`` maps each entry id to
+    ``"marker"``, ``"query_anchored"``, ``"fallback_anchored"``, or
+    ``"unplaced"``. A model-authored marker always wins: its position is
+    authoritative and nothing is inserted for that item.
+    """
+    if not entries:
+        return content, {}
+    outcomes: dict[str, str] = {}
+    if not content:
+        return content, {entry.item_id: "unplaced" for entry in entries}
+
+    referenced = set(parse_inline_rich_references(content))
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    blocks = [b for b in _segment_blocks(lines) if not b.is_code]
+
+    insertions: dict[int, str] = {}
+    placed = 0
+    for entry in entries:
+        if entry.item_id in referenced:
+            outcomes[entry.item_id] = "marker"
+            continue
+        if (
+            not entry.anchorable
+            or not blocks
+            or placed >= max_images
+            or len(entry.item_id) > RICH_ITEM_ID_MAX_LENGTH
+            or not _ITEM_ID_PATTERN.match(entry.item_id)
+        ):
+            outcomes[entry.item_id] = "unplaced"
+            continue
+
+        query_tokens = _tokens(entry.query or "")
+        best_line, best = -1, 0.0
+        for block in blocks:
+            if block.end_line in insertions:
+                continue
+            score = _score(query_tokens, block.tokens)
+            if score > best:
+                best_line, best = block.end_line, score
+
+        if best_line >= 0 and best >= min_score:
+            outcome = "query_anchored"
+        elif entry.origin in _FALLBACK_ANCHOR_ORIGINS:
+            best_line = _first_fallback_block_line(blocks, insertions)
+            outcome = "fallback_anchored" if best_line >= 0 else "unplaced"
+        else:
+            outcome = "unplaced"
+
+        if outcome == "unplaced":
+            outcomes[entry.item_id] = "unplaced"
+            continue
+        insertions[best_line] = f"<!--rich:{entry.item_id}-->"
+        outcomes[entry.item_id] = outcome
+        placed += 1
+
+    if not insertions:
+        return content, outcomes
+
+    out: list[str] = []
+    for idx, line in enumerate(lines):
+        out.append(line)
+        marker = insertions.get(idx)
+        if marker is not None:
+            out.append("")
+            out.append(marker)
+    return "\n".join(out), outcomes
+
+
 def _repair_unprefixed_markers(content: str, known_ids: set[str]) -> str:
     """Restore the ``rich:`` prefix on model-authored markers that dropped it.
 
