@@ -453,6 +453,41 @@ def strip_inline_rich_markers(markdown: str) -> str:
     return "\n".join(out) if changed else markdown
 
 
+def remove_inline_rich_reference(markdown: str, item_id: str) -> str:
+    """Remove one rich-item marker outside code contexts.
+
+    Used when optional media cannot be persisted. Other markers and literal
+    marker examples in fenced, indented, or inline code remain untouched.
+    """
+    if not markdown or not item_id or "<!--rich:" not in markdown:
+        return markdown
+    normalized = markdown.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    in_fence = _strip_fenced_code_blocks(lines)
+    changed = False
+    output: list[str] = []
+    for line, inside in zip(lines, in_fence, strict=False):
+        if inside or _is_indented_code(line):
+            output.append(line)
+            continue
+        pieces: list[str] = []
+        cursor = 0
+        for match in _iter_inline_rich_marker_matches(line):
+            if match.group(1) != item_id:
+                continue
+            pieces.append(line[cursor : match.start()])
+            cursor = match.end()
+            changed = True
+        if cursor:
+            pieces.append(line[cursor:])
+            output.append("".join(pieces))
+        else:
+            output.append(line)
+    if not changed:
+        return markdown
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(output)).strip("\n")
+
+
 # ---------------------------------------------------------------------------
 # Validation warnings
 # ---------------------------------------------------------------------------
@@ -708,6 +743,7 @@ __all__ = [
     "ToolRenderRichItem",
     "build_rich_item_inventory_block",
     "parse_inline_rich_references",
+    "remove_inline_rich_reference",
     "select_append_fallback_items",
     "select_transient_upsert_items",
     "strip_inline_rich_markers",

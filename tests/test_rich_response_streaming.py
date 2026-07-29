@@ -27,6 +27,7 @@ from app.schemas.workflow import (
 )
 from app.services.ai_service import AIService
 from app.services.event_streaming.ai_sdk_projection import (
+    _is_protected_relative_image_url,
     project_ai_sdk_message_for_capability,
 )
 from app.services.event_streaming.events import make_event
@@ -47,6 +48,16 @@ SAFE_WIDGET_ITEM = {
         "connection_endpoint": "/widgets/w-1/connection",
     },
 }
+
+
+def test_ai_sdk_projection_recognizes_all_protected_image_route_forms():
+    for url in (
+        "/chat-images/id-1",
+        "/api/chat-images/id-1",
+        "/web-images/id-1",
+        "/api/web-images/id-1",
+    ):
+        assert _is_protected_relative_image_url(url) is True
 
 
 def _rich_items_event(*, sequence: int = 1):

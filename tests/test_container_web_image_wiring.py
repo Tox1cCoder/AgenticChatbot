@@ -10,3 +10,9 @@ def test_container_provides_async_web_image_components():
     assert isinstance(repository, WebImageReferenceRepository)
     assert repository.async_session_factory is not None
     assert isinstance(container.web_image_service(), WebImageService)
+
+
+def test_container_injects_web_image_service_into_message_persistence():
+    container = Container()
+
+    assert container.message_service().web_image_service is container.web_image_service()

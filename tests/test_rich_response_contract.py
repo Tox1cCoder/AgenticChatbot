@@ -16,6 +16,7 @@ from app.core.rich_response import (
     RichItemType,
     build_rich_item_inventory_block,
     parse_inline_rich_references,
+    remove_inline_rich_reference,
     select_append_fallback_items,
     select_transient_upsert_items,
     validate_rich_references,
@@ -86,6 +87,20 @@ def test_marker_rejects_oversized_ids():
 def test_marker_duplicate_ids_preserve_order():
     body = "<!--rich:widget:1-->\n\nMid\n\n<!--rich:widget:1-->"
     assert parse_inline_rich_references(body) == ["widget:1", "widget:1"]
+
+
+def test_remove_one_rich_reference_preserves_other_markers_and_code_examples():
+    body = (
+        "Before\n\n<!--rich:image:drop-->\n\n"
+        "```\n<!--rich:image:drop-->\n```\n\n"
+        "<!--rich:image:keep-->\n\nAfter"
+    )
+
+    cleaned = remove_inline_rich_reference(body, "image:drop")
+
+    assert parse_inline_rich_references(cleaned) == ["image:keep"]
+    assert "```\n<!--rich:image:drop-->\n```" in cleaned
+    assert "\n\n\n" not in cleaned
 
 
 def test_embedded_markers_are_recognized_outside_inline_code():

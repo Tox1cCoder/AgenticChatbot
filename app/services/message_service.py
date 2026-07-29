@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 try:
@@ -28,6 +30,11 @@ from app.core.response_constants import (
     normalize_message_content,
 )
 from app.core.rich_placement import finalize_article_content
+from app.core.rich_response import (
+    PROTECTED_IMAGE_URL_PREFIXES,
+    remove_inline_rich_reference,
+    validate_rich_references,
+)
 from app.factories.message_factory import MessageFactory
 from app.interfaces.message_service_interface import IMessageService
 from app.models.enums import MessageRole, PlanLifecycle
@@ -127,6 +134,7 @@ class MessageService(IMessageService):
         custom_agent_service: Any | None = None,
         tool_approval_setting_repository=None,
         chat_image_service=None,
+        web_image_service=None,
     ):
         self.repository = message_repository
         self.conversation_validation_utils = conversation_validation_utils
@@ -139,6 +147,8 @@ class MessageService(IMessageService):
         self.custom_agent_service = custom_agent_service
         # Externalizes inline image base64 out of persisted message metadata.
         self.chat_image_service = chat_image_service
+        # Converts selected third-party URLs to authenticated opaque references.
+        self.web_image_service = web_image_service
         # Resolves the per-user HITL approval policy into workflow state each turn.
         self.tool_approval_setting_repository = tool_approval_setting_repository
         self.redis_client = self._init_redis_client()
@@ -2251,6 +2261,12 @@ class MessageService(IMessageService):
         bot_response_content = finalize_article_content(bot_response, bot_response_content)
 
         bot_metadata = build_bot_metadata(bot_response)
+        bot_response_content, bot_metadata = await self._externalize_remote_rich_images(
+            bot_response_content,
+            bot_metadata,
+            conversation_id,
+            user_id,
+        )
         if self._sync_response_plan_state(
             conversation_id=conversation_id,
             user_id=user_id,
@@ -2304,6 +2320,84 @@ class MessageService(IMessageService):
             )
 
         metadata["images"] = externalize_metadata_images(images, store=_store)
+
+    async def _externalize_remote_rich_images(
+        self,
+        content: str,
+        metadata: dict[str, Any],
+        conversation_id: UUID,
+        user_id: UUID | None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Replace selected remote image URLs with protected owned references.
+
+        Registration persists metadata only and performs no upstream request.
+        Any registration/policy failure removes just that optional visual and
+        its marker so assistant text persistence remains successful.
+        """
+        service = getattr(self, "web_image_service", None)
+        rich_items = metadata.get("rich_items") if isinstance(metadata, dict) else None
+        if service is None or user_id is None or not isinstance(rich_items, list):
+            return content, metadata
+
+        updated = deepcopy(metadata)
+        kept_items: list[dict[str, Any]] = []
+        updated_content = content
+        for item in updated.get("rich_items") or []:
+            if not isinstance(item, dict) or item.get("type") != "image":
+                kept_items.append(item)
+                continue
+            payload = item.get("payload")
+            if not isinstance(payload, dict):
+                kept_items.append(item)
+                continue
+            raw_url = payload.get("url")
+            if payload.get("data") or not isinstance(raw_url, str) or not raw_url.strip():
+                kept_items.append(item)
+                continue
+            image_url = raw_url.strip()
+            if image_url.startswith(PROTECTED_IMAGE_URL_PREFIXES):
+                kept_items.append(item)
+                continue
+
+            item_id = str(item.get("id") or "")
+            if urlsplit(image_url).scheme.lower() != "https":
+                logging.warning("Web image reference skipped code=web_image_reference_failed")
+                updated_content = remove_inline_rich_reference(updated_content, item_id)
+                continue
+            provenance = item.get("provenance")
+            provider = (
+                str(provenance.get("provider") or "other")
+                if isinstance(provenance, dict)
+                else "other"
+            )
+            try:
+                reference = await service.register(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    upstream_url=image_url,
+                    expected_mime=payload.get("mime_type"),
+                    provider=provider,
+                )
+                reference_id = (
+                    reference.get("id")
+                    if isinstance(reference, dict)
+                    else getattr(reference, "id", None)
+                )
+                if reference_id is None:
+                    raise ValueError("missing reference id")
+            except Exception:
+                logging.warning("Web image reference skipped code=web_image_reference_failed")
+                updated_content = remove_inline_rich_reference(updated_content, item_id)
+                continue
+            payload["url"] = f"/web-images/{reference_id}"
+            kept_items.append(item)
+
+        updated["rich_items"] = kept_items
+        updated["rich_reference_warnings"] = validate_rich_references(
+            updated_content,
+            kept_items,
+        )
+        return updated_content, updated
 
     def _externalize_attachments_for_persist(
         self, message_create_data: MessageCreate, user_id: UUID
@@ -2691,6 +2785,12 @@ class MessageService(IMessageService):
         bot_response_content = finalize_article_content(bot_response, bot_response_content)
         bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
         self._externalize_generated_images(bot_metadata, conversation_id, user_id)
+        bot_response_content, bot_metadata = await self._externalize_remote_rich_images(
+            bot_response_content,
+            bot_metadata,
+            conversation_id,
+            user_id,
+        )
         if reply_to_user_message_id:
             bot_metadata["reply_to_user_message_id"] = str(reply_to_user_message_id)
 

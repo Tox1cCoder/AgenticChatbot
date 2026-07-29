@@ -25,7 +25,7 @@ import base64
 import json
 from typing import Any
 
-from app.core.rich_response import strip_inline_rich_markers
+from app.core.rich_response import PROTECTED_IMAGE_URL_PREFIXES, strip_inline_rich_markers
 
 LEGACY_METADATA_KEYS = frozenset(
     {
@@ -91,9 +91,6 @@ def is_v1_rich_items_message(metadata: dict[str, Any] | None) -> bool:
     return metadata.get("rich_items_version") == 1
 
 
-_PROTECTED_IMAGE_URL_PREFIXES = ("/chat-images/", "/api/chat-images/")
-
-
 def _is_protected_relative_image_url(value: str) -> bool:
     """Recognize a protected, credentialed image reference served relative to
     the app origin (e.g. ``/chat-images/{id}``).
@@ -103,7 +100,7 @@ def _is_protected_relative_image_url(value: str) -> bool:
     (a JPEG payload starts ``/9j/...``), so only known media-route prefixes
     are treated as URLs.
     """
-    return value.startswith(_PROTECTED_IMAGE_URL_PREFIXES)
+    return value.startswith(PROTECTED_IMAGE_URL_PREFIXES)
 
 
 def _extract_mime_from_data_url(value: str) -> str | None:
