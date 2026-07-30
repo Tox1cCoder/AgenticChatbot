@@ -299,6 +299,28 @@ def test_empty_metadata_returns_single_markdown_segment():
     assert view.append_items == []
 
 
+def test_group_skips_cells_whose_url_is_blank_or_whitespace():
+    """A whitespace-only url is not a renderable reference.
+
+    Without a stripped check it reached the markup as a src of spaces, which
+    renders a broken cell instead of being dropped.
+    """
+    html = build_inline_image_group_html(
+        [
+            {"url": "   ", "mime_type": "image/jpeg"},
+            {"url": "/web-images/1", "mime_type": "image/jpeg"},
+            {"url": "/web-images/2", "mime_type": "image/jpeg"},
+        ],
+        alt_text="x",
+    )
+    assert "   " not in html.split("src=")[1][:8]
+    assert html.count("<img") == 2
+
+
+def test_group_renders_nothing_when_every_cell_url_is_blank():
+    assert build_inline_image_group_html([{"url": ""}, {"url": "  "}], alt_text="x") == ""
+
+
 # ---------------------------------------------------------------------------
 # Live stream state
 # ---------------------------------------------------------------------------

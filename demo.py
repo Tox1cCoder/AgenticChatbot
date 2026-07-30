@@ -7773,10 +7773,27 @@ def _render_inline_rich_item(
     item_type = item.get("type")
     payload = item.get("payload") or {}
     if item_type == "image_group":
-        cells = payload.get("items") or []
-        group_html = build_inline_image_group_html(
-            cells,
-            alt_text=item.get("alt_text"),
+        # Every cell URL is a protected /web-images/<id> reference after
+        # persistence, so each one must go through the shared authenticated
+        # resolver for the same reason the single-image branch below does: a bare
+        # relative path in an <img src> can't carry the app Bearer token, so the
+        # browser would 401/404 every cell and the whole row would render as
+        # "Visual unavailable". A cell that can't be resolved is dropped rather
+        # than rendered broken.
+        resolved_cells: list[dict[str, Any]] = []
+        for cell in payload.get("items") or []:
+            if not isinstance(cell, dict):
+                continue
+            cell_src = _resolve_displayable_image_src(
+                cell.get("url"), None, cell.get("mime_type") or "image/png"
+            )
+            if not cell_src:
+                continue
+            resolved_cells.append({**cell, "url": cell_src})
+        group_html = (
+            build_inline_image_group_html(resolved_cells, alt_text=item.get("alt_text"))
+            if resolved_cells
+            else ""
         )
         if group_html:
             st.markdown(group_html, unsafe_allow_html=True)

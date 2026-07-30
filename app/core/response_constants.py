@@ -184,7 +184,17 @@ def _widget_rich_item_from_live_widget(widget: dict[str, Any]) -> dict[str, Any]
 
 
 def _is_image_candidate(candidate: dict[str, Any]) -> bool:
-    return candidate.get("type") == RichItemType.image.value
+    """Both image shapes obey selected-only persistence.
+
+    ``image_group`` must be included: it is an image candidate that happens to
+    carry several cells, so omitting it lets an unplaced group persist, register
+    protected references for cells nobody will see, and leak into public image
+    projections.
+    """
+    return candidate.get("type") in {
+        RichItemType.image.value,
+        RichItemType.image_group.value,
+    }
 
 
 def _candidate_id(candidate: dict[str, Any]) -> str | None:
@@ -547,7 +557,8 @@ def build_bot_metadata(
     referenced_ids = {
         str(item.get("id"))
         for item in rich_items
-        if item.get("type") == RichItemType.image.value and item.get("id")
+        if item.get("type") in {RichItemType.image.value, RichItemType.image_group.value}
+        and item.get("id")
     }
     _filter_unreferenced_images_from_metadata_images(
         metadata,

@@ -341,6 +341,67 @@ def test_v1_message_strips_unselected_image_candidates_from_public_images():
     assert all("hidden.png" not in str(image) for image in images)
 
 
+def _group_candidate() -> dict:
+    return {
+        "id": "imagegroup:tool:c1",
+        "type": "image_group",
+        "source": "image_search",
+        "display_policy": "inline_only",
+        "alt_text": "Images of a red panda",
+        "payload": {
+            "items": [
+                {"url": "https://img.test/hidden-a.jpg", "mime_type": "image/jpeg"},
+                {"url": "https://img.test/hidden-b.jpg", "mime_type": "image/jpeg"},
+            ]
+        },
+    }
+
+
+def test_unreferenced_image_group_candidate_is_never_persisted_or_flattened():
+    """An ``image_group`` is an image candidate and obeys selected-only
+    persistence. This is the ``rich_auto_place_enabled=False`` + no-marker
+    shape: nothing placed the group, so nothing may persist it, register
+    ``/web-images`` rows for its cells, or flatten it into AI SDK file parts.
+    """
+    from app.services.event_streaming.ai_sdk_projection import (
+        selected_image_file_parts_from_rich_items,
+    )
+
+    response = WorkflowResponse(
+        message=WorkflowResponseMessage(content="No marker in this answer."),
+        metadata={"_rich_item_candidates": [_group_candidate()]},
+    )
+
+    metadata = build_bot_metadata(response)
+
+    assert metadata["rich_items"] == []
+    assert "hidden-a.jpg" not in str(metadata)
+    assert selected_image_file_parts_from_rich_items(metadata) == []
+
+
+def test_selected_image_group_keeps_its_legacy_gallery_entry():
+    """A placed group is a referenced image item, so its ``metadata["images"]``
+    entry must survive the hidden-candidate filter."""
+    response = WorkflowResponse(
+        message=WorkflowResponseMessage(content="Look:\n\n<!--rich:imagegroup:tool:c1-->"),
+        metadata={
+            "_rich_item_candidates": [_group_candidate()],
+            "images": [
+                {
+                    "rich_item_id": "imagegroup:tool:c1",
+                    "url": "https://img.test/hidden-a.jpg",
+                    "mime": "image/jpeg",
+                }
+            ],
+        },
+    )
+
+    metadata = build_bot_metadata(response)
+
+    assert [item["id"] for item in metadata["rich_items"]] == ["imagegroup:tool:c1"]
+    assert metadata["images"][0]["rich_item_id"] == "imagegroup:tool:c1"
+
+
 def test_v1_finalization_rejects_selected_image_with_invalid_url_scheme():
     response = WorkflowResponse(
         message=WorkflowResponseMessage(content="<!--rich:image:tool:c1:0-->"),

@@ -115,7 +115,11 @@ def build_inline_image_group_html(
     to load is swapped for a neutral in-place block, so sibling cells and the
     surrounding prose are unaffected.
     """
-    usable = [cell for cell in (cells or []) if isinstance(cell, dict) and cell.get("url")]
+    usable = [
+        cell
+        for cell in (cells or [])
+        if isinstance(cell, dict) and str(cell.get("url") or "").strip()
+    ]
     if not usable:
         return ""
     usable = usable[:INLINE_IMAGE_GROUP_MAX_CELLS]
