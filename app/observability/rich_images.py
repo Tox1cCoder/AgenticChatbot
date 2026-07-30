@@ -17,6 +17,7 @@ _CANDIDATE_OUTCOMES = {
     "rejected_junk_url",
 }
 _ANCHOR_OUTCOMES = {"marker", "query_anchored", "fallback_anchored", "unplaced"}
+_REGISTRATION_OUTCOMES = {"registered", "reused", "skipped_scheme", "failed"}
 _FETCH_OUTCOMES = {
     "success",
     "timeout",
@@ -81,6 +82,12 @@ class RichImageMetrics:
             ("provider",),
             registry=self.registry,
         )
+        self.registrations = Counter(
+            "rich_image_registrations_total",
+            "Protected-reference registration outcomes per image or group cell.",
+            ("provider", "outcome"),
+            registry=self.registry,
+        )
 
     def record_discovery(self, *, provider: str, result_count: int) -> None:
         self.discovery_results.labels(provider=_provider(provider)).observe(
@@ -106,6 +113,18 @@ class RichImageMetrics:
     def record_final_selection(self, *, provider: str, count: int) -> None:
         if count > 0:
             self.final_selections.labels(provider=_provider(provider)).inc(int(count))
+
+    def record_registration(self, *, provider: str, outcome: str) -> None:
+        """Record one protected-reference registration attempt.
+
+        Counted per image or per group cell, so a cell-level failure inside a
+        group that keeps its siblings is visible rather than hidden behind the
+        group's single final-selection count.
+        """
+        self.registrations.labels(
+            provider=_provider(provider),
+            outcome=_bounded(outcome, _REGISTRATION_OUTCOMES),
+        ).inc()
 
     def record_fetch(self, *, provider: str, outcome: str, duration_seconds: float) -> None:
         labels = {

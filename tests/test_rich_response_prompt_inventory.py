@@ -206,3 +206,34 @@ def test_presentation_counter_records_each_presented_image(monkeypatch):
         capability=True,
     )
     assert recorded == [("brave_image_search", 1)]
+
+
+def test_presentation_counter_is_clamped_to_the_inventory_cap(monkeypatch):
+    """The counter must report what the inventory offered, not every candidate
+    handed in. The builder keeps only the first ``image_max_items`` image
+    entries, so counting the raw list over-reports the presentation stage."""
+    from app.ai import prompts
+    from app.core.config import settings
+
+    recorded = []
+
+    class _Metrics:
+        def record_presentation(self, *, provider, count):
+            recorded.append((provider, count))
+
+    monkeypatch.setattr(prompts, "rich_image_metrics", _Metrics(), raising=False)
+    monkeypatch.setattr(settings, "rich_auto_place_max_images", 2)
+    prompts.build_rich_response_guidance(
+        candidates=[
+            {
+                "id": f"image:tool:c1:{index}",
+                "type": "image",
+                "title": f"I{index}",
+                "provenance": {"provider": "brave_image_search"},
+            }
+            for index in range(3)
+        ],
+        enabled=True,
+        capability=True,
+    )
+    assert recorded == [("brave_image_search", 2)]

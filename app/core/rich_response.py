@@ -584,6 +584,18 @@ def select_append_fallback_items(
     return fallback
 
 
+def provenance_provider(item: Any) -> str:
+    """Return an item's provenance provider, or ``"other"`` when absent.
+
+    Shared so the metrics call sites that label by provider all read provenance
+    the same way; three independent copies had drifted apart.
+    """
+    provenance = item.get("provenance") if isinstance(item, dict) else None
+    if isinstance(provenance, dict):
+        return str(provenance.get("provider") or "other")
+    return "other"
+
+
 def select_transient_upsert_items(
     items: Iterable[RichItem | BaseModel | dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -591,15 +603,19 @@ def select_transient_upsert_items(
     ``rich_items`` upserts before final selection.
 
     The initial implementation streams only safe created non-image records.
-    Image candidates, payloads carrying raw inline data, and canvas source are
-    excluded entirely. Returned items use the same public serialization as
-    finalized rich items: null-valued keys are omitted and default fields such
-    as ``provenance`` are materialized.
+    Image candidates in either shape (``image`` and ``image_group``), payloads
+    carrying raw inline data, and canvas source are excluded entirely. Streaming
+    an image candidate would both dump unselected candidates to the client and
+    hand it pre-externalization upstream provider URLs, which the client would
+    fetch directly from the third party. Returned items use the same public
+    serialization as finalized rich items: null-valued keys are omitted and
+    default fields such as ``provenance`` are materialized.
     """
+    excluded_image_types = {RichItemType.image.value, RichItemType.image_group.value}
     safe: list[dict[str, Any]] = []
     for item in items:
         item_type = _get_type(item)
-        if item_type is None or item_type == RichItemType.image.value:
+        if item_type is None or item_type in excluded_image_types:
             continue
         if item_type == RichItemType.canvas_artifact.value:
             # Canvas source is the asset; do not stream until terminal

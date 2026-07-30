@@ -318,7 +318,7 @@ def test_image_anchor_entries_tool_image_without_signal_is_not_anchorable():
             }
         ]
     }
-    [entry] = _image_anchor_entries(metadata)
+    [entry] = _image_anchor_entries(metadata, image_max_items=2)
     assert entry.origin == "tool_image"
     assert entry.anchorable is False
 
@@ -341,9 +341,48 @@ def test_image_anchor_entries_tool_image_with_description_is_anchorable():
             }
         ]
     }
-    [entry] = _image_anchor_entries(metadata)
+    [entry] = _image_anchor_entries(metadata, image_max_items=2)
     assert entry.origin == "tool_image"
     assert entry.anchorable is True
+
+
+def test_image_anchor_entries_respects_the_inventory_cap():
+    """Anchoring must bound the same candidate list the model-facing inventory
+    bounds. Without this, a third image candidate the model was never shown
+    could still be auto-anchored into the answer."""
+    from app.core.rich_placement import _image_anchor_entries
+
+    metadata = {
+        "_rich_item_candidates": [
+            {
+                "id": f"image:tool:c1:{index}",
+                "type": "image",
+                "source": "image_search",
+                "provenance": {"query": "red panda photo"},
+            }
+            for index in range(3)
+        ]
+    }
+    entries = _image_anchor_entries(metadata, image_max_items=2)
+    assert [entry.item_id for entry in entries] == ["image:tool:c1:0", "image:tool:c1:1"]
+
+
+def test_image_anchor_entries_collapses_a_repeated_item_id():
+    """A repeated id would otherwise produce two entries, so anchoring would
+    insert the same marker twice and the second outcome would silently overwrite
+    the first."""
+    from app.core.rich_placement import _image_anchor_entries
+
+    duplicate = {
+        "id": "imagegroup:tool:c1",
+        "type": "image_group",
+        "source": "image_search",
+        "provenance": {"query": "red panda photo"},
+    }
+    entries = _image_anchor_entries(
+        {"_rich_item_candidates": [duplicate, dict(duplicate)]}, image_max_items=2
+    )
+    assert [entry.item_id for entry in entries] == ["imagegroup:tool:c1"]
 
 
 def test_generic_alt_text_image_is_not_auto_placed(monkeypatch):

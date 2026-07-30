@@ -4,7 +4,7 @@ from contextlib import suppress
 
 from app.ai.token_counter import TokenCounter
 from app.core.config import settings
-from app.core.rich_response import build_rich_item_inventory_block
+from app.core.rich_response import build_rich_item_inventory_block, provenance_provider
 from app.observability.rich_images import rich_image_metrics
 
 _PROMPT_TOKEN_COUNTER = TokenCounter()
@@ -60,19 +60,24 @@ def build_rich_response_guidance(
     if not inventory:
         return ""
     with suppress(Exception):
+        # Count what the inventory actually offered, not every candidate handed
+        # in: the builder keeps only the first ``image_max_items`` image entries,
+        # so counting the raw list would over-report the presentation stage —
+        # exactly the "the metric name hides the difference" defect these
+        # stage-specific counters exist to fix.
+        image_cap = int(settings.rich_auto_place_max_images)
         presented: dict[str, int] = {}
+        offered = 0
         for candidate in candidates:
+            if offered >= image_cap:
+                break
             if not isinstance(candidate, dict):
                 continue
             if candidate.get("type") not in {"image", "image_group"}:
                 continue
-            provenance = candidate.get("provenance")
-            provider = (
-                str(provenance.get("provider") or "other")
-                if isinstance(provenance, dict)
-                else "other"
-            )
+            provider = provenance_provider(candidate)
             presented[provider] = presented.get(provider, 0) + 1
+            offered += 1
         for provider, count in presented.items():
             rich_image_metrics.record_presentation(provider=provider, count=count)
     return f"{inventory}\n\n{INLINE_RICH_RESPONSE_SUFFIX}"

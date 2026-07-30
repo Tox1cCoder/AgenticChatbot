@@ -92,3 +92,21 @@ def test_record_anchor_bounds_unknown_outcome_to_other():
 
     assert 'outcome="other"' in body
     assert "not-a-real-outcome" not in body
+
+
+def test_registration_outcomes_are_recorded_and_bounded():
+    """Registration is one of the stages the rollout is supposed to watch, and a
+    cell-level failure inside a group that keeps its siblings is invisible
+    without it."""
+    metrics = RichImageMetrics()
+    for outcome in ("registered", "reused", "skipped_scheme", "failed"):
+        metrics.record_registration(provider="brave", outcome=outcome)
+    metrics.record_registration(provider="tavily", outcome="https://leak.test/secret.jpg")
+
+    body = metrics.render().decode()
+
+    assert "rich_image_registrations_total" in body
+    for outcome in ("registered", "reused", "skipped_scheme", "failed"):
+        assert f'outcome="{outcome}"' in body
+    assert 'outcome="other"' in body
+    assert "leak.test" not in body

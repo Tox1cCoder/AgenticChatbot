@@ -201,6 +201,26 @@ def test_transient_upserts_exclude_image_items_entirely():
     assert select_transient_upsert_items([image]) == []
 
 
+def test_transient_upserts_exclude_image_groups_too():
+    """A group is an image candidate. Streaming one would dump unselected
+    candidates to the client and hand it pre-externalization upstream provider
+    URLs, which the browser would then fetch straight from the third party."""
+    group = {
+        "id": "imagegroup:tool:c1",
+        "type": "image_group",
+        "source": "image_search",
+        "display_policy": "inline_only",
+        "alt_text": "Images of a red panda",
+        "payload": {
+            "items": [
+                {"url": "https://upstream.test/a.jpg", "mime_type": "image/jpeg"},
+                {"url": "https://upstream.test/b.jpg", "mime_type": "image/jpeg"},
+            ]
+        },
+    }
+    assert select_transient_upsert_items([group]) == []
+
+
 def test_transient_upserts_include_safe_widget_records():
     widget = _make_widget()
     [item] = select_transient_upsert_items([widget])

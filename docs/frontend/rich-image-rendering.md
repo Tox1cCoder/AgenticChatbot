@@ -116,7 +116,7 @@ type ImageGroupCell = {
   url: string;
   mime_type: string;
   source_url?: string;
-  caption?: string;
+  description?: string;   // provider description; NOT a trusted caption
   width?: number;
   height?: number;
 };
@@ -125,13 +125,18 @@ type RichImageGroupItem = {
   id: string;
   type: "image_group";
   display_policy: "inline_only";
+  alt_text: string;       // required; describes the set
   payload: {
-    items: ImageGroupCell[];  // 1–3 cells per group
+    items: ImageGroupCell[];
   };
 };
 ```
 
-Each cell may fail independently during render (network timeout, invalid MIME, decode error). Per-cell failures do not cascade: a successful cell is displayed even if others fail. Treat failed cells like individual image load failures — remove without placeholder or unavailable state.
+A cell has no `caption` field. Its `description` is provider metadata, not a publisher-authored caption, so it belongs in the cell's `alt` attribute — never rendered as a visible figure footer. The visible footer is source attribution.
+
+The schema requires at least two cells (`items` has `min_length=2`), and the backend caps a group at `rich_image_group_max_items` (default 3). A **persisted** group may nonetheless carry a single cell: each cell is registered as a protected reference independently, and a cell whose registration failed is dropped. That persisted record is a projection and is not re-validated, so a client must handle a one-cell group and should render it as a single ordinary image rather than a one-item row.
+
+Each cell may fail independently during render (network timeout, invalid MIME, decode error). Per-cell failures do not cascade: a successful cell is displayed even if others fail. Replace a failed cell **in place** with a compact neutral `Visual unavailable` block, so the row keeps its shape and no caption is left stranded without its image. Do not silently remove the cell, and do not collapse the whole group because one cell failed.
 
 ### Anchor origins and fallback rules
 

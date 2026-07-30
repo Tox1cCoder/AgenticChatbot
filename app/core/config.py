@@ -1620,7 +1620,9 @@ class Settings(BaseSettings):
         default=0.25,
         description=(
             "Minimum keyword-overlap score (fraction of an item's descriptive tokens "
-            "found in a paragraph) required to auto-place the item after that paragraph."
+            "found in a paragraph) required to auto-place the item after that paragraph. "
+            "Governs widget auto-placement only; images use "
+            "RICH_IMAGE_ANCHOR_MIN_SCORE on the query-anchoring path."
         ),
     )
     rich_image_anchor_min_score: float = Field(

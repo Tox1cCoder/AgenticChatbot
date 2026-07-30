@@ -22,6 +22,7 @@ from .rich_response import (
     RichItemType,
     _strip_fenced_code_blocks,  # noqa: PLC2701  # deliberate same-package reuse of CommonMark fence semantics
     parse_inline_rich_references,
+    provenance_provider,
 )
 
 _WORD_RE = re.compile(r"[a-z0-9]{3,}")
@@ -367,7 +368,9 @@ def _descriptive_signal_text(candidate: dict[str, Any]) -> str:
     )
 
 
-def _image_anchor_entries(metadata: dict[str, Any]) -> list[ImageAnchorEntry]:
+def _image_anchor_entries(
+    metadata: dict[str, Any], *, image_max_items: int
+) -> list[ImageAnchorEntry]:
     """Map turn-scoped image candidates to anchoring entries.
 
     Origin decides fallback eligibility: a deliberate image search may anchor
@@ -378,15 +381,25 @@ def _image_anchor_entries(metadata: dict[str, Any]) -> list[ImageAnchorEntry]:
     failure this placement system exists to prevent; a source-bound
     web-search image may not fall back; and a query-level image is never
     anchored because it carries no page provenance.
+
+    Only the first ``image_max_items`` image candidates are considered, matching
+    the cap the model-facing inventory applies. Without that bound the two stages
+    read different sets and an image the model was never shown could be anchored
+    into the answer. Repeated ids are collapsed, because inserting one id twice
+    would place two markers and overwrite its own outcome.
     """
     image_types = {RichItemType.image.value, RichItemType.image_group.value}
     entries: list[ImageAnchorEntry] = []
+    seen_ids: set[str] = set()
     for candidate in metadata.get("_rich_item_candidates") or []:
         if not isinstance(candidate, dict) or candidate.get("type") not in image_types:
             continue
         item_id = candidate.get("id")
-        if not isinstance(item_id, str) or not item_id:
+        if not isinstance(item_id, str) or not item_id or item_id in seen_ids:
             continue
+        if len(entries) >= image_max_items:
+            break
+        seen_ids.add(item_id)
         provenance = candidate.get("provenance")
         provenance = provenance if isinstance(provenance, dict) else {}
         query = str(provenance.get("query") or "").strip()
@@ -415,15 +428,11 @@ def _record_anchor_outcomes(metadata: dict[str, Any], outcomes: dict[str, str]) 
     try:
         from app.observability.rich_images import rich_image_metrics
 
-        providers = {}
-        for candidate in metadata.get("_rich_item_candidates") or []:
-            if isinstance(candidate, dict) and isinstance(candidate.get("id"), str):
-                provenance = candidate.get("provenance")
-                providers[candidate["id"]] = (
-                    str(provenance.get("provider") or "other")
-                    if isinstance(provenance, dict)
-                    else "other"
-                )
+        providers = {
+            candidate["id"]: provenance_provider(candidate)
+            for candidate in metadata.get("_rich_item_candidates") or []
+            if isinstance(candidate, dict) and isinstance(candidate.get("id"), str)
+        }
         for item_id, outcome in outcomes.items():
             rich_image_metrics.record_anchor(
                 provider=providers.get(item_id, "other"), outcome=outcome
@@ -452,7 +461,10 @@ def finalize_article_content(response: Any, content: str) -> str:
         return content
 
     items = _widget_placement_entries(metadata, getattr(response, "tool_artifacts", None))
-    anchor_entries = _image_anchor_entries(metadata)
+    # One cap, one candidate set: the inventory the model saw and the anchoring
+    # pass must bound the same list, or an unseen image can be placed.
+    max_images = int(getattr(settings, "rich_auto_place_max_images", 2))
+    anchor_entries = _image_anchor_entries(metadata, image_max_items=max_images)
     if not items and not anchor_entries:
         return content
 
@@ -471,7 +483,7 @@ def finalize_article_content(response: Any, content: str) -> str:
             new_content,
             entries=anchor_entries,
             min_score=float(getattr(settings, "rich_image_anchor_min_score", 0.34)),
-            max_images=int(getattr(settings, "rich_auto_place_max_images", 2)),
+            max_images=max_images,
         )
         _record_anchor_outcomes(metadata, outcomes)
     if new_content == content:

@@ -33,6 +33,7 @@ from app.core.rich_placement import finalize_article_content
 from app.core.rich_response import (
     PROTECTED_IMAGE_URL_PREFIXES,
     RichItemType,
+    provenance_provider,
     remove_inline_rich_reference,
     validate_rich_references,
 )
@@ -2453,10 +2454,7 @@ class MessageService(IMessageService):
 
     @staticmethod
     def _provider_of(item: dict[str, Any]) -> str:
-        provenance = item.get("provenance")
-        if isinstance(provenance, dict):
-            return str(provenance.get("provider") or "other")
-        return "other"
+        return provenance_provider(item)
 
     async def _register_web_image_url(
         self,
@@ -2475,9 +2473,13 @@ class MessageService(IMessageService):
             return None
         image_url = raw_url.strip()
         if image_url.startswith(PROTECTED_IMAGE_URL_PREFIXES):
+            with contextlib.suppress(Exception):
+                rich_image_metrics.record_registration(provider=provider, outcome="reused")
             return image_url
         if urlsplit(image_url).scheme.lower() != "https":
             logging.warning("Web image reference skipped code=web_image_reference_failed")
+            with contextlib.suppress(Exception):
+                rich_image_metrics.record_registration(provider=provider, outcome="skipped_scheme")
             return None
         try:
             reference = await self.web_image_service.register(
@@ -2496,7 +2498,11 @@ class MessageService(IMessageService):
                 raise ValueError("missing reference id")
         except Exception:
             logging.warning("Web image reference skipped code=web_image_reference_failed")
+            with contextlib.suppress(Exception):
+                rich_image_metrics.record_registration(provider=provider, outcome="failed")
             return None
+        with contextlib.suppress(Exception):
+            rich_image_metrics.record_registration(provider=provider, outcome="registered")
         return f"/web-images/{reference_id}"
 
     def _externalize_attachments_for_persist(

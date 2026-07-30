@@ -300,10 +300,11 @@ whom a successful ranked image search ran, must not receive an image-free answer
 because the model omitted a formatting token. Tavily source-bound images get no
 fallback because their query described text research, not the image.
 
-`RICH_QUERY_ANCHORED_IMAGES_ENABLED` enables this path. While it is disabled, the
-legacy description-anchored path runs unchanged, so the flag is a straight
-rollback control. The legacy path is removed once the new path is verified.
-Widget auto-placement is untouched by either flag.
+`RICH_QUERY_ANCHORED_IMAGES_ENABLED` enabled this path during rollout. While it
+was disabled, the legacy description-anchored path ran unchanged, so the flag was
+a straight rollback control. **Both the flag and the legacy path were removed in
+the cleanup phase (Phase 7), so query anchoring is now the only image-placement
+path and the flag no longer exists.** Widget auto-placement is untouched.
 
 The shared prompt still tells the model to place zero, one, or at most two image
 items per answer, and that surrounding prose must remain useful without the
@@ -487,10 +488,15 @@ evaluation harness, or scoring threshold. No test requires a model call.
    deferred: a rollback flag that outlives its rollback window becomes a second
    permanent code path.
 
-Rollback controls: the global `INLINE_RICH_RESPONSE_ENABLED` kill switch,
-`RICH_QUERY_ANCHORED_IMAGES_ENABLED`, and `rich_auto_place_enabled`. If
-`rich_auto_place_enabled` is false, nothing auto-anchors regardless of the
-query-anchoring flag.
+Rollback controls during rollout: the global `INLINE_RICH_RESPONSE_ENABLED` kill
+switch, `RICH_QUERY_ANCHORED_IMAGES_ENABLED`, and `rich_auto_place_enabled`.
+
+**After Phase 7 the query-anchoring flag no longer exists**, so the remaining
+controls are `INLINE_RICH_RESPONSE_ENABLED` — which disables all rich items,
+widgets included — and `rich_auto_place_enabled`, which when false stops anything
+from auto-anchoring. Note the surviving per-answer image cap
+(`rich_auto_place_max_images`) applies on every path and is not a rollback
+control.
 
 ## Cleanup (Phase 7)
 
