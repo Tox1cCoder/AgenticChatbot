@@ -12,8 +12,6 @@ from app.core.rich_placement import (
 )
 from app.core.rich_response import parse_inline_rich_references
 
-WIDGET = "live_widget"
-
 # ---------------------------------------------------------------------------
 # ``auto_place_rich_items`` places widget-class items only: image items are
 # anchored on the model's own image query by ``anchor_image_items_by_query``,
@@ -29,7 +27,7 @@ def test_places_item_after_its_best_matching_paragraph():
         "The Eiffel Tower is stunning at night, lit by thousands of lamps.\n\n"
         "The Louvre houses the Mona Lisa and countless other works."
     )
-    items = [("widget:w1", WIDGET, "Eiffel Tower illuminated at night in Paris")]
+    items = [("widget:w1", "Eiffel Tower illuminated at night in Paris")]
     new_content, placed = auto_place_rich_items(content, items=items, min_score=0.25)
     assert placed == ["widget:w1"]
     lines = new_content.split("\n")
@@ -41,7 +39,7 @@ def test_places_item_after_its_best_matching_paragraph():
 
 def test_skips_items_below_min_score():
     content = "A paragraph about quarterly revenue growth and profit margins."
-    items = [("widget:w1", WIDGET, "A cat sleeping on a windowsill")]
+    items = [("widget:w1", "A cat sleeping on a windowsill")]
     new_content, placed = auto_place_rich_items(content, items=items, min_score=0.25)
     assert placed == []
     assert new_content == content
@@ -57,9 +55,9 @@ def test_places_every_matching_item_in_its_own_paragraph():
         "Hydroelectric dams use falling water to spin turbines."
     )
     items = [
-        ("widget:w0", WIDGET, "solar panels sunlight electricity"),
-        ("widget:w1", WIDGET, "wind turbines kinetic energy air"),
-        ("widget:w2", WIDGET, "hydroelectric dams falling water turbines"),
+        ("widget:w0", "solar panels sunlight electricity"),
+        ("widget:w1", "wind turbines kinetic energy air"),
+        ("widget:w2", "hydroelectric dams falling water turbines"),
     ]
     new_content, placed = auto_place_rich_items(content, items=items, min_score=0.25)
     assert placed == ["widget:w0", "widget:w1", "widget:w2"]
@@ -69,8 +67,8 @@ def test_places_every_matching_item_in_its_own_paragraph():
 def test_one_item_per_paragraph():
     content = "Solar panels convert sunlight into electricity using semiconductors."
     items = [
-        ("widget:w0", WIDGET, "solar panels sunlight electricity"),
-        ("widget:w1", WIDGET, "solar panels converting sunlight semiconductors"),
+        ("widget:w0", "solar panels sunlight electricity"),
+        ("widget:w1", "solar panels converting sunlight semiconductors"),
     ]
     _, placed = auto_place_rich_items(content, items=items, min_score=0.25)
     assert placed == ["widget:w0"]
@@ -78,7 +76,7 @@ def test_one_item_per_paragraph():
 
 def test_skips_already_referenced_items():
     content = "Solar panels convert sunlight into electricity.\n\n<!--rich:widget:w0-->\n"
-    items = [("widget:w0", WIDGET, "solar panels sunlight electricity")]
+    items = [("widget:w0", "solar panels sunlight electricity")]
     new_content, placed = auto_place_rich_items(content, items=items, min_score=0.25)
     assert placed == []
     assert new_content == content
@@ -91,7 +89,7 @@ def test_never_places_inside_code_blocks():
         "print('solar panels sunlight electricity')\n"
         "```"
     )
-    items = [("widget:w0", WIDGET, "solar panels sunlight electricity")]
+    items = [("widget:w0", "solar panels sunlight electricity")]
     new_content, placed = auto_place_rich_items(content, items=items, min_score=0.25)
     assert placed == []
     assert new_content == content
@@ -101,21 +99,21 @@ def test_places_widget_near_matching_paragraph():
     content = (
         "Here is the revenue comparison between the two quarters.\n\nOverall the trend is positive."
     )
-    items = [("widget:w1", WIDGET, "Quarterly revenue comparison chart")]
+    items = [("widget:w1", "Quarterly revenue comparison chart")]
     new_content, placed = auto_place_rich_items(content, items=items, min_score=0.25)
     assert placed == ["widget:w1"]
     assert "<!--rich:widget:w1-->" in new_content
 
 
 def test_empty_inputs_are_safe():
-    result_empty = auto_place_rich_items("", items=[("a", WIDGET, "x")], min_score=0.2)
+    result_empty = auto_place_rich_items("", items=[("a", "x")], min_score=0.2)
     assert result_empty == ("", [])
     assert auto_place_rich_items("text", items=[], min_score=0.2) == ("text", [])
 
 
 def test_inserted_marker_is_parseable():
     content = "Solar panels convert sunlight into electricity using semiconductors."
-    items = [("widget:w0", WIDGET, "solar panels sunlight electricity")]
+    items = [("widget:w0", "solar panels sunlight electricity")]
     new_content, placed = auto_place_rich_items(content, items=items, min_score=0.25)
     assert parse_inline_rich_references(new_content) == ["widget:w0"]
 
@@ -220,7 +218,7 @@ def test_places_item_when_paragraph_directly_precedes_fence():
     content = (
         "The Eiffel Tower glows at night in Paris.\n```python\nprint('hi')\n```\n\nUnrelated note."
     )
-    items = [("widget:w0", WIDGET, "Eiffel Tower glowing at night Paris")]
+    items = [("widget:w0", "Eiffel Tower glowing at night Paris")]
     new_content, placed = auto_place_rich_items(content, items=items, min_score=0.25)
     assert placed == ["widget:w0"]
     lines = new_content.split("\n")
@@ -233,7 +231,7 @@ def test_places_item_when_paragraph_directly_precedes_fence():
 
 def test_places_item_when_paragraph_directly_follows_fence():
     content = "```python\nprint('hi')\n```\nThe Eiffel Tower glows at night in Paris."
-    items = [("widget:w0", WIDGET, "Eiffel Tower glowing at night Paris")]
+    items = [("widget:w0", "Eiffel Tower glowing at night Paris")]
     new_content, placed = auto_place_rich_items(content, items=items, min_score=0.25)
     assert placed == ["widget:w0"]
     assert parse_inline_rich_references(new_content) == ["widget:w0"]
@@ -241,7 +239,7 @@ def test_places_item_when_paragraph_directly_follows_fence():
 
 def test_skips_items_with_unparseable_ids():
     content = "Here is the quarterly revenue comparison between both units."
-    items = [("widget:bad id with spaces & <stuff>", WIDGET, "quarterly revenue comparison")]
+    items = [("widget:bad id with spaces & <stuff>", "quarterly revenue comparison")]
     new_content, placed = auto_place_rich_items(content, items=items, min_score=0.25)
     assert placed == []
     assert new_content == content
@@ -772,12 +770,40 @@ def test_rollback_flag_is_removed():
     assert not hasattr(Settings(), "rich_query_anchored_images_enabled")
 
 
-def test_retained_settings_still_have_live_readers():
-    from app.core.config import Settings
+def test_retained_settings_still_have_live_readers(monkeypatch):
+    """The cleanup contract says a setting that survives unread is itself a
+    cleanup failure, so this must exercise the readers rather than assert the
+    fields exist — asserting existence would still pass after someone deleted
+    every consumer.
 
-    settings_obj = Settings()
-    assert settings_obj.rich_auto_place_max_images >= 1
-    assert settings_obj.rich_auto_place_min_score >= 0
+    ``rich_auto_place_max_images`` is read by two paths (the model-facing
+    inventory and the anchoring cap); ``rich_auto_place_min_score`` gates widget
+    placement. Each is proved by changing the value and observing the behavior
+    change.
+    """
+    from app.ai.prompts import build_rich_response_guidance
+    from app.core.config import settings as live_settings
+
+    # Reader 1: the model-facing inventory honors the image cap.
+    candidates = [
+        {"id": f"image:tool:c1:{index}", "type": "image", "title": f"I{index}"}
+        for index in range(3)
+    ]
+    monkeypatch.setattr(live_settings, "rich_auto_place_max_images", 1)
+    one = build_rich_response_guidance(candidates=candidates, enabled=True, capability=True)
+    monkeypatch.setattr(live_settings, "rich_auto_place_max_images", 3)
+    three = build_rich_response_guidance(candidates=candidates, enabled=True, capability=True)
+    assert one.count("| image |") == 1
+    assert three.count("| image |") == 3
+
+    # Reader 2: widget placement honors the minimum score.
+    content = "A paragraph about quarterly revenue growth and profit margins."
+    # Four of the five tokens match, so the score is 0.8: placed at a low
+    # threshold, rejected at a high one. A perfectly-matching text would score
+    # 1.0 and pass even at 0.99, proving nothing about the threshold.
+    items = [("widget:w1", "quarterly revenue growth margins helicopter")]
+    assert auto_place_rich_items(content, items=items, min_score=0.01)[1] == ["widget:w1"]
+    assert auto_place_rich_items(content, items=items, min_score=0.99)[1] == []
 
 
 def test_descriptive_signal_helper_survives_the_legacy_path_removal():

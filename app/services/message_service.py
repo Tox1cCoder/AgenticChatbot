@@ -2340,6 +2340,12 @@ class MessageService(IMessageService):
         service = getattr(self, "web_image_service", None)
         rich_items = metadata.get("rich_items") if isinstance(metadata, dict) else None
         if service is None or user_id is None or not isinstance(rich_items, list):
+            # Still record final selection on this path. A deployment without a
+            # configured web-image service persists its selected images as-is,
+            # and silently reporting nothing would look like "no images were
+            # ever selected" rather than "externalization did not run".
+            if isinstance(rich_items, list):
+                self._record_final_image_selection(rich_items)
             return content, metadata
 
         updated = deepcopy(metadata)

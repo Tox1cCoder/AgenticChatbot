@@ -135,10 +135,19 @@ def build_inline_image_group_html(
         )
 
     group_alt = _html.escape(alt_text or "", quote=True)
+    # Per-cell failure reveals that cell's own fallback in place, so the row keeps
+    # its shape. When every cell has failed the row is nothing but placeholders,
+    # so the whole figure collapses to one neutral block instead of repeating
+    # "Visual unavailable" two or three times across the answer.
     onerror = (
         "const c=this.closest('[data-role=cell]');"
         "c.querySelector('[data-role=cell-fallback]').style.display='block';"
-        "this.remove()"
+        "this.remove();"
+        "const f=c.closest('figure');"
+        "if(f.querySelectorAll('[data-role=cell] img').length===0){"
+        "f.dataset.state='failed';"
+        "f.querySelectorAll('[data-role=cell]').forEach((n,i)=>{if(i)n.remove()});"
+        "f.style.display='block'}"
     )
     rendered: list[str] = []
     for cell in usable:

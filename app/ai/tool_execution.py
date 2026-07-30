@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -99,6 +100,11 @@ _JUNK_IMAGE_URL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?:^|/)avatars?(?:/|\.|$)"),
     re.compile(r"1x1(?!\d)"),
 )
+
+
+def _short_digest(value: str) -> str:
+    """Return a short stable digest, used only to keep ids distinct."""
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:8]
 
 
 def image_aspect_ratio_ok(width: Any, height: Any, *, minimum: float, maximum: float) -> bool:
@@ -344,13 +350,12 @@ def _group_image_candidates(
 ) -> dict[str, Any]:
     """Collapse eligible image-search candidates into one image_group item.
 
-    ``metric_provider`` is the caller's already-classified provider label
-    ("brave"/"tavily"/"other"), not the raw per-image ``provider`` string.
-    Grouping is only reached when it is "brave", so it is used directly for
-    the group's ``provenance["provider"]`` rather than copying from the first
-    candidate's provenance, which may not carry a per-image "provider" key at
-    all (that copy is conditional; a missing key would otherwise silently
-    degrade to a None provider for the whole group).
+    ``provenance["provider"]`` prefers the raw per-image provider string so a
+    group spells its provider the same way a single image does — ``provenance``
+    is client-visible metadata, and two spellings of one provider is a trap for
+    anyone reading it. The per-image copy is conditional, so ``metric_provider``
+    (the caller's classified "brave"/"tavily"/"other" label) is the fallback that
+    keeps the field from ever being None. Both normalize identically for metrics.
     """
     cap = max(2, int(getattr(settings, "rich_image_group_max_items", 3)))
     selected = candidates[:cap]
@@ -367,8 +372,12 @@ def _group_image_candidates(
                 cell[key] = value
         cells.append(cell)
     first_provenance = selected[0].get("provenance") or {}
+    # Without a tool_call_id, two groups in one turn would both land on the same
+    # literal id and collide. The query discriminates them; per-image ids get the
+    # same protection from their trailing index.
+    discriminator = tool_call_id or f"q{_short_digest(query)}"
     return {
-        "id": f"imagegroup:tool:{tool_call_id or 'tool'}",
+        "id": f"imagegroup:tool:{discriminator}",
         "type": RichItemType.image_group.value,
         "source": "image_search",
         "display_policy": RichDisplayPolicy.inline_only.value,
@@ -377,7 +386,7 @@ def _group_image_candidates(
         "provenance": {
             "tool_call_id": tool_call_id,
             "tool": first_provenance.get("tool"),
-            "provider": metric_provider,
+            "provider": first_provenance.get("provider") or metric_provider,
             "query": query,
         },
     }

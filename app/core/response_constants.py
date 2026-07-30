@@ -357,9 +357,19 @@ def _filter_unreferenced_images_from_metadata_images(
             continue
         if candidate.get("id") in referenced_ids:
             continue
-        locator = _image_locator(candidate.get("payload") or {})
+        payload = candidate.get("payload") or {}
+        locator = _image_locator(payload)
         if locator:
             hidden_locators.add(locator)
+        # A group's payload holds no url/data of its own — each cell carries one.
+        # Without walking the cells, an unreferenced group contributes no locator
+        # and its images can only be scrubbed by id.
+        cells = payload.get("items") if isinstance(payload, dict) else None
+        if isinstance(cells, list):
+            for cell in cells:
+                cell_locator = _image_locator(cell) if isinstance(cell, dict) else None
+                if cell_locator:
+                    hidden_locators.add(cell_locator)
 
     kept: list[Any] = []
     for image in images:

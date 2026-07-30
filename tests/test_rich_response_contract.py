@@ -436,7 +436,7 @@ def test_image_payload_rejects_invalid_url_scheme():
 
 
 def test_shared_mime_and_url_validation_helper_is_reused_by_both_models():
-    """ImagePayload._has_exactly_one_source and ImageGroupItem._validate_cell
+    """ImagePayload._has_exactly_one_source and ImageGroupCell._validate_cell
     duplicated the mime-type check and the two URL validation calls
     line-for-line. Both must delegate to one shared helper instead."""
     from app.core.rich_response import _validate_image_mime_and_urls

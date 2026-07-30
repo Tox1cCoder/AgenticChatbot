@@ -9,6 +9,7 @@ calls and no prompt-context cost.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -24,6 +25,8 @@ from .rich_response import (
     parse_inline_rich_references,
     provenance_provider,
 )
+
+logger = logging.getLogger(__name__)
 
 _WORD_RE = re.compile(r"[a-z0-9]{3,}")
 
@@ -151,16 +154,16 @@ def _apply_insertions(lines: list[str], insertions: dict[int, str]) -> str:
 def auto_place_rich_items(
     content: str,
     *,
-    items: list[tuple[str, str, str]],
+    items: list[tuple[str, str]],
     min_score: float,
 ) -> tuple[str, list[str]]:
     """Insert markers for unreferenced widget-class items after their best block.
 
-    ``items`` holds ``(item_id, item_type, descriptive_text)`` tuples in
-    priority order. At most one item is placed per paragraph. Items already
-    referenced in ``content`` or scoring below ``min_score`` are skipped.
-    Returns ``(new_content, placed_ids)``; content is returned unchanged when
-    nothing places.
+    ``items`` holds ``(item_id, descriptive_text)`` tuples in priority order. At
+    most one item is placed per paragraph. Items already referenced in
+    ``content`` or scoring below ``min_score`` are skipped. Returns
+    ``(new_content, placed_ids)``; content is returned unchanged when nothing
+    places.
 
     Image items never travel through here: they are anchored on the model's own
     image query by ``anchor_image_items_by_query``, which owns the per-answer
@@ -177,7 +180,7 @@ def auto_place_rich_items(
 
     insertions: dict[int, str] = {}
     placed: list[str] = []
-    for item_id, _item_type, text in items:
+    for item_id, text in items:
         if item_id in referenced:
             continue
         if len(item_id) > RICH_ITEM_ID_MAX_LENGTH or not _ITEM_ID_PATTERN.match(item_id):
@@ -331,20 +334,20 @@ def _repair_unprefixed_markers(content: str, known_ids: set[str]) -> str:
 
 def _widget_placement_entries(
     metadata: dict[str, Any], response_artifacts: list[dict[str, Any]] | None
-) -> list[tuple[str, str, str]]:
+) -> list[tuple[str, str]]:
     artifacts: list[dict[str, Any]] = []
     meta_artifacts = metadata.get("tool_artifacts")
     if isinstance(meta_artifacts, list):
         artifacts.extend(a for a in meta_artifacts if isinstance(a, dict))
     if response_artifacts:
         artifacts.extend(a for a in response_artifacts if isinstance(a, dict))
-    entries: list[tuple[str, str, str]] = []
+    entries: list[tuple[str, str]] = []
     for widget in extract_live_widgets_from_artifacts(artifacts):
         widget_id = widget.get("widget_id")
         if not widget_id:
             continue
         text = str(widget.get("title") or "")
-        entries.append((f"widget:{widget_id}", RichItemType.live_widget.value, text))
+        entries.append((f"widget:{widget_id}", text))
     return entries
 
 
@@ -442,14 +445,27 @@ def _record_anchor_outcomes(metadata: dict[str, Any], outcomes: dict[str, str]) 
 
 
 def finalize_article_content(response: Any, content: str) -> str:
-    """Apply article-style auto-placement to the final assistant markdown.
+    """Apply article-style placement to the final assistant markdown.
 
     Mutates ``response.message.content`` to the placed content so
     ``build_bot_metadata()`` resolves the exact marker set the persisted
     message carries. Returns the (possibly updated) content. No-op unless the
     inline rich-response feature and auto-placement are enabled and the
     response advertised the per-turn capability.
+
+    Never raises. Placement is an optional enhancement on the persistence path,
+    so any unexpected failure returns the original content and the answer is
+    persisted without inline media. Making that structural here means every
+    caller inherits it rather than each having to remember a guard.
     """
+    try:
+        return _finalize_article_content(response, content)
+    except Exception:
+        logger.warning("Inline rich placement skipped code=rich_placement_failed")
+        return content
+
+
+def _finalize_article_content(response: Any, content: str) -> str:
     if not content or response is None:
         return content
     if not getattr(settings, "inline_rich_response_enabled", False):

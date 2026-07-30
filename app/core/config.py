@@ -1570,10 +1570,13 @@ class Settings(BaseSettings):
     rich_image_group_max_items: int = Field(
         default=3,
         ge=2,
-        le=6,
+        le=3,
         description=(
             "Maximum cells in one image_group. A deliberate image search collapses "
-            "into a single rich item so the model copies one marker, not N."
+            "into a single rich item so the model copies one marker, not N. Capped "
+            "at 3 to match INLINE_IMAGE_GROUP_MAX_CELLS, the renderer's row "
+            "ceiling: a higher value here would build cells that the frontend "
+            "silently drops while other consumers still receive them."
         ),
     )
     web_image_fetch_connect_timeout_seconds: float = Field(

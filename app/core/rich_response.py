@@ -123,7 +123,7 @@ def _validate_image_mime_and_urls(
     mime_type: str, url: str | None, source_url: str | None
 ) -> None:
     """Shared mime-type/URL validation for ``ImagePayload`` and
-    ``ImageGroupItem``. Both models accept the same image mime categories and
+    ``ImageGroupCell``. Both models accept the same image mime categories and
     validate ``url``/``source_url`` the same way; keep that logic in one
     place instead of duplicating it per model.
     """
@@ -154,7 +154,7 @@ class ImagePayload(PublicPayload):
         return self
 
 
-class ImageGroupItem(PublicPayload):
+class ImageGroupCell(PublicPayload):
     """One cell of an image group. Cells are always remote or protected URLs;
     inline base64 cells are not supported because a group is only ever built
     from provider search results."""
@@ -167,7 +167,7 @@ class ImageGroupItem(PublicPayload):
     height: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
-    def _validate_cell(self) -> ImageGroupItem:
+    def _validate_cell(self) -> ImageGroupCell:
         if not self.url:
             raise ValueError("image group cell requires a url")
         _validate_image_mime_and_urls(self.mime_type, self.url, self.source_url)
@@ -175,7 +175,7 @@ class ImageGroupItem(PublicPayload):
 
 
 class ImageGroupPayload(PublicPayload):
-    items: list[ImageGroupItem] = Field(min_length=2)
+    items: list[ImageGroupCell] = Field(min_length=2)
 
 
 class LiveWidgetPayload(PublicPayload):
@@ -793,7 +793,7 @@ __all__ = [
     "GENERIC_IMAGE_ALT_TEXT",
     "CitationPayload",
     "CitationRichItem",
-    "ImageGroupItem",
+    "ImageGroupCell",
     "ImageGroupPayload",
     "ImageGroupRichItem",
     "ImagePayload",
