@@ -319,18 +319,82 @@ def test_image_placement_entries_skips_signalless_candidates():
     assert ids == ["image:tool:c1:0"]
 
 
+def test_image_anchor_entries_tool_image_without_signal_is_not_anchorable():
+    """A tool_image candidate with no provenance query and only the generic
+    alt-text placeholder carries no genuine signal at all. It must not be
+    anchorable — an auto-placed junk image (e.g. a crawler/SEO thumbnail) is
+    exactly the failure this placement system exists to prevent, and the
+    reasoning for tool_image's fallback eligibility ("the tool call implies
+    display") does not license placing something with nothing to show."""
+    from app.core.rich_placement import _image_anchor_entries
+    from app.core.rich_response import GENERIC_IMAGE_ALT_TEXT
+
+    metadata = {
+        "_rich_item_candidates": [
+            {
+                "id": "image:tool:c1:4",
+                "type": "image",
+                "source": "tool_image",
+                "alt_text": GENERIC_IMAGE_ALT_TEXT,
+                "payload": {"url": "https://lookaside.instagram.com/seo/crawler"},
+            }
+        ]
+    }
+    [entry] = _image_anchor_entries(metadata)
+    assert entry.origin == "tool_image"
+    assert entry.anchorable is False
+
+
+def test_image_anchor_entries_tool_image_with_description_is_anchorable():
+    """A tool_image candidate with no query but a genuine description (title,
+    real alt_text, or payload description) is anchorable — it can be placed
+    via the fallback anchor even though it has no query to score against a
+    paragraph."""
+    from app.core.rich_placement import _image_anchor_entries
+
+    metadata = {
+        "_rich_item_candidates": [
+            {
+                "id": "image:tool:c1:0",
+                "type": "image",
+                "source": "tool_image",
+                "alt_text": "Eiffel Tower at night",
+                "payload": {"description": "Eiffel Tower at night in Paris"},
+            }
+        ]
+    }
+    [entry] = _image_anchor_entries(metadata)
+    assert entry.origin == "tool_image"
+    assert entry.anchorable is True
+
+
 def test_generic_alt_text_image_is_not_auto_placed(monkeypatch):
     """Regression: a description-less junk image matched a paragraph via the
     generic fallback's 'tool'/'result' tokens and was auto-placed, rendering a
-    broken placeholder. Such images carry no signal and must never be placed."""
+    broken placeholder. Such images carry no signal and must never be placed.
+
+    Carries ``source: "tool_image"`` — the real production shape (a
+    description-less tool image, e.g. a crawler/SEO thumbnail Brave returned,
+    is stamped with this source by ``build_image_candidates_from_tool_result``
+    per ``app/ai/tool_execution.py``) rather than the source-less shape,
+    which does not occur in production. The content is one clause longer
+    than the original regression case so the block clears
+    ``_FALLBACK_MIN_BLOCK_TOKENS`` and the test genuinely exercises the
+    descriptive-signal guard in ``_image_anchor_entries`` rather than passing
+    only because the block was too short for any fallback anchor."""
     from app.core.rich_response import GENERIC_IMAGE_ALT_TEXT
 
     monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
     monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
-    content = "Here are the latest match results and tool output for the league."
+    monkeypatch.setattr(settings, "rich_query_anchored_images_enabled", True)
+    content = (
+        "Here are the latest match results and tool output for the entire "
+        "football league season."
+    )
     candidate = {
         "id": "image:tool:c1:4",
         "type": "image",
+        "source": "tool_image",
         "display_policy": "inline_only",
         "alt_text": GENERIC_IMAGE_ALT_TEXT,
         "payload": {"url": "https://lookaside.instagram.com/seo/crawler", "mime_type": "image/png"},

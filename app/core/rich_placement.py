@@ -347,6 +347,27 @@ def _widget_placement_entries(
     return entries
 
 
+def _descriptive_signal_text(candidate: dict[str, Any]) -> str:
+    """Join a candidate's genuine descriptive text: title, alt_text, description.
+
+    The generic alt-text fallback is excluded — it is not a real description,
+    and using it as a placement signal lets junk images (e.g. crawler/SEO
+    URLs) match a paragraph via tokens like "tool"/"result" and render
+    broken. Shared by the legacy description-anchored path
+    (``_image_placement_entries``) and the ``tool_image`` fallback-anchor
+    origin (``_image_anchor_entries``), which both need the same notion of
+    "this candidate carries no genuine signal, never auto-place it."
+    """
+    payload = candidate.get("payload")
+    description = payload.get("description") if isinstance(payload, dict) else None
+    alt_text = candidate.get("alt_text")
+    if alt_text == GENERIC_IMAGE_ALT_TEXT:
+        alt_text = None
+    return " ".join(
+        str(part) for part in (candidate.get("title"), alt_text, description) if part
+    )
+
+
 def _image_placement_entries(metadata: dict[str, Any]) -> list[tuple[str, str, str]]:
     entries: list[tuple[str, str, str]] = []
     for candidate in metadata.get("_rich_item_candidates") or []:
@@ -357,17 +378,7 @@ def _image_placement_entries(metadata: dict[str, Any]) -> list[tuple[str, str, s
         item_id = candidate.get("id")
         if not isinstance(item_id, str) or not item_id:
             continue
-        payload = candidate.get("payload")
-        description = payload.get("description") if isinstance(payload, dict) else None
-        alt_text = candidate.get("alt_text")
-        if alt_text == GENERIC_IMAGE_ALT_TEXT:
-            # The generic fallback is not a real description; using it as a
-            # placement signal lets junk images (e.g. crawler/SEO URLs) match a
-            # paragraph via tokens like "tool"/"result" and render broken.
-            alt_text = None
-        text = " ".join(
-            str(part) for part in (candidate.get("title"), alt_text, description) if part
-        )
+        text = _descriptive_signal_text(candidate)
         if not text.strip():
             # No genuine descriptive signal → never auto-place; it cannot be
             # relevance-matched or captioned. The model may still place it
@@ -381,10 +392,13 @@ def _image_anchor_entries(metadata: dict[str, Any]) -> list[ImageAnchorEntry]:
     """Map turn-scoped image candidates to anchoring entries.
 
     Origin decides fallback eligibility: a deliberate image search may anchor
-    without a keyword match; a tool-produced image (no query by construction)
-    anchors the same way, because the tool call itself implies display; a
-    source-bound web-search image may not fall back; and a query-level image
-    is never anchored because it carries no page provenance.
+    without a keyword match; a tool-produced image anchors the same way when
+    it carries a genuine signal (an image-search query, or real descriptive
+    text — never the generic alt-text placeholder), because the tool call
+    itself implies display but a signal-less image is exactly the junk-image
+    failure this placement system exists to prevent; a source-bound
+    web-search image may not fall back; and a query-level image is never
+    anchored because it carries no page provenance.
     """
     image_types = {RichItemType.image.value, RichItemType.image_group.value}
     entries: list[ImageAnchorEntry] = []
@@ -401,7 +415,8 @@ def _image_anchor_entries(metadata: dict[str, Any]) -> list[ImageAnchorEntry]:
         if source == "image_search":
             origin, anchorable = "image_search", True
         elif source == "tool_image":
-            origin, anchorable = "tool_image", True
+            origin = "tool_image"
+            anchorable = bool(query) or bool(_descriptive_signal_text(candidate).strip())
         elif provenance.get("query_level"):
             origin, anchorable = "web_search_query_level", False
         else:

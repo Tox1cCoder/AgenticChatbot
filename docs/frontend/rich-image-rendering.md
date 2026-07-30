@@ -143,8 +143,8 @@ The backend attempts to anchor an unreferenced image group on the query that pro
    - Signal: the model explicitly ran an image search or selected an image from a search result.
 
 2. **Tool-produced image** (chart, rendered diagram, other non-search tool output)
-   - Carries no image-search query by construction, so it never scores a keyword match.
-   - Always falls back to after the first substantial prose block, on the same reasoning as image search: the tool call itself implies display.
+   - Anchors only when the candidate carries a genuine signal: an image-search query (usually absent), or real descriptive text (a title, a non-generic `alt_text`, or `payload.description`). A candidate with neither — for example a description-less crawler/SEO thumbnail carrying only the generic alt-text placeholder — is never anchored, on the same reasoning the legacy description-anchored path already uses: nothing to relevance-match or caption means nothing to place.
+   - When it does carry a signal, it falls back to after the first substantial prose block, the same as image search, since it usually has no query to score a keyword match against: the tool call itself implies display.
    - Signal: `source: "tool_image"` — an image returned directly by an MCP tool rather than harvested from a search result. This also covers a single eligible Brave image-search candidate, which is not grouped into an `image_group` (grouping needs two or more) and so carries this source instead of `image_search`.
 
 3. **Web-search source-bound** (Tavily result image)
@@ -160,7 +160,7 @@ The backend attempts to anchor an unreferenced image group on the query that pro
 
 When `RICH_QUERY_ANCHORED_IMAGES_ENABLED=true`, monitor these signals:
 
-- **`rich_image_anchor_outcomes_total{outcome="unplaced"}` rising** — the primary signal to disable query anchoring. Unplaced images indicate that query scoring is too strict or the content lacks qualifying paragraphs. A sustained rise suggests miscalibration of `rich_image_anchor_min_score` or that source-bound images lack relevance anchors.
+- **`rich_image_anchor_outcomes_total{outcome="unplaced"}` rising** — the primary signal to disable query anchoring. Unplaced images indicate that query scoring is too strict or the content lacks qualifying paragraphs. A sustained rise suggests miscalibration of `rich_image_anchor_min_score` or that source-bound images lack relevance anchors. A tool-produced image with no query and no descriptive text is intentionally counted here too — it is never anchored by design, not a scoring failure, so this baseline rate should be checked before treating a rise as a regression signal.
 - **`rich_image_anchor_outcomes_total{outcome="query_anchored"}`** — images successfully placed on query match; should trend higher than `fallback_anchored` under normal conditions.
 - **`rich_image_anchor_outcomes_total{outcome="fallback_anchored"}`** — images placed on fallback (first prose block); a spike suggests low query-paragraph overlap.
 - **`rich_image_anchor_outcomes_total{outcome="marker"}`** — images placed on model-authored marker; should remain steady as model writing behavior is stable.
