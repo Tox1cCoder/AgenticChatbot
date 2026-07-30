@@ -2350,33 +2350,14 @@ class MessageService(IMessageService):
                 continue
 
             if item.get("type") == RichItemType.image_group.value:
-                payload = item.get("payload")
-                cells = payload.get("items") if isinstance(payload, dict) else None
-                if not isinstance(cells, list):
+                if await self._externalize_group_cells(
+                    item, conversation_id=conversation_id, user_id=user_id
+                ):
                     kept_items.append(item)
-                    continue
-                kept_cells: list[dict[str, Any]] = []
-                for cell in cells:
-                    if not isinstance(cell, dict):
-                        continue
-                    reference_url = await self._register_web_image_url(
-                        cell.get("url"),
-                        expected_mime=cell.get("mime_type"),
-                        provider=self._provider_of(item),
-                        conversation_id=conversation_id,
-                        user_id=user_id,
-                    )
-                    if reference_url is None:
-                        continue
-                    cell["url"] = reference_url
-                    kept_cells.append(cell)
-                if not kept_cells:
+                else:
                     updated_content = remove_inline_rich_reference(
                         updated_content, str(item.get("id") or "")
                     )
-                    continue
-                payload["items"] = kept_cells
-                kept_items.append(item)
                 continue
 
             if item.get("type") != RichItemType.image.value:
@@ -2410,6 +2391,51 @@ class MessageService(IMessageService):
             updated_content,
             kept_items,
         )
+        self._record_final_image_selection(kept_items)
+        return updated_content, updated
+
+    async def _externalize_group_cells(
+        self,
+        item: dict[str, Any],
+        *,
+        conversation_id: UUID,
+        user_id: UUID,
+    ) -> bool:
+        """Rewrite an image group's cell URLs in place to owned references.
+
+        Cells that cannot be registered are dropped. Returns whether the group
+        item should be kept: True when at least one cell survived, and also when
+        the group carries no usable cell list at all (nothing to externalize, so
+        the item is left exactly as it was). False means every cell failed and
+        the caller must drop the item and remove its marker.
+        """
+        payload = item.get("payload")
+        cells = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(cells, list):
+            return True
+        kept_cells: list[dict[str, Any]] = []
+        for cell in cells:
+            if not isinstance(cell, dict):
+                continue
+            reference_url = await self._register_web_image_url(
+                cell.get("url"),
+                expected_mime=cell.get("mime_type"),
+                provider=self._provider_of(item),
+                conversation_id=conversation_id,
+                user_id=user_id,
+            )
+            if reference_url is None:
+                continue
+            cell["url"] = reference_url
+            kept_cells.append(cell)
+        if not kept_cells:
+            return False
+        payload["items"] = kept_cells
+        return True
+
+    def _record_final_image_selection(self, kept_items: list[dict[str, Any]]) -> None:
+        """Count image items surviving finalization. Never raises: telemetry
+        must not fail an answer that is otherwise ready to persist."""
         with contextlib.suppress(Exception):
             surviving: dict[str, int] = {}
             for kept in kept_items:
@@ -2424,7 +2450,6 @@ class MessageService(IMessageService):
                 surviving[provider] = surviving.get(provider, 0) + 1
             for provider, count in surviving.items():
                 rich_image_metrics.record_final_selection(provider=provider, count=count)
-        return updated_content, updated
 
     @staticmethod
     def _provider_of(item: dict[str, Any]) -> str:
