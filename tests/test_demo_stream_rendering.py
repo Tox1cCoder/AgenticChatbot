@@ -13,6 +13,32 @@ is exercised separately.
 from __future__ import annotations
 
 
+def test_escape_markdown_currency_escapes_price_ranges_and_lists():
+    """Currency runs must not be mistaken for Streamlit's inline LaTeX."""
+    from app.ui.stream_markdown import escape_markdown_currency
+
+    raw = "Budget: $150–$160; options: $5, $10, and $20."
+
+    assert escape_markdown_currency(raw) == (
+        r"Budget: \$150–\$160; options: \$5, \$10, and \$20."
+    )
+
+
+def test_escape_markdown_currency_preserves_protected_markdown_and_latex():
+    """Code, prior escapes, and intentionally delimited math stay verbatim."""
+    from app.ui.stream_markdown import escape_markdown_currency
+
+    raw = (
+        "`$150–$160`\n"
+        "```text\n$150–$160\n```\n"
+        r"\$150\n"
+        "$150 + 20$\n"
+        "$$\nx + y\n$$"
+    )
+
+    assert escape_markdown_currency(raw) == raw
+
+
 def test_normalize_stream_markdown_text_unescapes_quotes_only():
     """Quote entities (``&quot;``, ``&#34;``, ``&#x22;``, ``&#39;``,
     ``&#x27;``) must be unescaped. Angle-bracket entities must be left
