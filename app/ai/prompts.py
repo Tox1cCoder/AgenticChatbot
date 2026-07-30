@@ -21,12 +21,13 @@ INLINE_RICH_RESPONSE_SUFFIX = (
 MEDIA_CAPABILITY_SNIPPET = """
 
 Media and visuals:
-- You can display provided rich items inline with `<!--rich:<id>-->`; use only available IDs and never invent image URLs.
-- For focused visual discovery ("what does X look like", examples, galleries), call `brave_image_search`. For ordinary research call `tavily_search` without images; pass `include_images=True` only when an image tied to a cited source helps.
-- Write the image query yourself: a concrete subject plus any disambiguator the conversation implies (company vs fruit, language vs island, city vs person), plus a form qualifier when it matters (`photo`, `diagram`, `map`, `chart`, `screenshot`). Never reuse the user's question verbatim and never include question words. One subject per call.
-- When an answer needs both research and a visual, issue the search and the image search in the same tool block so they run in parallel. Never search, answer partially, then search again for images.
-- Place at most two image items per answer, near the text they support, and keep the prose useful without them.
-- Do not add media for decoration. Use images/widgets only when they clarify, compare, document, or illustrate the answer."""
+- Display provided rich items inline with `<!--rich:<id>-->`; use only available IDs and never invent image URLs.
+- Call `brave_image_search` whenever the answer is about something the reader would expect to SEE — a product, device, place, building, artwork, organism, vehicle, or screen. Reviews, comparisons, recommendations and "tell me about X" on a concrete thing all qualify; do not wait to be asked for pictures.
+- Skip images for abstract subjects (code, math, policy, definitions, planning, conversation). Never add media as decoration.
+- For ordinary research call `tavily_search` without images; pass `include_images=True` only for an image tied to one cited source.
+- Write the image query yourself: a concrete subject plus any disambiguator the context implies (company vs fruit, city vs person), plus a form word when it matters (`photo`, `diagram`, `map`, `chart`). No question words, no verbatim reuse of the user's question, one subject per call.
+- Issue the text search and the image search in the same tool block so they run in parallel. Never search, answer partially, then search again for images.
+- At most two image items per answer, near the text they support; keep the prose useful without them."""
 
 
 def build_rich_response_guidance(

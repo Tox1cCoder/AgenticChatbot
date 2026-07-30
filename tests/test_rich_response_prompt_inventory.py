@@ -176,6 +176,32 @@ def test_inventory_caps_image_entries_and_counts_a_group_as_one():
     assert "image:tool:c3:0" not in block
 
 
+def test_media_guidance_triggers_on_concrete_subjects_not_only_explicit_requests():
+    """Regression guard for a real production miss.
+
+    The first version of this guidance scoped ``brave_image_search`` to "focused
+    visual discovery (what does X look like, examples, galleries)". Asked to
+    review a product, the model reasonably read that as ordinary research, called
+    ``tavily_search`` — which no longer returns images by default — and produced
+    an answer with no visuals at all, where the pre-refactor behavior had shown
+    several. The trigger must stay framed around the subject being something the
+    reader would expect to see, and must not require the user to ask for images.
+    """
+    from app.ai.prompts import MEDIA_CAPABILITY_SNIPPET
+
+    text = MEDIA_CAPABILITY_SNIPPET.lower()
+    assert "brave_image_search" in text
+    # Framed on the subject, not on the user's phrasing.
+    assert "expect to see" in text
+    # The categories that must not need an explicit request.
+    for subject in ("product", "place", "review", "comparison"):
+        assert subject in text
+    assert "do not wait to be asked" in text
+    # The precision counterweight must survive alongside the broader trigger.
+    assert "abstract" in text
+    assert "decoration" in text
+
+
 # ---------------------------------------------------------------------------
 # Presentation counter: record_presentation was defined in an earlier task
 # with no caller. It must be wired where items actually enter the model-facing
