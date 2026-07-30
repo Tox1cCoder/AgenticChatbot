@@ -7,7 +7,6 @@ from typing import Any
 from prometheus_client import CollectorRegistry, Counter, Histogram, generate_latest
 
 _PROVIDERS = {"brave", "tavily"}
-_SELECTION_OUTCOMES = {"selected", "rejected", "omitted"}
 _CANDIDATE_OUTCOMES = {
     "eligible",
     "rejected_malformed",
@@ -44,12 +43,6 @@ class RichImageMetrics:
             "rich_image_discovery_results",
             "Normalized image results returned per provider call.",
             ("provider",),
-            registry=self.registry,
-        )
-        self.selections = Counter(
-            "rich_image_selections_total",
-            "Deterministic rich-image selection outcomes.",
-            ("provider", "outcome"),
             registry=self.registry,
         )
         self.fetches = Counter(
@@ -93,12 +86,6 @@ class RichImageMetrics:
         self.discovery_results.labels(provider=_provider(provider)).observe(
             max(0, int(result_count))
         )
-
-    def record_selection(self, *, provider: str, outcome: str) -> None:
-        self.selections.labels(
-            provider=_provider(provider),
-            outcome=_bounded(outcome, _SELECTION_OUTCOMES),
-        ).inc()
 
     def record_candidate(self, *, provider: str, outcome: str) -> None:
         self.candidates.labels(

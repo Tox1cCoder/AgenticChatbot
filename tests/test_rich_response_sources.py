@@ -347,7 +347,6 @@ def test_candidate_selection_records_bounded_provider_counts(monkeypatch):
         (),
         {
             "record_discovery": Mock(),
-            "record_selection": Mock(),
             "record_candidate": Mock(),
         },
     )()
@@ -358,12 +357,12 @@ def test_candidate_selection_records_bounded_provider_counts(monkeypatch):
     )
 
     metrics.record_discovery.assert_called_once_with(provider="brave", result_count=1)
-    metrics.record_selection.assert_called_once_with(provider="brave", outcome="selected")
     metrics.record_candidate.assert_called_once_with(provider="brave", outcome="eligible")
 
 
-def test_record_selection_survives_record_candidate_raising_on_acceptance(monkeypatch):
-    """The deprecated compatibility counter must not go dark if the new one breaks."""
+def test_candidate_survives_record_candidate_raising_on_acceptance(monkeypatch):
+    """Telemetry is best-effort: a raising counter must not drop an eligible
+    candidate or fail the surrounding tool result."""
     from app.ai import tool_execution
 
     metrics = type(
@@ -371,20 +370,19 @@ def test_record_selection_survives_record_candidate_raising_on_acceptance(monkey
         (),
         {
             "record_discovery": Mock(),
-            "record_selection": Mock(),
             "record_candidate": Mock(side_effect=RuntimeError("boom")),
         },
     )()
     monkeypatch.setattr(tool_execution, "rich_image_metrics", metrics)
 
-    build_image_candidates_from_tool_result(
+    candidates = build_image_candidates_from_tool_result(
         _brave_payload(), tool_call_id="call_metrics", tool_name="brave_image_search"
     )
 
-    metrics.record_selection.assert_called_once_with(provider="brave", outcome="selected")
+    assert len(candidates) == 1
 
 
-def test_record_selection_survives_record_candidate_raising_on_rejection(monkeypatch):
+def test_rejection_survives_record_candidate_raising(monkeypatch):
     """Same guarantee on the reject path (_reject helper), not just acceptance."""
     from app.ai import tool_execution
 
@@ -393,18 +391,18 @@ def test_record_selection_survives_record_candidate_raising_on_rejection(monkeyp
         (),
         {
             "record_discovery": Mock(),
-            "record_selection": Mock(),
             "record_candidate": Mock(side_effect=RuntimeError("boom")),
         },
     )()
     monkeypatch.setattr(tool_execution, "rich_image_metrics", metrics)
     payload = json.dumps({"images": [{"url": "http://insecure.test/a.jpg"}]})
 
-    build_image_candidates_from_tool_result(
-        payload, tool_call_id="call_metrics", tool_name="brave_image_search"
+    assert (
+        build_image_candidates_from_tool_result(
+            payload, tool_call_id="call_metrics", tool_name="brave_image_search"
+        )
+        == []
     )
-
-    metrics.record_selection.assert_called_once_with(provider="brave", outcome="rejected")
 
 
 def test_tavily_malformed_entry_is_counted_as_rejected(monkeypatch):
@@ -419,7 +417,6 @@ def test_tavily_malformed_entry_is_counted_as_rejected(monkeypatch):
         (),
         {
             "record_discovery": Mock(),
-            "record_selection": Mock(),
             "record_candidate": Mock(),
         },
     )()

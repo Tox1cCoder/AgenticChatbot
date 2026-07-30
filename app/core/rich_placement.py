@@ -116,21 +116,54 @@ def _score(item_tokens: frozenset[str], block_tokens: frozenset[str]) -> float:
     return len(item_tokens & block_tokens) / len(item_tokens)
 
 
+def _find_best_block(
+    tokens: frozenset[str], blocks: list[_Block], insertions: dict[int, str]
+) -> tuple[int, float]:
+    """Return ``(end_line, score)`` of the best-scoring free block.
+
+    Returns ``(-1, 0.0)`` when no block is free or nothing scores above zero.
+    Blocks already carrying an insertion are skipped, which is what keeps
+    placement to at most one item per paragraph.
+    """
+    best_line, best = -1, 0.0
+    for block in blocks:
+        if block.end_line in insertions:
+            continue
+        score = _score(tokens, block.tokens)
+        if score > best:
+            best_line, best = block.end_line, score
+    return best_line, best
+
+
+def _apply_insertions(lines: list[str], insertions: dict[int, str]) -> str:
+    """Rebuild the document with each marker on its own line after its block."""
+    out: list[str] = []
+    for idx, line in enumerate(lines):
+        out.append(line)
+        marker = insertions.get(idx)
+        if marker is not None:
+            out.append("")
+            out.append(marker)
+    return "\n".join(out)
+
+
 def auto_place_rich_items(
     content: str,
     *,
     items: list[tuple[str, str, str]],
-    max_images: int,
     min_score: float,
 ) -> tuple[str, list[str]]:
-    """Insert markers for unreferenced items after their best-matching paragraph.
+    """Insert markers for unreferenced widget-class items after their best block.
 
     ``items`` holds ``(item_id, item_type, descriptive_text)`` tuples in
-    priority order. At most one item is placed per paragraph and at most
-    ``max_images`` image items overall. Items already referenced in
-    ``content`` or scoring below ``min_score`` are skipped. Returns
-    ``(new_content, placed_ids)``; content is returned unchanged when nothing
-    places.
+    priority order. At most one item is placed per paragraph. Items already
+    referenced in ``content`` or scoring below ``min_score`` are skipped.
+    Returns ``(new_content, placed_ids)``; content is returned unchanged when
+    nothing places.
+
+    Image items never travel through here: they are anchored on the model's own
+    image query by ``anchor_image_items_by_query``, which owns the per-answer
+    image cap and the fallback-anchor rules.
     """
     if not content or not items:
         return content, []
@@ -143,50 +176,32 @@ def auto_place_rich_items(
 
     insertions: dict[int, str] = {}
     placed: list[str] = []
-    images_placed = 0
-    for item_id, item_type, text in items:
+    for item_id, _item_type, text in items:
         if item_id in referenced:
             continue
         if len(item_id) > RICH_ITEM_ID_MAX_LENGTH or not _ITEM_ID_PATTERN.match(item_id):
             # The parser rejects such markers; inserting one would persist a raw
             # comment with no matching rich_items entry.
             continue
-        is_image = item_type == RichItemType.image.value
-        if is_image and images_placed >= max_images:
-            continue
-        item_tokens = _tokens(text or "")
-        best_line, best = -1, 0.0
-        for block in blocks:
-            if block.end_line in insertions:
-                continue
-            score = _score(item_tokens, block.tokens)
-            if score > best:
-                best_line, best = block.end_line, score
+        best_line, best = _find_best_block(_tokens(text or ""), blocks, insertions)
         if best_line < 0 or best < min_score:
             continue
         insertions[best_line] = f"<!--rich:{item_id}-->"
         placed.append(item_id)
-        if is_image:
-            images_placed += 1
 
     if not placed:
         return content, []
-
-    out: list[str] = []
-    for idx, line in enumerate(lines):
-        out.append(line)
-        marker = insertions.get(idx)
-        if marker is not None:
-            out.append("")
-            out.append(marker)
-    return "\n".join(out), placed
+    return _apply_insertions(lines, insertions), placed
 
 
 #: Origins allowed to anchor without a scoring match. Running an image search is
 #: itself the intent to display, so a missed keyword match must not silently
-#: discard the result. A tool-produced image (e.g. a chart or rendered
-#: diagram) carries the same intent: the tool call itself implies display, and
-#: such images have no query to score against a paragraph in the first place.
+#: discard the result. A tool-produced image carries the same intent: the tool
+#: call itself implies display. Such an image may or may not carry a query — a
+#: chart or rendered diagram has none, while a single ungrouped Brave
+#: image-search candidate is stamped ``tool_image`` and does carry its
+#: provenance query — so the fallback exists for the queryless case and for the
+#: case where a real query simply matched no paragraph.
 _FALLBACK_ANCHOR_ORIGINS = frozenset({"image_search", "tool_image"})
 
 #: Minimum post-stopword token count for a block to accept a fallback anchor, so
@@ -254,14 +269,7 @@ def anchor_image_items_by_query(
             outcomes[entry.item_id] = "unplaced"
             continue
 
-        query_tokens = _tokens(entry.query or "")
-        best_line, best = -1, 0.0
-        for block in blocks:
-            if block.end_line in insertions:
-                continue
-            score = _score(query_tokens, block.tokens)
-            if score > best:
-                best_line, best = block.end_line, score
+        best_line, best = _find_best_block(_tokens(entry.query or ""), blocks, insertions)
 
         if best_line >= 0 and best >= min_score:
             outcome = "query_anchored"
@@ -280,15 +288,7 @@ def anchor_image_items_by_query(
 
     if not insertions:
         return content, outcomes
-
-    out: list[str] = []
-    for idx, line in enumerate(lines):
-        out.append(line)
-        marker = insertions.get(idx)
-        if marker is not None:
-            out.append("")
-            out.append(marker)
-    return "\n".join(out), outcomes
+    return _apply_insertions(lines, insertions), outcomes
 
 
 def _repair_unprefixed_markers(content: str, known_ids: set[str]) -> str:
@@ -353,10 +353,9 @@ def _descriptive_signal_text(candidate: dict[str, Any]) -> str:
     The generic alt-text fallback is excluded — it is not a real description,
     and using it as a placement signal lets junk images (e.g. crawler/SEO
     URLs) match a paragraph via tokens like "tool"/"result" and render
-    broken. Shared by the legacy description-anchored path
-    (``_image_placement_entries``) and the ``tool_image`` fallback-anchor
-    origin (``_image_anchor_entries``), which both need the same notion of
-    "this candidate carries no genuine signal, never auto-place it."
+    broken. Used by the ``tool_image`` fallback-anchor origin in
+    ``_image_anchor_entries`` to decide "this candidate carries no genuine
+    signal, never auto-place it."
     """
     payload = candidate.get("payload")
     description = payload.get("description") if isinstance(payload, dict) else None
@@ -366,26 +365,6 @@ def _descriptive_signal_text(candidate: dict[str, Any]) -> str:
     return " ".join(
         str(part) for part in (candidate.get("title"), alt_text, description) if part
     )
-
-
-def _image_placement_entries(metadata: dict[str, Any]) -> list[tuple[str, str, str]]:
-    entries: list[tuple[str, str, str]] = []
-    for candidate in metadata.get("_rich_item_candidates") or []:
-        if not isinstance(candidate, dict):
-            continue
-        if candidate.get("type") != RichItemType.image.value:
-            continue
-        item_id = candidate.get("id")
-        if not isinstance(item_id, str) or not item_id:
-            continue
-        text = _descriptive_signal_text(candidate)
-        if not text.strip():
-            # No genuine descriptive signal → never auto-place; it cannot be
-            # relevance-matched or captioned. The model may still place it
-            # explicitly if it judges the image useful.
-            continue
-        entries.append((item_id, RichItemType.image.value, text))
-    return entries
 
 
 def _image_anchor_entries(metadata: dict[str, Any]) -> list[ImageAnchorEntry]:
@@ -473,10 +452,7 @@ def finalize_article_content(response: Any, content: str) -> str:
         return content
 
     items = _widget_placement_entries(metadata, getattr(response, "tool_artifacts", None))
-    query_anchored = bool(getattr(settings, "rich_query_anchored_images_enabled", False))
-    anchor_entries = _image_anchor_entries(metadata) if query_anchored else []
-    if not query_anchored:
-        items.extend(_image_placement_entries(metadata))
+    anchor_entries = _image_anchor_entries(metadata)
     if not items and not anchor_entries:
         return content
 
@@ -488,7 +464,6 @@ def finalize_article_content(response: Any, content: str) -> str:
     new_content, _placed = auto_place_rich_items(
         repaired,
         items=items,
-        max_images=settings.rich_auto_place_max_images,
         min_score=settings.rich_auto_place_min_score,
     )
     if anchor_entries:

@@ -14,15 +14,15 @@ def test_rich_image_metrics_are_bounded_and_content_free():
     secret = f"https://secret.example/{uuid4()}"
 
     metrics.record_discovery(provider="brave_image_search", result_count=6)
-    metrics.record_selection(provider="tavily", outcome="selected")
-    metrics.record_selection(provider=secret, outcome=secret)
+    metrics.record_candidate(provider="tavily", outcome="eligible")
+    metrics.record_candidate(provider=secret, outcome=secret)
     metrics.record_fetch(provider="brave", outcome="success", duration_seconds=0.2)
     metrics.record_fetch(provider=secret, outcome=secret, duration_seconds=0.1)
 
     payload = metrics.render().decode("utf-8")
 
     assert "rich_image_discovery_results" in payload
-    assert "rich_image_selections_total" in payload
+    assert "rich_image_candidates_total" in payload
     assert "rich_image_fetches_total" in payload
     assert "rich_image_fetch_duration_seconds" in payload
     assert 'provider="brave"' in payload
@@ -63,10 +63,10 @@ def test_stage_counters_are_bounded_and_content_free():
         assert f'{forbidden}="' not in body
 
 
-def test_old_selection_counter_still_emits_during_compatibility_window():
+def test_deprecated_selection_counter_is_removed():
     metrics = RichImageMetrics()
-    metrics.record_selection(provider="tavily", outcome="selected")
-    assert "rich_image_selections_total" in metrics.render().decode()
+    assert not hasattr(metrics, "record_selection")
+    assert "rich_image_selections_total" not in metrics.render().decode()
 
 
 def test_presentation_and_final_selection_ignore_non_positive_counts():

@@ -193,12 +193,8 @@ def build_image_candidates_from_tool_result(
         )
 
     def _reject(reason: str) -> None:
-        # Each counter gets its own suppress block: a fault in the new,
-        # untested-in-production record_candidate metric must never be able
-        # to prevent the deprecated record_selection compatibility counter
-        # from firing, and vice versa.
-        with suppress(Exception):
-            rich_image_metrics.record_selection(provider=metric_provider, outcome="rejected")
+        # Telemetry is best-effort: a metrics fault must never drop a candidate
+        # decision or fail the surrounding tool result.
         with suppress(Exception):
             rich_image_metrics.record_candidate(provider=metric_provider, outcome=reason)
 
@@ -323,8 +319,6 @@ def build_image_candidates_from_tool_result(
         )
         if display_url:
             seen_display_urls.add(display_url)
-        with suppress(Exception):
-            rich_image_metrics.record_selection(provider=metric_provider, outcome="selected")
         with suppress(Exception):
             rich_image_metrics.record_candidate(provider=metric_provider, outcome="eligible")
         if len(candidates) >= candidate_cap:
