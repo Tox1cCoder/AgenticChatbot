@@ -131,9 +131,13 @@ def _make_response(content, *, candidates=None, artifacts=None, capable=True):
 
 
 def _image_candidate(item_id="image:tool:c1:0", description="Eiffel Tower at night in Paris"):
+    """A tool-produced image candidate (e.g. a Brave/MCP result), which is the
+    real-world shape: it carries a ``source`` and no image-search query, so it
+    reaches placement only through the ``tool_image`` fallback-anchor origin."""
     return {
         "id": item_id,
         "type": "image",
+        "source": "tool_image",
         "display_policy": "inline_only",
         "alt_text": description,
         "payload": {
@@ -147,7 +151,11 @@ def _image_candidate(item_id="image:tool:c1:0", description="Eiffel Tower at nig
 def test_finalize_places_image_and_mutates_response_message(monkeypatch):
     monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
     monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
-    content = "The Eiffel Tower is stunning at night, lit by thousands of lamps."
+    monkeypatch.setattr(settings, "rich_query_anchored_images_enabled", True)
+    # Long enough (>= _FALLBACK_MIN_BLOCK_TOKENS non-stopword tokens) for the
+    # tool_image fallback anchor to accept the block: this candidate has no
+    # query to score against a paragraph, so fallback is its only path.
+    content = "The Eiffel Tower is stunning at night, lit by thousands of golden lamps."
     response = _make_response(content, candidates=[_image_candidate()])
     new_content = finalize_article_content(response, content)
     assert "<!--rich:image:tool:c1:0-->" in new_content
@@ -449,6 +457,23 @@ def test_query_level_image_is_never_anchored():
     assert outcomes["image:tool:c1:0"] == "unplaced"
 
 
+def test_tool_image_falls_back_to_first_prose_block_with_no_query():
+    """A tool-produced image (chart, rendered diagram) carries no image query
+    by construction, so its score against every block is always zero. Origin
+    ``tool_image`` must still reach the fallback anchor, the same as a
+    deliberate image search — the tool call itself implies display."""
+    content, outcomes = anchor_image_items_by_query(
+        BODY,
+        entries=[
+            ImageAnchorEntry(item_id="image:tool:c1:0", query="", origin="tool_image")
+        ],
+        min_score=0.34,
+        max_images=2,
+    )
+    assert "<!--rich:image:tool:c1:0-->" in content
+    assert outcomes["image:tool:c1:0"] == "fallback_anchored"
+
+
 def test_existing_marker_wins_and_is_never_duplicated():
     body = BODY + "\n<!--rich:imagegroup:tool:c1-->\n"
     content, outcomes = anchor_image_items_by_query(
@@ -580,3 +605,89 @@ def test_widgets_still_auto_place_when_query_anchoring_is_on(monkeypatch):
     content = "Apple Park in Cupertino cost about five billion dollars to build."
     response = _make_response(content, artifacts=[artifact])
     assert "<!--rich:widget:w1-->" in finalize_article_content(response, content)
+
+
+def test_query_anchoring_is_enabled_by_default():
+    from app.core.config import Settings
+
+    assert Settings().rich_query_anchored_images_enabled is True
+
+
+# ---------------------------------------------------------------------------
+# Fallback-anchor origin contract at the finalize level: a tool-produced image
+# (``tool_image``) and a deliberate image search anchor with a fallback; a
+# source-bound web-search image (``web_search``/Tavily) with no query and no
+# model marker must stay unplaced. This is the stricter half of the contract
+# that ``test_finalize_places_image_and_mutates_response_message`` (tool_image,
+# placed) is the positive counterpart to.
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_leaves_source_bound_web_search_image_unplaced_without_query(monkeypatch):
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
+    monkeypatch.setattr(settings, "rich_query_anchored_images_enabled", True)
+    candidate = {
+        "id": "image:tool:c1:0",
+        "type": "image",
+        "source": "web_search",
+        "display_policy": "inline_only",
+        "alt_text": "Eiffel Tower at night",
+        "payload": {
+            "url": "https://example.com/eiffel.jpg",
+            "mime_type": "image/jpeg",
+        },
+    }
+    content = "The Eiffel Tower is stunning at night, lit by thousands of golden lamps."
+    response = _make_response(content, candidates=[candidate])
+    assert finalize_article_content(response, content) == content
+
+
+def test_single_brave_image_result_is_placed_via_fallback(monkeypatch):
+    """Pins the decision-2 fix: a single eligible Brave candidate (not grouped,
+    since grouping needs two) is built with ``source: "tool_image"`` by
+    ``build_image_candidates_from_tool_result``. Before ``tool_image`` joined
+    _FALLBACK_ANCHOR_ORIGINS, such a candidate had no fallback path and was
+    silently dropped whenever its search query did not textually match a
+    paragraph, breaking the project's own acceptance criterion that a
+    deliberate ``brave_image_search`` with at least one eligible candidate
+    always results in a displayed image."""
+    import json
+
+    from app.ai.tool_execution import build_image_candidates_from_tool_result
+
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
+    monkeypatch.setattr(settings, "rich_query_anchored_images_enabled", True)
+    payload = json.dumps(
+        {
+            "provider": "brave_image_search",
+            "query": "red panda photo",
+            "images": [
+                {
+                    "url": "https://e.com/0.jpg",
+                    "thumbnail_url": "https://cdn.brave.com/0.jpg",
+                    "mime_type": "image/jpeg",
+                    "width": 1200,
+                    "height": 800,
+                    "source_url": "https://e.com/page-0",
+                    "description": "red panda 0",
+                }
+            ],
+        }
+    )
+    [candidate] = build_image_candidates_from_tool_result(
+        payload, tool_call_id="c1", tool_name="brave_image_search"
+    )
+    assert candidate["type"] == "image"
+    assert candidate["source"] == "tool_image"
+
+    # Deliberately shares no tokens with "red panda photo" so the query-match
+    # path scores zero and only the fallback anchor can place the image.
+    content = (
+        "Quarterly revenue grew across every product line this period, driven "
+        "by strong subscription renewals and enterprise contract expansion."
+    )
+    response = _make_response(content, candidates=[candidate])
+    new_content = finalize_article_content(response, content)
+    assert f"<!--rich:{candidate['id']}-->" in new_content

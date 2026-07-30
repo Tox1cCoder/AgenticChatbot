@@ -1624,7 +1624,7 @@ class Settings(BaseSettings):
         ),
     )
     rich_query_anchored_images_enabled: bool = Field(
-        default=False,
+        default=True,
         description=(
             "Anchor unreferenced image items on the model's own image-search query "
             "instead of the provider description. While False, the legacy "

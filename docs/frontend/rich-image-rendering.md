@@ -103,9 +103,69 @@ The backend selects candidates, persists only selected images, converts remote U
 
 Before release, verify: one rendered visual per selected marker; no candidate dump; no duplicate AI SDK file part; one footer; alt text is not visible; a failed attempt produces no unavailable label or fallback source action; failed media leaves the answer intact; and all object URLs are revoked.
 
-## Deprecated metrics
+## Image placement
 
-`rich_image_selections_total` is superseded by the stage-specific
+When an image item lacks a model-authored marker, the backend applies automatic placement rules anchored on query data. Images are collected into `image_group` items (multiple cells per marker) and placed deterministically, with labeled failure outcomes for rollout monitoring.
+
+### image_group shape and cell states
+
+An `image_group` collapsible rich item contains multiple image cells under one marker:
+
+```typescript
+type ImageGroupCell = {
+  url: string;
+  mime_type: string;
+  source_url?: string;
+  caption?: string;
+  width?: number;
+  height?: number;
+};
+
+type RichImageGroupItem = {
+  id: string;
+  type: "image_group";
+  display_policy: "inline_only";
+  payload: {
+    items: ImageGroupCell[];  // 1–3 cells per group
+  };
+};
+```
+
+Each cell may fail independently during render (network timeout, invalid MIME, decode error). Per-cell failures do not cascade: a successful cell is displayed even if others fail. Treat failed cells like individual image load failures — remove without placeholder or unavailable state.
+
+### Anchor origins and fallback rules
+
+The backend attempts to anchor an unreferenced image group on the query that produced it. Four origins have different fallback behavior:
+
+1. **Image search** (deliberate model-run search)
+   - Anchors after the paragraph matching the most keywords from the search query.
+   - Falls back to after the first substantial prose block if no paragraph reaches the `rich_image_anchor_min_score` threshold.
+   - Signal: the model explicitly ran an image search or selected an image from a search result.
+
+2. **Tool-produced image** (chart, rendered diagram, other non-search tool output)
+   - Carries no image-search query by construction, so it never scores a keyword match.
+   - Always falls back to after the first substantial prose block, on the same reasoning as image search: the tool call itself implies display.
+   - Signal: `source: "tool_image"` — an image returned directly by an MCP tool rather than harvested from a search result. This also covers a single eligible Brave image-search candidate, which is not grouped into an `image_group` (grouping needs two or more) and so carries this source instead of `image_search`.
+
+3. **Web-search source-bound** (Tavily result image)
+   - Anchors only after a paragraph matching the image query; does NOT fall back.
+   - If no paragraph qualifies, the image is unplaced and does not append to the body.
+   - Signal: an image harvested from a web-search result and bound to that source.
+
+4. **Web-search query-level** (user query image)
+   - Never auto-anchored; remains unplaced unless the model writes its marker explicitly.
+   - Signal: an image matching the user's original message query (not the model's derived search).
+
+### Rollout watch list
+
+When `RICH_QUERY_ANCHORED_IMAGES_ENABLED=true`, monitor these signals:
+
+- **`rich_image_anchor_outcomes_total{outcome="unplaced"}` rising** — the primary signal to disable query anchoring. Unplaced images indicate that query scoring is too strict or the content lacks qualifying paragraphs. A sustained rise suggests miscalibration of `rich_image_anchor_min_score` or that source-bound images lack relevance anchors.
+- **`rich_image_anchor_outcomes_total{outcome="query_anchored"}`** — images successfully placed on query match; should trend higher than `fallback_anchored` under normal conditions.
+- **`rich_image_anchor_outcomes_total{outcome="fallback_anchored"}`** — images placed on fallback (first prose block); a spike suggests low query-paragraph overlap.
+- **`rich_image_anchor_outcomes_total{outcome="marker"}`** — images placed on model-authored marker; should remain steady as model writing behavior is stable.
+
+**Deprecated:** `rich_image_selections_total` is superseded by the stage-specific
 `rich_image_candidates_total` (eligibility outcome by reason) and
 `rich_image_final_selection_total` (images persisted with the message). The old
 counter still emits during the compatibility window but is removed in Task 17.

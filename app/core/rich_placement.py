@@ -184,8 +184,10 @@ def auto_place_rich_items(
 
 #: Origins allowed to anchor without a scoring match. Running an image search is
 #: itself the intent to display, so a missed keyword match must not silently
-#: discard the result.
-_FALLBACK_ANCHOR_ORIGINS = frozenset({"image_search"})
+#: discard the result. A tool-produced image (e.g. a chart or rendered
+#: diagram) carries the same intent: the tool call itself implies display, and
+#: such images have no query to score against a paragraph in the first place.
+_FALLBACK_ANCHOR_ORIGINS = frozenset({"image_search", "tool_image"})
 
 #: Minimum post-stopword token count for a block to accept a fallback anchor, so
 #: the image never lands under a bare heading or a two-word line.
@@ -379,8 +381,10 @@ def _image_anchor_entries(metadata: dict[str, Any]) -> list[ImageAnchorEntry]:
     """Map turn-scoped image candidates to anchoring entries.
 
     Origin decides fallback eligibility: a deliberate image search may anchor
-    without a keyword match, a source-bound web-search image may not, and a
-    query-level image is never anchored because it carries no page provenance.
+    without a keyword match; a tool-produced image (no query by construction)
+    anchors the same way, because the tool call itself implies display; a
+    source-bound web-search image may not fall back; and a query-level image
+    is never anchored because it carries no page provenance.
     """
     image_types = {RichItemType.image.value, RichItemType.image_group.value}
     entries: list[ImageAnchorEntry] = []
@@ -393,8 +397,11 @@ def _image_anchor_entries(metadata: dict[str, Any]) -> list[ImageAnchorEntry]:
         provenance = candidate.get("provenance")
         provenance = provenance if isinstance(provenance, dict) else {}
         query = str(provenance.get("query") or "").strip()
-        if candidate.get("source") == "image_search":
+        source = candidate.get("source")
+        if source == "image_search":
             origin, anchorable = "image_search", True
+        elif source == "tool_image":
+            origin, anchorable = "tool_image", True
         elif provenance.get("query_level"):
             origin, anchorable = "web_search_query_level", False
         else:
