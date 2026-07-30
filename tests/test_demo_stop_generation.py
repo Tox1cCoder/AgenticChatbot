@@ -197,3 +197,25 @@ def test_stop_rerun_appends_partial_message_when_view_matches(monkeypatch):
         demo._handle_stop_rerun(_STREAM_CONVERSATION_ID)
 
     assert stub.session_state.messages == [bot_msg]
+
+
+def test_stop_rerun_escapes_currency_in_partial_preview(monkeypatch):
+    """A cancelled live response uses the same display-only currency guard."""
+    demo, stub = _import_demo_with_ui_stubs(monkeypatch)
+    _set_inflight_stream(stub.session_state)
+    stub.session_state.stream_partial_text = "$150–$160"
+    rendered: list[str] = []
+    stub.markdown = lambda text, **_kwargs: rendered.append(text)
+    monkeypatch.setattr(
+        demo,
+        "make_api_request",
+        lambda _method, _endpoint, data=None: {
+            "success": True,
+            "data": {"status": "cancelled", "message": {"id": "m1", "content": "partial"}},
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="rerun"):
+        demo._handle_stop_rerun(_STREAM_CONVERSATION_ID)
+
+    assert rendered == [r"\$150–\$160 *(stopped)*"]

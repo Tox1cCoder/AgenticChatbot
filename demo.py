@@ -2734,7 +2734,7 @@ def _handle_stop_rerun(conversation_id: str) -> None:
     # Show partial text preview while the stop call completes
     if partial_preview:
         with st.chat_message("assistant"):
-            st.markdown(partial_preview + " *(stopped)*")
+            st.markdown(normalize_stream_markdown_text(partial_preview) + " *(stopped)*")
 
     if not user_message_id:
         _clear_inflight_state()
