@@ -68,6 +68,13 @@ def test_build_system_prompt_injects_multi_agent_activity():
     assert block in prompt
 
 
+def test_build_system_prompt_includes_currency_markdown_guidance_once():
+    prompt = _agent()._build_system_prompt(persona=None, has_tool_context=False)
+
+    assert "write dollar prices as \\$150; reserve $...$ for LaTeX" in prompt
+    assert prompt.count("write dollar prices as") == 1
+
+
 def test_build_system_prompt_uses_dynamic_delegation_targets():
     descriptions = {"custom_agent:abc": "Legal Reviewer: contracts."}
     prompt = _agent()._build_system_prompt(

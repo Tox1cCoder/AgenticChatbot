@@ -959,6 +959,8 @@ def test_rag_system_prompt_includes_dynamic_delegation_roster():
     rendered = system_msg.content if hasattr(system_msg, "content") else str(system_msg)
     assert "hand_off" in rendered
     assert "search_agent: Current web research." in rendered
+    assert "write dollar prices as \\$150; reserve $...$ for LaTeX" in rendered
+    assert rendered.count("write dollar prices as") == 1
 
 
 def test_rag_system_prompt_has_compact_complex_query_policy_without_hardcoded_phrases():

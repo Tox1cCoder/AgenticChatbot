@@ -12,6 +12,11 @@ is exercised separately.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+from types import SimpleNamespace
+
+from tests.test_demo_plan_widget import _import_demo_with_ui_stubs
+
 
 def test_escape_markdown_currency_escapes_price_ranges_and_lists():
     """Currency runs must not be mistaken for Streamlit's inline LaTeX."""
@@ -37,6 +42,25 @@ def test_escape_markdown_currency_preserves_protected_markdown_and_latex():
     )
 
     assert escape_markdown_currency(raw) == raw
+
+
+def test_persisted_message_rendering_escapes_currency_before_streamlit(monkeypatch):
+    """Stored content stays raw; only the Streamlit render call is escaped."""
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    rendered: list[str] = []
+    streamlit_stub.chat_message = lambda _avatar: nullcontext()
+    streamlit_stub.markdown = lambda text, **_kwargs: rendered.append(text)
+    monkeypatch.setattr(
+        demo,
+        "_build_rich_response_view_for_msg",
+        lambda *_args: SimpleNamespace(is_v1=False, use_legacy_image_gallery=False),
+    )
+
+    message = {"content": "$150–$160", "createdAt": "2026-07-30T00:00:00Z"}
+    demo.render_message_bubble(message, is_user=True)
+
+    assert message["content"] == "$150–$160"
+    assert rendered == [r"\$150–\$160"]
 
 
 def test_normalize_stream_markdown_text_unescapes_quotes_only():

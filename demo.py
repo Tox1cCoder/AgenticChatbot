@@ -50,7 +50,7 @@ from app.ui.rag_artifacts import (
     RAGDocumentListing,
     extract_rag_artifact_views,
 )
-from app.ui.stream_markdown import normalize_stream_markdown_text
+from app.ui.stream_markdown import escape_markdown_currency, normalize_stream_markdown_text
 from app.ui.subagent_activity import (
     build_live_subagent_activity_view,
     build_subagent_activity_view,
@@ -7455,7 +7455,7 @@ def render_message_bubble(
                 auto_mount=auto_mount_live_widgets,
             )
         else:
-            st.markdown(content_text)  # Native markdown with LaTeX support
+            st.markdown(escape_markdown_currency(content_text))
 
         if not is_user:
             render_subagent_activity(message_metadata)
@@ -7530,7 +7530,7 @@ def _render_rich_segments(
     mounted_widget_ids: set[str] = set()
     for index, segment in enumerate(segments):
         if segment.kind == "markdown" and segment.text:
-            st.markdown(segment.text)
+            st.markdown(escape_markdown_currency(segment.text))
             continue
         if segment.kind == "unavailable":
             st.caption(f":material/error_outline: rich item `{segment.item_id}` is unavailable.")

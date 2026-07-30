@@ -83,7 +83,8 @@ def normalize_stream_markdown_text(content: str) -> str:
     via ``app.ui.rich_response.build_rich_response_view`` and renders the
     referenced rich item (widget, image, tool view, etc.) at its inline
     position, so suppressing the raw token here only affects what the user
-    sees while the stream is still in flight.
+    sees while the stream is still in flight. Recognised currency runs are
+    also escaped so Streamlit does not interpret them as inline LaTeX.
     """
     if not isinstance(content, str) or not content:
         return ""

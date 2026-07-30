@@ -9,6 +9,10 @@ from app.observability.rich_images import rich_image_metrics
 
 _PROMPT_TOKEN_COUNTER = TokenCounter()
 
+MARKDOWN_CURRENCY_GUIDANCE = (
+    "\n\nMarkdown: write dollar prices as \\$150; reserve $...$ for LaTeX."
+)
+
 INLINE_RICH_RESPONSE_SUFFIX = (
     "Use `<!--rich:<id>-->` on its own line only for an available rich item that improves\n"
     "the answer. Never invent an ID. Do not write a Markdown caption after an image\n"

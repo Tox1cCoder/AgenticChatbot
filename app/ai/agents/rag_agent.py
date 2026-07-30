@@ -33,6 +33,7 @@ from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
 from ..model_factory import ModelFactory
 from ..prompts import (
     AGENTIC_RAG_SYSTEM_PROMPT,
+    MARKDOWN_CURRENCY_GUIDANCE,
     TOOL_EXPLORATION_SUFFIX,
 )
 from ..rag_tools import create_search_documents_tool
@@ -150,7 +151,7 @@ class RAGAgent(BaseAgent):
         device_id: str | None = None,
     ) -> str:
         """Return base prompt + tool exploration suffix + active skills suffix."""
-        prompt = f"{base_prompt}{TOOL_EXPLORATION_SUFFIX}"
+        prompt = f"{base_prompt}{MARKDOWN_CURRENCY_GUIDANCE}{TOOL_EXPLORATION_SUFFIX}"
         suffix = self._build_skills_suffix(user_id=user_id, device_id=device_id)
         if suffix:
             return f"{prompt}{suffix}"
@@ -954,7 +955,7 @@ class RAGAgent(BaseAgent):
         rag_force_final_response = bool(message.metadata.get("rag_force_final_response"))
         rag_tool_budget_notice = message.metadata.get("rag_tool_budget_notice")
 
-        system_prompt = AGENTIC_RAG_SYSTEM_PROMPT
+        system_prompt = f"{AGENTIC_RAG_SYSTEM_PROMPT}{MARKDOWN_CURRENCY_GUIDANCE}"
         system_prompt = f"{system_prompt}{TOOL_EXPLORATION_SUFFIX}"
         handoff_bound = any(
             getattr(tool, "name", None) == "hand_off" for tool in internal_tools or []

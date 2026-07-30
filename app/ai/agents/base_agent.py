@@ -43,7 +43,7 @@ from ..deferred_tool_binding import (
 from ..image_context import build_multimodal_content, has_image_parts
 from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
 from ..model_context import build_context_window_usage, resolve_model_context_window
-from ..prompts import TOOL_CONTEXT_SUFFIX, TOOL_EXPLORATION_SUFFIX
+from ..prompts import MARKDOWN_CURRENCY_GUIDANCE, TOOL_CONTEXT_SUFFIX, TOOL_EXPLORATION_SUFFIX
 from ..request_budget import (
     BudgetConfig,
     BudgetResult,
@@ -1644,7 +1644,7 @@ class BaseAgent(ABC):
         has_tool_context: bool,
         **_: Any,
     ) -> str:
-        system_prompt = self._get_base_system_prompt()
+        system_prompt = f"{self._get_base_system_prompt()}{MARKDOWN_CURRENCY_GUIDANCE}"
 
         user_id = _.get("user_id")
         device_id = _.get("device_id")
@@ -1744,7 +1744,7 @@ class BaseAgent(ABC):
         vision, RAGAgent traditional _generate) where _build_system_prompt()
         is not invoked.
         """
-        base = self._get_base_system_prompt()
+        base = f"{self._get_base_system_prompt()}{MARKDOWN_CURRENCY_GUIDANCE}"
         suffix = self._build_skills_suffix(user_id=user_id, device_id=device_id)
         if suffix:
             base = f"{base}{suffix}"
