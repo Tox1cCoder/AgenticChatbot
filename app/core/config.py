@@ -324,11 +324,16 @@ class Settings(BaseSettings):
         description="Default Tavily search depth: basic, fast, ultra-fast, or advanced.",
     )
     tavily_search_include_images: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "Include Tavily search image candidates by default. Off by default: "
-            "ordinary text research must not manufacture image candidates. "
-            "Callers pass include_images=True for source-bound visuals."
+            "Include Tavily search image candidates by default. On, because it is "
+            "the only image supply that does not depend on the model choosing to "
+            "call an image search: with it off, real answers came back with no "
+            "visuals at all. Precision no longer relies on this switch — junk-URL "
+            "and aspect gates filter candidates, a source-bound image anchors only "
+            "on a real query-token match with no fallback, query-level images never "
+            "auto-anchor, and at most two image items reach an answer. Callers pass "
+            "include_images=False for research where a visual cannot help."
         ),
     )
     tavily_search_include_image_descriptions: bool = Field(

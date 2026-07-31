@@ -201,7 +201,17 @@ def test_search_normalizes_result_bound_images_with_parent_provenance(monkeypatc
     assert payload["images"][1]["query_level"] is True
 
 
-def test_default_search_does_not_request_images(monkeypatch):
+def test_default_search_requests_source_bound_images(monkeypatch):
+    """Images are requested by default.
+
+    This was briefly flipped off so that ordinary research would stop
+    manufacturing candidates. In practice that removed the only image supply
+    that does not depend on the model choosing to call an image search, and real
+    answers came back with no visuals at all. Precision is now enforced further
+    down the pipeline instead — junk-URL and aspect gates, a query-token match
+    with no fallback for source-bound images, query-level images never
+    auto-anchored, and a two-item cap per answer.
+    """
     captured = {}
 
     class _FakeClient:
@@ -211,6 +221,21 @@ def test_default_search_does_not_request_images(monkeypatch):
 
     monkeypatch.setattr(tavily_server, "_make_client", lambda: _FakeClient())
     tavily_server.tavily_search(query="chip export rules 2026")
+    assert captured["include_images"] is True
+    assert captured["include_image_descriptions"] is True
+
+
+def test_explicit_include_images_false_suppresses_them(monkeypatch):
+    """The per-call opt-out still works, for research where no visual can help."""
+    captured = {}
+
+    class _FakeClient:
+        def search(self, **params):
+            captured.update(params)
+            return {"results": [], "images": []}
+
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: _FakeClient())
+    tavily_server.tavily_search(query="explain big-O notation", include_images=False)
     assert captured["include_images"] is False
     assert captured["include_image_descriptions"] is False
 

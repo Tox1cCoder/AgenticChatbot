@@ -142,11 +142,12 @@ def tavily_search(
 ) -> str:
     """Search the web for current facts, news, recent information, or source discovery.
 
-    Images are OFF by default. Pass ``include_images=True`` only when an image
-    tied to a cited source result would materially help the answer. For focused
-    visual discovery ("what does X look like", galleries, examples), call
-    ``brave_image_search`` instead — it is a ranked image index and gives far
-    better visuals than page-scraped images.
+    Images come back by default, tied to the source results that carried them.
+    Pass ``include_images=False`` for research where a visual cannot help (code,
+    math, policy, definitions) to keep the response smaller. When the answer's
+    subject is something the reader would expect to see, also call
+    ``brave_image_search``: it is a ranked image index and gives markedly better
+    visuals than images scraped off a result page.
 
     Pass ``auto_parameters=True`` to let Tavily pick the search depth when the
     query intent is genuinely ambiguous; an explicit ``search_depth`` always

@@ -130,13 +130,35 @@ owns final selection when it chooses to exercise it.
 
 ### 1. Explicit visual retrieval intent
 
-Change the Tavily deployment default to `include_images=false`.
+**Superseded after production observation. Retained here for the reasoning; see
+the amendment below for what ships.**
+
+The original decision was to change the Tavily deployment default to
+`include_images=false`, so ordinary research would stop manufacturing candidates
+and all visuals would come from a deliberate image search.
+
+**Amendment.** That shipped, and real answers came back with no images at all —
+twice, on questions where the pre-change behavior had shown several. Diagnosis:
+the whole retrieval path was verified working end to end (the Brave tool returns
+images, the candidate builder groups them, anchoring places the marker,
+persistence keeps it), so nothing downstream was broken. The failure was that
+turning the default off left image supply depending entirely on the model
+volunteering an image-search call, and it does not reliably do so. Two successive
+prompt rewrites did not change that.
+
+The default is therefore `include_images=true`. This is safe in a way it was not
+before this design, because precision no longer rests on the retrieval switch:
+junk-URL and aspect gates filter candidates, a source-bound image anchors only on
+a real query-token match with **no** fallback, query-level images are never
+auto-anchored, and at most two image items reach an answer. The
+misplacement failure this design set out to fix is prevented by those gates rather
+than by starving the supply.
 
 Routes defined by tool descriptions and shared media guidance:
 
-- Ordinary web research calls Tavily without images.
-- Research needing an image tied to a cited source calls Tavily with
-  `include_images=true`.
+- Ordinary web research calls Tavily, which returns source-bound images.
+- Research where no visual can help passes `include_images=false` to keep the
+  response smaller.
 - Focused visual discovery calls `brave_image_search`.
 - An answer needing both broad research and visuals issues the Tavily and Brave
   calls in the same parallel tool block. The guidance explicitly forbids the
@@ -549,7 +571,12 @@ and must survive:
 
 ## Acceptance Criteria
 
-- Ordinary Tavily research creates no image candidates by default.
+- ~~Ordinary Tavily research creates no image candidates by default.~~
+  **Withdrawn** — see the amendment in Decision 1. Starving the supply removed
+  the only image source that does not depend on a model decision, and answers
+  came back with no visuals. Replaced by: ordinary Tavily research creates
+  candidates, and no unsuitable candidate survives the eligibility gates, the
+  query-match anchoring threshold, or the per-answer cap.
 - Tavily automatic depth actually omits explicit depth when enabled.
 - Source-bound Tavily images retain parent source title, URL, domain, rank, and
   score through selection.
