@@ -395,7 +395,9 @@ def test_existing_destination_is_never_partially_overwritten(tmp_path):
 
 
 def test_limits_from_settings_reads_configured_bounds(monkeypatch):
-    from client_backend.core.config import client_settings
+    # The proxy this module resolves against, which module eviction elsewhere in
+    # the suite can make distinct from a freshly imported one.
+    client_settings = SkillArchiveValidator.__init__.__globals__["client_settings"]
 
     monkeypatch.setattr(client_settings, "skill_upload_max_bytes", 111)
     monkeypatch.setattr(client_settings, "skill_upload_max_expanded_bytes", 222)

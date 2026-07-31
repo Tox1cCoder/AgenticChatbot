@@ -10,12 +10,12 @@ processes.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 
 import pytest
 
-from client_backend.core.config import client_settings
 from client_backend.services.skill_runtime.locks import (
     SkillLockTimeoutError,
     profile_lock,
@@ -25,6 +25,21 @@ from client_backend.services.skill_runtime.state import (
     atomic_write_json,
     read_json_object,
 )
+
+
+def _live_locks() -> dict:
+    """The lock module's globals, which is what ``profile_lock`` resolves names in.
+
+    Not ``sys.modules[...]``: another test in this directory evicts every
+    ``client_backend*`` module, after which a fresh import is a different object
+    from the one this file closed over. See the same note in test_skill_uploads.py.
+    """
+    return inspect.unwrap(profile_lock).__globals__
+
+
+def _live_settings():
+    """The settings proxy the lock module resolves against."""
+    return _live_locks()["client_settings"]
 
 
 def test_atomic_write_json_never_leaves_partial_target(tmp_path, monkeypatch):
@@ -76,7 +91,7 @@ def test_atomic_write_json_leaves_no_temporary_files_on_success(tmp_path):
 
 @pytest.mark.asyncio
 async def test_profile_lock_times_out_for_same_scope(monkeypatch):
-    monkeypatch.setattr(client_settings, "skill_install_lock_timeout_seconds", 0.05)
+    monkeypatch.setattr(_live_settings(), "skill_install_lock_timeout_seconds", 0.05)
     async with profile_lock("user-a", "skill:demo"):
         with pytest.raises(SkillLockTimeoutError):
             async with profile_lock("user-a", "skill:demo"):
@@ -91,14 +106,14 @@ async def test_profile_locks_allow_different_scopes():
 
 @pytest.mark.asyncio
 async def test_profile_locks_are_scoped_per_user(monkeypatch):
-    monkeypatch.setattr(client_settings, "skill_install_lock_timeout_seconds", 0.05)
+    monkeypatch.setattr(_live_settings(), "skill_install_lock_timeout_seconds", 0.05)
     async with profile_lock("user-a", "skill:demo"), profile_lock("user-b", "skill:demo"):
         pass
 
 
 @pytest.mark.asyncio
 async def test_profile_lock_is_released_after_an_exception(monkeypatch):
-    monkeypatch.setattr(client_settings, "skill_install_lock_timeout_seconds", 0.05)
+    monkeypatch.setattr(_live_settings(), "skill_install_lock_timeout_seconds", 0.05)
 
     with pytest.raises(RuntimeError):
         async with profile_lock("user-a", "skill:demo"):
@@ -130,9 +145,7 @@ async def test_profile_lock_serializes_concurrent_waiters():
 @pytest.mark.asyncio
 async def test_lock_filenames_never_embed_raw_scope_text(tmp_path, monkeypatch):
     """Skill names and user ids are hashed, never pasted into a filename."""
-    from client_backend.services.skill_runtime import locks as locks_module
-
-    monkeypatch.setattr(locks_module, "get_skill_locks_root", lambda user_id: tmp_path)
+    monkeypatch.setitem(_live_locks(), "get_skill_locks_root", lambda user_id: tmp_path)
     async with profile_lock("user-a", "skill:../escape"):
         names = [path.name for path in tmp_path.iterdir()]
 
