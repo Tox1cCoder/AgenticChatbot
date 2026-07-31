@@ -537,3 +537,43 @@ async def test_failed_initial_catalog_sync_never_publishes_ready(monkeypatch):
         await bridge._sync_initial_catalogs_and_mark_ready()
 
     assert bridge._connected_event.is_set() is False
+
+
+@pytest.mark.asyncio
+async def test_concurrent_catalog_refreshes_are_serialized(monkeypatch):
+    """Two publications must not interleave their version bump and cache rebuild.
+
+    ``refresh_catalogs`` mirrors the server's catalog version counter and rebuilds
+    the qualified-id cache that later dispatch validation reads. Interleaving two
+    runs can leave that cache describing one catalog while the server holds
+    another, which rejects tools that are genuinely present. A skill install and a
+    reload arriving together is the ordinary way that happens.
+    """
+    server_client = _ServerClientStub()
+    bridge = RuntimeBridgeService(server_client=server_client, mcp_scope=_MCP_SCOPE)
+    bridge._device_identifier = _MCP_SCOPE.device_identifier
+    bridge._device_id = "device-123"
+
+    active = 0
+    overlaps: list[int] = []
+
+    class _SlowRegistry:
+        def get_skill_catalog(self, include_content: bool = True) -> dict:
+            return {"skills": []}
+
+    async def slow_build_tool_catalog():
+        nonlocal active
+        active += 1
+        overlaps.append(active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return {"tools": [], "server_count": 0, "active_servers": []}
+
+    monkeypatch.setattr(runtime_bridge_module, "get_skills_registry", lambda: _SlowRegistry())
+    monkeypatch.setattr(bridge, "_build_tool_catalog", slow_build_tool_catalog)
+
+    await asyncio.gather(*(bridge.refresh_catalogs() for _ in range(4)))
+
+    assert max(overlaps) == 1
+    assert len(server_client.skill_catalog_updates) == 4
+    assert bridge._tool_catalog_version == 4

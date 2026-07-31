@@ -103,6 +103,12 @@ class RuntimeBridgeService:
         self._stop_requested = False
         self._connected_event = asyncio.Event()
         self._send_lock = asyncio.Lock()
+        # Catalog publication is not idempotent: it bumps the mirrored tool
+        # catalog version and rebuilds the validation cache. Two overlapping
+        # refreshes could interleave those steps and leave the cache describing
+        # one catalog while the server holds another, which fails later dispatch
+        # validation for tools that are genuinely present.
+        self._catalog_refresh_lock = asyncio.Lock()
         self._websocket = None
         self._device_id: str | None = None
         self._session_id: str | None = None
@@ -221,10 +227,18 @@ class RuntimeBridgeService:
         )
 
     async def refresh_catalogs(self) -> None:
-        """Resync tool and skill catalogs to the server for the current runtime session."""
+        """Resync tool and skill catalogs to the server for the current runtime session.
+
+        Serialized: concurrent callers (a skill install and a reload arriving
+        together) publish one after the other rather than interleaving the
+        version bump and the cache rebuild below.
+        """
         if not self._device_id:
             return
+        async with self._catalog_refresh_lock:
+            await self._refresh_catalogs_locked()
 
+    async def _refresh_catalogs_locked(self) -> None:
         tool_catalog = await self._build_tool_catalog()
         skill_catalog = get_skills_registry().get_skill_catalog(include_content=False)
 
