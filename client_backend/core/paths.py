@@ -227,3 +227,33 @@ def get_skill_runtimes_root(user_id: str) -> Path:
     Resolution only; the runtime preparer creates it when it first needs it.
     """
     return profile_subdir_path(user_id, "skills") / "runtimes"
+
+
+def _user_skills_root(user_id: str) -> Path:
+    """Resolve one user's skill root from a validated single path component.
+
+    Unlike :func:`get_installed_skills_root`, the upload/operation/lock helpers
+    below are reached with a user id that arrived over HTTP, so the component is
+    validated here rather than trusted.
+    """
+    return profile_subdir_path(_validate_profile_component(user_id, "user_id"), "skills")
+
+
+def get_skill_uploads_root(user_id: str) -> Path:
+    """Return the profile directory that holds staged skill archive uploads."""
+    return _user_skills_root(user_id) / "uploads"
+
+
+def get_skill_operations_root(user_id: str) -> Path:
+    """Return the profile directory that holds persisted installation receipts."""
+    return _user_skills_root(user_id) / "operations"
+
+
+def get_skill_locks_root(user_id: str) -> Path:
+    """Return the profile directory that holds cross-process skill lock files."""
+    return _user_skills_root(user_id) / "locks"
+
+
+def get_skill_catalog_state_path(user_id: str) -> Path:
+    """Return the file that persists this profile's catalog generation state."""
+    return _user_skills_root(user_id) / "catalog_state.json"

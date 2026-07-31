@@ -4,11 +4,13 @@ Client backend configuration settings.
 All settings can be overridden via environment variables.
 """
 
+import ipaddress
 import os
 import platform
 import secrets
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, DotEnvSettingsSource, PydanticBaseSettingsSource
@@ -136,6 +138,68 @@ class ClientSettings(BaseSettings):
         description="Maximum reconnection attempts before giving up.",
     )
 
+    # Skill Archive Uploads
+    skill_upload_max_bytes: int = Field(
+        default=25 * 1024 * 1024,
+        description="Maximum accepted size of an uploaded skill archive in bytes.",
+    )
+    skill_upload_max_expanded_bytes: int = Field(
+        default=100 * 1024 * 1024,
+        description="Maximum total expanded size of one skill archive in bytes.",
+    )
+    skill_upload_max_file_bytes: int = Field(
+        default=50 * 1024 * 1024,
+        description="Maximum expanded size of a single archive member in bytes.",
+    )
+    skill_upload_max_entries: int = Field(
+        default=2_000,
+        description="Maximum number of entries in one skill archive.",
+    )
+    skill_upload_max_compression_ratio: int = Field(
+        default=200,
+        description="Maximum expanded-to-compressed ratio before rejecting an archive.",
+    )
+    skill_upload_max_path_depth: int = Field(
+        default=20,
+        description="Maximum number of path components in an archive member name.",
+    )
+    skill_upload_max_path_chars: int = Field(
+        default=240,
+        description="Maximum length of a portable archive member path.",
+    )
+    skill_upload_ttl_seconds: int = Field(
+        default=1_800,
+        description="Lifetime of a staged, uninstalled skill upload in seconds.",
+    )
+    skill_operation_receipt_ttl_seconds: int = Field(
+        default=3_600,
+        description="Lifetime of a terminal installation receipt in seconds.",
+    )
+    skill_upload_max_outstanding: int = Field(
+        default=5,
+        description="Maximum concurrently staged uploads per user profile.",
+    )
+    skill_upload_quota_bytes: int = Field(
+        default=250 * 1024 * 1024,
+        description="Maximum total staged upload bytes per user profile.",
+    )
+    skill_upload_rate_limit_count: int = Field(
+        default=10,
+        description="Maximum upload attempts per user within the rate-limit window.",
+    )
+    skill_upload_rate_limit_window_seconds: int = Field(
+        default=60,
+        description="Length of the upload rate-limit window in seconds.",
+    )
+    skill_install_lock_timeout_seconds: float = Field(
+        default=10,
+        description="Seconds to wait for a skill mutation lock before failing.",
+    )
+    skill_catalog_freshness_seconds: float = Field(
+        default=1.0,
+        description="How long a projected skill catalog may be reused without rescanning.",
+    )
+
     # Security
     local_session_secret: str = Field(
         default="",
@@ -144,6 +208,30 @@ class ClientSettings(BaseSettings):
     local_session_expire_minutes: int = Field(
         default=1440,
         description="Local session expiration in minutes (24 hours default).",
+    )
+    allowed_origins: list[str] = Field(
+        default=[
+            # Next.js frontend
+            "http://127.0.0.1:3000",
+            "http://localhost:3000",
+            "http://[::1]:3000",
+            # Streamlit frontend
+            "http://127.0.0.1:8501",
+            "http://localhost:8501",
+            # Tauri desktop shell: custom protocol (macOS/Linux), the Windows
+            # http(s)://tauri.localhost form, and the 1420 dev server.
+            "tauri://localhost",
+            "http://tauri.localhost",
+            "https://tauri.localhost",
+            "http://tauri.localhost:1420",
+            "http://localhost:1420",
+            "http://127.0.0.1:1420",
+        ],
+        description="Explicit browser origins allowed to call the sidecar. Never '*'.",
+    )
+    allow_non_loopback_backend: bool = Field(
+        default=False,
+        description="Opt in to binding the sidecar off loopback. Exposes local tools.",
     )
 
     # Logging
@@ -200,6 +288,66 @@ class ClientSettings(BaseSettings):
     def _normalize_path_list(cls, values: list[str]) -> list[str]:
         return [str(Path(value).expanduser()) for value in values]
 
+    @field_validator(
+        "skill_upload_max_bytes",
+        "skill_upload_max_expanded_bytes",
+        "skill_upload_max_file_bytes",
+        "skill_upload_max_entries",
+        "skill_upload_max_compression_ratio",
+        "skill_upload_max_path_depth",
+        "skill_upload_max_path_chars",
+        "skill_upload_ttl_seconds",
+        "skill_operation_receipt_ttl_seconds",
+        "skill_upload_max_outstanding",
+        "skill_upload_quota_bytes",
+        "skill_upload_rate_limit_count",
+        "skill_upload_rate_limit_window_seconds",
+        "skill_install_lock_timeout_seconds",
+        "skill_catalog_freshness_seconds",
+        mode="after",
+    )
+    @classmethod
+    def _require_positive_limit(cls, value: int | float, info) -> int | float:
+        # A zero or negative bound would silently disable the limit it names,
+        # which is the difference between "small archives only" and "any
+        # archive". Fail at construction instead.
+        if value <= 0:
+            raise ValueError(f"{info.field_name} must be greater than zero")
+        return value
+
+    @field_validator("allowed_origins", mode="before")
+    @classmethod
+    def _parse_allowed_origins(cls, value) -> list[str]:
+        if isinstance(value, str):
+            candidates = [origin.strip() for origin in value.split(",")]
+        else:
+            candidates = [str(origin).strip() for origin in value or []]
+
+        origins = [origin for origin in candidates if origin]
+        if not origins:
+            raise ValueError("allowed_origins must list at least one explicit origin")
+
+        for origin in origins:
+            if origin == "*":
+                raise ValueError(
+                    "allowed_origins must not contain '*'; the sidecar exposes local "
+                    "tool execution and requires explicit browser origins"
+                )
+            parsed = urlsplit(origin)
+            # `tauri` is the desktop shell's custom protocol origin on
+            # macOS/Linux; it is a real origin the sidecar must accept.
+            if (
+                parsed.scheme not in {"http", "https", "tauri"}
+                or not parsed.netloc
+                or parsed.path
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError(
+                    f"allowed_origins entry '{origin}' is not a scheme://host[:port] origin"
+                )
+        return origins
+
     def get_profile_path(self, *subpaths: str) -> Path:
         """Get a path within the profile directory."""
         return Path(self.profile_root).joinpath(*subpaths)
@@ -217,10 +365,32 @@ def get_client_settings() -> ClientSettings:
     return ClientSettings()
 
 
+def _is_loopback_host(host: str) -> bool:
+    """Report whether a bind host reaches only this machine."""
+    normalized = (host or "").strip().strip("[]").lower()
+    if normalized in {"localhost", ""}:
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        # A hostname we cannot resolve to a loopback literal is treated as
+        # remote-reachable; the operator opts in explicitly if it is not.
+        return False
+
+
 def initialize_client_environment(settings: ClientSettings | None = None) -> ClientSettings:
     """Apply runtime-only filesystem setup for the client environment."""
 
     resolved_settings = settings or get_client_settings()
+    if not _is_loopback_host(resolved_settings.backend_host) and not (
+        resolved_settings.allow_non_loopback_backend
+    ):
+        raise ValueError(
+            f"backend_host '{resolved_settings.backend_host}' is not loopback. The sidecar "
+            "executes local tools and skill commands, so binding it to a reachable "
+            "interface requires setting allow_non_loopback_backend=true explicitly."
+        )
+
     profile_path = Path(resolved_settings.profile_root)
     profile_path.mkdir(parents=True, exist_ok=True)
 

@@ -2,6 +2,7 @@
 Authentication helpers for the local client backend.
 """
 
+import secrets
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -84,14 +85,15 @@ async def require_local_session(
         return payload
 
     current_user_id = auth_service.get_current_user_id()
-    restored_user_id = None
     if not auth_service.is_authenticated() or not current_user_id:
+        # The `sub` claim is read from an UNVERIFIED token, so it is only ever a
+        # hint about which stored session to rehydrate. Authorization below still
+        # requires the presented token to equal that session's access token;
+        # never treat a successful restore as proof of the bearer's identity.
         hinted_user_id = _extract_user_id_from_bearer_token(raw_token)
         if hinted_user_id:
-            restored = await auth_service.restore_session(hinted_user_id)
-            if restored:
-                restored_user_id = hinted_user_id
-                current_user_id = auth_service.get_current_user_id()
+            await auth_service.restore_session(hinted_user_id)
+            current_user_id = auth_service.get_current_user_id()
 
     if not auth_service.is_authenticated() or not current_user_id:
         raise HTTPException(
@@ -100,10 +102,7 @@ async def require_local_session(
         )
 
     current_access_token = auth_service.get_current_access_token()
-    if current_access_token and raw_token == current_access_token:
-        return _build_compat_session_payload(str(current_user_id))
-
-    if restored_user_id and current_user_id and str(restored_user_id) == str(current_user_id):
+    if current_access_token and secrets.compare_digest(raw_token, current_access_token):
         return _build_compat_session_payload(str(current_user_id))
 
     raise HTTPException(

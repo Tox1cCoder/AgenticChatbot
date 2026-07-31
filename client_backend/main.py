@@ -75,10 +75,13 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS middleware - intentionally permissive for local sidecar usage.
+    # CORS middleware. Origins are explicit: this process executes local shell
+    # commands, filesystem operations, and skill runtimes, so any page must not
+    # be able to drive it. `allow_private_network` stays on because a browser on
+    # a public origin cannot reach a loopback server without that opt-in.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=list(client_settings.allowed_origins),
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
