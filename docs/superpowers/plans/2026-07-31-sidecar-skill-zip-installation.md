@@ -24,6 +24,24 @@
 - Keep `/skills/*` and `/api/skills/*` behavior equivalent.
 - Keep the AI SDK UI Message Stream unchanged; skill management remains ordinary sidecar HTTP.
 - Use TDD for every behavior change and commit after each independently testable task.
+- Run every test and lint command with `.\.venv\Scripts\python.exe`. That
+  interpreter holds the pinned `fastapi==0.139.2`/`starlette==1.3.1` runtime plus
+  `streamlit` and `pytest-asyncio>=1.4`. `.conda` cannot even collect this suite
+  (`tests/conftest.py` registers the `pytest_asyncio_loop_factories` hook that
+  its older `pytest-asyncio` rejects) and carries fastapi 0.128.2.
+- Wire responses are camelCase, but every existing service-layer dict
+  (`SkillBundleInstaller.preview()`/`.install()`) stays snake_case. Cross the
+  boundary once, in a typed Pydantic model — never by hand-editing dict keys and
+  never by relying on `alias_generator`, which renames model fields and not the
+  contents of a `dict[str, Any]` field.
+- Behavior changes this plan deliberately makes to existing endpoints, each
+  covered by an updated test: a new install now conflicts on **any** existing
+  name (today `install()` conflicts only when the existing skill is `enabled`,
+  silently replacing a disabled one), and `GET /skills`-family responses gain
+  catalog fields while retaining `totalCount` and `enabledCount`.
+- Behavior deliberately *not* changed: uninstalling an unknown skill keeps
+  returning 404. Uninstall retry-safety applies only to resuming a persisted
+  cleanup receipt.
 
 ## File Structure
 
@@ -43,6 +61,7 @@
 - `tests/client_backend/test_skill_catalog.py` — generation, freshness, and degraded sync behavior.
 - `tests/client_backend/test_skill_operations.py` — idempotency, transitions, cancellation, recovery, and replacement.
 - `tests/client_backend/test_skill_upload_api.py` — multipart and operation wire contract.
+- `tests/client_backend/test_skill_upload_security_config.py` — settings, path, and CORS bounds.
 - `tests/test_demo_skill_installation.py` — Streamlit transport, session state, polling, and render behavior.
 - `tests/test_skill_installation_chat_integration.py` — installed skill publication and device-bound AI SDK chat resolution.
 
@@ -64,8 +83,12 @@
 - `tests/client_backend/test_skill_installation.py` — replacement and post-commit behavior.
 - `tests/client_backend/test_skills_api.py` — new catalog shape and mutation responses.
 - `tests/client_backend/test_runtime_bridge.py` — concurrent refresh serialization.
+- `tests/client_backend/test_cors_preflight.py` — configured-origin preflight instead of `*`.
+- `tests/client_backend/test_skill_audit.py` — lifecycle audit allowlist.
 - `tests/test_demo_sidecar_auth.py` — restored bearer regression.
 - `tests/test_skills_architecture.py` — sidecar-only ownership and Streamlit route guardrails.
+- `tests/test_skills_tool.py` — device-bound resolution of an uploaded skill.
+- `tests/test_production_readiness_contract.py` — documented endpoint/error coverage.
 - `README.md` — browser ZIP workflow and sidecar endpoints.
 - `docs/skill-runtime.md` — archive/install lifecycle and error table.
 - `plans/SKILLS_MCP_HITL_FE_CONTRACT.md` — link to the dedicated upload contract.
@@ -77,12 +100,17 @@
 
 **Files:**
 - Modify: `pyproject.toml`
-- Modify: `client_backend/core/config.py:37-149`
-- Modify: `client_backend/core/paths.py:50-150`
-- Modify: `client_backend/core/auth.py:45-105`
-- Modify: `client_backend/main.py:65-87`
+- Modify: `client_backend/core/config.py:37-163`
+- Modify: `client_backend/core/paths.py:181-230`
+- Modify: `client_backend/core/auth.py:96-112`
+- Modify: `client_backend/main.py:78-86`
+- Modify: `tests/client_backend/test_cors_preflight.py:40`
 - Test: `tests/test_demo_sidecar_auth.py`
 - Create: `tests/client_backend/test_skill_upload_security_config.py`
+
+`filelock` is already frozen as `filelock==3.28.0` in `requirements.txt` and
+`environment.yml`, so only the `pyproject.toml` declaration is missing and the
+range below needs no reinstall.
 
 **Interfaces:**
 - Produces: validated `ClientSettings.skill_upload_*`, `skill_install_*`, and `allowed_origins` settings.
@@ -124,8 +152,8 @@ def test_skill_profile_paths_reject_traversal():
         get_skill_uploads_root("../other-user")
 
 
-def test_skill_upload_defaults_are_production_bounded():
-    settings = ClientSettings(_env_file=None)
+def test_skill_upload_defaults_are_production_bounded(isolated_settings_env):
+    settings = ClientSettings()
     assert settings.skill_upload_max_bytes == 25 * 1024 * 1024
     assert settings.skill_upload_max_expanded_bytes == 100 * 1024 * 1024
     assert settings.skill_upload_max_file_bytes == 50 * 1024 * 1024
@@ -134,16 +162,30 @@ def test_skill_upload_defaults_are_production_bounded():
     assert settings.skill_operation_receipt_ttl_seconds == 3600
 ```
 
+`ClientSettings(_env_file=None)` is **not** hermetic here:
+`settings_customise_sources` always builds its own `DotEnvSettingsSource` from
+`CLIENT_ENV_FILE` or the tracked `.env.client`, and `env_settings` still reads
+real `CLIENT_*` variables. Provide an `isolated_settings_env` fixture that
+points `CLIENT_ENV_FILE` at a nonexistent path and deletes every `CLIENT_`
+variable before constructing settings.
+
 Add a `create_app()` assertion that production CORS receives configured origins
 and never `["*"]`. Add a startup assertion that a non-loopback
 `backend_host` fails unless `allow_non_loopback_backend=true`.
+
+Update the existing preflight contract in `tests/client_backend/test_cors_preflight.py`,
+which currently asserts `access-control-allow-origin == "*"`. The new
+expectation is the echoed configured origin for an allowed origin, plus a
+missing `access-control-allow-origin` header for a disallowed one. Preflight
+must still succeed without a local session, so the middleware ordering
+assertion stays.
 
 - [ ] **Step 2: Run the focused tests and verify the failures**
 
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/test_demo_sidecar_auth.py tests/client_backend/test_skill_upload_security_config.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_demo_sidecar_auth.py tests/client_backend/test_skill_upload_security_config.py tests/client_backend/test_cors_preflight.py -q
 ```
 
 Expected: failures for forged-token acceptance and missing settings/path helpers.
@@ -199,31 +241,41 @@ Implement the other three helpers with the same validated user component.
 
 - [ ] **Step 4: Harden restored bearer verification and CORS**
 
-Replace subject-only authorization with:
+`auth.py:106-107` authorizes purely on the `sub` claim of an *unverified* JWT
+once `restore_session()` succeeds, so any attacker-signed token carrying a known
+user id is accepted. Delete that branch outright and make the surviving
+comparison constant-time — do not add a second guarded branch, because
+`auth.py:102-104` already returns for every token that equals the active access
+token, which would leave the replacement unreachable:
 
 ```python
-current_access_token = auth_service.get_current_access_token()
-if (
-    restored_user_id
-    and current_user_id
-    and str(restored_user_id) == str(current_user_id)
-    and current_access_token
-    and secrets.compare_digest(raw_token, current_access_token)
-):
-    return _build_compat_session_payload(str(current_user_id))
+    current_access_token = auth_service.get_current_access_token()
+    if current_access_token and secrets.compare_digest(raw_token, current_access_token):
+        return _build_compat_session_payload(str(current_user_id))
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Bearer token is not a valid local session or the active upstream access token.",
+    )
 ```
 
-Configure `CORSMiddleware` from `client_settings.allowed_origins`. Reject a
-non-loopback host during environment initialization unless the explicit opt-in
-is set.
+`restored_user_id` then has no remaining reader; drop the variable and keep the
+restore attempt itself, which is what lets a cold sidecar rehydrate a session
+before the token equality check.
+
+Configure `CORSMiddleware` from `client_settings.allowed_origins` while
+preserving the current `allow_credentials=False` and `allow_private_network=True`
+arguments; the latter is what lets a browser on a public origin reach the
+loopback sidecar at all. Reject a non-loopback host during environment
+initialization unless the explicit opt-in is set.
 
 - [ ] **Step 5: Run focused tests, lint changed files, and commit**
 
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/test_demo_sidecar_auth.py tests/client_backend/test_skill_upload_security_config.py -q
-.\.conda\python.exe -m ruff check client_backend/core/config.py client_backend/core/paths.py client_backend/core/auth.py client_backend/main.py
+.\.venv\Scripts\python.exe -m pytest tests/test_demo_sidecar_auth.py tests/client_backend/test_skill_upload_security_config.py tests/client_backend/test_cors_preflight.py -q
+.\.venv\Scripts\python.exe -m ruff check client_backend/core/config.py client_backend/core/paths.py client_backend/core/auth.py client_backend/main.py
 ```
 
 Expected: all pass.
@@ -231,7 +283,7 @@ Expected: all pass.
 Commit:
 
 ```powershell
-git add pyproject.toml client_backend/core tests/test_demo_sidecar_auth.py tests/client_backend/test_skill_upload_security_config.py client_backend/main.py
+git add pyproject.toml client_backend/core tests/test_demo_sidecar_auth.py tests/client_backend/test_skill_upload_security_config.py tests/client_backend/test_cors_preflight.py client_backend/main.py
 git commit -m "security: harden sidecar skill upload foundations"
 ```
 
@@ -312,7 +364,7 @@ def test_lifecycle_audit_never_serializes_paths_or_uploaded_names(tmp_path):
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/client_backend/test_skill_state_and_locks.py tests/client_backend/test_skill_audit.py -q
+.\.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_state_and_locks.py tests/client_backend/test_skill_audit.py -q
 ```
 
 Expected: collection fails because the new modules do not exist.
@@ -364,8 +416,8 @@ best-effort and never changes the primary operation result.
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/client_backend/test_skill_state_and_locks.py tests/client_backend/test_skill_audit.py -q
-.\.conda\python.exe -m ruff check client_backend/services/skill_runtime/state.py client_backend/services/skill_runtime/locks.py client_backend/services/skill_runtime/audit.py tests/client_backend/test_skill_state_and_locks.py tests/client_backend/test_skill_audit.py
+.\.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_state_and_locks.py tests/client_backend/test_skill_audit.py -q
+.\.venv\Scripts\python.exe -m ruff check client_backend/services/skill_runtime/state.py client_backend/services/skill_runtime/locks.py client_backend/services/skill_runtime/audit.py tests/client_backend/test_skill_state_and_locks.py tests/client_backend/test_skill_audit.py
 ```
 
 Expected: all pass.
@@ -475,7 +527,7 @@ is over 200 for the ratio assertion.
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/client_backend/test_skill_archive.py -q
+.\.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_archive.py -q
 ```
 
 Expected: collection fails because `archive.py` is absent.
@@ -503,8 +555,8 @@ requested destination with `os.replace()` only after every member succeeds.
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/client_backend/test_skill_archive.py -q
-.\.conda\python.exe -m ruff check client_backend/services/skill_runtime/archive.py tests/client_backend/test_skill_archive.py
+.\.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_archive.py -q
+.\.venv\Scripts\python.exe -m ruff check client_backend/services/skill_runtime/archive.py tests/client_backend/test_skill_archive.py
 ```
 
 Expected: all archive cases pass on Windows; POSIX-only mode cases skip only
@@ -528,6 +580,7 @@ git commit -m "feat: validate and confine skill zip extraction"
 
 **Interfaces:**
 - Produces: strict `CamelModel` with `alias_generator`, `populate_by_name=True`, and `extra="forbid"`.
+- Produces: typed `SkillArchivePreview`, `SkillArchiveSetupPreview`, `SkillExecutableAssets`, and `SkillExistingSkill` models plus `SkillArchivePreview.from_installer_preview(payload, existing)`, the single snake_case-to-camelCase boundary for staged previews.
 - Produces: `SkillUploadRecord` with version, owner, state, timestamps, archive summary, preview, request fingerprint, and operation ID.
 - Produces: `SkillInstallationRequest(expected_source_hash, approve_setup, replace_source_hash)`.
 - Produces: `SkillUploadService.stage(*, user_id: str, filename: str, stream: AsyncReadable) -> SkillUploadRecord`.
@@ -549,7 +602,7 @@ async def test_stage_streams_once_previews_without_setup_and_persists_record(upl
     )
 
     assert record.state == "staged"
-    assert record.preview["name"] == "demo"
+    assert record.preview.name == "demo"
     assert record.archive.filename == "calendar.zip"
     assert stream.max_requested_chunk <= 1024 * 1024
     assert upload_env.environment.prepared == []
@@ -612,7 +665,7 @@ within 60 seconds make the eleventh return a retryable rate-limit error.
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/client_backend/test_skill_uploads.py -q
+.\.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_uploads.py -q
 ```
 
 Expected: collection fails for missing upload service/schema.
@@ -638,6 +691,45 @@ class CamelModel(BaseModel):
 Use UTC ISO timestamps in persisted JSON and Pydantic `datetime` fields in
 memory. Keep ownership fields out of `model_dump_for_api()`.
 
+`SkillBundleInstaller.preview()` returns snake_case (`source_hash`,
+`bundle_shape`, `executable_assets`, `setup.confirmation_required`,
+`executable_assets.python_project`) and `alias_generator` does not rewrite the
+contents of a `dict[str, Any]` field, so a raw dict would serialize
+`source_hash` straight onto the wire and fail the Task 8 contract. Type the
+preview instead:
+
+```python
+class SkillArchivePreview(CamelModel):
+    name: str
+    source_hash: str
+    bundle_shape: Literal["direct", "nested"]
+    executable_assets: SkillExecutableAssets
+    setup: SkillArchiveSetupPreview
+    existing_skill: SkillExistingSkill | None = None
+```
+
+`from_installer_preview()` is the only place that reads the installer's
+snake_case keys. Persisted records store `model_dump(mode="json")` (snake_case
+field names, stable on disk); API responses use
+`model_dump(mode="json", by_alias=True)`.
+
+Populate `existing_skill` inside `stage()` from the initialized registry, since
+the contract requires it and the installer preview has no such field:
+
+```python
+existing = registry.get_skill(preview["name"])
+existing_skill = None
+if existing is not None:
+    installed = is_under_root(existing.bundle_root, get_installed_skills_root(user_id))
+    existing_skill = SkillExistingSkill(
+        name=existing.name,
+        source_hash=existing.source_hash,
+        install_source="profile" if installed else "configured_root",
+        enabled=existing.enabled,
+        replaceable=installed,
+    )
+```
+
 - [ ] **Step 4: Implement streaming, quota reservation, preview, and cleanup**
 
 Read at most 1 MiB per call, enforce the running upload limit, flush/fsync the
@@ -657,8 +749,8 @@ and expired transitions; audit failure never changes the upload response.
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/client_backend/test_skill_uploads.py tests/client_backend/test_skill_archive.py -q
-.\.conda\python.exe -m ruff check client_backend/schemas/skill_installation.py client_backend/services/skill_runtime/uploads.py tests/client_backend/test_skill_uploads.py
+.\.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_uploads.py tests/client_backend/test_skill_archive.py -q
+.\.venv\Scripts\python.exe -m ruff check client_backend/schemas/skill_installation.py client_backend/services/skill_runtime/uploads.py tests/client_backend/test_skill_uploads.py
 ```
 
 Expected: all pass.
@@ -680,10 +772,11 @@ git commit -m "feat: stage user-scoped skill uploads"
 - Modify: `tests/client_backend/test_skill_installation.py`
 
 **Interfaces:**
-- Produces: `SkillBundleInstaller.install(self, source: str | Path, *, expected_source_hash: str | None = None, approve_setup: bool = False, replace_source_hash: str | None = None, source_kind: Literal["path", "upload"] = "path", observer: SkillInstallObserver | None = None) -> dict`.
+- Produces: `SkillBundleInstaller.install(self, source: str | Path, *, expected_source_hash: str | None = None, approve_setup: bool = False, replace_source_hash: str | None = None, source_kind: Literal["path", "upload"] = "path", observer: SkillInstallObserver | None = None) -> dict`, returning the existing snake_case keys plus `action`.
 - Produces: async `SkillInstallObserver.phase(name: str) -> None` and `SkillInstallObserver.before_commit() -> None` cooperative lifecycle hooks.
-- Produces: `SKILL_SOURCE_CHANGED` and `SKILL_CONFIGURED_ROOT_CONFLICT`.
-- Produces: idempotent uninstall result with `cleanup_status: "complete" | "pending"`.
+- Produces: `SKILL_SOURCE_CHANGED` and `SKILL_CONFIGURED_ROOT_CONFLICT` in `shared/skills/errors.py`, both added to the `docs/skill-runtime.md` and FE-contract error tables in Task 13 so no undocumented code reaches a client.
+- Produces: resumable uninstall result with `cleanup_status: "complete" | "pending"`.
+- Note: existing callers must be updated in the same task — `_InstallerStub.install` in `tests/client_backend/test_skill_installation.py:342` has a fixed keyword signature and its call assertion at line 377 compares an exact argument tuple.
 - Removes: runtime-bridge synchronization from installer methods.
 - Consumes: existing atomic stage/backup promotion and registry refresh.
 
@@ -753,19 +846,30 @@ async def test_configured_root_skill_cannot_be_replaced(install_env, enabled):
 
 
 @pytest.mark.asyncio
-async def test_repeated_uninstall_is_idempotent_and_cleanup_can_be_retried(install_env):
+async def test_failed_cleanup_is_resumable_without_changing_the_404_contract(install_env):
     source = _write_skill(install_env.sources / "demo")
     _, installer = _installer(install_env)
     await installer.install(source)
+    install_env.environment.fail_remove = True
+
     first = await installer.uninstall("demo-skill")
-    second = await installer.uninstall("demo-skill")
     assert first["removed"] is True
+    assert first["cleanup_status"] == "pending"
+
+    install_env.environment.fail_remove = False
+    second = await installer.uninstall("demo-skill")
     assert second["removed"] is False
+    assert second["cleanup_status"] == "complete"
+
+    with pytest.raises(SkillRuntimeError) as exc_info:
+        await installer.uninstall("demo-skill")
+    assert exc_info.value.code == SKILL_INSTALL_INVALID
 ```
 
-Inject environment/secret cleanup failure and assert the bundle is removed,
-the result reports `cleanup_status == "pending"`, and a later uninstall/recovery
-finishes cleanup. Assert the runtime bridge is never called by
+Uninstall stays 404 for a skill with neither an installed bundle nor a pending
+cleanup receipt, which is what `_UNINSTALL_ERROR_STATUS_OVERRIDES` in
+`client_backend/api/skills.py` maps today. `removed: false` is reserved for
+resuming a receipt. Assert the runtime bridge is never called by
 install/setup/uninstall.
 
 - [ ] **Step 2: Run installation tests and confirm failures**
@@ -773,7 +877,7 @@ install/setup/uninstall.
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/client_backend/test_skill_installation.py -q
+.\.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_installation.py -q
 ```
 
 Expected: replacement signatures/codes are absent and installer still invokes
@@ -785,9 +889,19 @@ After initial discovery, enter `profile_lock(user_id,
 f"skill:{source_skill.name}")`, rediscover and rehash the source, initialize
 the registry, then apply:
 
+Resolve the lock owner the same way the installer already resolves its install
+root — `self._registry._resolve_current_user_id()`, raising the existing
+`SkillRuntimeError(SKILL_INSTALL_INVALID, "no active user profile")` when it is
+`None`. `install()` gains no `user_id` parameter.
+
+Decide `installed` by **location**, not by metadata content: the registry copies
+`install_metadata` out of any bundle-root `install.json` it finds under any
+configured root, so a hand-copied bundle could otherwise claim
+`"installed": true` and bypass the configured-root guard.
+
 ```python
 if existing is not None:
-    installed = bool((existing.install_metadata or {}).get("installed"))
+    installed = is_under_root(existing.bundle_root, get_installed_skills_root(user_id))
     if not installed:
         raise SkillRuntimeError(
             SKILL_CONFIGURED_ROOT_CONFLICT,
@@ -826,17 +940,23 @@ returns `removed: false, cleanup_status: "complete"`.
 
 - [ ] **Step 4: Remove bridge synchronization from installer commit paths**
 
-Delete `_refresh_runtime_bridge_catalogs_if_connected()` and its calls. Keep
-the registry refresh because existing installer callers require immediate
+Delete `_refresh_runtime_bridge_catalogs_if_connected()` from
+`client_backend/services/skill_runtime/install.py:368` and its three calls
+(install, setup, uninstall), plus the now-unused `get_runtime_bridge` import.
+Keep the registry refresh because existing installer callers require immediate
 local visibility. Catalog synchronization moves to `SkillCatalogService`.
+
+A second copy of the same helper lives at `client_backend/api/skills.py:63` and
+serves `toggle`/`reload`; Task 9 removes that one when those routes move onto
+the catalog service. Do not delete it in this task or those routes stop syncing.
 
 - [ ] **Step 5: Run installation and registry tests and commit**
 
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/client_backend/test_skill_installation.py tests/client_backend/test_skills_registry.py -q
-.\.conda\python.exe -m ruff check client_backend/services/skill_runtime/install.py shared/skills/errors.py tests/client_backend/test_skill_installation.py
+.\.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_installation.py tests/client_backend/test_skills_registry.py -q
+.\.venv\Scripts\python.exe -m ruff check client_backend/services/skill_runtime/install.py shared/skills/errors.py tests/client_backend/test_skill_installation.py
 ```
 
 Expected: all pass.
@@ -903,7 +1023,7 @@ lower-level bridge concurrent-refresh serialization tests.
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/client_backend/test_skill_catalog.py tests/client_backend/test_runtime_bridge.py -q
+.\.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_catalog.py tests/client_backend/test_runtime_bridge.py -q
 ```
 
 Expected: collection/service failures.
@@ -914,6 +1034,14 @@ Move `_skill_summary` and list payload construction from the API into the
 catalog service. Serialize the projection with sorted keys and sorted skills,
 hash it with SHA-256, compare it to persisted `projectionHash`, and increment
 the persisted integer generation only on change.
+
+The snapshot keeps the existing `skills`, `totalCount`, and `enabledCount` keys
+— `demo.py:8739-8740` and the FE contract both read them — and adds `deviceId`
+from `get_runtime_bridge().get_registered_device_id()` (`None` when
+unregistered), `catalogGeneration`, and `catalogSyncStatus`. Only the
+generation/sync fields and `deviceId` are new; nothing existing is renamed or
+dropped. Exclude `catalogSyncStatus` and `deviceId` from the hashed projection
+so a bridge reconnect cannot bump the generation on its own.
 
 The persisted state shape is:
 
@@ -941,8 +1069,8 @@ persists `pending`, and returns the local snapshot. On success it persists
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/client_backend/test_skill_catalog.py tests/client_backend/test_runtime_bridge.py tests/client_backend/test_skills_registry.py -q
-.\.conda\python.exe -m ruff check client_backend/services/skill_catalog.py client_backend/services/local_skills_registry.py client_backend/services/runtime_bridge.py tests/client_backend/test_skill_catalog.py
+.\.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_catalog.py tests/client_backend/test_runtime_bridge.py tests/client_backend/test_skills_registry.py -q
+.\.venv\Scripts\python.exe -m ruff check client_backend/services/skill_catalog.py client_backend/services/local_skills_registry.py client_backend/services/runtime_bridge.py tests/client_backend/test_skill_catalog.py
 ```
 
 Expected: all pass.
@@ -975,7 +1103,7 @@ git commit -m "feat: add fresh generation-tagged skill catalogs"
 @pytest.mark.asyncio
 async def test_start_is_idempotent_for_identical_request(operation_env):
     upload = operation_env.staged_upload()
-    request = _request(expected_source_hash=upload.preview["source_hash"])
+    request = _request(expected_source_hash=upload.preview.source_hash)
 
     first = await operation_env.service.start("user-a", upload.upload_id, request)
     second = await operation_env.service.start("user-a", upload.upload_id, request)
@@ -1071,7 +1199,7 @@ not-found.
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/client_backend/test_skill_operations.py -q
+.\.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_operations.py -q
 ```
 
 Expected: collection fails because `operations.py` is absent.
@@ -1118,8 +1246,8 @@ committed result from a pre-commit interruption.
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/client_backend/test_skill_operations.py tests/client_backend/test_skill_uploads.py tests/client_backend/test_skill_installation.py tests/client_backend/test_skill_audit.py -q
-.\.conda\python.exe -m ruff check client_backend/services/skill_runtime/operations.py tests/client_backend/test_skill_operations.py
+.\.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_operations.py tests/client_backend/test_skill_uploads.py tests/client_backend/test_skill_installation.py tests/client_backend/test_skill_audit.py -q
+.\.venv\Scripts\python.exe -m ruff check client_backend/services/skill_runtime/operations.py tests/client_backend/test_skill_operations.py
 ```
 
 Expected: all pass.
@@ -1193,18 +1321,51 @@ parity tests.
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/client_backend/test_skill_upload_api.py tests/client_backend/test_skills_api.py -q
+.\.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_upload_api.py tests/client_backend/test_skills_api.py -q
 ```
 
 Expected: new routes return 404 and legacy payload assertions lack new fields.
 
 - [ ] **Step 3: Implement stable skill route error mapping**
 
-Extend `make_api_response` with optional `code`. Register global
+Extend `make_api_response` with optional `code`, emitted only when a caller
+passes one so every other route's envelope stays byte-identical. Register global
 `HTTPException` and `RequestValidationError` handlers that delegate to
 FastAPI's default handlers unless `request.url.path` starts with `/skills/`,
 equals `/skills`, or starts with `/api/skills`. Map only safe normalized fields
 into the skill envelope.
+
+`skill_errors.py` owns the one authoritative code-to-status table. Every code
+here is already published in `plans/SKILL_INSTALLATION_FE_CONTRACT.md:466-481`,
+so no route may invent a code outside it:
+
+| Code | Status | Raised by |
+|---|---|---|
+| `SKILL_ARCHIVE_INVALID` | 400 | archive: not a ZIP body, bad central directory, CRC mismatch |
+| `SKILL_ARCHIVE_PATH_UNSAFE` | 400 | archive: traversal, absolute/UNC name, reserved name, duplicate portable path, depth/length |
+| `SKILL_BUNDLE_INVALID` | 400 | installer `SKILL_INSTALL_INVALID` surfaced through an upload route |
+| `SKILL_UPLOAD_STATE_INVALID` | 400 | delete/install against a non-`staged` upload |
+| `SKILL_ARCHIVE_TYPE_UNSUPPORTED` | 415 | non-`.zip` filename or empty filename |
+| `SKILL_ARCHIVE_TOO_LARGE` | 413 | uploaded, expanded, per-file, or ratio limit |
+| `SKILL_ARCHIVE_TOO_MANY_FILES` | 413 | entry-count limit |
+| `SKILL_UPLOAD_QUOTA_EXCEEDED` | 413 | outstanding-upload, byte-quota, or rate limit |
+| `SKILL_UPLOAD_NOT_FOUND` | 404 | unknown, expired, or foreign upload |
+| `SKILL_OPERATION_NOT_FOUND` | 404 | unknown, expired, or foreign operation |
+| `SKILL_INSTALL_CONFLICT` | 409 | existing name without `replaceSourceHash`; configured-root collision |
+| `SKILL_SOURCE_CHANGED` | 409 | stale `expectedSourceHash` or `replaceSourceHash` |
+| `SKILL_UPLOAD_CONSUMED` | 409 | claimed upload with a different request fingerprint |
+| `SKILL_OPERATION_COMMITTED` | 409 | cancel after the commit boundary |
+| `SKILL_INSTALL_LOCKED` | 423 | `SkillLockTimeoutError` |
+| `SKILL_STORAGE_INSUFFICIENT` | 507 | `ENOSPC` or insufficient free space |
+| `UNAUTHENTICATED` | 401 | `require_local_session` failure on a skill route |
+
+`SKILL_ARCHIVE_PATH_UNSAFE` and `SKILL_CONFIGURED_ROOT_CONFLICT` are new codes.
+Publish the former in the FE contract table in Task 13. Keep the latter
+**internal**: map it to the already-documented `SKILL_INSTALL_CONFLICT`/409 at
+the route boundary, because the contract expresses non-replaceability through
+`preview.existingSkill.replaceable` rather than a distinct wire code. Mark
+`retryable: true` only for `SKILL_INSTALL_LOCKED`, `SKILL_STORAGE_INSUFFICIENT`,
+and `SKILL_SETUP_FAILED`.
 
 - [ ] **Step 4: Add static upload routes before `/{name}`**
 
@@ -1226,8 +1387,8 @@ during process lifespan startup. On shutdown call operation-service
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/client_backend/test_skill_upload_api.py tests/client_backend/test_skills_api.py tests/client_backend/test_skill_operations.py -q
-.\.conda\python.exe -m ruff check client_backend/api/skill_errors.py client_backend/api/skills.py client_backend/api/common.py client_backend/main.py tests/client_backend/test_skill_upload_api.py
+.\.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_upload_api.py tests/client_backend/test_skills_api.py tests/client_backend/test_skill_operations.py -q
+.\.venv\Scripts\python.exe -m ruff check client_backend/api/skill_errors.py client_backend/api/skills.py client_backend/api/common.py client_backend/main.py tests/client_backend/test_skill_upload_api.py
 ```
 
 Expected: all pass.
@@ -1262,6 +1423,7 @@ def _assert_catalog(data):
     assert isinstance(data["catalogGeneration"], int)
     assert data["catalogSyncStatus"] in {"synced", "pending", "disconnected"}
     assert data["totalCount"] == len(data["skills"])
+    assert data["enabledCount"] == sum(1 for skill in data["skills"] if skill["enabled"])
 
 
 def test_reload_returns_refreshed_catalog(skills_client):
@@ -1284,7 +1446,7 @@ bridge sync failure produces success plus `pending`.
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/client_backend/test_skills_api.py tests/client_backend/test_skill_installation.py -q
+.\.venv\Scripts\python.exe -m pytest tests/client_backend/test_skills_api.py tests/client_backend/test_skill_installation.py -q
 ```
 
 Expected: old message-only mutation responses fail catalog assertions.
@@ -1311,13 +1473,20 @@ catalog = await get_skill_catalog_service().after_mutation(sync=True)
 after install/setup/uninstall/toggle. `GET /skills` uses bounded freshness;
 detail lookup calls snapshot before registry lookup.
 
+Delete `_refresh_runtime_bridge_catalogs_if_connected()` at
+`client_backend/api/skills.py:63` together with the now-unused
+`get_runtime_bridge` import; `after_mutation(sync=True)` replaces both of its
+callers. `tests/client_backend/test_skills_api.py:138,152` assert those two
+routes still trigger a bridge refresh, so rewrite them against the catalog
+service rather than deleting the coverage.
+
 - [ ] **Step 5: Run all sidecar skill tests and commit**
 
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/client_backend/test_skills_api.py tests/client_backend/test_skill_installation.py tests/client_backend/test_skill_catalog.py tests/client_backend/test_skills_registry.py -q
-.\.conda\python.exe -m ruff check client_backend/schemas/skills.py client_backend/api/skills.py tests/client_backend/test_skills_api.py
+.\.venv\Scripts\python.exe -m pytest tests/client_backend/test_skills_api.py tests/client_backend/test_skill_installation.py tests/client_backend/test_skill_catalog.py tests/client_backend/test_skills_registry.py -q
+.\.venv\Scripts\python.exe -m ruff check client_backend/schemas/skills.py client_backend/api/skills.py tests/client_backend/test_skills_api.py
 ```
 
 Expected: all pass.
@@ -1399,12 +1568,27 @@ requests increment `api_cache_version`.
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/test_demo_skill_installation.py tests/test_demo_sidecar_auth.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_demo_skill_installation.py tests/test_demo_sidecar_auth.py -q
 ```
 
 Expected: missing helper failures.
 
-- [ ] **Step 3: Implement dedicated multipart transport**
+- [ ] **Step 3: Extract shared transport plumbing, then add multipart**
+
+`demo.py` has no `_auth_headers()` or `_handle_api_response()` yet — today all of
+that logic is inline in `make_api_request` (`demo.py:3089-3175`). Extract it
+first, in one behavior-preserving refactor:
+
+- `_auth_headers() -> dict[str, str]` — the `Authorization` header built from
+  `st.session_state.auth_token`, omitted entirely when there is no token.
+- `_handle_api_response(response, *, mutation: bool) -> dict` — `raise_for_status`
+  handling, `_extract_api_error_message` into `_last_api_error_message`, the
+  401/`unauthenticated` transition plus `st.toast`, the `success is false`
+  branch, and the `api_cache_version` bump for mutations.
+
+`make_api_request` then calls both, so existing callers keep identical
+behavior. Cover that with a regression test asserting a 401 still calls
+`_transition_to_login` and a successful POST still bumps `api_cache_version`.
 
 Do not overload `make_api_request` with ambiguous simultaneous JSON/files.
 Reuse auth/error/cache invalidation behavior in a focused helper:
@@ -1440,8 +1624,8 @@ best-effort and must not block clearing local state.
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/test_demo_skill_installation.py tests/test_demo_sidecar_auth.py tests/test_hitl_demo_panel.py -q
-.\.conda\python.exe -m ruff check demo.py tests/test_demo_skill_installation.py
+.\.venv\Scripts\python.exe -m pytest tests/test_demo_skill_installation.py tests/test_demo_sidecar_auth.py tests/test_hitl_demo_panel.py -q
+.\.venv\Scripts\python.exe -m ruff check demo.py tests/test_demo_skill_installation.py
 ```
 
 Expected: all pass.
@@ -1473,7 +1657,7 @@ Use the repository's established source/AST helper style to assert:
 
 ```python
 def test_streamlit_skill_panel_has_zip_preview_and_explicit_approvals():
-    source = Path("demo.py").read_text(encoding="utf-8")
+    source = REPO_ROOT.joinpath("demo.py").read_text(encoding="utf-8")
     assert 'st.file_uploader(' in source
     assert 'type=["zip"]' in source
     assert "Install only skills you trust" in source
@@ -1482,7 +1666,7 @@ def test_streamlit_skill_panel_has_zip_preview_and_explicit_approvals():
 
 
 def test_streamlit_polling_does_not_block_in_a_while_loop():
-    tree = ast.parse(Path("demo.py").read_text(encoding="utf-8"))
+    tree = ast.parse(REPO_ROOT.joinpath("demo.py").read_text(encoding="utf-8"))
     polling = _function_node(tree, "_poll_skill_installation")
     assert not any(isinstance(node, ast.While) for node in ast.walk(polling))
 ```
@@ -1497,7 +1681,7 @@ commit, and selecting a new ZIP.
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/test_demo_skill_installation.py tests/test_skills_architecture.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_demo_skill_installation.py tests/test_skills_architecture.py -q
 ```
 
 Expected: missing uploader/polling contract failures.
@@ -1525,8 +1709,8 @@ distinct copy for `synced`, `pending`, and `disconnected`.
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/test_demo_skill_installation.py tests/test_skills_architecture.py tests/test_demo_refactor_contract.py tests/test_hitl_demo_panel.py -q
-.\.conda\python.exe -m ruff check demo.py tests/test_demo_skill_installation.py tests/test_skills_architecture.py
+.\.venv\Scripts\python.exe -m pytest tests/test_demo_skill_installation.py tests/test_skills_architecture.py tests/test_demo_refactor_contract.py tests/test_hitl_demo_panel.py -q
+.\.venv\Scripts\python.exe -m ruff check demo.py tests/test_demo_skill_installation.py tests/test_skills_architecture.py
 ```
 
 Expected: all pass.
@@ -1570,7 +1754,7 @@ async def test_uploaded_skill_reaches_only_originating_device_chat(
         "user-a",
         upload.upload_id,
         SkillInstallationRequest(
-            expected_source_hash=upload.preview["source_hash"],
+            expected_source_hash=upload.preview.source_hash,
             approve_setup=False,
         ),
     )
@@ -1581,10 +1765,16 @@ async def test_uploaded_skill_reaches_only_originating_device_chat(
     other = list_resolved_skills(user_id="user-a", device_id="device-b")
     unbound = list_resolved_skills(user_id="user-a", device_id=None)
 
-    assert {skill.name for skill in origin} == {"google-calendar"}
+    assert {skill.name for skill in origin} == {"cli-anything-google-calendar"}
     assert other == []
     assert unbound == []
 ```
+
+The fixture's front matter declares `name: cli-anything-google-calendar`, which
+is the name the registry, the catalog projection, and `ResolvedSkill.name` all
+carry; the ZIP filename is irrelevant to it. `_fixture_zip` must skip
+`__pycache__`/`*.pyc` so the archive matches what `compute_skill_bundle_hash`
+already ignores.
 
 Use the real catalog projection and capture
 `update_device_skill_catalog(device_id="device-a", catalog=captured_catalog)`. Feed that
@@ -1619,7 +1809,7 @@ def test_ai_sdk_chat_keeps_stream_contract_and_stamps_local_device(
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/test_skill_installation_chat_integration.py tests/test_skill_device_isolation.py tests/test_skills_tool.py tests/client_backend/test_runtime_bridge.py tests/test_image_stream_http_contract.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_skill_installation_chat_integration.py tests/test_skill_device_isolation.py tests/test_skills_tool.py tests/client_backend/test_runtime_bridge.py tests/test_image_stream_http_contract.py -q
 ```
 
 Expected: all pass because Tasks 4-9 already completed the production wiring.
@@ -1629,7 +1819,7 @@ Expected: all pass because Tasks 4-9 already completed the production wiring.
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/test_skill_installation_chat_integration.py tests/test_skill_device_isolation.py tests/test_skills_tool.py tests/test_image_stream_http_contract.py tests/client_backend/test_image_stream_proxy.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_skill_installation_chat_integration.py tests/test_skill_device_isolation.py tests/test_skills_tool.py tests/test_image_stream_http_contract.py tests/client_backend/test_image_stream_proxy.py -q
 ```
 
 Expected: all pass.
@@ -1662,28 +1852,34 @@ git commit -m "test: verify installed skills in device-bound AI SDK chat"
 
 ```python
 def test_readme_documents_zip_upload_operation_flow():
-    readme = Path("README.md").read_text(encoding="utf-8")
+    readme = REPO_ROOT.joinpath("README.md").read_text(encoding="utf-8")
     assert "POST /skills/uploads" in readme
     assert "GET /skills/installations/{operationId}" in readme
     assert "replaceSourceHash" in readme
 
 
 def test_canonical_server_still_exposes_no_skill_upload_router():
-    source = Path("app/main.py").read_text(encoding="utf-8")
+    source = REPO_ROOT.joinpath("app/main.py").read_text(encoding="utf-8")
     assert "skill_upload" not in source
     assert "skills_router" not in source
 ```
 
-Add a contract test that every documented error code appears in the
-implementation error registry and every operation phase appears in the
-Pydantic enum.
+`REPO_ROOT` is `Path(__file__).resolve().parents[1]`, matching
+`tests/test_skills_architecture.py`; never read repository files through a
+CWD-relative path.
+
+Add a contract test that closes the loop in **both** directions: every code in
+the FE contract's error table resolves in `skill_errors.py`, and every code
+`skill_errors.py` can emit appears in that table. Assert the same both ways for
+operation phases against the Pydantic enum. A one-directional check would let an
+undocumented code such as `SKILL_ARCHIVE_PATH_UNSAFE` reach a client silently.
 
 - [ ] **Step 2: Run documentation contract tests and confirm failures**
 
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/test_production_readiness_contract.py tests/test_skills_architecture.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_production_readiness_contract.py tests/test_skills_architecture.py -q
 ```
 
 Expected: missing new endpoint/error documentation assertions fail.
@@ -1710,7 +1906,7 @@ correct any field that implementation does not emit.
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/client_backend/test_skill_archive.py tests/client_backend/test_skill_uploads.py tests/client_backend/test_skill_operations.py tests/client_backend/test_skill_upload_api.py tests/client_backend/test_skill_catalog.py tests/client_backend/test_skill_installation.py tests/client_backend/test_skills_api.py tests/test_demo_skill_installation.py tests/test_skill_installation_chat_integration.py -q
+.\.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_archive.py tests/client_backend/test_skill_uploads.py tests/client_backend/test_skill_operations.py tests/client_backend/test_skill_upload_api.py tests/client_backend/test_skill_catalog.py tests/client_backend/test_skill_installation.py tests/client_backend/test_skills_api.py tests/test_demo_skill_installation.py tests/test_skill_installation_chat_integration.py -q
 ```
 
 Expected: all pass.
@@ -1720,7 +1916,7 @@ Expected: all pass.
 Run:
 
 ```powershell
-.\.conda\python.exe -m pytest tests/test_demo_sidecar_auth.py tests/test_skills_architecture.py tests/test_skill_device_isolation.py tests/test_skills_tool.py tests/test_hitl_demo_panel.py tests/test_image_stream_http_contract.py tests/client_backend/test_image_stream_proxy.py tests/client_backend/test_runtime_bridge.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_demo_sidecar_auth.py tests/test_skills_architecture.py tests/test_skill_device_isolation.py tests/test_skills_tool.py tests/test_hitl_demo_panel.py tests/test_image_stream_http_contract.py tests/client_backend/test_image_stream_proxy.py tests/client_backend/test_runtime_bridge.py -q
 ```
 
 Expected: all pass.
@@ -1730,9 +1926,9 @@ Expected: all pass.
 Run:
 
 ```powershell
-.\.conda\python.exe -m ruff check client_backend demo.py tests/client_backend tests/test_demo_skill_installation.py tests/test_skill_installation_chat_integration.py
+.\.venv\Scripts\python.exe -m ruff check client_backend demo.py tests/client_backend tests/test_demo_skill_installation.py tests/test_skill_installation_chat_integration.py
 git diff --check
-.\.conda\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
 Expected: Ruff clean, no whitespace errors, and the full suite passes.
