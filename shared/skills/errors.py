@@ -13,6 +13,15 @@ from __future__ import annotations
 SKILL_INSTALL_INVALID = "SKILL_INSTALL_INVALID"
 SKILL_INSTALL_CONFLICT = "SKILL_INSTALL_CONFLICT"
 UNSAFE_BUNDLE_PATH = "UNSAFE_BUNDLE_PATH"
+# Raised when a guarded replacement no longer matches what the client previewed:
+# either the uploaded bundle or the installed bundle changed in between. The
+# client must re-preview rather than retry with a fresh hash.
+SKILL_SOURCE_CHANGED = "SKILL_SOURCE_CHANGED"
+# Raised when the colliding skill lives in a user-configured skills root. The
+# sidecar owns only the bundles it installed into the profile, so it never
+# rewrites a directory the user manages. Routes surface this as the documented
+# SKILL_INSTALL_CONFLICT.
+SKILL_CONFIGURED_ROOT_CONFLICT = "SKILL_CONFIGURED_ROOT_CONFLICT"
 SKILL_SETUP_REQUIRED = "SKILL_SETUP_REQUIRED"
 SKILL_SETUP_FAILED = "SKILL_SETUP_FAILED"
 SKILL_RUNTIME_STALE = "SKILL_RUNTIME_STALE"
