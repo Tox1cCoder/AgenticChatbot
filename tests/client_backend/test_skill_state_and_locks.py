@@ -13,6 +13,8 @@ import asyncio
 import inspect
 import json
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -242,3 +244,46 @@ def test_lifecycle_audit_appends_one_line_per_event(tmp_path):
         "install_started",
     ]
     assert all(json.loads(line)["timestamp"].endswith("+00:00") for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_lock_is_released_when_acquire_and_release_use_different_threads(
+    tmp_path, monkeypatch
+):
+    """The file lock must not be thread-affine.
+
+    ``profile_lock`` acquires and releases through ``asyncio.to_thread``, which is
+    free to pick a different pool thread for each call. filelock's default
+    ``thread_local=True`` counts recursion per thread, so a release from another
+    thread silently does nothing and the OS lock survives for the life of the
+    process -- after which every skill operation for that profile fails as locked.
+    Pinning each hop to its own single-thread executor reproduces that
+    deterministically instead of waiting for the pool to grow.
+    """
+    monkeypatch.setitem(_live_locks(), "get_skill_locks_root", lambda user_id: tmp_path)
+    used: list[int] = []
+    executors = [ThreadPoolExecutor(max_workers=1) for _ in range(2)]
+
+    async def alternating_to_thread(func, /, *args, **kwargs):
+        loop = asyncio.get_running_loop()
+        executor = executors[len(used) % 2]
+
+        def run():
+            used.append(threading.get_ident())
+            return func(*args, **kwargs)
+
+        return await loop.run_in_executor(executor, run)
+
+    monkeypatch.setattr(asyncio, "to_thread", alternating_to_thread)
+    try:
+        async with profile_lock("user-a", "skill:demo", timeout_seconds=1):
+            pass
+
+        # Without two distinct threads the test would pass vacuously.
+        assert len(set(used)) == 2
+
+        async with profile_lock("user-a", "skill:demo", timeout_seconds=1):
+            pass
+    finally:
+        for executor in executors:
+            executor.shutdown(wait=False)

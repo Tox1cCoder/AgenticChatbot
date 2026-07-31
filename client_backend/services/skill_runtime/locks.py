@@ -103,7 +103,13 @@ async def profile_lock(
     except (TimeoutError, asyncio.TimeoutError) as exc:
         raise SkillLockTimeoutError(scope) from exc
 
-    file_lock = filelock.FileLock(str(path))
+    # thread_local=False is required, not a preference. filelock's default keys
+    # its recursion counter by thread, while `asyncio.to_thread` is free to run
+    # the acquire and the release on two different pool threads -- and then the
+    # release no-ops and the OS lock is held until the process exits, so every
+    # later skill operation for this profile fails as locked. Exclusion here is
+    # per profile scope, coordinated by the asyncio lock above, never per thread.
+    file_lock = filelock.FileLock(str(path), thread_local=False)
     try:
         try:
             # FileLock.acquire blocks the thread, so it must never run on the
