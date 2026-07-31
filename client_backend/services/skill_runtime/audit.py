@@ -17,6 +17,7 @@ skill execution into a failure, nor crash a failed one further.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -29,8 +30,32 @@ from client_backend.services.upstream_auth import get_upstream_auth_service
 logger = get_logger(__name__)
 
 _AUDIT_FILENAME = "audit.jsonl"
+_LIFECYCLE_AUDIT_FILENAME = "lifecycle.jsonl"
 
 _UNAVAILABLE_ARGUMENTS = {"<unavailable>": True}
+
+# The complete set of keys a lifecycle record may contain. This is an allowlist
+# rather than a denylist on purpose: callers pass through archive-derived and
+# filesystem-derived values, so anything not named here -- a staging path, an
+# uploaded filename, setup output, a token -- is dropped instead of audited.
+LIFECYCLE_AUDIT_FIELDS = frozenset(
+    {
+        "timestamp",
+        "event",
+        "user_id",
+        "device_id",
+        "upload_id",
+        "operation_id",
+        "skill",
+        "source_hash",
+        "status",
+        "phase",
+        "error_code",
+        "duration_ms",
+        "sync_status",
+        "metrics",
+    }
+)
 
 
 def new_audit_id() -> str:
@@ -131,3 +156,106 @@ class SkillAuditWriter:
         if isinstance(value, (list, tuple)):
             return [cls._redact_structure(item, secret_values) for item in value]
         return value
+
+
+class SkillLifecycleAuditWriter:
+    """Append one JSON line per upload/installation lifecycle transition.
+
+    Separate from :class:`SkillAuditWriter` because the two answer different
+    questions from different inputs. Execution audit records what a skill command
+    did; this records how a bundle arrived and was installed, and its inputs are
+    attacker-influenced (archive member names, front-matter skill names, uploaded
+    filenames). Fields are therefore allowlisted by
+    :data:`LIFECYCLE_AUDIT_FIELDS` and anything else a caller passes is dropped.
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
+        self._path = path
+
+    def write(
+        self,
+        *,
+        event: str,
+        user_id: str,
+        device_id: str | None = None,
+        upload_id: str | None = None,
+        operation_id: str | None = None,
+        skill: str | None = None,
+        source_hash: str | None = None,
+        status: str | None = None,
+        phase: str | None = None,
+        error_code: str | None = None,
+        duration_ms: int | None = None,
+        sync_status: str | None = None,
+        metrics: Mapping[str, int] | None = None,
+        **ignored: object,
+    ) -> None:
+        """Write one lifecycle record. Never raises -- failures are logged only.
+
+        Unknown keyword arguments are accepted and discarded so a future caller
+        cannot leak a new field by passing it; ``**ignored`` exists to swallow
+        them, not to forward them.
+        """
+        try:
+            if ignored:
+                logger.debug(
+                    "dropping %d non-allowlisted lifecycle audit field(s) for %s",
+                    len(ignored),
+                    event,
+                )
+            record = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event": str(event),
+                "user_id": str(user_id),
+                "device_id": _optional_str(device_id),
+                "upload_id": _optional_str(upload_id),
+                "operation_id": _optional_str(operation_id),
+                "skill": _optional_str(skill),
+                "source_hash": _optional_str(source_hash),
+                "status": _optional_str(status),
+                "phase": _optional_str(phase),
+                "error_code": _optional_str(error_code),
+                "duration_ms": int(duration_ms) if duration_ms is not None else None,
+                "sync_status": _optional_str(sync_status),
+                "metrics": _numeric_metrics(metrics),
+            }
+            record = {key: value for key, value in record.items() if value is not None}
+            self._append_line(self._resolve_path(user_id), json.dumps(record) + "\n")
+        except Exception:  # noqa: BLE001 - auditing must never break installation
+            logger.warning("failed to write skill lifecycle audit record", exc_info=True)
+
+    def _resolve_path(self, user_id: str) -> Path:
+        if self._path is not None:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            return self._path
+        return get_profile_subdir(user_id, "skills") / _LIFECYCLE_AUDIT_FILENAME
+
+    @staticmethod
+    def _append_line(audit_path: Path, line: str) -> None:
+        """Append one serialized record; the single failure seam for tests."""
+        with audit_path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+
+
+def _optional_str(value: object) -> str | None:
+    """Normalize an optional identifier to a non-empty string."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _numeric_metrics(metrics: Mapping[str, int] | None) -> dict[str, int] | None:
+    """Keep only integral counters, dropping anything that could carry text.
+
+    Byte and file counts are safe to record; a caller that slips a path or a
+    filename in under a counter key must not have it persisted.
+    """
+    if not metrics:
+        return None
+    numeric = {
+        str(key): int(value)
+        for key, value in metrics.items()
+        if isinstance(value, int) and not isinstance(value, bool)
+    }
+    return numeric or None
