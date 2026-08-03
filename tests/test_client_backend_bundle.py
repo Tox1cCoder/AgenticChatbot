@@ -1,4 +1,5 @@
 import ast
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -182,3 +183,146 @@ def test_bundle_can_import_the_real_server_startup_path(tmp_path):
 
     assert probe.returncode == 0, probe.stderr or probe.stdout
     assert "OK" in probe.stdout
+
+
+# Third-party packages the sidecar reaches only through an optional path, plus
+# the ones whose import name differs from their distribution name. Anything else
+# the bundle imports must appear in its requirements file, or a fresh install
+# starts and immediately dies on ModuleNotFoundError.
+THIRD_PARTY_IMPORT_TO_DISTRIBUTION = {
+    "dotenv": "python-dotenv",
+    "jwt": "PyJWT",
+    "multipart": "python-multipart",
+    "yaml": "PyYAML",
+}
+
+# Imported behind a feature the bundle does not ship, or provided transitively by
+# a declared package. Each entry is a deliberate exclusion, not an oversight.
+BUNDLE_REQUIREMENTS_EXEMPT = frozenset(
+    {
+        "app",
+        "client_backend",
+        "shared",
+        # Pulled in by fastapi/uvicorn rather than declared directly.
+        "starlette",
+        "anyio",
+        "sniffio",
+        "click",
+        "h11",
+        "certifi",
+        "idna",
+        "typing_extensions",
+        "annotated_types",
+        "pydantic_core",
+        "charset_normalizer",
+        "urllib3",
+        "requests",
+        # Server-side only; the sidecar's copied app/ modules import them behind
+        # guards that never run in the bundle.
+        "sqlalchemy",
+        "alembic",
+        "celery",
+        "langchain",
+        "langchain_core",
+        "langgraph",
+        "openai",
+        "psycopg2",
+        "qdrant_client",
+        "sentence_transformers",
+        "torch",
+        "transformers",
+        "tiktoken",
+        "nltk",
+        "numpy",
+        "PIL",
+        "pypdf",
+        "docx",
+        "openpyxl",
+        "pdfplumber",
+        "tabulate",
+        "dependency_injector",
+        "prometheus_client",
+        "truststore",
+        "httpcore",
+        "httpx2",
+        "streamlit",
+        "markdown",
+        "dateutil",
+        "pytest",
+    }
+)
+
+
+def _bundle_requirement_names() -> set[str]:
+    from build_client_backend_bundle import REQUIREMENTS_CONTENT
+
+    names = set()
+    for line in REQUIREMENTS_CONTENT.splitlines():
+        entry = line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        name = re.split(r"[<>=!\[;]", entry, maxsplit=1)[0].strip()
+        names.add(_normalize_distribution(name))
+    return names
+
+
+def _normalize_distribution(name: str) -> str:
+    """PEP 503 normalization, so pydantic_settings matches pydantic-settings."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _third_party_imports(root: Path) -> dict[str, set[str]]:
+    """Map every third-party top-level import in the tree to its importers."""
+    found: dict[str, set[str]] = {}
+    for path in root.rglob("*.py"):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                modules = [node.module]
+            else:
+                continue
+            for module in modules:
+                top = module.split(".")[0]
+                if top in sys.stdlib_module_names or top in BUNDLE_REQUIREMENTS_EXEMPT:
+                    continue
+                found.setdefault(top, set()).add(path.relative_to(REPO_ROOT).as_posix())
+    return found
+
+
+def test_bundle_requirements_cover_every_third_party_import_of_the_sidecar():
+    """A missing entry here is a bundle that dies on startup, not a test nit.
+
+    The builder embeds its own requirements list rather than reusing the
+    repository manifests, so adding a dependency to pyproject.toml does not reach
+    the shipped sidecar. filelock was exactly that: imported by the skill lock
+    module, absent from the bundle, and undetectable until first run.
+    """
+    declared = _bundle_requirement_names()
+    imported = _third_party_imports(REPO_ROOT / "client_backend")
+
+    missing = {
+        module: sorted(importers)
+        for module, importers in sorted(imported.items())
+        if _normalize_distribution(THIRD_PARTY_IMPORT_TO_DISTRIBUTION.get(module, module))
+        not in declared
+    }
+
+    assert not missing, f"bundle requirements omit imported packages: {missing}"
+
+
+def test_both_bundle_builders_declare_the_same_requirements():
+    """The PowerShell and Python builders must produce identical artifacts."""
+    from build_client_backend_bundle import REQUIREMENTS_CONTENT
+
+    powershell = (REPO_ROOT / "scripts" / "build-client-backend-bundle.ps1").read_text(
+        encoding="utf-8"
+    )
+    embedded = re.search(r"\$requirementsContent = @'\n(.*?)\n'@", powershell, re.S)
+
+    assert embedded is not None, "the PowerShell builder no longer embeds a requirements block"
+    assert embedded.group(1).strip().splitlines() == REQUIREMENTS_CONTENT.strip().splitlines()
