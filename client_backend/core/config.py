@@ -211,21 +211,13 @@ class ClientSettings(BaseSettings):
     )
     allowed_origins: list[str] = Field(
         default=[
-            # Next.js frontend
+            # AI SDK frontend
             "http://127.0.0.1:3000",
             "http://localhost:3000",
             "http://[::1]:3000",
             # Streamlit frontend
             "http://127.0.0.1:8501",
             "http://localhost:8501",
-            # Tauri desktop shell: custom protocol (macOS/Linux), the Windows
-            # http(s)://tauri.localhost form, and the 1420 dev server.
-            "tauri://localhost",
-            "http://tauri.localhost",
-            "https://tauri.localhost",
-            "http://tauri.localhost:1420",
-            "http://localhost:1420",
-            "http://127.0.0.1:1420",
         ],
         description="Explicit browser origins allowed to call the sidecar. Never '*'.",
     )
@@ -334,10 +326,8 @@ class ClientSettings(BaseSettings):
                     "tool execution and requires explicit browser origins"
                 )
             parsed = urlsplit(origin)
-            # `tauri` is the desktop shell's custom protocol origin on
-            # macOS/Linux; it is a real origin the sidecar must accept.
             if (
-                parsed.scheme not in {"http", "https", "tauri"}
+                parsed.scheme not in {"http", "https"}
                 or not parsed.netloc
                 or parsed.path
                 or parsed.query

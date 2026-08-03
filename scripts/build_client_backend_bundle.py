@@ -207,6 +207,21 @@ That regenerates `dist\\client-backend-bundle` and `dist\\client-backend-bundle.
 """
 
 
+def _copy_mcp_servers(destination: Path) -> None:
+    """Copy only the MCP server scripts this repository actually tracks.
+
+    Not a ``copytree`` of the directory: developers keep unversioned server
+    installations beside the tracked scripts -- OCR binaries, model weights --
+    and a recursive copy sweeps all of it into a distributable. That both bloats
+    the artifact by orders of magnitude and makes the build non-reproducible,
+    since the result depends on what happens to sit in one machine's working
+    tree. Only the tracked ``*.py`` servers are part of the product.
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    for script in sorted((REPO_ROOT / "app" / "ai" / "mcp_servers").glob("*.py")):
+        shutil.copy2(script, destination / script.name)
+
+
 def _ignore_caches(_dir: str, names: list[str]) -> set[str]:
     return {name for name in names if name in CACHE_DIR_NAMES}
 
@@ -252,11 +267,7 @@ def build(output_root: Path) -> tuple[Path, Path]:
         REPO_ROOT / "app" / "ai" / "mcp_config.json",
         app_dir / "ai" / "mcp_config.json",
     )
-    shutil.copytree(
-        REPO_ROOT / "app" / "ai" / "mcp_servers",
-        app_dir / "ai" / "mcp_servers",
-        ignore=_ignore_caches,
-    )
+    _copy_mcp_servers(app_dir / "ai" / "mcp_servers")
     shutil.copy2(
         REPO_ROOT / "app" / "core" / "config.py",
         app_dir / "core" / "config.py",

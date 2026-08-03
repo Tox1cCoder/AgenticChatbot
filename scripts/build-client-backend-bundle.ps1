@@ -67,7 +67,14 @@ New-Item -ItemType Directory -Path (Join-Path $bundleRoot "app\\schemas") -Force
 New-Item -ItemType Directory -Path (Join-Path $bundleRoot "app\\services") -Force | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $repoRoot "app\\ai\\mcp_config.json") -Destination (Join-Path $bundleRoot "app\\ai\\mcp_config.json") -Force
-Copy-Item -LiteralPath (Join-Path $repoRoot "app\\ai\\mcp_servers") -Destination (Join-Path $bundleRoot "app\\ai") -Recurse -Force
+# Only the tracked *.py servers: developers keep unversioned server
+# installations (OCR binaries, model weights) beside them, and a recursive copy
+# would sweep those into the distributable and make the build depend on one
+# machine's working tree.
+$mcpServersDestination = Join-Path $bundleRoot "app\\ai\\mcp_servers"
+New-Item -ItemType Directory -Force -Path $mcpServersDestination | Out-Null
+Get-ChildItem -LiteralPath (Join-Path $repoRoot "app\\ai\\mcp_servers") -Filter *.py -File |
+    ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $mcpServersDestination -Force }
 Copy-Item -LiteralPath (Join-Path $repoRoot "app\\core\\config.py") -Destination (Join-Path $bundleRoot "app\\core\\config.py") -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "app\\core\\build_info.py") -Destination (Join-Path $bundleRoot "app\\core\\build_info.py") -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "app\\core\\mcp_adapter_utils.py") -Destination (Join-Path $bundleRoot "app\\core\\mcp_adapter_utils.py") -Force

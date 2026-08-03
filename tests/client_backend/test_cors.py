@@ -6,11 +6,16 @@ process specifically: the sidecar executes local shell commands, reads and write
 the filesystem, installs skill bundles, and holds an upstream session, so a
 wildcard let any page the user visited drive all of it from the browser.
 
-The replacement contract keeps every origin the product actually ships (Next.js
-dev server, Streamlit, and the Tauri desktop shell's custom-protocol and
-Windows/dev origins) and refuses everything else. Environment no longer changes
-the answer -- a permissive development mode is what leaks into production
+The replacement contract keeps the origins the product actually ships -- the AI
+SDK frontend and Streamlit -- and refuses everything else. Environment no longer
+changes the answer: a permissive development mode is what leaks into production
 installs.
+
+The previous version of this file asserted that Tauri custom-protocol origins
+were allowed. Nothing in this repository ships a Tauri shell; those cases were
+demonstrating that a wildcard accepts anything, using Tauri as the example. They
+are gone rather than preserved, because an allowlist entry for a client that does
+not exist is surface area for nothing.
 """
 
 import os
@@ -56,9 +61,6 @@ def restore_environment():
         "http://127.0.0.1:3000",
         "http://[::1]:3000",
         "http://localhost:8501",
-        "tauri://localhost",
-        "http://tauri.localhost",
-        "http://tauri.localhost:1420",
     ],
 )
 def test_shipped_frontend_origins_are_allowed(restore_environment, environment, origin):
@@ -79,7 +81,8 @@ def test_shipped_frontend_origins_are_allowed(restore_environment, environment, 
     [
         "https://evil.example.com",
         "http://localhost:9999",
-        "http://tauri.localhost.evil.example",
+        "http://localhost.evil.example",
+        "tauri://localhost",
     ],
 )
 def test_unconfigured_origins_receive_no_allow_origin_header(
