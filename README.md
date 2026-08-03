@@ -863,8 +863,18 @@ Archives are accepted only as ZIP, and only within the configured limits
 (`CLIENT_SKILL_UPLOAD_*`): 25 MiB uploaded, 100 MiB expanded, 50 MiB per file,
 2,000 entries, a 200:1 compression ratio, 20 path components, and 240 path
 characters. Path traversal, absolute and UNC names, reserved device names,
-case- and Unicode-colliding paths, encrypted members, and non-regular entry types
-(symlinks, FIFOs, devices) are rejected before anything is written.
+case- and Unicode-colliding paths, encrypted members, and device, socket, or pipe
+entries are rejected before anything is written.
+
+Symbolic links are dropped rather than extracted, and reported as
+`archive.skippedLinkCount`. Source downloads of real repositories routinely carry
+one, and materializing it is the actual hazard -- on POSIX it would later be
+followed out of the bundle, and on Windows it becomes a plain file whose contents
+are the target path.
+
+**One archive installs one skill.** Downloading a repository that collects many
+skills and uploading the whole thing is rejected with the list of skills it found;
+zip the individual skill folder, the one holding its `SKILL.md`.
 
 Every catalog response carries `catalogGeneration` and `catalogSyncStatus`. Do
 not replace a cached catalog with a lower generation. A `pending` sync means the

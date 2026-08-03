@@ -139,12 +139,17 @@ class SkillArchiveSummary(CamelModel):
 
     ``filename`` is the sanitized base name of what the user selected, echoed so
     the confirmation UI can name the file. It is never used to build a path.
+
+    ``skipped_link_count`` reports symbolic links dropped during extraction, which
+    source downloads of real repositories often carry. It is surfaced rather than
+    hidden so a bundle that depended on one is diagnosable.
     """
 
     filename: str
     compressed_bytes: int
     expanded_bytes: int
     file_count: int
+    skipped_link_count: int = 0
 
 
 class SkillUploadRecord(CamelModel):

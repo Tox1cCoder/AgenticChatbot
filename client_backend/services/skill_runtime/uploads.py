@@ -345,6 +345,7 @@ class SkillUploadService:
                 compressed_bytes=compressed_bytes,
                 expanded_bytes=summary.expanded_bytes,
                 file_count=summary.file_count,
+                skipped_link_count=summary.skipped_link_count,
             ),
             preview=SkillArchivePreview.from_installer_preview(
                 preview_payload,
@@ -361,7 +362,35 @@ class SkillUploadService:
             return await installer.preview(extracted)
         except SkillRuntimeError as exc:
             # The archive was structurally fine but is not one installable skill.
-            raise SkillUploadError(SKILL_BUNDLE_INVALID, exc.message) from exc
+            raise SkillUploadError(
+                SKILL_BUNDLE_INVALID,
+                self._bundle_rejection_message(extracted, exc),
+            ) from exc
+
+    @staticmethod
+    def _bundle_rejection_message(extracted: Path, exc: SkillRuntimeError) -> str:
+        """Explain a rejected bundle in terms of what the user uploaded.
+
+        Downloading a repository that collects many skills and uploading the whole
+        thing is the most likely way this fails, and the installer's own wording
+        ("exactly one SKILL.md") describes the rule rather than the way out.
+        """
+        found = sorted(path for path in extracted.rglob("SKILL.md") if path.is_file())
+        if len(found) > 1:
+            names = sorted({path.parent.name for path in found})
+            preview = ", ".join(names[:5])
+            more = f", and {len(names) - 5} more" if len(names) > 5 else ""
+            return (
+                f"This archive contains {len(found)} skills ({preview}{more}). "
+                "Upload one skill at a time: zip the individual skill folder, the "
+                "one holding its SKILL.md."
+            )
+        if not found:
+            return (
+                "This archive contains no SKILL.md, so there is no skill to install. "
+                "Zip the folder that holds the skill's SKILL.md."
+            )
+        return exc.message
 
     def _build_installer(self):
         from client_backend.services.skill_runtime.install import SkillBundleInstaller

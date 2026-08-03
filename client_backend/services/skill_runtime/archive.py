@@ -109,6 +109,7 @@ class SkillArchiveSummary:
     compressed_bytes: int
     expanded_bytes: int
     file_count: int
+    skipped_link_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -151,13 +152,16 @@ class SkillArchiveValidator:
 
         try:
             with zipfile.ZipFile(archive_path) as archive:
-                members, expanded_bytes = self._plan_members(archive, compressed_bytes)
+                members, expanded_bytes, skipped_links = self._plan_members(
+                    archive, compressed_bytes
+                )
                 return self._extract_planned(
                     archive,
                     members,
                     destination,
                     compressed_bytes=compressed_bytes,
                     declared_expanded_bytes=expanded_bytes,
+                    skipped_link_count=skipped_links,
                 )
         except zipfile.BadZipFile as exc:
             raise SkillArchiveError(
@@ -185,15 +189,29 @@ class SkillArchiveValidator:
         self,
         archive: zipfile.ZipFile,
         compressed_bytes: int,
-    ) -> tuple[list[_PlannedMember], int]:
+    ) -> tuple[list[_PlannedMember], int, int]:
         """Check every entry before creating anything on disk."""
         infos = archive.infolist()
         planned: list[_PlannedMember] = []
         collision_keys: dict[str, str] = {}
         declared_expanded = 0
         file_count = 0
+        skipped_links = 0
 
         for info in infos:
+            if _is_symlink_entry(info):
+                # Dropped rather than extracted, and not a reason to reject the
+                # archive. Source downloads of real repositories routinely carry
+                # a link or two (an AGENTS.md aliasing CLAUDE.md, say), and
+                # refusing the whole upload over one is disproportionate. What
+                # must not happen is *materializing* it: on POSIX the link would
+                # later be followed out of the bundle, and on Windows zipfile
+                # writes a plain file whose contents are the target path, which
+                # is silent nonsense. The bundle hasher rejects links outright
+                # too, so an extracted one could never install anyway.
+                skipped_links += 1
+                continue
+
             self._require_supported_entry(info)
             relative_path, is_directory = self._safe_relative_path(info)
 
@@ -235,10 +253,10 @@ class SkillArchiveValidator:
         if file_count == 0:
             raise SkillArchiveError(
                 SKILL_ARCHIVE_INVALID,
-                "The archive contains no files.",
+                "The archive contains no installable files.",
             )
         self._require_sane_ratio(declared_expanded, compressed_bytes)
-        return planned, declared_expanded
+        return planned, declared_expanded, skipped_links
 
     def _require_sane_ratio(self, expanded_bytes: int, compressed_bytes: int) -> None:
         if compressed_bytes <= 0:
@@ -265,11 +283,12 @@ class SkillArchiveValidator:
 
     @staticmethod
     def _require_regular_file_mode(info: zipfile.ZipInfo) -> None:
-        """Reject anything a Unix-created archive marks as a non-regular file.
+        """Reject entry types that have no benign reading.
 
         ``external_attr``'s high 16 bits carry st_mode when ``create_system`` is
-        Unix. A symlink member is the classic escape: extracting it as a link and
-        then copying "through" it reaches any absolute path the attacker chose.
+        Unix. Symlinks are handled separately -- they are common in source
+        archives and are skipped. A FIFO, socket, or device node inside a skill
+        ZIP has no legitimate purpose and signals a hostile or corrupt archive.
         """
         if info.create_system != 3:
             return
@@ -282,7 +301,9 @@ class SkillArchiveValidator:
             return
         raise SkillArchiveError(
             SKILL_ARCHIVE_PATH_UNSAFE,
-            "The archive contains an entry that is not a regular file or folder.",
+            "The archive contains a device, socket, or pipe entry. A skill bundle "
+            "may only contain regular files and folders; repackage it from a clean "
+            "checkout.",
         )
 
     def _safe_relative_path(self, info: zipfile.ZipInfo) -> tuple[PurePosixPath, bool]:
@@ -373,6 +394,7 @@ class SkillArchiveValidator:
         *,
         compressed_bytes: int,
         declared_expanded_bytes: int,
+        skipped_link_count: int = 0,
     ) -> SkillArchiveSummary:
         """Stream every planned member into a temporary root, then promote it."""
         destination = destination.resolve()
@@ -416,10 +438,17 @@ class SkillArchiveValidator:
                 declared_expanded_bytes,
                 expanded_bytes,
             )
+        if skipped_link_count:
+            logger.info(
+                "skipped %d symbolic link entr%s while extracting a skill archive",
+                skipped_link_count,
+                "y" if skipped_link_count == 1 else "ies",
+            )
         return SkillArchiveSummary(
             compressed_bytes=compressed_bytes,
             expanded_bytes=expanded_bytes,
             file_count=file_count,
+            skipped_link_count=skipped_link_count,
         )
 
     @staticmethod
@@ -487,6 +516,14 @@ class SkillArchiveValidator:
                 "The archive could not be extracted to local storage.",
             ) from exc
         return written
+
+
+def _is_symlink_entry(info: zipfile.ZipInfo) -> bool:
+    """Report whether a Unix-created entry records a symbolic link."""
+    if info.create_system != 3:
+        return False
+    mode = info.external_attr >> 16
+    return bool(mode) and stat.S_ISLNK(mode)
 
 
 def _looks_like_windows_absolute(raw: str) -> bool:

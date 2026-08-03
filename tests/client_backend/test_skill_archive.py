@@ -10,6 +10,7 @@ lands in the requested destination.
 
 from __future__ import annotations
 
+import stat
 import struct
 import zipfile
 from dataclasses import replace
@@ -226,28 +227,6 @@ def test_rejects_encrypted_member(tmp_path):
     assert not (tmp_path / "out").exists()
 
 
-@pytest.mark.parametrize(
-    ("mode", "label"),
-    [
-        (0o120777, "symlink"),
-        (0o010644, "fifo"),
-        (0o020644, "character device"),
-        (0o060644, "block device"),
-        (0o140644, "socket"),
-    ],
-)
-def test_rejects_non_regular_unix_entry_types(tmp_path, mode, label):
-    info = zipfile.ZipInfo("demo/entry")
-    info.create_system = 3  # Unix, so external_attr carries the mode
-    info.external_attr = mode << 16
-    archive = _zip_with_info(tmp_path / "hostile.zip", info, b"target")
-
-    with pytest.raises(SkillArchiveError) as exc_info:
-        _validator().extract(archive, tmp_path / "out")
-
-    assert exc_info.value.code == "SKILL_ARCHIVE_PATH_UNSAFE", label
-
-
 def test_rejects_unsupported_compression_method(tmp_path):
     """Method 99 is the WinZip AES marker; refuse it instead of failing mid-copy."""
     archive = _zip(tmp_path / "unsupported.zip", {"SKILL.md": VALID_SKILL_MD})
@@ -422,3 +401,121 @@ def test_temporary_extraction_root_is_removed_on_success_and_failure(tmp_path):
     leftovers = [path.name for path in tmp_path.iterdir() if ".extract-" in path.name]
 
     assert leftovers == []
+
+
+def _zip_with_symlink(path: Path, *, link_name: str, target: str, members: dict[str, str]) -> Path:
+    """Build an archive carrying a real Unix symlink entry.
+
+    This is how a source download of a repository that uses symlinks arrives: a
+    member whose external_attr records S_IFLNK and whose content is the target
+    path. It reproduces the exact shape that made a GitHub archive unusable.
+    """
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, content in members.items():
+            archive.writestr(name, content)
+        info = zipfile.ZipInfo(link_name)
+        info.create_system = 3
+        info.external_attr = (stat.S_IFLNK | 0o777) << 16
+        archive.writestr(info, target)
+    return path
+
+
+def test_symlink_entries_are_skipped_not_rejected(tmp_path):
+    """A source archive with an alias link must still install.
+
+    Refusing the whole upload over one unrelated top-level link -- an AGENTS.md
+    aliasing CLAUDE.md, for instance -- blocks legitimate archives for no safety
+    gain, because the link is never materialized either way.
+    """
+    archive = _zip_with_symlink(
+        tmp_path / "repo.zip",
+        link_name="repo/AGENTS.md",
+        target="CLAUDE.md",
+        members={"repo/SKILL.md": VALID_SKILL_MD, "repo/CLAUDE.md": "guidance"},
+    )
+    destination = tmp_path / "out"
+
+    summary = _validator().extract(archive, destination)
+
+    assert summary.skipped_link_count == 1
+    assert summary.file_count == 2
+    assert (destination / "repo" / "SKILL.md").is_file()
+    assert (destination / "repo" / "CLAUDE.md").is_file()
+    # The link must not exist in any form -- neither as a link nor as a plain
+    # file whose contents are the target path, which is what zipfile would write
+    # on Windows.
+    assert not (destination / "repo" / "AGENTS.md").exists()
+
+
+def test_a_skipped_link_never_becomes_a_file_containing_its_target(tmp_path):
+    archive = _zip_with_symlink(
+        tmp_path / "escape.zip",
+        link_name="repo/passwd",
+        target="/etc/passwd",
+        members={"repo/SKILL.md": VALID_SKILL_MD},
+    )
+    destination = tmp_path / "out"
+
+    _validator().extract(archive, destination)
+
+    assert not (destination / "repo" / "passwd").exists()
+    assert [path.name for path in (destination / "repo").iterdir()] == ["SKILL.md"]
+
+
+def test_an_archive_of_only_links_has_nothing_to_install(tmp_path):
+    archive = _zip_with_symlink(
+        tmp_path / "links.zip",
+        link_name="repo/AGENTS.md",
+        target="CLAUDE.md",
+        members={},
+    )
+
+    with pytest.raises(SkillArchiveError) as exc_info:
+        _validator().extract(archive, tmp_path / "out")
+
+    assert exc_info.value.code == "SKILL_ARCHIVE_INVALID"
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize(
+    ("mode", "label"),
+    [
+        (0o010644, "fifo"),
+        (0o020644, "character device"),
+        (0o060644, "block device"),
+        (0o140644, "socket"),
+    ],
+)
+def test_other_non_regular_entry_types_are_still_rejected(tmp_path, mode, label):
+    """Unlike a symlink, these have no benign reading inside a skill bundle."""
+    info = zipfile.ZipInfo("demo/entry")
+    info.create_system = 3
+    info.external_attr = mode << 16
+    archive = _zip_with_info(tmp_path / "hostile.zip", info, b"payload")
+
+    with pytest.raises(SkillArchiveError) as exc_info:
+        _validator().extract(archive, tmp_path / "out")
+
+    assert exc_info.value.code == "SKILL_ARCHIVE_PATH_UNSAFE", label
+    assert "device, socket, or pipe" in exc_info.value.message
+
+
+def test_the_real_superpowers_archive_shape_extracts(tmp_path):
+    """Regression for the reported failure, reproduced structurally.
+
+    The uploaded archive was a repository download whose only unusual entry was
+    one symlink; every other member was an ordinary file.
+    """
+    archive = tmp_path / "superpowers-main.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as handle:
+        handle.writestr("superpowers-main/CLAUDE.md", "root guidance")
+        handle.writestr("superpowers-main/skills/brainstorming/SKILL.md", VALID_SKILL_MD)
+        info = zipfile.ZipInfo("superpowers-main/AGENTS.md")
+        info.create_system = 3
+        info.external_attr = (stat.S_IFLNK | 0o777) << 16
+        handle.writestr(info, "CLAUDE.md")
+
+    summary = _validator().extract(archive, tmp_path / "out")
+
+    assert summary.skipped_link_count == 1
+    assert summary.file_count == 2

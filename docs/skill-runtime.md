@@ -112,9 +112,13 @@ type -- and every member is checked before a byte is written: traversal segments
 absolute POSIX/Windows/UNC names, reserved device names, trailing dot or space
 components, paths beyond the configured depth and length, duplicates that collide
 after casefolding and NFC normalization, encrypted members, unsupported
-compression, non-regular Unix entry types, and every size, count, and ratio
-limit. Members stream into a temporary sibling that is promoted only after all of
-them succeed, so a rejected archive leaves nothing behind.
+compression, device/socket/pipe entries, and every size, count, and ratio limit.
+Symbolic links are skipped rather than rejected -- source archives commonly carry
+one, the bundle hasher refuses links anyway, and extracting one is the only
+dangerous option -- and the count is reported as ``archive.skippedLinkCount``.
+
+Members stream into a temporary sibling that is promoted only after all of them
+succeed, so a rejected archive leaves nothing behind.
 
 One redundant wrapper directory is stripped: zipping a folder produces
 `my-skill/SKILL.md`, and the bundle root is what publishes `bin/` and `scripts/`.

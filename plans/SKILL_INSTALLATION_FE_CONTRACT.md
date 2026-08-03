@@ -170,7 +170,8 @@ Success is `201 Created`:
       "filename": "google-calendar.zip",
       "compressedBytes": 24576,
       "expandedBytes": 98304,
-      "fileCount": 14
+      "fileCount": 14,
+      "skippedLinkCount": 0
     },
     "preview": {
       "name": "google-calendar",
@@ -196,6 +197,10 @@ Success is `201 Created`:
   "error": null
 }
 ```
+
+`archive.skippedLinkCount` counts symbolic links dropped during extraction rather
+than materialized. Surface it when non-zero: a bundle that depended on a link is
+otherwise silently incomplete.
 
 `setup.dependencyLock` names the bundle's lock file when it ships one
 (`requirements.lock`), otherwise `null`. `operationId` is `null` until an
@@ -472,7 +477,7 @@ and polling state from the previous cache boundary.
 |---|---|---|
 | `400` | `SKILL_ARCHIVE_INVALID` | Malformed, encrypted, or corrupt ZIP. Select another file. |
 | `400` | `SKILL_ARCHIVE_PATH_UNSAFE` | A path inside the ZIP escapes the bundle, collides on this filesystem, or is not portable. Repackage it. |
-| `400` | `SKILL_BUNDLE_INVALID` | ZIP does not contain exactly one valid skill. |
+| `400` | `SKILL_BUNDLE_INVALID` | ZIP does not contain exactly one valid skill. A repository archive holding several is the usual cause; the message names them. |
 | `400` | `SKILL_UPLOAD_STATE_INVALID` | Upload cannot perform the requested transition. Reload its state. |
 | `400` | `SKILL_SETUP_REQUIRED` | The bundle declares a Python project; resend with `approveSetup: true`. |
 | `400` | `SKILL_SETUP_FAILED` | The runtime could not be prepared. Retryable. |
