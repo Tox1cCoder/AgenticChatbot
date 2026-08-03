@@ -8871,6 +8871,315 @@ def render_tools_tab():
                 _render_mcp_tool_tester(selected_tool, selected_tool_key)
 
 
+# Bounded backoff for installation polling, in seconds. Short at first because a
+# small instruction-only skill installs almost immediately, then longer so a
+# multi-minute dependency build does not generate hundreds of requests.
+SKILL_POLL_DELAYS = (0.5, 1.0, 2.0, 3.0)
+
+# How often the status fragment re-enters. The fragment only *checks* this often;
+# whether it issues a request is decided by SKILL_POLL_DELAYS.
+SKILL_STATUS_REFRESH_SECONDS = 0.5
+
+SKILL_TRUST_WARNING = (
+    "Install only skills you trust. Approved setup and skill commands run locally "
+    "with your user account's filesystem and network access. ZIP validation does "
+    "not sandbox the installed code."
+)
+
+_SYNC_STATUS_COPY = {
+    "synced": ("Skill is installed and available to device-bound chat.", ":material/check_circle:"),
+    "pending": ("Installed locally; connecting skill to chat.", ":material/sync:"),
+    "disconnected": (
+        "Installed locally; connect this device to use the skill in chat.",
+        ":material/cloud_off:",
+    ),
+}
+
+
+def _next_skill_poll_delay(current: float | None) -> float:
+    """Return the next backoff step, holding at the longest one."""
+    if current is None:
+        return SKILL_POLL_DELAYS[0]
+    for delay in SKILL_POLL_DELAYS:
+        if delay > current:
+            return delay
+    return SKILL_POLL_DELAYS[-1]
+
+
+def _poll_skill_installation() -> dict[str, Any] | None:
+    """Issue at most one status request per rerun, on a bounded backoff.
+
+    Deliberately not a wait loop: Streamlit runs this inside a script run, so
+    sleeping here would freeze the whole page, including the cancel button this
+    very panel renders. The fragment re-enters instead, and this returns
+    immediately when the next poll is not yet due.
+    """
+    operation_id = st.session_state.get("skill_operation_id")
+    if not operation_id:
+        return None
+
+    state = st.session_state.get("skill_operation_state") or {}
+    if state.get("state") in {"succeeded", "failed", "cancelled"}:
+        return state
+
+    now = time.monotonic()
+    next_poll_at = st.session_state.get("skill_install_next_poll_at")
+    if next_poll_at is not None and now < float(next_poll_at):
+        return state or None
+
+    operation = get_skill_installation(operation_id)
+    if operation is None:
+        # A network blip is not a failed installation; keep the receipt and try
+        # again on the next tick.
+        delay = _next_skill_poll_delay(st.session_state.get("skill_install_poll_delay"))
+        st.session_state.skill_install_poll_delay = delay
+        st.session_state.skill_install_next_poll_at = now + delay
+        return state or None
+
+    st.session_state.skill_operation_state = operation
+    delay = _next_skill_poll_delay(st.session_state.get("skill_install_poll_delay"))
+    st.session_state.skill_install_poll_delay = delay
+    st.session_state.skill_install_next_poll_at = now + delay
+
+    if operation.get("state") == "succeeded":
+        _apply_installed_skill_catalog(operation)
+    return operation
+
+
+def _apply_installed_skill_catalog(operation: dict[str, Any]) -> None:
+    """Adopt the catalog a finished installation returned.
+
+    Applied only when its generation is at least the cached one, so a slow
+    response cannot roll the view back to a state the user has already moved past.
+    """
+    catalog = ((operation.get("result") or {}).get("catalog")) or {}
+    if not catalog:
+        return
+    cached = st.session_state.get("skill_operation_catalog") or {}
+    if int(catalog.get("catalogGeneration") or 0) < int(cached.get("catalogGeneration") or 0):
+        return
+    st.session_state.skill_operation_catalog = catalog
+    _bump_api_cache_version()
+
+
+def _render_skill_preview(preview: dict[str, Any], archive: dict[str, Any]) -> None:
+    """Show what installing this archive would bring, before anything is run."""
+    st.markdown(f"**{preview.get('name', 'Unknown skill')}**")
+    expanded_kb = int(archive.get("expandedBytes") or 0) / 1024
+    st.caption(
+        f"{archive.get('filename', 'archive.zip')} - "
+        f"{expanded_kb:.1f} KB expanded, {archive.get('fileCount', 0)} files"
+    )
+
+    assets = preview.get("executableAssets") or {}
+    setup = preview.get("setup") or {}
+    # Every value below came out of an uploaded archive, so it is rendered as
+    # text. st.write/st.caption escape; unsafe_allow_html here would let a
+    # crafted SKILL.md inject markup into the page.
+    for label, values in (
+        ("Commands", assets.get("bin") or []),
+        ("Scripts", assets.get("scripts") or []),
+        ("Python dependencies", setup.get("dependencies") or []),
+        ("Build requirements", setup.get("buildRequirements") or []),
+    ):
+        if values:
+            st.caption(f"{label}: {', '.join(str(value) for value in values)}")
+
+    st.warning(SKILL_TRUST_WARNING, icon=":material/warning:")
+
+
+def _render_existing_skill_notice(existing: dict[str, Any] | None) -> bool:
+    """Explain a name collision. Returns whether an update is even permitted."""
+    if not existing:
+        return False
+    if not existing.get("replaceable"):
+        st.error(
+            f"A skill named '{existing.get('name')}' already comes from a configured "
+            "skills folder. The sidecar does not manage that folder, so it cannot be "
+            "replaced from here.",
+            icon=":material/block:",
+        )
+        return False
+    st.info(
+        f"'{existing.get('name')}' is already installed. Installing this archive "
+        "replaces it.",
+        icon=":material/update:",
+    )
+    return True
+
+
+def render_skill_install_panel() -> None:
+    """Upload, preview, confirm, and watch one skill ZIP installation."""
+    st.markdown("### Install a skill from a ZIP")
+
+    uploaded = st.file_uploader(
+        "Skill archive",
+        type=["zip"],
+        key="skill_zip_uploader",
+        help="One ZIP containing exactly one SKILL.md bundle.",
+    )
+
+    awaiting_upload = uploaded is not None and st.session_state.get("skill_upload_id") is None
+    if awaiting_upload and st.button(
+        "Upload and preview", icon=":material/upload:", key="skill_zip_stage"
+    ):
+        with st.spinner("Validating archive..."):
+            staged = stage_skill_zip(
+                uploaded.name,
+                uploaded.getvalue(),
+                getattr(uploaded, "type", "application/zip") or "application/zip",
+            )
+        if staged is None:
+            st.error(
+                _last_api_error_message("The archive could not be staged."),
+                icon=":material/error:",
+            )
+        else:
+            st.session_state.skill_upload_id = staged.get("uploadId")
+            st.session_state.skill_upload_preview = staged.get("preview") or {}
+            st.session_state.skill_upload_archive = staged.get("archive") or {}
+            st.rerun()
+
+    if st.session_state.get("skill_upload_id") and not st.session_state.get("skill_operation_id"):
+        _render_skill_confirmation()
+
+    if st.session_state.get("skill_operation_id"):
+        _render_skill_installation_status()
+
+
+def _render_skill_confirmation() -> None:
+    """Render the staged preview and the two deliberate approvals."""
+    preview = st.session_state.get("skill_upload_preview") or {}
+    archive = st.session_state.get("skill_upload_archive") or {}
+    _render_skill_preview(preview, archive)
+
+    existing = preview.get("existingSkill")
+    replaceable = _render_existing_skill_notice(existing)
+    setup = preview.get("setup") or {}
+
+    approve_setup = False
+    if setup.get("confirmationRequired"):
+        # Unchecked by default, and separate from the update confirmation: each
+        # authorizes a different thing, and neither may be inferred from the other.
+        approve_setup = st.checkbox(
+            "Run this skill's Python setup (executes project build code)",
+            key="skill_install_approve_setup",
+            value=False,
+        )
+
+    approve_replace = False
+    if replaceable:
+        approve_replace = st.checkbox(
+            "Update the existing skill",
+            key="skill_install_approve_replace",
+            value=False,
+        )
+
+    blocked = bool(existing) and not replaceable
+    needs_replacement = replaceable and not approve_replace
+    needs_setup = bool(setup.get("confirmationRequired")) and not approve_setup
+
+    install_column, cancel_column = st.columns(2)
+    with install_column:
+        if st.button(
+            "Install skill",
+            icon=":material/download:",
+            key="skill_install_confirm",
+            disabled=blocked or needs_replacement or needs_setup,
+            width="stretch",
+        ):
+            operation = start_skill_install(
+                st.session_state.skill_upload_id,
+                str(preview.get("sourceHash") or ""),
+                approve_setup,
+                (existing or {}).get("sourceHash") if approve_replace else None,
+            )
+            if operation is None:
+                st.error(
+                    _last_api_error_message("The installation could not be started."),
+                    icon=":material/error:",
+                )
+            else:
+                st.session_state.skill_operation_id = operation.get("operationId")
+                st.session_state.skill_operation_state = operation
+                st.session_state.skill_install_next_poll_at = None
+                st.session_state.skill_install_poll_delay = None
+                st.rerun()
+    with cancel_column:
+        if st.button(
+            "Discard archive",
+            icon=":material/close:",
+            key="skill_install_discard",
+            width="stretch",
+        ):
+            _clear_skill_installation_session_state(cleanup_remote=True)
+            st.rerun()
+
+
+def _render_skill_installation_status() -> None:
+    """Render the live installation status in an auto-refreshing fragment.
+
+    The fragment is declared here rather than as a module-level decorator so that
+    importing ``demo`` never requires the host to provide ``st.fragment``; the UI
+    tests replace streamlit with a minimal module double. Re-declaring an inline
+    fragment on each run is the ordinary Streamlit pattern.
+    """
+
+    @st.fragment(run_every=SKILL_STATUS_REFRESH_SECONDS)
+    def _status_fragment() -> None:
+        _render_skill_installation_status_body()
+
+    _status_fragment()
+
+
+def _render_skill_installation_status_body() -> None:
+    """Poll once and draw the current state, never blocking the rest of the page."""
+    operation = _poll_skill_installation() or {}
+    state = str(operation.get("state") or "pending")
+
+    if state in {"pending", "running"}:
+        st.info(
+            f"Installing... ({operation.get('phase') or 'validating'})",
+            icon=":material/hourglass:",
+        )
+        if st.button("Cancel installation", icon=":material/cancel:", key="skill_install_cancel"):
+            cancelled = cancel_skill_installation(st.session_state.skill_operation_id)
+            if cancelled is None:
+                # The usual reason is that the commit boundary was crossed while
+                # the click was in flight; keep polling to the real outcome.
+                st.warning(
+                    _last_api_error_message("The installation could not be cancelled."),
+                    icon=":material/info:",
+                )
+            else:
+                st.session_state.skill_operation_state = cancelled
+                st.rerun()
+        return
+
+    if state == "succeeded":
+        result = operation.get("result") or {}
+        action = "updated" if result.get("action") == "updated" else "installed"
+        st.success(f"Skill '{result.get('name')}' {action}.", icon=":material/check_circle:")
+        catalog = result.get("catalog") or {}
+        message, icon = _SYNC_STATUS_COPY.get(
+            str(catalog.get("catalogSyncStatus")),
+            _SYNC_STATUS_COPY["pending"],
+        )
+        st.caption(message)
+        st.session_state.setdefault("_skill_sync_icon", icon)
+    elif state == "failed":
+        failure = operation.get("failure") or {}
+        st.error(failure.get("message") or "The installation failed.", icon=":material/error:")
+        if failure.get("retryable"):
+            st.caption("This can be retried.")
+    elif state == "cancelled":
+        st.info("Installation cancelled.", icon=":material/cancel:")
+
+    if st.button("Install another skill", icon=":material/refresh:", key="skill_install_reset"):
+        _clear_skill_installation_session_state(cleanup_remote=False)
+        st.rerun()
+
+
 def render_skills_tab():
     """Render the installed repo skills interface."""
     st.markdown("# :material/psychology: Installed Repo Skills")
@@ -8908,6 +9217,10 @@ def render_skills_tab():
                     st.rerun()
                 else:
                     st.error("Failed to reload skills. Is the API running?")
+
+    st.markdown("---")
+
+    render_skill_install_panel()
 
     st.markdown("---")
 

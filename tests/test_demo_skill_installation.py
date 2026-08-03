@@ -8,11 +8,13 @@ selected them.
 
 from __future__ import annotations
 
+import ast
 import importlib
 import io
 import sys
 import types
 import zipfile
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -407,3 +409,250 @@ def test_auth_headers_are_omitted_when_signed_out(demo_module):
     demo_module.st.session_state.auth_token = None
 
     assert demo_module._auth_headers() == {}
+
+
+# --- Render contract -------------------------------------------------------
+#
+# Asserted against the source rather than a rendered page: Streamlit widgets need
+# a running script context, and what matters here is a security contract (the
+# approvals exist, are separate, and default to off) that source inspection pins
+# precisely.
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _demo_source() -> str:
+    return REPO_ROOT.joinpath("demo.py").read_text(encoding="utf-8")
+
+
+def _function_node(tree: ast.AST, name: str) -> ast.FunctionDef:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"{name} is not defined in demo.py")
+
+
+def test_streamlit_skill_panel_has_zip_preview_and_explicit_approvals():
+    source = _demo_source()
+
+    assert "st.file_uploader(" in source
+    assert 'type=["zip"]' in source
+    assert "Install only skills you trust" in source
+    assert "skill_install_approve_setup" in source
+    assert "skill_install_approve_replace" in source
+
+
+def test_streamlit_polling_does_not_block_in_a_while_loop():
+    """A sleep or loop here would freeze the page, including its own cancel button."""
+    tree = ast.parse(_demo_source())
+    polling = _function_node(tree, "_poll_skill_installation")
+
+    assert not any(isinstance(node, (ast.While, ast.AsyncFor)) for node in ast.walk(polling))
+    calls = [
+        node.func.attr
+        for node in ast.walk(polling)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    ]
+    assert "sleep" not in calls
+
+
+def test_status_widget_is_a_fragment_so_the_page_stays_interactive():
+    """Auto-refresh must be scoped to the status widget, not the whole page."""
+    tree = ast.parse(_demo_source())
+    status = _function_node(tree, "_render_skill_installation_status")
+    decorators = [
+        ast.unparse(decorator)
+        for node in ast.walk(status)
+        if isinstance(node, ast.FunctionDef)
+        for decorator in node.decorator_list
+    ]
+
+    assert any("st.fragment" in decorator for decorator in decorators)
+    assert any("run_every" in decorator for decorator in decorators)
+
+
+def test_archive_metadata_is_never_rendered_as_raw_html():
+    tree = ast.parse(_demo_source())
+    preview = _function_node(tree, "_render_skill_preview")
+
+    for node in ast.walk(preview):
+        if isinstance(node, ast.keyword) and node.arg == "unsafe_allow_html":
+            raise AssertionError("archive-derived text must not be rendered as HTML")
+
+
+@pytest.mark.parametrize(
+    ("current", "expected"),
+    [(None, 0.5), (0.5, 1.0), (1.0, 2.0), (2.0, 3.0), (3.0, 3.0), (99.0, 3.0)],
+)
+def test_poll_backoff_steps_then_holds(demo_module, current, expected):
+    assert demo_module._next_skill_poll_delay(current) == expected
+
+
+# --- Polling behavior ------------------------------------------------------
+
+
+def _running(**overrides) -> dict:
+    payload = {"operationId": "op-a", "state": "running", "phase": "copying"}
+    payload.update(overrides)
+    return payload
+
+
+def _succeeded(sync_status: str = "synced", generation: int = 7) -> dict:
+    return {
+        "operationId": "op-a",
+        "state": "succeeded",
+        "phase": "syncingCatalog",
+        "result": {
+            "action": "installed",
+            "name": "demo",
+            "sourceHash": SOURCE_HASH,
+            "runtimeStatus": "ready",
+            "catalog": {
+                "deviceId": "device-123",
+                "catalogGeneration": generation,
+                "catalogSyncStatus": sync_status,
+                "skills": [],
+                "totalCount": 0,
+                "enabledCount": 0,
+            },
+        },
+    }
+
+
+def test_poll_issues_at_most_one_request_per_rerun(demo_module, monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        demo_module,
+        "get_skill_installation",
+        lambda operation_id: calls.append(operation_id) or _running(),
+    )
+    demo_module.st.session_state.skill_operation_id = "op-a"
+
+    demo_module._poll_skill_installation()
+    demo_module._poll_skill_installation()
+
+    assert calls == ["op-a"]
+
+
+def test_poll_resumes_after_the_backoff_window(demo_module, monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        demo_module,
+        "get_skill_installation",
+        lambda operation_id: calls.append(operation_id) or _running(),
+    )
+    demo_module.st.session_state.skill_operation_id = "op-a"
+
+    demo_module._poll_skill_installation()
+    demo_module.st.session_state.skill_install_next_poll_at = 0.0
+    demo_module._poll_skill_installation()
+
+    assert len(calls) == 2
+
+
+def test_poll_stops_once_the_operation_is_terminal(demo_module, monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        demo_module,
+        "get_skill_installation",
+        lambda operation_id: calls.append(operation_id) or _succeeded(),
+    )
+    demo_module.st.session_state.skill_operation_id = "op-a"
+
+    demo_module._poll_skill_installation()
+    demo_module.st.session_state.skill_install_next_poll_at = 0.0
+    demo_module._poll_skill_installation()
+
+    assert calls == ["op-a"]
+
+
+def test_poll_without_an_operation_does_nothing(demo_module, monkeypatch):
+    monkeypatch.setattr(
+        demo_module,
+        "get_skill_installation",
+        lambda operation_id: pytest.fail("must not poll without an operation"),
+    )
+
+    assert demo_module._poll_skill_installation() is None
+
+
+def test_network_failure_keeps_the_receipt_and_retries(demo_module, monkeypatch):
+    """A failed poll is not a failed installation."""
+    monkeypatch.setattr(demo_module, "get_skill_installation", lambda operation_id: None)
+    demo_module.st.session_state.skill_operation_id = "op-a"
+    demo_module.st.session_state.skill_operation_state = _running()
+
+    result = demo_module._poll_skill_installation()
+
+    assert result["state"] == "running"
+    assert demo_module.st.session_state.skill_operation_id == "op-a"
+
+
+def test_success_applies_the_returned_catalog_and_invalidates_the_cache(demo_module, monkeypatch):
+    monkeypatch.setattr(demo_module, "get_skill_installation", lambda operation_id: _succeeded())
+    demo_module.st.session_state.skill_operation_id = "op-a"
+    before = demo_module.st.session_state.api_cache_version
+
+    demo_module._poll_skill_installation()
+
+    catalog = demo_module.st.session_state.skill_operation_catalog
+    assert catalog["catalogGeneration"] == 7
+    assert demo_module.st.session_state.api_cache_version == before + 1
+
+
+def test_an_older_generation_never_replaces_a_newer_cached_catalog(demo_module):
+    demo_module.st.session_state.skill_operation_catalog = {"catalogGeneration": 9}
+
+    demo_module._apply_installed_skill_catalog(_succeeded(generation=4))
+
+    assert demo_module.st.session_state.skill_operation_catalog["catalogGeneration"] == 9
+
+
+@pytest.mark.parametrize("sync_status", ["synced", "pending", "disconnected"])
+def test_each_sync_status_has_distinct_user_facing_copy(demo_module, sync_status):
+    message, _icon = demo_module._SYNC_STATUS_COPY[sync_status]
+
+    assert message
+    others = {
+        text for status, (text, _) in demo_module._SYNC_STATUS_COPY.items() if status != sync_status
+    }
+    assert message not in others
+
+
+def test_pending_sync_is_never_described_as_a_failure(demo_module):
+    message, _icon = demo_module._SYNC_STATUS_COPY["pending"]
+
+    assert "fail" not in message.lower()
+    assert "error" not in message.lower()
+    assert "Installed locally" in message
+
+
+def test_configured_root_collision_is_not_replaceable(demo_module, monkeypatch):
+    rendered: list[str] = []
+    monkeypatch.setattr(
+        demo_module.st,
+        "error",
+        lambda message, **_kwargs: rendered.append(message),
+        raising=False,
+    )
+
+    replaceable = demo_module._render_existing_skill_notice(
+        {"name": "demo", "replaceable": False, "sourceHash": SOURCE_HASH}
+    )
+
+    assert replaceable is False
+    assert "configured skills folder" in rendered[0]
+
+
+def test_profile_installed_collision_offers_an_update(demo_module, monkeypatch):
+    monkeypatch.setattr(demo_module.st, "info", lambda *args, **kwargs: None, raising=False)
+
+    replaceable = demo_module._render_existing_skill_notice(
+        {"name": "demo", "replaceable": True, "sourceHash": SOURCE_HASH}
+    )
+
+    assert replaceable is True
+
+
+def test_no_collision_needs_no_update_confirmation(demo_module):
+    assert demo_module._render_existing_skill_notice(None) is False
