@@ -15,7 +15,15 @@ my-skill/
   assets/                # optional resources
 ```
 
-The installer also accepts a distribution containing exactly one nested `SKILL.md`, such as `skills/my-skill/SKILL.md`, while executable assets remain at the copied bundle root. A source with zero or multiple skills is rejected.
+The installer also accepts a distribution containing exactly one nested `SKILL.md`, such as `skills/my-skill/SKILL.md`, while executable assets remain at the copied bundle root.
+
+An uploaded archive may instead carry a whole library: every folder that directly contains a `SKILL.md` is one skill, and the set installs together. The single-skill case deliberately keeps the archive root as its bundle root, because that is where a nested distribution puts its `bin/`; only a library gives each skill its own folder as a root.
+
+## Progressive disclosure
+
+A skill keeps `SKILL.md` short and points at companion documents for the parts that only sometimes apply. Activation lists every readable file in the bundle by relative path, and `read_skill_resource` returns one on demand.
+
+Reads are confined to the selected, enabled skill's bundle: the path is re-checked after the OS resolves it, links are refused rather than followed, only regular files are read, the size is capped, and content must decode as UTF-8. Binary assets ship with the skill and can be used by its commands, but never enter a prompt as text.
 
 The front-matter `name` must be 1-64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen.
 

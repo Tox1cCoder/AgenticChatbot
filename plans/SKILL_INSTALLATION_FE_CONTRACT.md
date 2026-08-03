@@ -192,11 +192,53 @@ Success is `201 Created`:
       },
       "existingSkill": null
     },
+    "collection": {
+      "name": "google-calendar",
+      "version": null,
+      "description": null,
+      "skillCount": 1
+    },
+    "skills": [
+      { "name": "google-calendar", "sourceHash": "64-hex-characters", "…": "…" }
+    ],
     "operationId": null
   },
   "error": null
 }
 ```
+
+### One archive may contain a library
+
+Skill libraries are distributed as one repository holding many skills, so
+`skills` is always the complete list and `collection` always describes the
+archive, even for a single skill. `preview` repeats the first entry so a client
+written against the single-skill shape keeps working.
+
+For a library, `collection.name`, `version`, and `description` come from a plugin
+manifest in the archive (`.claude-plugin/plugin.json`, `.codex-plugin/`,
+`.cursor-plugin/`, or a root `plugin.json`); without one, the name falls back to
+the uploaded filename.
+
+Render the whole list before asking for confirmation. A library installs **as one
+unit**: one approval covers the set, and if any skill fails, the ones installed by
+that operation are rolled back. Setup approval covers every skill in the archive
+that declares a Python project.
+
+Replacement differs by shape:
+
+- **one skill** — send `replaceSourceHash` with that skill's installed hash, as
+  documented below;
+- **a library** — one hash cannot describe several installed skills, so
+  `replaceSourceHash` acts as consent to replace, and the sidecar guards each
+  skill with its own installed hash from the preview you displayed. Skills in the
+  archive with no collision install fresh.
+
+A library whose skills collide with a configured-root skill
+(`existingSkill.replaceable: false`) cannot be installed; the UI must block it
+rather than install a subset.
+
+A successful `result` for a library carries `skills`, the per-skill results, and
+`result.name` is the collection name.
 
 `archive.skippedLinkCount` counts symbolic links dropped during extraction rather
 than materialized. Surface it when non-zero: a bundle that depended on a link is

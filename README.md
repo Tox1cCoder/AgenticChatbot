@@ -872,9 +872,17 @@ one, and materializing it is the actual hazard -- on POSIX it would later be
 followed out of the bundle, and on Windows it becomes a plain file whose contents
 are the target path.
 
-**One archive installs one skill.** Downloading a repository that collects many
-skills and uploading the whole thing is rejected with the list of skills it found;
-zip the individual skill folder, the one holding its `SKILL.md`.
+**One archive may install a whole library.** A downloaded skill repository holding
+many skills installs as one unit: the preview lists every skill it found, one
+approval covers the set, and a failure rolls back whatever that operation already
+installed. The library's name and version come from its plugin manifest
+(`.claude-plugin/plugin.json` and the equivalents for other harnesses).
+
+**Skills can disclose their own files.** A skill in the current convention keeps
+`SKILL.md` short and points at companion documents. Activation lists those files
+by relative path and the model reads one with `read_skill_resource`, confined to
+that skill's own folder: links refused, regular UTF-8 text files only, size
+capped. Binary assets still ship and run; they are not readable as text.
 
 Every catalog response carries `catalogGeneration` and `catalogSyncStatus`. Do
 not replace a cached catalog with a lower generation. A `pending` sync means the
