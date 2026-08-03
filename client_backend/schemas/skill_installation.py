@@ -134,6 +134,20 @@ class SkillArchivePreview(CamelModel):
         )
 
 
+class SkillCollectionInfo(CamelModel):
+    """Identity of the library an archive contains.
+
+    Present for every upload, including a single skill, so a client renders one
+    shape. ``version`` and ``description`` come from a plugin manifest when the
+    archive ships one, and are ``None`` for a plain folder.
+    """
+
+    name: str
+    version: str | None = None
+    description: str | None = None
+    skill_count: int = 1
+
+
 class SkillArchiveSummary(CamelModel):
     """Non-sensitive measurements of a staged archive.
 
@@ -168,7 +182,12 @@ class SkillUploadRecord(CamelModel):
     created_at: datetime
     expires_at: datetime
     archive: SkillArchiveSummary
+    # The archive's first skill. Retained as the primary preview so a client
+    # written against the single-skill contract keeps working; `skills` is the
+    # complete list and is what a collection-aware client should render.
     preview: SkillArchivePreview
+    collection: SkillCollectionInfo | None = None
+    skills: list[SkillArchivePreview] = Field(default_factory=list)
     request_fingerprint: str | None = None
     operation_id: str | None = None
 

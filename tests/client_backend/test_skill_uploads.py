@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import inspect
 import io
+import json
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -771,3 +772,165 @@ async def test_lifecycle_audit_records_accepted_and_rejected_uploads(upload_env,
 
     assert len(lines) == 2
     assert "demo.zip" not in audit_path.read_text(encoding="utf-8")
+
+
+# --- Collections ------------------------------------------------------------
+
+
+def _collection_zip(skills: dict[str, str], *, manifest: dict | None = None) -> bytes:
+    """An archive shaped like a downloaded skill repository."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        if manifest is not None:
+            archive.writestr("library/.claude-plugin/plugin.json", json.dumps(manifest))
+        archive.writestr("library/README.md", "A library of skills.")
+        for name, body in skills.items():
+            archive.writestr(
+                f"library/skills/{name}/SKILL.md",
+                f"---\nname: {name}\ndescription: {name}\n---\n{body}",
+            )
+            archive.writestr(f"library/skills/{name}/notes.md", f"Notes for {name}.")
+    return buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_stages_every_skill_in_a_library(upload_env):
+    payload = _collection_zip(
+        {"brainstorming": "Explore first.", "systematic-debugging": "Find the root cause."},
+        manifest={"name": "superpowers", "version": "6.2.0", "description": "Core skills"},
+    )
+
+    record = await upload_env.service.stage(
+        user_id=USER_A,
+        filename="superpowers-main.zip",
+        stream=_AsyncReader(payload),
+    )
+
+    assert record.collection.name == "superpowers"
+    assert record.collection.version == "6.2.0"
+    assert record.collection.skill_count == 2
+    assert [skill.name for skill in record.skills] == [
+        "brainstorming",
+        "systematic-debugging",
+    ]
+    # The first skill doubles as `preview`, so a single-skill client still works.
+    assert record.preview.name == "brainstorming"
+
+
+@pytest.mark.asyncio
+async def test_a_single_skill_upload_still_reports_one_collection_of_one(upload_env):
+    record = await upload_env.service.stage(
+        user_id=USER_A,
+        filename="demo.zip",
+        stream=_AsyncReader(_valid_skill_zip_bytes()),
+    )
+
+    assert record.collection.skill_count == 1
+    assert record.collection.version is None
+    assert [skill.name for skill in record.skills] == ["demo"]
+    assert record.preview.name == "demo"
+
+
+@pytest.mark.asyncio
+async def test_collection_previews_report_each_skills_own_collision(upload_env, monkeypatch):
+    from types import SimpleNamespace
+
+    installed_root = upload_env.root.parent / "installed"
+    monkeypatch.setitem(
+        _upload_globals(),
+        "get_installed_skills_root",
+        lambda user_id: installed_root,
+    )
+    bundle = installed_root / "brainstorming-abc"
+    bundle.mkdir(parents=True)
+    upload_env.registry.skills["brainstorming"] = SimpleNamespace(
+        name="brainstorming",
+        source_hash="c" * 64,
+        bundle_root=bundle,
+        enabled=True,
+    )
+
+    record = await upload_env.service.stage(
+        user_id=USER_A,
+        filename="library.zip",
+        stream=_AsyncReader(_collection_zip({"brainstorming": "a", "other": "b"})),
+    )
+
+    by_name = {skill.name: skill for skill in record.skills}
+    assert by_name["brainstorming"].existing_skill.replaceable is True
+    assert by_name["brainstorming"].existing_skill.source_hash == "c" * 64
+    assert by_name["other"].existing_skill is None
+
+
+@pytest.mark.asyncio
+async def test_skill_roots_follow_the_previewed_order(upload_env):
+    record = await upload_env.service.stage(
+        user_id=USER_A,
+        filename="library.zip",
+        stream=_AsyncReader(_collection_zip({"alpha": "a", "zulu": "z"})),
+    )
+
+    roots = upload_env.service.skill_roots(USER_A, record.upload_id)
+
+    assert [name for name, _ in roots] == [skill.name for skill in record.skills]
+    for name, root in roots:
+        assert (root / "SKILL.md").is_file()
+        assert root.name == name
+
+
+@pytest.mark.asyncio
+async def test_rejects_an_archive_whose_skills_share_a_name(upload_env):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for folder in ("first", "second"):
+            archive.writestr(
+                f"library/skills/{folder}/SKILL.md",
+                "---\nname: duplicated\ndescription: d\n---\nBody",
+            )
+
+    with pytest.raises(SkillUploadError) as exc_info:
+        await upload_env.service.stage(
+            user_id=USER_A,
+            filename="library.zip",
+            stream=_AsyncReader(buffer.getvalue()),
+        )
+
+    assert exc_info.value.code == "SKILL_BUNDLE_INVALID"
+    assert "duplicated" in exc_info.value.message
+
+
+@pytest.mark.asyncio
+async def test_rejects_an_archive_with_more_skills_than_allowed(upload_env, monkeypatch):
+    """A tree with hundreds of SKILL.md files is a workspace, not a library."""
+    monkeypatch.setitem(
+        _upload_globals(),
+        "MAX_SKILLS_PER_COLLECTION",
+        2,
+    )
+
+    with pytest.raises(SkillUploadError) as exc_info:
+        await upload_env.service.stage(
+            user_id=USER_A,
+            filename="huge.zip",
+            stream=_AsyncReader(_collection_zip({"a": "1", "b": "2", "c": "3"})),
+        )
+
+    assert exc_info.value.code == "SKILL_BUNDLE_INVALID"
+    assert "more than" in exc_info.value.message
+
+
+@pytest.mark.asyncio
+async def test_an_archive_with_no_skill_says_so(upload_env):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("library/README.md", "nothing installable here")
+
+    with pytest.raises(SkillUploadError) as exc_info:
+        await upload_env.service.stage(
+            user_id=USER_A,
+            filename="empty.zip",
+            stream=_AsyncReader(buffer.getvalue()),
+        )
+
+    assert exc_info.value.code == "SKILL_BUNDLE_INVALID"
+    assert "no SKILL.md" in exc_info.value.message

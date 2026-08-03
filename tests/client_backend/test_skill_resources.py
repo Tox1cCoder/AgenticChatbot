@@ -55,13 +55,14 @@ def test_provenance_metadata_is_not_listed(bundle):
 
 
 def test_listing_is_bounded_and_reports_truncation(tmp_path, monkeypatch):
-    from client_backend.services.skill_runtime import resources as resources_module
-
+    # Patched through __globals__, not a fresh import: another test in this
+    # directory evicts every client_backend module, after which a re-imported one
+    # is a different object and patching it silently does nothing.
     root = tmp_path / "big"
     root.mkdir()
     for index in range(12):
         (root / f"doc-{index:03d}.md").write_text("x", encoding="utf-8")
-    monkeypatch.setattr(resources_module, "MAX_LISTED_RESOURCES", 5)
+    monkeypatch.setitem(list_skill_resources.__globals__, "MAX_LISTED_RESOURCES", 5)
 
     listing = list_skill_resources(root)
 

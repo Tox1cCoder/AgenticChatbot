@@ -5113,6 +5113,8 @@ SKILL_INSTALL_SESSION_KEYS = (
     "skill_upload_bytes",
     "skill_upload_preview",
     "skill_upload_archive",
+    "skill_upload_collection",
+    "skill_upload_skills",
     "skill_operation_id",
     "skill_operation_state",
     "skill_operation_catalog",
@@ -8962,13 +8964,71 @@ def _apply_installed_skill_catalog(operation: dict[str, Any]) -> None:
     _bump_api_cache_version()
 
 
+def _render_collection_preview(
+    collection: dict[str, Any],
+    skills: list[dict[str, Any]],
+    archive: dict[str, Any],
+) -> None:
+    """Summarize a library of skills before any of them is installed.
+
+    A downloaded skill repository holds many skills, and the user is approving
+    all of them at once, so every name is listed rather than summarized away.
+    """
+    version = collection.get("version")
+    heading = collection.get("name", "Skill library")
+    st.markdown(f"**{heading}**" + (f" v{version}" if version else ""))
+    if collection.get("description"):
+        st.caption(str(collection["description"]))
+
+    expanded_kb = int(archive.get("expandedBytes") or 0) / 1024
+    st.caption(
+        f"{archive.get('filename', 'archive.zip')} - {len(skills)} skills, "
+        f"{expanded_kb:.1f} KB expanded, {archive.get('fileCount', 0)} files"
+    )
+
+    replacing = [skill for skill in skills if (skill.get("existingSkill") or {}).get("replaceable")]
+    blocked = [
+        skill
+        for skill in skills
+        if skill.get("existingSkill") and not skill["existingSkill"].get("replaceable")
+    ]
+
+    with st.expander(f"The {len(skills)} skills this installs", expanded=len(skills) <= 8):
+        for skill in skills:
+            existing = skill.get("existingSkill") or {}
+            if existing and not existing.get("replaceable"):
+                marker = " — from a configured folder, cannot be replaced"
+            elif existing:
+                marker = " — replaces the installed version"
+            else:
+                marker = ""
+            st.caption(f"- {skill.get('name')}{marker}")
+
+    if blocked:
+        st.error(
+            f"{len(blocked)} skill(s) in this library share a name with a skill from a "
+            "configured folder the sidecar does not manage. Installing is blocked until "
+            "those names differ.",
+            icon=":material/block:",
+        )
+    elif replacing:
+        st.info(
+            f"{len(replacing)} of these skills are already installed and would be replaced.",
+            icon=":material/update:",
+        )
+
+    st.warning(SKILL_TRUST_WARNING, icon=":material/warning:")
+
+
 def _render_skill_preview(preview: dict[str, Any], archive: dict[str, Any]) -> None:
     """Show what installing this archive would bring, before anything is run."""
     st.markdown(f"**{preview.get('name', 'Unknown skill')}**")
     expanded_kb = int(archive.get("expandedBytes") or 0) / 1024
+    skipped = int(archive.get("skippedLinkCount") or 0)
     st.caption(
         f"{archive.get('filename', 'archive.zip')} - "
         f"{expanded_kb:.1f} KB expanded, {archive.get('fileCount', 0)} files"
+        + (f", {skipped} symbolic link(s) skipped" if skipped else "")
     )
 
     assets = preview.get("executableAssets") or {}
@@ -9038,6 +9098,8 @@ def render_skill_install_panel() -> None:
             st.session_state.skill_upload_id = staged.get("uploadId")
             st.session_state.skill_upload_preview = staged.get("preview") or {}
             st.session_state.skill_upload_archive = staged.get("archive") or {}
+            st.session_state.skill_upload_collection = staged.get("collection") or {}
+            st.session_state.skill_upload_skills = staged.get("skills") or []
             st.rerun()
 
     if st.session_state.get("skill_upload_id") and not st.session_state.get("skill_operation_id"):
@@ -9048,9 +9110,15 @@ def render_skill_install_panel() -> None:
 
 
 def _render_skill_confirmation() -> None:
-    """Render the staged preview and the two deliberate approvals."""
+    """Render the staged preview and the deliberate approvals."""
     preview = st.session_state.get("skill_upload_preview") or {}
     archive = st.session_state.get("skill_upload_archive") or {}
+    collection = st.session_state.get("skill_upload_collection") or {}
+    skills = st.session_state.get("skill_upload_skills") or []
+
+    if len(skills) > 1:
+        return _render_collection_confirmation(collection, skills, archive)
+
     _render_skill_preview(preview, archive)
 
     existing = preview.get("existingSkill")
@@ -9132,6 +9200,80 @@ def _render_skill_installation_status() -> None:
     _status_fragment()
 
 
+def _render_collection_confirmation(
+    collection: dict[str, Any],
+    skills: list[dict[str, Any]],
+    archive: dict[str, Any],
+) -> None:
+    """Approve a whole library at once, the way it is distributed."""
+    _render_collection_preview(collection, skills, archive)
+
+    blocked = any(
+        skill.get("existingSkill") and not skill["existingSkill"].get("replaceable")
+        for skill in skills
+    )
+    needs_setup_approval = any(
+        (skill.get("setup") or {}).get("confirmationRequired") for skill in skills
+    )
+    replacing = [skill for skill in skills if (skill.get("existingSkill") or {}).get("replaceable")]
+
+    approve_setup = False
+    if needs_setup_approval:
+        approve_setup = st.checkbox(
+            "Run Python setup for the skills in this library that need it",
+            key="skill_install_approve_setup",
+            value=False,
+        )
+
+    approve_replace = False
+    if replacing:
+        approve_replace = st.checkbox(
+            f"Replace the {len(replacing)} skill(s) already installed",
+            key="skill_install_approve_replace",
+            value=False,
+        )
+
+    install_column, cancel_column = st.columns(2)
+    with install_column:
+        if st.button(
+            f"Install {len(skills)} skills",
+            icon=":material/download:",
+            key="skill_install_confirm",
+            disabled=blocked
+            or (bool(replacing) and not approve_replace)
+            or (needs_setup_approval and not approve_setup),
+            width="stretch",
+        ):
+            operation = start_skill_install(
+                st.session_state.skill_upload_id,
+                str((skills[0] or {}).get("sourceHash") or ""),
+                approve_setup,
+                # One consent for the set; the sidecar guards each skill with its
+                # own installed hash from the preview shown above.
+                "collection" if approve_replace else None,
+            )
+            if operation is None:
+                st.error(
+                    _last_api_error_message("The installation could not be started."),
+                    icon=":material/error:",
+                )
+            else:
+                st.session_state.skill_operation_id = operation.get("operationId")
+                st.session_state.skill_operation_state = operation
+                st.session_state.skill_install_next_poll_at = None
+                st.session_state.skill_install_poll_delay = None
+                st.rerun()
+    with cancel_column:
+        if st.button(
+            "Discard archive",
+            icon=":material/close:",
+            key="skill_install_discard",
+            width="stretch",
+        ):
+            _clear_skill_installation_session_state(cleanup_remote=True)
+            st.rerun()
+
+
 def _render_skill_installation_status_body() -> None:
     """Poll once and draw the current state, never blocking the rest of the page."""
     operation = _poll_skill_installation() or {}
@@ -9159,7 +9301,17 @@ def _render_skill_installation_status_body() -> None:
     if state == "succeeded":
         result = operation.get("result") or {}
         action = "updated" if result.get("action") == "updated" else "installed"
-        st.success(f"Skill '{result.get('name')}' {action}.", icon=":material/check_circle:")
+        installed_skills = result.get("skills") or []
+        if len(installed_skills) > 1:
+            names = ", ".join(str(entry.get("name")) for entry in installed_skills[:4])
+            more = f" and {len(installed_skills) - 4} more" if len(installed_skills) > 4 else ""
+            st.success(
+                f"{len(installed_skills)} skills {action} from '{result.get('name')}' "
+                f"({names}{more}).",
+                icon=":material/check_circle:",
+            )
+        else:
+            st.success(f"Skill '{result.get('name')}' {action}.", icon=":material/check_circle:")
         catalog = result.get("catalog") or {}
         message, icon = _SYNC_STATUS_COPY.get(
             str(catalog.get("catalogSyncStatus")),

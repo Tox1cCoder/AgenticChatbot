@@ -47,6 +47,7 @@ from client_backend.core.paths import (
 from client_backend.schemas.skill_installation import (
     SkillArchivePreview,
     SkillArchiveSummary,
+    SkillCollectionInfo,
     SkillExistingSkill,
     SkillUploadRecord,
 )
@@ -55,9 +56,15 @@ from client_backend.services.skill_runtime.archive import (
     SkillArchiveValidator,
 )
 from client_backend.services.skill_runtime.audit import SkillLifecycleAuditWriter
+from client_backend.services.skill_runtime.collection import (
+    MAX_SKILLS_PER_COLLECTION,
+    DiscoveredCollection,
+    discover_collection,
+)
 from client_backend.services.skill_runtime.locks import profile_lock
 from client_backend.services.skill_runtime.state import atomic_write_json, read_json_object
 from shared.skills.errors import SkillRuntimeError
+from shared.skills.front_matter import parse_skill_front_matter
 
 logger = get_logger(__name__)
 
@@ -331,8 +338,13 @@ class SkillUploadService:
                 status_code=exc.status_code,
             ) from exc
 
-        preview_payload = await self._preview_bundle(_resolve_archive_bundle_root(extracted))
-        existing = await self._describe_existing_skill(user_id, str(preview_payload["name"]))
+        bundle_root = _resolve_archive_bundle_root(extracted)
+        collection = discover_collection(
+            bundle_root,
+            fallback_name=filename.removesuffix(".zip").removesuffix(".ZIP") or "skills",
+        )
+        previews = await self._preview_collection(user_id, bundle_root, collection)
+
         now = self._clock()
         record = SkillUploadRecord(
             upload_id=upload_id,
@@ -347,50 +359,91 @@ class SkillUploadService:
                 file_count=summary.file_count,
                 skipped_link_count=summary.skipped_link_count,
             ),
-            preview=SkillArchivePreview.from_installer_preview(
-                preview_payload,
-                existing_skill=existing,
+            collection=SkillCollectionInfo(
+                name=collection.manifest.name,
+                version=collection.manifest.version,
+                description=collection.manifest.description,
+                skill_count=len(previews),
             ),
+            # The first skill doubles as `preview` so a client written against the
+            # single-skill contract keeps working unchanged.
+            preview=previews[0],
+            skills=previews,
         )
         self._write_record(record)
         return record
 
-    async def _preview_bundle(self, extracted: Path) -> dict[str, Any]:
-        """Read bundle metadata through the installer's read-only preview."""
-        installer = self._build_installer()
-        try:
-            return await installer.preview(extracted)
-        except SkillRuntimeError as exc:
-            # The archive was structurally fine but is not one installable skill.
+    async def _preview_collection(
+        self,
+        user_id: str,
+        bundle_root: Path,
+        collection: DiscoveredCollection,
+    ) -> list[SkillArchivePreview]:
+        """Preview every skill the archive contains, without running any of them."""
+        if not collection.skill_roots:
             raise SkillUploadError(
                 SKILL_BUNDLE_INVALID,
-                self._bundle_rejection_message(extracted, exc),
+                "This archive contains no SKILL.md, so there is no skill to install. "
+                "Zip the folder that holds the skill's SKILL.md.",
+            )
+        if len(collection.skill_roots) > MAX_SKILLS_PER_COLLECTION:
+            raise SkillUploadError(
+                SKILL_BUNDLE_INVALID,
+                f"This archive contains {len(collection.skill_roots)} skills, more than "
+                f"the {MAX_SKILLS_PER_COLLECTION} allowed in one upload. It is probably "
+                "a whole workspace rather than a skill library.",
+            )
+
+        previews: list[SkillArchivePreview] = []
+        for skill_root in collection.skill_roots:
+            payload = await self._preview_bundle(skill_root, bundle_root)
+            existing = await self._describe_existing_skill(user_id, str(payload["name"]))
+            previews.append(
+                SkillArchivePreview.from_installer_preview(payload, existing_skill=existing)
+            )
+
+        duplicates = self._duplicate_names(previews)
+        if duplicates:
+            raise SkillUploadError(
+                SKILL_BUNDLE_INVALID,
+                f"This archive declares the same skill name twice ({', '.join(duplicates)}). "
+                "Each skill in a collection needs a distinct name.",
+            )
+        return previews
+
+    @staticmethod
+    def _duplicate_names(previews: list[SkillArchivePreview]) -> list[str]:
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+        for preview in previews:
+            if preview.name in seen:
+                duplicates.add(preview.name)
+            seen.add(preview.name)
+        return sorted(duplicates)
+
+    async def _preview_bundle(self, skill_root: Path, archive_root: Path) -> dict[str, Any]:
+        """Read one skill's metadata through the installer's read-only preview."""
+        installer = self._build_installer()
+        try:
+            return await installer.preview(skill_root)
+        except SkillRuntimeError as exc:
+            raise SkillUploadError(
+                SKILL_BUNDLE_INVALID,
+                self._bundle_rejection_message(skill_root, archive_root, exc),
             ) from exc
 
     @staticmethod
-    def _bundle_rejection_message(extracted: Path, exc: SkillRuntimeError) -> str:
-        """Explain a rejected bundle in terms of what the user uploaded.
-
-        Downloading a repository that collects many skills and uploading the whole
-        thing is the most likely way this fails, and the installer's own wording
-        ("exactly one SKILL.md") describes the rule rather than the way out.
-        """
-        found = sorted(path for path in extracted.rglob("SKILL.md") if path.is_file())
-        if len(found) > 1:
-            names = sorted({path.parent.name for path in found})
-            preview = ", ".join(names[:5])
-            more = f", and {len(names) - 5} more" if len(names) > 5 else ""
-            return (
-                f"This archive contains {len(found)} skills ({preview}{more}). "
-                "Upload one skill at a time: zip the individual skill folder, the "
-                "one holding its SKILL.md."
-            )
-        if not found:
-            return (
-                "This archive contains no SKILL.md, so there is no skill to install. "
-                "Zip the folder that holds the skill's SKILL.md."
-            )
-        return exc.message
+    def _bundle_rejection_message(
+        skill_root: Path,
+        archive_root: Path,
+        exc: SkillRuntimeError,
+    ) -> str:
+        """Explain a rejected skill in terms of the archive the user uploaded."""
+        try:
+            location = skill_root.relative_to(archive_root).as_posix() or "."
+        except ValueError:
+            location = skill_root.name
+        return f"The skill in '{location}' could not be read: {exc.message}"
 
     def _build_installer(self):
         from client_backend.services.skill_runtime.install import SkillBundleInstaller
@@ -446,11 +499,44 @@ class SkillUploadService:
         return record
 
     def extracted_root(self, user_id: str, upload_id: str) -> Path:
-        """Return the validated bundle directory for a staged upload."""
+        """Return the validated bundle directory for a staged upload.
+
+        For a collection this is the archive root; use :meth:`skill_roots` to
+        install the individual skills inside it.
+        """
         self.get_owned(user_id, upload_id)
         return _resolve_archive_bundle_root(
             self._staging_dir(user_id, upload_id) / _EXTRACTED_DIRNAME
         )
+
+    def skill_roots(self, user_id: str, upload_id: str) -> list[tuple[str, Path]]:
+        """Return ``(skill name, bundle directory)`` for every skill in an upload.
+
+        Re-discovered from disk rather than read from the receipt: the receipt
+        stores previews, and the installer needs the directories those previews
+        were taken from. Discovery is deterministic over an extracted tree that
+        nothing else writes to.
+        """
+        record = self.get_owned(user_id, upload_id)
+        archive_root = self.extracted_root(user_id, upload_id)
+        collection = discover_collection(archive_root, fallback_name=record.archive.filename)
+
+        by_name: dict[str, Path] = {}
+        for skill_root in collection.skill_roots:
+            parsed = parse_skill_front_matter(
+                (skill_root / "SKILL.md").read_text(encoding="utf-8")
+            )
+            name = (parsed.name if parsed else None) or skill_root.name
+            by_name.setdefault(name, skill_root)
+
+        # Ordered by the preview the user approved, so installation follows the
+        # list they were shown rather than a filesystem ordering.
+        ordered: list[tuple[str, Path]] = []
+        for preview in record.skills or [record.preview]:
+            root = by_name.get(preview.name)
+            if root is not None:
+                ordered.append((preview.name, root))
+        return ordered
 
     # ------------------------------------------------------------ transitions
 

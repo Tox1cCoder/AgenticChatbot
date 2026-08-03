@@ -129,6 +129,11 @@ class _UploadServiceStub:
         self.get_owned(user_id, upload_id)
         return self._bundle_root
 
+    def skill_roots(self, user_id: str, upload_id: str) -> list[tuple[str, Path]]:
+        record = self.get_owned(user_id, upload_id)
+        previews = record.skills or [record.preview]
+        return [(preview.name, self._bundle_root / preview.name) for preview in previews]
+
     def mark_succeeded(self, user_id: str, upload_id: str):
         self.succeeded.append(upload_id)
         record = self._records[upload_id]
@@ -146,6 +151,9 @@ class _InstallerStub:
         self.commit_gate: asyncio.Event | None = None
         self.raise_after_commit = False
         self.observed_phases: list[str] = []
+        self.uninstalled: list[str] = []
+        self.installed_names: list[str] = []
+        self.fail_on_name: str | None = None
 
     async def install(
         self,
@@ -158,6 +166,9 @@ class _InstallerStub:
         observer=None,
     ):
         self.install_calls += 1
+        skill_name = Path(source).name
+        if self.fail_on_name and skill_name == self.fail_on_name:
+            raise RuntimeError(f"install of {skill_name} failed")
         for phase in ("validating", "waitingForLock", "copying", "preparingRuntime"):
             if observer is not None:
                 await observer.phase(phase)
@@ -172,8 +183,9 @@ class _InstallerStub:
         if self.raise_after_commit:
             raise RuntimeError("failed after the promotion started")
         self.installed_hashes.append(str(expected_source_hash))
+        self.installed_names.append(skill_name)
         return {
-            "name": "demo",
+            "name": skill_name,
             "install_id": "demo-abc123",
             "source_hash": expected_source_hash or SOURCE_HASH,
             "runtime_status": "ready",
@@ -182,6 +194,10 @@ class _InstallerStub:
 
     def list_installed(self):
         return [{"bundle_name": "demo", "source_hash": value} for value in self.installed_hashes]
+
+    async def uninstall(self, name: str) -> dict:
+        self.uninstalled.append(name)
+        return {"name": name, "removed": True, "cleanup_status": "complete"}
 
 
 class _CatalogStub:

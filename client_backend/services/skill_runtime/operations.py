@@ -280,16 +280,12 @@ class SkillInstallationService:
                     "SKILL_SOURCE_CHANGED",
                     "the staged archive changed after preview; upload it again",
                 )
-            bundle_root = uploads.extracted_root(user_id, operation.upload_id)
-
-            installer = self._installer_factory()
-            result = await installer.install(
-                bundle_root,
-                expected_source_hash=request.expected_source_hash,
-                approve_setup=request.approve_setup,
-                replace_source_hash=request.replace_source_hash,
-                source_kind="upload",
-                observer=_OperationObserver(self, user_id, operation_id),
+            result = await self._install_upload(
+                user_id,
+                operation_id,
+                upload,
+                request,
+                uploads=uploads,
             )
         except asyncio.CancelledError:
             self._mark_cancelled(user_id, operation_id)
@@ -319,6 +315,137 @@ class SkillInstallationService:
             return
 
         await self._complete(user_id, operation_id, result, started=started)
+
+    async def _install_upload(
+        self,
+        user_id: str,
+        operation_id: str,
+        upload: Any,
+        request: SkillInstallationRequest,
+        *,
+        uploads: Any,
+    ) -> dict[str, Any]:
+        """Install every skill the upload contains, as one unit.
+
+        A library is approved and installed together, the way a plugin is: the
+        user confirmed a set, and ending up with nine of fourteen skills is a
+        state nobody asked for and cannot easily reason about. If any skill
+        fails, the ones this operation already installed are removed before the
+        failure is reported.
+
+        Rollback removes only what *this* operation added. A skill that was
+        already installed and got replaced is not restored -- that would need a
+        second copy of the previous bundle -- so a replacement failure is
+        reported against a catalog that still contains the older skill, which is
+        what the installer's own atomic promotion guarantees.
+        """
+        installer = self._installer_factory()
+        observer = _OperationObserver(self, user_id, operation_id)
+        entries = uploads.skill_roots(user_id, upload.upload_id)
+        if not entries:
+            raise SkillRuntimeError(
+                "SKILL_INSTALL_INVALID",
+                "the staged archive no longer contains an installable skill",
+            )
+
+        previews = {preview.name: preview for preview in (upload.skills or [upload.preview])}
+        single = len(entries) == 1
+        installed: list[dict[str, Any]] = []
+        try:
+            for name, skill_root in entries:
+                preview = previews.get(name)
+                installed.append(
+                    await installer.install(
+                        skill_root,
+                        expected_source_hash=(
+                            request.expected_source_hash
+                            if single
+                            else (preview.source_hash if preview else None)
+                        ),
+                        approve_setup=request.approve_setup,
+                        replace_source_hash=self._replacement_hash_for(
+                            request,
+                            preview,
+                            single=single,
+                        ),
+                        source_kind="upload",
+                        observer=observer,
+                    )
+                )
+        except BaseException:
+            await self._rollback_installed(installer, installed)
+            raise
+
+        return self._combine_results(installed, upload)
+
+    @staticmethod
+    def _replacement_hash_for(
+        request: SkillInstallationRequest,
+        preview: Any,
+        *,
+        single: bool,
+    ) -> str | None:
+        """Decide which installed hash this skill's replacement is guarded by.
+
+        For a single skill the request's own ``replace_source_hash`` is
+        authoritative: the client named the exact bundle it means to overwrite,
+        which is what the published contract documents.
+
+        A collection cannot work that way -- one hash cannot describe fourteen
+        installed skills -- so the request field becomes the user's *consent* to
+        replace, and each skill is guarded by its own installed hash from the
+        preview they approved. A skill with no collision installs fresh.
+        """
+        if single:
+            return request.replace_source_hash
+        if not request.replace_source_hash or preview is None:
+            return None
+        existing = preview.existing_skill
+        if existing is None or not existing.replaceable:
+            return None
+        return existing.source_hash
+
+    async def _rollback_installed(self, installer: Any, installed: list[dict[str, Any]]) -> None:
+        """Undo this operation's installs after a partial failure."""
+        for entry in reversed(installed):
+            name = str(entry.get("name") or "")
+            if not name:
+                continue
+            try:
+                await installer.uninstall(name)
+            except Exception as exc:  # noqa: BLE001 - the original failure wins
+                logger.warning("could not roll back skill %s after a failed install: %s", name, exc)
+
+    @staticmethod
+    def _combine_results(installed: list[dict[str, Any]], upload: Any) -> dict[str, Any]:
+        """Report a collection install as one result.
+
+        ``name`` and ``source_hash`` describe the collection as a whole for a
+        single-skill upload, which is the overwhelmingly common case and what the
+        published contract already documents; ``skills`` carries the full list.
+        """
+        primary = installed[0]
+        if len(installed) == 1:
+            return {**primary, "skills": installed}
+
+        collection = getattr(upload, "collection", None)
+        collection_name = getattr(collection, "name", None) or primary["name"]
+        return {
+            "name": collection_name,
+            "install_id": primary.get("install_id", ""),
+            "source_hash": primary.get("source_hash", ""),
+            "runtime_status": (
+                "ready"
+                if all(entry.get("runtime_status") == "ready" for entry in installed)
+                else "mixed"
+            ),
+            "action": (
+                "updated"
+                if any(entry.get("action") == "updated" for entry in installed)
+                else "installed"
+            ),
+            "skills": installed,
+        }
 
     async def _complete(
         self,
