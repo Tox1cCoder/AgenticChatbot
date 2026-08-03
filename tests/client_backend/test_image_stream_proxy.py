@@ -539,6 +539,17 @@ def test_internal_sse_proxy_delivers_oversized_final_image_early_by_reference(mo
 # ---------------------------------------------------------------------------
 
 
+def test_sidecar_openapi_exposes_every_protected_image_route():
+    paths = create_app().openapi()["paths"]
+
+    assert {
+        "/chat-images/{image_id}",
+        "/api/chat-images/{image_id}",
+        "/web-images/{image_id}",
+        "/api/web-images/{image_id}",
+    }.issubset(paths)
+
+
 @pytest.mark.parametrize("path_prefix", ["/chat-images", "/api/chat-images"])
 def test_sidecar_exposes_chat_image_read_route(monkeypatch, path_prefix):
     """RED: the sidecar must expose ``GET /chat-images/{id}`` (and its ``/api``
