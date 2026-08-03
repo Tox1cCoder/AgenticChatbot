@@ -3086,6 +3086,80 @@ def _transition_to_login() -> None:
     st.session_state.show_login = True
 
 
+def _auth_headers() -> dict[str, str]:
+    """Bearer header for the current session, omitted entirely when signed out."""
+    auth_token = st.session_state.get("auth_token")
+    return {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
+
+
+def _handle_api_error_status(status_code: int | None, payload: Any) -> dict:
+    """Record a failed response and surface it, returning the empty result."""
+    error_message = _extract_api_error_message(status_code, payload)
+    st.session_state["_last_api_error_message"] = error_message
+    if status_code == 401:
+        _transition_to_login()
+        st.toast("Please log in", icon=":material/lock:")
+        return {}
+    st.toast(error_message, icon=":material/cancel:")
+    return {}
+
+
+def _handle_http_error(http_error: requests.exceptions.HTTPError) -> dict:
+    """Turn an HTTPError into the shared failure handling.
+
+    Reachable from two places, which is why it is not inlined: ``raise_for_status``
+    raises it after a response arrives, and a retry adapter configured to raise on
+    status raises it from the request call itself. A 401 has to sign the user out
+    either way.
+    """
+    response = http_error.response
+    status_code = response.status_code if response is not None else None
+    payload: Any = {}
+    if response is not None:
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+    return _handle_api_error_status(status_code, payload)
+
+
+def _bump_api_cache_version() -> None:
+    st.session_state.api_cache_version = int(st.session_state.get("api_cache_version", 0)) + 1
+
+
+def _handle_api_response(response: requests.Response, *, mutation: bool) -> dict:
+    """Apply the shared response contract to one already-issued request.
+
+    Shared by the JSON and multipart transports so both treat a 401, an
+    envelope-level failure, and cache invalidation identically. Duplicating this
+    for uploads is how a second transport ends up not signing the user out.
+    """
+    try:
+        response.raise_for_status()
+        parsed = response.json()
+    except requests.exceptions.HTTPError as http_error:
+        return _handle_http_error(http_error)
+    except ValueError:
+        st.toast("Unexpected response from API", icon=":material/cancel:")
+        return {}
+
+    response_data = parsed if isinstance(parsed, dict) else {}
+    if not response_data.get("success"):
+        error_code = response_data.get("code", "unknown_error")
+        error_message = response_data.get("message", "An unknown error occurred.")
+        st.session_state["_last_api_error_message"] = error_message
+        if error_code == "unauthenticated":
+            _transition_to_login()
+            st.toast("Please log in", icon=":material/lock:")
+        else:
+            st.toast(f"{error_message}", icon=":material/cancel:")
+        return {}
+
+    if mutation:
+        _bump_api_cache_version()
+    return response_data
+
+
 def make_api_request(
     method: str,
     endpoint: str,
@@ -3094,85 +3168,80 @@ def make_api_request(
     use_cache: bool = True,
 ) -> dict:
     method = method.strip().upper()
-    auth_token = st.session_state.get("auth_token")
-    response_data: dict[str, Any]
     st.session_state["_last_api_error_message"] = None
 
     try:
         if method == "GET" and data is None and use_cache:
             cached = _cached_get_request(
                 endpoint=endpoint,
-                auth_token=str(auth_token or ""),
+                auth_token=str(st.session_state.get("auth_token") or ""),
                 cache_version=int(st.session_state.get("api_cache_version", 0)),
             )
             status_code = int(cached.get("status_code") or 0)
             response_data = cached.get("payload") or {}
             if status_code >= 400:
-                error_message = _extract_api_error_message(status_code, response_data)
+                return _handle_api_error_status(status_code, response_data)
+            if not response_data.get("success"):
+                error_message = response_data.get("message", "An unknown error occurred.")
                 st.session_state["_last_api_error_message"] = error_message
-                if status_code == 401:
-                    _transition_to_login()
-                    st.toast("Please log in", icon=":material/lock:")
-                    return {}
-                st.toast(error_message, icon=":material/cancel:")
+                st.toast(f"{error_message}", icon=":material/cancel:")
                 return {}
-        else:
-            url = f"{API_BASE_URL}{endpoint}"
-            headers = {}
-            if auth_token:
-                headers["Authorization"] = f"Bearer {auth_token}"
-            response = get_http_session().request(
-                method,
-                url,
-                json=data,
-                headers=headers,
-                timeout=REQUEST_TIMEOUT,
-            )
-            response.raise_for_status()
-            parsed = response.json()
-            response_data = parsed if isinstance(parsed, dict) else {}
+            return response_data
+
+        response = get_http_session().request(
+            method,
+            f"{API_BASE_URL}{endpoint}",
+            json=data,
+            headers=_auth_headers(),
+            timeout=REQUEST_TIMEOUT,
+        )
     except requests.exceptions.HTTPError as http_error:
-        status_code = http_error.response.status_code if http_error.response is not None else None
-        payload: Any = {}
-        if http_error.response is not None:
-            try:
-                payload = http_error.response.json()
-            except ValueError:
-                payload = {}
-        error_message = _extract_api_error_message(status_code, payload)
-        st.session_state["_last_api_error_message"] = error_message
-        if status_code == 401:
-            _transition_to_login()
-            st.toast("Please log in", icon=":material/lock:")
-            return {}
-        st.toast(error_message, icon=":material/cancel:")
-        return {}
+        return _handle_http_error(http_error)
     except requests.exceptions.ConnectionError:
         st.toast("Cannot connect to API", icon=":material/cancel:")
-        return {}
-    except ValueError:
-        st.toast("Unexpected response from API", icon=":material/cancel:")
         return {}
     except Exception as exc:
         st.toast(f"Error: {exc}", icon=":material/cancel:")
         return {}
 
-    if not response_data.get("success"):
-        error_code = response_data.get("code", "unknown_error")
-        error_message = response_data.get("message", "An unknown error occurred.")
-        st.session_state["_last_api_error_message"] = error_message
+    return _handle_api_response(
+        response,
+        mutation=method in {"POST", "PUT", "PATCH", "DELETE"},
+    )
 
-        if error_code == "unauthenticated":
-            _transition_to_login()
-            st.toast("Please log in", icon=":material/lock:")
-        else:
-            st.toast(f"{error_message}", icon=":material/cancel:")
+
+def make_api_multipart_request(
+    endpoint: str,
+    *,
+    files: dict[str, tuple[str, bytes, str]],
+    form: dict[str, str] | None = None,
+) -> dict:
+    """POST multipart form data, reusing the shared auth and error contract.
+
+    A separate entry point rather than a ``files=`` parameter on
+    :func:`make_api_request`: a request carrying both a JSON body and a file is
+    ambiguous, and requests would silently drop one. The longer stream timeout
+    applies because a 25 MiB archive does not upload inside the interactive one.
+    """
+    st.session_state["_last_api_error_message"] = None
+    try:
+        response = get_http_session().post(
+            f"{API_BASE_URL}{endpoint}",
+            files=files,
+            data=form or {},
+            headers=_auth_headers(),
+            timeout=STREAM_REQUEST_TIMEOUT,
+        )
+    except requests.exceptions.HTTPError as http_error:
+        return _handle_http_error(http_error)
+    except requests.exceptions.ConnectionError:
+        st.toast("Cannot connect to API", icon=":material/cancel:")
+        return {}
+    except Exception as exc:
+        st.toast(f"Error: {exc}", icon=":material/cancel:")
         return {}
 
-    if method in {"POST", "PUT", "PATCH", "DELETE"}:
-        st.session_state.api_cache_version = int(st.session_state.get("api_cache_version", 0)) + 1
-
-    return response_data
+    return _handle_api_response(response, mutation=True)
 
 
 def _discover_system_zone_name() -> str | None:
@@ -4466,6 +4535,10 @@ def _clear_skill_hitl_session_state() -> None:
     for key in list(st.session_state):
         if str(key).startswith("hitl_skill_mode_") or str(key).startswith("skill_secret_"):
             del st.session_state[key]
+    # An upload id and its archive bytes belong to the user who selected them.
+    # Remote cleanup is skipped here because the session token is about to be
+    # discarded; the sidecar expires the staged upload on its own.
+    _clear_skill_installation_session_state(cleanup_remote=False)
 
 
 def render_json_output(data: Any, label: str = "JSON Output", expanded: bool | None = None) -> None:
@@ -4961,6 +5034,116 @@ def reload_skills() -> dict[str, Any] | None:
     """Rescan the local sidecar's skill roots."""
     response = make_api_request("POST", "/skills/reload")
     return response.get("data") if response else None
+
+
+# ── Skill ZIP upload and installation ──────────────────────────────
+#
+# Identifiers are opaque strings from the sidecar, but they still travel through
+# `quote(..., safe="")` before entering a URL: an id is not a place to discover
+# that an assumption about its character set was wrong.
+
+
+def stage_skill_zip(filename: str, content: bytes, content_type: str) -> dict[str, Any] | None:
+    """Upload one ZIP for validation and preview. Nothing is installed yet."""
+    response = make_api_multipart_request(
+        "/skills/uploads",
+        files={"file": (filename, content, content_type or "application/zip")},
+    )
+    return response.get("data") if response else None
+
+
+def start_skill_install(
+    upload_id: str,
+    expected_source_hash: str,
+    approve_setup: bool,
+    replace_source_hash: str | None = None,
+) -> dict[str, Any] | None:
+    """Confirm installation of a staged upload and return its operation receipt."""
+    payload: dict[str, Any] = {
+        "expectedSourceHash": expected_source_hash,
+        "approveSetup": bool(approve_setup),
+    }
+    if replace_source_hash:
+        payload["replaceSourceHash"] = replace_source_hash
+    response = make_api_request(
+        "POST",
+        f"/skills/uploads/{quote(str(upload_id), safe='')}/install",
+        payload,
+    )
+    return response.get("data") if response else None
+
+
+def get_skill_installation(operation_id: str) -> dict[str, Any] | None:
+    """Poll one installation's state.
+
+    ``use_cache=False`` because the whole point is to observe a value that
+    changes; the shared GET cache would serve a stale phase for its whole TTL.
+    """
+    response = make_api_request(
+        "GET",
+        f"/skills/installations/{quote(str(operation_id), safe='')}",
+        use_cache=False,
+    )
+    return response.get("data") if response else None
+
+
+def cancel_skill_upload(upload_id: str) -> dict[str, Any] | None:
+    """Discard a staged upload the user decided not to install."""
+    response = make_api_request(
+        "DELETE",
+        f"/skills/uploads/{quote(str(upload_id), safe='')}",
+    )
+    return response.get("data") if response else None
+
+
+def cancel_skill_installation(operation_id: str) -> dict[str, Any] | None:
+    """Ask to stop an installation that has not yet been committed."""
+    response = make_api_request(
+        "DELETE",
+        f"/skills/installations/{quote(str(operation_id), safe='')}",
+    )
+    return response.get("data") if response else None
+
+
+# Session keys holding skill installation state. Listed once so logout and user
+# transitions cannot clear a subset and leave one user's upload id visible to the
+# next.
+SKILL_INSTALL_SESSION_KEYS = (
+    "skill_upload_id",
+    "skill_upload_bytes",
+    "skill_upload_preview",
+    "skill_upload_archive",
+    "skill_operation_id",
+    "skill_operation_state",
+    "skill_operation_catalog",
+    "skill_install_approve_setup",
+    "skill_install_approve_replace",
+    "skill_install_next_poll_at",
+    "skill_install_poll_delay",
+    "skill_install_error",
+)
+
+
+def _clear_skill_installation_session_state(cleanup_remote: bool = False) -> None:
+    """Drop all local skill installation state, optionally telling the sidecar.
+
+    Local state is cleared first and unconditionally: a failing or slow cleanup
+    call must never leave another user's upload id in this session.
+    """
+    upload_id = st.session_state.get("skill_upload_id")
+    operation_id = st.session_state.get("skill_operation_id")
+    for key in SKILL_INSTALL_SESSION_KEYS:
+        st.session_state.pop(key, None)
+
+    if not cleanup_remote:
+        return
+    try:
+        if operation_id:
+            cancel_skill_installation(operation_id)
+        if upload_id:
+            cancel_skill_upload(upload_id)
+    except Exception:  # noqa: BLE001 - best effort; the upload expires on its own
+        return
 
 
 def render_login_page():
