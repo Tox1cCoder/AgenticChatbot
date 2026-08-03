@@ -147,6 +147,20 @@ def test_pre_resolved_failed_cells_keep_group_shape():
     assert 'data-state="failed"' in html
 
 
+def test_all_pre_resolved_failures_keep_every_group_cell_in_place():
+    html = build_inline_image_group_html(
+        [
+            {"_load_failed": True, "url": None},
+            {"_load_failed": True, "url": None},
+        ],
+        alt_text="x",
+    )
+
+    assert html.count('data-role="cell"') == 2
+    assert html.count("Visual unavailable") == 2
+    assert "<img" not in html
+
+
 def test_one_cell_pre_resolved_failure_is_neutral_not_broken_image():
     html = build_inline_image_group_html(
         [{"_load_failed": True, "url": None}],

@@ -160,8 +160,9 @@ def build_inline_image_group_html(
     rendered: list[str] = []
     for cell in usable:
         load_failed = cell.get("_load_failed") is True
+        fallback_display = "block" if load_failed else "none"
         fallback = (
-            f'<div data-role="cell-fallback" style="display:{"block" if load_failed else "none"};padding:12px;'
+            f'<div data-role="cell-fallback" style="display:{fallback_display};padding:12px;'
             "border-radius:8px;background:#f1f5f9;color:#64748b;font-size:12px;"
             'text-align:center;">Visual unavailable</div>'
         )

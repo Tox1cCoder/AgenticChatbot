@@ -364,4 +364,3 @@ use `original_image_url` as a fallback.
 - [ ] Alt text, structured caption, and source attribution each have one owner.
 - [ ] No source/provenance fallback or token leakage exists.
 - [ ] Missing `/web-images` is handled as a stale-sidecar deployment issue.
-
