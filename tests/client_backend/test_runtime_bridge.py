@@ -1,4 +1,7 @@
 import asyncio
+import tempfile
+from functools import lru_cache
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +13,20 @@ from client_backend.services import runtime_bridge as runtime_bridge_module
 from client_backend.services.runtime_bridge import RuntimeBridgeService
 from client_backend.services.skill_runtime.manager import SkillReadiness
 from shared.skills.errors import SkillRuntimeError
+
+
+@lru_cache(maxsize=1)
+def _empty_bundle_root() -> Path:
+    """A bundle directory with no companion files.
+
+    Activation lists what a skill ships, so a double needs a real directory; an
+    empty one keeps these tests focused on the runtime footer they assert.
+    """
+    root = Path(tempfile.mkdtemp(prefix="bridge-bundle-")) / "demo"
+    root.mkdir()
+    (root / "SKILL.md").write_text("---\nname: demo\n---\nBody", encoding="utf-8")
+    return root
+
 
 _MCP_SCOPE = MCPProfileScope(
     user_id="user-1",
@@ -102,6 +119,7 @@ async def test_runtime_bridge_executes_activate_skill_locally(monkeypatch):
                     enabled=True,
                     content="Follow the demo instructions.",
                     source_hash="a" * 64,
+                    bundle_root=_empty_bundle_root(),
                     executable_assets={
                         "bin": ["demo-cli.py"],
                         "scripts": [],
@@ -146,6 +164,7 @@ def _ready_skill(name="demo"):
         enabled=True,
         content="Follow the demo instructions.",
         source_hash="a" * 64,
+        bundle_root=_empty_bundle_root(),
         executable_assets={
             "bin": [f"{name}-cli.py"],
             "scripts": [],
@@ -235,6 +254,7 @@ def test_collect_skill_tools_publishes_only_ready_fixed_command(monkeypatch):
         enabled=True,
         description="ready",
         source_hash="a" * 64,
+        bundle_root=_empty_bundle_root(),
         executable_assets={"bin": ["ready-cli.py"], "scripts": [], "python_project": False},
     )
     instruction_only = SimpleNamespace(
@@ -242,6 +262,7 @@ def test_collect_skill_tools_publishes_only_ready_fixed_command(monkeypatch):
         enabled=True,
         description="notes",
         source_hash="b" * 64,
+        bundle_root=_empty_bundle_root(),
         executable_assets={"bin": [], "scripts": [], "python_project": False},
     )
     monkeypatch.setattr(
@@ -264,6 +285,7 @@ async def test_activation_reports_setup_required_without_package_manager_guessin
         enabled=True,
         content="Use python-skill-cli.",
         source_hash="c" * 64,
+        bundle_root=_empty_bundle_root(),
         executable_assets={"bin": [], "scripts": [], "python_project": True},
     )
 
@@ -577,3 +599,144 @@ async def test_concurrent_catalog_refreshes_are_serialized(monkeypatch):
     assert max(overlaps) == 1
     assert len(server_client.skill_catalog_updates) == 4
     assert bridge._tool_catalog_version == 4
+
+
+# --- Progressive disclosure -------------------------------------------------
+
+
+class _ResourceBundleSkill:
+    """A skill shaped the way current libraries are written: router + companions."""
+
+    def __init__(self, root: Path, *, enabled: bool = True) -> None:
+        self.name = "systematic-debugging"
+        self.description = "Debug systematically"
+        self.enabled = enabled
+        self.bundle_root = root
+        self.path = root / "SKILL.md"
+        self.content = "Read root-cause-tracing.md before proposing a fix."
+        self.source_hash = "a" * 64
+        self.executable_assets = {"bin": [], "scripts": [], "python_project": False}
+
+
+@pytest.fixture()
+def resource_skill(tmp_path):
+    root = tmp_path / "installed" / "systematic-debugging"
+    (root / "references").mkdir(parents=True)
+    (root / "SKILL.md").write_text("---\nname: systematic-debugging\n---\nRouter", "utf-8")
+    (root / "root-cause-tracing.md").write_text("Trace to the root cause.", "utf-8")
+    (root / "references" / "defense-in-depth.md").write_text("Layer the checks.", "utf-8")
+    return _ResourceBundleSkill(root)
+
+
+def _bridge_with_skill(monkeypatch, skill):
+    bridge = RuntimeBridgeService(server_client=_ServerClientStub(), mcp_scope=_MCP_SCOPE)
+    bridge._device_identifier = _MCP_SCOPE.device_identifier
+    bridge._device_id = "device-123"
+    monkeypatch.setattr(
+        runtime_bridge_module,
+        "get_skills_registry",
+        lambda: SimpleNamespace(get_skill=lambda name: skill if name == skill.name else None),
+    )
+    return bridge
+
+
+@pytest.mark.asyncio
+async def test_activation_advertises_the_bundle_files_it_can_read(monkeypatch, resource_skill):
+    """A companion file nothing announces is a file the model never reads."""
+    bridge = _bridge_with_skill(monkeypatch, resource_skill)
+    monkeypatch.setattr(
+        runtime_bridge_module,
+        "SkillRuntimeManager",
+        lambda: SimpleNamespace(
+            evaluate_readiness=lambda _skill: SkillReadiness(
+                status="instruction_only",
+                setup_status="not_applicable",
+                commands=[],
+                repair_hints={},
+            )
+        ),
+    )
+
+    activation = await bridge._execute_client_skill_request(
+        arguments={"skill_name": "systematic-debugging"}
+    )
+
+    assert "read_skill_resource" in activation
+    assert "root-cause-tracing.md" in activation
+    assert "references/defense-in-depth.md" in activation
+    # SKILL.md is already inlined above; listing it again would just be noise.
+    assert "  - SKILL.md" not in activation
+
+
+@pytest.mark.asyncio
+async def test_reads_a_companion_file_through_the_bridge(monkeypatch, resource_skill):
+    bridge = _bridge_with_skill(monkeypatch, resource_skill)
+
+    content = await bridge._execute_client_skill_resource_request(
+        arguments={
+            "skill_name": "systematic-debugging",
+            "resource_path": "references/defense-in-depth.md",
+        }
+    )
+
+    assert content == "Layer the checks."
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_skill_exposes_no_files(monkeypatch, resource_skill):
+    resource_skill.enabled = False
+    bridge = _bridge_with_skill(monkeypatch, resource_skill)
+
+    with pytest.raises(ValueError, match="disabled"):
+        await bridge._execute_client_skill_resource_request(
+            arguments={"skill_name": "systematic-debugging", "resource_path": "SKILL.md"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_skill_exposes_no_files(monkeypatch, resource_skill):
+    bridge = _bridge_with_skill(monkeypatch, resource_skill)
+
+    with pytest.raises(ValueError, match="not found"):
+        await bridge._execute_client_skill_resource_request(
+            arguments={"skill_name": "other-skill", "resource_path": "SKILL.md"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_path_escape_is_refused_at_the_bridge(monkeypatch, resource_skill):
+    bridge = _bridge_with_skill(monkeypatch, resource_skill)
+
+    with pytest.raises(ValueError, match="outside"):
+        await bridge._execute_client_skill_resource_request(
+            arguments={
+                "skill_name": "systematic-debugging",
+                "resource_path": "../../secrets.json",
+            }
+        )
+
+
+def test_the_reserved_resource_request_is_accepted_by_validation():
+    """Reserved skill ids bypass the tool catalog, so validation must name them."""
+    bridge = RuntimeBridgeService(server_client=_ServerClientStub(), mcp_scope=_MCP_SCOPE)
+    bridge._session_id = "session-a"
+
+    accepted = bridge._validate_tool_request(
+        ToolDispatchRequest(
+            request_id="r1",
+            tool_name="read_skill_resource",
+            qualified_tool_id="client_skill::read_resource",
+            arguments={},
+        )
+    )
+    mismatched = bridge._validate_tool_request(
+        ToolDispatchRequest(
+            request_id="r2",
+            tool_name="something_else",
+            qualified_tool_id="client_skill::read_resource",
+            arguments={},
+        )
+    )
+
+    assert accepted is None
+    assert mismatched is not None and "mismatch" in mismatched

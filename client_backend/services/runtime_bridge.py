@@ -52,6 +52,11 @@ from client_backend.services.local_skills_registry import (
 from client_backend.services.server_api import ServerAPIClient, get_server_client
 from client_backend.services.skill_runtime.execution import SkillExecutionEngine
 from client_backend.services.skill_runtime.manager import SkillRuntimeManager
+from client_backend.services.skill_runtime.resources import (
+    SkillResourceError,
+    list_skill_resources,
+    read_skill_resource,
+)
 from client_backend.services.skill_runtime.secrets import SkillSecretStore
 from shared.skills.errors import SkillRuntimeError
 
@@ -547,6 +552,14 @@ class RuntimeBridgeService:
                 )
             return None
 
+        if qualified_id == "client_skill::read_resource":
+            if request.tool_name and request.tool_name != "read_skill_resource":
+                return (
+                    f"Tool name mismatch: request.tool_name={request.tool_name!r} "
+                    "does not match reserved client skill resource request."
+                )
+            return None
+
         if qualified_id.startswith("skill::") and (
             not request.expected_session_id
             or request.expected_catalog_version is None
@@ -652,6 +665,9 @@ class RuntimeBridgeService:
         if qualified_tool_id == "client_skill::activate":
             return await self._execute_client_skill_request(arguments=arguments)
 
+        if qualified_tool_id == "client_skill::read_resource":
+            return await self._execute_client_skill_resource_request(arguments=arguments)
+
         if qualified_tool_id.startswith("skill::"):
             return await self._execute_skill_capability(
                 qualified_tool_id, arguments, timeout_seconds, request.mutation_approved
@@ -745,9 +761,56 @@ class RuntimeBridgeService:
 
         return (
             f"── Skill: {skill.name} ──\n\n{skill.content}\n\n"
-            f"── Device-local skill runtime ──\n{runtime_footer}\n\n"
+            f"── Device-local skill runtime ──\n{runtime_footer}\n"
+            f"{self._describe_skill_resources(skill)}\n"
             f"── End Skill: {skill.name} ──"
         )
+
+    @staticmethod
+    def _describe_skill_resources(skill: Any) -> str:
+        """List the skill's companion files so the model knows what it may read.
+
+        Skills in the current convention keep SKILL.md short and point at
+        supporting documents for the parts that only sometimes apply. Those files
+        are dead weight unless the model is told they exist, so activation
+        advertises them by exact relative path and ``read_skill_resource`` fetches
+        one on demand -- rather than inlining every one of them into every
+        activation, which is what the convention exists to avoid.
+        """
+        listing = list_skill_resources(skill.bundle_root)
+        others = [path for path in listing.paths if not path.endswith("SKILL.md")]
+        if not others:
+            return ""
+
+        shown = "\n".join(f"  - {path}" for path in others)
+        suffix = "\n  (list truncated)" if listing.truncated else ""
+        return (
+            "\nBundled files you can read with `read_skill_resource`, by exact "
+            f"relative path:\n{shown}{suffix}\n"
+            "Read one only when this skill's instructions call for it.\n"
+        )
+
+    async def _execute_client_skill_resource_request(
+        self,
+        *,
+        arguments: dict[str, Any],
+    ) -> Any:
+        """Return one companion file from an enabled skill's own bundle."""
+        skill_name = str(arguments.get("skill_name") or "").strip()
+        resource_path = str(arguments.get("resource_path") or "").strip()
+        if not skill_name:
+            raise ValueError("skill_name is required")
+
+        skill = get_skills_registry().get_skill(skill_name)
+        if skill is None:
+            raise ValueError(f"Skill '{skill_name}' not found on this device.")
+        if not skill.enabled:
+            raise ValueError(f"Skill '{skill_name}' is disabled on this device.")
+
+        try:
+            return read_skill_resource(skill.bundle_root, resource_path)
+        except SkillResourceError as exc:
+            raise ValueError(exc.message) from exc
 
     async def _build_tool_catalog(self) -> dict[str, Any]:
         mcp_catalog = self._get_mcp_manager().get_tool_catalog()

@@ -53,6 +53,21 @@ class ActivateSkillInput(BaseModel):
     )
 
 
+class ReadSkillResourceInput(BaseModel):
+    """Input schema for the read_skill_resource tool."""
+
+    skill_name: str = Field(
+        description="The exact name of the skill that owns the file.",
+    )
+    resource_path: str = Field(
+        description=(
+            "Path of the file to read, exactly as listed in that skill's "
+            "activation output, relative to the skill's own folder "
+            "(for example 'references/api.md')."
+        ),
+    )
+
+
 def get_available_skill_summaries(
     *,
     user_id: str | None,
@@ -186,3 +201,111 @@ def create_activate_skill_tool(
         "source_tool_name": "activate_skill",
     }
     return activate_skill
+
+
+def create_read_skill_resource_tool(
+    *,
+    user_id: str | None,
+    device_id: str | None,
+    allowed_skill_refs: list[dict[str, Any]] | None = None,
+):
+    """Create the ``read_skill_resource`` tool.
+
+    The counterpart to activation. A skill in the current convention keeps its
+    ``SKILL.md`` short and points at companion documents for the parts that only
+    sometimes apply; activation lists those files and this fetches one. Without
+    it an author's only option is to inline everything, spending context on
+    material that is usually irrelevant.
+
+    Resolution, device binding, and the custom-agent allowlist are identical to
+    activation on purpose: a file read must not be a way around a restriction
+    that applies to loading the same skill.
+    """
+
+    session = get_bound_device_session(user_id=user_id, device_id=device_id)
+    bound_user_id = str(session.user_id) if session is not None else str(user_id or "")
+    bound_device_id = str(session.device_id) if session is not None else str(device_id or "")
+    bound_session_id = session.session_id if session is not None else None
+
+    @tool(args_schema=ReadSkillResourceInput)
+    async def read_skill_resource(skill_name: str, resource_path: str) -> str:
+        """Read one file bundled with a skill, by its exact listed path.
+
+        Use this when a skill you have activated tells you to consult one of its
+        own files. Only paths listed in that skill's activation output are
+        readable, and only from that skill's folder.
+        """
+        resolved_skill, resolution_error = resolve_runtime_skill_reference(
+            skill_name=skill_name,
+            user_id=bound_user_id,
+            device_id=bound_device_id,
+            allowed_skill_refs=allowed_skill_refs,
+        )
+        if resolution_error:
+            return resolution_error
+        if resolved_skill is None:
+            return "Error: skill resolution failed."
+
+        ctx = get_tool_context()
+        context_device_id = str(ctx.device_id or bound_device_id or "")
+        if bound_device_id and context_device_id and context_device_id != bound_device_id:
+            return (
+                "Error: a skill file was requested for a different device session "
+                "than the active run."
+            )
+
+        active_session = get_bound_device_session(
+            user_id=bound_user_id,
+            device_id=bound_device_id,
+        )
+        if active_session is None:
+            return "Error: client-side skills are not available because the device is disconnected."
+
+        expected_session_id = resolved_skill.bound_session_id or bound_session_id
+        if expected_session_id and active_session.session_id != expected_session_id:
+            return (
+                "Error: the client device session changed after skills were bound. "
+                "Retry from the active device session."
+            )
+
+        policy = get_current_tool_policy()
+        execution_timeout_seconds = (
+            policy.client_execution_timeout_seconds
+            if policy is not None and policy.client_execution_timeout_seconds is not None
+            else float(settings.client_runtime_ws_timeout_seconds)
+        )
+        response_timeout_seconds = (
+            policy.client_response_timeout_seconds
+            if policy is not None and policy.client_response_timeout_seconds is not None
+            else float(settings.client_runtime_ws_timeout_seconds)
+        )
+        response = await ClientDeviceService.dispatch_tool_call(
+            user_id=bound_user_id,
+            device_id=bound_device_id,
+            tool_name="read_skill_resource",
+            qualified_tool_id="client_skill::read_resource",
+            arguments={
+                "skill_name": resolved_skill.name,
+                "resource_path": resource_path,
+            },
+            execution_timeout_seconds=execution_timeout_seconds,
+            response_timeout_seconds=response_timeout_seconds,
+            bound_session_id=expected_session_id,
+        )
+
+        if not response.get("success", False):
+            raise client_runtime_error_from_response(response)
+
+        result = response.get("result")
+        if isinstance(result, str):
+            return result
+        if isinstance(result, dict) and isinstance(result.get("content"), str):
+            return str(result["content"])
+        return json.dumps(result, indent=2, ensure_ascii=False, default=str)
+
+    read_skill_resource.metadata = {
+        "tool_origin": "client_skill",
+        "qualified_tool_id": "client_skill::read_resource",
+        "source_tool_name": "read_skill_resource",
+    }
+    return read_skill_resource

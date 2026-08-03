@@ -52,7 +52,11 @@ from ..request_budget import (
     RequestEnvelope,
 )
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..skills_tool import create_activate_skill_tool, get_available_skill_summaries
+from ..skills_tool import (
+    create_activate_skill_tool,
+    create_read_skill_resource_tool,
+    get_available_skill_summaries,
+)
 from ..time_context import build_runtime_time_context_block
 from ..token_counter import TokenCounter
 from ..token_instrumentation import (
@@ -393,9 +397,16 @@ class BaseAgent(ABC):
         user_id: str | None,
         device_id: str | None,
     ) -> list[BaseTool]:
-        """Return the activate_skill tool when server or client skills are available."""
+        """Return the skill activation and resource tools when skills exist.
+
+        Both or neither: a model told at activation to read a companion file has
+        no way to do so if the reader is absent.
+        """
         if get_available_skill_summaries(user_id=user_id, device_id=device_id):
-            return [create_activate_skill_tool(user_id=user_id, device_id=device_id)]
+            return [
+                create_activate_skill_tool(user_id=user_id, device_id=device_id),
+                create_read_skill_resource_tool(user_id=user_id, device_id=device_id),
+            ]
         return []
 
     def _get_client_runtime_tools(

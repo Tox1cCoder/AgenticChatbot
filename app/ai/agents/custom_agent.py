@@ -31,7 +31,7 @@ from ..deferred_tool_state import get_deferred_tool_state
 from ..hand_off_tool import create_hand_off_tool
 from ..schemas import AgentType
 from ..skill_resolver import list_resolved_skills
-from ..skills_tool import create_activate_skill_tool
+from ..skills_tool import create_activate_skill_tool, create_read_skill_resource_tool
 from ..tool_scope import is_client_only_scope
 from ..tool_search_tool import create_tool_search_tool_for_custom_agent
 from .base_agent import BaseAgent
@@ -334,6 +334,13 @@ class CustomAgent(BaseAgent):
         tools: list[Any] = [
             create_tool_search_tool_for_custom_agent(spec),
             create_activate_skill_tool(
+                user_id=user_id,
+                device_id=device_id,
+                allowed_skill_refs=spec.allowed_skill_refs,
+            ),
+            # Same allowlist as activation: reading a skill's files must not be a
+            # way around a restriction that applies to loading the skill itself.
+            create_read_skill_resource_tool(
                 user_id=user_id,
                 device_id=device_id,
                 allowed_skill_refs=spec.allowed_skill_refs,
