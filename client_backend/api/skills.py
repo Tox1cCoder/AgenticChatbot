@@ -19,9 +19,8 @@ from client_backend.schemas.skills import (
     SkillUninstallRequest,
 )
 from client_backend.services.local_skills_registry import get_skills_registry
-from client_backend.services.runtime_bridge import get_runtime_bridge
+from client_backend.services.skill_catalog import get_skill_catalog_service, skill_summary
 from client_backend.services.skill_runtime.install import SkillBundleInstaller
-from client_backend.services.skill_runtime.manager import SkillRuntimeManager
 from client_backend.services.skill_runtime.operations import (
     SkillOperationError,
     get_skill_installation_service,
@@ -52,49 +51,22 @@ def get_secret_store() -> SkillSecretStore:
     return SkillSecretStore()
 
 
-def _skill_summary(skill) -> dict:
-    readiness = SkillRuntimeManager().evaluate_readiness(skill)
-    return {
-        "name": skill.name,
-        "description": skill.description,
-        "enabled": skill.enabled,
-        "folderPath": str(skill.path.parent),
-        "sourceHash": getattr(skill, "source_hash", None),
-        "commandCapable": readiness.status == "ready",
-        "runtimeStatus": readiness.status,
-        "setupStatus": readiness.setup_status,
-    }
-
-
 def _skill_detail(skill) -> dict:
-    payload = _skill_summary(skill)
+    payload = skill_summary(skill)
     payload["content"] = skill.content
     return payload
-
-
-async def _refresh_runtime_bridge_catalogs_if_connected() -> None:
-    bridge = get_runtime_bridge()
-    if not bridge.is_connected() or not bridge.get_registered_device_id():
-        return
-    await bridge.refresh_catalogs()
 
 
 @router.get("")
 async def list_skills(
     _session: LocalSessionPayload = Depends(require_local_session),
 ):
-    """List local skills in the server's `ApiResponse[SkillListResponse]` shape."""
-    registry = get_skills_registry()
-    await registry.initialize()
-    skills = [_skill_summary(skill) for skill in registry.get_all_skills()]
+    """Return the device catalog, rescanning only when it is stale."""
+    catalog = await get_skill_catalog_service().snapshot()
     return make_api_response(
         success=True,
         message="Skills retrieved",
-        data={
-            "skills": skills,
-            "totalCount": len(skills),
-            "enabledCount": sum(1 for skill in skills if skill["enabled"]),
-        },
+        data=catalog,
     )
 
 
@@ -110,6 +82,7 @@ async def install_skill(
             payload.source_path,
             expected_source_hash=payload.expected_source_hash,
             approve_setup=payload.approve_setup,
+            replace_source_hash=payload.replace_source_hash,
         )
     except SkillRuntimeError as exc:
         status_code = _INSTALL_ERROR_STATUS_OVERRIDES.get(exc.code, 400)
@@ -118,13 +91,10 @@ async def install_skill(
             detail={"code": exc.code, "message": exc.message},
         ) from exc
 
-    # SkillBundleInstaller.install() already refreshes the registry and the
-    # runtime bridge catalogs (if connected) as its last step, so this route
-    # does not repeat that refresh.
     return make_api_response(
         success=True,
         message=f"Skill bundle '{result['name']}' installed",
-        data=result,
+        data={**result, "catalog": await get_skill_catalog_service().after_mutation()},
     )
 
 
@@ -312,7 +282,7 @@ async def setup_skill(
     return make_api_response(
         success=True,
         message=f"Skill '{name}' runtime prepared",
-        data=result,
+        data={**result, "catalog": await get_skill_catalog_service().after_mutation()},
     )
 
 
@@ -332,13 +302,10 @@ async def uninstall_skill(
             detail={"code": exc.code, "message": exc.message},
         ) from exc
 
-    # SkillBundleInstaller.uninstall() already refreshes the registry and the
-    # runtime bridge catalogs (if connected) as its last step, so this route
-    # does not repeat that refresh.
     return make_api_response(
         success=True,
         message=f"Skill bundle '{payload.name}' uninstalled",
-        data=result,
+        data={**result, "catalog": await get_skill_catalog_service().after_mutation()},
     )
 
 
@@ -429,6 +396,9 @@ async def get_skill(
     _session: LocalSessionPayload = Depends(require_local_session),
 ):
     """Get detail for one local skill."""
+    # Snapshot first: a skill installed moments ago must not 404 because the
+    # registry has not rescanned yet.
+    await get_skill_catalog_service().snapshot()
     registry = get_skills_registry()
     await registry.initialize()
     skill = registry.get_skill(name)
@@ -455,14 +425,15 @@ async def toggle_skill(
     if not updated:
         raise HTTPException(status_code=404, detail="Skill not found")
 
-    await _refresh_runtime_bridge_catalogs_if_connected()
-
     state = "enabled" if enabled else "disabled"
     message = f"Skill '{name}' {state}"
     return make_api_response(
         success=True,
         message=message,
-        data={"message": message},
+        data={
+            "message": message,
+            "catalog": await get_skill_catalog_service().after_mutation(),
+        },
     )
 
 
@@ -471,12 +442,9 @@ async def reload_skills(
     _session: LocalSessionPayload = Depends(require_local_session),
 ):
     """Rescan configured local skill roots."""
-    registry = get_skills_registry()
-    await registry.refresh()
-    await _refresh_runtime_bridge_catalogs_if_connected()
-    message = "Skills reloaded"
+    catalog = await get_skill_catalog_service().snapshot(force=True, sync=True)
     return make_api_response(
         success=True,
-        message=message,
-        data={"message": message},
+        message="Skills reloaded",
+        data=catalog,
     )
