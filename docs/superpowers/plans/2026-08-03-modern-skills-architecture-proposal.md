@@ -1,6 +1,7 @@
 # Modern Skills Architecture — Proposal
 
-**Status:** proposal, awaiting direction. Nothing here is implemented.
+**Status:** Phase 1 shipped 2026-08-03 (`665050e`, `e8e72c4`). Phases 2 and 3 remain
+proposals, awaiting direction. The open questions at the bottom are answered.
 
 **Goal:** make the sidecar's skill system work with skills as they are actually
 written and distributed today (the Agent Skills / Claude Code convention), while
@@ -38,15 +39,19 @@ Verified against the code, not assumed:
 | G5 | **Frontmatter narrower than the ecosystem's** | `shared/skills/front_matter.py` parses `name`, `description`, `category`, `tags` | `allowed-tools` is ignored, so a skill's own tool restrictions are not honored |
 | G6 | **All skill summaries go in every system prompt** | `get_available_skill_summaries` | Fine at 14 skills; a few hundred is a context problem with no search path |
 
+**G1 and G2 are closed** by Phase 1 below. G3–G6 stand as written.
+
 Two things this system already does that Claude Code does **not**, and which the
 proposal must not regress: device-scoped execution with per-skill approval and
 encrypted secrets, and hash-bound atomic installation.
 
 ## Proposal
 
-### Phase 1 — make real skill libraries usable (the unblock)
+### Phase 1 — make real skill libraries usable (the unblock) — SHIPPED
 
-**1.1 `read_skill_resource(skill, path)`** — the keystone.
+**1.1 `read_skill_resource(skill, path)`** — the keystone. Shipped in `665050e`:
+`client_backend/services/skill_runtime/resources.py`, routed through
+`client_skill::read_resource`, exposed by `app/ai/skills_tool.py`.
 
 A device-scoped tool that returns one text file from inside an installed bundle.
 Confinement mirrors `run_skill_command`: resolve only under that skill's bundle
@@ -56,7 +61,9 @@ companion file in every modern skill is unreachable.
 Activation changes shape with it: `activate_skill` returns the router body plus a
 manifest of readable resources, and the model pulls what it needs.
 
-**1.2 Collection install.**
+**1.2 Collection install.** Shipped in `e8e72c4`:
+`client_backend/services/skill_runtime/collection.py`, with the all-or-nothing
+install loop and rollback in `operations.py`.
 
 Accept an archive containing many skills. Preview lists every skill found, with
 per-skill existing-collision state; approval is one decision for the set;
@@ -112,12 +119,20 @@ no user-visible blocker behind it.
 | 2.2/2.3 Versioning + update | medium | Re-fetching a source implies network access from the sidecar |
 | 3.x | small each | Enforcement changes behavior for already-installed skills |
 
-## Open questions
+## Open questions — decided 2026-08-03
 
-1. Should a collection install as one unit that upgrades together, or as N
-   independent skills that merely share provenance?
-2. Should the sidecar ever fetch from a URL (install/update from a GitHub repo
-   directly), or stay upload-only? Upload-only is a meaningful part of the current
-   security story.
-3. Does the AI SDK frontend need the same collection UI as Streamlit in the first
-   pass, or is Streamlit enough to validate the shape?
+1. **One unit.** A collection installs together: one approval, atomic across the set,
+   rollback on any failure. A partial 9-of-14 install is a state nobody asked for.
+   Per-skill enable/disable still applies afterwards.
+2. **Upload-only.** The sidecar executes local code; adding outbound fetch would buy
+   convenience with SSRF surface. Rejected rather than deferred — revisit only with a
+   pinned-host allowlist.
+3. **Streamlit is enough for the first pass.** `/api/skills/*` is the contract and is
+   byte-identical for both frontends, so the AI SDK path can implement it against
+   `plans/SKILL_INSTALLATION_FE_CONTRACT.md` without a second UI blocking Phase 1.
+
+## Verified against a real library
+
+`superpowers-main.zip` (obra/superpowers v6.2.0): collection identified as
+`superpowers` v6.2.0, 14 skills discovered, 1 symbolic link skipped, all 14 installed
+in one operation. This archive previously could not be installed at all (G2).
