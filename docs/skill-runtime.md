@@ -100,11 +100,70 @@ DELETE /skills/{name}/secrets/{secret_name}
 
 The POST body is `{"name":"ACCESS_TOKEN","value":"..."}`. GET returns configured names only. Values are encrypted at rest and namespaced by skill.
 
+## Archive upload and installation lifecycle
+
+A browser installs a skill by uploading a ZIP; the two-step shape is what keeps
+uploaded code from running before anyone approves it.
+
+**Staging** (`POST /skills/uploads`) validates the container, extracts it under
+confinement, and reads its metadata. Nothing is executed. The archive must be a
+real ZIP by central-directory parse -- never by extension or client-supplied MIME
+type -- and every member is checked before a byte is written: traversal segments,
+absolute POSIX/Windows/UNC names, reserved device names, trailing dot or space
+components, paths beyond the configured depth and length, duplicates that collide
+after casefolding and NFC normalization, encrypted members, unsupported
+compression, non-regular Unix entry types, and every size, count, and ratio
+limit. Members stream into a temporary sibling that is promoted only after all of
+them succeed, so a rejected archive leaves nothing behind.
+
+One redundant wrapper directory is stripped: zipping a folder produces
+`my-skill/SKILL.md`, and the bundle root is what publishes `bin/` and `scripts/`.
+A root with several entries is left alone.
+
+Staged uploads are scoped to one user, expire (30 minutes by default), and are
+bounded per profile by outstanding count, total bytes, attempt rate, and
+available disk space. An unknown, expired, or foreign upload id returns the same
+404, so an id cannot be probed.
+
+**Installation** (`POST /skills/uploads/{uploadId}/install`) requires the
+`expectedSourceHash` the user previewed, `approveSetup` for a Python project, and
+`replaceSourceHash` to overwrite an existing skill. Replacement is permitted only
+for bundles under the profile's installed root; a skill from a configured root is
+never rewritten. The work runs asynchronously against a persisted receipt:
+
+`validating` -> `waitingForLock` -> `copying` -> `preparingRuntime` ->
+`committing` -> `refreshingCatalog` -> `syncingCatalog`
+
+Cancellation is honored until the atomic promotion begins and reports
+`SKILL_OPERATION_COMMITTED` afterwards. A process killed mid-install is
+reconciled on the next start by comparing the operation's source hash against
+what is actually installed, so an interrupted operation resolves to the outcome
+that really happened rather than to its last recorded state.
+
+Publishing the catalog to the canonical server is best-effort and reported as
+`catalogSyncStatus`; a committed local install with a failed sync is a success
+with `pending`, never a failure.
+
 ## Errors
 
 | Code | Meaning |
 |---|---|
 | `SKILL_INSTALL_INVALID` | The bundle source, structure, or preview hash is invalid. |
+| `SKILL_SOURCE_CHANGED` | The uploaded or installed hash is stale; re-preview before retrying. |
+| `SKILL_CONFIGURED_ROOT_CONFLICT` | The colliding skill lives in a configured root the sidecar does not manage. Published to clients as `SKILL_INSTALL_CONFLICT`. |
+| `SKILL_ARCHIVE_INVALID` | The ZIP is malformed, encrypted, corrupt, or uses unsupported compression. |
+| `SKILL_ARCHIVE_PATH_UNSAFE` | A member path escapes the bundle, collides on this filesystem, or is not portable. |
+| `SKILL_ARCHIVE_TOO_LARGE` | An upload, expansion, per-file, or compression-ratio limit was exceeded. |
+| `SKILL_ARCHIVE_TOO_MANY_FILES` | The archive holds more entries than allowed. |
+| `SKILL_ARCHIVE_TYPE_UNSUPPORTED` | Only a single `.zip` archive is accepted. |
+| `SKILL_UPLOAD_NOT_FOUND` | The upload is unknown, expired, or owned by another profile. |
+| `SKILL_UPLOAD_STATE_INVALID` | The upload cannot make the requested transition. |
+| `SKILL_UPLOAD_CONSUMED` | The upload already has a different installation request. |
+| `SKILL_UPLOAD_QUOTA_EXCEEDED` | Outstanding uploads, stored bytes, or attempt rate exceeded. |
+| `SKILL_OPERATION_NOT_FOUND` | The installation is unknown, expired, or owned by another profile. |
+| `SKILL_OPERATION_COMMITTED` | Too late to cancel; poll for the result. |
+| `SKILL_INSTALL_LOCKED` | Another mutation holds this skill's lock. Retryable. |
+| `SKILL_STORAGE_INSUFFICIENT` | Not enough free local disk space. Retryable. |
 | `UNSAFE_BUNDLE_PATH` | A symlink or path escapes a confined root. |
 | `SKILL_SETUP_REQUIRED` | Python setup needs explicit approval. |
 | `SKILL_SETUP_FAILED` | Environment creation or installation failed. |

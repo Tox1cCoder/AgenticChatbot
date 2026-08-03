@@ -186,14 +186,21 @@ Success is `201 Created`:
         "dependencies": [],
         "buildRequirements": [],
         "declaredCommands": [],
+        "dependencyLock": null,
         "confirmationRequired": false
       },
       "existingSkill": null
-    }
+    },
+    "operationId": null
   },
   "error": null
 }
 ```
+
+`setup.dependencyLock` names the bundle's lock file when it ships one
+(`requirements.lock`), otherwise `null`. `operationId` is `null` until an
+installation claims this upload, then names it; a client that already tracks the
+`202` response does not need to read it.
 
 When a skill with the same name exists, `preview.existingSkill` is:
 
@@ -463,9 +470,12 @@ and polling state from the previous cache boundary.
 
 | Status | Code | Meaning / FE action |
 |---|---|---|
-| `400` | `SKILL_ARCHIVE_INVALID` | Malformed ZIP. Select another file. |
+| `400` | `SKILL_ARCHIVE_INVALID` | Malformed, encrypted, or corrupt ZIP. Select another file. |
+| `400` | `SKILL_ARCHIVE_PATH_UNSAFE` | A path inside the ZIP escapes the bundle, collides on this filesystem, or is not portable. Repackage it. |
 | `400` | `SKILL_BUNDLE_INVALID` | ZIP does not contain exactly one valid skill. |
 | `400` | `SKILL_UPLOAD_STATE_INVALID` | Upload cannot perform the requested transition. Reload its state. |
+| `400` | `SKILL_SETUP_REQUIRED` | The bundle declares a Python project; resend with `approveSetup: true`. |
+| `400` | `SKILL_SETUP_FAILED` | The runtime could not be prepared. Retryable. |
 | `401` | `UNAUTHENTICATED` | Clear local auth state and log in again. |
 | `404` | `SKILL_UPLOAD_NOT_FOUND` | Upload is unknown, expired, or foreign. Re-upload. |
 | `404` | `SKILL_OPERATION_NOT_FOUND` | Operation is unknown, expired, or foreign. Reload catalog before retrying. |

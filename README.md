@@ -810,6 +810,7 @@ not part of the distributed repository.
 API (sidecar only — the server has no skills endpoints of its own):
 
 - `/skills`, `/skills/{name}`, `/skills/{name}/toggle`, `/skills/reload`
+- `POST /skills/uploads`, `GET /skills/installations/{operationId}` (browser ZIP installation)
 
 When a skill is resolved to a tool (`skills_tool.py`), the agent's skill summaries are injected into its system prompt so it knows *what* is available without paying the schema cost for every skill.
 
@@ -819,7 +820,7 @@ An executable skill uses the standard Agent Skills layout: `SKILL.md` plus optio
 
 Highlights:
 
-- **Two install paths** — read-only `CLIENT_SKILLS_ROOTS` scanning, or hash-bound `POST /skills/install/preview` plus `POST /skills/install` into the device-local user profile.
+- **Three install paths** — read-only `CLIENT_SKILLS_ROOTS` scanning; hash-bound `POST /skills/install/preview` plus `POST /skills/install` for local tooling; or a browser ZIP upload (below).
 - **Scoped execution** — argv zero resolves only from that skill's bundle or prepared Python environment; no global `PATH` mutation and no arbitrary system-command fallback.
 - **Readiness** — `ready` / `not_ready` / `instruction_only`, with explicit setup and rebuild hints; unsafe bundles are rejected or omitted.
 - **Python setup** — approved projects are installed into staged, per-skill virtual environments and atomically promoted.
@@ -830,6 +831,48 @@ Highlights:
 This is command confinement, not an OS sandbox: an approved skill still runs with the local sidecar user's host privileges, matching the trust model of coding-agent commands.
 
 Extra sidecar endpoints: `POST /skills/install/preview`, `POST /skills/install`, `POST /skills/{name}/setup`, `POST /skills/uninstall`, `GET /skills/installed`, and per-skill secret GET/POST/DELETE routes.
+
+### Installing a skill from a ZIP
+
+A browser (Streamlit or the AI SDK frontend) installs a skill by uploading one
+ZIP to the sidecar. Uploads never reach the canonical server: a skill bundle and
+its secrets are device-local.
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/skills/uploads` | Upload, validate, extract, and preview one ZIP (`201`) |
+| `DELETE` | `/skills/uploads/{uploadId}` | Discard a staged upload |
+| `POST` | `/skills/uploads/{uploadId}/install` | Start a new install or guarded update (`202`) |
+| `GET` | `/skills/installations/{operationId}` | Poll installation state |
+| `DELETE` | `/skills/installations/{operationId}` | Cancel before the commit boundary |
+
+The flow is deliberately two-step. Uploading validates and previews; it never
+runs setup code. Installing requires the `expectedSourceHash` from that preview,
+plus `approveSetup` when the bundle declares a Python project, plus
+`replaceSourceHash` when a skill of the same name is already installed. A skill
+discovered from a configured root reports `preview.existingSkill.replaceable:
+false` and is never overwritten — the sidecar does not manage those folders.
+
+Installation runs asynchronously because a dependency build outlasts an HTTP
+request. Poll the returned `statusUrl` with bounded backoff; a failed
+installation is reported as HTTP `200` with `state: "failed"`, since the
+*operation* was retrieved successfully. Cancelling after the commit boundary
+returns `409 SKILL_OPERATION_COMMITTED` — keep polling to the real outcome.
+
+Archives are accepted only as ZIP, and only within the configured limits
+(`CLIENT_SKILL_UPLOAD_*`): 25 MiB uploaded, 100 MiB expanded, 50 MiB per file,
+2,000 entries, a 200:1 compression ratio, 20 path components, and 240 path
+characters. Path traversal, absolute and UNC names, reserved device names,
+case- and Unicode-colliding paths, encrypted members, and non-regular entry types
+(symlinks, FIFOs, devices) are rejected before anything is written.
+
+Every catalog response carries `catalogGeneration` and `catalogSyncStatus`. Do
+not replace a cached catalog with a lower generation. A `pending` sync means the
+skill is installed and working locally while publication to the server is still
+outstanding; it is not a failure.
+
+**Frontend contract: [`plans/SKILL_INSTALLATION_FE_CONTRACT.md`](plans/SKILL_INSTALLATION_FE_CONTRACT.md)** — request/response
+shapes, the full error-code table, polling policy, and cache rules.
 
 The credential UI returns configured names only, never values. Bindings live in
 the local sidecar profile for the current user and device; switching users or
@@ -1176,6 +1219,7 @@ In addition to proxying most server routes under both `/...` and `/api/...`, the
 
 - `/runtime/status`, `/runtime/connect`, `/runtime/disconnect`, `/runtime/refresh-catalogs`
 - `/skills`, `/skills/{name}`, `/skills/{name}/toggle`, `/skills/reload`
+- `POST /skills/uploads`, `GET /skills/installations/{operationId}` (browser ZIP installation)
 - `/mcp/*` — local MCP lifecycle
 - `/auth/restore`, `/auth/session`, `/auth/verify-local-token` — local-session wrappers
 - `/status`, `/device` — local-runtime state

@@ -567,3 +567,100 @@ def test_plain_text_loader_preserves_loader_error_boundary(tmp_path: Path) -> No
 
     with pytest.raises(RuntimeError, match=re.escape(f"Error loading {source}")):
         load_utf8_text_document(source)
+
+
+def test_readme_documents_zip_upload_operation_flow() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "POST /skills/uploads" in readme
+    assert "/skills/installations/{operationId}" in readme
+    assert "replaceSourceHash" in readme
+    assert "catalogSyncStatus" in readme
+
+
+def test_canonical_server_still_exposes_no_skill_upload_router() -> None:
+    """A skill bundle is device-local; the shared server must not accept one."""
+    source = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+
+    assert "skill_upload" not in source
+    assert "skills_router" not in source
+
+
+def _documented_error_codes() -> set[str]:
+    contract = (ROOT / "plans" / "SKILL_INSTALLATION_FE_CONTRACT.md").read_text(encoding="utf-8")
+    return set(re.findall(r"`(SKILL_[A-Z_]+|UNAUTHENTICATED)`", contract))
+
+
+def test_every_emittable_skill_error_code_is_documented() -> None:
+    """Neither direction may drift.
+
+    A code the implementation can emit but the contract omits reaches a client
+    that has no branch for it; a documented code the implementation cannot
+    produce sends frontend authors chasing a case that never happens.
+    """
+    from client_backend.api.skill_errors import SKILL_ERROR_STATUS
+
+    documented = _documented_error_codes()
+    emittable = set(SKILL_ERROR_STATUS)
+
+    undocumented = emittable - documented
+    unreachable = {code for code in documented if code.startswith("SKILL_")} - emittable
+
+    assert not undocumented, f"emittable but undocumented: {sorted(undocumented)}"
+    assert not unreachable, f"documented but not emittable: {sorted(unreachable)}"
+
+
+def test_internal_error_codes_never_reach_a_client() -> None:
+    """Internal codes are aliased at the boundary, so they must not be published."""
+    from client_backend.api.skill_errors import SKILL_ERROR_STATUS, publish_code
+    from shared.skills.errors import SKILL_CONFIGURED_ROOT_CONFLICT, SKILL_INSTALL_INVALID
+
+    for internal in (SKILL_CONFIGURED_ROOT_CONFLICT, SKILL_INSTALL_INVALID):
+        assert internal not in SKILL_ERROR_STATUS
+        assert publish_code(internal) in SKILL_ERROR_STATUS
+
+
+def test_documented_operation_phases_match_the_implementation() -> None:
+    from typing import get_args
+
+    from client_backend.schemas.skill_installation import OperationPhase, OperationState
+
+    contract = (ROOT / "plans" / "SKILL_INSTALLATION_FE_CONTRACT.md").read_text(encoding="utf-8")
+    implemented_phases = set(get_args(OperationPhase))
+    implemented_states = set(get_args(OperationState))
+
+    for phase in implemented_phases:
+        assert f"`{phase}`" in contract, f"phase {phase} is not documented"
+    for state in implemented_states:
+        assert f'"{state}"' in contract or f"`{state}`" in contract, f"state {state} undocumented"
+
+
+def test_documented_upload_limits_match_the_settings_defaults() -> None:
+    """A limit table that drifts sends people repackaging archives for no reason."""
+    from client_backend.core.config import ClientSettings
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    fields = ClientSettings.model_fields
+
+    assert str(fields["skill_upload_max_bytes"].default // (1024 * 1024)) + " MiB" in readme
+    assert str(fields["skill_upload_max_entries"].default) not in {""}
+    assert "2,000 entries" in readme
+    assert f"{fields['skill_upload_max_compression_ratio'].default}:1" in readme
+
+
+def test_frontend_contract_examples_use_camel_case_only() -> None:
+    """Every documented data field must match what the models actually serialize."""
+    from client_backend.schemas.skill_installation import (
+        SkillArchivePreview,
+        SkillInstallationOperationModel,
+        SkillUploadRecord,
+    )
+
+    forbidden = set()
+    for model in (SkillArchivePreview, SkillUploadRecord, SkillInstallationOperationModel):
+        forbidden |= {name for name in model.model_fields if "_" in name}
+
+    contract = (ROOT / "plans" / "SKILL_INSTALLATION_FE_CONTRACT.md").read_text(encoding="utf-8")
+    leaked = [name for name in sorted(forbidden) if f'"{name}"' in contract]
+
+    assert not leaked, f"snake_case field names documented as wire fields: {leaked}"

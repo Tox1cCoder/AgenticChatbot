@@ -52,6 +52,12 @@ on them): `POST /client-devices/register`, `POST /client-devices/heartbeat`,
 All routes require the sidecar local session (`Authorization: Bearer
 <localSessionToken>` from the sidecar login response).
 
+Browser ZIP installation has its own dedicated document:
+[`SKILL_INSTALLATION_FE_CONTRACT.md`](SKILL_INSTALLATION_FE_CONTRACT.md) covers the
+upload/operation lifecycle, guarded updates, the full error-code table, polling
+policy, and catalog cache rules. The path-based `install` routes below remain for
+local tooling; a browser has no trustworthy filesystem path to send.
+
 | Endpoint | Purpose |
 |---|---|
 | `GET /skills` | List this device's skills with readiness. |
@@ -63,6 +69,11 @@ All routes require the sidecar local session (`Authorization: Bearer
 | `POST /skills/{name}/setup` | Prepare the Python runtime. Requires `approveSetup: true` + exact `expectedSourceHash`. |
 | `POST /skills/uninstall` | Remove an installed bundle. |
 | `GET /skills/installed` | Installed bundles (device-local paths included). |
+| `POST /skills/uploads` | Upload one skill ZIP for validation and preview. |
+| `DELETE /skills/uploads/{uploadId}` | Discard a staged upload. |
+| `POST /skills/uploads/{uploadId}/install` | Start a new install or guarded update. |
+| `GET /skills/installations/{operationId}` | Poll installation state. |
+| `DELETE /skills/installations/{operationId}` | Cancel before the commit boundary. |
 | `POST /skills/{name}/secrets` | Bind a secret. Body `{"name": "ENV_NAME", "value": "..."}`. |
 | `GET /skills/{name}/secrets` | Configured secret **names** only. |
 | `DELETE /skills/{name}/secrets/{secretName}` | Remove one binding. |

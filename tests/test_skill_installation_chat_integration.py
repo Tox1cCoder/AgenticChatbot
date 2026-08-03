@@ -24,6 +24,7 @@ from app.ai.skill_resolver import list_resolved_skills
 from client_backend.schemas.skill_installation import SkillInstallationRequest
 from client_backend.services.local_skills_registry import LocalSkillsRegistry
 from client_backend.services.skill_catalog import SkillCatalogService
+from client_backend.services.skill_runtime.install import SkillBundleInstaller
 from client_backend.services.skill_runtime.operations import SkillInstallationService
 from client_backend.services.skill_runtime.uploads import SkillUploadService
 
@@ -125,15 +126,21 @@ class _BridgeStub:
 
 @pytest.fixture()
 def sidecar_profile(tmp_path, monkeypatch):
-    """A real sidecar skill stack rooted in a temporary profile."""
-    from client_backend.core.config import client_settings
-    from client_backend.services import local_skills_registry as registry_module
-    from client_backend.services.skill_runtime import install as install_module
+    """A real sidecar skill stack rooted in a temporary profile.
+
+    Everything is patched through the globals of the objects under test rather
+    than through a freshly imported module. ``test_document_upload_proxy_guard``
+    evicts every ``client_backend`` module to prove an import boundary, so a later
+    ``import client_backend...`` can return a different module object -- with its
+    own settings cache -- than the classes imported here already closed over.
+    """
+    registry_globals = LocalSkillsRegistry._resolve_current_user_id.__globals__
+    client_settings = registry_globals["client_settings"]
 
     original_profile_root = client_settings.profile_root
     client_settings.profile_root = str(tmp_path / "profile")
-    monkeypatch.setattr(
-        registry_module,
+    monkeypatch.setitem(
+        registry_globals,
         "get_upstream_auth_service",
         lambda: SimpleNamespace(get_current_user_id=lambda: USER_ID),
     )
@@ -142,14 +149,13 @@ def sidecar_profile(tmp_path, monkeypatch):
         "SkillRuntimeManager",
         _ReadinessManager,
     )
-
     registry = LocalSkillsRegistry(skill_roots=[])
     environment = _EnvironmentManager()
     device_id = str(uuid4())
     bridge = _BridgeStub(device_id)
     bridge.registry = registry
 
-    installer = install_module.SkillBundleInstaller(
+    installer = SkillBundleInstaller(
         registry=registry,
         environment_manager=environment,
         secret_store=_SecretStore(),
