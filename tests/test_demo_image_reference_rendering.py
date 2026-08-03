@@ -42,6 +42,28 @@ def test_relative_reference_falls_back_to_inline_data(monkeypatch):
     assert out == {"src": "data:image/png;base64,QUJD", "name": "img"}
 
 
+def test_protected_fetch_rejects_non_image_content_type(monkeypatch):
+    class Response:
+        headers = {"Content-Type": "text/html; charset=utf-8"}
+        content = b"<html>not an image</html>"
+
+        def raise_for_status(self):
+            return None
+
+    class Session:
+        def get(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr(demo, "get_http_session", lambda: Session())
+
+    result = demo._fetch_protected_image_data_uri.__wrapped__(
+        "/web-images/11111111-1111-4111-8111-111111111111",
+        "token",
+    )
+
+    assert result is None
+
+
 def test_b64_data_field_supported(monkeypatch):
     _patch_st(monkeypatch)
     out = demo._normalize_image_for_gallery(
@@ -153,6 +175,46 @@ def test_failed_protected_fetch_renders_no_fallback(monkeypatch):
     )
 
     assert rendered == []
+
+
+def test_inline_group_preserves_failed_protected_cell_in_place(monkeypatch):
+    rendered: list[str] = []
+    monkeypatch.setattr(
+        demo,
+        "st",
+        SimpleNamespace(
+            session_state={"auth_token": "tok"},
+            markdown=lambda html, **_kwargs: rendered.append(html),
+        ),
+    )
+
+    def fetch(url, _token):
+        if url.endswith("/1"):
+            return "data:image/jpeg;base64,QUJD"
+        return None
+
+    monkeypatch.setattr(demo, "_fetch_protected_image_data_uri", fetch)
+    demo._render_inline_rich_item(
+        {
+            "type": "image_group",
+            "alt_text": "Two selected images",
+            "payload": {
+                "items": [
+                    {"url": "/web-images/1", "mime_type": "image/jpeg"},
+                    {"url": "/web-images/2", "mime_type": "image/jpeg"},
+                ]
+            },
+        },
+        message_metadata={},
+        message_key="m1",
+        auto_mount=False,
+    )
+
+    html = rendered[0]
+    assert html.count('data-role="cell"') == 2
+    assert html.count("<img") == 1
+    assert 'data-state="failed"' in html
+    assert "Visual unavailable" in html
 
 
 class _PlaceholderStub:

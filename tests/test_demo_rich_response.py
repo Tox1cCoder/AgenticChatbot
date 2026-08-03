@@ -133,6 +133,30 @@ def test_cell_failure_replaces_only_that_cell():
     assert "onerror" in html
 
 
+def test_pre_resolved_failed_cells_keep_group_shape():
+    html = build_inline_image_group_html(
+        [
+            {"_load_failed": True, "url": None},
+            {"url": "data:image/jpeg;base64,QUJD", "mime_type": "image/jpeg"},
+        ],
+        alt_text="x",
+    )
+
+    assert html.count('data-role="cell"') == 2
+    assert html.count("<img") == 1
+    assert 'data-state="failed"' in html
+
+
+def test_one_cell_pre_resolved_failure_is_neutral_not_broken_image():
+    html = build_inline_image_group_html(
+        [{"_load_failed": True, "url": None}],
+        alt_text="x",
+    )
+
+    assert "Visual unavailable" in html
+    assert "<img" not in html
+
+
 def test_group_escapes_hostile_metadata():
     hostile = [
         {"url": '/web-images/1" onload="alert(1)', "description": "<script>x</script>"},

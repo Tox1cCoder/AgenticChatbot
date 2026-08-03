@@ -118,13 +118,24 @@ def build_inline_image_group_html(
     usable = [
         cell
         for cell in (cells or [])
-        if isinstance(cell, dict) and str(cell.get("url") or "").strip()
+        if isinstance(cell, dict)
+        and (str(cell.get("url") or "").strip() or cell.get("_load_failed") is True)
     ]
     if not usable:
         return ""
     usable = usable[:INLINE_IMAGE_GROUP_MAX_CELLS]
     if len(usable) == 1:
         cell = usable[0]
+        if cell.get("_load_failed") is True:
+            group_alt = _html.escape(alt_text or "", quote=True)
+            return (
+                f'<figure data-state="failed" aria-label="{group_alt}" '
+                'style="margin:8px 0;width:min(480px, 100%);">'
+                '<div data-role="cell" data-state="failed" style="min-width:0;">'
+                '<div data-role="cell-fallback" style="display:block;padding:12px;'
+                'border-radius:8px;background:#f1f5f9;color:#64748b;font-size:12px;'
+                'text-align:center;">Visual unavailable</div></div></figure>'
+            )
         return build_inline_image_html(
             str(cell.get("url") or ""),
             alt_text=str(cell.get("description") or alt_text or ""),
@@ -135,32 +146,37 @@ def build_inline_image_group_html(
         )
 
     group_alt = _html.escape(alt_text or "", quote=True)
-    # Per-cell failure reveals that cell's own fallback in place, so the row keeps
-    # its shape. When every cell has failed the row is nothing but placeholders,
-    # so the whole figure collapses to one neutral block instead of repeating
-    # "Visual unavailable" two or three times across the answer.
+    # Per-cell failure reveals only that cell's fallback in place. It also removes
+    # the failed cell's source attribution so no caption is stranded without its
+    # image. The row never removes or reorders sibling cells.
     onerror = (
         "const c=this.closest('[data-role=cell]');"
+        "c.dataset.state='failed';"
         "c.querySelector('[data-role=cell-fallback]').style.display='block';"
+        "const cap=c.querySelector('[data-role=cell-caption]');"
+        "if(cap)cap.remove();"
         "this.remove();"
-        "const f=c.closest('figure');"
-        "if(f.querySelectorAll('[data-role=cell] img').length===0){"
-        "f.dataset.state='failed';"
-        "f.querySelectorAll('[data-role=cell]').forEach((n,i)=>{if(i)n.remove()});"
-        "f.style.display='block'}"
     )
     rendered: list[str] = []
     for cell in usable:
-        src = _html.escape(str(cell.get("url") or ""), quote=True)
-        cell_alt = _html.escape(str(cell.get("description") or alt_text or ""), quote=True)
-        link = _source_link_html(cell.get("source_url"))
+        load_failed = cell.get("_load_failed") is True
         fallback = (
-            '<div data-role="cell-fallback" style="display:none;padding:12px;'
+            f'<div data-role="cell-fallback" style="display:{"block" if load_failed else "none"};padding:12px;'
             "border-radius:8px;background:#f1f5f9;color:#64748b;font-size:12px;"
             'text-align:center;">Visual unavailable</div>'
         )
+        if load_failed:
+            rendered.append(
+                '<div data-role="cell" data-state="failed" '
+                f'style="flex:1 1 0;min-width:0;">{fallback}</div>'
+            )
+            continue
+        src = _html.escape(str(cell.get("url") or ""), quote=True)
+        cell_alt = _html.escape(str(cell.get("description") or alt_text or ""), quote=True)
+        link = _source_link_html(cell.get("source_url"))
         caption = (
-            f'<div style="color:#64748b;font-size:12px;margin-top:4px;">{link}</div>'
+            f'<div data-role="cell-caption" '
+            f'style="color:#64748b;font-size:12px;margin-top:4px;">{link}</div>'
             if link
             else ""
         )
