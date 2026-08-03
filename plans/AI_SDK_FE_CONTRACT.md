@@ -1,5 +1,10 @@
 # AI SDK Frontend Contract
 
+For rich items, assistant images, protected media loading, and Streamlit parity,
+the sole normative specification is
+[AI_SDK_FE_RICH_ITEM_CONTRACT.md](AI_SDK_FE_RICH_ITEM_CONTRACT.md). The summary
+below is informational and must not override that contract.
+
 ## Endpoints
 
 | Endpoint | Purpose |
@@ -265,7 +270,7 @@ Rich item upsert (only for requests that sent `inlineRichResponseV1: true`):
 | Item type | Streams transiently? | Delivered via |
 |---|---|---|
 | `live_widget`, `tool_render` | Yes, as each safe tool completes. | Upsert **and** final `data-assistant-message.metadata.rich_items`. |
-| `image` | Never. | Final `data-assistant-message.metadata.rich_items` / history for placement, plus selected image `file` parts for media. |
+| `image`, `image_group` | Never. | Rich-capable clients: final `data-assistant-message.metadata.rich_items` / history only. Compatibility clients: selected AI SDK `file` data only. |
 | `canvas_artifact` | Never. | Final `data-assistant-message.metadata.rich_items` / history only. |
 | Any item whose payload carries inline binary `data` / `base64`, including nested renderer content | Never. | Final / history only. |
 
@@ -313,17 +318,17 @@ exceeded the inline wire budget and was intentionally dropped — show a
 "generating…" affordance and wait for the `final` reference; do not treat it
 as an error.
 
-Previews are ephemeral display state: the authoritative image still arrives as
-`file` parts / `metadata.rich_items` on the final `data-assistant-message`,
-and previews are never persisted to history. Disabled server-side via
+Previews are ephemeral display state: the authoritative final arrives through
+`metadata.rich_items` for rich-capable clients or selected AI SDK file data for
+compatibility clients. Previews are never persisted to history. Disabled server-side via
 `ENABLE_IMAGE_STREAMING=false`; oversized inline partials
 (`IMAGE_STREAM_PREVIEW_MAX_B64_CHARS`) surface as `preview_skipped` while the
 `final` still arrives by reference.
 
 Emitted only on `POST /api/chat/{conversationId}` streams. Resume streams
-(`POST /ai/resume-interrupt`) do not emit image previews — the completed
-image still arrives via `file` parts and `metadata.rich_items` on the final
-`data-assistant-message`. Unlike `data-rich-items`, `data-image-preview`
+(`POST /ai/resume-interrupt`) do not emit image previews — the completed image
+still arrives through the negotiated final projection. Unlike
+`data-rich-items`, `data-image-preview`
 does **not** require `inlineRichResponseV1`; it is emitted for any streaming
 chat request while `ENABLE_IMAGE_STREAMING` is on (clients that do not
 handle it fall under the standard unknown-event rule). Because
@@ -804,11 +809,18 @@ Planning/UX fields:
 
 ### Assistant Images
 
-Selected images are represented twice for v1 rich messages: `image` entries in
-`metadata.rich_items` provide placement/provenance, and AI SDK `file` events /
-`parts[].type === "file"` provide the renderable media payload. The file parts
-are exactly the selected images; unselected candidates are never exposed. Do not
-build an image gallery from legacy metadata.
+For v1 messages, image rendering follows the negotiated capability:
+
+- Rich-capable AI SDK and Streamlit clients render selected `image` and
+  `image_group` records from markers plus final `metadata.rich_items`. They
+  receive no selected-image `file` events/parts.
+- Compatibility AI SDK clients receive marker-free text, no rich registry, and
+  the finalized selected images as standard AI SDK file data.
+
+Unselected candidates are never exposed. Do not build an image gallery from
+legacy metadata for a v1 message. See the normative
+[rich-item contract](AI_SDK_FE_RICH_ITEM_CONTRACT.md) for wire shapes, renderer
+lifecycle, group failure semantics, and Streamlit parity.
 
 Generated/final image media (`file` parts, `data-image-preview` finals, and
 `rich_items[].payload.url` for stored images) is delivered as a **protected
@@ -1098,12 +1110,12 @@ You will not receive them. RAG citations are delivered through
    part `id` and render it under the streaming text, resolving any protected
    reference `url` through the shared authenticated fetch and revoking stale
    Blob URLs on replacement (see Protected Media Rendering). Discard and revoke
-   all previews at `data-assistant-message` / `finish` — the final message's
-   `file` parts and `rich_items` are authoritative.
-9. Render final `file` parts and history image `rich_items` through the custom
-   terminal `file` renderer: protected relative URLs (`/chat-images/{id}`) are
-   fetched with credentials and rendered from a Blob URL (revoked on unmount /
-   `url` change); absolute and `data:` URLs render directly.
+   all previews at `data-assistant-message` / `finish` — the negotiated final
+   projection is authoritative.
+9. Rich-capable clients render final images only through marker-resolved
+   `rich_items`. Compatibility clients render the assembled AI SDK file part
+   once. Resolve protected references through authenticated Blob loading and
+   revoke the Blob URL on replacement/unmount.
 
 ## Live Widgets
 
