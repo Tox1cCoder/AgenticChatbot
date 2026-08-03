@@ -688,7 +688,13 @@ async def test_recovered_records_survive_a_new_service_instance(upload_env):
 
 
 @pytest.mark.asyncio
-async def test_extracted_bundle_is_readable_for_installation(upload_env):
+async def test_extracted_bundle_root_strips_one_wrapper_directory(upload_env):
+    """Zipping a folder is how these archives are made, and it adds a wrapper.
+
+    Asset discovery looks for ``bin/`` directly beneath the bundle root, so
+    treating the extraction directory as the root would install a skill whose
+    commands are invisible.
+    """
     record = await upload_env.service.stage(
         user_id=USER_A,
         filename="demo.zip",
@@ -697,7 +703,50 @@ async def test_extracted_bundle_is_readable_for_installation(upload_env):
 
     bundle_root = upload_env.service.extracted_root(USER_A, record.upload_id)
 
-    assert (bundle_root / "demo" / "SKILL.md").is_file()
+    assert bundle_root.name == "demo"
+    assert (bundle_root / "SKILL.md").is_file()
+    assert (bundle_root / "bin" / "demo.py").is_file()
+    assert record.preview.executable_assets.bin == ["demo.py"]
+
+
+@pytest.mark.asyncio
+async def test_a_flat_archive_keeps_its_extraction_root(upload_env):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("SKILL.md", SKILL_MD)
+        archive.writestr("bin/demo.py", "print('ok')\n")
+
+    record = await upload_env.service.stage(
+        user_id=USER_A,
+        filename="flat.zip",
+        stream=_AsyncReader(buffer.getvalue()),
+    )
+
+    bundle_root = upload_env.service.extracted_root(USER_A, record.upload_id)
+
+    assert bundle_root.name == "extracted"
+    assert record.preview.executable_assets.bin == ["demo.py"]
+
+
+@pytest.mark.asyncio
+async def test_a_multi_entry_root_is_never_stripped(upload_env):
+    """A bundle with bin/ beside skills/ already has its real root."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("skills/demo/SKILL.md", SKILL_MD)
+        archive.writestr("bin/demo.py", "print('ok')\n")
+
+    record = await upload_env.service.stage(
+        user_id=USER_A,
+        filename="nested.zip",
+        stream=_AsyncReader(buffer.getvalue()),
+    )
+
+    bundle_root = upload_env.service.extracted_root(USER_A, record.upload_id)
+
+    assert bundle_root.name == "extracted"
+    assert record.preview.bundle_shape == "nested"
+    assert record.preview.executable_assets.bin == ["demo.py"]
 
 
 @pytest.mark.asyncio

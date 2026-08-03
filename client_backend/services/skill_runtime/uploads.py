@@ -118,6 +118,29 @@ class SkillUploadStateError(SkillUploadError):
         super().__init__(SKILL_UPLOAD_STATE_INVALID, message, status_code=400)
 
 
+def _resolve_archive_bundle_root(extracted: Path) -> Path:
+    """Strip one redundant wrapper directory from an extracted archive.
+
+    Zipping a folder -- the way a person actually produces one of these -- yields
+    ``google-calendar/SKILL.md`` and ``google-calendar/bin/...`` rather than
+    ``SKILL.md`` at the top. The bundle root is what publishes commands: asset
+    discovery looks for ``bin/`` and ``scripts/`` directly beneath it. Treating the
+    extraction directory as the root in that case finds no commands at all and
+    installs a silently inert skill.
+
+    Exactly one leading directory is removed, and only when nothing else sits
+    beside it, so a bundle that legitimately has ``bin/`` next to ``skills/``
+    keeps its real root.
+    """
+    try:
+        entries = list(extracted.iterdir())
+    except OSError:
+        return extracted
+    if len(entries) == 1 and entries[0].is_dir():
+        return entries[0]
+    return extracted
+
+
 def available_bytes(path: Path) -> int:
     """Free bytes on the volume holding ``path``; a seam for tests."""
     probe = path
@@ -308,7 +331,7 @@ class SkillUploadService:
                 status_code=exc.status_code,
             ) from exc
 
-        preview_payload = await self._preview_bundle(extracted)
+        preview_payload = await self._preview_bundle(_resolve_archive_bundle_root(extracted))
         existing = await self._describe_existing_skill(user_id, str(preview_payload["name"]))
         now = self._clock()
         record = SkillUploadRecord(
@@ -396,7 +419,9 @@ class SkillUploadService:
     def extracted_root(self, user_id: str, upload_id: str) -> Path:
         """Return the validated bundle directory for a staged upload."""
         self.get_owned(user_id, upload_id)
-        return self._staging_dir(user_id, upload_id) / _EXTRACTED_DIRNAME
+        return _resolve_archive_bundle_root(
+            self._staging_dir(user_id, upload_id) / _EXTRACTED_DIRNAME
+        )
 
     # ------------------------------------------------------------ transitions
 
