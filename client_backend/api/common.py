@@ -86,18 +86,25 @@ def make_api_response(
     message: str,
     data: Any = None,
     error: dict[str, Any] | None = None,
+    code: str | None = None,
     status_code: int = status.HTTP_200_OK,
 ) -> JSONResponse:
-    """Build a server-style ApiResponse envelope."""
-    return JSONResponse(
-        status_code=status_code,
-        content={
-            "success": success,
-            "message": message,
-            "data": data,
-            "error": error,
-        },
-    )
+    """Build a server-style ApiResponse envelope.
+
+    ``code`` is a stable machine-readable failure identifier for callers that
+    must branch on the kind of error rather than its prose. It is omitted from
+    the body entirely unless supplied, so every existing endpoint's response
+    stays byte-identical.
+    """
+    content: dict[str, Any] = {
+        "success": success,
+        "message": message,
+        "data": data,
+        "error": error,
+    }
+    if code is not None:
+        content["code"] = code
+    return JSONResponse(status_code=status_code, content=content)
 
 
 def rewrite_widget_ws_url(payload: dict[str, Any]) -> dict[str, Any]:

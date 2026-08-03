@@ -2,11 +2,15 @@
 Local skills management endpoints with server-compatible response envelopes.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from urllib.parse import quote
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 
 from client_backend.api.common import make_api_response
+from client_backend.api.skill_errors import response_for_exception
 from client_backend.core.auth import require_local_session
 from client_backend.core.security import LocalSessionPayload
+from client_backend.schemas.skill_installation import SkillInstallationRequest
 from client_backend.schemas.skills import (
     SkillInstallPreviewRequest,
     SkillInstallRequest,
@@ -18,7 +22,15 @@ from client_backend.services.local_skills_registry import get_skills_registry
 from client_backend.services.runtime_bridge import get_runtime_bridge
 from client_backend.services.skill_runtime.install import SkillBundleInstaller
 from client_backend.services.skill_runtime.manager import SkillRuntimeManager
+from client_backend.services.skill_runtime.operations import (
+    SkillOperationError,
+    get_skill_installation_service,
+)
 from client_backend.services.skill_runtime.secrets import SkillSecretStore
+from client_backend.services.skill_runtime.uploads import (
+    SkillUploadError,
+    get_skill_upload_service,
+)
 from shared.skills.errors import SKILL_INSTALL_CONFLICT, SKILL_INSTALL_INVALID, SkillRuntimeError
 
 router = APIRouter(prefix="/skills", tags=["skills"])
@@ -134,6 +146,149 @@ async def preview_skill_install(
         message=f"Skill bundle '{result['name']}' previewed",
         data=result,
     )
+
+
+# --- ZIP upload and asynchronous installation -------------------------------
+#
+# Declared before the dynamic ``/{name}`` routes below. None of these shapes
+# currently collide with one, but keeping the static prefixes first means adding
+# a future ``POST /{name}`` cannot silently capture ``/uploads``.
+
+
+async def _session_user(session: LocalSessionPayload) -> str:
+    """Resolve the profile that owns this request and recover its state once.
+
+    Recovery runs on the first authenticated skill request for a profile rather
+    than at process startup, because at startup there is no user session to scope
+    uploads, receipts, or locks to.
+    """
+    user_id = str(session.user_id)
+    await get_skill_upload_service().ensure_recovered(user_id)
+    await get_skill_installation_service().ensure_recovered(user_id)
+    return user_id
+
+
+@router.post("/uploads", status_code=201)
+async def stage_skill_upload(
+    file: UploadFile = File(...),
+    session: LocalSessionPayload = Depends(require_local_session),
+):
+    """Accept one ZIP, validate and extract it, and return its preview.
+
+    Nothing in the archive is executed here; installation is a separate,
+    explicitly confirmed step.
+    """
+    user_id = await _session_user(session)
+    try:
+        record = await get_skill_upload_service().stage(
+            user_id=user_id,
+            filename=file.filename or "",
+            stream=file,
+        )
+    except SkillUploadError as exc:
+        return response_for_exception(exc)
+    finally:
+        # Starlette spills large uploads to a temporary file; closing is what
+        # removes it, and it must happen whether or not staging succeeded.
+        await file.close()
+
+    return make_api_response(
+        success=True,
+        message="Skill archive staged",
+        data=record.to_api(),
+        status_code=201,
+    )
+
+
+@router.delete("/uploads/{upload_id}")
+async def cancel_skill_upload(
+    upload_id: str,
+    session: LocalSessionPayload = Depends(require_local_session),
+):
+    """Discard a staged upload and its bytes."""
+    user_id = await _session_user(session)
+    try:
+        get_skill_upload_service().delete(user_id, upload_id)
+    except SkillUploadError as exc:
+        return response_for_exception(exc)
+    return make_api_response(
+        success=True,
+        message="Skill upload cancelled",
+        data={"uploadId": upload_id, "state": "cancelled"},
+    )
+
+
+@router.post("/uploads/{upload_id}/install", status_code=202)
+async def start_skill_installation(
+    upload_id: str,
+    payload: SkillInstallationRequest,
+    session: LocalSessionPayload = Depends(require_local_session),
+):
+    """Begin installing a staged upload and return its polling receipt."""
+    user_id = await _session_user(session)
+    try:
+        operation = await get_skill_installation_service().start(user_id, upload_id, payload)
+    except (SkillUploadError, SkillOperationError) as exc:
+        return response_for_exception(exc)
+
+    data = operation.to_api()
+    data["statusUrl"] = f"/skills/installations/{quote(operation.operation_id, safe='')}"
+    return make_api_response(
+        success=True,
+        message="Skill installation started",
+        data=data,
+        status_code=202,
+    )
+
+
+@router.get("/installations/{operation_id}")
+async def get_skill_installation(
+    operation_id: str,
+    session: LocalSessionPayload = Depends(require_local_session),
+):
+    """Report one installation's state.
+
+    A failed installation is still a successful *retrieval*, so this stays HTTP
+    200 with ``state: "failed"``; only an unknown or foreign id is a 404.
+    """
+    user_id = await _session_user(session)
+    try:
+        operation = get_skill_installation_service().get_owned(user_id, operation_id)
+    except SkillOperationError as exc:
+        return response_for_exception(exc)
+    return make_api_response(
+        success=True,
+        message=_operation_message(operation.state),
+        data=operation.to_api(),
+    )
+
+
+@router.delete("/installations/{operation_id}")
+async def cancel_skill_installation(
+    operation_id: str,
+    session: LocalSessionPayload = Depends(require_local_session),
+):
+    """Cancel an installation that has not yet crossed the commit boundary."""
+    user_id = await _session_user(session)
+    try:
+        operation = await get_skill_installation_service().cancel(user_id, operation_id)
+    except SkillOperationError as exc:
+        return response_for_exception(exc)
+    return make_api_response(
+        success=True,
+        message="Skill installation cancelled",
+        data=operation.to_api(),
+    )
+
+
+def _operation_message(state: str) -> str:
+    return {
+        "pending": "Skill installation queued",
+        "running": "Skill installation running",
+        "succeeded": "Skill installed",
+        "failed": "Skill installation failed",
+        "cancelled": "Skill installation cancelled",
+    }.get(state, "Skill installation state retrieved")
 
 
 @router.post("/{name}/setup")

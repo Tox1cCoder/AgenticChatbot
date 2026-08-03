@@ -24,6 +24,7 @@ from client_backend.api.messages import ai_sdk_router
 from client_backend.api.messages import router as messages_router
 from client_backend.api.proxy import router as proxy_router
 from client_backend.api.runtime import router as runtime_router
+from client_backend.api.skill_errors import register_skill_exception_handlers
 from client_backend.api.skills import router as skills_router
 from client_backend.api.web_images import router as web_images_router
 from client_backend.core.config import client_settings, initialize_client_environment
@@ -31,6 +32,7 @@ from client_backend.core.logging import get_logger, setup_logging
 from client_backend.services.local_skills_registry import initialize_skills_registry
 from client_backend.services.runtime_bridge import get_runtime_bridge
 from client_backend.services.server_api import close_server_client
+from client_backend.services.skill_runtime.operations import get_skill_installation_service
 
 logger = get_logger(__name__)
 
@@ -60,6 +62,13 @@ async def lifespan(app: FastAPI):
 
     # Shutdown tasks
     logger.info("Shutting down Client Backend...")
+    # Installation tasks are stopped before the bridge so a half-finished install
+    # cannot try to publish a catalog through a closing connection. Their receipts
+    # stay on disk and are reconciled by recovery on the next start.
+    try:
+        await get_skill_installation_service().shutdown()
+    except Exception as exc:  # noqa: BLE001 - shutdown must continue regardless
+        logger.warning("Skill installation shutdown failed: %s", exc)
     await get_runtime_bridge().stop()
     await close_server_client()
 
@@ -107,6 +116,10 @@ def create_app() -> FastAPI:
         app.include_router(api_router, prefix="/api")
 
     app.include_router(ai_sdk_router)
+
+    # Scoped to /skills and /api/skills inside the handlers; every other route
+    # keeps FastAPI's default error shape.
+    register_skill_exception_handlers(app)
 
     # Root endpoint
     @app.get("/")
