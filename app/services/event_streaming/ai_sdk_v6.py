@@ -497,18 +497,29 @@ class AISDKV6StreamAdapter:
 
     async def _complete(self, data: dict[str, Any]) -> AsyncGenerator[str, None]:
         state = self._state
-        message = data.get("message") or {}
+        original_message = data.get("message") or {}
+        message = original_message
         is_v1 = False
-        if isinstance(message, dict):
+        file_parts: list[dict[str, str]] = []
+        if isinstance(original_message, dict):
             # v1-ness is decided on the original metadata so hidden image
             # candidates cannot fall back onto legacy `images` after the
             # capability projection strips the rich keys.
-            is_v1 = is_v1_rich_items_message(find_message_metadata(message))
-            message = project_ai_sdk_message_for_capability(
-                message,
+            is_v1 = is_v1_rich_items_message(find_message_metadata(original_message))
+            file_parts = visible_image_file_parts(
+                original_message,
+                is_v1=is_v1,
                 inline_rich_response_v1=state.inline_rich_response_v1,
             )
-            message = attach_image_parts_to_message(message, is_v1=is_v1)
+            message = project_ai_sdk_message_for_capability(
+                original_message,
+                inline_rich_response_v1=state.inline_rich_response_v1,
+            )
+            message = attach_image_parts_to_message(
+                message,
+                image_parts=file_parts,
+                is_v1=is_v1,
+            )
 
         if not state.any_text_delta:
             content = message.get("content") or "" if isinstance(message, dict) else ""
@@ -517,9 +528,7 @@ class AISDKV6StreamAdapter:
                 yield _sse({"type": "text-delta", "id": state.text_id, "delta": content})
 
         if isinstance(message, dict):
-            # File parts are sourced before the projection scrubs legacy image
-            # metadata off the wire payload.
-            for file_part in visible_image_file_parts(message, is_v1=is_v1):
+            for file_part in file_parts:
                 yield _sse(
                     {
                         "type": "file",

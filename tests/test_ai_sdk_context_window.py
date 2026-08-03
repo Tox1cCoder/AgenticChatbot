@@ -89,6 +89,29 @@ def _build_assistant_message_with_rich_items() -> SimpleNamespace:
     )
 
 
+def _build_assistant_message_with_selected_image() -> SimpleNamespace:
+    image_url = "/web-images/11111111-1111-4111-8111-111111111111"
+    return SimpleNamespace(
+        id=uuid4(),
+        sender=2,
+        content="Intro\n\n<!--rich:image:tool:c1:0-->\n\nDone",
+        created_at=datetime.now(UTC),
+        message_metadata={
+            "rich_items_version": 1,
+            "rich_items": [
+                {
+                    "id": "image:tool:c1:0",
+                    "type": "image",
+                    "display_policy": "inline_only",
+                    "alt_text": "Selected",
+                    "payload": {"url": image_url, "mime_type": "image/jpeg"},
+                }
+            ],
+            "rich_reference_warnings": [],
+        },
+    )
+
+
 def _build_paginated_result(
     items: list[SimpleNamespace],
     *,
@@ -117,6 +140,19 @@ def _build_message_service(
         limit=limit,
     )
     return service
+
+
+def _history_payload(message: SimpleNamespace, *, capable: bool) -> dict:
+    response = asyncio.run(
+        get_conversation_messages_ai_sdk(
+            uuid4(),
+            _build_message_service([message]),
+            uuid4(),
+            MessagePaginationParams(),
+            inline_rich_response_v1=capable,
+        )
+    )
+    return response.data.messages[0].model_dump(by_alias=True)
 
 
 def test_ai_sdk_messages_route_signature_exposes_pagination_dependency():
@@ -375,6 +411,23 @@ def test_ai_sdk_messages_preserve_rich_v1_fields_with_capability():
     assert "<!--rich:widget:w-1-->" in payload["content"]
     assert payload["metadata"]["rich_items_version"] == 1
     assert payload["metadata"]["rich_items"][0]["id"] == "widget:w-1"
+
+
+def test_ai_sdk_rich_history_uses_image_rich_item_without_file_part():
+    payload = _history_payload(_build_assistant_message_with_selected_image(), capable=True)
+
+    assert payload["metadata"]["rich_items"][0]["type"] == "image"
+    assert all(part["type"] != "file" for part in payload["parts"])
+
+
+def test_ai_sdk_non_rich_history_projects_selected_image_once():
+    payload = _history_payload(_build_assistant_message_with_selected_image(), capable=False)
+
+    assert "rich_items" not in payload["metadata"]
+    assert "<!--rich:" not in payload["content"]
+    files = [part for part in payload["parts"] if part["type"] == "file"]
+    assert len(files) == 1
+    assert files[0]["url"].startswith("/web-images/")
 
 
 def test_group_cells_become_file_parts_in_order():

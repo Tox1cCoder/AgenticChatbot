@@ -247,6 +247,51 @@ async def test_ai_sdk_complete_does_not_emit_unselected_image_file_parts():
     assert "hidden.png" not in content
 
 
+@pytest.mark.asyncio
+async def test_rich_capable_stream_keeps_image_rich_item_without_file_event():
+    selected_url = "/web-images/11111111-1111-4111-8111-111111111111"
+
+    async def source() -> Any:
+        yield make_event(
+            "complete",
+            sequence=1,
+            data={
+                "message": {
+                    "id": "m-image",
+                    "content": "Intro\n\n<!--rich:image:tool:c1:0-->",
+                    "message_metadata": {
+                        "rich_items_version": 1,
+                        "rich_items": [
+                            {
+                                "id": "image:tool:c1:0",
+                                "type": "image",
+                                "display_policy": "inline_only",
+                                "alt_text": "Selected",
+                                "payload": {
+                                    "url": selected_url,
+                                    "mime_type": "image/jpeg",
+                                },
+                            }
+                        ],
+                    },
+                }
+            },
+        )
+
+    state = StreamState(
+        message_id="m-image",
+        text_id="t-image",
+        reasoning_id="r-image",
+        inline_rich_response_v1=True,
+    )
+    response = _build_ui_message_stream_response(lambda: source(), state)
+    content = "".join([chunk async for chunk in response.body_iterator])
+
+    assert '"type":"file"' not in content
+    assert '"rich_items"' in content
+    assert selected_url in content
+
+
 def test_transient_upserts_do_not_accept_unselected_images():
     hidden_image = {
         "id": "image:tool:c1:0",
@@ -308,7 +353,7 @@ async def test_non_capable_stream_does_not_receive_rich_data_parts():
 
 
 @pytest.mark.asyncio
-async def test_non_capable_stream_does_not_receive_v1_selected_image_parts():
+async def test_non_capable_stream_receives_only_v1_selected_image_file_part():
     async def source() -> Any:
         yield make_event(
             "complete",
@@ -347,8 +392,27 @@ async def test_non_capable_stream_does_not_receive_v1_selected_image_parts():
     content = "".join([chunk async for chunk in response.body_iterator])
 
     assert "<!--rich:" not in content
-    assert "selected.png" not in content
     assert '"rich_items"' not in content
+    payloads = [
+        json.loads(line[6:])
+        for line in content.splitlines()
+        if line.startswith("data: ") and line[6:] != "[DONE]"
+    ]
+    file_events = [payload for payload in payloads if payload.get("type") == "file"]
+    assert [payload["url"] for payload in file_events] == [
+        "https://img.test/selected.png"
+    ]
+    terminal = next(
+        payload for payload in payloads if payload.get("type") == "data-assistant-message"
+    )
+    terminal_files = [
+        part
+        for part in terminal["data"]["message"]["parts"]
+        if part.get("type") == "file"
+    ]
+    assert [part["url"] for part in terminal_files] == [
+        "https://img.test/selected.png"
+    ]
 
 
 def _message_row(*, conversation_id, sender: int, content: str) -> SimpleNamespace:

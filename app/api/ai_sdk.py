@@ -29,6 +29,7 @@ from app.services.event_streaming.ai_sdk_projection import (
     is_v1_rich_items_message,
     project_ai_sdk_message_for_capability,
     scrub_legacy_metadata,
+    visible_image_file_parts,
 )
 from app.services.event_streaming.ai_sdk_v6 import (
     AISDKV6StreamAdapter,
@@ -462,12 +463,20 @@ async def get_conversation_messages_ai_sdk(
             # candidates cannot fall back onto legacy `images` after the
             # capability projection strips the rich keys.
             is_v1 = is_v1_rich_items_message(msg.message_metadata)
+            file_parts = visible_image_file_parts(
+                message_payload,
+                is_v1=is_v1,
+                inline_rich_response_v1=rich_response_capable,
+            )
             message_payload = project_ai_sdk_message_for_capability(
                 message_payload,
                 inline_rich_response_v1=rich_response_capable,
             )
-            # Image file parts are extracted before the legacy scrub below.
-            message_payload = attach_image_parts_to_message(message_payload, is_v1=is_v1)
+            message_payload = attach_image_parts_to_message(
+                message_payload,
+                image_parts=file_parts,
+                is_v1=is_v1,
+            )
 
         ensure_leading_text_part(message_payload)
         metadata = message_payload.get("metadata")
