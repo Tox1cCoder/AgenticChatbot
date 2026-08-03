@@ -33,7 +33,10 @@ def test_ai_sdk_contract_documents_html_state_and_iframe():
 def test_ai_sdk_contract_clarifies_image_and_canvas_channels():
     doc = _read("plans/AI_SDK_FE_CONTRACT.md")
     assert "exclusively as `file` parts" not in doc
-    assert "Selected images are represented twice" in doc
+    assert "Selected images are represented twice" not in doc
+    assert "Rich-capable AI SDK and Streamlit clients render selected" in doc
+    assert "receive no selected-image `file` events/parts" in doc
+    assert "Compatibility AI SDK clients receive marker-free text" in doc
     assert "normal `message.metadata.rich_items`" in doc
     assert "Legacy `metadata.canvas_artifact`" in doc
 
