@@ -398,6 +398,67 @@ def test_group_cells_become_file_parts_in_order():
     assert [p["mediaType"] for p in parts] == ["image/jpeg", "image/png"]
 
 
+def _v1_selected_image_message():
+    return {
+        "content": "Intro\n\n<!--rich:image:tool:c1:0-->",
+        "metadata": {
+            "rich_items_version": 1,
+            "rich_items": [
+                {
+                    "id": "image:tool:c1:0",
+                    "type": "image",
+                    "display_policy": "inline_only",
+                    "alt_text": "Selected",
+                    "payload": {
+                        "url": "/web-images/11111111-1111-4111-8111-111111111111",
+                        "mime_type": "image/jpeg",
+                    },
+                }
+            ],
+        },
+    }
+
+
+def test_rich_capable_v1_message_has_no_image_file_parts():
+    from app.services.event_streaming.ai_sdk_projection import visible_image_file_parts
+
+    assert (
+        visible_image_file_parts(
+            _v1_selected_image_message(),
+            is_v1=True,
+            inline_rich_response_v1=True,
+        )
+        == []
+    )
+
+
+def test_non_rich_v1_message_keeps_selected_image_file_parts():
+    from app.services.event_streaming.ai_sdk_projection import visible_image_file_parts
+
+    assert visible_image_file_parts(
+        _v1_selected_image_message(),
+        is_v1=True,
+        inline_rich_response_v1=False,
+    ) == [
+        {
+            "url": "/web-images/11111111-1111-4111-8111-111111111111",
+            "mediaType": "image/jpeg",
+        }
+    ]
+
+
+def test_explicit_empty_image_parts_prevents_rederivation():
+    from app.services.event_streaming.ai_sdk_projection import attach_image_parts_to_message
+
+    projected = attach_image_parts_to_message(
+        _v1_selected_image_message(),
+        image_parts=[],
+        is_v1=True,
+    )
+
+    assert all(part.get("type") != "file" for part in projected.get("parts") or [])
+
+
 def test_group_and_image_duplicates_are_deduplicated():
     metadata = {
         "rich_items_version": 1,

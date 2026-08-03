@@ -290,20 +290,22 @@ def visible_image_file_parts(
     message: dict[str, Any],
     *,
     is_v1: bool | None = None,
+    inline_rich_response_v1: bool = False,
 ) -> list[dict[str, str]]:
     """Resolve the image ``file`` parts a message may expose on the wire.
 
-    For v1 rich-items messages, file parts come only from finalized
-    ``rich_items`` (selected images) so hidden candidates cannot leak — even
-    when the capability projection has already stripped the rich keys for a
-    non-capable client (pass ``is_v1`` computed from the original metadata).
-    Other messages fall back to the persisted legacy image metadata, which is
-    scrubbed from the wire separately.
+    Rich-capable v1 clients render images from markers plus ``rich_items`` and
+    receive no compatibility file parts. Non-rich v1 projections receive only
+    finalized selected images. Callers must invoke this on the original message
+    before capability projection strips rich metadata. Legacy messages fall
+    back to persisted legacy image metadata.
     """
     metadata = find_message_metadata(message)
     if is_v1 is None:
         is_v1 = is_v1_rich_items_message(metadata)
     if is_v1:
+        if inline_rich_response_v1:
+            return []
         return selected_image_file_parts_from_rich_items(metadata)
     return extract_image_file_parts_from_message(message)
 
@@ -311,15 +313,30 @@ def visible_image_file_parts(
 def attach_image_parts_to_message(
     message: dict[str, Any],
     *,
+    image_parts: list[dict[str, str]] | None = None,
     is_v1: bool | None = None,
+    inline_rich_response_v1: bool = False,
 ) -> dict[str, Any]:
-    """Embed the message's visible images as AI SDK ``file`` parts."""
+    """Embed visible images as AI SDK ``file`` parts.
+
+    ``image_parts`` lets an adapter attach a selection computed from the
+    original message after it applies a capability projection. An explicit
+    empty list suppresses attachment; ``None`` derives the selection here.
+    """
     if not isinstance(message, dict):
         return message
 
     payload = dict(message)
-    image_parts = visible_image_file_parts(payload, is_v1=is_v1)
-    if not image_parts:
+    resolved_parts = (
+        list(image_parts)
+        if image_parts is not None
+        else visible_image_file_parts(
+            payload,
+            is_v1=is_v1,
+            inline_rich_response_v1=inline_rich_response_v1,
+        )
+    )
+    if not resolved_parts:
         return payload
 
     existing_parts = payload.get("parts")
@@ -338,7 +355,7 @@ def attach_image_parts_to_message(
         p.get("url") for p in parts if p.get("type") == "file" and isinstance(p.get("url"), str)
     }
 
-    for file_part in image_parts:
+    for file_part in resolved_parts:
         url = file_part["url"]
         if url in existing_urls:
             continue
