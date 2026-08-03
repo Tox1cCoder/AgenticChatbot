@@ -395,3 +395,57 @@ def test_bundle_contains_no_untracked_repository_content(tmp_path):
     assert not unexplained, (
         f"bundle ships files that are neither tracked nor generated: {unexplained}"
     )
+
+
+def _start_script(tmp_path) -> str:
+    from build_client_backend_bundle import build
+
+    bundle_root, _ = build(tmp_path)
+    return (bundle_root / "start-client-backend.ps1").read_text(encoding="utf-8")
+
+
+def test_launcher_reinstalls_on_requirement_content_change_not_mtime(tmp_path):
+    """Timestamps cannot decide this, and getting it wrong looks like a code bug.
+
+    Unzipping a bundle restores the mtime stored in the archive, so a freshly
+    deployed requirements file is routinely *older* than the marker written during
+    the previous run on that machine. A timestamp comparison then skips the
+    install, and the sidecar dies at import on a module its own manifest declares
+    -- which is exactly how a missing dependency was reported from another
+    machine.
+    """
+    script = _start_script(tmp_path)
+
+    assert "Get-FileHash" in script
+    assert "LastWriteTimeUtc" not in script
+
+
+def test_launcher_records_the_install_only_after_pip_succeeds(tmp_path):
+    """A failed install must not be remembered as a completed one."""
+    script = _start_script(tmp_path)
+
+    install_block = script.split("$installedHash -ne $requirementsHash")[1]
+    exit_check = install_block.index("$LASTEXITCODE")
+    marker_write = install_block.index("Set-Content -Path $installMarker")
+
+    assert exit_check < marker_write, "the marker is written before pip's exit code is checked"
+    assert "throw" in install_block[:marker_write]
+
+
+def test_launcher_marker_stores_the_hash_it_compares(tmp_path):
+    script = _start_script(tmp_path)
+
+    assert "Set-Content -Path $installMarker -Value $requirementsHash" in script
+
+
+def test_both_builders_emit_the_same_start_script(tmp_path):
+    """The PowerShell builder embeds its own copy; they must not diverge."""
+    from build_client_backend_bundle import START_PS1_CONTENT
+
+    powershell = (REPO_ROOT / "scripts" / "build-client-backend-bundle.ps1").read_text(
+        encoding="utf-8"
+    )
+    embedded = re.search(r"\$startPs1Content = @'\n(.*?)\n'@", powershell, re.S)
+
+    assert embedded is not None, "the PowerShell builder no longer embeds a start script"
+    assert embedded.group(1).strip().splitlines() == START_PS1_CONTENT.strip().splitlines()
