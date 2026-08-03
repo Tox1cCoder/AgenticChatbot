@@ -163,15 +163,26 @@ if (!(Test-Path $venvPython)) {
     }
 }
 
-$shouldInstall = $true
-if ((Test-Path $installMarker) -and (Test-Path $requirementsPath)) {
-    $shouldInstall = (Get-Item $requirementsPath).LastWriteTimeUtc -gt (Get-Item $installMarker).LastWriteTimeUtc
+# Compare requirement *contents*, not timestamps. Unzipping a bundle restores the
+# mtime recorded in the archive, so a newly deployed requirements file routinely
+# looks older than the marker written during the previous machine's last run, and
+# a timestamp check then skips installing a dependency that was just added. The
+# symptom is the sidecar dying at import on a module the bundle does declare.
+$requirementsHash = (Get-FileHash -LiteralPath $requirementsPath -Algorithm SHA256).Hash
+$installedHash = ""
+if (Test-Path $installMarker) {
+    $installedHash = (Get-Content -LiteralPath $installMarker -Raw).Trim()
 }
 
-if ($shouldInstall) {
+if ($installedHash -ne $requirementsHash) {
     & $venvPython -m pip install --upgrade pip
     & $venvPython -m pip install -r $requirementsPath
-    Set-Content -Path $installMarker -Value (Get-Date).ToString("o") -Encoding UTF8
+    if ($LASTEXITCODE -ne 0) {
+        throw "Installing $requirementsPath failed. The sidecar was not started; fix the error above and run this script again."
+    }
+    # Written only after pip succeeds. Recording it beforehand would mark a
+    # failed install as done and skip every retry.
+    Set-Content -Path $installMarker -Value $requirementsHash -Encoding UTF8
 }
 
 $env:CLIENT_ENV_FILE = (Resolve-Path $ConfigPath).Path
