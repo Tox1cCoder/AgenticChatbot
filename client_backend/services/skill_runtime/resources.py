@@ -22,13 +22,11 @@ path arrives from a model:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
-from client_backend.core.logging import get_logger
 from client_backend.core.paths import is_under_root
 from shared.skills.commands import is_link_like
-
-logger = get_logger(__name__)
 
 # A companion document is prose. This bounds one read, not the bundle: a larger
 # file still installs and still runs, it just is not readable into a prompt.
@@ -60,31 +58,105 @@ class SkillResourceListing:
     truncated: bool
 
 
-def list_skill_resources(bundle_root: Path) -> SkillResourceListing:
+@dataclass(frozen=True)
+class _ReadableResource:
+    relative_path: str
+    content: str
+
+
+def _normalize_resource_path(resource_path: str) -> str:
+    candidate = str(resource_path or "").strip().replace("\\", "/")
+    if not candidate:
+        raise SkillResourceError("resource_path is required.")
+    if candidate.startswith("/") or (len(candidate) > 1 and candidate[1] == ":"):
+        raise SkillResourceError("resource_path must be relative to the skill's own folder.")
+    relative = Path(candidate)
+    if ".." in relative.parts:
+        raise SkillResourceError("resource_path points outside the skill's own folder.")
+    return relative.as_posix()
+
+
+def _reject_link_components(root: Path, relative: Path) -> None:
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if is_link_like(current):
+            raise SkillResourceError("Symbolic links inside a skill bundle are not read.")
+
+
+def _read_policy_resource(bundle_root: Path, resource_path: str) -> _ReadableResource:
+    candidate = _normalize_resource_path(resource_path)
+    root = bundle_root.resolve()
+    relative = Path(candidate)
+    if relative.name in _EXCLUDED_NAMES or _EXCLUDED_DIRS.intersection(relative.parts):
+        raise SkillResourceError(f"'{candidate}' is not readable content.")
+
+    _reject_link_components(root, relative)
+    target = (root / relative).resolve()
+    if not is_under_root(target, root):
+        raise SkillResourceError("resource_path points outside the skill's own folder.")
+    if not target.is_file():
+        raise SkillResourceError(f"'{candidate}' is not a file in this skill.")
+
+    try:
+        with target.open("rb") as stream:
+            raw = stream.read(MAX_RESOURCE_BYTES + 1)
+    except OSError as exc:
+        raise SkillResourceError(f"'{candidate}' could not be read.") from exc
+    if len(raw) > MAX_RESOURCE_BYTES:
+        raise SkillResourceError(
+            f"'{candidate}' is larger than the {MAX_RESOURCE_BYTES // 1024} KB read limit."
+        )
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SkillResourceError(
+            f"'{candidate}' is not a UTF-8 text file. Binary assets ship with the "
+            "skill and can be used by its commands, but cannot be read as text."
+        ) from exc
+    return _ReadableResource(relative.as_posix(), content)
+
+
+def _scan_skill_resources(bundle_root: Path) -> tuple[str, ...]:
+    root = bundle_root.resolve()
+    found: list[str] = []
+    for path in root.rglob("*"):
+        if path.is_dir():
+            continue
+        relative = path.relative_to(root).as_posix()
+        try:
+            readable = _read_policy_resource(root, relative)
+        except SkillResourceError:
+            continue
+        found.append(readable.relative_path)
+    found.sort()
+    return tuple(found)
+
+
+@lru_cache(maxsize=256)
+def _cached_skill_resources(resolved_bundle_root: str, source_hash: str) -> tuple[str, ...]:
+    return _scan_skill_resources(Path(resolved_bundle_root))
+
+
+def list_skill_resources(
+    bundle_root: Path,
+    *,
+    source_hash: str | None = None,
+) -> SkillResourceListing:
     """List readable companion files, relative to the bundle root.
 
     ``SKILL.md`` is included: a nested bundle keeps it at a path the model may
     legitimately want to re-read, and excluding it would make the listing lie.
     """
-    root = bundle_root.resolve()
-    found: list[str] = []
-
-    for path in root.rglob("*"):
-        if not path.is_file() or is_link_like(path):
-            continue
-        relative = path.relative_to(root)
-        if relative.name in _EXCLUDED_NAMES:
-            continue
-        if _EXCLUDED_DIRS.intersection(relative.parts):
-            continue
-        found.append(relative.as_posix())
-
-    # Sorted as strings, not as Path objects: Path comparison is case-insensitive
-    # on Windows, so sorting paths would list a bundle differently depending on
-    # the host and make the advertised order untestable.
-    found.sort()
+    if source_hash:
+        found = _cached_skill_resources(str(bundle_root.resolve()), source_hash)
+    else:
+        found = _scan_skill_resources(bundle_root)
     truncated = len(found) > MAX_LISTED_RESOURCES
-    return SkillResourceListing(paths=found[:MAX_LISTED_RESOURCES], truncated=truncated)
+    return SkillResourceListing(
+        paths=list(found[:MAX_LISTED_RESOURCES]),
+        truncated=truncated,
+    )
 
 
 def read_skill_resource(bundle_root: Path, resource_path: str) -> str:
@@ -98,43 +170,4 @@ def read_skill_resource(bundle_root: Path, resource_path: str) -> str:
         SkillResourceError: The path escapes the bundle, is not a readable
             regular text file, or exceeds the size cap.
     """
-    candidate = str(resource_path or "").strip().replace("\\", "/")
-    if not candidate:
-        raise SkillResourceError("resource_path is required.")
-    if candidate.startswith("/") or (len(candidate) > 1 and candidate[1] == ":"):
-        raise SkillResourceError(
-            "resource_path must be relative to the skill's own folder."
-        )
-
-    root = bundle_root.resolve()
-    target = (root / candidate).resolve()
-
-    # Checked after resolution, not before: only the resolved path reveals where
-    # a chain of `..` segments or an intermediate link actually lands.
-    if not is_under_root(target, root):
-        raise SkillResourceError(
-            "resource_path points outside the skill's own folder."
-        )
-    if is_link_like(target):
-        raise SkillResourceError("Symbolic links inside a skill bundle are not read.")
-    if not target.is_file():
-        raise SkillResourceError(f"'{candidate}' is not a file in this skill.")
-    if _EXCLUDED_DIRS.intersection(target.relative_to(root).parts):
-        raise SkillResourceError(f"'{candidate}' is not readable content.")
-
-    size = target.stat().st_size
-    if size > MAX_RESOURCE_BYTES:
-        raise SkillResourceError(
-            f"'{candidate}' is {size // 1024} KB, larger than the "
-            f"{MAX_RESOURCE_BYTES // 1024} KB read limit."
-        )
-
-    try:
-        return target.read_text(encoding="utf-8")
-    except UnicodeDecodeError as exc:
-        raise SkillResourceError(
-            f"'{candidate}' is not a UTF-8 text file. Binary assets ship with the "
-            "skill and can be used by its commands, but cannot be read as text."
-        ) from exc
-    except OSError as exc:
-        raise SkillResourceError(f"'{candidate}' could not be read.") from exc
+    return _read_policy_resource(bundle_root, resource_path).content

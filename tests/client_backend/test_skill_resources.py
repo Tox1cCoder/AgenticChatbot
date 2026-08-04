@@ -54,6 +54,11 @@ def test_provenance_metadata_is_not_listed(bundle):
     assert "install.json" not in list_skill_resources(bundle).paths
 
 
+def test_provenance_metadata_cannot_be_read_directly(bundle):
+    with pytest.raises(SkillResourceError, match="not readable"):
+        read_skill_resource(bundle, "install.json")
+
+
 def test_listing_is_bounded_and_reports_truncation(tmp_path, monkeypatch):
     # Patched through __globals__, not a fresh import: another test in this
     # directory evicts every client_backend module, after which a re-imported one
@@ -135,6 +140,22 @@ def test_refuses_a_link_out_of_the_bundle(bundle, tmp_path):
     assert "escape.md" not in [path for path in list_skill_resources(bundle).paths]
 
 
+def test_refuses_a_linked_intermediate_directory(bundle, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("secret", encoding="utf-8")
+    link = bundle / "linked"
+    try:
+        os.symlink(outside, link, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlink creation not permitted on this platform")
+
+    with pytest.raises(SkillResourceError, match="link"):
+        read_skill_resource(bundle, "linked/secret.md")
+
+    assert "linked/secret.md" not in list_skill_resources(bundle).paths
+
+
 def test_refuses_a_file_over_the_read_limit(bundle):
     oversized = bundle / "huge.md"
     oversized.write_text("x" * (MAX_RESOURCE_BYTES + 1), encoding="utf-8")
@@ -153,6 +174,28 @@ def test_refuses_binary_content(bundle):
         read_skill_resource(bundle, "model.bin")
 
     assert "UTF-8" in exc_info.value.message
+
+
+def test_oversized_and_binary_files_are_not_advertised(bundle):
+    (bundle / "huge.md").write_text("x" * (MAX_RESOURCE_BYTES + 1), encoding="utf-8")
+    (bundle / "binary.dat").write_bytes(b"\xff\xfe")
+
+    paths = list_skill_resources(bundle).paths
+
+    assert "huge.md" not in paths
+    assert "binary.dat" not in paths
+
+
+def test_manifest_cache_is_bound_to_the_installed_source_hash(bundle):
+    first = list_skill_resources(bundle, source_hash="a" * 64)
+    (bundle / "new.md").write_text("new", encoding="utf-8")
+
+    same_hash = list_skill_resources(bundle, source_hash="a" * 64)
+    new_hash = list_skill_resources(bundle, source_hash="b" * 64)
+
+    assert "new.md" not in first.paths
+    assert same_hash.paths == first.paths
+    assert "new.md" in new_hash.paths
 
 
 def test_cache_directories_are_neither_listed_nor_read(bundle):

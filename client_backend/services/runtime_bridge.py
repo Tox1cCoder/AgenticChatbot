@@ -777,7 +777,10 @@ class RuntimeBridgeService:
         one on demand -- rather than inlining every one of them into every
         activation, which is what the convention exists to avoid.
         """
-        listing = list_skill_resources(skill.bundle_root)
+        listing = list_skill_resources(
+            skill.bundle_root,
+            source_hash=str(getattr(skill, "source_hash", "") or ""),
+        )
         others = [path for path in listing.paths if not path.endswith("SKILL.md")]
         if not others:
             return ""
