@@ -332,10 +332,10 @@ No media failure may fail, replace, truncate, or roll back the assistant text.
 
 ## 11. Attribution and prohibited fallbacks
 
-- `payload.url` is the media reference.
+- `payload.url` is the protected media reference.
 - `payload.source_url` is a clickable attribution link only.
-- `provenance.original_image_url` is diagnostic provenance only.
-- Never fetch or render `source_url` or `original_image_url` as fallback media.
+- `provenance.original_image_url` is not part of the public wire contract.
+- Never fetch or render publisher asset URLs as fallback media.
 - Never expand CSP `img-src` to arbitrary publishers to mask a protected-route
   failure.
 - Never expose unselected candidates or build a legacy gallery for v1 messages.
@@ -347,7 +347,7 @@ The restrictive media CSP is intentional defense in depth.
 The current sidecar OpenAPI must include all four protected paths listed in
 section 7. If `/web-images/{image_id}` or its `/api` alias is missing, the local
 sidecar is stale: rebuild/reinstall and restart it. Do not change frontend CSP or
-use `original_image_url` as a fallback.
+substitute a publisher asset URL as fallback media.
 
 ## 13. FE acceptance checklist
 
@@ -362,5 +362,6 @@ use `original_image_url` as a fallback.
 - [ ] Single-image failure leaves the answer intact.
 - [ ] Group cell failure preserves successful siblings and cell order.
 - [ ] Alt text, structured caption, and source attribution each have one owner.
+- [ ] `original_image_url` is absent from stream and history payloads.
 - [ ] No source/provenance fallback or token leakage exists.
 - [ ] Missing `/web-images` is handled as a stale-sidecar deployment issue.
