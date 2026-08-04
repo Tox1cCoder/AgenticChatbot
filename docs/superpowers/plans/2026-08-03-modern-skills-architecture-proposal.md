@@ -1,138 +1,146 @@
-# Modern Skills Architecture — Proposal
+# Modern Skills Architecture — Verified Proposal
 
-**Status:** Phase 1 shipped 2026-08-03 (`665050e`, `e8e72c4`). Phases 2 and 3 remain
-proposals, awaiting direction. The open questions at the bottom are answered.
+**Status:** Re-audited against the codebase on 2026-08-04. Progressive
+disclosure and collection installation are shipped and production-hardened.
+Identity, persisted collection provenance, specification fidelity, and catalog
+scaling remain follow-up work.
 
-**Goal:** make the sidecar's skill system work with skills as they are actually
-written and distributed today (the Agent Skills / Claude Code convention), while
-keeping the device-local execution, approval, and secret model that this system
-already has and Claude Code does not.
+**Goal:** support skills as they are distributed in modern Agent Skills and
+Claude Code repositories while preserving this system's stronger device-local
+execution, approval, secret-isolation, and hash-bound installation model.
 
-## What "modern skills" actually look like
+## What modern skill distributions look like
 
-Measured from `superpowers-main.zip` (obra/superpowers v6.2.0, 14 skills), which
-is a representative current library rather than a guess:
+The checked-in reference test can inspect `superpowers-main.zip` (obra/superpowers
+v6.2.0) when that local fixture is present. It contains 14 skills under one
+repository and companion documents/scripts beyond each `SKILL.md`.
 
-| Property | What the ecosystem does |
+| Property | Common distribution shape |
 |---|---|
-| Frontmatter | `name` and `description` only. The description is a *trigger*: "You MUST use this before any creative work…" |
-| Body | A short router, not the whole method |
-| Companion files | Every non-trivial skill ships them: `root-cause-tracing.md`, `defense-in-depth.md`, `condition-based-waiting.md`, `visual-companion.md`, example `.ts`, `find-polluter.sh` |
-| Distribution | One git repo = one **collection** of many skills, with `.claude-plugin/plugin.json` (name, version, author, license, homepage) |
-| Multi-harness | The same repo carries `.claude-plugin`, `.codex-plugin`, `.cursor-plugin`, `.pi`, `.opencode`, `.agents` |
-| Cross-references | Skills name each other: `superpowers:brainstorming` |
+| Frontmatter | `name` and `description`, sometimes with harness-specific optional fields |
+| Body | A short router that points to supporting material |
+| Companion files | Reference Markdown, examples, scripts, and other bundle-owned assets |
+| Distribution | One repository/archive containing a collection of skills |
+| Multi-harness metadata | `.claude-plugin`, `.codex-plugin`, `.cursor-plugin`, and similar manifests |
+| Cross-references | One skill may instruct the model to activate another skill |
 
-The load-bearing idea is **progressive disclosure**: `SKILL.md` stays small and
-says *when* to read `references/x.md`; the agent reads the rest on demand. That is
-what keeps a 14-skill library from consuming the context window.
+The load-bearing pattern is **progressive disclosure**: activation supplies the
+small router and a manifest; supporting text is read only when needed.
 
-## Where this system stands
+## Verified implementation state
 
-Verified against the code, not assumed:
+The findings below were rechecked against the production paths and tests, not
+inferred from the reference archive alone.
 
-| # | Gap | Evidence | Consequence |
+| # | Finding | Current evidence | Status / consequence |
 |---|---|---|---|
-| G1 | **No progressive disclosure.** `activate_skill` returns the entire `SKILL.md` body and nothing else can be read | `app/ai/skills_tool.py` returns `content`; no reader for bundled files exists anywhere in `app/` or `client_backend/` | A skill's companion files are dead weight — shipped, never readable. Authors must inline everything into `SKILL.md`, which is exactly what the convention avoids |
-| G2 | **One archive installs one skill** | `install.py::_discover_source` requires exactly one `SKILL.md` | Every real collection is rejected. This is the error you hit |
-| G3 | **No provenance, version, or update path** | `install.json` records `bundle_name`, `source_hash`, `source` | Cannot answer "is this current?" or "update my superpowers skills" |
-| G4 | **Flat namespace** | `LocalSkillsRegistry.skills` is keyed by bare name | Two collections owning a `brainstorming` skill silently collide |
-| G5 | **Frontmatter narrower than the ecosystem's** | `shared/skills/front_matter.py` parses `name`, `description`, `category`, `tags` | `allowed-tools` is ignored, so a skill's own tool restrictions are not honored |
-| G6 | **All skill summaries go in every system prompt** | `get_available_skill_summaries` | Fine at 14 skills; a few hundred is a context problem with no search path |
+| G1 | Progressive disclosure | `skill_runtime/resources.py` uses one policy for listing and reading; the runtime bridge binds reads to user, device, session, skill, and source hash | **Closed.** Links, escapes, generated metadata, excluded directories, oversized files, binary data, and invalid UTF-8 are neither advertised nor readable. Listings are cached by resolved bundle root plus source hash. |
+| G2 | Collection install | `collection.py` preserves each discovered bundle/member path; `transactions.py` stages every member, journals promotion, rolls back in reverse, and recovers after restart | **Closed.** One upload can install multiple skills as one logical transaction. Catalog refresh and uninstall share the mutation lock, so partial promotion is not published. |
+| G3 | Provenance, version, and updates | `install.json` persists per-skill source hash/name/source; replacement already requires a previewed current hash | **Partly open.** Guarded updates exist, but collection identity/version/origin are not persisted as a lifecycle object and there is no update-discovery endpoint. |
+| G4 | Flat namespace | `LocalSkillsRegistry.skills` is keyed by bare skill name | **Open.** Same-name skills cannot coexist; configured-root conflicts are rejected rather than silently overwritten. |
+| G5 | Agent Skills specification fidelity | `front_matter.py` validates portable names and parses `name`, `description`, `category`, and comma-separated `tags` | **Open.** It does not preserve unknown fields or validate the complete current specification (including description bounds and name/directory agreement). `allowed-tools` is experimental pre-approval metadata in the Agent Skills specification, not a restrictive security allowlist; treating it as an execution sandbox would be incorrect. |
+| G6 | Catalog scale | `get_available_skill_summaries` supplies all enabled summaries to the model | **Open, measurement required.** There is no lookup/search path. A switch threshold must come from measured prompt cost and retrieval quality, not an arbitrary skill count. |
 
-**G1 and G2 are closed** by Phase 1 below. G3–G6 stand as written.
+Existing guarantees that future phases must preserve:
 
-Two things this system already does that Claude Code does **not**, and which the
-proposal must not regress: device-scoped execution with per-skill approval and
-encrypted secrets, and hash-bound atomic installation.
+- execution stays device-, user-, session-, tool-instance-, and source-hash-bound;
+- secrets remain encrypted and local to one profile and are injected only for the
+  selected skill;
+- command selection is confined, approval still applies, and no shell/global
+  executable fallback is introduced;
+- upload members and model-requested resources remain path-confined; and
+- installs are recoverable logical transactions. No filesystem can provide one
+  atomic rename across N independent destination paths, so the journal and
+  rollback protocol—not the word “atomic” by itself—is the production guarantee.
 
-## Proposal
+## Delivered hardening (2026-08-04)
 
-### Phase 1 — make real skill libraries usable (the unblock) — SHIPPED
+### Resource reads
 
-**1.1 `read_skill_resource(skill, path)`** — the keystone. Shipped in `665050e`:
-`client_backend/services/skill_runtime/resources.py`, routed through
-`client_skill::read_resource`, exposed by `app/ai/skills_tool.py`.
+`read_skill_resource(skill, path)` is routed through the selected device. The
+same policy loader drives both the activation manifest and the read itself, so a
+listed path cannot later bypass a stricter read rule. Only regular UTF-8 text
+within the selected bundle is exposed, with a 256 KiB per-read limit and a
+bounded manifest.
 
-A device-scoped tool that returns one text file from inside an installed bundle.
-Confinement mirrors `run_skill_command`: resolve only under that skill's bundle
-root, refuse links and escapes, cap the size, text only. Without it, every
-companion file in every modern skill is unreachable.
+### Collection discovery and identity preservation
 
-Activation changes shape with it: `activate_skill` returns the router body plus a
-manifest of readable resources, and the model pulls what it needs.
+Upload preview records the exact archive-relative bundle and `SKILL.md` member
+for every discovered skill. Installation revalidates those confined members
+instead of rediscovering a different skill later. Older persisted uploads remain
+readable through deterministic fallback discovery.
 
-**1.2 Collection install.** Shipped in `e8e72c4`:
-`client_backend/services/skill_runtime/collection.py`, with the all-or-nothing
-install loop and rollback in `operations.py`.
+### Transactional installation and recovery
 
-Accept an archive containing many skills. Preview lists every skill found, with
-per-skill existing-collision state; approval is one decision for the set;
-installation is atomic across the set (all or none), recording a shared
-`collection_id`. Per-skill enable/disable afterwards, as today.
+All members are prepared before mutation. Promotion runs under one profile
+mutation lock with a durable journal containing the complete expected name/hash
+set. A failure restores prior bundles, runtimes, and secrets in reverse order.
+On restart, recovery accepts success only when the journal is committed and
+every expected installed hash matches; incomplete cleanup remains retryable.
+The terminal operation receipt is persisted before its journal is finalized.
 
-This is the difference between "zip 14 folders one at a time" and "install
-superpowers".
+### Catalog isolation
+
+Catalog refresh and uninstall use the same mutation scope as installation. Stage
+and backup directories are excluded from registry discovery, preventing a
+concurrent scan from publishing partial or internal transaction state.
+
+## Recommended follow-up phases
 
 ### Phase 2 — identity and lifecycle
 
-**2.1 Namespaced identity.** `collection:skill`, with a bare name resolving when
-unambiguous and erroring when not. Required before two libraries can coexist.
+1. Introduce a stable `collection:skill` identity. Allow a bare name only when it
+   resolves unambiguously, with an explicit migration for existing catalogs,
+   stored selections, tool names, secrets, and audit records.
+2. Persist collection name, version, manifest kind, and user-visible origin in a
+   collection record. Keep absolute local paths out of synchronized metadata.
+3. Add update preview as a first-class operation using the existing guarded
+   replacement and transaction machinery. Keep upload-only acquisition unless a
+   separately reviewed network-fetch policy is introduced.
 
-**2.2 Provenance and versioning.** Record collection name, version, and origin
-(URL or filename) in `install.json`; surface them in the catalog; add
-`GET /skills/updates` comparing installed versions against a re-fetched source.
+### Phase 3 — specification fidelity
 
-**2.3 Update as a first-class operation.** Reuse the guarded-replacement machinery
-already built: preview → hash-bound confirm → atomic swap, per skill or per
-collection.
+1. Parse frontmatter with a bounded safe YAML implementation or an equivalently
+   strict schema parser. Validate required values, length limits, portable name,
+   and skill-directory agreement.
+2. Preserve bounded unknown metadata for forward compatibility without allowing
+   it to affect security decisions implicitly.
+3. If `allowed-tools` is supported, model it as pre-approval guidance only. The
+   platform's own device binding, tool policy, and HITL rules remain authoritative.
+4. Define namespaced skill-to-skill activation and detect recursion/cycles.
 
-### Phase 3 — fidelity and scale
+### Phase 4 — measured catalog scaling
 
-**3.1 Honor `allowed-tools`.** Parse it, and enforce it when a skill is active.
-Currently a skill can declare restrictions that nothing applies.
+Instrument enabled-skill count, prompt tokens, activation success, and lookup
+quality. Add indexed lookup only after defining latency and recall targets; keep
+small catalogs inline when that is cheaper and more reliable.
 
-**3.2 Forward-compatible frontmatter.** Preserve unknown keys instead of dropping
-them, so a skill written for a newer convention still installs.
+## Risk register
 
-**3.3 Skill-to-skill activation.** Let an active skill name another
-(`superpowers:brainstorming`); resolve through the same allowlist a custom agent
-already has.
-
-**3.4 Search over injection, past a threshold.** Beyond ~50 skills, inject names
-and one-line descriptions only and add a lookup tool.
-
-## Sequencing rationale
-
-Phase 1 is what makes the system usable with libraries that exist today, and both
-items are additive — no existing contract changes. Phase 2 is what makes it
-maintainable once more than one library is installed; it touches the registry key,
-so it wants to land before people accumulate skills. Phase 3 is fidelity work with
-no user-visible blocker behind it.
-
-## Cost and risk
-
-| Item | Rough size | Main risk |
+| Risk | Current control | Remaining action |
 |---|---|---|
-| 1.1 read_skill_resource | small–medium | Another file-read surface on the device; confinement must match the command runtime's |
-| 1.2 Collection install | medium | Atomicity across N skills, and a preview UI that stays comprehensible at N=14 |
-| 2.1 Namespacing | medium | Touches registry keys, catalog projection, resolver, and the model-facing tool names |
-| 2.2/2.3 Versioning + update | medium | Re-fetching a source implies network access from the sidecar |
-| 3.x | small each | Enforcement changes behavior for already-installed skills |
+| Host compromise by an approved command | Constrained argv resolution, scoped environment/secrets, HITL, audit | This is not an OS sandbox. Use a subprocess/container sandbox only if the product threat model requires untrusted code. |
+| Partial multi-skill state | Pre-staging, shared mutation lock, durable journal, reverse rollback, restart recovery | Keep transaction failure-injection and recovery tests mandatory. |
+| Same-name collection collision | Conflict rejection and guarded replacement | Namespaced identity and migration. |
+| Stale/tampered preview | Exact member receipt plus expected source hashes revalidated at install | Preserve the receipt schema compatibility tests. |
+| Prompt growth | Summary-only injection | Measure and design lookup before setting a threshold. |
+| Metadata semantic drift | Known-field parser and portable-name validation | Complete specification conformance; never infer security authority from unknown metadata. |
 
-## Open questions — decided 2026-08-03
+## Decisions retained
 
-1. **One unit.** A collection installs together: one approval, atomic across the set,
-   rollback on any failure. A partial 9-of-14 install is a state nobody asked for.
-   Per-skill enable/disable still applies afterwards.
-2. **Upload-only.** The sidecar executes local code; adding outbound fetch would buy
-   convenience with SSRF surface. Rejected rather than deferred — revisit only with a
-   pinned-host allowlist.
-3. **Streamlit is enough for the first pass.** `/api/skills/*` is the contract and is
-   byte-identical for both frontends, so the AI SDK path can implement it against
-   `plans/SKILL_INSTALLATION_FE_CONTRACT.md` without a second UI blocking Phase 1.
+1. **One approval and one logical transaction per collection.** Per-skill
+   enable/disable remains available after install.
+2. **Upload-only acquisition.** The sidecar does not fetch arbitrary URLs; that
+   avoids adding SSRF and source-authentication policy to a local code installer.
+3. **The HTTP contract is frontend-independent.** Streamlit and AI SDK clients
+   use the same `/api/skills/*` behavior described in
+   `plans/SKILL_INSTALLATION_FE_CONTRACT.md`.
 
-## Verified against a real library
+## Reference-library verification boundary
 
-`superpowers-main.zip` (obra/superpowers v6.2.0): collection identified as
-`superpowers` v6.2.0, 14 skills discovered, 1 symbolic link skipped, all 14 installed
-in one operation. This archive previously could not be installed at all (G2).
+When `superpowers-main.zip` is present locally, the collection test verifies its
+manifest and all 14 discovered skills. Transaction tests use controlled
+multi-skill fixtures to prove commit, rollback, update restoration, and restart
+recovery. The reference archive is not a permanent repository fixture, so this
+document intentionally does not claim that an end-to-end 14-skill installation
+runs in every checkout.

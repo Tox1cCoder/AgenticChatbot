@@ -6,7 +6,6 @@ import asyncio
 import contextlib
 import hashlib
 import json
-import os
 import shutil
 import uuid
 from dataclasses import dataclass
@@ -392,67 +391,6 @@ class SkillBundleInstaller:
             previous_source_hash=existing.source_hash if existing is not None else None,
         )
 
-    async def _install_locked(
-        self,
-        source: str | Path | DiscoveredSkill,
-        *,
-        user_id: str,
-        expected_source_hash: str | None,
-        approve_setup: bool,
-        replace_source_hash: str | None,
-        source_kind: Literal["path", "upload"],
-        observer: SkillInstallObserver | None,
-    ) -> dict:
-        """Prepare and atomically promote one bundle while holding its lock."""
-        discovered = await self._as_discovered(source)
-        prepared = await self.prepare_install(
-            SkillInstallSpec(
-                discovered=discovered,
-                expected_source_hash=expected_source_hash,
-                approve_setup=approve_setup,
-                replace_source_hash=replace_source_hash,
-                source_kind=source_kind,
-            ),
-            observer=observer,
-            user_id=user_id,
-        )
-        try:
-            await self._notify(observer, "committing")
-            if observer is not None:
-                await observer.before_commit()
-
-            if prepared.previous is not None and prepared.previous.exists():
-                await asyncio.to_thread(os.replace, prepared.previous, prepared.backup)
-            try:
-                await asyncio.to_thread(os.replace, prepared.stage, prepared.target)
-            except Exception:
-                if prepared.backup.exists() and not prepared.previous.exists():
-                    await asyncio.to_thread(os.replace, prepared.backup, prepared.previous)
-                raise
-            if prepared.backup.exists():
-                await asyncio.to_thread(shutil.rmtree, prepared.backup)
-        except Exception:
-            if prepared.stage.exists():
-                await asyncio.to_thread(shutil.rmtree, prepared.stage)
-            raise
-
-        if prepared.previous_source_hash and prepared.previous_source_hash != prepared.source_hash:
-            with contextlib.suppress(Exception):
-                await asyncio.to_thread(
-                    self._environment.remove_runtime,
-                    prepared.name,
-                    prepared.previous_source_hash,
-                )
-
-        await self._registry.refresh()
-        return {
-            "name": prepared.name,
-            "install_id": prepared.target.name,
-            "source_hash": prepared.source_hash,
-            "runtime_status": prepared.runtime_status,
-            "action": prepared.action,
-        }
-
     def _resolve_replacement_action(
         self,
         name: str,
@@ -662,9 +600,6 @@ class SkillBundleInstaller:
                 f"bundle must contain exactly one SKILL.md file; found {len(skill_files)}",
             )
         return DiscoveredSkill(bundle_root=source_path, skill_file=skill_files[0])
-
-    async def _discover_source(self, source: str | Path) -> tuple[SkillMetadata, str]:
-        return await self._load_discovered_skill(await self._as_discovered(source))
 
     async def _load_discovered_skill(
         self,

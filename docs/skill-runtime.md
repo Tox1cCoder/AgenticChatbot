@@ -141,16 +141,29 @@ available disk space. An unknown, expired, or foreign upload id returns the same
 `expectedSourceHash` the user previewed, `approveSetup` for a Python project, and
 `replaceSourceHash` to overwrite an existing skill. Replacement is permitted only
 for bundles under the profile's installed root; a skill from a configured root is
-never rewritten. The work runs asynchronously against a persisted receipt:
+never rewritten. For collections, the receipt preserves each exact previewed
+bundle and `SKILL.md` member; install revalidates those paths and hashes instead
+of rediscovering archive contents. The work runs asynchronously against a
+persisted receipt:
 
 `validating` -> `waitingForLock` -> `copying` -> `preparingRuntime` ->
 `committing` -> `refreshingCatalog` -> `syncingCatalog`
 
-Cancellation is honored until the atomic promotion begins and reports
-`SKILL_OPERATION_COMMITTED` afterwards. A process killed mid-install is
-reconciled on the next start by comparing the operation's source hash against
-what is actually installed, so an interrupted operation resolves to the outcome
-that really happened rather than to its last recorded state.
+Cancellation is honored until promotion begins and reports
+`SKILL_OPERATION_COMMITTED` afterwards. Every member is staged before filesystem
+mutation. Promotion then holds one profile mutation lock and persists a durable
+journal after each backup and rename. On failure it restores the previous set in
+reverse order, including prior runtime and secret state. A process killed
+mid-install is reconciled on the next start from that journal. Recovery reports
+success only if every expected skill name/source-hash pair is installed; it does
+not infer collection success from one matching member. The terminal operation
+receipt is persisted before the completed journal is removed.
+
+This is a recoverable logical transaction, not a claim that several independent
+destination paths can be renamed atomically by the operating system. Catalog
+refresh and uninstall take the same mutation lock, and internal stage/backup
+directories are ignored by registry discovery, so partial transaction state is
+not published.
 
 Publishing the catalog to the canonical server is best-effort and reported as
 `catalogSyncStatus`; a committed local install with a failed sync is a success

@@ -797,7 +797,9 @@ The frontend owns component rendering. Unknown render types must fall back to JS
 
 ## Skills System
 
-Skills are markdown files with YAML frontmatter describing a capability (name, description, allowed-tools, optional arguments). They are loaded by:
+Skills are Markdown files with YAML frontmatter describing a capability. The
+current parser accepts `name`, `description`, `category`, and comma-separated
+`tags`; unsupported metadata is not treated as a security policy. They are loaded by:
 
 - **Client (only source of skills)** — [`LocalSkillsRegistry`](client_backend/services/local_skills_registry.py), scanning `CLIENT_SKILLS_ROOTS`; synced per-device to the server and resolved at chat time by [`skill_resolver.py`](app/ai/skill_resolver.py) strictly for the originating device.
 - To serve this repo's `skills/` folder during development, add its absolute path to the local sidecar's `CLIENT_SKILLS_ROOTS`.
@@ -874,9 +876,13 @@ are the target path.
 
 **One archive may install a whole library.** A downloaded skill repository holding
 many skills installs as one unit: the preview lists every skill it found, one
-approval covers the set, and a failure rolls back whatever that operation already
-installed. The library's name and version come from its plugin manifest
-(`.claude-plugin/plugin.json` and the equivalents for other harnesses).
+approval covers the set, all members are staged before promotion, and a durable
+journal restores the previous complete set after a failure or interrupted
+process. Catalog refresh and uninstall share the same mutation lock, so stage,
+backup, or partially promoted members are never published. The library's preview
+name and version come from its plugin manifest (`.claude-plugin/plugin.json` and
+the equivalents for other harnesses); collection-level provenance is not yet a
+persisted lifecycle object.
 
 **Skills can disclose their own files.** A skill in the current convention keeps
 `SKILL.md` short and points at companion documents. Activation lists those files
@@ -1470,7 +1476,21 @@ pwsh -File scripts/build-client-backend-bundle.ps1
 ```
 
 The bundle scripts generate artifacts under the ignored
-`dist/client-backend-bundle/` directory. `pyproject.toml` defines the console script:
+`dist/client-backend-bundle/` directory. The PowerShell and Python builders copy
+the same tracked templates from `scripts/client-backend-bundle/`; edit those
+templates instead of embedding launcher text in either builder.
+
+On Windows, run `start-client-backend.bat` (Explorer/cmd) or
+`./start-client-backend.ps1` (PowerShell). The launcher supports Windows
+PowerShell 5.1 and PowerShell 7 without relying on `Get-FileHash`. It selects
+Python 3.10+, creates or repairs the bundle-owned `.venv`, bootstraps missing pip
+with `ensurepip`, and installs `requirements-client.txt` only when its SHA-256 or
+the interpreter major/minor changes. The marker is written only after a
+successful install. If the venv is corrupt, only the bundle-owned `.venv` is
+replaced; `.env.client` is preserved. Launcher and sidecar failures propagate as
+non-zero exit codes.
+
+`pyproject.toml` defines the console script:
 
 ```toml
 [project.scripts]

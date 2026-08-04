@@ -20,18 +20,15 @@ from client_backend.core.paths import (
 from client_backend.services.upstream_auth import get_upstream_auth_service
 from shared.skills.commands import is_link_like, is_supported_bundle_command
 from shared.skills.front_matter import (
-    extract_yaml_value,
     is_valid_skill_name,
     parse_skill_front_matter,
-    split_front_matter,
 )
 from shared.skills.hashing import compute_skill_bundle_hash
 
 logger = get_logger(__name__)
 
-# Fields we're willing to echo back from install_metadata. Task 4 (the
-# installer) owns the real shape of this dict; this is a thin, defensive
-# allow-list so a scanned SkillMetadata never round-trips something unsafe.
+# Fields we're willing to echo back from install metadata. This defensive
+# allow-list prevents scanned metadata from round-tripping unsafe values.
 _SAFE_INSTALL_SUMMARY_KEYS = ("installed", "source_hash", "bundle_name", "source")
 
 # Matches POSIX-style ("/..."), Windows drive-letter ("C:\..." / "C:/..."),
@@ -47,8 +44,8 @@ def _looks_like_absolute_path(value: object) -> bool:
     Checks the whole string and each whitespace-delimited token, so a path
     embedded in a larger string (e.g. ``"copied from C:\\Users\\x"``) is caught,
     not only a value that is itself a bare path. This backstops the redaction
-    in :meth:`SkillMetadata._install_summary` regardless of how Task 4's
-    installer shapes ``install_metadata``.
+    in :meth:`SkillMetadata._install_summary` regardless of how the installer
+    shapes ``install_metadata``.
     """
     if not isinstance(value, str):
         return False
@@ -77,8 +74,8 @@ class SkillMetadata:
     enabled: bool = True
     category: str | None = None
     tags: list[str] = None
-    # Reserved for the Task 4 installer to populate (source hash, bundle name,
-    # etc.). Always None for freshly scanned skills; declared here so
+    # Populated by the installer (source hash, bundle name, etc.). Always None
+    # for freshly scanned configured-root skills; declared here so
     # to_dict()/to_sync_dict() have a stable, redacted place to surface it.
     install_metadata: dict | None = None
 
@@ -471,32 +468,6 @@ class LocalSkillsRegistry:
     def _compute_source_hash(bundle_root: Path) -> str:
         return compute_skill_bundle_hash(bundle_root, link_checker=is_link_like)
 
-    @staticmethod
-    def _split_front_matter(raw: str) -> tuple[str, str] | None:
-        """
-        Split a SKILL.md file into YAML block and body.
-
-        Returns (yaml_block, body) if valid front matter delimiters are found,
-        or None if the file does not start with a valid ``---`` block.
-        Mirrors the server-side ``SkillsRegistry._split_front_matter`` exactly.
-        """
-        return split_front_matter(raw)
-
-    @staticmethod
-    def _extract_yaml_value(yaml_block: str, key: str) -> str | None:
-        """
-        Extract a simple scalar or folded multi-line value from a YAML block.
-
-        Handles:
-          name: simple-value
-          description: >
-            multi-line
-            folded text
-
-        Mirrors the server-side ``SkillsRegistry._extract_yaml_value`` exactly.
-        """
-        return extract_yaml_value(yaml_block, key)
-
     async def reload_skill(self, skill_name: str) -> bool:
         """
         Reload a specific skill from disk.
@@ -663,8 +634,8 @@ class LocalSkillsRegistry:
         else:
             roots = list(client_settings.skills_roots)
 
-        # Installed bundles (Task 4's SkillBundleInstaller) live under the
-        # active user's profile, not CLIENT_SKILLS_ROOTS, so they must be
+        # Installer-managed bundles live under the active user's profile, not
+        # CLIENT_SKILLS_ROOTS, so they must be
         # scanned unconditionally here. The directory only exists once a bundle
         # has actually been installed, so it is tracked as implicit and its
         # absence is not reported as a misconfiguration.
