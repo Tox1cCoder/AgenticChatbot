@@ -177,6 +177,41 @@ def test_finalize_noop_when_auto_place_disabled(monkeypatch):
     assert finalize_article_content(response, content) == content
 
 
+def test_unknown_image_marker_is_removed_when_auto_place_is_disabled(monkeypatch):
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    monkeypatch.setattr(settings, "rich_auto_place_enabled", False)
+    content = "Answer\n\n<!--rich:image:not-selected-->"
+    response = _make_response(
+        content,
+        candidates=[_image_candidate(item_id="image:selected")],
+    )
+
+    finalized = finalize_article_content(response, content)
+
+    assert "image:not-selected" not in finalized
+    assert "<!--rich:" not in finalized
+    assert response.message.content == finalized
+
+
+def test_marker_integrity_keeps_selected_images_and_unknown_widgets(monkeypatch):
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    monkeypatch.setattr(settings, "rich_auto_place_enabled", False)
+    content = (
+        "Answer\n\n"
+        "<!--rich:image:selected-->\n\n"
+        "<!--rich:widget:external-->"
+    )
+    response = _make_response(
+        content,
+        candidates=[_image_candidate(item_id="image:selected")],
+    )
+
+    finalized = finalize_article_content(response, content)
+
+    assert "<!--rich:image:selected-->" in finalized
+    assert "<!--rich:widget:external-->" in finalized
+
+
 def test_finalize_noop_without_capability(monkeypatch):
     monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
     monkeypatch.setattr(settings, "rich_auto_place_enabled", True)

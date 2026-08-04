@@ -752,6 +752,32 @@ class _TavilyStyleTool:
         )
 
 
+class _ManyWebImagesTool:
+    def __init__(self, *, provider: str) -> None:
+        self.provider = provider
+
+    async def ainvoke(self, args):
+        return json.dumps(
+            {
+                "provider": self.provider,
+                "query": args.get("query", "team roster"),
+                "images": [
+                    {
+                        "url": f"https://img.test/photo-{index}.jpg",
+                        "thumbnail_url": f"https://img.test/thumb-{index}.jpg",
+                        "source_url": f"https://pages.test/article-{index}",
+                        "description": f"team roster photo {index}",
+                        "width": 1200,
+                        "height": 800,
+                        "provider": self.provider,
+                        "result_rank": index,
+                    }
+                    for index in range(114)
+                ],
+            }
+        )
+
+
 class _WidgetTool:
     name = "widget_create"
 
@@ -769,6 +795,22 @@ class _WidgetTool:
         )
 
 
+class _ImageContentTool:
+    name = "diagram_tool"
+
+    async def ainvoke(self, _args):
+        return {
+            "content": [
+                {
+                    "type": "image",
+                    "data": "QUJDRA==",
+                    "mimeType": "image/png",
+                    "description": "Generated diagram",
+                }
+            ]
+        }
+
+
 @pytest.mark.asyncio
 async def test_execute_tool_calls_attaches_rich_candidates_to_artifact():
     from app.ai.tool_execution import execute_tool_calls
@@ -784,6 +826,64 @@ async def test_execute_tool_calls_attaches_rich_candidates_to_artifact():
     # tool; image bytes/data must not have been spliced into it.
     assert outputs[0]["content"].startswith("{")
     assert "_rich_item_candidates" not in outputs[0]
+    assert _images == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "provider"),
+    [
+        ("tavily_search", "tavily"),
+        ("brave_image_search", "brave_image_search"),
+    ],
+)
+async def test_typed_web_provider_raw_images_do_not_enter_legacy_gallery(
+    tool_name: str,
+    provider: str,
+) -> None:
+    from app.ai.tool_execution import execute_tool_calls
+    from app.core.config import settings
+
+    _outputs, artifacts, images = await execute_tool_calls(
+        tool_calls=[
+            {
+                "id": f"call-{provider}",
+                "name": tool_name,
+                "args": {"query": "team roster"},
+            }
+        ],
+        tool_map={tool_name: _ManyWebImagesTool(provider=provider)},
+    )
+
+    assert len(artifacts[0]["_rich_item_candidates"]) <= (
+        settings.rich_image_candidate_max_count
+    )
+    assert images == []
+
+
+@pytest.mark.asyncio
+async def test_non_search_tool_image_content_keeps_existing_capture_path() -> None:
+    from app.ai.tool_execution import execute_tool_calls
+
+    _outputs, artifacts, images = await execute_tool_calls(
+        tool_calls=[
+            {
+                "id": "call-diagram",
+                "name": "diagram_tool",
+                "args": {},
+            }
+        ],
+        tool_map={"diagram_tool": _ImageContentTool()},
+    )
+
+    assert images == [
+        {
+            "data": "QUJDRA==",
+            "mime": "image/png",
+            "description": "Generated diagram",
+        }
+    ]
+    assert artifacts[0]["_rich_item_candidates"][0]["source"] == "tool_image"
 
 
 @pytest.mark.asyncio

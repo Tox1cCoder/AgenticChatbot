@@ -57,6 +57,7 @@ _RETRY_COMPATIBILITY_ALLOWLIST = frozenset({("internal", "internal::tool_search"
 _WIDGET_ARTIFACT_TOOLS = {"widget_create", "widget_update"}
 _WIDGET_SESSION_BOUND_TOOLS = {"widget_create", "session_list_widgets"}
 _FULL_MODEL_HANDOFF_TOOLS = {"dispatch_subagents"}
+_TYPED_WEB_IMAGE_TOOLS = frozenset({"tavily_search", "brave_image_search"})
 
 # Render-type values that should never produce a public tool_render candidate.
 # Live-widget renders have a dedicated `widget:<id>` candidate; error/text/json
@@ -2006,7 +2007,7 @@ async def execute_tool_calls(
                 tool_name=tool_name,
             )
             artifacts.append(artifact)
-            if capture_images:
+            if capture_images and tool_name not in _TYPED_WEB_IMAGE_TOOLS:
                 images.extend(extract_images_from_tool_result(result_text))
                 images.extend(extract_images_from_tool_content(result))
 

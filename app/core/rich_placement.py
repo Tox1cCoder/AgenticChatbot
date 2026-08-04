@@ -24,6 +24,7 @@ from .rich_response import (
     _strip_fenced_code_blocks,  # noqa: PLC2701  # deliberate same-package reuse of CommonMark fence semantics
     parse_inline_rich_references,
     provenance_provider,
+    remove_inline_rich_reference,
 )
 
 logger = logging.getLogger(__name__)
@@ -470,11 +471,31 @@ def _finalize_article_content(response: Any, content: str) -> str:
         return content
     if not getattr(settings, "inline_rich_response_enabled", False):
         return content
-    if not getattr(settings, "rich_auto_place_enabled", False):
-        return content
     metadata = getattr(response, "metadata", None)
     if not isinstance(metadata, dict) or not metadata.get("_inline_rich_response_v1"):
         return content
+
+    image_types = {RichItemType.image.value, RichItemType.image_group.value}
+    allowed_image_ids = frozenset(
+        str(candidate.get("id"))
+        for candidate in metadata.get("_rich_item_candidates") or []
+        if isinstance(candidate, dict)
+        and candidate.get("type") in image_types
+        and candidate.get("id")
+    )
+    cleaned_content = content
+    for reference in parse_inline_rich_references(content):
+        if (
+            reference.startswith(("image:", "imagegroup:"))
+            and reference not in allowed_image_ids
+        ):
+            cleaned_content = remove_inline_rich_reference(cleaned_content, reference)
+    if cleaned_content != content:
+        message = getattr(response, "message", None)
+        if message is not None and isinstance(getattr(message, "content", None), str):
+            message.content = cleaned_content
+    if not getattr(settings, "rich_auto_place_enabled", False):
+        return cleaned_content
 
     items = _widget_placement_entries(metadata, getattr(response, "tool_artifacts", None))
     # One cap, one candidate set: the inventory the model saw and the anchoring
@@ -482,13 +503,13 @@ def _finalize_article_content(response: Any, content: str) -> str:
     max_images = int(getattr(settings, "rich_auto_place_max_images", 2))
     anchor_entries = _image_anchor_entries(metadata, image_max_items=max_images)
     if not items and not anchor_entries:
-        return content
+        return cleaned_content
 
     # Repair markers the model authored without the ``rich:`` prefix first, so
     # the now-canonical marker is recognized as a reference (the item renders
     # inline) and auto-placement does not place a second copy of it.
     known_ids = {entry[0] for entry in items} | {e.item_id for e in anchor_entries}
-    repaired = _repair_unprefixed_markers(content, known_ids)
+    repaired = _repair_unprefixed_markers(cleaned_content, known_ids)
     new_content, _placed = auto_place_rich_items(
         repaired,
         items=items,
@@ -502,8 +523,8 @@ def _finalize_article_content(response: Any, content: str) -> str:
             max_images=max_images,
         )
         _record_anchor_outcomes(metadata, outcomes)
-    if new_content == content:
-        return content
+    if new_content == cleaned_content:
+        return cleaned_content
 
     message = getattr(response, "message", None)
     if message is not None and isinstance(getattr(message, "content", None), str):

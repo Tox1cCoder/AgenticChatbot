@@ -334,42 +334,39 @@ def _image_locator(payload: dict[str, Any]) -> str | None:
     return None
 
 
-def _filter_unreferenced_images_from_metadata_images(
+def _strip_rich_candidate_images_from_metadata_images(
     metadata: dict[str, Any],
     *,
-    referenced_ids: set[str],
     candidates: list[dict[str, Any]],
 ) -> None:
-    """For v1 messages, drop hidden image candidates from ``metadata["images"]``.
+    """Keep typed rich images out of the legacy ``metadata["images"]`` gallery.
 
-    A candidate is hidden when its rich-item id is not present in the final
-    markdown. Filtering matches by candidate id when available and by URL/data
-    locator otherwise, so unreferenced URLs do not leak through the legacy
-    gallery field.
+    Every typed candidate renders through ``rich_items`` when selected. Matching
+    all candidate ids and cell locators avoids both selected duplicates and
+    unselected leaks while leaving unrelated generated or user-owned entries.
     """
     images = metadata.get("images")
     if not isinstance(images, list) or not images:
         return
 
-    hidden_locators: set[str] = set()
+    candidate_ids: set[str] = set()
+    candidate_locators: set[str] = set()
     for candidate in candidates:
         if not _is_image_candidate(candidate):
             continue
-        if candidate.get("id") in referenced_ids:
-            continue
+        candidate_id = candidate.get("id")
+        if isinstance(candidate_id, str) and candidate_id:
+            candidate_ids.add(candidate_id)
         payload = candidate.get("payload") or {}
         locator = _image_locator(payload)
         if locator:
-            hidden_locators.add(locator)
-        # A group's payload holds no url/data of its own — each cell carries one.
-        # Without walking the cells, an unreferenced group contributes no locator
-        # and its images can only be scrubbed by id.
+            candidate_locators.add(locator)
         cells = payload.get("items") if isinstance(payload, dict) else None
         if isinstance(cells, list):
             for cell in cells:
                 cell_locator = _image_locator(cell) if isinstance(cell, dict) else None
                 if cell_locator:
-                    hidden_locators.add(cell_locator)
+                    candidate_locators.add(cell_locator)
 
     kept: list[Any] = []
     for image in images:
@@ -377,10 +374,10 @@ def _filter_unreferenced_images_from_metadata_images(
             kept.append(image)
             continue
         candidate_id = image.get("rich_item_id") or image.get("id")
-        if isinstance(candidate_id, str) and candidate_id and candidate_id not in referenced_ids:
+        if isinstance(candidate_id, str) and candidate_id in candidate_ids:
             continue
         locator = _image_locator(image)
-        if locator and locator in hidden_locators:
+        if locator and locator in candidate_locators:
             continue
         kept.append(image)
     if kept:
@@ -562,17 +559,10 @@ def build_bot_metadata(
     metadata["rich_items"] = rich_items
     metadata["rich_reference_warnings"] = warnings
 
-    # For v1 messages, drop unreferenced image candidates from any public
-    # ``metadata["images"]`` field so the legacy gallery cannot surface them.
-    referenced_ids = {
-        str(item.get("id"))
-        for item in rich_items
-        if item.get("type") in {RichItemType.image.value, RichItemType.image_group.value}
-        and item.get("id")
-    }
-    _filter_unreferenced_images_from_metadata_images(
+    # Typed v1 images render exclusively through ``rich_items``. Strip their
+    # legacy-gallery duplicates whether or not the model referenced them.
+    _strip_rich_candidate_images_from_metadata_images(
         metadata,
-        referenced_ids=referenced_ids,
         candidates=candidates,
     )
 

@@ -12,7 +12,11 @@ from uuid import uuid4
 
 import pytest
 
-from app.ai.tool_execution import build_image_candidates_from_tool_result
+from app.ai.tool_execution import (
+    build_image_candidates_from_tool_result,
+    execute_tool_calls,
+)
+from app.ai.workflow.tool_loop import ToolLoopMixin
 from app.core.config import settings
 from app.core.response_constants import build_bot_metadata
 from app.core.rich_placement import finalize_article_content
@@ -70,6 +74,89 @@ def _workflow_response(content, candidates):
         tool_artifacts=None,
         error=None,
     )
+
+
+class _SearchPayloadTool:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    async def ainvoke(self, _args):
+        return json.dumps(self.payload)
+
+
+@pytest.mark.asyncio
+async def test_trace_shaped_parallel_search_selects_brave_without_legacy_gallery(
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
+    tavily_payload = {
+        "provider": "tavily",
+        "query": "T1 roster history",
+        "images": [
+            {
+                "url": f"https://pages.example/assets/{index}.jpg",
+                "source_url": f"https://pages.example/articles/{index}",
+                "description": "team article illustration",
+                "result_rank": index,
+            }
+            for index in range(114)
+        ],
+    }
+    brave_payload = {
+        "provider": "brave_image_search",
+        "query": "T1 roster players",
+        "images": [
+            {
+                "url": f"https://media.example/original-{index}.jpg",
+                "thumbnail_url": f"https://media.example/roster-{index}.jpg",
+                "source_url": f"https://publisher.example/roster-{index}",
+                "description": f"T1 roster players on stage {index}",
+                "width": 1200,
+                "height": 800,
+                "provider": "brave_image_search",
+            }
+            for index in range(3)
+        ],
+    }
+
+    _outputs, artifacts, legacy_images = await execute_tool_calls(
+        tool_calls=[
+            {
+                "id": "call-tavily",
+                "name": "tavily_search",
+                "args": {"query": "T1 roster history"},
+            },
+            {
+                "id": "call-brave",
+                "name": "brave_image_search",
+                "args": {"query": "T1 roster players"},
+            },
+        ],
+        tool_map={
+            "tavily_search": _SearchPayloadTool(tavily_payload),
+            "brave_image_search": _SearchPayloadTool(brave_payload),
+        },
+    )
+    context: dict = {}
+    ToolLoopMixin._lift_rich_candidates(context, artifacts)
+
+    assert legacy_images == []
+    assert context["rich_item_candidates"][0]["id"] == (
+        "imagegroup:tool:call-brave"
+    )
+
+    answer = (
+        "The T1 roster combined Faker with Zeus, Oner, Gumayusi, and Keria "
+        "during one of the team's defining competitive eras."
+    )
+    response = _workflow_response(answer, context["rich_item_candidates"])
+    response.metadata["images"] = legacy_images
+    finalize_article_content(response, answer)
+    metadata = build_bot_metadata(response)
+
+    assert metadata.get("images") in (None, [])
+    assert metadata["rich_items"][0]["id"] == "imagegroup:tool:call-brave"
 
 
 def test_tavily_image_lands_inline_in_persisted_message(monkeypatch):

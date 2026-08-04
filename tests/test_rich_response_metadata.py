@@ -407,9 +407,8 @@ def test_unreferenced_image_group_candidate_is_never_persisted_or_flattened():
     assert selected_image_file_parts_from_rich_items(metadata) == []
 
 
-def test_selected_image_group_keeps_its_legacy_gallery_entry():
-    """A placed group is a referenced image item, so its ``metadata["images"]``
-    entry must survive the hidden-candidate filter."""
+def test_selected_image_group_is_not_duplicated_in_legacy_gallery():
+    """Typed v1 images render through rich_items, never a second gallery."""
     response = WorkflowResponse(
         message=WorkflowResponseMessage(content="Look:\n\n<!--rich:imagegroup:tool:c1-->"),
         metadata={
@@ -419,7 +418,12 @@ def test_selected_image_group_keeps_its_legacy_gallery_entry():
                     "rich_item_id": "imagegroup:tool:c1",
                     "url": "https://img.test/hidden-a.jpg",
                     "mime": "image/jpeg",
-                }
+                },
+                {
+                    "id": "generated:local-1",
+                    "url": "/chat-images/local-1",
+                    "mime": "image/png",
+                },
             ],
         },
     )
@@ -427,7 +431,13 @@ def test_selected_image_group_keeps_its_legacy_gallery_entry():
     metadata = build_bot_metadata(response)
 
     assert [item["id"] for item in metadata["rich_items"]] == ["imagegroup:tool:c1"]
-    assert metadata["images"][0]["rich_item_id"] == "imagegroup:tool:c1"
+    assert metadata["images"] == [
+        {
+            "id": "generated:local-1",
+            "url": "/chat-images/local-1",
+            "mime": "image/png",
+        }
+    ]
 
 
 def test_v1_finalization_rejects_selected_image_with_invalid_url_scheme():
