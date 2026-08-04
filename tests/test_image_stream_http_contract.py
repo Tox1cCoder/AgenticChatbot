@@ -153,6 +153,39 @@ def _assistant_message_read(conversation_id: UUID, image_url: str) -> MessageRea
     )
 
 
+def test_message_read_strips_original_image_url_from_historical_rich_items():
+    row = _message_row(
+        conversation_id=uuid4(),
+        sender=MessageRole.assistant.value,
+        content="Answer\n\n<!--rich:image:tool:c1:0-->",
+        metadata={
+            "rich_items_version": 1,
+            "rich_items": [
+                {
+                    "id": "image:tool:c1:0",
+                    "type": "image",
+                    "display_policy": "inline_only",
+                    "alt_text": "Selected",
+                    "payload": {
+                        "url": "/web-images/11111111-1111-4111-8111-111111111111",
+                        "mime_type": "image/jpeg",
+                    },
+                    "provenance": {
+                        "provider": "tavily",
+                        "original_image_url": "https://img.test/original.jpg",
+                    },
+                }
+            ],
+        },
+    )
+
+    message = MessageRead.model_validate(row)
+
+    provenance = message.message_metadata["rich_items"][0]["provenance"]
+    assert provenance == {"provider": "tavily"}
+    assert row.message_metadata["rich_items"][0]["provenance"]["original_image_url"]
+
+
 class _HarnessImageStorage:
     """Deterministic ChatImageStorageService stand-in for the media delivery
     seam. Returns a fixed protected reference (the test's ``image_url``) so the

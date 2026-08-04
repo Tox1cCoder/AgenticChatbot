@@ -25,7 +25,11 @@ import base64
 import json
 from typing import Any
 
-from app.core.rich_response import PROTECTED_IMAGE_URL_PREFIXES, strip_inline_rich_markers
+from app.core.rich_response import (
+    PROTECTED_IMAGE_URL_PREFIXES,
+    sanitize_public_rich_metadata,
+    strip_inline_rich_markers,
+)
 
 LEGACY_METADATA_KEYS = frozenset(
     {
@@ -78,9 +82,10 @@ def scrub_legacy_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     nested contracts such as ``context_window`` and unknown future fields are
     additive and pass through unchanged.
     """
+    public_metadata = sanitize_public_rich_metadata(metadata)
     return {
         key: value
-        for key, value in metadata.items()
+        for key, value in public_metadata.items()
         if key not in _SCRUBBED_METADATA_KEYS and not key.startswith("_")
     }
 

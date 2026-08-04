@@ -7,6 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.rich_response import sanitize_public_rich_metadata
 from app.models.enums import MessageRole
 from app.schemas.feedback import FeedbackRead
 from app.schemas.workflow import InterruptDecision, InterruptResponse
@@ -147,6 +148,7 @@ class MessageRead(BaseModel):
         # Populate fields from message_metadata for persisted messages
         if not isinstance(self.message_metadata, dict):
             return self
+        self.message_metadata = sanitize_public_rich_metadata(self.message_metadata)
 
         # Populate interrupt from metadata
         if self.interrupt is None:

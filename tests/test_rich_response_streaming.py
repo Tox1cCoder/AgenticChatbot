@@ -271,6 +271,10 @@ async def test_rich_capable_stream_keeps_image_rich_item_without_file_event():
                                     "url": selected_url,
                                     "mime_type": "image/jpeg",
                                 },
+                                "provenance": {
+                                    "provider": "tavily",
+                                    "original_image_url": "https://img.test/original.jpg",
+                                },
                             }
                         ],
                     },
@@ -290,6 +294,7 @@ async def test_rich_capable_stream_keeps_image_rich_item_without_file_event():
     assert '"type":"file"' not in content
     assert '"rich_items"' in content
     assert selected_url in content
+    assert "original_image_url" not in content
 
 
 def test_transient_upserts_do_not_accept_unselected_images():

@@ -105,6 +105,10 @@ def _build_assistant_message_with_selected_image() -> SimpleNamespace:
                     "display_policy": "inline_only",
                     "alt_text": "Selected",
                     "payload": {"url": image_url, "mime_type": "image/jpeg"},
+                    "provenance": {
+                        "provider": "tavily",
+                        "original_image_url": "https://img.test/original.jpg",
+                    },
                 }
             ],
             "rich_reference_warnings": [],
@@ -417,6 +421,7 @@ def test_ai_sdk_rich_history_uses_image_rich_item_without_file_part():
     payload = _history_payload(_build_assistant_message_with_selected_image(), capable=True)
 
     assert payload["metadata"]["rich_items"][0]["type"] == "image"
+    assert "original_image_url" not in payload["metadata"]["rich_items"][0]["provenance"]
     assert all(part["type"] != "file" for part in payload["parts"])
 
 
