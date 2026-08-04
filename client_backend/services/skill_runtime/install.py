@@ -90,7 +90,13 @@ def _track_background_cleanup(task: asyncio.Task) -> None:
     task.add_done_callback(_BACKGROUND_PREPARATION_CLEANUPS.discard)
 
 
-def _prepare_environment_with_runtime_lock(environment, skill, *, approve_setup: bool):
+def _prepare_environment_with_runtime_lock(
+    environment,
+    skill,
+    *,
+    approve_setup: bool,
+    force: bool = False,
+):
     lock_path = environment.preparation_lock_path(skill)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     runtime_lease = filelock.FileLock(str(lock_path), thread_local=False)
@@ -102,7 +108,7 @@ def _prepare_environment_with_runtime_lock(environment, skill, *, approve_setup:
             f"runtime preparation for skill '{skill.name}' is already in progress",
         ) from exc
     try:
-        return environment.prepare(skill, approve_setup=approve_setup)
+        return environment.prepare(skill, approve_setup=approve_setup, force=force)
     finally:
         runtime_lease.release()
 
@@ -545,35 +551,35 @@ class SkillBundleInstaller:
         expected_source_hash: str | None,
         approve_setup: bool,
     ) -> dict:
-        await self._registry.initialize()
-        skill = self._registry.get_skill(name)
-        if skill is None:
-            raise SkillRuntimeError(SKILL_INSTALL_INVALID, f"skill '{name}' was not found")
-        if not expected_source_hash:
-            raise SkillRuntimeError(
-                SKILL_INSTALL_INVALID,
-                "skill setup requires the current expected source hash",
-            )
-        try:
+        user_id = self._resolve_user_id()
+        async with profile_lock(user_id, SKILLS_MUTATION_SCOPE):
+            await self._registry.refresh()
+            skill = self._registry.get_skill(name)
+            if skill is None:
+                raise SkillRuntimeError(SKILL_INSTALL_INVALID, f"skill '{name}' was not found")
+            if not expected_source_hash:
+                raise SkillRuntimeError(
+                    SKILL_INSTALL_INVALID,
+                    "skill setup requires the current expected source hash",
+                )
             live_source_hash = await asyncio.to_thread(
                 _compute_source_hash,
                 skill.bundle_root,
             )
-        except SkillRuntimeError:
-            raise
-        if expected_source_hash != skill.source_hash or live_source_hash != skill.source_hash:
-            raise SkillRuntimeError(
-                SKILL_INSTALL_INVALID,
-                "skill changed after preview; request a new preview before setup",
+            if expected_source_hash != skill.source_hash or live_source_hash != skill.source_hash:
+                raise SkillRuntimeError(
+                    SKILL_INSTALL_INVALID,
+                    "skill changed after preview; request a new preview before setup",
+                )
+            result = await _settled_to_thread(
+                _prepare_environment_with_runtime_lock,
+                self._environment,
+                skill,
+                approve_setup=approve_setup,
+                force=True,
             )
-        result = await asyncio.to_thread(
-            self._environment.prepare,
-            skill,
-            approve_setup=approve_setup,
-            force=True,
-        )
-        await self._registry.refresh()
-        return {"name": name, "source_hash": skill.source_hash, **result}
+            await self._registry.refresh()
+            return {"name": name, "source_hash": skill.source_hash, **result}
 
     async def uninstall(self, name: str) -> dict:
         """Remove one installed bundle, its runtime, and its secrets.
