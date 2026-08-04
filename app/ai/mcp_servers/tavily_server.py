@@ -9,7 +9,6 @@ sys.path.insert(0, str(project_root))
 
 import contextlib  # noqa: E402
 from typing import Any  # noqa: E402
-from urllib.parse import urlsplit  # noqa: E402
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
@@ -137,17 +136,13 @@ def tavily_search(
     max_results: int | None = None,
     search_depth: str | None = None,
     include_raw_content: bool = False,
-    include_images: bool | None = None,
     auto_parameters: bool | None = None,
 ) -> str:
     """Search the web for current facts, news, recent information, or source discovery.
 
-    Images come back by default, tied to the source results that carried them.
-    Pass ``include_images=False`` for research where a visual cannot help (code,
-    math, policy, definitions) to keep the response smaller. When the answer's
-    subject is something the reader would expect to see, also call
-    ``brave_image_search``: it is a ranked image index and gives markedly better
-    visuals than images scraped off a result page.
+    Returns a synthesized ``answer`` plus ranked text results with their source
+    URLs. This tool never returns images; ``brave_image_search`` is the only
+    source of web images.
 
     Pass ``auto_parameters=True`` to let Tavily pick the search depth when the
     query intent is genuinely ambiguous; an explicit ``search_depth`` always
@@ -176,17 +171,10 @@ def tavily_search(
         default_depth=str(getattr(settings, "tavily_search_default_depth", "basic") or "basic"),
         default_auto=bool(getattr(settings, "tavily_search_auto_parameters", False)),
     )
-    images_enabled = (
-        bool(getattr(settings, "tavily_search_include_images", False))
-        if include_images is None
-        else bool(include_images)
-    )
     params: dict[str, Any] = {
         "query": cleaned_query,
         "max_results": result_count,
-        "include_images": images_enabled,
-        "include_image_descriptions": images_enabled
-        and bool(getattr(settings, "tavily_search_include_image_descriptions", True)),
+        "include_answer": True,
         "include_raw_content": include_raw_content,
         "auto_parameters": resolved["auto_parameters"],
         "include_usage": True,
@@ -199,18 +187,10 @@ def tavily_search(
         return _error(str(exc), operation=operation, retryable=True)
     except Exception as exc:
         return _error(f"Search failed: {exc}", operation=operation)
-    return _json(
-        _normalize_search_response(
-            query=cleaned_query,
-            response=response,
-            include_images=images_enabled,
-        )
-    )
+    return _json(_normalize_search_response(query=cleaned_query, response=response))
 
 
-def _normalize_search_response(
-    *, query: str, response: Any, include_images: bool = True
-) -> dict[str, Any]:
+def _normalize_search_response(*, query: str, response: Any) -> dict[str, Any]:
     response = response if isinstance(response, dict) else {}
     results = []
     for idx, result in enumerate(response.get("results") or [], 1):
@@ -229,71 +209,20 @@ def _normalize_search_response(
             item["favicon"] = result.get("favicon")
         results.append(item)
 
-    images: list[dict[str, Any]] = []
-    seen_urls: set[str] = set()
-    if include_images:
-        # Result-bound images come first so exact duplicates retain publisher
-        # provenance instead of the weaker query-level record.
-        for result_rank, result in enumerate(response.get("results") or []):
-            if not isinstance(result, dict):
-                continue
-            source_url = str(result.get("url") or "").strip()
-            source_title = str(result.get("title") or "").strip()
-            source_domain = urlsplit(source_url).hostname or ""
-            for raw_image in result.get("images") or []:
-                image = _normalize_search_image(raw_image)
-                if image is None or image["url"] in seen_urls:
-                    continue
-                raw_score = result.get("score")
-                image.update(
-                    {
-                        "source_url": source_url,
-                        "source_title": source_title,
-                        "source_domain": source_domain,
-                        "result_rank": result_rank,
-                        "result_score": (
-                            float(raw_score) if isinstance(raw_score, (int, float)) else None
-                        ),
-                    }
-                )
-                images.append(image)
-                seen_urls.add(image["url"])
-
-        for raw_image in response.get("images") or []:
-            image = _normalize_search_image(raw_image)
-            if image is None or image["url"] in seen_urls:
-                continue
-            image["query_level"] = True
-            images.append(image)
-            seen_urls.add(image["url"])
-
+    # Field order is contractual: a truncated preview must keep facts, so
+    # results lead and diagnostics trail.
     payload = {
+        "results": results,
+        "total_results": len(results),
+        "answer": response.get("answer", ""),
         "provider": "tavily",
         "operation": "search",
         "query": query,
-        "answer": response.get("answer", ""),
-        "images": images,
-        "results": results,
-        "total_results": len(results),
     }
     for key in ("auto_parameters", "usage", "request_id", "response_time"):
         if key in response:
             payload[key] = response[key]
     return payload
-
-
-def _normalize_search_image(raw_image: Any) -> dict[str, Any] | None:
-    if isinstance(raw_image, str):
-        url = raw_image.strip()
-        description = ""
-    elif isinstance(raw_image, dict):
-        url = str(raw_image.get("url") or "").strip()
-        description = str(raw_image.get("description") or "").strip()
-    else:
-        return None
-    if not url:
-        return None
-    return {"url": url, "description": description, "provider": "tavily"}
 
 
 @mcp.tool()

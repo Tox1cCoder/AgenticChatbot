@@ -103,11 +103,11 @@ class _FakeTavilyClient:
         return self.response
 
 
-def test_search_uses_configured_basic_depth_and_preserves_images(monkeypatch):
+def test_search_requests_answer_and_never_requests_images(monkeypatch):
     client = _FakeTavilyClient(
         {
             "query": "openai news",
-            "answer": "",
+            "answer": "OpenAI shipped a model.",
             "images": [{"url": "https://example.com/a.jpg", "description": "A"}],
             "results": [
                 {
@@ -116,6 +116,7 @@ def test_search_uses_configured_basic_depth_and_preserves_images(monkeypatch):
                     "content": "Snippet",
                     "score": 0.9,
                     "raw_content": "Full text",
+                    "images": [{"url": "https://example.com/bound.jpg"}],
                 }
             ],
             "usage": {"credits": 1},
@@ -130,127 +131,44 @@ def test_search_uses_configured_basic_depth_and_preserves_images(monkeypatch):
         tavily_server.settings, "tavily_search_auto_parameters", False, raising=False
     )
 
-    payload = json.loads(
-        tavily_server.tavily_search("openai news", max_results=25, include_images=True)
-    )
+    payload = json.loads(tavily_server.tavily_search("openai news", max_results=25))
 
     assert client.calls[0]["search_depth"] == "basic"
     assert client.calls[0]["max_results"] == 10
-    assert client.calls[0]["include_images"] is True
-    assert payload["provider"] == "tavily"
-    assert payload["operation"] == "search"
-    assert payload["images"][0]["url"] == "https://example.com/a.jpg"
+    assert client.calls[0]["include_answer"] is True
+    assert "include_images" not in client.calls[0]
+    assert "include_image_descriptions" not in client.calls[0]
+    assert "images" not in payload
+    assert payload["answer"] == "OpenAI shipped a model."
     assert payload["results"][0]["raw_content"] == "Full text"
     assert payload["usage"] == {"credits": 1}
 
 
-def test_search_explicit_false_suppresses_provider_images(monkeypatch):
+def test_search_payload_orders_results_before_diagnostics(monkeypatch):
     client = _FakeTavilyClient(
         {
-            "images": [{"url": "https://example.com/unexpected.jpg"}],
-            "results": [],
+            "answer": "a",
+            "results": [{"title": "T", "url": "https://e.example", "content": "c", "score": 1}],
+            "usage": {"credits": 1},
+            "request_id": "req-2",
+            "response_time": 0.4,
         }
     )
     monkeypatch.setattr(tavily_server, "_make_client", lambda: client)
 
-    payload = json.loads(tavily_server.tavily_search("text research", include_images=False))
+    keys = list(json.loads(tavily_server.tavily_search("ordering")).keys())
 
-    assert client.calls[0]["include_images"] is False
-    assert client.calls[0]["include_image_descriptions"] is False
-    assert payload["images"] == []
-
-
-def test_search_normalizes_result_bound_images_with_parent_provenance(monkeypatch):
-    client = _FakeTavilyClient(
-        {
-            "images": [
-                "https://cdn.example/query.jpg",
-                {"url": "https://cdn.example/rover.jpg", "description": "duplicate"},
-            ],
-            "results": [
-                {
-                    "title": "Rover story",
-                    "url": "https://publisher.example/rover",
-                    "content": "Story",
-                    "score": 0.91,
-                    "images": [
-                        {
-                            "url": "https://cdn.example/rover.jpg",
-                            "description": "Mars rover",
-                        }
-                    ],
-                }
-            ],
-        }
-    )
-    monkeypatch.setattr(tavily_server, "_make_client", lambda: client)
-
-    payload = json.loads(tavily_server.tavily_search("mars rover", include_images=True))
-
-    assert [image["url"] for image in payload["images"]] == [
-        "https://cdn.example/rover.jpg",
-        "https://cdn.example/query.jpg",
-    ]
-    result_image = payload["images"][0]
-    assert result_image["source_url"] == "https://publisher.example/rover"
-    assert result_image["source_title"] == "Rover story"
-    assert result_image["source_domain"] == "publisher.example"
-    assert result_image["result_rank"] == 0
-    assert result_image["result_score"] == 0.91
-    assert result_image["provider"] == "tavily"
-    assert payload["images"][1]["query_level"] is True
+    assert keys[0] == "results"
+    assert keys.index("results") < keys.index("usage")
+    assert keys.index("results") < keys.index("request_id")
+    assert keys.index("results") < keys.index("response_time")
 
 
-def test_default_search_requests_source_bound_images(monkeypatch):
-    """Images are requested by default.
+def test_search_rejects_an_include_images_argument(monkeypatch):
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: _FakeTavilyClient({"results": []}))
 
-    This was briefly flipped off so that ordinary research would stop
-    manufacturing candidates. In practice that removed the only image supply
-    that does not depend on the model choosing to call an image search, and real
-    answers came back with no visuals at all. Precision is now enforced further
-    down the pipeline instead — junk-URL and aspect gates, a query-token match
-    with no fallback for source-bound images, query-level images never
-    auto-anchored, and a two-item cap per answer.
-    """
-    captured = {}
-
-    class _FakeClient:
-        def search(self, **params):
-            captured.update(params)
-            return {"results": [], "images": []}
-
-    monkeypatch.setattr(tavily_server, "_make_client", lambda: _FakeClient())
-    tavily_server.tavily_search(query="chip export rules 2026")
-    assert captured["include_images"] is True
-    assert captured["include_image_descriptions"] is True
-
-
-def test_explicit_include_images_false_suppresses_them(monkeypatch):
-    """The per-call opt-out still works, for research where no visual can help."""
-    captured = {}
-
-    class _FakeClient:
-        def search(self, **params):
-            captured.update(params)
-            return {"results": [], "images": []}
-
-    monkeypatch.setattr(tavily_server, "_make_client", lambda: _FakeClient())
-    tavily_server.tavily_search(query="explain big-O notation", include_images=False)
-    assert captured["include_images"] is False
-    assert captured["include_image_descriptions"] is False
-
-
-def test_explicit_include_images_still_requests_them(monkeypatch):
-    captured = {}
-
-    class _FakeClient:
-        def search(self, **params):
-            captured.update(params)
-            return {"results": [], "images": []}
-
-    monkeypatch.setattr(tavily_server, "_make_client", lambda: _FakeClient())
-    tavily_server.tavily_search(query="apple park", include_images=True)
-    assert captured["include_images"] is True
+    with pytest.raises(TypeError):
+        tavily_server.tavily_search("apple park", include_images=True)
 
 
 def test_tavily_search_omits_depth_in_auto_mode(monkeypatch):
