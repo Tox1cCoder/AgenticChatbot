@@ -1,3 +1,4 @@
+import json
 from uuid import uuid4
 
 import pytest
@@ -32,32 +33,58 @@ def test_offload_if_large_returns_inline_for_small_output(tmp_path):
     assert repo.created == []
 
 
-def test_offload_if_large_stores_content_in_db_and_creates_no_files(tmp_path):
+def test_offload_stores_content_and_notice_carries_the_blob_id(tmp_path):
     repo = FakeRepository()
     service = ToolResultBlobService(repo, storage_root=tmp_path, threshold_chars=10)
-    conversation_id = uuid4()
-    user_id = uuid4()
 
     result = service.offload_if_large(
-        conversation_id=conversation_id,
-        user_id=user_id,
+        conversation_id=uuid4(),
+        user_id=uuid4(),
         tool_call_id="call-1",
         tool_name="search_documents",
         output_text="abcdefghijklmnopqrstuvwxyz",
     )
 
-    assert (
-        result["output"] == "abcdefghij\n\n[Output offloaded: use blob_id to read the full result.]"
-    )
-    assert result["blob_id"]
+    assert result["output"].startswith("abcdefghij")
+    assert f"blob_id={result['blob_id']}" in result["output"]
+    assert "26 chars" in result["output"]
+    assert "read_tool_result" in result["output"]
     assert result["size_bytes"] == 26
     record = repo.created[0]
-    assert record["conversation_id"] == conversation_id
-    assert record["user_id"] == user_id
-    assert record["tool_call_id"] == "call-1"
     assert record["content"] == "abcdefghijklmnopqrstuvwxyz"
     assert record["storage_path"] is None
     assert list(tmp_path.iterdir()) == [], "offload must not create files on disk"
+
+
+def test_offload_notice_names_the_omitted_array_and_dropped_results(tmp_path):
+    repo = FakeRepository()
+    service = ToolResultBlobService(
+        repo, storage_root=tmp_path, threshold_chars=100, preview_chars=600
+    )
+    payload = json.dumps(
+        {
+            "results": [
+                {"title": f"T{i}", "url": f"https://e.example/{i}", "content": "c" * 900}
+                for i in range(6)
+            ],
+            "total_results": 6,
+            "answer": "",
+            "provider": "tavily",
+            "images": [{"url": "https://cdn.example/a.jpg"} for _ in range(24)],
+        }
+    )
+
+    result = service.offload_if_large(
+        conversation_id=uuid4(),
+        user_id=uuid4(),
+        tool_call_id="call-2",
+        tool_name="tavily_search",
+        output_text=payload,
+    )
+
+    assert "images (24 entries)" in result["output"]
+    assert "further results" in result["output"]
+    assert "https://cdn.example/a.jpg" not in result["output"]
 
 
 def test_read_text_prefers_db_content(tmp_path):

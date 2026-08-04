@@ -1129,6 +1129,23 @@ class Settings(BaseSettings):
         default=4000,
         description="Preview characters kept inline after a tool result is offloaded.",
     )
+    tool_result_offload_answer_share: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=0.9,
+        description=(
+            "Share of the preview budget reserved for a synthesized answer before "
+            "results are allocated."
+        ),
+    )
+    tool_result_offload_min_result_chars: int = Field(
+        default=200,
+        ge=1,
+        description=(
+            "Per-result content floor in a preview. Below this, later results are "
+            "dropped whole instead of shrinking every result into uselessness."
+        ),
+    )
     tool_result_blob_storage_dir: str = Field(
         default="data/tool_result_blobs",
         description=(

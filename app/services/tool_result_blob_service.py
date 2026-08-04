@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+from app.services.tool_result_preview import ToolResultPreview, build_tool_result_preview
+
 
 class ToolResultBlobService:
     """Persist full tool outputs out-of-band when they exceed a size threshold.
@@ -23,11 +25,15 @@ class ToolResultBlobService:
         storage_root: str | Path,
         threshold_chars: int,
         preview_chars: int | None = None,
+        answer_share: float = 0.25,
+        min_result_content_chars: int = 200,
     ):
         self.repository = repository
         self.storage_root = Path(storage_root)
         self.threshold_chars = max(1, int(threshold_chars))
         self.preview_chars = max(1, int(preview_chars or threshold_chars))
+        self.answer_share = min(0.9, max(0.0, float(answer_share)))
+        self.min_result_content_chars = max(1, int(min_result_content_chars))
 
     def offload_if_large(
         self,
@@ -60,10 +66,15 @@ class ToolResultBlobService:
                 "content_type": "text/plain",
             }
         )
-        preview = output_text[: self.preview_chars].rstrip()
+        preview = build_tool_result_preview(
+            output_text,
+            budget_chars=self.preview_chars,
+            answer_share=self.answer_share,
+            min_result_content_chars=self.min_result_content_chars,
+        )
         record_id = record["id"] if isinstance(record, dict) else record.id
         return {
-            "output": f"{preview}\n\n[Output offloaded: use blob_id to read the full result.]",
+            "output": f"{preview.text.rstrip()}\n\n{_notice(record_id, len(output_text), preview)}",
             "blob_id": str(record_id),
             "size_bytes": len(encoded),
         }
@@ -80,3 +91,17 @@ class ToolResultBlobService:
                 "the record is corrupt and cannot be read."
             )
         return (self.storage_root / storage_path).read_text(encoding="utf-8")
+
+
+def _notice(blob_id: Any, total_chars: int, preview: ToolResultPreview) -> str:
+    """Describe what the preview omitted and how to read the rest."""
+
+    omissions = [f"{key} ({count} entries)" for key, count in preview.omitted_arrays]
+    if preview.omitted_results:
+        omissions.append(f"{preview.omitted_results} further results")
+    detail = f" Omitted: {'; '.join(omissions)}." if omissions else ""
+    return (
+        f"[Output offloaded: {total_chars} chars stored as blob_id={blob_id}.{detail}"
+        f' Call read_tool_result(blob_id="{blob_id}") to read the rest —'
+        " do not repeat the search.]"
+    )

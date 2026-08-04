@@ -318,6 +318,8 @@ class Container(containers.DeclarativeContainer):
         storage_root=providers.Object(settings.tool_result_blob_storage_dir),
         threshold_chars=providers.Object(settings.tool_result_offload_threshold_chars),
         preview_chars=providers.Object(settings.tool_result_offload_preview_chars),
+        answer_share=providers.Object(settings.tool_result_offload_answer_share),
+        min_result_content_chars=providers.Object(settings.tool_result_offload_min_result_chars),
     )
 
     chat_image_repository = providers.Factory(
