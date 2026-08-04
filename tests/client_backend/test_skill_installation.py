@@ -1,5 +1,7 @@
+import asyncio
 import json
 import os
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -68,6 +70,9 @@ class _EnvironmentManager:
 
     def remove_runtime(self, name, source_hash):
         self.removed.append((name, source_hash))
+
+    def preparation_lock_path(self, skill):
+        return skill.bundle_root.parent / f".{skill.source_hash}.prepare.lock"
 
 
 class _SecretStore:
@@ -615,6 +620,63 @@ async def test_observer_cancellation_before_commit_installs_nothing(install_env)
 
 
 @pytest.mark.asyncio
+async def test_runtime_preparation_cancellation_returns_before_worker_and_cleans_later(
+    install_env, monkeypatch
+):
+    source = _write_skill(install_env.sources / "demo")
+    (source / "pyproject.toml").write_text(
+        "[project]\nname='demo-skill'\nversion='1'\n[project.scripts]\ndemo-skill='x:y'\n",
+        encoding="utf-8",
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    preparation_calls: list[str] = []
+
+    def blocking_prepare(skill, *, approve_setup, force=False):
+        preparation_calls.append(skill.source_hash)
+        entered.set()
+        assert release.wait(timeout=5)
+        return {"status": "ready", "commands": ["demo-skill"]}
+
+    monkeypatch.setattr(install_env.environment, "prepare", blocking_prepare)
+    _, installer = _installer(install_env)
+    preview = await installer.preview(source)
+    task = asyncio.create_task(
+        installer.install(
+            source,
+            expected_source_hash=preview["source_hash"],
+            approve_setup=True,
+        )
+    )
+    assert await asyncio.to_thread(entered.wait, 5)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.5)
+
+    install_root = get_installed_skills_root(USER_ID)
+    assert any(install_root.glob("*.stage-*"))
+    retry = asyncio.create_task(
+        installer.install(
+            source,
+            expected_source_hash=preview["source_hash"],
+            approve_setup=True,
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert preparation_calls == [preview["source_hash"]]
+    release.set()
+    retried = await retry
+    assert retried["name"] == "demo-skill"
+    for _ in range(100):
+        if not any(install_root.glob("*.stage-*")):
+            break
+        await asyncio.sleep(0.01)
+    assert not any(install_root.glob("*.stage-*"))
+    assert not install_env.environment.removed
+
+
+@pytest.mark.asyncio
 async def test_failed_cleanup_is_resumable_without_changing_the_404_contract(install_env):
     source = _write_skill(install_env.sources / "demo")
     _, installer = _installer(install_env)
@@ -679,3 +741,20 @@ async def test_install_setup_and_uninstall_never_touch_the_runtime_bridge(instal
         approve_setup=True,
     )
     await installer.uninstall("demo-skill")
+
+
+def test_list_installed_omits_a_bundle_that_cannot_be_safely_hashed(install_env, monkeypatch):
+    _, installer = _installer(install_env)
+    bundle = get_installed_skills_root(USER_ID) / "demo-skill-deadbeef"
+    bundle.mkdir(parents=True)
+    (bundle / "install.json").write_text(
+        json.dumps({"bundle_name": "demo-skill", "source_hash": "a" * 64}),
+        encoding="utf-8",
+    )
+
+    def unsafe_hash(_path):
+        raise SkillRuntimeError(UNSAFE_BUNDLE_PATH, "linked bundle")
+
+    monkeypatch.setattr(install_module, "_compute_source_hash", unsafe_hash)
+
+    assert installer.list_installed() == []

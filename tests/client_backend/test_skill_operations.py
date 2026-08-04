@@ -9,6 +9,7 @@ installer's atomic promotion starts, the answer to "cancel" is no.
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -374,7 +375,7 @@ def operation_env(tmp_path, monkeypatch) -> _OperationEnv:
 
     monkeypatch.setitem(
         operations_globals,
-        "recover_install_transactions",
+        "recover_install_transactions_locked",
         recover_transactions,
     )
     return _OperationEnv(
@@ -656,6 +657,87 @@ async def test_recovery_accepts_a_committed_complete_collection(operation_env):
 
 
 @pytest.mark.asyncio
+async def test_recovery_classification_keeps_the_mutation_lock(operation_env, monkeypatch):
+    operation = operation_env.persist_operation(
+        state="running",
+        commit_started=True,
+        source_hash="a" * 64,
+        operation_id="txlocked",
+    )
+    operation_env.persist_installed_bundle(source_hash="a" * 64)
+    entered = threading.Event()
+    release = threading.Event()
+    real_list = operation_env.installer.list_installed
+
+    def blocking_list():
+        entered.set()
+        assert release.wait(timeout=5)
+        return real_list()
+
+    monkeypatch.setattr(operation_env.installer, "list_installed", blocking_list)
+    recovery = asyncio.create_task(operation_env.service.recover(USER_A))
+    assert await asyncio.to_thread(entered.wait, 5)
+    acquired = asyncio.Event()
+    operations_globals = _service_globals()
+    mutation_scope = operations_globals["SKILLS_MUTATION_SCOPE"]
+
+    async def competing_mutation() -> None:
+        async with operations_globals["profile_lock"](USER_A, mutation_scope):
+            acquired.set()
+
+    competitor = asyncio.create_task(competing_mutation())
+    await asyncio.sleep(0.05)
+    assert not acquired.is_set()
+    release.set()
+    await recovery
+    await competitor
+
+    assert operation_env.get(operation).state == "succeeded"
+    assert acquired.is_set()
+
+
+@pytest.mark.asyncio
+async def test_recovery_refreshes_catalog_only_after_journal_classification(
+    operation_env, monkeypatch
+):
+    operation_env.persist_operation(
+        state="running",
+        commit_started=True,
+        source_hash="a" * 64,
+        operation_id="txordered",
+    )
+    operation_env.persist_installed_bundle(source_hash="a" * 64)
+    order: list[str] = []
+    operations_globals = _service_globals()
+
+    async def recover_transactions(_user_id, _installer):
+        order.append("journal")
+        return {"txordered": "committed"}
+
+    real_list = operation_env.installer.list_installed
+
+    def classified_list():
+        order.append("classify")
+        return real_list()
+
+    async def catalog_snapshot(*args, **kwargs):
+        order.append("catalog")
+        return operation_env.catalog._payload()
+
+    monkeypatch.setitem(
+        operations_globals,
+        "recover_install_transactions_locked",
+        recover_transactions,
+    )
+    monkeypatch.setattr(operation_env.installer, "list_installed", classified_list)
+    monkeypatch.setattr(operation_env.catalog, "snapshot", catalog_snapshot)
+
+    await operation_env.service.recover(USER_A)
+
+    assert order == ["journal", "classify", "catalog"]
+
+
+@pytest.mark.asyncio
 async def test_recovery_fails_a_commit_that_left_no_installed_bundle(operation_env):
     """commit_started alone is not evidence; the installed hash is."""
     operation = operation_env.persist_operation(
@@ -739,6 +821,40 @@ async def test_shutdown_cancels_in_flight_tasks(operation_env):
 
     assert operation_env.service.get_owned(USER_A, operation.operation_id) is not None
     assert operation_env.installer.installed_hashes == []
+
+
+@pytest.mark.asyncio
+async def test_catalog_failure_after_commit_still_persists_terminal_success(
+    operation_env, monkeypatch
+):
+    async def failing_publish(sync: bool = True) -> dict:
+        raise RuntimeError("catalog unavailable")
+
+    monkeypatch.setattr(operation_env.catalog, "after_mutation", failing_publish)
+    operation = await operation_env.start_and_wait()
+
+    assert operation.state == "succeeded"
+    assert operation.result is not None
+    assert operation.result.catalog["catalogSyncStatus"] == "pending"
+    assert operation.transaction_id in operation_env.installer.finalized
+
+
+@pytest.mark.asyncio
+async def test_total_catalog_failure_is_explicitly_unavailable_not_fabricated(
+    operation_env, monkeypatch
+):
+    async def failing_catalog(*args, **kwargs) -> dict:
+        raise RuntimeError("catalog unavailable")
+
+    monkeypatch.setattr(operation_env.catalog, "after_mutation", failing_catalog)
+    monkeypatch.setattr(operation_env.catalog, "snapshot", failing_catalog)
+    operation = await operation_env.start_and_wait()
+
+    assert operation.state == "succeeded"
+    assert operation.result.catalog == {
+        "catalogSyncStatus": "pending",
+        "catalogUnavailable": True,
+    }
 
 
 @pytest.mark.asyncio

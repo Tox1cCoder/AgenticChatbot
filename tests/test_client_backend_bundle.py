@@ -538,3 +538,12 @@ def test_both_builders_copy_the_canonical_handoff_files(tmp_path):
         expected = (canonical_root / name).read_bytes()
         assert (python_bundle / name).read_bytes() == expected
         assert (powershell_bundle / name).read_bytes() == expected
+
+    def tree_bytes(root: Path) -> dict[str, bytes]:
+        return {
+            path.relative_to(root).as_posix(): path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+
+    assert tree_bytes(powershell_bundle) == tree_bytes(python_bundle)

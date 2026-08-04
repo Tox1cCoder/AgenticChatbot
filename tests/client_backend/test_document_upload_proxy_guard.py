@@ -73,29 +73,40 @@ def test_upload_proxy_forwards_bytes_and_conversation_id(monkeypatch):
 def test_client_backend_does_not_import_server_parser_or_indexer():
     """The sidecar must not reach into server-side parsing/indexing code."""
 
-    # Force a clean import so cached parents from other tests don't hide the issue.
-    for mod_name in list(sys.modules):
-        if mod_name.startswith("client_backend"):
+    # Force a clean import so cached parents from other tests don't hide the
+    # issue, then restore the original module graph. Leaving two generations of
+    # package objects alive makes later tests (and their settings singletons)
+    # order-dependent.
+    saved_modules = {
+        name: module for name, module in sys.modules.items() if name.startswith("client_backend")
+    }
+    try:
+        for mod_name in saved_modules:
             sys.modules.pop(mod_name, None)
 
-    importlib.import_module("client_backend.api.documents")
-    importlib.import_module("client_backend.services.server_api")
+        importlib.import_module("client_backend.api.documents")
+        importlib.import_module("client_backend.services.server_api")
 
-    forbidden_prefixes = (
-        "app.services.document_processing_service",
-        "app.services.document_index_service",
-        "app.services.document_chunk_builder",
-        "app.ai.agents.rag_agent",
-        "app.ai.rag_tool_actions",
-    )
-    leaked: list[str] = []
-    for name, module in list(sys.modules.items()):
-        if not name.startswith("client_backend"):
-            continue
-        module_attrs = getattr(module, "__dict__", {}) or {}
-        for attr_value in module_attrs.values():
-            if isinstance(attr_value, ModuleType):
-                attr_name = getattr(attr_value, "__name__", "")
-                if any(attr_name.startswith(prefix) for prefix in forbidden_prefixes):
-                    leaked.append(f"{name} -> {attr_name}")
-    assert not leaked, f"client_backend leaked server-side imports: {leaked}"
+        forbidden_prefixes = (
+            "app.services.document_processing_service",
+            "app.services.document_index_service",
+            "app.services.document_chunk_builder",
+            "app.ai.agents.rag_agent",
+            "app.ai.rag_tool_actions",
+        )
+        leaked: list[str] = []
+        for name, module in list(sys.modules.items()):
+            if not name.startswith("client_backend"):
+                continue
+            module_attrs = getattr(module, "__dict__", {}) or {}
+            for attr_value in module_attrs.values():
+                if isinstance(attr_value, ModuleType):
+                    attr_name = getattr(attr_value, "__name__", "")
+                    if any(attr_name.startswith(prefix) for prefix in forbidden_prefixes):
+                        leaked.append(f"{name} -> {attr_name}")
+        assert not leaked, f"client_backend leaked server-side imports: {leaked}"
+    finally:
+        for mod_name in list(sys.modules):
+            if mod_name.startswith("client_backend"):
+                sys.modules.pop(mod_name, None)
+        sys.modules.update(saved_modules)

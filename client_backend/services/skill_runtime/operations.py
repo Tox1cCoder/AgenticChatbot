@@ -47,9 +47,13 @@ from client_backend.schemas.skill_installation import (
 from client_backend.services.skill_catalog import get_skill_catalog_service
 from client_backend.services.skill_runtime.audit import SkillLifecycleAuditWriter
 from client_backend.services.skill_runtime.install import SkillInstallSpec
-from client_backend.services.skill_runtime.locks import SkillLockTimeoutError, profile_lock
+from client_backend.services.skill_runtime.locks import (
+    SKILLS_MUTATION_SCOPE,
+    SkillLockTimeoutError,
+    profile_lock,
+)
 from client_backend.services.skill_runtime.state import atomic_write_json, read_json_object
-from client_backend.services.skill_runtime.transactions import recover_install_transactions
+from client_backend.services.skill_runtime.transactions import recover_install_transactions_locked
 from client_backend.services.skill_runtime.uploads import (
     SkillUploadError,
     SkillUploadNotFoundError,
@@ -440,7 +444,22 @@ class SkillInstallationService:
     ) -> None:
         """Record success, then publish the catalog without risking that success."""
         self._record_phase(user_id, operation_id, "refreshingCatalog")
-        catalog = await self._catalog_service().after_mutation(sync=True)
+        catalog_service = self._catalog_service()
+        try:
+            catalog = await catalog_service.after_mutation(sync=True)
+        except Exception:  # noqa: BLE001 - the local transaction is committed
+            logger.warning(
+                "catalog publication failed after committed skill install",
+                exc_info=True,
+            )
+            try:
+                catalog = await catalog_service.snapshot(force=True, sync=False)
+            except Exception:  # noqa: BLE001 - persist a truthful degraded result
+                catalog = {
+                    "catalogSyncStatus": "pending",
+                    "catalogUnavailable": True,
+                }
+            catalog = {**catalog, "catalogSyncStatus": "pending"}
         self._record_phase(user_id, operation_id, "syncingCatalog")
 
         operation = self._read(user_id, operation_id)
@@ -597,24 +616,37 @@ class SkillInstallationService:
     async def recover(self, user_id: str) -> None:
         """Recover journals first, then classify receipts from the complete set."""
         installer = self._installer_factory()
-        outcomes = await recover_install_transactions(user_id, installer)
-        installed_hashes = await self._installed_skill_hashes(installer)
-        for operation in self._iter_operations(user_id):
-            if operation.is_terminal:
-                self._finalize_transaction(operation)
-                continue
-            expected = dict(operation.expected_source_hashes)
-            outcome = outcomes.get(str(operation.transaction_id or ""))
-            committed = (
-                bool(expected)
-                and outcome == "committed"
-                and all(
-                    installed_hashes.get(name) == source_hash
-                    for name, source_hash in expected.items()
+        unavailable_catalog = {
+            "catalogSyncStatus": "pending",
+            "catalogUnavailable": True,
+        }
+        recovered_operations: list[str] = []
+        async with profile_lock(user_id, SKILLS_MUTATION_SCOPE):
+            outcomes = await recover_install_transactions_locked(user_id, installer)
+            installed_hashes = await self._installed_skill_hashes(installer)
+            for operation in self._iter_operations(user_id):
+                if operation.is_terminal:
+                    self._finalize_transaction(operation)
+                    continue
+                expected = dict(operation.expected_source_hashes)
+                outcome = outcomes.get(str(operation.transaction_id or ""))
+                committed = (
+                    bool(expected)
+                    and outcome == "committed"
+                    and all(
+                        installed_hashes.get(name) == source_hash
+                        for name, source_hash in expected.items()
+                    )
                 )
-            )
-            if committed:
-                catalog = await self._catalog_service().snapshot(force=True, sync=False)
+                if not committed:
+                    self._fail(
+                        user_id,
+                        operation.operation_id,
+                        "SKILL_INTERRUPTED",
+                        "The installation was interrupted before it completed. "
+                        "Upload the archive again to retry.",
+                    )
+                    continue
                 primary_name, primary_hash = next(iter(expected.items()))
                 self._persist(
                     operation.model_copy(
@@ -627,7 +659,7 @@ class SkillInstallationService:
                                 name=primary_name,
                                 source_hash=primary_hash,
                                 runtime_status="unknown",
-                                catalog=catalog,
+                                catalog=unavailable_catalog,
                             ),
                         }
                     )
@@ -639,13 +671,23 @@ class SkillInstallationService:
                     status="succeeded",
                 )
                 self._finalize_transaction(operation)
+                recovered_operations.append(operation.operation_id)
+
+        if not recovered_operations:
+            return
+        try:
+            catalog = await self._catalog_service().snapshot(force=True, sync=False)
+            catalog = {**catalog, "catalogSyncStatus": "pending"}
+        except Exception:  # noqa: BLE001 - terminal local success is already persisted
+            return
+        for operation_id in recovered_operations:
+            operation = self._read(user_id, operation_id)
+            if operation is None or operation.result is None:
                 continue
-            self._fail(
-                user_id,
-                operation.operation_id,
-                "SKILL_INTERRUPTED",
-                "The installation was interrupted before it completed. "
-                "Upload the archive again to retry.",
+            self._persist(
+                operation.model_copy(
+                    update={"result": operation.result.model_copy(update={"catalog": catalog})}
+                )
             )
 
     @staticmethod

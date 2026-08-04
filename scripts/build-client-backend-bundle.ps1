@@ -42,7 +42,8 @@ function Write-BundleFile {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
 
-    Set-Content -LiteralPath $Path -Value $Content -Encoding UTF8
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $Content, $utf8NoBom)
 }
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path

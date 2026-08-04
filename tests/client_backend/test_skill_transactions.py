@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +15,8 @@ from client_backend.services.local_skills_registry import LocalSkillsRegistry
 from client_backend.services.skill_runtime.collection import DiscoveredSkill
 from client_backend.services.skill_runtime.environment import SkillEnvironmentManager
 from client_backend.services.skill_runtime.install import SkillBundleInstaller, SkillInstallSpec
+from client_backend.services.skill_runtime.locks import SKILLS_MUTATION_SCOPE, profile_lock
+from shared.skills.errors import SKILL_INSTALL_CONFLICT, SkillRuntimeError
 
 USER_ID = "user-a"
 
@@ -207,3 +211,152 @@ async def test_recovery_resumes_an_incomplete_precommit_rollback(transaction_env
     assert _installed_payloads() == []
     transaction_env.installer.finalize_transaction("tx-recover")
     assert not journal.exists()
+
+
+@pytest.mark.asyncio
+async def test_failed_update_preserves_a_preexisting_same_hash_runtime(
+    transaction_env, monkeypatch
+):
+    one = _write_skill(transaction_env.root / "sources" / "one", "one", "same one")
+    installed = await transaction_env.installer.install(one)
+    runtime = transaction_env.root / "runtimes" / "one" / installed["source_hash"]
+    runtime.mkdir(parents=True)
+    two = _write_skill(transaction_env.root / "sources" / "two", "two", "new two")
+    specs = [
+        await _spec(
+            transaction_env.installer,
+            one,
+            replace_source_hash=installed["source_hash"],
+        ),
+        await _spec(transaction_env.installer, two),
+    ]
+    from client_backend.services.skill_runtime import transactions
+
+    real_replace = transactions._replace_path
+
+    def fail_second_promotion(source: Path, destination: Path) -> None:
+        if ".stage-" in source.name and destination.name.startswith("two-"):
+            raise OSError("promote two")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(transactions, "_replace_path", fail_second_promotion)
+
+    with pytest.raises(OSError, match="promote two"):
+        await transaction_env.installer.install_many(specs, transaction_id="tx-same-hash")
+
+    assert runtime.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_transaction_refreshes_stale_registry_before_authorizing_install(transaction_env):
+    await transaction_env.registry.initialize()
+    existing = _write_skill(transaction_env.root / "existing" / "one", "one", "existing")
+    other_registry = LocalSkillsRegistry(skill_roots=[])
+    other_installer = SkillBundleInstaller(
+        registry=other_registry,
+        environment_manager=transaction_env.environment,
+        secret_store=transaction_env.secrets,
+    )
+    await other_installer.install(existing)
+    replacement = _write_skill(transaction_env.root / "replacement" / "one", "one", "replacement")
+    spec = await _spec(transaction_env.installer, replacement)
+
+    with pytest.raises(SkillRuntimeError) as exc_info:
+        await transaction_env.installer.install_many([spec], transaction_id="tx-stale")
+
+    assert exc_info.value.code == SKILL_INSTALL_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_committed_recovery_rejects_tampered_bundle_content(transaction_env):
+    one = _write_skill(transaction_env.root / "sources" / "one", "one", "original")
+    specs = [await _spec(transaction_env.installer, one)]
+    installed = await transaction_env.installer.install_many(specs, transaction_id="tx-tampered")
+    target = get_installed_skills_root(USER_ID) / installed[0]["install_id"]
+    (target / "SKILL.md").write_text(
+        "---\nname: one\ndescription: one\n---\ntampered\n", encoding="utf-8"
+    )
+    from client_backend.services.skill_runtime import transactions
+
+    outcomes = await transactions.recover_install_transactions(USER_ID, transaction_env.installer)
+
+    assert outcomes == {"tx-tampered": "failed"}
+
+
+@pytest.mark.asyncio
+async def test_recovery_holds_the_global_mutation_lock(transaction_env, monkeypatch):
+    one = _write_skill(transaction_env.root / "sources" / "one", "one", "original")
+    await transaction_env.installer.install_many(
+        [await _spec(transaction_env.installer, one)], transaction_id="tx-lock"
+    )
+    from client_backend.services.skill_runtime import transactions
+
+    entered = threading.Event()
+    release = threading.Event()
+    real_hash = transactions.compute_skill_bundle_hash
+
+    def blocking_hash(path: Path):
+        entered.set()
+        assert release.wait(timeout=5)
+        return real_hash(path)
+
+    monkeypatch.setattr(transactions, "compute_skill_bundle_hash", blocking_hash)
+    recovery = asyncio.create_task(
+        transactions.recover_install_transactions(USER_ID, transaction_env.installer)
+    )
+    assert await asyncio.to_thread(entered.wait, 5)
+    acquired = asyncio.Event()
+
+    async def competing_mutation() -> None:
+        async with profile_lock(USER_ID, SKILLS_MUTATION_SCOPE):
+            acquired.set()
+
+    competitor = asyncio.create_task(competing_mutation())
+    await asyncio.sleep(0.05)
+    assert not acquired.is_set()
+    release.set()
+    await recovery
+    await competitor
+    assert acquired.is_set()
+
+
+@pytest.mark.asyncio
+async def test_recovery_removes_an_unjournaled_cancelled_install_stage(transaction_env):
+    orphan = get_installed_skills_root(USER_ID) / "one-deadbeef.stage-cancelled"
+    orphan.mkdir(parents=True)
+    (orphan / "SKILL.md").write_text("partial", encoding="utf-8")
+    from client_backend.services.skill_runtime import transactions
+
+    outcomes = await transactions.recover_install_transactions(USER_ID, transaction_env.installer)
+
+    assert outcomes == {}
+    assert not orphan.exists()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_waits_for_inflight_promotion_then_commits(transaction_env, monkeypatch):
+    one = _write_skill(transaction_env.root / "sources" / "one", "one", "new one")
+    spec = await _spec(transaction_env.installer, one)
+    from client_backend.services.skill_runtime import transactions
+
+    entered = threading.Event()
+    release = threading.Event()
+    real_replace = transactions._replace_path
+
+    def blocking_promotion(source: Path, destination: Path) -> None:
+        if ".stage-" in source.name:
+            entered.set()
+            assert release.wait(timeout=5)
+        real_replace(source, destination)
+
+    monkeypatch.setattr(transactions, "_replace_path", blocking_promotion)
+    task = asyncio.create_task(
+        transaction_env.installer.install_many([spec], transaction_id="tx-cancel")
+    )
+    assert await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    release.set()
+    result = await task
+
+    assert result[0]["name"] == "one"
+    assert {payload["bundle_name"] for payload in _installed_payloads()} == {"one"}

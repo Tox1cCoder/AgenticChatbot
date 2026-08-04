@@ -73,6 +73,12 @@ def _normalize_resource_path(resource_path: str) -> str:
     relative = Path(candidate)
     if ".." in relative.parts:
         raise SkillResourceError("resource_path points outside the skill's own folder.")
+    components = candidate.split("/")
+    if any(
+        not component or ":" in component or component.endswith((".", " "))
+        for component in components
+    ):
+        raise SkillResourceError("resource_path contains a non-portable path component.")
     return relative.as_posix()
 
 
@@ -88,7 +94,10 @@ def _read_policy_resource(bundle_root: Path, resource_path: str) -> _ReadableRes
     candidate = _normalize_resource_path(resource_path)
     root = bundle_root.resolve()
     relative = Path(candidate)
-    if relative.name in _EXCLUDED_NAMES or _EXCLUDED_DIRS.intersection(relative.parts):
+    folded_parts = {part.casefold() for part in relative.parts}
+    if relative.name.casefold() in {name.casefold() for name in _EXCLUDED_NAMES} or {
+        name.casefold() for name in _EXCLUDED_DIRS
+    }.intersection(folded_parts):
         raise SkillResourceError(f"'{candidate}' is not readable content.")
 
     _reject_link_components(root, relative)

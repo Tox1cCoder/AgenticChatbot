@@ -38,6 +38,7 @@ from shared.skills.errors import (
 RUNTIME_FORMAT_VERSION = 1
 SETUP_TIMEOUT_SECONDS = 300
 MAX_SETUP_LOG_BYTES = 64_000
+PREPARATION_LEASE_FILENAME = ".sidecar-preparation.lock"
 
 
 def _default_venv_builder(venv_root: Path) -> None:
@@ -243,6 +244,11 @@ class SkillEnvironmentManager:
             ) from exc
 
         return self.inspect(skill)
+
+    def preparation_lock_path(self, skill: SkillMetadata) -> Path:
+        """Return the cross-process lock shared by one skill/source runtime."""
+        target = self._runtime_root(skill)
+        return target.parent / f".{target.name}.prepare.lock"
 
     def inspect(self, skill: SkillMetadata) -> dict:
         try:

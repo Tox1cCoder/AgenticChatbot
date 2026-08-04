@@ -419,6 +419,21 @@ Succeeded:
 
 For an update, `result.action` is `updated`.
 
+If the local install commits but the sidecar cannot produce even a last-known
+catalog, the operation still succeeds and returns an explicitly unavailable
+catalog instead of inventing an empty device catalog:
+
+```json
+{
+  "catalogSyncStatus": "pending",
+  "catalogUnavailable": true
+}
+```
+
+In that case, do not replace or clear the cached device catalog. Show the
+`pending` state and retry `POST /skills/reload`; apply a later complete catalog
+only through the normal device/generation rules.
+
 Failed operation polling remains HTTP `200` because the operation resource was
 retrieved successfully:
 
@@ -502,7 +517,8 @@ For the same device, do not replace a cached catalog with a response whose
 
 After successful install/update:
 
-1. install `result.catalog` immediately if its generation is current/newer;
+1. install `result.catalog` immediately if it is available and its generation
+   is current/newer; when `catalogUnavailable` is true, retain the cached catalog;
 2. invalidate the affected skill detail;
 3. invalidate any device tool/capability catalog;
 4. invalidate HITL settings because executable skill tools are grouped there.

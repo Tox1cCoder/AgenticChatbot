@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Protocol
 
+import filelock
+
 from client_backend.core.logging import get_logger
 from client_backend.core.paths import (
     get_installed_skills_root,
@@ -26,7 +28,11 @@ from client_backend.services.local_skills_registry import (
     get_skills_registry,
 )
 from client_backend.services.skill_runtime.collection import DiscoveredSkill
-from client_backend.services.skill_runtime.environment import SkillEnvironmentManager
+from client_backend.services.skill_runtime.environment import (
+    PREPARATION_LEASE_FILENAME,
+    SETUP_TIMEOUT_SECONDS,
+    SkillEnvironmentManager,
+)
 from client_backend.services.skill_runtime.locks import (
     SKILLS_MUTATION_SCOPE,
     profile_lock,
@@ -48,6 +54,57 @@ from shared.skills.hashing import UnsafeSkillBundleError, compute_skill_bundle_h
 logger = get_logger(__name__)
 
 _INSTALL_METADATA_FILENAME = "install.json"
+_BACKGROUND_PREPARATION_CLEANUPS: set[asyncio.Task] = set()
+
+
+async def _settled_to_thread(function, /, *args, **kwargs):
+    """Finish an in-flight thread operation before propagating cancellation."""
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await task
+        raise
+
+
+async def _cleanup_cancelled_preparation(
+    preparation: asyncio.Task,
+    *,
+    stage: Path,
+    stage_lease: filelock.FileLock,
+) -> None:
+    """Clean stages only after a cancelled worker stops touching them."""
+    with contextlib.suppress(Exception):
+        await preparation
+    try:
+        await asyncio.to_thread(stage_lease.release)
+        (stage / PREPARATION_LEASE_FILENAME).unlink(missing_ok=True)
+        if stage.exists():
+            await asyncio.to_thread(shutil.rmtree, stage)
+    except Exception:  # noqa: BLE001 - startup cleanup can retry orphaned stages
+        logger.warning("cancelled skill preparation cleanup failed", exc_info=True)
+
+
+def _track_background_cleanup(task: asyncio.Task) -> None:
+    _BACKGROUND_PREPARATION_CLEANUPS.add(task)
+    task.add_done_callback(_BACKGROUND_PREPARATION_CLEANUPS.discard)
+
+
+def _prepare_environment_with_runtime_lock(environment, skill, *, approve_setup: bool):
+    lock_path = environment.preparation_lock_path(skill)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_lease = filelock.FileLock(str(lock_path), thread_local=False)
+    try:
+        runtime_lease.acquire(timeout=SETUP_TIMEOUT_SECONDS)
+    except filelock.Timeout as exc:
+        raise SkillRuntimeError(
+            SKILL_SETUP_REQUIRED,
+            f"runtime preparation for skill '{skill.name}' is already in progress",
+        ) from exc
+    try:
+        return environment.prepare(skill, approve_setup=approve_setup)
+    finally:
+        runtime_lease.release()
 
 
 @dataclass(frozen=True)
@@ -316,16 +373,17 @@ class SkillBundleInstaller:
                     UNSAFE_BUNDLE_PATH, "install path escapes the profile skill root"
                 )
 
+        runtime_cleanup_deferred = False
         try:
             await self._notify(observer, "copying")
-            await asyncio.to_thread(
+            await _settled_to_thread(
                 shutil.copytree,
                 source_skill.bundle_root,
                 stage,
                 symlinks=True,
                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git", ".venv"),
             )
-            copied_hash = await asyncio.to_thread(_compute_source_hash, stage)
+            copied_hash = await _settled_to_thread(_compute_source_hash, stage)
             if copied_hash != source_skill.source_hash:
                 raise SkillRuntimeError(
                     SKILL_INSTALL_INVALID,
@@ -342,7 +400,7 @@ class SkillBundleInstaller:
             }
             if spec.source_kind == "path":
                 install_payload["source_path"] = str(source_skill.bundle_root)
-            await asyncio.to_thread(
+            await _settled_to_thread(
                 (stage / _INSTALL_METADATA_FILENAME).write_text,
                 json.dumps(install_payload, indent=2),
                 encoding="utf-8",
@@ -361,11 +419,44 @@ class SkillBundleInstaller:
             )
             if installed_skill.executable_assets["python_project"]:
                 await self._notify(observer, "preparingRuntime")
-                runtime = await asyncio.to_thread(
-                    self._environment.prepare,
-                    installed_skill,
-                    approve_setup=spec.approve_setup,
+                stage_lease = filelock.FileLock(
+                    str(stage / PREPARATION_LEASE_FILENAME),
+                    thread_local=False,
                 )
+                try:
+                    await _settled_to_thread(
+                        stage_lease.acquire,
+                        timeout=SETUP_TIMEOUT_SECONDS,
+                    )
+                except BaseException:
+                    await asyncio.to_thread(stage_lease.release)
+                    (stage / PREPARATION_LEASE_FILENAME).unlink(missing_ok=True)
+                    raise
+                preparation = asyncio.create_task(
+                    asyncio.to_thread(
+                        _prepare_environment_with_runtime_lock,
+                        self._environment,
+                        installed_skill,
+                        approve_setup=spec.approve_setup,
+                    )
+                )
+                try:
+                    runtime = await asyncio.shield(preparation)
+                except asyncio.CancelledError:
+                    runtime_cleanup_deferred = True
+                    cleanup = asyncio.create_task(
+                        _cleanup_cancelled_preparation(
+                            preparation,
+                            stage=stage,
+                            stage_lease=stage_lease,
+                        )
+                    )
+                    _track_background_cleanup(cleanup)
+                    raise
+                finally:
+                    if not runtime_cleanup_deferred:
+                        await _settled_to_thread(stage_lease.release)
+                        (stage / PREPARATION_LEASE_FILENAME).unlink(missing_ok=True)
                 runtime_status = str(runtime.get("status") or "not_ready")
             elif (
                 installed_skill.executable_assets["bin"]
@@ -374,9 +465,18 @@ class SkillBundleInstaller:
                 runtime_status = "ready"
             else:
                 runtime_status = "instruction_only"
-        except Exception:
-            if stage.exists():
-                await asyncio.to_thread(shutil.rmtree, stage)
+        except BaseException:
+            if not runtime_cleanup_deferred and stage.exists():
+                await _settled_to_thread(shutil.rmtree, stage)
+            if not runtime_cleanup_deferred and (
+                existing is None or existing.source_hash != source_skill.source_hash
+            ):
+                with contextlib.suppress(Exception):
+                    await _settled_to_thread(
+                        self._environment.remove_runtime,
+                        source_skill.name,
+                        source_skill.source_hash,
+                    )
             raise
 
         return PreparedSkillInstall(
@@ -568,12 +668,19 @@ class SkillBundleInstaller:
         root = get_installed_skills_root(user_id)
         if not root.is_dir():
             return []
-        return [
-            metadata
-            for entry in sorted(root.iterdir())
-            if entry.is_dir()
-            if (metadata := _read_install_metadata(entry)) is not None
-        ]
+        installed: list[dict] = []
+        for entry in sorted(root.iterdir()):
+            if not entry.is_dir():
+                continue
+            metadata = _read_install_metadata(entry)
+            if metadata is None:
+                continue
+            try:
+                live_hash = _compute_source_hash(entry)
+            except (OSError, ValueError, SkillRuntimeError):
+                continue
+            installed.append({**metadata, "source_hash": live_hash})
+        return installed
 
     async def _load_source(
         self,

@@ -186,7 +186,9 @@ if (Test-Path -LiteralPath $installMarker -PathType Leaf) {
 if ($installedFingerprint -ne $fingerprint) {
     Invoke-NativeChecked `
         -FilePath $venvPython `
-        -ArgumentList @("-m", "pip", "install", "-r", $requirementsPath) `
+        -ArgumentList @(
+            "-m", "pip", "install", "--disable-pip-version-check", "-r", $requirementsPath
+        ) `
         -Phase "Installing sidecar requirements from '$requirementsPath'"
     $temporaryMarker = "$installMarker.tmp"
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)

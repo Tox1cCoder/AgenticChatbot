@@ -59,6 +59,22 @@ def test_provenance_metadata_cannot_be_read_directly(bundle):
         read_skill_resource(bundle, "install.json")
 
 
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "INSTALL.JSON",
+        "install.json.",
+        "install.json ",
+        "install.json:stream",
+        "__PYCACHE__/x.pyc",
+        "references./x.md",
+    ],
+)
+def test_windows_aliases_cannot_bypass_resource_exclusions(bundle, hostile):
+    with pytest.raises(SkillResourceError):
+        read_skill_resource(bundle, hostile)
+
+
 def test_listing_is_bounded_and_reports_truncation(tmp_path, monkeypatch):
     # Patched through __globals__, not a fresh import: another test in this
     # directory evicts every client_backend module, after which a re-imported one
