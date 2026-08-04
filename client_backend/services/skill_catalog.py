@@ -33,7 +33,10 @@ from client_backend.core.logging import get_logger
 from client_backend.core.paths import get_skill_catalog_state_path
 from client_backend.services.local_skills_registry import get_skills_registry
 from client_backend.services.runtime_bridge import get_runtime_bridge
-from client_backend.services.skill_runtime.locks import profile_lock
+from client_backend.services.skill_runtime.locks import (
+    SKILLS_MUTATION_SCOPE,
+    profile_lock,
+)
 from client_backend.services.skill_runtime.manager import SkillRuntimeManager
 from client_backend.services.skill_runtime.state import atomic_write_json, read_json_object
 
@@ -117,8 +120,14 @@ class SkillCatalogService:
             if not force and time.monotonic() < self._fresh_until:
                 return
             registry = self._get_registry()
-            await registry.initialize()
-            await registry.refresh()
+            user_id = self._resolve_user_id()
+            if user_id is None:
+                await registry.initialize()
+                await registry.refresh()
+            else:
+                async with profile_lock(user_id, SKILLS_MUTATION_SCOPE):
+                    await registry.initialize()
+                    await registry.refresh()
             self._fresh_until = time.monotonic() + float(
                 client_settings.skill_catalog_freshness_seconds
             )

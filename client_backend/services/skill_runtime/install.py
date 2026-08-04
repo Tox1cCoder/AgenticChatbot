@@ -28,7 +28,10 @@ from client_backend.services.local_skills_registry import (
 )
 from client_backend.services.skill_runtime.collection import DiscoveredSkill
 from client_backend.services.skill_runtime.environment import SkillEnvironmentManager
-from client_backend.services.skill_runtime.locks import profile_lock
+from client_backend.services.skill_runtime.locks import (
+    SKILLS_MUTATION_SCOPE,
+    profile_lock,
+)
 from client_backend.services.skill_runtime.secrets import SkillSecretStore
 from client_backend.services.skill_runtime.state import atomic_write_json, read_json_object
 from shared.skills.errors import (
@@ -548,7 +551,7 @@ class SkillBundleInstaller:
         resumed receipt reports ``removed: False``.
         """
         user_id = self._resolve_user_id()
-        async with profile_lock(user_id, f"skill:{name}"):
+        async with profile_lock(user_id, SKILLS_MUTATION_SCOPE):
             install_root = self._resolve_install_root()
             bundle = _find_installed_bundle(install_root, name)
             receipt_path = self._cleanup_receipt_path(user_id, name)

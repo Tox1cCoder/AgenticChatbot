@@ -8,6 +8,7 @@ publication failure never turns a committed local install into a failure.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -172,6 +173,32 @@ async def test_concurrent_freshness_checks_share_one_scan(catalog_env):
     await asyncio.gather(*(catalog_env.service.snapshot(force=False) for _ in range(10)))
 
     assert catalog_env.registry.refresh_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_catalog_scan_waits_for_the_skills_mutation_lock(catalog_env, monkeypatch):
+    catalog_globals = SkillCatalogService.__init__.__globals__
+    assert "SKILLS_MUTATION_SCOPE" in catalog_globals, (
+        "catalog scans must share the installed-bundle mutation scope"
+    )
+    mutation_scope = catalog_globals["SKILLS_MUTATION_SCOPE"]
+    original_lock = catalog_globals["profile_lock"]
+    attempted = asyncio.Event()
+
+    @asynccontextmanager
+    async def observed_lock(user_id: str, scope: str):
+        attempted.set()
+        async with original_lock(user_id, scope):
+            yield
+
+    monkeypatch.setitem(catalog_globals, "profile_lock", observed_lock)
+    async with original_lock(USER_ID, mutation_scope):
+        snapshot_task = asyncio.create_task(catalog_env.service.snapshot(force=True))
+        await asyncio.wait_for(attempted.wait(), timeout=1)
+        assert not snapshot_task.done()
+
+    snapshot = await snapshot_task
+    assert snapshot["skills"]
 
 
 @pytest.mark.asyncio
