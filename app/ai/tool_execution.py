@@ -5,7 +5,6 @@ import hashlib
 import json
 import logging
 import math
-import re
 import time
 from contextlib import suppress
 from dataclasses import dataclass
@@ -15,6 +14,7 @@ from urllib.parse import urlsplit
 from anyio import ClosedResourceError
 
 from ..core.config import settings
+from ..core.rich_image_selection import image_aspect_ratio_ok, is_junk_image_url
 from ..core.rich_response import (
     GENERIC_IMAGE_ALT_TEXT,
     RichDisplayPolicy,
@@ -82,51 +82,9 @@ def _guess_mime_from_url(url: str) -> str:
     return "image/png"
 
 
-#: Non-content asset markers matched against an image URL's path. Kept as a
-#: module constant rather than a setting so no unvalidated pattern arrives
-#: through config. "logo" is deliberately absent — "what does the new X logo
-#: look like" is a legitimate visual query.
-#:
-#: "avatar" and "1x1" are ambiguous as bare substrings (they collide with
-#: real filenames like "avatar-poster.jpg" or "diagram-1x100.jpg"), so those
-#: two are anchored: "avatar"/"avatars" only matches as a full path segment
-#: or exact filename stem, and "1x1" only matches when not immediately
-#: followed by another digit. The rest keep plain substring behavior.
-_JUNK_IMAGE_URL_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"favicon"),
-    re.compile(r"sprite"),
-    re.compile(r"spacer"),
-    re.compile(r"pixel\.gif"),
-    re.compile(r"(?:^|/)avatars?(?:/|\.|$)"),
-    re.compile(r"1x1(?!\d)"),
-)
-
-
 def _short_digest(value: str) -> str:
     """Return a short stable digest, used only to keep ids distinct."""
     return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:8]
-
-
-def image_aspect_ratio_ok(width: Any, height: Any, *, minimum: float, maximum: float) -> bool:
-    """Return False only when both dimensions are known and the ratio is extreme.
-
-    Unknown or nonsense dimensions are not a rejection signal. Tavily supplies no
-    dimensions at all, so this gate applies in practice only to Brave results.
-    """
-    if not isinstance(width, int) or not isinstance(height, int):
-        return True
-    if width <= 0 or height <= 0:
-        return True
-    ratio = width / height
-    return minimum <= ratio <= maximum
-
-
-def is_junk_image_url(url: str) -> bool:
-    """Return True when the URL path names a known non-content asset."""
-    path = urlsplit(str(url or "")).path.lower()
-    if not path:
-        return False
-    return any(pattern.search(path) for pattern in _JUNK_IMAGE_URL_PATTERNS)
 
 
 def order_tavily_images(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -313,7 +271,13 @@ def build_image_candidates_from_tool_result(
             {
                 "id": f"image:tool:{candidate_id_base}:{index}",
                 "type": RichItemType.image.value,
-                "source": "web_search" if tool_name == "tavily_search" else "tool_image",
+                "source": (
+                    "web_search"
+                    if tool_name == "tavily_search"
+                    else "image_search"
+                    if is_brave
+                    else "tool_image"
+                ),
                 "display_policy": RichDisplayPolicy.inline_only.value,
                 "alt_text": str(description or image.get("alt") or GENERIC_IMAGE_ALT_TEXT),
                 "title": image.get("title"),

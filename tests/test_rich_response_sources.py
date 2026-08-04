@@ -197,9 +197,9 @@ def test_brave_image_candidate_identity_and_payload():
     assert len(candidates) == 1
     cand = candidates[0]
     assert cand["type"] == "image"
-    # Provider identity lives in provenance; source may remain the generic value.
+    # A single result has the same deliberate-search intent as a Brave group.
     assert cand["provenance"]["tool"] == "brave_image_search"
-    assert cand["source"] == "tool_image"
+    assert cand["source"] == "image_search"
     # source_url stays in the public payload (ImagePayload accepts it).
     assert cand["payload"]["url"] == "https://img.test/thumb-1.jpg"
     assert cand["payload"]["source_url"] == "https://example.com/page"
@@ -272,8 +272,8 @@ def test_aspect_ratio_gate(width, height, expected):
         "https://e.com/img/spacer.gif",
         "https://e.com/t/1x1.png",
         "https://e.com/pixel.gif",
-        "https://e.com/users/avatar/12.jpg",
-        "https://e.com/avatars/me.png",
+        "https://e.com/avatars/default.png",
+        "https://e.com/default-avatar.jpg",
     ],
 )
 def test_junk_urls_are_rejected(url):
@@ -287,6 +287,8 @@ def test_junk_urls_are_rejected(url):
         "https://e.com/logos/brand.png",
         "https://e.com/photos/apple-park.jpg",
         "https://e.com/movies/avatar-poster.jpg",
+        "https://e.com/users/avatar/12.jpg",
+        "https://e.com/avatars/me.png",
         "https://e.com/diagram-1x100.jpg",
     ],
 )
