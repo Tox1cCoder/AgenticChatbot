@@ -30,3 +30,18 @@ class ToolResultBlobRepository:
                 ToolResultBlob.deleted_at.is_(None),
             )
             return db.execute(statement).scalars().first()
+
+    def get_for_user_and_conversation(
+        self,
+        blob_id: UUID,
+        user_id: UUID,
+        conversation_id: UUID,
+    ) -> ToolResultBlob | None:
+        with self.session_factory() as db:  # type: Session
+            statement = select(ToolResultBlob).where(
+                ToolResultBlob.id == blob_id,
+                ToolResultBlob.user_id == user_id,
+                ToolResultBlob.conversation_id == conversation_id,
+                ToolResultBlob.deleted_at.is_(None),
+            )
+            return db.execute(statement).scalars().first()

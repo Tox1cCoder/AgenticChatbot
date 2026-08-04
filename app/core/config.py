@@ -1146,6 +1146,11 @@ class Settings(BaseSettings):
             "dropped whole instead of shrinking every result into uselessness."
         ),
     )
+    tool_result_read_max_chars: int = Field(
+        default=8000,
+        ge=1,
+        description="Maximum characters returned by one read_tool_result call.",
+    )
     tool_result_blob_storage_dir: str = Field(
         default="data/tool_result_blobs",
         description=(
