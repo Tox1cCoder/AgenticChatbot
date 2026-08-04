@@ -49,8 +49,17 @@ def build_tool_result_preview(
     shell["results"] = [_shrink_result(entry, share) for entry in results[:kept]]
 
     text = _dump(shell)
+    if len(text) > budget:
+        # Even an empty results array doesn't fit the shell (identity keys +
+        # capped answer) within budget. _fit_results guarantees any kept > 0
+        # allocation fits exactly, so this only fires when kept == 0 and the
+        # bare shell itself overflows. Slicing the JSON here would produce
+        # invalid text mislabeled structured=True; falling back to a plain
+        # character prefix of the original output is honest about what fits.
+        return ToolResultPreview(text=output_text[:budget].rstrip(), structured=False)
+
     return ToolResultPreview(
-        text=text if len(text) <= budget else text[:budget],
+        text=text,
         omitted_arrays=omitted_arrays,
         omitted_results=max(0, len(results) - kept),
         structured=True,
