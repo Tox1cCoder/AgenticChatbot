@@ -9,12 +9,15 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
 
 from anyio import ClosedResourceError
 
 from ..core.config import settings
-from ..core.rich_image_selection import image_aspect_ratio_ok, is_junk_image_url
+from ..core.rich_image_selection import (
+    image_aspect_ratio_ok,
+    image_url_scheme,
+    is_junk_image_url,
+)
 from ..core.rich_response import (
     GENERIC_IMAGE_ALT_TEXT,
     RichDisplayPolicy,
@@ -122,11 +125,11 @@ def build_image_candidates_from_tool_result(
     payload. The candidate dicts are safe to forward to
     ``build_bot_metadata()`` as transient `_rich_item_candidates`.
 
-    A Brave result with 2+ eligible candidates collapses into a single
-    ``image_group`` item (see ``_group_image_candidates``) so the model has
-    one marker id to copy instead of choosing among several. Tavily results
-    and single-candidate Brave results are returned as individual ``image``
-    items.
+    A Brave result with 2+ unique eligible candidates collapses into a
+    single ``image_group`` item (see ``_group_image_candidates``) so the model
+    has one marker id to copy instead of choosing among several. Tavily
+    results and single-candidate Brave results are returned as individual
+    ``image`` items.
     """
     if not result_text:
         return []
@@ -201,7 +204,7 @@ def build_image_candidates_from_tool_result(
         width = image.get("width")
         height = image.get("height")
         if display_url:
-            if urlsplit(display_url).scheme.lower() != "https":
+            if image_url_scheme(display_url) != "https":
                 _reject("rejected_scheme")
                 continue
             if display_url in seen_display_urls:
@@ -325,7 +328,26 @@ def _group_image_candidates(
     keeps the field from ever being None. Both normalize identically for metrics.
     """
     cap = max(2, int(getattr(settings, "rich_image_group_max_items", 3)))
-    selected = candidates[:cap]
+    selected: list[dict[str, Any]] = []
+    seen_locators: set[str] = set()
+    for candidate in candidates:
+        payload = candidate.get("payload") or {}
+        display_url = str(payload.get("url") or "").strip()
+        locators = {f"display::{display_url}"} if display_url else set()
+        provenance = candidate.get("provenance") or {}
+        digests = provenance.get("original_image_digests")
+        if display_url and isinstance(digests, dict):
+            digest = digests.get(display_url)
+            if digest:
+                locators.add(f"original::{digest}")
+        if seen_locators.intersection(locators):
+            continue
+        selected.append(candidate)
+        seen_locators.update(locators)
+        if len(selected) >= cap:
+            break
+    if len(selected) == 1:
+        return selected[0]
     cells: list[dict[str, Any]] = []
     for candidate in selected:
         payload = candidate.get("payload") or {}

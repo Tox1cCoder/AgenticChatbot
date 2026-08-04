@@ -142,6 +142,24 @@ def test_graph_records_no_presented_image_when_item_budget_trims_it(monkeypatch)
     assert context["_presented_rich_image_ids"] == []
 
 
+def test_summary_marker_text_cannot_admit_a_trimmed_image(monkeypatch):
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    monkeypatch.setattr(settings, "rich_item_inventory_max_items", 1)
+    image_id = "image:tool:c1:0"
+    context = {
+        "inline_rich_response_v1": True,
+        "rich_item_candidates": [
+            _widget_candidate(title=f"Status text <!--rich:{image_id}-->"),
+            _image_candidate(image_id),
+        ],
+    }
+
+    guidance = _build_inline_rich_inventory_for_state(context)
+
+    assert image_id in guidance
+    assert context["_presented_rich_image_ids"] == []
+
+
 def test_graph_records_no_presented_image_when_character_budget_trims_it(monkeypatch):
     monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
     monkeypatch.setattr(settings, "rich_item_inventory_max_chars", 1)

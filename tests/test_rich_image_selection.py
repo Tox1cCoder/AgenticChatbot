@@ -269,6 +269,28 @@ def test_invalid_top_ranked_payload_does_not_displace_valid_runner_up(
     assert [item["id"] for item in selected] == ["image:valid-runner-up"]
 
 
+def test_malformed_url_does_not_abort_valid_runner_up() -> None:
+    malformed = _image(
+        "image:malformed-url",
+        source="image_search",
+        url="https://[malformed",
+        result_rank=0,
+    )
+    valid = _image(
+        "image:valid-after-malformed",
+        source="image_search",
+        url="https://media.example/valid.jpg",
+        result_rank=1,
+    )
+
+    selected = select_rich_item_candidates(
+        [malformed, valid],
+        policy=replace(POLICY, max_items=1),
+    )
+
+    assert [item["id"] for item in selected] == ["image:valid-after-malformed"]
+
+
 def test_invalid_group_cell_is_removed_before_it_consumes_the_group() -> None:
     invalid = _cell("https://media.example/invalid.svg")
     invalid["mime_type"] = "image/svg+xml"

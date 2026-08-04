@@ -271,6 +271,81 @@ def test_brave_thumbnails_of_same_original_image_are_deduplicated() -> None:
     )
 
 
+def test_brave_originals_are_deduplicated_before_group_cell_cap() -> None:
+    payload = json.dumps(
+        {
+            "query": "team roster",
+            "provider": "brave_image_search",
+            "images": [
+                *[
+                    {
+                        "url": "https://origin.example/shared.jpg",
+                        "thumbnail_url": f"https://thumbs.example/variant-{index}.jpg",
+                        "description": "team roster",
+                        "mime_type": "image/jpeg",
+                        "width": 1200,
+                        "height": 800,
+                        "provider": "brave_image_search",
+                    }
+                    for index in range(3)
+                ],
+                {
+                    "url": "https://origin.example/unique.jpg",
+                    "thumbnail_url": "https://thumbs.example/unique.jpg",
+                    "description": "team roster unique view",
+                    "mime_type": "image/jpeg",
+                    "width": 1200,
+                    "height": 800,
+                    "provider": "brave_image_search",
+                },
+            ],
+        }
+    )
+    [candidate] = build_image_candidates_from_tool_result(
+        payload,
+        tool_call_id="call-pre-cap-dedupe",
+        tool_name="brave_image_search",
+    )
+
+    assert candidate["type"] == "image_group"
+    assert [cell["url"] for cell in candidate["payload"]["items"]] == [
+        "https://thumbs.example/variant-0.jpg",
+        "https://thumbs.example/unique.jpg",
+    ]
+
+
+def test_malformed_provider_url_rejects_only_that_candidate() -> None:
+    payload = json.dumps(
+        {
+            "provider": "brave_image_search",
+            "images": [
+                {
+                    "url": "https://[malformed",
+                    "description": "broken",
+                    "width": 1200,
+                    "height": 800,
+                },
+                {
+                    "url": "https://media.example/valid.jpg",
+                    "description": "valid",
+                    "width": 1200,
+                    "height": 800,
+                },
+            ],
+        }
+    )
+
+    candidates = build_image_candidates_from_tool_result(
+        payload,
+        tool_call_id="call-malformed-url",
+        tool_name="brave_image_search",
+    )
+
+    assert [candidate["payload"]["url"] for candidate in candidates] == [
+        "https://media.example/valid.jpg"
+    ]
+
+
 def test_remote_candidates_reject_insecure_duplicate_and_known_tiny_images(monkeypatch):
     from app.core.config import settings
 

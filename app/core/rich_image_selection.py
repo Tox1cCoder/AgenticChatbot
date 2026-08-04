@@ -95,10 +95,22 @@ def image_aspect_ratio_ok(
     return minimum <= width / height <= maximum
 
 
+def image_url_scheme(url: Any) -> str | None:
+    """Return a normalized URL scheme, or ``None`` for malformed input."""
+
+    try:
+        return urlsplit(str(url or "")).scheme.lower()
+    except ValueError:
+        return None
+
+
 def is_junk_image_url(url: str) -> bool:
     """Return whether a URL path unambiguously names a non-content asset."""
 
-    path = urlsplit(str(url or "")).path
+    try:
+        path = urlsplit(str(url or "")).path
+    except ValueError:
+        return True
     return bool(path) and any(pattern.search(path) for pattern in _JUNK_IMAGE_URL_PATTERNS)
 
 
@@ -216,7 +228,7 @@ def _payload_is_eligible(
     if caption is not None and (not isinstance(caption, str) or len(caption) > 500):
         return False
     if require_remote_url and has_url:
-        if urlsplit(url).scheme.lower() != "https" or is_junk_image_url(url):
+        if image_url_scheme(url) != "https" or is_junk_image_url(url):
             return False
     elif (require_remote_url and not has_data) or (
         has_url and not _is_allowed_image_url(url)
@@ -240,7 +252,7 @@ def _payload_is_eligible(
 def _is_allowed_absolute_url(value: Any) -> bool:
     if not isinstance(value, str) or "://" not in value:
         return False
-    return urlsplit(value).scheme.lower() in ALLOWED_URL_SCHEMES
+    return image_url_scheme(value) in ALLOWED_URL_SCHEMES
 
 
 def _is_allowed_image_url(url: str) -> bool:

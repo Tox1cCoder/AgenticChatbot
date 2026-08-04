@@ -6,7 +6,6 @@ from app.ai.token_counter import TokenCounter
 from app.core.config import settings
 from app.core.rich_response import (
     build_rich_item_inventory_block,
-    parse_inline_rich_references,
     provenance_provider,
 )
 from app.observability.rich_images import rich_image_metrics
@@ -58,6 +57,7 @@ def build_rich_response_guidance(
         return ""
     if not candidates:
         return ""
+    admitted_item_ids: list[str] = []
     inventory = build_rich_item_inventory_block(
         candidates,
         max_items=max_items if max_items is not None else settings.rich_item_inventory_max_items,
@@ -66,10 +66,11 @@ def build_rich_response_guidance(
             summary_chars if summary_chars is not None else settings.rich_item_summary_max_chars
         ),
         image_max_items=settings.rich_auto_place_max_images,
+        admitted_item_ids=admitted_item_ids,
     )
     if not inventory:
         return ""
-    inventory_ids = set(parse_inline_rich_references(inventory))
+    inventory_ids = set(admitted_item_ids)
     admitted_image_ids = [
         str(candidate.get("id"))
         for candidate in candidates

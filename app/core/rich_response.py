@@ -758,6 +758,7 @@ def build_rich_item_inventory_block(
     max_chars: int,
     summary_chars: int,
     image_max_items: int,
+    admitted_item_ids: list[str] | None = None,
 ) -> str:
     """Return a bounded human-readable inventory block listing rich items
     available for inline placement.
@@ -787,6 +788,7 @@ def build_rich_item_inventory_block(
         ordered = ordered[:max_items]
 
     lines = [_INVENTORY_HEADER]
+    admitted_ids: list[str] = []
     for item in ordered:
         item_id = getattr(item, "id", None) or (item.get("id") if isinstance(item, dict) else None)
         item_type = _get_type(item) or "unknown"
@@ -796,6 +798,7 @@ def build_rich_item_inventory_block(
             lines.append(f"- {marker} | {item_type} | {summary}")
         else:
             lines.append(f"- {marker} | {item_type}")
+        admitted_ids.append(str(item_id))
     lines.append("")
     lines.append(_INVENTORY_FOOTER)
     block = "\n".join(lines)
@@ -805,10 +808,13 @@ def build_rich_item_inventory_block(
         while len(block) > max_chars and len(lines) > 3:
             # Remove the last non-footer, non-blank line.
             del lines[-3]
+            admitted_ids.pop()
             block = "\n".join(lines)
         if len(block) > max_chars:
             # Last resort: hard truncate.
             block = block[:max_chars]
+    if admitted_item_ids is not None:
+        admitted_item_ids[:] = admitted_ids
     return block
 
 
