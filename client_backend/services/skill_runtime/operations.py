@@ -341,7 +341,7 @@ class SkillInstallationService:
         """
         installer = self._installer_factory()
         observer = _OperationObserver(self, user_id, operation_id)
-        entries = uploads.skill_roots(user_id, upload.upload_id)
+        entries = uploads.discovered_skills(user_id, upload.upload_id)
         if not entries:
             raise SkillRuntimeError(
                 "SKILL_INSTALL_INVALID",
@@ -352,11 +352,11 @@ class SkillInstallationService:
         single = len(entries) == 1
         installed: list[dict[str, Any]] = []
         try:
-            for name, skill_root in entries:
+            for name, discovered in entries:
                 preview = previews.get(name)
                 installed.append(
                     await installer.install(
-                        skill_root,
+                        discovered,
                         expected_source_hash=(
                             request.expected_source_hash
                             if single

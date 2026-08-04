@@ -129,7 +129,7 @@ class _UploadServiceStub:
         self.get_owned(user_id, upload_id)
         return self._bundle_root
 
-    def skill_roots(self, user_id: str, upload_id: str) -> list[tuple[str, Path]]:
+    def discovered_skills(self, user_id: str, upload_id: str) -> list[tuple[str, Path]]:
         record = self.get_owned(user_id, upload_id)
         previews = record.skills or [record.preview]
         return [(preview.name, self._bundle_root / preview.name) for preview in previews]
@@ -506,9 +506,7 @@ async def test_cancel_before_commit_stops_a_running_install(operation_env):
             break
         await asyncio.sleep(0.005)
 
-    cancel_task = asyncio.create_task(
-        operation_env.service.cancel(USER_A, operation.operation_id)
-    )
+    cancel_task = asyncio.create_task(operation_env.service.cancel(USER_A, operation.operation_id))
     await asyncio.sleep(0.01)
     gate.set()
     cancelled = await cancel_task
@@ -660,9 +658,7 @@ def test_request_fingerprint_distinguishes_setup_approval(operation_env):
 
 def test_operation_model_rejects_unknown_fields():
     with pytest.raises(ValueError):
-        SkillInstallationRequest.model_validate(
-            {"expectedSourceHash": SOURCE_HASH, "sneaky": True}
-        )
+        SkillInstallationRequest.model_validate({"expectedSourceHash": SOURCE_HASH, "sneaky": True})
 
 
 def test_service_singleton_is_resettable():

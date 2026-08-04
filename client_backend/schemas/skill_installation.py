@@ -166,6 +166,14 @@ class SkillArchiveSummary(CamelModel):
     skipped_link_count: int = 0
 
 
+class SkillArchiveMember(CamelModel):
+    """Internal archive-relative paths binding a preview to one exact document."""
+
+    name: str
+    bundle_path: str
+    skill_path: str
+
+
 class SkillUploadRecord(CamelModel):
     """A staged, validated, not-yet-installed archive.
 
@@ -175,7 +183,7 @@ class SkillUploadRecord(CamelModel):
     used for idempotency.
     """
 
-    version: int = 1
+    version: int = 2
     upload_id: str
     owner: str
     state: UploadState = "staged"
@@ -188,12 +196,13 @@ class SkillUploadRecord(CamelModel):
     preview: SkillArchivePreview
     collection: SkillCollectionInfo | None = None
     skills: list[SkillArchivePreview] = Field(default_factory=list)
+    members: list[SkillArchiveMember] = Field(default_factory=list)
     request_fingerprint: str | None = None
     operation_id: str | None = None
 
     def to_api(self) -> dict[str, Any]:
         payload = super().to_api()
-        for internal in ("owner", "version", "requestFingerprint"):
+        for internal in ("owner", "version", "requestFingerprint", "members"):
             payload.pop(internal, None)
         return payload
 

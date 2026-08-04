@@ -63,6 +63,14 @@ def _valid_skill_zip_bytes(name: str = "demo") -> bytes:
     return buffer.getvalue()
 
 
+def _nested_single_skill_zip_bytes() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("skills/demo/SKILL.md", SKILL_MD)
+        archive.writestr("bin/demo.py", "print('ok')\n")
+    return buffer.getvalue()
+
+
 class _AsyncReader:
     """An UploadFile-shaped async stream that records how it was consumed."""
 
@@ -314,6 +322,7 @@ async def test_api_payload_hides_owner_and_fingerprint(upload_env):
 
     assert "owner" not in payload
     assert "requestFingerprint" not in payload
+    assert "members" not in payload
     assert payload["uploadId"] == record.upload_id
     assert payload["preview"]["sourceHash"] == record.preview.source_hash
     assert "source_hash" not in payload["preview"]
@@ -832,6 +841,43 @@ async def test_a_single_skill_upload_still_reports_one_collection_of_one(upload_
 
 
 @pytest.mark.asyncio
+async def test_nested_single_skill_preserves_document_and_bundle_root(upload_env):
+    record = await upload_env.service.stage(
+        user_id=USER_A,
+        filename="nested-demo.zip",
+        stream=_AsyncReader(_nested_single_skill_zip_bytes()),
+    )
+
+    assert hasattr(upload_env.service, "discovered_skills"), (
+        "upload receipts must rehydrate exact skill descriptors"
+    )
+    members = upload_env.service.discovered_skills(USER_A, record.upload_id)
+    assert len(members) == 1
+    name, discovered = members[0]
+    assert name == "demo"
+    assert discovered.bundle_root == upload_env.service.extracted_root(USER_A, record.upload_id)
+    assert (
+        discovered.skill_file.relative_to(discovered.bundle_root).as_posix()
+        == "skills/demo/SKILL.md"
+    )
+    assert (discovered.bundle_root / "bin/demo.py").is_file()
+
+
+@pytest.mark.asyncio
+async def test_persisted_member_paths_cannot_escape_the_staged_archive(upload_env):
+    record = await upload_env.service.stage(
+        user_id=USER_A,
+        filename="demo.zip",
+        stream=_AsyncReader(_valid_skill_zip_bytes()),
+    )
+    record.members[0].bundle_path = "../outside"
+    upload_env.service.persist_for_test(record)
+
+    with pytest.raises(SkillUploadStateError, match="invalid"):
+        upload_env.service.discovered_skills(USER_A, record.upload_id)
+
+
+@pytest.mark.asyncio
 async def test_collection_previews_report_each_skills_own_collision(upload_env, monkeypatch):
     from types import SimpleNamespace
 
@@ -863,19 +909,19 @@ async def test_collection_previews_report_each_skills_own_collision(upload_env, 
 
 
 @pytest.mark.asyncio
-async def test_skill_roots_follow_the_previewed_order(upload_env):
+async def test_discovered_skills_follow_the_previewed_order(upload_env):
     record = await upload_env.service.stage(
         user_id=USER_A,
         filename="library.zip",
         stream=_AsyncReader(_collection_zip({"alpha": "a", "zulu": "z"})),
     )
 
-    roots = upload_env.service.skill_roots(USER_A, record.upload_id)
+    discovered_skills = upload_env.service.discovered_skills(USER_A, record.upload_id)
 
-    assert [name for name, _ in roots] == [skill.name for skill in record.skills]
-    for name, root in roots:
-        assert (root / "SKILL.md").is_file()
-        assert root.name == name
+    assert [name for name, _ in discovered_skills] == [skill.name for skill in record.skills]
+    for name, discovered in discovered_skills:
+        assert discovered.skill_file.is_file()
+        assert discovered.bundle_root.name == name
 
 
 @pytest.mark.asyncio

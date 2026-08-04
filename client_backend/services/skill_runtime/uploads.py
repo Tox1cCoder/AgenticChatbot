@@ -45,6 +45,7 @@ from client_backend.core.paths import (
     sanitize_filename,
 )
 from client_backend.schemas.skill_installation import (
+    SkillArchiveMember,
     SkillArchivePreview,
     SkillArchiveSummary,
     SkillCollectionInfo,
@@ -59,6 +60,7 @@ from client_backend.services.skill_runtime.audit import SkillLifecycleAuditWrite
 from client_backend.services.skill_runtime.collection import (
     MAX_SKILLS_PER_COLLECTION,
     DiscoveredCollection,
+    DiscoveredSkill,
     discover_collection,
 )
 from client_backend.services.skill_runtime.locks import profile_lock
@@ -369,6 +371,14 @@ class SkillUploadService:
             # single-skill contract keeps working unchanged.
             preview=previews[0],
             skills=previews,
+            members=[
+                SkillArchiveMember(
+                    name=preview.name,
+                    bundle_path=(discovered.bundle_root.relative_to(bundle_root).as_posix() or "."),
+                    skill_path=discovered.relative_skill_file,
+                )
+                for discovered, preview in zip(collection.skills, previews, strict=True)
+            ],
         )
         self._write_record(record)
         return record
@@ -380,23 +390,23 @@ class SkillUploadService:
         collection: DiscoveredCollection,
     ) -> list[SkillArchivePreview]:
         """Preview every skill the archive contains, without running any of them."""
-        if not collection.skill_roots:
+        if not collection.skills:
             raise SkillUploadError(
                 SKILL_BUNDLE_INVALID,
                 "This archive contains no SKILL.md, so there is no skill to install. "
                 "Zip the folder that holds the skill's SKILL.md.",
             )
-        if len(collection.skill_roots) > MAX_SKILLS_PER_COLLECTION:
+        if len(collection.skills) > MAX_SKILLS_PER_COLLECTION:
             raise SkillUploadError(
                 SKILL_BUNDLE_INVALID,
-                f"This archive contains {len(collection.skill_roots)} skills, more than "
+                f"This archive contains {len(collection.skills)} skills, more than "
                 f"the {MAX_SKILLS_PER_COLLECTION} allowed in one upload. It is probably "
                 "a whole workspace rather than a skill library.",
             )
 
         previews: list[SkillArchivePreview] = []
-        for skill_root in collection.skill_roots:
-            payload = await self._preview_bundle(skill_root, bundle_root)
+        for discovered in collection.skills:
+            payload = await self._preview_bundle(discovered, bundle_root)
             existing = await self._describe_existing_skill(user_id, str(payload["name"]))
             previews.append(
                 SkillArchivePreview.from_installer_preview(payload, existing_skill=existing)
@@ -421,15 +431,19 @@ class SkillUploadService:
             seen.add(preview.name)
         return sorted(duplicates)
 
-    async def _preview_bundle(self, skill_root: Path, archive_root: Path) -> dict[str, Any]:
+    async def _preview_bundle(
+        self,
+        discovered: DiscoveredSkill,
+        archive_root: Path,
+    ) -> dict[str, Any]:
         """Read one skill's metadata through the installer's read-only preview."""
         installer = self._build_installer()
         try:
-            return await installer.preview(skill_root)
+            return await installer.preview(discovered)
         except SkillRuntimeError as exc:
             raise SkillUploadError(
                 SKILL_BUNDLE_INVALID,
-                self._bundle_rejection_message(skill_root, archive_root, exc),
+                self._bundle_rejection_message(discovered.skill_file, archive_root, exc),
             ) from exc
 
     @staticmethod
@@ -501,7 +515,7 @@ class SkillUploadService:
     def extracted_root(self, user_id: str, upload_id: str) -> Path:
         """Return the validated bundle directory for a staged upload.
 
-        For a collection this is the archive root; use :meth:`skill_roots` to
+        For a collection this is the archive root; use :meth:`discovered_skills` to
         install the individual skills inside it.
         """
         self.get_owned(user_id, upload_id)
@@ -509,34 +523,82 @@ class SkillUploadService:
             self._staging_dir(user_id, upload_id) / _EXTRACTED_DIRNAME
         )
 
-    def skill_roots(self, user_id: str, upload_id: str) -> list[tuple[str, Path]]:
-        """Return ``(skill name, bundle directory)`` for every skill in an upload.
-
-        Re-discovered from disk rather than read from the receipt: the receipt
-        stores previews, and the installer needs the directories those previews
-        were taken from. Discovery is deterministic over an extracted tree that
-        nothing else writes to.
-        """
+    def discovered_skills(
+        self,
+        user_id: str,
+        upload_id: str,
+    ) -> list[tuple[str, DiscoveredSkill]]:
+        """Rehydrate the exact bundle/document pairs persisted at preview."""
         record = self.get_owned(user_id, upload_id)
         archive_root = self.extracted_root(user_id, upload_id)
-        collection = discover_collection(archive_root, fallback_name=record.archive.filename)
-
-        by_name: dict[str, Path] = {}
-        for skill_root in collection.skill_roots:
-            parsed = parse_skill_front_matter(
-                (skill_root / "SKILL.md").read_text(encoding="utf-8")
+        members = record.members
+        if not members:
+            collection = discover_collection(
+                archive_root,
+                fallback_name=record.archive.filename,
             )
-            name = (parsed.name if parsed else None) or skill_root.name
-            by_name.setdefault(name, skill_root)
+            members = [
+                SkillArchiveMember(
+                    name=preview.name,
+                    bundle_path=(
+                        discovered.bundle_root.relative_to(archive_root).as_posix() or "."
+                    ),
+                    skill_path=discovered.relative_skill_file,
+                )
+                for discovered, preview in zip(
+                    collection.skills,
+                    record.skills or [record.preview],
+                    strict=True,
+                )
+            ]
+
+        by_name: dict[str, DiscoveredSkill] = {}
+        for member in members:
+            bundle_root = self._resolve_member_path(
+                archive_root,
+                member.bundle_path,
+                label="bundle path",
+            )
+            skill_file = self._resolve_member_path(
+                bundle_root,
+                member.skill_path,
+                label="skill path",
+            )
+            if skill_file.name != "SKILL.md" or not skill_file.is_file():
+                raise SkillUploadStateError("The staged skill document is no longer valid.")
+            parsed = parse_skill_front_matter(skill_file.read_text(encoding="utf-8"))
+            name = (parsed.name if parsed else None) or sanitize_filename(skill_file.parent.name)
+            if name != member.name:
+                raise SkillUploadStateError("The staged skill no longer matches its preview.")
+            by_name.setdefault(
+                name,
+                DiscoveredSkill(bundle_root=bundle_root, skill_file=skill_file),
+            )
 
         # Ordered by the preview the user approved, so installation follows the
         # list they were shown rather than a filesystem ordering.
-        ordered: list[tuple[str, Path]] = []
+        ordered: list[tuple[str, DiscoveredSkill]] = []
         for preview in record.skills or [record.preview]:
             root = by_name.get(preview.name)
             if root is not None:
                 ordered.append((preview.name, root))
         return ordered
+
+    @staticmethod
+    def _resolve_member_path(root: Path, value: str, *, label: str) -> Path:
+        normalized = str(value or "").strip().replace("\\", "/")
+        relative = Path(normalized)
+        if (
+            not normalized
+            or relative.is_absolute()
+            or (len(normalized) > 1 and normalized[1] == ":")
+            or ".." in relative.parts
+        ):
+            raise SkillUploadStateError(f"The staged {label} is invalid.")
+        target = (root / relative).resolve()
+        if not is_under_root(target, root.resolve()):
+            raise SkillUploadStateError(f"The staged {label} escapes the archive.")
+        return target
 
     # ------------------------------------------------------------ transitions
 

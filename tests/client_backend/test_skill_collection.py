@@ -77,7 +77,10 @@ def test_a_single_skill_keeps_the_archive_root_as_its_bundle(tmp_path):
     collection = discover_collection(tmp_path, fallback_name="demo")
 
     assert collection.is_single_skill
-    assert collection.skill_roots == [tmp_path]
+    assert hasattr(collection, "skills"), "discovery must retain the exact SKILL.md"
+    discovered = collection.skills[0]
+    assert discovered.bundle_root == tmp_path
+    assert discovered.skill_file == tmp_path / "skills" / "demo" / "SKILL.md"
 
 
 def test_a_collection_gives_each_skill_its_own_root(tmp_path):
@@ -87,7 +90,7 @@ def test_a_collection_gives_each_skill_its_own_root(tmp_path):
     collection = discover_collection(tmp_path, fallback_name="library")
 
     assert not collection.is_single_skill
-    assert [root.name for root in collection.skill_roots] == ["one", "two"]
+    assert [skill.bundle_root.name for skill in collection.skills] == ["one", "two"]
 
 
 @pytest.mark.parametrize(
@@ -139,7 +142,7 @@ def test_an_unreadable_manifest_does_not_break_discovery(tmp_path):
     collection = discover_collection(tmp_path, fallback_name="fallback")
 
     assert collection.manifest.name == "fallback"
-    assert len(collection.skill_roots) == 2
+    assert len(collection.skills) == 2
 
 
 def test_an_archive_with_no_skills_discovers_none(tmp_path):
@@ -147,7 +150,7 @@ def test_an_archive_with_no_skills_discovers_none(tmp_path):
 
     collection = discover_collection(tmp_path, fallback_name="empty")
 
-    assert collection.skill_roots == []
+    assert collection.skills == []
 
 
 def test_the_real_superpowers_archive_discovers_its_library(tmp_path):
@@ -169,5 +172,5 @@ def test_the_real_superpowers_archive_discovers_its_library(tmp_path):
 
     assert collection.manifest.name == "superpowers"
     assert collection.manifest.version
-    assert len(collection.skill_roots) == 14
-    assert "brainstorming" in {root.name for root in collection.skill_roots}
+    assert len(collection.skills) == 14
+    assert "brainstorming" in {skill.bundle_root.name for skill in collection.skills}

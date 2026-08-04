@@ -53,11 +53,31 @@ class DiscoveredCollection:
     """The skills an archive contains, and what the archive calls itself."""
 
     manifest: CollectionManifest
-    skill_roots: list[Path] = field(default_factory=list)
+    skills: list[DiscoveredSkill] = field(default_factory=list)
 
     @property
     def is_single_skill(self) -> bool:
-        return len(self.skill_roots) == 1
+        return len(self.skills) == 1
+
+
+@dataclass(frozen=True)
+class DiscoveredSkill:
+    """One exact skill document and the bundle copied when it is installed."""
+
+    bundle_root: Path
+    skill_file: Path
+
+    def __post_init__(self) -> None:
+        root = self.bundle_root.resolve()
+        document = self.skill_file.resolve()
+        if document.name != "SKILL.md" or (
+            root != document.parent and root not in document.parents
+        ):
+            raise ValueError("skill document must be inside its bundle root")
+
+    @property
+    def relative_skill_file(self) -> str:
+        return self.skill_file.resolve().relative_to(self.bundle_root.resolve()).as_posix()
 
 
 def _load_manifest(root: Path) -> CollectionManifest | None:
@@ -121,5 +141,10 @@ def discover_collection(root: Path, *, fallback_name: str) -> DiscoveredCollecti
     manifest = _load_manifest(root) or CollectionManifest(name=fallback_name)
     skill_roots = find_skill_roots(root)
     if len(skill_roots) == 1:
-        skill_roots = [root]
-    return DiscoveredCollection(manifest=manifest, skill_roots=skill_roots)
+        skills = [DiscoveredSkill(bundle_root=root, skill_file=skill_roots[0] / "SKILL.md")]
+    else:
+        skills = [
+            DiscoveredSkill(bundle_root=skill_root, skill_file=skill_root / "SKILL.md")
+            for skill_root in skill_roots
+        ]
+    return DiscoveredCollection(manifest=manifest, skills=skills)

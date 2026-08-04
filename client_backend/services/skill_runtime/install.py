@@ -25,6 +25,7 @@ from client_backend.services.local_skills_registry import (
     SkillMetadata,
     get_skills_registry,
 )
+from client_backend.services.skill_runtime.collection import DiscoveredSkill
 from client_backend.services.skill_runtime.environment import SkillEnvironmentManager
 from client_backend.services.skill_runtime.locks import profile_lock
 from client_backend.services.skill_runtime.secrets import SkillSecretStore
@@ -113,8 +114,8 @@ class SkillBundleInstaller:
         self._environment = environment_manager or SkillEnvironmentManager()
         self._secrets = secret_store or SkillSecretStore()
 
-    async def preview(self, source: str | Path) -> dict:
-        skill, shape = await self._discover_source(source)
+    async def preview(self, source: str | Path | DiscoveredSkill) -> dict:
+        skill, shape = await self._load_source(source)
         setup = await asyncio.to_thread(self._environment.preview, skill)
         return {
             "name": skill.name,
@@ -126,7 +127,7 @@ class SkillBundleInstaller:
 
     async def install(
         self,
-        source: str | Path,
+        source: str | Path | DiscoveredSkill,
         *,
         expected_source_hash: str | None = None,
         approve_setup: bool = False,
@@ -154,7 +155,7 @@ class SkillBundleInstaller:
             ``action`` (``"installed"`` or ``"updated"``).
         """
         await self._notify(observer, "validating")
-        source_skill, shape = await self._discover_source(source)
+        source_skill, shape = await self._load_source(source)
         preview = await self._build_preview(source_skill, shape)
         self._require_preview_agreement(
             source_skill,
@@ -215,7 +216,7 @@ class SkillBundleInstaller:
 
     async def _install_locked(
         self,
-        source: str | Path,
+        source: str | Path | DiscoveredSkill,
         *,
         user_id: str,
         expected_source_hash: str | None,
@@ -231,7 +232,7 @@ class SkillBundleInstaller:
         bundle on disk can change, and a copy of *different* content than the user
         approved is exactly what the hash binding exists to prevent.
         """
-        source_skill, shape = await self._discover_source(source)
+        source_skill, shape = await self._load_source(source)
         if expected_source_hash and expected_source_hash != source_skill.source_hash:
             raise SkillRuntimeError(
                 SKILL_INSTALL_INVALID,
@@ -548,6 +549,14 @@ class SkillBundleInstaller:
             if (metadata := _read_install_metadata(entry)) is not None
         ]
 
+    async def _load_source(
+        self,
+        source: str | Path | DiscoveredSkill,
+    ) -> tuple[SkillMetadata, str]:
+        if isinstance(source, DiscoveredSkill):
+            return await self._load_discovered_skill(source)
+        return await self._discover_source(source)
+
     async def _discover_source(self, source: str | Path) -> tuple[SkillMetadata, str]:
         source_path = Path(source).expanduser().resolve()
         if not source_path.is_dir():
@@ -555,14 +564,33 @@ class SkillBundleInstaller:
                 SKILL_INSTALL_INVALID,
                 f"source '{source}' does not exist or is not a directory",
             )
-        source_hash = await asyncio.to_thread(_compute_source_hash, source_path)
         skill_files = sorted(source_path.rglob("SKILL.md"))
         if len(skill_files) != 1:
             raise SkillRuntimeError(
                 SKILL_INSTALL_INVALID,
                 f"bundle must contain exactly one SKILL.md file; found {len(skill_files)}",
             )
-        skill_path = skill_files[0]
+        return await self._load_discovered_skill(
+            DiscoveredSkill(bundle_root=source_path, skill_file=skill_files[0])
+        )
+
+    async def _load_discovered_skill(
+        self,
+        discovered: DiscoveredSkill,
+    ) -> tuple[SkillMetadata, str]:
+        source_path = discovered.bundle_root.expanduser().resolve()
+        skill_path = discovered.skill_file.expanduser().resolve()
+        if not source_path.is_dir() or not skill_path.is_file():
+            raise SkillRuntimeError(
+                SKILL_INSTALL_INVALID,
+                "the previewed skill bundle or SKILL.md no longer exists",
+            )
+        if skill_path.name != "SKILL.md" or not is_under_root(skill_path, source_path):
+            raise SkillRuntimeError(
+                SKILL_INSTALL_INVALID,
+                "the previewed SKILL.md is outside its bundle root",
+            )
+        source_hash = await asyncio.to_thread(_compute_source_hash, source_path)
         raw = await asyncio.to_thread(skill_path.read_text, encoding="utf-8")
         parsed = parse_skill_front_matter(raw)
         if parsed is not None:
