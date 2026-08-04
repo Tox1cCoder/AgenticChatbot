@@ -164,3 +164,46 @@ async def test_later_failure_restores_old_bundles_runtimes_and_secrets(
     for name, source_hash in old_hashes.items():
         assert (transaction_env.root / "runtimes" / name / source_hash).is_dir()
     assert transaction_env.secrets.values["one"] == {"TOKEN": "encrypted"}
+
+
+@pytest.mark.asyncio
+async def test_recovery_resumes_an_incomplete_precommit_rollback(transaction_env, monkeypatch):
+    one = _write_skill(transaction_env.root / "sources" / "one", "one", "new one")
+    two = _write_skill(transaction_env.root / "sources" / "two", "two", "new two")
+    specs = [
+        await _spec(transaction_env.installer, one),
+        await _spec(transaction_env.installer, two),
+    ]
+    from client_backend.services.skill_runtime import transactions
+
+    real_replace = transactions._replace_path
+    real_rmtree = transactions.shutil.rmtree
+
+    def fail_second_promotion(source: Path, destination: Path) -> None:
+        if ".stage-" in source.name and destination.name.startswith("two-"):
+            raise OSError("promote two")
+        real_replace(source, destination)
+
+    def fail_first_rollback(path: Path) -> None:
+        if path.name.startswith("one-") and ".stage-" not in path.name:
+            raise OSError("rollback one")
+        real_rmtree(path)
+
+    monkeypatch.setattr(transactions, "_replace_path", fail_second_promotion)
+    monkeypatch.setattr(transactions.shutil, "rmtree", fail_first_rollback)
+    with pytest.raises(OSError, match="promote two"):
+        await transaction_env.installer.install_many(specs, transaction_id="tx-recover")
+
+    journal = next(get_skill_operations_root(USER_ID).glob("transaction-*.json"))
+    assert json.loads(journal.read_text(encoding="utf-8"))["state"] == "rolling_back"
+
+    monkeypatch.setattr(transactions.shutil, "rmtree", real_rmtree)
+    outcomes = await transactions.recover_install_transactions(
+        USER_ID,
+        transaction_env.installer,
+    )
+
+    assert outcomes == {"tx-recover": "rolled_back"}
+    assert _installed_payloads() == []
+    transaction_env.installer.finalize_transaction("tx-recover")
+    assert not journal.exists()

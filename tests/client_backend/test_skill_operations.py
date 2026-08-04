@@ -34,6 +34,13 @@ USER_B = "user-b"
 SOURCE_HASH = "a" * 64
 
 
+def test_operation_receipt_has_complete_transaction_recovery_fields():
+    fields = SkillInstallationOperationModel.model_fields
+
+    assert "transaction_id" in fields
+    assert "expected_source_hashes" in fields
+
+
 def _service_globals() -> dict:
     """The operations module's globals, which is where its `except` clauses look.
 
@@ -154,6 +161,8 @@ class _InstallerStub:
         self.uninstalled: list[str] = []
         self.installed_names: list[str] = []
         self.fail_on_name: str | None = None
+        self.transaction_outcomes: dict[str, str] = {}
+        self.finalized: list[str] = []
 
     async def install(
         self,
@@ -192,8 +201,57 @@ class _InstallerStub:
             "action": "updated" if replace_source_hash else "installed",
         }
 
+    async def install_many(self, specs, *, transaction_id, observer=None):
+        self.install_calls += len(specs)
+        names = [
+            Path(getattr(spec.discovered, "bundle_root", spec.discovered)).name for spec in specs
+        ]
+        try:
+            if self.fail_on_name and self.fail_on_name in names:
+                raise RuntimeError(f"install of {self.fail_on_name} failed")
+            for phase in ("validating", "waitingForLock", "copying", "preparingRuntime"):
+                if observer is not None:
+                    await observer.phase(phase)
+                    self.observed_phases.append(phase)
+            if self.error is not None:
+                raise self.error
+            if self.commit_gate is not None:
+                await self.commit_gate.wait()
+            if observer is not None:
+                await observer.phase("committing")
+                await observer.before_commit()
+            if self.raise_after_commit:
+                raise RuntimeError("failed after the promotion started")
+            results = []
+            for name, spec in zip(names, specs, strict=True):
+                source_hash = str(spec.expected_source_hash or SOURCE_HASH)
+                self.installed_hashes.append(source_hash)
+                self.installed_names.append(name)
+                results.append(
+                    {
+                        "name": name,
+                        "install_id": f"{name}-abc123",
+                        "source_hash": source_hash,
+                        "runtime_status": "ready",
+                        "action": "updated" if spec.replace_source_hash else "installed",
+                    }
+                )
+            self.transaction_outcomes[transaction_id] = "committed"
+            return results
+        except BaseException:
+            self.transaction_outcomes[transaction_id] = "rolled_back"
+            raise
+
+    def finalize_transaction(self, transaction_id: str) -> None:
+        self.finalized.append(transaction_id)
+        self.transaction_outcomes.pop(transaction_id, None)
+
     def list_installed(self):
-        return [{"bundle_name": "demo", "source_hash": value} for value in self.installed_hashes]
+        names = self.installed_names or ["demo"] * len(self.installed_hashes)
+        return [
+            {"bundle_name": name, "source_hash": source_hash}
+            for name, source_hash in zip(names, self.installed_hashes, strict=True)
+        ]
 
     async def uninstall(self, name: str) -> dict:
         self.uninstalled.append(name)
@@ -259,10 +317,13 @@ class _OperationEnv:
         source_hash: str = SOURCE_HASH,
         owner: str = USER_A,
         operation_id: str | None = None,
+        expected_source_hashes: dict[str, str] | None = None,
+        transaction_id: str | None = None,
     ) -> SkillInstallationOperationModel:
         now = self.clock()
+        resolved_operation_id = operation_id or f"op{len(list(self.root.glob('operation-*.json')))}"
         operation = SkillInstallationOperationModel(
-            operation_id=operation_id or f"op{len(list(self.root.glob('operation-*.json')))}",
+            operation_id=resolved_operation_id,
             upload_id="upload-a",
             owner=owner,
             state=state,
@@ -272,12 +333,18 @@ class _OperationEnv:
             started_at=now,
             commit_started_at=now if commit_started else None,
             upload_source_hash=source_hash,
+            transaction_id=transaction_id or resolved_operation_id,
+            expected_source_hashes=expected_source_hashes or {"demo": source_hash},
+        )
+        self.installer.transaction_outcomes[operation.transaction_id] = (
+            "committed" if commit_started else "rolled_back"
         )
         self.service.persist_for_test(operation)
         return operation
 
-    def persist_installed_bundle(self, *, source_hash: str) -> None:
+    def persist_installed_bundle(self, *, source_hash: str, name: str = "demo") -> None:
         self.installer.installed_hashes.append(source_hash)
+        self.installer.installed_names.append(name)
 
 
 @pytest.fixture()
@@ -300,6 +367,15 @@ def operation_env(tmp_path, monkeypatch) -> _OperationEnv:
         catalog_service=catalog,
         clock=clock,
         audit=None,
+    )
+
+    async def recover_transactions(_user_id: str, _installer: _InstallerStub):
+        return dict(_installer.transaction_outcomes)
+
+    monkeypatch.setitem(
+        operations_globals,
+        "recover_install_transactions",
+        recover_transactions,
     )
     return _OperationEnv(
         service=service,
@@ -391,7 +467,14 @@ async def test_api_payload_hides_internal_recovery_fields(operation_env):
     assert payload["operationId"] == operation.operation_id
     assert payload["state"] == "succeeded"
     assert payload["result"]["sourceHash"] == SOURCE_HASH
-    for internal in ("owner", "commitStartedAt", "cancelRequested", "uploadSourceHash"):
+    for internal in (
+        "owner",
+        "commitStartedAt",
+        "cancelRequested",
+        "uploadSourceHash",
+        "transactionId",
+        "expectedSourceHashes",
+    ):
         assert internal not in payload
 
 
@@ -536,6 +619,40 @@ async def test_recovery_reconciles_commit_and_fails_precommit(operation_env):
     assert operation_env.get(committed).state == "succeeded"
     assert operation_env.get(precommit).state == "failed"
     assert operation_env.get(precommit).failure.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_recovery_does_not_accept_only_the_first_collection_member(operation_env):
+    operation = operation_env.persist_operation(
+        state="running",
+        commit_started=True,
+        expected_source_hashes={"one": "a" * 64, "two": "b" * 64},
+        operation_id="txpartial",
+    )
+    operation_env.persist_installed_bundle(name="one", source_hash="a" * 64)
+
+    await operation_env.service.recover(USER_A)
+
+    recovered = operation_env.get(operation)
+    assert recovered.state == "failed"
+    assert recovered.failure.code == "SKILL_INTERRUPTED"
+
+
+@pytest.mark.asyncio
+async def test_recovery_accepts_a_committed_complete_collection(operation_env):
+    expected = {"one": "a" * 64, "two": "b" * 64}
+    operation = operation_env.persist_operation(
+        state="running",
+        commit_started=True,
+        expected_source_hashes=expected,
+        operation_id="txcomplete",
+    )
+    for name, source_hash in expected.items():
+        operation_env.persist_installed_bundle(name=name, source_hash=source_hash)
+
+    await operation_env.service.recover(USER_A)
+
+    assert operation_env.get(operation).state == "succeeded"
 
 
 @pytest.mark.asyncio

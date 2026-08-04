@@ -46,8 +46,10 @@ from client_backend.schemas.skill_installation import (
 )
 from client_backend.services.skill_catalog import get_skill_catalog_service
 from client_backend.services.skill_runtime.audit import SkillLifecycleAuditWriter
+from client_backend.services.skill_runtime.install import SkillInstallSpec
 from client_backend.services.skill_runtime.locks import SkillLockTimeoutError, profile_lock
 from client_backend.services.skill_runtime.state import atomic_write_json, read_json_object
+from client_backend.services.skill_runtime.transactions import recover_install_transactions
 from client_backend.services.skill_runtime.uploads import (
     SkillUploadError,
     SkillUploadNotFoundError,
@@ -212,6 +214,10 @@ class SkillInstallationService:
             expires_at=now
             + timedelta(seconds=int(client_settings.skill_operation_receipt_ttl_seconds)),
             upload_source_hash=upload.preview.source_hash,
+            transaction_id=operation_id,
+            expected_source_hashes={
+                preview.name: preview.source_hash for preview in (upload.skills or [upload.preview])
+            },
             request_fingerprint=fingerprint,
         )
         # Persisted before the task exists: a 202 must always be resolvable, even
@@ -325,20 +331,7 @@ class SkillInstallationService:
         *,
         uploads: Any,
     ) -> dict[str, Any]:
-        """Install every skill the upload contains, as one unit.
-
-        A library is approved and installed together, the way a plugin is: the
-        user confirmed a set, and ending up with nine of fourteen skills is a
-        state nobody asked for and cannot easily reason about. If any skill
-        fails, the ones this operation already installed are removed before the
-        failure is reported.
-
-        Rollback removes only what *this* operation added. A skill that was
-        already installed and got replaced is not restored -- that would need a
-        second copy of the previous bundle -- so a replacement failure is
-        reported against a catalog that still contains the older skill, which is
-        what the installer's own atomic promotion guarantees.
-        """
+        """Install every previewed member through one durable transaction."""
         installer = self._installer_factory()
         observer = _OperationObserver(self, user_id, operation_id)
         entries = uploads.discovered_skills(user_id, upload.upload_id)
@@ -350,31 +343,32 @@ class SkillInstallationService:
 
         previews = {preview.name: preview for preview in (upload.skills or [upload.preview])}
         single = len(entries) == 1
-        installed: list[dict[str, Any]] = []
-        try:
-            for name, discovered in entries:
-                preview = previews.get(name)
-                installed.append(
-                    await installer.install(
-                        discovered,
-                        expected_source_hash=(
-                            request.expected_source_hash
-                            if single
-                            else (preview.source_hash if preview else None)
-                        ),
-                        approve_setup=request.approve_setup,
-                        replace_source_hash=self._replacement_hash_for(
-                            request,
-                            preview,
-                            single=single,
-                        ),
-                        source_kind="upload",
-                        observer=observer,
-                    )
+        specs = []
+        for name, discovered in entries:
+            preview = previews.get(name)
+            specs.append(
+                SkillInstallSpec(
+                    discovered=discovered,
+                    expected_source_hash=(
+                        request.expected_source_hash
+                        if single
+                        else (preview.source_hash if preview else None)
+                    ),
+                    approve_setup=request.approve_setup,
+                    replace_source_hash=self._replacement_hash_for(
+                        request,
+                        preview,
+                        single=single,
+                    ),
+                    source_kind="upload",
                 )
-        except BaseException:
-            await self._rollback_installed(installer, installed)
-            raise
+            )
+
+        installed = await installer.install_many(
+            specs,
+            transaction_id=operation_id,
+            observer=observer,
+        )
 
         return self._combine_results(installed, upload)
 
@@ -404,17 +398,6 @@ class SkillInstallationService:
         if existing is None or not existing.replaceable:
             return None
         return existing.source_hash
-
-    async def _rollback_installed(self, installer: Any, installed: list[dict[str, Any]]) -> None:
-        """Undo this operation's installs after a partial failure."""
-        for entry in reversed(installed):
-            name = str(entry.get("name") or "")
-            if not name:
-                continue
-            try:
-                await installer.uninstall(name)
-            except Exception as exc:  # noqa: BLE001 - the original failure wins
-                logger.warning("could not roll back skill %s after a failed install: %s", name, exc)
 
     @staticmethod
     def _combine_results(installed: list[dict[str, Any]], upload: Any) -> dict[str, Any]:
@@ -479,6 +462,7 @@ class SkillInstallationService:
         )
         with contextlib.suppress(SkillUploadError):
             self._upload_service().mark_succeeded(user_id, operation.upload_id)
+        self._finalize_transaction(operation)
         self._audit_event(
             "install_succeeded",
             user_id=user_id,
@@ -530,6 +514,7 @@ class SkillInstallationService:
                 }
             )
         )
+        self._finalize_transaction(operation)
         self._audit_event(
             "install_failed",
             user_id=user_id,
@@ -547,6 +532,7 @@ class SkillInstallationService:
         self._persist(
             operation.model_copy(update={"state": "cancelled", "finished_at": self._now()})
         )
+        self._finalize_transaction(operation)
         self._audit_event(
             "install_cancelled",
             user_id=user_id,
@@ -554,6 +540,22 @@ class SkillInstallationService:
             upload_id=operation.upload_id,
             status="cancelled",
         )
+
+    def _finalize_transaction(self, operation: SkillInstallationOperationModel) -> None:
+        if not operation.transaction_id:
+            return
+        installer = self._installer_factory()
+        finalize = getattr(installer, "finalize_transaction", None)
+        if finalize is None:
+            return
+        try:
+            finalize(operation.transaction_id)
+        except RuntimeError:
+            # Incomplete cleanup is deliberately left for startup recovery.
+            logger.warning(
+                "skill transaction %s is not ready to finalize",
+                operation.transaction_id,
+            )
 
     async def cancel(self, user_id: str, operation_id: str) -> SkillInstallationOperationModel:
         """Request cancellation, if the commit boundary has not been crossed."""
@@ -593,23 +595,27 @@ class SkillInstallationService:
     # -------------------------------------------------------------- recovery
 
     async def recover(self, user_id: str) -> None:
-        """Reconcile operations left mid-flight by a previous process.
-
-        An interrupted operation is judged by evidence: if the bundle that is
-        installed carries the hash this operation was installing, the atomic
-        promotion completed and the operation succeeded even though nothing got to
-        write that down. Otherwise nothing was committed and it failed retryably.
-        """
-        installed_hashes = await self._installed_source_hashes()
+        """Recover journals first, then classify receipts from the complete set."""
+        installer = self._installer_factory()
+        outcomes = await recover_install_transactions(user_id, installer)
+        installed_hashes = await self._installed_skill_hashes(installer)
         for operation in self._iter_operations(user_id):
             if operation.is_terminal:
+                self._finalize_transaction(operation)
                 continue
+            expected = dict(operation.expected_source_hashes)
+            outcome = outcomes.get(str(operation.transaction_id or ""))
             committed = (
-                operation.commit_started_at is not None
-                and operation.upload_source_hash in installed_hashes
+                bool(expected)
+                and outcome == "committed"
+                and all(
+                    installed_hashes.get(name) == source_hash
+                    for name, source_hash in expected.items()
+                )
             )
             if committed:
                 catalog = await self._catalog_service().snapshot(force=True, sync=False)
+                primary_name, primary_hash = next(iter(expected.items()))
                 self._persist(
                     operation.model_copy(
                         update={
@@ -618,8 +624,8 @@ class SkillInstallationService:
                             "finished_at": self._now(),
                             "result": SkillInstallationResult(
                                 action="installed",
-                                name=self._skill_name_for(operation, catalog),
-                                source_hash=str(operation.upload_source_hash or ""),
+                                name=primary_name,
+                                source_hash=primary_hash,
                                 runtime_status="unknown",
                                 catalog=catalog,
                             ),
@@ -632,46 +638,23 @@ class SkillInstallationService:
                     operation_id=operation.operation_id,
                     status="succeeded",
                 )
+                self._finalize_transaction(operation)
                 continue
-            self._persist(
-                operation.model_copy(
-                    update={
-                        "state": "failed",
-                        "finished_at": self._now(),
-                        "failure": SkillInstallationFailure(
-                            code="SKILL_INTERRUPTED",
-                            message="The installation was interrupted before it completed. "
-                            "Upload the archive again to retry.",
-                            retryable=True,
-                        ),
-                    }
-                )
-            )
-            self._audit_event(
-                "install_recovered",
-                user_id=user_id,
-                operation_id=operation.operation_id,
-                status="failed",
-                error_code="SKILL_INTERRUPTED",
+            self._fail(
+                user_id,
+                operation.operation_id,
+                "SKILL_INTERRUPTED",
+                "The installation was interrupted before it completed. "
+                "Upload the archive again to retry.",
             )
 
     @staticmethod
-    def _skill_name_for(
-        operation: SkillInstallationOperationModel,
-        catalog: dict[str, Any],
-    ) -> str:
-        for entry in catalog.get("skills") or []:
-            if entry.get("sourceHash") == operation.upload_source_hash:
-                return str(entry.get("name") or "")
-        return ""
-
-    async def _installed_source_hashes(self) -> set[str]:
-        installer = self._installer_factory()
+    async def _installed_skill_hashes(installer: Any) -> dict[str, str]:
         installed = await asyncio.to_thread(installer.list_installed)
         return {
-            str(entry.get("source_hash"))
+            str(entry.get("bundle_name")): str(entry.get("source_hash"))
             for entry in installed
-            if isinstance(entry, dict) and entry.get("source_hash")
+            if isinstance(entry, dict) and entry.get("bundle_name") and entry.get("source_hash")
         }
 
     async def ensure_recovered(self, user_id: str) -> None:

@@ -281,6 +281,8 @@ class SkillInstallationOperationModel(CamelModel):
     commit_started_at: datetime | None = None
     cancel_requested: bool = False
     upload_source_hash: str | None = None
+    transaction_id: str | None = None
+    expected_source_hashes: dict[str, str] = Field(default_factory=dict)
     request_fingerprint: str | None = None
     result: SkillInstallationResult | None = None
     failure: SkillInstallationFailure | None = None
@@ -293,6 +295,8 @@ class SkillInstallationOperationModel(CamelModel):
             "commitStartedAt",
             "cancelRequested",
             "uploadSourceHash",
+            "transactionId",
+            "expectedSourceHashes",
             "requestFingerprint",
         ):
             payload.pop(internal, None)
