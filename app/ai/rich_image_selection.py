@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import MutableMapping
+from contextlib import suppress
 from typing import Any
 
 from app.core.config import settings
@@ -12,6 +14,7 @@ from app.core.rich_image_selection import (
     is_image_candidate,
     select_rich_item_candidates,
 )
+from app.observability.rich_images import rich_image_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +38,7 @@ def apply_rich_image_selection(context: MutableMapping[str, Any]) -> None:
         if isinstance(raw_candidates, list)
         else []
     )
+    started_at = time.perf_counter()
     try:
         context["rich_item_candidates"] = select_rich_item_candidates(
             candidates,
@@ -47,3 +51,8 @@ def apply_rich_image_selection(context: MutableMapping[str, Any]) -> None:
         context["rich_item_candidates"] = [
             item for item in candidates if not is_image_candidate(item)
         ]
+    finally:
+        with suppress(Exception):
+            rich_image_metrics.record_selection_duration(
+                time.perf_counter() - started_at
+            )

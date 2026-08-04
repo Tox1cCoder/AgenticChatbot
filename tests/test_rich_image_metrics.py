@@ -4,9 +4,21 @@ from uuid import uuid4
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from prometheus_client import CollectorRegistry
 
 from app.api.health import create_health_router
 from app.observability.rich_images import RichImageMetrics
+
+
+def test_selector_duration_metric_has_no_content_labels() -> None:
+    metrics = RichImageMetrics(registry=CollectorRegistry())
+
+    metrics.record_selection_duration(0.004)
+
+    samples = list(metrics.selector_duration.collect())[0].samples
+    count = next(sample for sample in samples if sample.name.endswith("_count"))
+    assert count.value == 1
+    assert count.labels == {}
 
 
 def test_rich_image_metrics_are_bounded_and_content_free():

@@ -46,6 +46,11 @@ class RichImageMetrics:
             ("provider",),
             registry=self.registry,
         )
+        self.selector_duration = Histogram(
+            "rich_image_selector_duration_seconds",
+            "Time spent selecting canonical rich image candidates.",
+            registry=self.registry,
+        )
         self.fetches = Counter(
             "rich_image_fetches_total",
             "Render-time rich-image fetch outcomes.",
@@ -93,6 +98,9 @@ class RichImageMetrics:
         self.discovery_results.labels(provider=_provider(provider)).observe(
             max(0, int(result_count))
         )
+
+    def record_selection_duration(self, duration_seconds: float) -> None:
+        self.selector_duration.observe(max(0.0, float(duration_seconds)))
 
     def record_candidate(self, *, provider: str, outcome: str) -> None:
         self.candidates.labels(

@@ -2,7 +2,7 @@
 
 **Status:** Normative production contract
 
-**Version:** Rich response v1, updated 2026-08-03
+**Version:** Rich response v1, updated 2026-08-04
 
 This is the sole normative frontend contract for rich items, assistant images,
 protected media, AI SDK rendering, and Streamlit parity. Images remain rich
@@ -24,6 +24,25 @@ For any assistant message with `metadata.rich_items_version === 1`:
 `image` and `image_group` are first-class `RichItem` variants, exactly like
 `live_widget`, `canvas_artifact`, and `tool_render`. They are not a parallel
 attachment system.
+
+### Backend-selected image sequence
+
+The backend supplies an already-ranked and capped image sequence. Dedicated
+image-search results have stronger discovery intent than incidental images from
+web-page search; query-level web-search assets without source provenance are
+not eligible. The frontend must preserve the supplied order and must not choose
+alternate provider results.
+
+Raw Tavily and Brave image arrays are not a v1 gallery fallback and never
+supplement `metadata.rich_items`. If no discovered image passes backend
+selection, a text-only answer is complete and valid.
+
+During discovery, a group with one usable cell is normalized to `type: "image"`;
+two or more usable cells remain `type: "image_group"`; zero usable cells are
+omitted. A persisted group may still contain one cell if later protected-media
+registration removed its siblings. Generated images and user attachments keep
+their existing protected-media and compatibility paths. Backend eligibility and
+ranking decisions are transient and are not fields in this public contract.
 
 ## 2. Capability and projection matrix
 

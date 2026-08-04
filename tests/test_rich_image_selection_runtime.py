@@ -10,6 +10,7 @@ from app.ai.rich_image_selection import apply_rich_image_selection
 from app.ai.workflow.tool_loop import ToolLoopMixin
 from app.core.config import settings
 from app.core.rich_placement import _image_anchor_entries
+from app.observability.rich_images import rich_image_metrics
 
 
 def _web_image(index: int) -> dict[str, Any]:
@@ -122,6 +123,46 @@ def test_selector_failure_keeps_widget_and_drops_images(
     apply_rich_image_selection(context)
 
     assert context["rich_item_candidates"] == [widget]
+
+
+def test_adapter_records_one_non_negative_duration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded: list[float] = []
+    monkeypatch.setattr(
+        rich_image_metrics,
+        "record_selection_duration",
+        recorded.append,
+    )
+
+    apply_rich_image_selection({"rich_item_candidates": [_web_image(0)]})
+
+    assert len(recorded) == 1
+    assert recorded[0] >= 0.0
+
+
+def test_adapter_records_duration_when_selector_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded: list[float] = []
+    monkeypatch.setattr(
+        rich_image_metrics,
+        "record_selection_duration",
+        recorded.append,
+    )
+
+    def _raise(*args: object, **kwargs: object) -> list[dict[str, object]]:
+        raise RuntimeError("synthetic selector failure")
+
+    monkeypatch.setattr(
+        "app.ai.rich_image_selection.select_rich_item_candidates",
+        _raise,
+    )
+
+    apply_rich_image_selection({"rich_item_candidates": [_web_image(0)]})
+
+    assert len(recorded) == 1
+    assert recorded[0] >= 0.0
 
 
 def test_document_registration_reuses_canonical_selector() -> None:
