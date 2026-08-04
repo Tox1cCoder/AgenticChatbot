@@ -157,13 +157,12 @@ def test_candidate_provenance_keeps_source_title_and_query():
     assert provenance["query"] == "apple park cupertino aerial"
 
 
-def test_missing_tavily_score_is_none_not_zero():
+def test_normalized_search_response_never_leaks_result_images():
     normalized = tavily_server._normalize_search_response(
         query="q",
         response={"results": [{"url": "https://e.com/a", "title": "A", "images": ["https://e.com/i.jpg"]}]},
-        include_images=True,
     )
-    assert normalized["images"][0]["result_score"] is None
+    assert "images" not in normalized
 
 
 # ---------------------------------------------------------------------------
