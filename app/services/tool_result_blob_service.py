@@ -94,14 +94,27 @@ class ToolResultBlobService:
 
 
 def _notice(blob_id: Any, total_chars: int, preview: ToolResultPreview) -> str:
-    """Describe what the preview omitted and how to read the rest."""
+    """Describe what the preview omitted and how to read the rest.
+
+    Every loss is named, including the ones inside a kept result. A notice that
+    listed two omitted arrays while silently stripping the page text out of each
+    result told the model its omissions were trivial, which is worse than
+    telling it nothing.
+    """
 
     omissions = [f"{key} ({count} entries)" for key, count in preview.omitted_arrays]
+    omissions.extend(preview.omitted_keys)
     if preview.omitted_results:
         omissions.append(f"{preview.omitted_results} further results")
+    if preview.omitted_result_keys:
+        omissions.append(f"{', '.join(preview.omitted_result_keys)} inside each result")
     detail = f" Omitted: {'; '.join(omissions)}." if omissions else ""
+    shortened = (
+        f" Shortened: {', '.join(preview.shortened_keys)}." if preview.shortened_keys else ""
+    )
     return (
         f"[Output offloaded: {total_chars} chars stored as blob_id={blob_id}.{detail}"
-        f' Call read_tool_result(blob_id="{blob_id}") to read the rest —'
-        " do not repeat the search.]"
+        f"{shortened}"
+        f' Call read_tool_result(blob_id="{blob_id}") to read the full text —'
+        " do not re-run the tool.]"
     )

@@ -36,10 +36,12 @@ def test_offload_if_large_returns_inline_for_small_output(tmp_path):
 def test_offload_stores_content_and_notice_carries_the_blob_id(tmp_path):
     repo = FakeRepository()
     service = ToolResultBlobService(repo, storage_root=tmp_path, threshold_chars=10)
+    conversation_id = uuid4()
+    user_id = uuid4()
 
     result = service.offload_if_large(
-        conversation_id=uuid4(),
-        user_id=uuid4(),
+        conversation_id=conversation_id,
+        user_id=user_id,
         tool_call_id="call-1",
         tool_name="search_documents",
         output_text="abcdefghijklmnopqrstuvwxyz",
@@ -53,6 +55,11 @@ def test_offload_stores_content_and_notice_carries_the_blob_id(tmp_path):
     record = repo.created[0]
     assert record["content"] == "abcdefghijklmnopqrstuvwxyz"
     assert record["storage_path"] is None
+    # These three columns are what the conversation-scoped read predicate filters
+    # on, so a record created without them is unreadable by the model.
+    assert record["conversation_id"] == conversation_id
+    assert record["user_id"] == user_id
+    assert record["tool_call_id"] == "call-1"
     assert list(tmp_path.iterdir()) == [], "offload must not create files on disk"
 
 
@@ -85,6 +92,48 @@ def test_offload_notice_names_the_omitted_array_and_dropped_results(tmp_path):
     assert "images (24 entries)" in result["output"]
     assert "further results" in result["output"]
     assert "https://cdn.example/a.jpg" not in result["output"]
+
+
+def test_offload_notice_reports_dropped_keys_and_shortened_fields(tmp_path):
+    repo = FakeRepository()
+    service = ToolResultBlobService(
+        repo, storage_root=tmp_path, threshold_chars=100, preview_chars=1200
+    )
+    payload = json.dumps(
+        {
+            "provider": "tavily",
+            "operation": "extract",
+            "urls": ["https://e.example/a"],
+            "results": [
+                {
+                    "url": "https://e.example/a",
+                    "raw_content": "page body. " * 400,
+                    "images": ["https://cdn.example/1.jpg"],
+                }
+            ],
+            "failed_results": [],
+            "usage": {"credits": 2},
+            "request_id": "req-7",
+            "response_time": 1.4,
+        }
+    )
+
+    output = service.offload_if_large(
+        conversation_id=uuid4(),
+        user_id=uuid4(),
+        tool_call_id="call-3",
+        tool_name="tavily_extract",
+        output_text=payload,
+    )["output"]
+
+    assert "page body." in output, "extract page text must survive the preview"
+    assert "usage" in output
+    assert "request_id" in output
+    assert "response_time" in output
+    assert "images inside each result" in output
+    assert "Shortened: raw_content" in output
+    assert "do not re-run the tool" in output
+    assert "search" not in output, "the notice must read correctly for any tool"
 
 
 def test_read_text_prefers_db_content(tmp_path):
