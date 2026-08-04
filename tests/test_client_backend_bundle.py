@@ -1,4 +1,5 @@
 import ast
+import os
 import re
 import subprocess
 import sys
@@ -27,9 +28,7 @@ def _first_party_imports(path: Path) -> set[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             found.update(
-                alias.name
-                for alias in node.names
-                if alias.name.split(".")[0] in FIRST_PARTY_ROOTS
+                alias.name for alias in node.names if alias.name.split(".")[0] in FIRST_PARTY_ROOTS
             )
         elif (
             isinstance(node, ast.ImportFrom)
@@ -114,9 +113,7 @@ def test_client_backend_bundle_can_import_local_skills_registry(tmp_path):
 
     bundle_root = output_root / "client-backend-bundle"
     assert (bundle_root / "app" / "ai" / "mcp_config.json").is_file()
-    assert (
-        bundle_root / "app" / "ai" / "mcp_servers" / "time_server.py"
-    ).is_file()
+    assert (bundle_root / "app" / "ai" / "mcp_servers" / "time_server.py").is_file()
     assert (bundle_root / "app" / "services" / "widget_runtime.py").is_file()
     probe = subprocess.run(
         [
@@ -142,6 +139,132 @@ def _build_bundle(output_root: Path) -> Path:
 
     bundle_root, _ = build(output_root)
     return bundle_root
+
+
+def _launcher_fixture(tmp_path: Path, *, without_pip: bool = False) -> Path:
+    """Build a real handoff bundle whose sidecar has a deterministic exit."""
+    bundle = _build_bundle(tmp_path / "output")
+    (bundle / "requirements-client.txt").write_text("", encoding="utf-8")
+    (bundle / "client_backend" / "__main__.py").write_text(
+        "raise SystemExit(7)\n",
+        encoding="utf-8",
+    )
+    if without_pip:
+        subprocess.run(
+            [sys.executable, "-m", "venv", "--without-pip", str(bundle / ".venv")],
+            check=True,
+        )
+    return bundle
+
+
+def _run_launcher(bundle: Path, *, block_get_file_hash: bool = False):
+    launcher = bundle / "start-client-backend.ps1"
+    command = f"& '{launcher}'"
+    if block_get_file_hash:
+        command = "function Get-FileHash { throw 'Get-FileHash is unavailable' }; " + command
+    command += "; exit $LASTEXITCODE"
+    return subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ],
+        cwd=bundle,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _run_batch_launcher(bundle: Path):
+    return subprocess.run(
+        [str(bundle / "start-client-backend.bat")],
+        cwd=bundle,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows launcher")
+def test_launcher_needs_no_get_file_hash_command(tmp_path):
+    bundle = _launcher_fixture(tmp_path, without_pip=True)
+
+    result = _run_launcher(bundle, block_get_file_hash=True)
+
+    assert result.returncode == 7, result.stderr or result.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows launcher")
+def test_launcher_repairs_a_pipless_venv_without_network(tmp_path):
+    bundle = _launcher_fixture(tmp_path, without_pip=True)
+
+    result = _run_launcher(bundle)
+
+    assert result.returncode == 7, result.stderr or result.stdout
+    pip_probe = subprocess.run(
+        [
+            bundle / ".venv" / "Scripts" / "python.exe",
+            "-m",
+            "pip",
+            "--version",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert pip_probe.returncode == 0, pip_probe.stderr
+    marker = bundle / ".venv" / ".client_requirements_installed"
+    assert marker.read_text(encoding="utf-8-sig").startswith("2|")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows launcher")
+def test_launcher_propagates_the_sidecar_exit_code(tmp_path):
+    bundle = _launcher_fixture(tmp_path)
+
+    result = _run_launcher(bundle)
+
+    assert result.returncode == 7, result.stderr or result.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows launcher")
+def test_batch_launcher_propagates_the_sidecar_exit_code(tmp_path):
+    bundle = _launcher_fixture(tmp_path)
+
+    result = _run_batch_launcher(bundle)
+
+    assert result.returncode == 7, result.stderr or result.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows launcher")
+def test_failed_requirements_install_never_writes_the_marker(tmp_path):
+    bundle = _launcher_fixture(tmp_path)
+    (bundle / "requirements-client.txt").write_text(
+        "--no-index\npackage-that-does-not-exist==0\n",
+        encoding="utf-8",
+    )
+
+    result = _run_launcher(bundle)
+
+    assert result.returncode != 0
+    assert not (bundle / ".venv" / ".client_requirements_installed").exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows launcher")
+def test_requirements_content_not_mtime_controls_reinstall(tmp_path):
+    bundle = _launcher_fixture(tmp_path)
+    first = _run_launcher(bundle)
+    marker = bundle / ".venv" / ".client_requirements_installed"
+    first_fingerprint = marker.read_text(encoding="utf-8-sig")
+    requirements = bundle / "requirements-client.txt"
+    requirements.write_text("# changed without a newer timestamp\n", encoding="utf-8")
+    old_time = requirements.stat().st_mtime - 3600
+    os.utime(requirements, (old_time, old_time))
+
+    second = _run_launcher(bundle)
+
+    assert first.returncode == second.returncode == 7
+    assert marker.read_text(encoding="utf-8-sig") != first_fingerprint
 
 
 def test_bundle_ships_every_first_party_module_it_imports(tmp_path):
@@ -254,10 +377,11 @@ BUNDLE_REQUIREMENTS_EXEMPT = frozenset(
 
 
 def _bundle_requirement_names() -> set[str]:
-    from build_client_backend_bundle import REQUIREMENTS_CONTENT
-
     names = set()
-    for line in REQUIREMENTS_CONTENT.splitlines():
+    requirements = (
+        REPO_ROOT / "scripts" / "client-backend-bundle" / "requirements-client.txt"
+    ).read_text(encoding="utf-8")
+    for line in requirements.splitlines():
         entry = line.strip()
         if not entry or entry.startswith("#"):
             continue
@@ -313,19 +437,6 @@ def test_bundle_requirements_cover_every_third_party_import_of_the_sidecar():
     }
 
     assert not missing, f"bundle requirements omit imported packages: {missing}"
-
-
-def test_both_bundle_builders_declare_the_same_requirements():
-    """The PowerShell and Python builders must produce identical artifacts."""
-    from build_client_backend_bundle import REQUIREMENTS_CONTENT
-
-    powershell = (REPO_ROOT / "scripts" / "build-client-backend-bundle.ps1").read_text(
-        encoding="utf-8"
-    )
-    embedded = re.search(r"\$requirementsContent = @'\n(.*?)\n'@", powershell, re.S)
-
-    assert embedded is not None, "the PowerShell builder no longer embeds a requirements block"
-    assert embedded.group(1).strip().splitlines() == REQUIREMENTS_CONTENT.strip().splitlines()
 
 
 def _tracked_files(prefix: str) -> set[str]:
@@ -387,9 +498,7 @@ def test_bundle_contains_no_untracked_repository_content(tmp_path):
     unexplained = sorted(
         path.relative_to(bundle_root).as_posix()
         for path in bundle_root.rglob("*")
-        if path.is_file()
-        and path.name not in generated
-        and path.name not in tracked_names
+        if path.is_file() and path.name not in generated and path.name not in tracked_names
     )
 
     assert not unexplained, (
@@ -397,55 +506,35 @@ def test_bundle_contains_no_untracked_repository_content(tmp_path):
     )
 
 
-def _start_script(tmp_path) -> str:
-    from build_client_backend_bundle import build
-
-    bundle_root, _ = build(tmp_path)
-    return (bundle_root / "start-client-backend.ps1").read_text(encoding="utf-8")
-
-
-def test_launcher_reinstalls_on_requirement_content_change_not_mtime(tmp_path):
-    """Timestamps cannot decide this, and getting it wrong looks like a code bug.
-
-    Unzipping a bundle restores the mtime stored in the archive, so a freshly
-    deployed requirements file is routinely *older* than the marker written during
-    the previous run on that machine. A timestamp comparison then skips the
-    install, and the sidecar dies at import on a module its own manifest declares
-    -- which is exactly how a missing dependency was reported from another
-    machine.
-    """
-    script = _start_script(tmp_path)
-
-    assert "Get-FileHash" in script
-    assert "LastWriteTimeUtc" not in script
-
-
-def test_launcher_records_the_install_only_after_pip_succeeds(tmp_path):
-    """A failed install must not be remembered as a completed one."""
-    script = _start_script(tmp_path)
-
-    install_block = script.split("$installedHash -ne $requirementsHash")[1]
-    exit_check = install_block.index("$LASTEXITCODE")
-    marker_write = install_block.index("Set-Content -Path $installMarker")
-
-    assert exit_check < marker_write, "the marker is written before pip's exit code is checked"
-    assert "throw" in install_block[:marker_write]
-
-
-def test_launcher_marker_stores_the_hash_it_compares(tmp_path):
-    script = _start_script(tmp_path)
-
-    assert "Set-Content -Path $installMarker -Value $requirementsHash" in script
-
-
-def test_both_builders_emit_the_same_start_script(tmp_path):
-    """The PowerShell builder embeds its own copy; they must not diverge."""
-    from build_client_backend_bundle import START_PS1_CONTENT
-
-    powershell = (REPO_ROOT / "scripts" / "build-client-backend-bundle.ps1").read_text(
-        encoding="utf-8"
+@pytest.mark.skipif(sys.platform != "win32", reason="PowerShell builder is Windows-specific")
+def test_both_builders_copy_the_canonical_handoff_files(tmp_path):
+    python_bundle = _build_bundle(tmp_path / "python-output")
+    powershell_output = tmp_path / "powershell-output"
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(REPO_ROOT / "scripts" / "build-client-backend-bundle.ps1"),
+            "-OutputRoot",
+            str(powershell_output),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
     )
-    embedded = re.search(r"\$startPs1Content = @'\n(.*?)\n'@", powershell, re.S)
+    assert result.returncode == 0, result.stderr or result.stdout
 
-    assert embedded is not None, "the PowerShell builder no longer embeds a start script"
-    assert embedded.group(1).strip().splitlines() == START_PS1_CONTENT.strip().splitlines()
+    canonical_root = REPO_ROOT / "scripts" / "client-backend-bundle"
+    powershell_bundle = powershell_output / "client-backend-bundle"
+    for name in (
+        "requirements-client.txt",
+        "start-client-backend.ps1",
+        "start-client-backend.bat",
+        "README.client_backend.md",
+    ):
+        expected = (canonical_root / name).read_bytes()
+        assert (python_bundle / name).read_bytes() == expected
+        assert (powershell_bundle / name).read_bytes() == expected

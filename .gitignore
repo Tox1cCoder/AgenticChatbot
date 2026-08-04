@@ -70,7 +70,9 @@ mcp_config.json
 !app/ai/mcp_config.json
 output/
 boring_servers/
-scripts/
+scripts/*
+!scripts/client-backend-bundle/
+!scripts/client-backend-bundle/**
 .agent
 .pytest_cache/
 .ruff_cache/
