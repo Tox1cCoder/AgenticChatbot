@@ -207,13 +207,13 @@ def test_brave_image_candidate_identity_and_payload():
     assert cand["payload"]["height"] == 800
 
 
-def test_brave_image_candidate_keeps_provider_urls_in_provenance():
+def test_brave_image_candidate_keeps_safe_provider_provenance_only():
     [cand] = build_image_candidates_from_tool_result(
         _brave_payload(), tool_call_id="call_b", tool_name="brave_image_search"
     )
     prov = cand["provenance"]
     assert prov["thumbnail_url"] == "https://img.test/thumb-1.jpg"
-    assert prov["original_image_url"] == "https://img.test/direct-1.jpg"
+    assert "original_image_url" not in prov
     assert prov["source_domain"] == "example.com"
     assert prov["provider"] == "brave_image_search"
     for forbidden in ("thumbnail_url", "original_image_url", "source_domain", "provider"):

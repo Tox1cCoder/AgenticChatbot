@@ -309,8 +309,6 @@ def build_image_candidates_from_tool_result(
                 provenance[meta_key] = meta_value
         if result_query:
             provenance["query"] = result_query
-        if original_url:
-            provenance["original_image_url"] = original_url
         candidates.append(
             {
                 "id": f"image:tool:{candidate_id_base}:{index}",

@@ -297,6 +297,31 @@ RichItem = Annotated[
 ]
 
 _RICH_ITEM_ADAPTER = TypeAdapter(RichItem)
+_PUBLIC_RICH_PROVENANCE_OMIT_KEYS = frozenset({"original_image_url"})
+
+
+def sanitize_public_rich_item(item: Any) -> Any:
+    """Return a public-safe rich item without mutating its input."""
+    if not isinstance(item, dict):
+        return item
+    sanitized = dict(item)
+    provenance = sanitized.get("provenance")
+    if isinstance(provenance, dict):
+        sanitized["provenance"] = {
+            key: value
+            for key, value in provenance.items()
+            if key not in _PUBLIC_RICH_PROVENANCE_OMIT_KEYS
+        }
+    return sanitized
+
+
+def sanitize_public_rich_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Copy message metadata and sanitize every public rich-item record."""
+    sanitized = dict(metadata)
+    rich_items = sanitized.get("rich_items")
+    if isinstance(rich_items, list):
+        sanitized["rich_items"] = [sanitize_public_rich_item(item) for item in rich_items]
+    return sanitized
 
 
 def validate_public_rich_item(
@@ -305,7 +330,7 @@ def validate_public_rich_item(
     selected_image_max_bytes: int | None = None,
 ) -> RichItem:
     """Validate one record before it is persisted or exposed to renderers."""
-    validated = _RICH_ITEM_ADAPTER.validate_python(item)
+    validated = _RICH_ITEM_ADAPTER.validate_python(sanitize_public_rich_item(item))
     if isinstance(validated, ImageRichItem) and validated.payload.data is not None:
         try:
             decoded = base64.b64decode(validated.payload.data, validate=True)
@@ -813,6 +838,8 @@ __all__ = [
     "build_rich_item_inventory_block",
     "parse_inline_rich_references",
     "remove_inline_rich_reference",
+    "sanitize_public_rich_item",
+    "sanitize_public_rich_metadata",
     "select_append_fallback_items",
     "select_transient_upsert_items",
     "strip_inline_rich_markers",

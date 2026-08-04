@@ -54,6 +54,34 @@ def test_build_bot_metadata_persists_only_inline_selected_images():
     assert metadata["rich_items_version"] == 1
 
 
+def test_build_bot_metadata_strips_original_image_url_from_public_provenance():
+    candidate = {
+        "id": "image:tool:c1:0",
+        "type": "image",
+        "display_policy": "inline_only",
+        "alt_text": "Selected image",
+        "payload": {
+            "url": "https://img.test/selected.png",
+            "mime_type": "image/png",
+        },
+        "provenance": {
+            "provider": "tavily",
+            "original_image_url": "https://img.test/original.png",
+        },
+    }
+    response = WorkflowResponse(
+        message=WorkflowResponseMessage(
+            content="See this.\n\n<!--rich:image:tool:c1:0-->"
+        ),
+        metadata={"_rich_item_candidates": [candidate]},
+    )
+
+    metadata = build_bot_metadata(response)
+
+    assert "original_image_url" not in metadata["rich_items"][0]["provenance"]
+    assert candidate["provenance"]["original_image_url"].endswith("original.png")
+
+
 def test_build_bot_metadata_persists_embedded_selected_images():
     response = WorkflowResponse(
         message=WorkflowResponseMessage(
