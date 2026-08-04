@@ -697,14 +697,11 @@ def test_finalize_leaves_source_bound_web_search_image_unplaced_without_query(mo
 
 
 def test_single_brave_image_result_is_placed_via_fallback(monkeypatch):
-    """Pins the decision-2 fix: a single eligible Brave candidate (not grouped,
-    since grouping needs two) is built with ``source: "tool_image"`` by
-    ``build_image_candidates_from_tool_result``. Before ``tool_image`` joined
-    _FALLBACK_ANCHOR_ORIGINS, such a candidate had no fallback path and was
-    silently dropped whenever its search query did not textually match a
-    paragraph, breaking the project's own acceptance criterion that a
-    deliberate ``brave_image_search`` with at least one eligible candidate
-    always results in a displayed image."""
+    """A single eligible Brave candidate keeps deliberate-search fallback.
+
+    Grouping needs two candidates, but a single result still uses the same
+    ``image_search`` intent and fallback-anchor origin as a Brave group.
+    """
     import json
 
     from app.ai.tool_execution import build_image_candidates_from_tool_result
@@ -732,7 +729,7 @@ def test_single_brave_image_result_is_placed_via_fallback(monkeypatch):
         payload, tool_call_id="c1", tool_name="brave_image_search"
     )
     assert candidate["type"] == "image"
-    assert candidate["source"] == "tool_image"
+    assert candidate["source"] == "image_search"
 
     # Deliberately shares no tokens with "red panda photo" so the query-match
     # path scores zero and only the fallback anchor can place the image.

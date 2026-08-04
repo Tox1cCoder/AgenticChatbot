@@ -11,6 +11,7 @@ from ..core.rich_response import (
     RichDisplayPolicy,
     RichItemType,
 )
+from .rich_image_selection import apply_rich_image_selection
 from .schemas import DocumentAction
 from .tool_error_policy import ToolErrorKind, ToolErrorSummary
 
@@ -214,6 +215,7 @@ def register_document_image_candidates(
         added += 1
     if added:
         context["rich_item_candidates"] = existing
+        apply_rich_image_selection(context)
     return added
 
 

@@ -17,6 +17,7 @@ from app.ai.hitl_config import (
     redact_sensitive_args,
 )
 from app.ai.mcp_registry import get_global_mcp_manager
+from app.ai.rich_image_selection import apply_rich_image_selection
 from app.ai.schemas import GraphState, GraphStateView
 from app.ai.token_instrumentation import truncate_tool_result
 from app.ai.tool_context import tool_execution_context
@@ -64,6 +65,7 @@ class ToolLoopMixin:
                 seen_ids.add(candidate_id)
         if existing_candidates:
             context["rich_item_candidates"] = existing_candidates
+            apply_rich_image_selection(context)
 
     async def _tool_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
