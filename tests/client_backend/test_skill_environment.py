@@ -186,3 +186,18 @@ def test_remove_skill_runtimes_is_confined_to_selected_skill(tmp_path):
 
     assert not selected.exists()
     assert other.exists()
+
+
+def test_remove_runtime_removes_only_the_requested_hash(tmp_path):
+    runtime_base = tmp_path / "runtimes"
+    first = runtime_base / "demo-skill" / ("a" * 64)
+    second = runtime_base / "demo-skill" / ("b" * 64)
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    manager = SkillEnvironmentManager(runtime_base=runtime_base)
+
+    assert hasattr(manager, "remove_runtime"), "hash-scoped cleanup is required"
+    manager.remove_runtime("demo-skill", "b" * 64)
+
+    assert first.is_dir()
+    assert not second.exists()

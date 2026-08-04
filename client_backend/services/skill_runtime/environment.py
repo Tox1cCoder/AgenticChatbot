@@ -291,6 +291,23 @@ class SkillEnvironmentManager:
         if target.exists() and is_under_root(target, base):
             shutil.rmtree(target)
 
+    def remove_runtime(self, skill_name: str, source_hash: str) -> None:
+        """Remove one prepared version without touching another skill version."""
+        normalized_hash = str(source_hash or "").lower()
+        if len(normalized_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in normalized_hash
+        ):
+            raise SkillRuntimeError(UNSAFE_BUNDLE_PATH, "invalid skill runtime hash")
+        parent = self._skill_runtime_root(skill_name)
+        target = parent / normalized_hash
+        base = self._base()
+        if not is_under_root(target, base):
+            raise SkillRuntimeError(UNSAFE_BUNDLE_PATH, "skill runtime path escapes profile root")
+        if target.exists():
+            shutil.rmtree(target)
+        if parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+
     def _inspect_runtime_root(
         self,
         target: Path,

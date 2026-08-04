@@ -13,6 +13,7 @@ from client_backend.core.paths import get_installed_skills_root
 from client_backend.services import local_skills_registry as registry_module
 from client_backend.services.local_skills_registry import LocalSkillsRegistry
 from client_backend.services.skill_runtime import install as install_module
+from client_backend.services.skill_runtime.collection import DiscoveredSkill
 from client_backend.services.skill_runtime.install import SkillBundleInstaller
 from shared.skills.errors import (
     SKILL_CONFIGURED_ROOT_CONFLICT,
@@ -64,6 +65,9 @@ class _EnvironmentManager:
 
     def remove_skill(self, name):
         self.removed.append(name)
+
+    def remove_runtime(self, name, source_hash):
+        self.removed.append((name, source_hash))
 
 
 class _SecretStore:
@@ -479,6 +483,32 @@ async def test_failed_update_preserves_the_previous_bundle_and_runtime(install_e
     assert "v1" in surviving.content
     assert surviving.source_hash == installed["source_hash"]
     assert (get_installed_skills_root(USER_ID) / installed["install_id"]).is_dir()
+
+
+@pytest.mark.asyncio
+async def test_prepare_install_stages_replacement_without_mutating_old_bundle(install_env):
+    first = _write_skill(install_env.sources / "v1", body="v1")
+    second = _write_skill(install_env.sources / "v2", body="v2")
+    _, installer = _installer(install_env)
+    installed = await installer.install(first)
+    preview = await installer.preview(second)
+    old_bundle = get_installed_skills_root(USER_ID) / installed["install_id"]
+    assert hasattr(install_module, "SkillInstallSpec"), "transactions require install specs"
+    spec = install_module.SkillInstallSpec(
+        discovered=DiscoveredSkill(second, second / "SKILL.md"),
+        expected_source_hash=preview["source_hash"],
+        approve_setup=False,
+        replace_source_hash=installed["source_hash"],
+        source_kind="path",
+    )
+
+    assert hasattr(installer, "prepare_install"), "transactions require a prepare phase"
+    prepared = await installer.prepare_install(spec)
+
+    assert old_bundle.is_dir()
+    assert prepared.previous == old_bundle
+    assert prepared.stage.is_dir()
+    assert not prepared.target.exists()
 
 
 @pytest.mark.asyncio

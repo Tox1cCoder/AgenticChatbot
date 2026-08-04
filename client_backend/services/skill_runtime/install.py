@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Protocol
@@ -45,6 +46,28 @@ from shared.skills.hashing import UnsafeSkillBundleError, compute_skill_bundle_h
 logger = get_logger(__name__)
 
 _INSTALL_METADATA_FILENAME = "install.json"
+
+
+@dataclass(frozen=True)
+class SkillInstallSpec:
+    discovered: DiscoveredSkill
+    expected_source_hash: str | None
+    approve_setup: bool
+    replace_source_hash: str | None
+    source_kind: Literal["path", "upload"]
+
+
+@dataclass
+class PreparedSkillInstall:
+    name: str
+    source_hash: str
+    action: Literal["installed", "updated"]
+    stage: Path
+    target: Path
+    previous: Path | None
+    backup: Path
+    runtime_status: str
+    previous_source_hash: str | None
 
 
 class SkillInstallObserver(Protocol):
@@ -214,38 +237,30 @@ class SkillBundleInstaller:
                 repair={"type": "approve_skill_setup", "preview": preview},
             )
 
-    async def _install_locked(
+    async def prepare_install(
         self,
-        source: str | Path | DiscoveredSkill,
+        spec: SkillInstallSpec,
         *,
-        user_id: str,
-        expected_source_hash: str | None,
-        approve_setup: bool,
-        replace_source_hash: str | None,
-        source_kind: Literal["path", "upload"],
-        observer: SkillInstallObserver | None,
-    ) -> dict:
-        """Perform the mutation while holding this skill's lock.
-
-        The source is rediscovered and rehashed here rather than reusing the
-        pre-lock result: between the caller's check and the lock being granted, the
-        bundle on disk can change, and a copy of *different* content than the user
-        approved is exactly what the hash binding exists to prevent.
-        """
-        source_skill, shape = await self._load_source(source)
-        if expected_source_hash and expected_source_hash != source_skill.source_hash:
-            raise SkillRuntimeError(
-                SKILL_INSTALL_INVALID,
-                "bundle changed after preview; request a new preview before installing",
-            )
-
+        observer: SkillInstallObserver | None = None,
+        user_id: str | None = None,
+    ) -> PreparedSkillInstall:
+        """Validate and stage one install without changing installed bundles."""
+        source_skill, shape = await self._load_discovered_skill(spec.discovered)
+        preview = await self._build_preview(source_skill, shape)
+        self._require_preview_agreement(
+            source_skill,
+            preview,
+            expected_source_hash=spec.expected_source_hash,
+            approve_setup=spec.approve_setup,
+        )
+        owner = user_id or self._resolve_user_id()
         await self._registry.initialize()
         existing = self._registry.get_skill(source_skill.name)
         action = self._resolve_replacement_action(
             source_skill.name,
             existing,
-            user_id=user_id,
-            replace_source_hash=replace_source_hash,
+            user_id=owner,
+            replace_source_hash=spec.replace_source_hash,
         )
 
         install_root = self._resolve_install_root()
@@ -253,14 +268,15 @@ class SkillBundleInstaller:
             f"{sanitize_filename(source_skill.name)}-{source_skill.source_hash[:12]}"
         )
         stage = install_root / f"{target.name}.stage-{uuid.uuid4().hex}"
-        backup = install_root / f"{target.name}.backup-{uuid.uuid4().hex}"
+        previous = _find_installed_bundle(install_root, source_skill.name)
+        backup_basis = previous.name if previous is not None else target.name
+        backup = install_root / f"{backup_basis}.backup-{uuid.uuid4().hex}"
         for path in (target, stage, backup):
             if not is_under_root(path, install_root):
                 raise SkillRuntimeError(
                     UNSAFE_BUNDLE_PATH, "install path escapes the profile skill root"
                 )
 
-        stale_bundle = _find_installed_bundle(install_root, source_skill.name)
         try:
             await self._notify(observer, "copying")
             await asyncio.to_thread(
@@ -280,14 +296,12 @@ class SkillBundleInstaller:
             install_payload = {
                 "bundle_name": source_skill.name,
                 "source_hash": source_skill.source_hash,
-                "source": "upload" if source_kind == "upload" else "profile",
+                "source": "upload" if spec.source_kind == "upload" else "profile",
                 "installed_at": datetime.now(timezone.utc).isoformat(),
                 "enabled": True,
                 "installed": True,
             }
-            if source_kind == "path":
-                # An upload's source path points into staging, which is deleted
-                # after installation and must never be persisted or served.
+            if spec.source_kind == "path":
                 install_payload["source_path"] = str(source_skill.bundle_root)
             await asyncio.to_thread(
                 (stage / _INSTALL_METADATA_FILENAME).write_text,
@@ -306,13 +320,12 @@ class SkillBundleInstaller:
                 tags=list(source_skill.tags),
                 install_metadata=install_payload,
             )
-
             if installed_skill.executable_assets["python_project"]:
                 await self._notify(observer, "preparingRuntime")
                 runtime = await asyncio.to_thread(
                     self._environment.prepare,
                     installed_skill,
-                    approve_setup=approve_setup,
+                    approve_setup=spec.approve_setup,
                 )
                 runtime_status = str(runtime.get("status") or "not_ready")
             elif (
@@ -322,47 +335,82 @@ class SkillBundleInstaller:
                 runtime_status = "ready"
             else:
                 runtime_status = "instruction_only"
-
-            # Last point at which nothing user-visible has changed. An operation
-            # observer either aborts here or durably records that the commit
-            # began, because everything below is a single atomic promotion that
-            # cannot be half-undone.
-            await self._notify(observer, "committing")
-            if observer is not None:
-                await observer.before_commit()
-
-            if target.exists():
-                await asyncio.to_thread(os.replace, target, backup)
-            try:
-                await asyncio.to_thread(os.replace, stage, target)
-            except Exception:
-                if backup.exists() and not target.exists():
-                    await asyncio.to_thread(os.replace, backup, target)
-                raise
-            if backup.exists():
-                await asyncio.to_thread(shutil.rmtree, backup)
-            if (
-                stale_bundle is not None
-                and stale_bundle != target
-                and stale_bundle.exists()
-                and is_under_root(stale_bundle, install_root)
-            ):
-                await asyncio.to_thread(shutil.rmtree, stale_bundle)
         except Exception:
             if stage.exists():
                 await asyncio.to_thread(shutil.rmtree, stage)
             raise
 
-        # Local visibility only. Runtime-catalog synchronization is the catalog
-        # service's job: a bridge failure must not turn a committed install into a
-        # failed one, and this method has already committed.
+        return PreparedSkillInstall(
+            name=source_skill.name,
+            source_hash=source_skill.source_hash,
+            action=action,
+            stage=stage,
+            target=target,
+            previous=previous,
+            backup=backup,
+            runtime_status=runtime_status,
+            previous_source_hash=existing.source_hash if existing is not None else None,
+        )
+
+    async def _install_locked(
+        self,
+        source: str | Path | DiscoveredSkill,
+        *,
+        user_id: str,
+        expected_source_hash: str | None,
+        approve_setup: bool,
+        replace_source_hash: str | None,
+        source_kind: Literal["path", "upload"],
+        observer: SkillInstallObserver | None,
+    ) -> dict:
+        """Prepare and atomically promote one bundle while holding its lock."""
+        discovered = await self._as_discovered(source)
+        prepared = await self.prepare_install(
+            SkillInstallSpec(
+                discovered=discovered,
+                expected_source_hash=expected_source_hash,
+                approve_setup=approve_setup,
+                replace_source_hash=replace_source_hash,
+                source_kind=source_kind,
+            ),
+            observer=observer,
+            user_id=user_id,
+        )
+        try:
+            await self._notify(observer, "committing")
+            if observer is not None:
+                await observer.before_commit()
+
+            if prepared.previous is not None and prepared.previous.exists():
+                await asyncio.to_thread(os.replace, prepared.previous, prepared.backup)
+            try:
+                await asyncio.to_thread(os.replace, prepared.stage, prepared.target)
+            except Exception:
+                if prepared.backup.exists() and not prepared.previous.exists():
+                    await asyncio.to_thread(os.replace, prepared.backup, prepared.previous)
+                raise
+            if prepared.backup.exists():
+                await asyncio.to_thread(shutil.rmtree, prepared.backup)
+        except Exception:
+            if prepared.stage.exists():
+                await asyncio.to_thread(shutil.rmtree, prepared.stage)
+            raise
+
+        if prepared.previous_source_hash and prepared.previous_source_hash != prepared.source_hash:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(
+                    self._environment.remove_runtime,
+                    prepared.name,
+                    prepared.previous_source_hash,
+                )
+
         await self._registry.refresh()
         return {
-            "name": source_skill.name,
-            "install_id": target.name,
-            "source_hash": source_skill.source_hash,
-            "runtime_status": runtime_status,
-            "action": action,
+            "name": prepared.name,
+            "install_id": prepared.target.name,
+            "source_hash": prepared.source_hash,
+            "runtime_status": prepared.runtime_status,
+            "action": prepared.action,
         }
 
     def _resolve_replacement_action(
@@ -553,11 +601,14 @@ class SkillBundleInstaller:
         self,
         source: str | Path | DiscoveredSkill,
     ) -> tuple[SkillMetadata, str]:
-        if isinstance(source, DiscoveredSkill):
-            return await self._load_discovered_skill(source)
-        return await self._discover_source(source)
+        return await self._load_discovered_skill(await self._as_discovered(source))
 
-    async def _discover_source(self, source: str | Path) -> tuple[SkillMetadata, str]:
+    async def _as_discovered(
+        self,
+        source: str | Path | DiscoveredSkill,
+    ) -> DiscoveredSkill:
+        if isinstance(source, DiscoveredSkill):
+            return source
         source_path = Path(source).expanduser().resolve()
         if not source_path.is_dir():
             raise SkillRuntimeError(
@@ -570,9 +621,10 @@ class SkillBundleInstaller:
                 SKILL_INSTALL_INVALID,
                 f"bundle must contain exactly one SKILL.md file; found {len(skill_files)}",
             )
-        return await self._load_discovered_skill(
-            DiscoveredSkill(bundle_root=source_path, skill_file=skill_files[0])
-        )
+        return DiscoveredSkill(bundle_root=source_path, skill_file=skill_files[0])
+
+    async def _discover_source(self, source: str | Path) -> tuple[SkillMetadata, str]:
+        return await self._load_discovered_skill(await self._as_discovered(source))
 
     async def _load_discovered_skill(
         self,
