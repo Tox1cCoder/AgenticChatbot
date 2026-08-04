@@ -41,8 +41,11 @@ def _t1_provider_response() -> dict:
 
 
 def test_search_result_carries_facts_and_no_image_metadata(monkeypatch):
+    captured_params: dict = {}
+
     class _Client:
         def search(self, **params):
+            captured_params.update(params)
             return _t1_provider_response()
 
     monkeypatch.setattr(tavily_server, "_make_client", lambda: _Client())
@@ -50,6 +53,10 @@ def test_search_result_carries_facts_and_no_image_metadata(monkeypatch):
     raw = tavily_server.tavily_search("T1 League of Legends Esports team news roster 2026")
     payload = json.loads(raw)
 
+    # A regression that stops requesting an answer from the provider reproduces
+    # "the model received no facts" even though this mock ignores params and
+    # always returns one; assert on the request, not just the canned response.
+    assert captured_params.get("include_answer") is True
     assert "images" not in payload
     assert "cdn.example" not in raw
     assert payload["answer"].startswith("T1 is a South Korean")
@@ -71,6 +78,11 @@ def test_offload_preview_of_that_result_still_contains_both_sources(monkeypatch)
         SOURCE_URL,
         "https://lol.fandom.com/wiki/T1",
     ]
+    # The broader check alone is satisfiable by the always-present, always-short
+    # `answer` field even if result content is dropped during truncation, so it
+    # would not catch a regression in `_shrink_result`; pin the fact to the
+    # surviving result content specifically.
     assert "South Korean" in json.dumps(parsed)
+    assert "South Korean" in parsed["results"][1]["content"]
     assert preview.omitted_arrays == ()
     assert preview.omitted_results == 0
