@@ -297,7 +297,9 @@ RichItem = Annotated[
 ]
 
 _RICH_ITEM_ADAPTER = TypeAdapter(RichItem)
-_PUBLIC_RICH_PROVENANCE_OMIT_KEYS = frozenset({"original_image_url"})
+_PUBLIC_RICH_PROVENANCE_OMIT_KEYS = frozenset(
+    {"original_image_url", "original_image_digests"}
+)
 
 
 def sanitize_public_rich_item(item: Any) -> Any:

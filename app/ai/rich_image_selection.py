@@ -32,6 +32,7 @@ def _configured_policy() -> ImageSelectionPolicy:
 def apply_rich_image_selection(context: MutableMapping[str, Any]) -> None:
     """Replace the context pool with its selected, fail-closed sequence."""
 
+    context.pop("_presented_rich_image_ids", None)
     raw_candidates = context.get("rich_item_candidates")
     candidates = (
         [item for item in raw_candidates if isinstance(item, dict)]

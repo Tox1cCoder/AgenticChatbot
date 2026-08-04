@@ -162,6 +162,19 @@ def test_finalize_places_image_and_mutates_response_message(monkeypatch):
     assert response.message.content == new_content
 
 
+def test_finalize_does_not_place_image_trimmed_from_prompt_inventory(monkeypatch):
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
+    content = "The Eiffel Tower is stunning at night, lit by thousands of golden lamps."
+    response = _make_response(content, candidates=[_image_candidate()])
+    response.metadata["_presented_rich_image_ids"] = []
+
+    finalized = finalize_article_content(response, content)
+
+    assert finalized == content
+    assert "<!--rich:" not in finalized
+
+
 def test_finalize_noop_when_feature_disabled(monkeypatch):
     monkeypatch.setattr(settings, "inline_rich_response_enabled", False)
     content = "The Eiffel Tower is stunning at night."

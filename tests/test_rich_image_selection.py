@@ -35,6 +35,7 @@ def _image(
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "url": url,
+        "mime_type": "image/jpeg",
         "description": description,
         "width": width,
         "height": height,
@@ -184,6 +185,21 @@ def test_known_tiny_image_is_rejected() -> None:
     assert select_rich_item_candidates([candidate], policy=POLICY) == []
 
 
+@pytest.mark.parametrize("source", ["rag_document", "tool_image", "generated_image"])
+def test_direct_sources_keep_their_existing_dimension_contract(source: str) -> None:
+    candidate = _image(
+        f"image:{source}:tiny",
+        source=source,
+        url=f"https://media.example/{source}.png",
+        width=45,
+        height=45,
+    )
+
+    selected = select_rich_item_candidates([candidate], policy=POLICY)
+
+    assert [item["id"] for item in selected] == [f"image:{source}:tiny"]
+
+
 def test_tiny_resize_url_is_rejected_when_dimensions_are_unknown() -> None:
     candidate = _image(
         "image:tiny-url",
@@ -217,6 +233,79 @@ def test_unknown_dimensions_rank_after_known_usable_dimensions() -> None:
     )
 
     assert [item["id"] for item in selected] == ["image:known"]
+
+
+@pytest.mark.parametrize(
+    "invalid_payload_update",
+    [
+        {"mime_type": "text/html"},
+        {"data": "QUJDRA=="},
+        {"source_url": "javascript:alert(1)"},
+        {"unexpected": "provider-private-field"},
+    ],
+)
+def test_invalid_top_ranked_payload_does_not_displace_valid_runner_up(
+    invalid_payload_update: dict[str, Any],
+) -> None:
+    invalid = _image(
+        "image:invalid-top",
+        source="image_search",
+        url="https://media.example/invalid.jpg",
+        result_rank=0,
+    )
+    invalid["payload"].update(invalid_payload_update)
+    valid = _image(
+        "image:valid-runner-up",
+        source="image_search",
+        url="https://media.example/valid.jpg",
+        result_rank=1,
+    )
+
+    selected = select_rich_item_candidates(
+        [invalid, valid],
+        policy=replace(POLICY, max_items=1),
+    )
+
+    assert [item["id"] for item in selected] == ["image:valid-runner-up"]
+
+
+def test_invalid_group_cell_is_removed_before_it_consumes_the_group() -> None:
+    invalid = _cell("https://media.example/invalid.svg")
+    invalid["mime_type"] = "image/svg+xml"
+    group = _group(
+        "imagegroup:brave:0",
+        [invalid, _cell("https://media.example/valid.jpg")],
+    )
+
+    [selected] = select_rich_item_candidates([group], policy=POLICY)
+
+    assert selected["type"] == "image"
+    assert selected["payload"]["url"] == "https://media.example/valid.jpg"
+
+
+def test_invalid_inline_data_does_not_displace_valid_direct_image() -> None:
+    invalid = _image(
+        "image:invalid-data",
+        source="tool_image",
+        url="https://media.example/invalid.jpg",
+        result_rank=0,
+    )
+    invalid["payload"].pop("url")
+    invalid["payload"]["data"] = "not-valid-base64!!!"
+    invalid["payload"]["mime_type"] = "image/png"
+    valid = _image(
+        "image:valid-direct",
+        source="tool_image",
+        url="https://media.example/valid.jpg",
+        result_rank=1,
+    )
+
+    selected = select_rich_item_candidates(
+        [invalid, valid],
+        policy=replace(POLICY, max_items=1),
+    )
+
+    assert [item["id"] for item in selected] == ["image:valid-direct"]
 
 
 @pytest.mark.parametrize(
@@ -409,3 +498,29 @@ def test_repeated_selection_is_deterministic() -> None:
     second = select_rich_item_candidates(candidates, policy=POLICY)
 
     assert first == second
+
+
+def test_relevance_overlap_ignores_provider_text_beyond_the_bound() -> None:
+    oversized = _image(
+        "image:oversized-description",
+        source="image_search",
+        url="https://media.example/oversized.jpg",
+        query="needle",
+        result_rank=0,
+        description=f"{'x' * 5000} needle",
+    )
+    bounded_match = _image(
+        "image:bounded-match",
+        source="image_search",
+        url="https://media.example/match.jpg",
+        query="needle",
+        result_rank=1,
+        description="needle",
+    )
+
+    selected = select_rich_item_candidates(
+        [oversized, bounded_match],
+        policy=replace(POLICY, max_items=1),
+    )
+
+    assert [item["id"] for item in selected] == ["image:bounded-match"]

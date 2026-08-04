@@ -266,6 +266,10 @@ def build_image_candidates_from_tool_result(
             meta_value = image.get(meta_key)
             if meta_value is not None:
                 provenance[meta_key] = meta_value
+        if display_url and original_url:
+            provenance["original_image_digests"] = {
+                display_url: hashlib.sha256(original_url.encode("utf-8")).hexdigest()
+            }
         if result_query:
             provenance["query"] = result_query
         candidates.append(
@@ -335,11 +339,23 @@ def _group_image_candidates(
                 cell[key] = value
         cells.append(cell)
     first_provenance = selected[0].get("provenance") or {}
+    original_image_digests: dict[str, str] = {}
+    for candidate in selected:
+        candidate_provenance = candidate.get("provenance") or {}
+        digests = candidate_provenance.get("original_image_digests")
+        if isinstance(digests, dict):
+            original_image_digests.update(
+                {
+                    str(display_url): str(digest)
+                    for display_url, digest in digests.items()
+                    if display_url and digest
+                }
+            )
     # Without a tool_call_id, two groups in one turn would both land on the same
     # literal id and collide. The query discriminates them; per-image ids get the
     # same protection from their trailing index.
     discriminator = tool_call_id or f"q{_short_digest(query)}"
-    return {
+    group = {
         "id": f"imagegroup:tool:{discriminator}",
         "type": RichItemType.image_group.value,
         "source": "image_search",
@@ -353,6 +369,9 @@ def _group_image_candidates(
             "query": query,
         },
     }
+    if original_image_digests:
+        group["provenance"]["original_image_digests"] = original_image_digests
+    return group
 
 
 def _extract_image_content_blocks(result: Any) -> list[dict[str, Any]]:

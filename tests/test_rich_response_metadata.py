@@ -413,6 +413,7 @@ def test_selected_image_group_is_not_duplicated_in_legacy_gallery():
         message=WorkflowResponseMessage(content="Look:\n\n<!--rich:imagegroup:tool:c1-->"),
         metadata={
             "_rich_item_candidates": [_group_candidate()],
+            "_presented_rich_image_ids": ["imagegroup:tool:c1"],
             "images": [
                 {
                     "rich_item_id": "imagegroup:tool:c1",
@@ -438,6 +439,7 @@ def test_selected_image_group_is_not_duplicated_in_legacy_gallery():
             "mime": "image/png",
         }
     ]
+    assert "_presented_rich_image_ids" not in metadata
 
 
 def test_v1_finalization_rejects_selected_image_with_invalid_url_scheme():

@@ -517,6 +517,7 @@ def build_bot_metadata(
         # disabled, but never persist the internal candidate handoff field.
         metadata.pop("_rich_item_candidates", None)
         metadata.pop("_inline_rich_response_v1", None)
+        metadata.pop("_presented_rich_image_ids", None)
         return metadata
 
     # ── Rich items finalization ─────────────────────────────────────────
@@ -525,6 +526,7 @@ def build_bot_metadata(
     # persisted assistant metadata.
     raw_candidates = metadata.pop("_rich_item_candidates", None)
     capable_response = bool(metadata.pop("_inline_rich_response_v1", False))
+    metadata.pop("_presented_rich_image_ids", None)
     candidates: list[dict[str, Any]] = []
     if isinstance(raw_candidates, list):
         candidates = [c for c in raw_candidates if isinstance(c, dict)]

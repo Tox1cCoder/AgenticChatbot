@@ -395,11 +395,19 @@ def _image_anchor_entries(
     image_types = {RichItemType.image.value, RichItemType.image_group.value}
     entries: list[ImageAnchorEntry] = []
     seen_ids: set[str] = set()
+    raw_presented_ids = metadata.get("_presented_rich_image_ids")
+    presented_ids = (
+        {str(item_id) for item_id in raw_presented_ids}
+        if isinstance(raw_presented_ids, list)
+        else None
+    )
     for candidate in metadata.get("_rich_item_candidates") or []:
         if not isinstance(candidate, dict) or candidate.get("type") not in image_types:
             continue
         item_id = candidate.get("id")
         if not isinstance(item_id, str) or not item_id or item_id in seen_ids:
+            continue
+        if presented_ids is not None and item_id not in presented_ids:
             continue
         if len(entries) >= image_max_items:
             break
@@ -450,9 +458,9 @@ def finalize_article_content(response: Any, content: str) -> str:
 
     Mutates ``response.message.content`` to the placed content so
     ``build_bot_metadata()`` resolves the exact marker set the persisted
-    message carries. Returns the (possibly updated) content. No-op unless the
-    inline rich-response feature and auto-placement are enabled and the
-    response advertised the per-turn capability.
+    message carries. Returns the (possibly updated) content. Image-marker
+    integrity runs whenever inline rich response is enabled and capable;
+    automatic placement additionally requires its own setting.
 
     Never raises. Placement is an optional enhancement on the persistence path,
     so any unexpected failure returns the original content and the answer is
@@ -483,6 +491,11 @@ def _finalize_article_content(response: Any, content: str) -> str:
         and candidate.get("type") in image_types
         and candidate.get("id")
     )
+    raw_presented_ids = metadata.get("_presented_rich_image_ids")
+    if isinstance(raw_presented_ids, list):
+        allowed_image_ids = allowed_image_ids.intersection(
+            str(item_id) for item_id in raw_presented_ids
+        )
     cleaned_content = content
     for reference in parse_inline_rich_references(content):
         if (

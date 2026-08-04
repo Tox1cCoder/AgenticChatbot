@@ -141,6 +141,17 @@ def test_adapter_records_one_non_negative_duration(
     assert recorded[0] >= 0.0
 
 
+def test_new_selection_clears_stale_presented_image_ids() -> None:
+    context = {
+        "rich_item_candidates": [_web_image(0)],
+        "_presented_rich_image_ids": ["image:stale"],
+    }
+
+    apply_rich_image_selection(context)
+
+    assert "_presented_rich_image_ids" not in context
+
+
 def test_adapter_records_duration_when_selector_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

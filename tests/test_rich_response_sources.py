@@ -20,6 +20,11 @@ from app.ai.tool_execution import (
     is_junk_image_url,
     order_tavily_images,
 )
+from app.core.rich_image_selection import (
+    ImageSelectionPolicy,
+    select_rich_item_candidates,
+)
+from app.core.rich_response import sanitize_public_rich_item
 
 # ---------------------------------------------------------------------------
 # Tavily-style image candidates
@@ -218,6 +223,52 @@ def test_brave_image_candidate_keeps_safe_provider_provenance_only():
     assert prov["provider"] == "brave_image_search"
     for forbidden in ("thumbnail_url", "original_image_url", "source_domain", "provider"):
         assert forbidden not in cand["payload"]
+    public = sanitize_public_rich_item(cand)
+    assert "original_image_digests" not in public["provenance"]
+
+
+def test_brave_thumbnails_of_same_original_image_are_deduplicated() -> None:
+    payload = json.dumps(
+        {
+            "query": "team roster",
+            "provider": "brave_image_search",
+            "images": [
+                {
+                    "url": "https://origin.example/shared.jpg",
+                    "thumbnail_url": f"https://thumbs.example/variant-{index}.jpg",
+                    "source_url": f"https://pages.example/article-{index}",
+                    "description": "team roster",
+                    "mime_type": "image/jpeg",
+                    "width": 1200,
+                    "height": 800,
+                    "provider": "brave_image_search",
+                }
+                for index in range(2)
+            ],
+        }
+    )
+    candidates = build_image_candidates_from_tool_result(
+        payload,
+        tool_call_id="call-original-dedupe",
+        tool_name="brave_image_search",
+    )
+
+    selected = select_rich_item_candidates(
+        candidates,
+        policy=ImageSelectionPolicy(
+            max_items=2,
+            min_width_px=320,
+            min_height_px=180,
+            min_aspect_ratio=0.2,
+            max_aspect_ratio=5.0,
+        ),
+    )
+
+    assert len(selected) == 1
+    assert selected[0]["type"] == "image"
+    assert selected[0]["payload"]["url"] == (
+        "https://thumbs.example/variant-0.jpg"
+    )
 
 
 def test_remote_candidates_reject_insecure_duplicate_and_known_tiny_images(monkeypatch):

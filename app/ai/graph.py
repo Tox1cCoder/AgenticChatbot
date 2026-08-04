@@ -150,6 +150,7 @@ def _build_inline_rich_inventory_for_state(context: dict[str, Any] | None) -> st
     """
     if not isinstance(context, dict):
         return ""
+    context["_presented_rich_image_ids"] = []
     if not getattr(settings, "inline_rich_response_enabled", False):
         return ""
     if not context.get("inline_rich_response_v1"):
@@ -159,11 +160,15 @@ def _build_inline_rich_inventory_for_state(context: dict[str, Any] | None) -> st
         return ""
     from .prompts import build_rich_response_guidance
 
-    return build_rich_response_guidance(
+    presented_image_ids: list[str] = []
+    guidance = build_rich_response_guidance(
         candidates=list(candidates),
         enabled=True,
         capability=True,
+        presented_image_ids=presented_image_ids,
     )
+    context["_presented_rich_image_ids"] = presented_image_ids
+    return guidance
 
 
 class MultiAgentWorkflow(
@@ -413,6 +418,11 @@ class MultiAgentWorkflow(
             response.metadata["_inline_rich_response_v1"] = True
             if rich_candidates:
                 response.metadata["_rich_item_candidates"] = list(rich_candidates)
+            presented_image_ids = context.get("_presented_rich_image_ids")
+            if isinstance(presented_image_ids, list):
+                response.metadata["_presented_rich_image_ids"] = list(
+                    presented_image_ids
+                )
 
     def _attach_final_agent_metadata(
         self,

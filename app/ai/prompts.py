@@ -4,7 +4,11 @@ from contextlib import suppress
 
 from app.ai.token_counter import TokenCounter
 from app.core.config import settings
-from app.core.rich_response import build_rich_item_inventory_block, provenance_provider
+from app.core.rich_response import (
+    build_rich_item_inventory_block,
+    parse_inline_rich_references,
+    provenance_provider,
+)
 from app.observability.rich_images import rich_image_metrics
 
 _PROMPT_TOKEN_COUNTER = TokenCounter()
@@ -42,6 +46,7 @@ def build_rich_response_guidance(
     max_items: int | None = None,
     max_chars: int | None = None,
     summary_chars: int | None = None,
+    presented_image_ids: list[str] | None = None,
 ) -> str:
     """Return the bounded prompt block (inventory + marker guidance) for the
     inline rich-response feature.
@@ -64,25 +69,32 @@ def build_rich_response_guidance(
     )
     if not inventory:
         return ""
+    inventory_ids = set(parse_inline_rich_references(inventory))
+    admitted_image_ids = [
+        str(candidate.get("id"))
+        for candidate in candidates
+        if isinstance(candidate, dict)
+        and candidate.get("type") in {"image", "image_group"}
+        and candidate.get("id") in inventory_ids
+    ]
+    if presented_image_ids is not None:
+        presented_image_ids[:] = admitted_image_ids
     with suppress(Exception):
         # Count what the inventory actually offered, not every candidate handed
         # in: the builder keeps only the first ``image_max_items`` image entries,
         # so counting the raw list would over-report the presentation stage —
         # exactly the "the metric name hides the difference" defect these
         # stage-specific counters exist to fix.
-        image_cap = int(settings.rich_auto_place_max_images)
         presented: dict[str, int] = {}
-        offered = 0
         for candidate in candidates:
-            if offered >= image_cap:
-                break
             if not isinstance(candidate, dict):
                 continue
             if candidate.get("type") not in {"image", "image_group"}:
                 continue
+            if candidate.get("id") not in inventory_ids:
+                continue
             provider = provenance_provider(candidate)
             presented[provider] = presented.get(provider, 0) + 1
-            offered += 1
         for provider, count in presented.items():
             rich_image_metrics.record_presentation(provider=provider, count=count)
     return f"{inventory}\n\n{INLINE_RICH_RESPONSE_SUFFIX}"

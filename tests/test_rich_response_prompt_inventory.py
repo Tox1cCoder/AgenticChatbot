@@ -4,7 +4,7 @@ references (response_format.md Task 4).
 
 from __future__ import annotations
 
-from app.ai.graph import MultiAgentWorkflow
+from app.ai.graph import MultiAgentWorkflow, _build_inline_rich_inventory_for_state
 from app.ai.prompts import (
     INLINE_RICH_RESPONSE_SUFFIX,
     build_rich_response_guidance,
@@ -124,6 +124,38 @@ def test_build_rich_response_guidance_prefers_non_image_when_trimmed():
     assert widget["id"] in block
 
 
+def test_graph_records_no_presented_image_when_item_budget_trims_it(monkeypatch):
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    monkeypatch.setattr(settings, "rich_item_inventory_max_items", 1)
+    context = {
+        "inline_rich_response_v1": True,
+        "rich_item_candidates": [
+            _widget_candidate(),
+            _image_candidate("image:tool:c1:0"),
+        ],
+    }
+
+    guidance = _build_inline_rich_inventory_for_state(context)
+
+    assert "widget:w-1" in guidance
+    assert "image:tool:c1:0" not in guidance
+    assert context["_presented_rich_image_ids"] == []
+
+
+def test_graph_records_no_presented_image_when_character_budget_trims_it(monkeypatch):
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    monkeypatch.setattr(settings, "rich_item_inventory_max_chars", 1)
+    context = {
+        "inline_rich_response_v1": True,
+        "rich_item_candidates": [_image_candidate("image:tool:c1:0")],
+    }
+
+    guidance = _build_inline_rich_inventory_for_state(context)
+
+    assert "image:tool:c1:0" not in guidance
+    assert context["_presented_rich_image_ids"] == []
+
+
 def test_graph_does_not_forward_candidates_for_non_capable_response(monkeypatch):
     monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
@@ -144,6 +176,30 @@ def test_graph_does_not_forward_candidates_for_non_capable_response(monkeypatch)
 
     assert "_rich_item_candidates" not in response.metadata
     assert "_inline_rich_response_v1" not in response.metadata
+
+
+def test_graph_forwards_presented_image_ids_as_transient_response_state(monkeypatch):
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    response = AgentResponse(
+        agent_type=AgentType.CHAT,
+        agent_id="chat_agent",
+        message=AgentMessage(role=MessageRole.ASSISTANT, content="Answer"),
+        metadata={},
+    )
+    state = {
+        "context": {
+            "inline_rich_response_v1": True,
+            "rich_item_candidates": [_image_candidate("image:tool:c1:0")],
+            "_presented_rich_image_ids": ["image:tool:c1:0"],
+        }
+    }
+
+    workflow._merge_tool_artifacts(state, response)
+
+    assert response.metadata["_presented_rich_image_ids"] == [
+        "image:tool:c1:0"
+    ]
 
 
 def test_media_guidance_requires_disambiguated_image_query():
