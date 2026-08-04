@@ -65,6 +65,7 @@ from ..token_instrumentation import (
     extract_actual_usage,
 )
 from ..tool_execution import _WIDGET_SESSION_BOUND_TOOLS, _bind_widget_session_args
+from ..tool_result_read_tool import create_read_tool_result_tool
 from ..tool_scope import is_client_only_scope
 from ..user_memory_tools import create_user_memory_tools
 from ..utils import (
@@ -458,6 +459,11 @@ class BaseAgent(ABC):
 
         for tool in skills_tools:
             _add_internal(tool)
+
+        # A preview-only tool result is unusable without a reader, and the model's
+        # only other recovery is to repeat the search that produced it.
+        if getattr(settings, "tool_result_offload_enabled", False):
+            _add_internal(create_read_tool_result_tool())
 
         # Caller-provided internal tools include the graph-scoped ``hand_off``
         # tool. The graph owns its roster, so BaseAgent never supplies a static
