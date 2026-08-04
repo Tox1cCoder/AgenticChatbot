@@ -281,7 +281,6 @@ The full schema lives in [`app/core/config.py`](app/core/config.py). Selected hi
 |---|---|---|
 | `GEMINI_API_KEY` | — | Default provider; still supported via env |
 | `TAVILY_API_KEY` | — | Tavily Search, Extract, Map, and Crawl |
-| `TAVILY_SEARCH_INCLUDE_IMAGES` | `true` | Default when `tavily_search.include_images` is omitted |
 | `BRAVE_SEARCH_API_KEY` | — | Brave Image Search (visual references) |
 | `BRAVE_IMAGE_SEARCH_DEFAULT_COUNT` | `6` | Default image results per call |
 | `BRAVE_IMAGE_SEARCH_MAX_COUNT` | `10` | Hard cap on image results per call |
@@ -1368,9 +1367,7 @@ Image candidates are **never** streamed transiently — they only surface in the
 
 ### Rich image provider, latency, and failure policy
 
-Brave Image Search is the preferred adapter for focused visual discovery because it supplies dedicated thumbnail and image metadata. Tavily serves a different job: web research that can return source-bound images, and an orchestrated alternative when appropriate. Brave is not universally better, and the adapters do not perform an unconditional serial Brave-to-Tavily retry.
-
-For `tavily_search`, omitting `include_images` (the internal `None` case) preserves `TAVILY_SEARCH_INCLUDE_IMAGES`; passing `include_images=false` disables images for that call and intentionally returns an empty image list. This does not change the deployment default for later calls.
+Brave Image Search is the preferred adapter for focused visual discovery because it supplies dedicated thumbnail and image metadata. `tavily_search` returns text and sources only — it never returns images, so `brave_image_search` is the only source of web images.
 
 Candidate filtering is deterministic and bounded by `RICH_IMAGE_CANDIDATE_MAX_COUNT` (default `8`), `RICH_IMAGE_MIN_WIDTH_PX` (`320`), and `RICH_IMAGE_MIN_HEIGHT_PX` (`180`). The model chooses placement from this bounded inventory; there is no model-based image evaluator, labeled-dataset dependency, or additional evaluation latency.
 
