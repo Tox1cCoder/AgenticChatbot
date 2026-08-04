@@ -14,7 +14,7 @@ This is Phase 1 of `docs/superpowers/specs/2026-08-04-vision-verified-image-inje
 
 - Run every command from the repository root with the app runtime: `.venv/Scripts/python.exe -m pytest ...`. Do not use a bare `python`; three interpreters exist in this checkout and only `.venv` is the app runtime.
 - Functions: 100 lines max, cyclomatic complexity 8 max, 5 positional parameters max, 100-character lines.
-- Zero new warnings from `ruff`. The repository has roughly 161 pre-existing `ruff` findings; do not fix unrelated ones, and do not add any.
+- Zero `ruff` findings. **Correction, 2026-08-04:** this constraint originally claimed "roughly 161 pre-existing findings", quoting a superseded 2026-06 measurement. Repo-wide `ruff check . --no-cache` is in fact clean, so "zero new findings" means `All checks passed!`. The wrong number led an implementer to leave the repository's only lint error in place until the final review caught it.
 - Comments explain WHY, not WHAT. Delete commented-out code rather than keeping it.
 - `results` is serialized first in the Tavily search payload, ahead of every optional diagnostic key. Field order is part of the contract because truncation is order-sensitive.
 - The `answer` share of the preview budget is `0.25` initially. The per-result content floor is `200` characters initially. Both are configuration, not literals at the call site.

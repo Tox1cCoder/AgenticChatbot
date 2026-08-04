@@ -10,11 +10,22 @@
 
 This is Phase 2 of `docs/superpowers/specs/2026-08-04-vision-verified-image-injection-design.md`. **Phase 1 (`docs/superpowers/plans/2026-08-04-research-payload-and-offload-repair.md`) must be merged first**; Task 1 here assumes `tavily_search` no longer accepts or returns images.
 
+## Carried over from Phase 1
+
+Phase 1 shipped clean (final review: ready to merge) but left four tracked follow-ups. None block Phase 2; the first is the only one with production impact.
+
+1. **`offload_if_large` runs a blocking DB commit on the event loop.** `ToolResultBlobService.offload_if_large` calls `ToolResultBlobRepository.create`, a synchronous SQLAlchemy `commit()` of the full multi-MB payload, from inside `async def execute_tool_calls` (`app/ai/tool_execution.py`). Phase 1 removed a 26-second CPU stall there but did not thread the call. The read path next to it already threads its DB work (`app/ai/tool_result_read_tool.py`), so the write path is inconsistent with its own neighbour. Roughly a three-line fix. Phase 2 adds no new offloaded output, so it neither worsens nor depends on this.
+2. **`app/api/tool_result_blobs.py` calls `service.read_text(record)` unguarded**, so a corrupt record returns HTTP 500 on the download endpoint while the tool path now returns a structured not-found. Pre-existing; Phase 1 fixed only the tool path.
+3. **`TOOL_CONTEXT_SUFFIX` says "Do NOT repeat the search"** in a bullet that applies to every tool, which reads oddly for extract, map, or SQL. The operative instruction in the same bullet is tool-neutral, so this is wording only. Phase 2's Task 6 rewrites nearby prompt text and can absorb it.
+4. **The preview's `content` share is now diluted on search payloads that carry `raw_content`** — measured 543 → 232 chars of curated content at budget 4000 with 5 results. Inherent to dropping the key whitelist (which was necessary: the whitelist reduced a 41 KB `tavily_extract` payload to 189 characters of URLs). `include_raw_content` defaults to `False`, so the common path is unaffected.
+
+Also inherited: every `tests/integration/*_postgres.py` skips silently because nothing in this repo sets `TEST_DATABASE_URL` — no CI config, no `addopts`, no `conftest` default. The file tree therefore overstates coverage. Phase 1 worked around it with a DB-free statement-capture test; if Phase 2 adds Postgres-only properties, do the same or make the skip loud.
+
 ## Global Constraints
 
 - Run every command from the repository root with the app runtime: `.venv/Scripts/python.exe -m pytest ...`. Only `.venv` is the app runtime; the other two interpreters in this checkout have drifted pins.
 - Functions: 100 lines max, cyclomatic complexity 8 max, 5 positional parameters max, 100-character lines.
-- Zero new `ruff` findings. Roughly 161 pre-existing findings are the baseline; do not add to it and do not fix unrelated ones.
+- Zero `ruff` findings. Repo-wide `ruff check . --no-cache` is clean as of 2026-08-04 and must stay that way: "zero new findings" means `All checks passed!`, not "no worse than a large baseline". (An earlier draft of this constraint claimed ~161 pre-existing findings, quoting a superseded 2026-06 measurement; a Phase 1 implementer relied on it and left the repo's only lint error in place.)
 - Confidence threshold is `0.85` initially. Maximum candidates submitted to the verifier is `6`. Maximum image items in an answer is `2` (the existing `rich_auto_place_max_images`). Image-path deadline is `4.0` seconds initially. All four are configuration, never literals at a call site.
 - Verifier decisions, confidence values, content kinds, and rejection reasons must never appear in public rich items, response metadata, persisted messages, logs, or metric labels. Metrics carry aggregate counts, durations, and bounded reason enums only.
 - The answering model must never see a rejected candidate's id, URL, title, or description.
