@@ -72,7 +72,10 @@ class _EnvironmentManager:
         self.removed.append((name, source_hash))
 
     def preparation_lock_path(self, skill):
-        return skill.bundle_root.parent / f".{skill.source_hash}.prepare.lock"
+        return self.preparation_lock_path_for_name(skill.name)
+
+    def preparation_lock_path_for_name(self, name):
+        return Path(client_settings.profile_root) / "runtime-locks" / f".{name}.prepare.lock"
 
 
 class _SecretStore:
@@ -674,6 +677,56 @@ async def test_runtime_preparation_cancellation_returns_before_worker_and_cleans
         await asyncio.sleep(0.01)
     assert not any(install_root.glob("*.stage-*"))
     assert not install_env.environment.removed
+
+
+@pytest.mark.asyncio
+async def test_uninstall_waits_for_cancelled_update_runtime_preparation(install_env, monkeypatch):
+    original = _write_skill(install_env.sources / "original", body="Original instructions.")
+    _, installer = _installer(install_env)
+    installed = await installer.install(original)
+
+    update = _write_skill(install_env.sources / "update", body="Updated instructions.")
+    (update / "pyproject.toml").write_text(
+        "[project]\nname='demo-skill'\nversion='2'\n[project.scripts]\ndemo-skill='x:y'\n",
+        encoding="utf-8",
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_prepare(skill, *, approve_setup, force=False):
+        entered.set()
+        assert release.wait(timeout=5)
+        return {"status": "ready", "commands": ["demo-skill"]}
+
+    monkeypatch.setattr(install_env.environment, "prepare", blocking_prepare)
+    preview = await installer.preview(update)
+    update_task = asyncio.create_task(
+        installer.install(
+            update,
+            expected_source_hash=preview["source_hash"],
+            approve_setup=True,
+            replace_source_hash=installed["source_hash"],
+        )
+    )
+    assert await asyncio.to_thread(entered.wait, 5)
+
+    update_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(update_task, timeout=0.5)
+
+    uninstall_task = asyncio.create_task(installer.uninstall("demo-skill"))
+    await asyncio.sleep(0.05)
+    assert not uninstall_task.done()
+    assert install_env.environment.removed == []
+
+    release.set()
+    result = await uninstall_task
+    assert result == {
+        "name": "demo-skill",
+        "removed": True,
+        "cleanup_status": "complete",
+    }
+    assert install_env.environment.removed == ["demo-skill"]
 
 
 @pytest.mark.asyncio

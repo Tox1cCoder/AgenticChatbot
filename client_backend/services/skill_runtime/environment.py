@@ -246,9 +246,16 @@ class SkillEnvironmentManager:
         return self.inspect(skill)
 
     def preparation_lock_path(self, skill: SkillMetadata) -> Path:
-        """Return the cross-process lock shared by one skill/source runtime."""
-        target = self._runtime_root(skill)
-        return target.parent / f".{target.name}.prepare.lock"
+        """Return the cross-process lock shared by all runtimes for one skill."""
+        return self.preparation_lock_path_for_name(skill.name)
+
+    def preparation_lock_path_for_name(self, skill_name: str) -> Path:
+        """Return a stable lock outside the runtime subtree removed by uninstall."""
+        base = self._base()
+        target = base / f".{sanitize_filename(skill_name)}.runtime.lock"
+        if not is_under_root(target, base):
+            raise SkillRuntimeError(UNSAFE_BUNDLE_PATH, "skill runtime lock escapes profile root")
+        return target
 
     def inspect(self, skill: SkillMetadata) -> dict:
         try:

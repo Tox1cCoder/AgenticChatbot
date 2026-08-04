@@ -113,6 +113,24 @@ def _prepare_environment_with_runtime_lock(
         runtime_lease.release()
 
 
+def _remove_environment_with_runtime_lock(environment, skill_name: str) -> None:
+    """Serialize runtime deletion with current and detached preparation workers."""
+    lock_path = environment.preparation_lock_path_for_name(skill_name)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_lease = filelock.FileLock(str(lock_path), thread_local=False)
+    try:
+        runtime_lease.acquire(timeout=SETUP_TIMEOUT_SECONDS)
+    except filelock.Timeout as exc:
+        raise SkillRuntimeError(
+            SKILL_SETUP_REQUIRED,
+            f"runtime preparation for skill '{skill_name}' is already in progress",
+        ) from exc
+    try:
+        environment.remove_skill(skill_name)
+    finally:
+        runtime_lease.release()
+
+
 @dataclass(frozen=True)
 class SkillInstallSpec:
     discovered: DiscoveredSkill
@@ -630,7 +648,12 @@ class SkillBundleInstaller:
                 progress["bundle_removed"] = True
 
             for step, remover in (
-                ("runtime_removed", self._environment.remove_skill),
+                (
+                    "runtime_removed",
+                    lambda skill_name: _remove_environment_with_runtime_lock(
+                        self._environment, skill_name
+                    ),
+                ),
                 ("secrets_removed", self._secrets.remove_skill),
             ):
                 if progress[step]:
