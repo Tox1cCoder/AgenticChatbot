@@ -32,6 +32,7 @@ from client_backend.core.config import client_settings
 from client_backend.core.paths import get_skill_locks_root
 
 _LOCK_SUFFIX = ".lock"
+SKILLS_MUTATION_SCOPE = "skills-mutation"
 
 # One asyncio.Lock per resolved lock file, per event loop. The loop dimension is
 # required: an asyncio.Lock binds to the loop that first awaits it and raises if

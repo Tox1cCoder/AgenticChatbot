@@ -177,28 +177,65 @@ class SkillBundleInstaller:
             ``name``, ``install_id``, ``source_hash``, ``runtime_status``, and
             ``action`` (``"installed"`` or ``"updated"``).
         """
-        await self._notify(observer, "validating")
-        source_skill, shape = await self._load_source(source)
-        preview = await self._build_preview(source_skill, shape)
-        self._require_preview_agreement(
-            source_skill,
-            preview,
-            expected_source_hash=expected_source_hash,
-            approve_setup=approve_setup,
+        from client_backend.services.skill_runtime.transactions import (
+            SkillInstallTransaction,
         )
 
+        await self._notify(observer, "validating")
+        discovered = await self._as_discovered(source)
         user_id = self._resolve_user_id()
         await self._notify(observer, "waitingForLock")
-        async with profile_lock(user_id, f"skill:{source_skill.name}"):
-            return await self._install_locked(
-                source,
-                user_id=user_id,
-                expected_source_hash=expected_source_hash,
-                approve_setup=approve_setup,
-                replace_source_hash=replace_source_hash,
-                source_kind=source_kind,
+        transaction = SkillInstallTransaction(self, user_id)
+        transaction_id = uuid.uuid4().hex
+        try:
+            results = await transaction.execute(
+                [
+                    SkillInstallSpec(
+                        discovered=discovered,
+                        expected_source_hash=expected_source_hash,
+                        approve_setup=approve_setup,
+                        replace_source_hash=replace_source_hash,
+                        source_kind=source_kind,
+                    )
+                ],
+                transaction_id=transaction_id,
                 observer=observer,
             )
+        except BaseException:
+            with contextlib.suppress(RuntimeError):
+                transaction.finalize()
+            raise
+        transaction.finalize()
+        return results[0]
+
+    async def install_many(
+        self,
+        specs: list[SkillInstallSpec],
+        *,
+        transaction_id: str,
+        observer: SkillInstallObserver | None = None,
+    ) -> list[dict]:
+        """Install a complete collection and retain its journal for its receipt."""
+        from client_backend.services.skill_runtime.transactions import (
+            SkillInstallTransaction,
+        )
+
+        await self._notify(observer, "waitingForLock")
+        transaction = SkillInstallTransaction(self, self._resolve_user_id())
+        return await transaction.execute(
+            specs,
+            transaction_id=transaction_id,
+            observer=observer,
+        )
+
+    def finalize_transaction(self, transaction_id: str) -> None:
+        from client_backend.services.skill_runtime.transactions import (
+            SkillInstallTransaction,
+        )
+
+        transaction = SkillInstallTransaction(self, self._resolve_user_id())
+        transaction._transaction_id = transaction_id
+        transaction.finalize()
 
     async def _build_preview(self, source_skill: SkillMetadata, shape: str) -> dict:
         setup_preview = await asyncio.to_thread(self._environment.preview, source_skill)

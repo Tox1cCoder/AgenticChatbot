@@ -248,6 +248,15 @@ class LocalSkillsRegistry:
 
                 # Find all SKILL.md files
                 skill_files = list(root_path.rglob("SKILL.md"))
+                if root in self._implicit_skill_roots:
+                    skill_files = [
+                        path
+                        for path in skill_files
+                        if not any(
+                            ".stage-" in part or ".backup-" in part
+                            for part in path.relative_to(root_path).parts
+                        )
+                    ]
 
                 for skill_file in skill_files:
                     try:
