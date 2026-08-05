@@ -137,8 +137,33 @@ class WebImageService:
                         duration_seconds=time.perf_counter() - started,
                     )
 
+    async def fetch_url(self, url: str, *, provider: str = "other") -> FetchedWebImage:
+        """Fetch and validate an upstream image URL with no persisted record.
+
+        Same guards as ``fetch``: HTTPS-only, public-address assertion, pinned
+        transport, revalidated redirects, byte cap, decoded MIME and dimensions.
+        """
+        started = time.perf_counter()
+        outcome = "success"
+        try:
+            return await self._fetch_url_with_redirects(url)
+        except (WebImageRejected, WebImageUpstreamFailure) as exc:
+            outcome = exc.reason
+            raise
+        finally:
+            if self.metrics is not None:
+                with suppress(Exception):
+                    self.metrics.record_fetch(
+                        provider=provider,
+                        outcome=outcome,
+                        duration_seconds=time.perf_counter() - started,
+                    )
+
     async def _fetch_redirects(self, record: Any) -> FetchedWebImage:
-        current_url = self._record_value(record, "upstream_url")
+        return await self._fetch_url_with_redirects(self._record_value(record, "upstream_url"))
+
+    async def _fetch_url_with_redirects(self, url: str) -> FetchedWebImage:
+        current_url = url
         for redirect_count in range(self.max_redirects + 1):
             outcome = await self._fetch_once(current_url)
             if isinstance(outcome, FetchedWebImage):

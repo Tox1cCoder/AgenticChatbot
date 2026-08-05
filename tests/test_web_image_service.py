@@ -301,6 +301,26 @@ async def test_fetch_records_bounded_success_and_failure_metrics():
 
 
 @pytest.mark.asyncio
+async def test_fetch_url_rejects_a_private_address():
+    service, _ = _service(resolver=_resolver("127.0.0.1"))
+
+    with pytest.raises(WebImageRejected) as excinfo:
+        await service.fetch_url("https://internal.example/a.png")
+
+    assert excinfo.value.reason == "private_address"
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_rejects_a_non_https_scheme():
+    service, _ = _service(resolver=_resolver("93.184.216.34"))
+
+    with pytest.raises(WebImageRejected) as excinfo:
+        await service.fetch_url("http://example.com/a.png")
+
+    assert excinfo.value.reason == "scheme"
+
+
+@pytest.mark.asyncio
 async def test_metrics_failure_cannot_break_a_valid_image_fetch():
     metrics = Mock()
     metrics.record_fetch.side_effect = RuntimeError("metrics unavailable")
