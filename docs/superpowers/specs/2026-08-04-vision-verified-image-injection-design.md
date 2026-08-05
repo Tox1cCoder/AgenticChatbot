@@ -101,6 +101,7 @@ independently coordinating Tavily and Brave. Its relevant input is:
 class WebResearchInput:
     query: str
     image_query: str | None = None
+    image_intent: Literal["figure", "gallery"] | None = None
     max_results: int | None = None
     search_depth: str | None = None
 ```
@@ -108,6 +109,19 @@ class WebResearchInput:
 `query` is the factual research query. `image_query` is a short, concrete visual
 subject or `None` when an image would not improve the answer. The tool
 description must explicitly say that an uncertain image decision uses `None`.
+
+`image_intent` selects the layout, and through it the count. `figure` — the
+default whenever `image_query` is set — means up to two individual images placed
+beside the prose they support. `gallery` means one grid item holding several
+images, and is for requests that ask to see multiple instances or to compare
+things: "show me the roster", "what do the team logos look like", "compare the
+colours".
+
+The model declares intent only. It never declares a number. How many images a
+subject deserves is an unverifiable judgement, and unverifiable model judgement
+about images is what this design exists to remove; the server maps intent to a
+cap and the verifier decides which candidates survive. For a comparison the
+count is derived from the things being compared, not guessed.
 
 `web_research` is an **in-process internal tool**, registered the way
 `internal::tool_search` and `internal::dispatch_subagents` already are. It must
@@ -313,9 +327,20 @@ A candidate is admitted only when all conditions hold:
   is used only when that kind is relevant to the requested subject. Explicit
   user requests for a kind override the generic preference against it.
 
-The final pool preserves Brave order among approved candidates and contains at
-most two image items. Zero approved candidates is a successful text-only
-outcome, not an error.
+The final pool preserves Brave order among approved candidates. Its size follows
+the declared intent: `figure` admits at most two individual image items,
+`gallery` admits one grid item holding up to six. Zero approved candidates is a
+successful text-only outcome in either mode, not an error.
+
+Candidates are discovered, fetched, and verified individually — never as a
+pre-grouped grid. Grouping happens only after admission, over the survivors.
+Grouping before verification would both hide individual images from the verifier
+and cap discovery below the candidate budget.
+
+Raising the gallery ceiling costs nothing at verification time: the verifier
+already receives the whole candidate batch in one call, so admitting six rather
+than two adds no model call and no thumbnail download. The marginal cost is
+render-time fetches for images actually placed.
 
 Verifier decisions, confidence values, kinds, and rejection reasons stay in
 turn-local memory only. They are excluded from public rich items, response
@@ -328,8 +353,11 @@ model-visible marker inventory. The answering model never sees rejected remote
 candidate IDs, URLs, titles, or descriptions and therefore cannot place them.
 
 Placement remains optional. The answer must be complete without an image, and an
-approved marker is used only near prose it directly supports. At most two remote
-image items may be placed in one answer.
+approved marker is used only near prose it directly supports. In `figure` mode at
+most two remote image items may be placed. In `gallery` mode there is exactly one
+marker to place, because the grid is a single item — the answering model never
+chooses how many images the grid holds, and must not describe the grid's contents
+beyond what the prose already says.
 
 User-uploaded images, RAG document images, generated images, and explicit
 image-producing tool results retain their current direct-source path. They skip
@@ -455,6 +483,20 @@ Recreate the essential `example_run.txt` conditions:
 - Explicit requests for a portrait, logo, map, diagram, chart, screenshot, or
   product photo can admit that kind when confidence is high.
 - Abstract questions use `image_query=None` and make no Brave or verifier call.
+
+### Layout and count
+
+- `figure` intent admits at most two individual image items.
+- `gallery` intent admits exactly one grid item, holding up to six approved
+  images, and the answering inventory therefore exposes one marker.
+- A gallery request whose candidates are mostly rejected still produces a grid
+  from whatever survived; a single survivor is emitted as an individual image
+  rather than a one-cell grid.
+- Candidates reach the verifier individually even in gallery mode. A test must
+  prove the verifier saw every candidate separately and that discovery was not
+  capped by any grouping bound.
+- An absent `image_intent` alongside a non-empty `image_query` behaves as
+  `figure`.
 
 ### Safety and robustness
 

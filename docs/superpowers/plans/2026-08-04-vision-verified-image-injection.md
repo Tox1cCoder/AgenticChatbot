@@ -26,7 +26,9 @@ Also inherited: every `tests/integration/*_postgres.py` skips silently because n
 - Run every command from the repository root with the app runtime: `.venv/Scripts/python.exe -m pytest ...`. Only `.venv` is the app runtime; the other two interpreters in this checkout have drifted pins.
 - Functions: 100 lines max, cyclomatic complexity 8 max, 5 positional parameters max, 100-character lines.
 - Zero `ruff` findings. Repo-wide `ruff check . --no-cache` is clean as of 2026-08-04 and must stay that way: "zero new findings" means `All checks passed!`, not "no worse than a large baseline". (An earlier draft of this constraint claimed ~161 pre-existing findings, quoting a superseded 2026-06 measurement; a Phase 1 implementer relied on it and left the repo's only lint error in place.)
-- Confidence threshold is `0.85` initially. Maximum candidates submitted to the verifier is `6`. Maximum image items in an answer is `2` (the existing `rich_auto_place_max_images`). Image-path deadline is `4.0` seconds initially. All four are configuration, never literals at a call site.
+- Confidence threshold is `0.85` initially. Maximum candidates submitted to the verifier is `6`. Image-path deadline is `4.0` seconds initially. All are configuration, never literals at a call site.
+- The image count follows the declared layout intent, and the model never states a number: `figure` intent admits at most `rich_auto_place_max_images` (2) individual items; `gallery` intent admits exactly one grid item holding up to `rich_image_gallery_max_items` (6). An absent intent with a non-empty `image_query` means `figure`.
+- Candidates are discovered, fetched, and verified **individually**, never as a pre-grouped grid. Grouping happens only after admission, over the survivors. Grouping earlier both hides individual images from the verifier and caps discovery below the candidate budget.
 - Verifier decisions, confidence values, content kinds, and rejection reasons must never appear in public rich items, response metadata, persisted messages, logs, or metric labels. Metrics carry aggregate counts, durations, and bounded reason enums only.
 - The answering model must never see a rejected candidate's id, URL, title, or description.
 - Every failure in the image path — Brave error, thumbnail failure, verifier timeout, malformed structured output, zero approvals — is a successful text-only answer, not an error.
@@ -1148,7 +1150,22 @@ In `app/core/config.py`, after `research_budget_enabled`:
         gt=0,
         description="Per-thumbnail download timeout during verification.",
     )
+    rich_image_gallery_max_items: int = Field(
+        default=6,
+        ge=2,
+        le=8,
+        description=(
+            "Images in one verified gallery grid. Only reachable through "
+            "image_intent='gallery'; figure mode stays bound by "
+            "rich_auto_place_max_images."
+        ),
+    )
 ```
+
+Leave the existing `rich_image_group_max_items` (default 3, `le=3`) alone. It still
+governs the legacy grouping path inside `build_image_candidates_from_tool_result`,
+which remains reachable when a model loads `brave_image_search` directly through
+`tool_search`.
 
 In the same edit, lower the existing Brave timeout so image search plus one
 thumbnail leaves the verifier room inside the 4-second deadline:
@@ -1438,10 +1455,13 @@ The single model-facing research operation. It runs the two providers concurrent
 
 **Files:**
 - Create: `app/ai/web_research_tool.py`
+- Create: `app/ai/image_verification_flow.py`
+- Modify: `app/ai/tool_execution.py` (two additive keyword parameters — see Step 4b)
 - Create: `tests/test_web_research_tool.py`
+- Modify: `tests/test_tool_execution_rendering.py`
 
 **Interfaces:**
-- Consumes: `get_research_budget` (Task 1), `fetch_thumbnails` (Task 2), `verify_candidates`/`admit_candidates`/`SubmittedCandidate` (Task 3), `offer_verified_images` (Task 4), `build_image_candidates_from_tool_result` (existing, for Brave results only).
+- Consumes: `get_research_budget` (Task 1), `fetch_thumbnails` (Task 2), `verify_candidates`/`admit_candidates`/`SubmittedCandidate` (Task 3), `offer_verified_images` (Task 4), `build_image_candidates_from_tool_result` and `_group_image_candidates` (existing, for Brave results only).
 - Produces: `create_web_research_tool(*, tavily_tool=None, brave_tool=None, web_image_service=None, verifier_model=None) -> StructuredTool` named `web_research`, with metadata `{"tool_origin": "internal", "qualified_tool_id": "internal::web_research"}`. Its JSON result is the Tavily payload plus `"research": {"reused": bool, "searches_used": int}`, and never any image field.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1617,6 +1637,116 @@ async def test_only_the_verified_team_photo_is_offered():
     assert payload["answer"].startswith("T1 is a South Korean")
 
 
+def _brave_payload(count: int) -> str:
+    """A Brave result with ``count`` distinct, verifiable team photos."""
+    return json.dumps(
+        {
+            "query": "T1 League of Legends team photo",
+            "provider": "brave_image_search",
+            "images": [
+                {
+                    "url": f"https://cdn.example/team-{index}.jpg",
+                    "provider": "brave_image_search",
+                    "mime_type": "image/jpeg",
+                    "title": f"T1 roster {index}",
+                    "description": f"T1 roster {index}",
+                    "width": 995,
+                    "height": 565,
+                    "source_url": "https://sheepesports.example/t1",
+                }
+                for index in range(count)
+            ],
+            "total_results": count,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_gallery_intent_returns_one_grid_item_holding_every_survivor():
+    verifier = _ApproveOnlyTeamPhoto()
+
+    _, sink = await _run(
+        _tool(
+            _FakeTool("tavily_search", TAVILY_PAYLOAD),
+            _FakeTool("brave_image_search", _brave_payload(4)),
+            _FakeImageService(),
+            verifier,
+        ),
+        query="T1 roster 2026",
+        image_query="T1 League of Legends team photo",
+        image_intent="gallery",
+    )
+
+    assert len(sink) == 1
+    assert sink[0]["type"] == "image_group"
+    assert len(sink[0]["payload"]["items"]) == 4
+    assert verifier.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_gallery_candidates_reach_the_verifier_individually():
+    """Grouping before verification would hide images and cap discovery."""
+
+    seen: list[str] = []
+
+    class _Recorder:
+        calls = 0
+
+        async def ainvoke(self, messages):
+            text = messages[0].content[0]["text"]
+            seen.extend(re.findall(r"^- (c\d+): ", text, flags=re.MULTILINE))
+            return VisualVerificationResult(decisions=[])
+
+    await _run(
+        _tool(
+            _FakeTool("tavily_search", TAVILY_PAYLOAD),
+            _FakeTool("brave_image_search", _brave_payload(5)),
+            _FakeImageService(),
+            _Recorder(),
+        ),
+        query="T1 roster 2026",
+        image_query="T1 League of Legends team photo",
+        image_intent="gallery",
+    )
+
+    assert len(seen) == 5, "every candidate must be judged on its own pixels"
+
+
+@pytest.mark.asyncio
+async def test_figure_intent_caps_at_two_individual_items():
+    _, sink = await _run(
+        _tool(
+            _FakeTool("tavily_search", TAVILY_PAYLOAD),
+            _FakeTool("brave_image_search", _brave_payload(4)),
+            _FakeImageService(),
+            _ApproveOnlyTeamPhoto(),
+        ),
+        query="T1 roster 2026",
+        image_query="T1 League of Legends team photo",
+    )
+
+    assert len(sink) == 2
+    assert all(item["type"] == "image" for item in sink)
+
+
+@pytest.mark.asyncio
+async def test_gallery_with_a_single_survivor_is_not_a_one_cell_grid():
+    _, sink = await _run(
+        _tool(
+            _FakeTool("tavily_search", TAVILY_PAYLOAD),
+            _FakeTool("brave_image_search", _brave_payload(1)),
+            _FakeImageService(),
+            _ApproveOnlyTeamPhoto(),
+        ),
+        query="T1 roster 2026",
+        image_query="T1 League of Legends team photo",
+        image_intent="gallery",
+    )
+
+    assert len(sink) == 1
+    assert sink[0]["type"] == "image"
+
+
 @pytest.mark.asyncio
 async def test_no_image_query_skips_brave_and_the_verifier():
     tavily = _FakeTool("tavily_search", TAVILY_PAYLOAD)
@@ -1773,7 +1903,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
@@ -1795,8 +1925,14 @@ _DESCRIPTION = (
     "Leave image_query unset for abstract subjects (code, math, policy, definitions, "
     "planning) and whenever you are unsure whether an image would help. An uncertain "
     "image decision uses no image_query at all.\n\n"
+    "Set image_intent='gallery' when the user asks to SEE several instances or to "
+    "compare things — a roster, a set of logos, colour options, a lineup. Otherwise "
+    "leave it unset: the default places up to two images beside the prose they "
+    "support. Never state how many images you want; the layout decides, and only "
+    "images verified against the subject survive.\n\n"
     "Approved images appear in your available rich items. Not every image_query "
-    "produces one, and a complete answer never depends on an image."
+    "produces one, and a complete answer never depends on an image. A gallery "
+    "arrives as ONE grid item with one marker."
 )
 
 
@@ -1805,6 +1941,14 @@ class WebResearchInput(BaseModel):
     image_query: str | None = Field(
         default=None,
         description="Short concrete visual subject, or omit when an image would not help.",
+    )
+    image_intent: Literal["figure", "gallery"] | None = Field(
+        default=None,
+        description=(
+            "Layout: 'figure' (default) for up to two images beside the prose, "
+            "'gallery' for a grid when the user asks to see several instances or "
+            "to compare things. Never state a count."
+        ),
     )
     max_results: int | None = Field(default=None, description="Optional result count.")
     search_depth: str | None = Field(default=None, description="Optional Tavily depth.")
@@ -1822,6 +1966,7 @@ def create_web_research_tool(
     async def _research(
         query: str,
         image_query: str | None = None,
+        image_intent: str | None = None,
         max_results: int | None = None,
         search_depth: str | None = None,
     ) -> str:
@@ -1848,6 +1993,7 @@ def create_web_research_tool(
                     user_request=query,
                     image_query=str(image_query).strip(),
                     factual_query=query,
+                    image_intent=image_intent,
                 )
             )
 
@@ -1931,6 +2077,7 @@ async def _discover_and_verify(
     user_request: str,
     image_query: str,
     factual_query: str,
+    image_intent: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return public candidate dicts for approved images, or an empty list."""
 
@@ -1945,6 +2092,7 @@ async def _discover_and_verify(
                 user_request=user_request,
                 image_query=image_query,
                 factual_query=factual_query,
+                image_intent=image_intent,
             )
     except Exception as exc:
         logger.debug("Image verification abandoned: %s", type(exc).__name__)
@@ -2026,7 +2174,10 @@ from typing import Any
 
 from ..core.config import settings
 from ..services.thumbnail_batch import fetch_thumbnails
-from .tool_execution import build_image_candidates_from_tool_result
+from .tool_execution import (
+    _group_image_candidates,
+    build_image_candidates_from_tool_result,
+)
 from .visual_verifier import (
     SubmittedCandidate,
     admit_candidates,
@@ -2044,16 +2195,27 @@ async def discover_and_verify_images(
     user_request: str,
     image_query: str,
     factual_query: str,
+    image_intent: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Return public candidate dicts for verifier-approved images only."""
+    """Return public candidate dicts for verifier-approved images only.
+
+    ``image_intent`` selects the layout and through it the cap: ``gallery``
+    returns a single grid item, anything else returns individual images.
+    """
 
     if brave_tool is None or web_image_service is None:
         return []
     raw = str(await brave_tool.ainvoke({"query": image_query}))
+    # group_images=False is load-bearing: the legacy path collapses two or more
+    # Brave results into one capped grid, which would both hide individual images
+    # from the verifier and cap discovery below the candidate budget.
     candidates = build_image_candidates_from_tool_result(
-        raw, tool_call_id=None, tool_name="brave_image_search"
+        raw,
+        tool_call_id=None,
+        tool_name="brave_image_search",
+        group_images=False,
     )
-    candidates = _flatten(candidates)[: max(1, int(settings.image_verification_max_candidates))]
+    candidates = candidates[: max(1, int(settings.image_verification_max_candidates))]
     if not candidates:
         return []
 
@@ -2086,46 +2248,35 @@ async def discover_and_verify_images(
         model=verifier_model,
         timeout=float(settings.image_verification_deadline_seconds),
     )
+    gallery = str(image_intent or "figure").strip().lower() == "gallery"
     approved = admit_candidates(
         result,
         submitted,
         threshold=float(settings.image_verification_confidence_threshold),
-        max_items=max(0, int(settings.rich_auto_place_max_images)),
+        max_items=(
+            max(2, int(settings.rich_image_gallery_max_items))
+            if gallery
+            else max(0, int(settings.rich_auto_place_max_images))
+        ),
         requested_kinds=_requested_kinds(f"{user_request} {image_query}"),
     )
     by_id = {f"c{index}": candidate for index, candidate in enumerate(candidates)}
-    return [
+    public = [
         _with_decoded_dimensions(by_id[item.candidate_id], item)
         for item in approved
         if item.candidate_id in by_id
     ]
-
-
-def _flatten(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Expand an image_group back into individual images for verification."""
-
-    flattened: list[dict[str, Any]] = []
-    for candidate in candidates:
-        if candidate.get("type") != "image_group":
-            if isinstance(candidate.get("payload"), dict) and candidate["payload"].get("url"):
-                flattened.append(candidate)
-            continue
-        items = candidate.get("payload", {}).get("items") or []
-        for index, cell in enumerate(items):
-            if not isinstance(cell, dict) or not cell.get("url"):
-                continue
-            expanded = {
-                **{key: value for key, value in candidate.items() if key != "payload"},
-                "id": f"{candidate.get('id')}:{index}",
-                "type": "image",
-                "payload": dict(cell),
-            }
-            # The group's alt text names the query, not this image. A single
-            # admitted image must describe itself in the rendered figure footer.
-            if cell.get("description"):
-                expanded["alt_text"] = str(cell["description"])
-            flattened.append(expanded)
-    return flattened
+    if gallery and len(public) >= 2:
+        return [
+            _group_image_candidates(
+                public,
+                tool_call_id=None,
+                query=image_query,
+                metric_provider="brave",
+                max_items=max(2, int(settings.rich_image_gallery_max_items)),
+            )
+        ]
+    return public
 
 
 def _with_decoded_dimensions(
@@ -2158,6 +2309,53 @@ def _requested_kinds(text: str) -> frozenset[str]:
         kind for kind, words in _KIND_WORDS.items() if any(word in lowered for word in words)
     )
 ```
+
+- [ ] **Step 4b: Make grouping opt-out and its cap explicit**
+
+The flow above needs two small changes in `app/ai/tool_execution.py`, both additive
+and both defaulted so every existing caller behaves exactly as before.
+
+In `build_image_candidates_from_tool_result`, add a keyword-only parameter and
+guard the collapse at the end of the function:
+
+```python
+def build_image_candidates_from_tool_result(
+    result_text: str,
+    *,
+    tool_call_id: str | None,
+    tool_name: str,
+    group_images: bool = True,
+) -> list[dict[str, Any]]:
+```
+
+```python
+    if group_images and metric_provider == "brave" and len(candidates) >= 2:
+```
+
+In `_group_image_candidates`, let the caller supply the cap instead of always
+reading the legacy setting:
+
+```python
+def _group_image_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    tool_call_id: str | None,
+    query: str,
+    metric_provider: str,
+    max_items: int | None = None,
+) -> dict[str, Any]:
+```
+
+```python
+    cap = max(2, int(max_items if max_items is not None else
+                     getattr(settings, "rich_image_group_max_items", 3)))
+```
+
+Add two tests to `tests/test_tool_execution_rendering.py` (or the existing file
+covering this function): that `group_images=False` returns individual `image`
+candidates for a multi-result Brave payload rather than one `image_group`, and
+that an explicit `max_items` overrides the legacy setting. Both must fail before
+the change.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
@@ -2261,6 +2459,7 @@ def test_media_guidance_describes_web_research_only():
 
     assert "web_research" in MEDIA_CAPABILITY_SNIPPET
     assert "image_query" in MEDIA_CAPABILITY_SNIPPET
+    assert "image_intent" in MEDIA_CAPABILITY_SNIPPET
     assert "brave_image_search" not in MEDIA_CAPABILITY_SNIPPET
     assert "include_images" not in MEDIA_CAPABILITY_SNIPPET
 ```
@@ -2312,6 +2511,7 @@ Media and visuals:
 - Display provided rich items inline with `<!--rich:<id>-->`; use only available IDs and never invent image URLs.
 - Research the web with `web_research`. Set `image_query` when the answer is about something the reader would expect to SEE — a product, device, place, building, artwork, organism, vehicle, or screen. Reviews, comparisons, recommendations and "tell me about X" on a concrete thing all qualify; do not wait to be asked for pictures.
 - Omit `image_query` for abstract subjects (code, math, policy, definitions, planning, conversation) and whenever you are unsure an image would help. Never add media as decoration.
+- Add `image_intent="gallery"` when the user asks to see several instances or to compare things — a team roster, a set of logos, colour or trim options, a lineup. Leave it unset otherwise. Never ask for a number of images: the layout decides the count, and only images verified against the subject survive. A gallery arrives as one grid item with a single marker.
 - Write the image subject yourself: a concrete subject plus any disambiguator the context implies (company vs fruit, city vs person), plus a form word when it matters (`photo`, `diagram`, `map`, `chart`). No question words, no verbatim reuse of the user's question, one subject per call.
 - Images are verified against the subject before they reach you. An approved image appears in your available rich items; many turns will have none, which is normal. Never claim an image exists that is not listed.
 - At most two image items per answer, near the text they support; keep the prose useful without them."""
@@ -3061,3 +3261,4 @@ git commit -m "feat: serve verified image bytes from cache"
 - The spec's "bounded Tavily result titles when already available" is implemented as `result_titles=[]` in Task 5: the image path starts concurrently with the search and must never wait for it, so titles are usually unavailable at dispatch. The verifier receives the factual query and the user request, which the spec names as the required subject context. Passing real titles would require the image path to await Tavily, which the spec forbids.
 - `SubmittedCandidate.candidate_id` uses positional `c0`/`c1` ids scoped to one verifier call, never leaving the process. The spec's "stable, unguessable temporary ID" requirement is satisfied by scope rather than entropy: the ids are never persisted, logged, or shown to the answering model, and a hallucinated id fails closed in `admit_candidates`.
 - `image_verification_deadline_seconds` bounds both the thumbnail batch and the verifier call, and Task 3 Step 6 asserts the provider timeouts fit inside it.
+- **Amended 2026-08-05, after review of the fixed two-image cap.** The original draft capped every answer at two individual images and, in Task 5, flattened Brave's `image_group` into singles before verification. Two defects followed. First, gallery answers would have regressed against today's behaviour: the existing pipeline already supports two items where each may be a three-cell group (six images), and flatten-then-cap-at-two would have reduced that to two. Second, `build_image_candidates_from_tool_result` collapses a multi-result Brave payload into one group capped at `rich_image_group_max_items` (3), so flattening it could never yield more than three candidates — `image_verification_max_candidates` (6) was dead. Both are fixed by discovering and verifying individuals (`group_images=False`) and grouping only the survivors. The count now follows a declared `image_intent` rather than a fixed constant, and the model never states a number, because an unverifiable model judgement about images is the failure class this design exists to remove. Raising the gallery ceiling is nearly free: the verifier already receives the whole batch in one call.
