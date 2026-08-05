@@ -59,3 +59,15 @@ def test_tool_context_prompt_points_at_the_reader():
     from app.ai.prompts import TOOL_CONTEXT_SUFFIX
 
     assert "read_tool_result" in TOOL_CONTEXT_SUFFIX
+
+
+def test_tool_context_prompt_offload_bullet_is_tool_neutral():
+    """The offload bullet must read correctly for read_file, SQL tools, and
+    client skills, not only for a search tool. It must also agree in register
+    with the offload notice text in tool_result_blob_service.py, which already
+    says "do not re-run the tool".
+    """
+    from app.ai.prompts import TOOL_CONTEXT_SUFFIX
+
+    assert "search" not in TOOL_CONTEXT_SUFFIX.lower()
+    assert "do not re-run the tool" in TOOL_CONTEXT_SUFFIX.lower()
