@@ -65,6 +65,7 @@ from .image_generation import (
     use_media_delivery_service,
 )
 from .rag_tool_actions import canonicalize_rag_tool_call, execute_search_documents_action
+from .research_budget import reset_research_budget
 from .schemas import (
     AgentMessage,
     AgentResponse,
@@ -550,6 +551,10 @@ class MultiAgentWorkflow(
 
         # Initialize planning call count for budget tracking
         initial_state["planning_call_count"] = 0
+
+        # A new user turn gets a clean research budget; the previous turn's
+        # deduplication must not suppress a legitimate follow-up question.
+        reset_research_budget(str(request.conversation_id) if request.conversation_id else None)
 
         # Derive planning_phase from persisted lifecycle:
         # If lifecycle is "executing", set execution phase so the planning agent

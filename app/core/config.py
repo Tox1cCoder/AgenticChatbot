@@ -1151,6 +1151,27 @@ class Settings(BaseSettings):
         ge=1,
         description="Maximum characters returned by one read_tool_result call.",
     )
+    research_max_search_calls_per_turn: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Distinct Tavily network requests allowed per user turn. Further calls "
+            "return the accumulated research result instead of searching again."
+        ),
+    )
+    research_near_duplicate_threshold: float = Field(
+        default=0.75,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Token-set overlap, as a share of the smaller query, above which a "
+            "research query reuses the existing result."
+        ),
+    )
+    research_budget_enabled: bool = Field(
+        default=True,
+        description="Kill switch for turn-local research dedup and call caps.",
+    )
     tool_result_blob_storage_dir: str = Field(
         default="data/tool_result_blobs",
         description=(
