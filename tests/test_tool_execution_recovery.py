@@ -1206,3 +1206,53 @@ def test_skill_terminal_error_output_is_not_offloaded():
 
     assert outputs[0]["content"] == content
     assert "blob_id" not in artifacts[0]
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_calls_offloads_off_the_event_loop_thread(monkeypatch):
+    """offload_if_large commits a multi-MB payload synchronously to Postgres.
+
+    Running that commit on the event loop thread would stall every other
+    concurrent request/stream for its duration. Recording the thread identity
+    the fake service observes proves the offload actually ran elsewhere,
+    rather than merely proving the call happened at all.
+    """
+    caller_thread_id = threading.get_ident()
+    offload_thread_ids: list[int] = []
+
+    class _ThreadRecordingOffloadService:
+        threshold_chars = 1
+
+        def offload_if_large(self, **kwargs):
+            offload_thread_ids.append(threading.get_ident())
+            return {
+                "blob_id": "blob-thread-check",
+                "size_bytes": len(kwargs["output_text"].encode("utf-8")),
+                "output": "preview only\n\n[Output offloaded]",
+            }
+
+    monkeypatch.setattr(
+        "app.ai.tool_execution._resolve_offload_service",
+        lambda: _ThreadRecordingOffloadService(),
+    )
+
+    class _BigOutputTool:
+        name = "big_output_tool"
+        metadata = {}
+
+        async def ainvoke(self, args):
+            return "y" * 50
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-1", "name": "big_output_tool", "args": {}}],
+        tool_map={"big_output_tool": _BigOutputTool()},
+        conversation_id="00000000-0000-0000-0000-000000000003",
+        user_id="00000000-0000-0000-0000-000000000004",
+    )
+
+    assert artifacts[0]["blob_id"] == "blob-thread-check"
+    assert outputs[0]["content"].startswith("preview only")
+    assert offload_thread_ids, "offload_if_large was never called"
+    assert offload_thread_ids[0] != caller_thread_id, (
+        "offload ran on the event loop thread, blocking concurrent requests"
+    )

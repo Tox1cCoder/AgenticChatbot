@@ -2094,7 +2094,14 @@ async def execute_tool_calls(
                 )
             )
 
-    _apply_offload_to_outputs_and_artifacts(
+    # Offloading commits the full payload to Postgres synchronously (see
+    # ToolResultBlobRepository.create). Run it off the event loop thread so a
+    # multi-MB commit does not stall every other concurrent request/stream;
+    # this function only touches plain dicts and sync repository/service
+    # calls, so threading the whole call is safe. Awaiting it keeps the
+    # return values below correctly ordered after the in-place mutations.
+    await asyncio.to_thread(
+        _apply_offload_to_outputs_and_artifacts,
         outputs=outputs,
         artifacts=artifacts,
         conversation_id=conversation_id,
