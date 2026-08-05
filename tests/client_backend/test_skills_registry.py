@@ -133,6 +133,39 @@ def test_source_hash_rejects_fifo_without_blocking(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_declared_secret_names_reach_the_catalogued_skill(tmp_path):
+    """The credential names a skill declares are what the UI suggests binding."""
+    skill_root = tmp_path / "skills"
+    skill_dir = skill_root / "calendar"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: calendar\ndescription: Demo.\nsecrets: CALENDAR_TOKEN, bad-name\n---\n\nBody\n",
+        encoding="utf-8",
+    )
+
+    registry = LocalSkillsRegistry(skill_root=str(skill_root))
+    await registry.initialize()
+
+    skill = registry.get_skill("calendar")
+    assert skill.declared_secrets == ["CALENDAR_TOKEN"]
+    # Names stay device-local: the server sync payload has no place for them.
+    assert "CALENDAR_TOKEN" not in json.dumps(skill.to_sync_dict())
+
+
+@pytest.mark.asyncio
+async def test_plain_markdown_skill_declares_no_secrets(tmp_path):
+    skill_root = tmp_path / "skills"
+    skill_dir = skill_root / "plain"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("Just instructions.\n", encoding="utf-8")
+
+    registry = LocalSkillsRegistry(skill_root=str(skill_root))
+    await registry.initialize()
+
+    assert registry.get_skill("plain").declared_secrets == []
+
+
+@pytest.mark.asyncio
 async def test_scanner_skips_installer_staging_and_backup_copies(tmp_path):
     """The installer stages inside the root it owns, which is now this root too.
 

@@ -102,6 +102,7 @@ def test_two_machine_profile_roots_do_not_share_secret_bindings(tmp_path, monkey
 
 class _Skill:
     name = "calendar"
+    declared_secrets = ["CALENDAR_TOKEN", "CALENDAR_ID"]
 
 
 class _Registry:
@@ -148,10 +149,35 @@ def test_per_skill_secret_api_never_returns_values(monkeypatch):
 
     assert saved.status_code == 200
     assert listed.status_code == 200
-    assert listed.json()["data"] == {"secrets": [{"name": "ACCESS_TOKEN", "configured": True}]}
+    # Declared names first, in the author's order, then configured extras.
+    assert listed.json()["data"] == {
+        "secrets": [
+            {"name": "CALENDAR_TOKEN", "declared": True, "configured": False},
+            {"name": "CALENDAR_ID", "declared": True, "configured": False},
+            {"name": "ACCESS_TOKEN", "declared": False, "configured": True},
+        ]
+    }
     assert "never-echo" not in saved.text
     assert "never-echo" not in listed.text
     assert removed.status_code == 200
+
+
+def test_declared_secret_reports_configured_once_bound(monkeypatch):
+    store = _Store()
+    monkeypatch.setattr(skills_api, "get_secret_store", lambda: store)
+    monkeypatch.setattr(skills_api, "get_skills_registry", lambda: _Registry())
+
+    with TestClient(_build_app()) as client:
+        client.post(
+            "/skills/calendar/secrets",
+            json={"name": "CALENDAR_TOKEN", "value": "bound"},
+        )
+        listed = client.get("/skills/calendar/secrets")
+
+    assert listed.json()["data"]["secrets"] == [
+        {"name": "CALENDAR_TOKEN", "declared": True, "configured": True},
+        {"name": "CALENDAR_ID", "declared": True, "configured": False},
+    ]
 
 
 def test_secret_api_rejects_unknown_skill(monkeypatch):

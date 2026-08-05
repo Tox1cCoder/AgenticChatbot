@@ -78,8 +78,8 @@ def create_app() -> FastAPI:
     Create and configure the FastAPI application.
     """
     app = FastAPI(
-        title="Codex Client Backend",
-        description="Local runtime backend for the Codex Desktop App",
+        title="Kani Client Backend",
+        description="Local runtime backend for the Kani Desktop App",
         version=__version__,
         lifespan=lifespan,
     )
@@ -125,7 +125,7 @@ def create_app() -> FastAPI:
     @app.get("/")
     async def root():
         return {
-            "name": "Codex Client Backend",
+            "name": "Kani Client Backend",
             "version": __version__,
             "status": "running",
         }

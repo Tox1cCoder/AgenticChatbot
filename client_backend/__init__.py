@@ -1,5 +1,5 @@
 """
-Client Backend for the Codex Desktop App.
+Client Backend for the Kani Desktop App.
 
 This package provides a per-device local runtime that:
 - Manages local tool execution (shell, filesystem)

@@ -90,7 +90,7 @@ class ServerAPIClient:
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
                 timeout=httpx.Timeout(self.timeout),
-                headers={"User-Agent": f"CodexClientBackend/{client_settings.device_name}"},
+                headers={"User-Agent": f"KaniClientBackend/{client_settings.device_name}"},
             )
         return self._client
 

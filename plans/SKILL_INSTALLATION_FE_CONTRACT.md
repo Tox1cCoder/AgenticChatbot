@@ -82,7 +82,7 @@ Rules:
 | `POST` | `/skills/uninstall` | Remove a profile-installed skill. |
 | `GET` | `/skills/installed` | List profile-installed bundle metadata. |
 | `POST` | `/skills/{name}/secrets` | Set one write-only secret binding. |
-| `GET` | `/skills/{name}/secrets` | List configured secret names. |
+| `GET` | `/skills/{name}/secrets` | List secret names the skill declares and the ones configured here. |
 | `DELETE` | `/skills/{name}/secrets/{secretName}` | Remove one binding. |
 
 The existing path-based `POST /skills/install/preview` and
@@ -681,9 +681,27 @@ Content-Type: application/json
 { "name": "ACCESS_TOKEN", "value": "secret-value" }
 ```
 
-`GET /skills/{name}/secrets` returns configured names only. Never cache secret
+`GET /skills/{name}/secrets` returns names only — never values. Never cache secret
 values or include them in analytics, logs, error reporting, chat requests, or
 operation metadata.
+
+```json
+{
+  "secrets": [
+    { "name": "TAVILY_API_KEY", "declared": true, "configured": false },
+    { "name": "ACCOUNT_ID", "declared": true, "configured": true },
+    { "name": "LEGACY_TOKEN", "declared": false, "configured": true }
+  ]
+}
+```
+
+`declared` means the skill's own front matter asks for that credential;
+`configured` means this device has a value bound for it. Declared names come
+first, in the order the skill author wrote them, so the first
+`declared && !configured` entry is the one to offer: use it as the credential-name
+placeholder and surface the full missing set before the form. Free text stays
+allowed — a skill may need a credential it never declared — and an entry that is
+`configured` is the only kind that gets a remove action.
 
 ## Compatibility
 

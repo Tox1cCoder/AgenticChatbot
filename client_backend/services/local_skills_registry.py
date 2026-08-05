@@ -113,10 +113,17 @@ class SkillMetadata:
     # for a hand-authored bundle the sidecar never installed; declared here so
     # to_dict()/to_sync_dict() have a stable, redacted place to surface it.
     install_metadata: dict | None = None
+    # Environment variable names the skill's front matter says it needs. Names
+    # only -- a value never comes from a bundle -- and device-local: they are
+    # served to the local client so it can name the credential to bind, and are
+    # deliberately absent from to_sync_dict().
+    declared_secrets: list[str] = None
 
     def __post_init__(self):
         if self.tags is None:
             self.tags = []
+        if self.declared_secrets is None:
+            self.declared_secrets = []
 
     def _execution_summary(self) -> dict:
         """Return a path-free summary of the bundle's executable inputs."""
@@ -344,6 +351,7 @@ class LocalSkillsRegistry:
                 description = parsed.description
                 category = parsed.category
                 tags = list(parsed.tags)
+                declared_secrets = list(parsed.secrets)
                 content = parsed.body
                 used_plain_markdown_fallback = False
             else:
@@ -362,6 +370,7 @@ class LocalSkillsRegistry:
 
                 category = None
                 tags = []
+                declared_secrets = []
 
             if used_plain_markdown_fallback and not description:
                 description = f"Skill: {name}"
@@ -429,6 +438,7 @@ class LocalSkillsRegistry:
                 category=category,
                 tags=tags,
                 install_metadata=install_metadata,
+                declared_secrets=declared_secrets,
             )
 
         except Exception as e:

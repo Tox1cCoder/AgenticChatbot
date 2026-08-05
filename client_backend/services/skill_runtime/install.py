@@ -442,6 +442,7 @@ class SkillBundleInstaller:
                 category=source_skill.category,
                 tags=list(source_skill.tags),
                 install_metadata=install_payload,
+                declared_secrets=list(source_skill.declared_secrets),
             )
             if installed_skill.executable_assets["python_project"]:
                 await self._notify(observer, "preparingRuntime")

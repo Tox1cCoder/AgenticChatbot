@@ -26,7 +26,7 @@ def _apply_env_overrides(args: argparse.Namespace) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="codex-client-backend")
+    parser = argparse.ArgumentParser(prog="kani-client-backend")
     subparsers = parser.add_subparsers(dest="command")
 
     run_parser = subparsers.add_parser("run", help="Run the client backend")

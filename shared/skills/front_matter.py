@@ -6,11 +6,31 @@ import re
 from dataclasses import dataclass
 
 _SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_SECRET_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# A declared name only reaches a person as a suggestion, but it comes from an
+# untrusted SKILL.md, so the list is bounded and each entry has to be a name the
+# secret store would actually accept.
+_MAX_DECLARED_SECRETS = 20
+_MAX_SECRET_NAME_LENGTH = 64
 
 
 def is_valid_skill_name(value: str) -> bool:
     """Return whether a name satisfies the portable Agent Skills contract."""
     return 1 <= len(value) <= 64 and _SKILL_NAME_PATTERN.fullmatch(value) is not None
+
+
+def is_valid_secret_name(value: str) -> bool:
+    """Return whether a name can be bound as an environment variable.
+
+    The single definition of a bindable secret name: the secret store validates
+    what it stores against this, and front-matter parsing drops anything a skill
+    declares that the store would then refuse.
+    """
+    return (
+        1 <= len(value) <= _MAX_SECRET_NAME_LENGTH
+        and _SECRET_NAME_PATTERN.fullmatch(value) is not None
+    )
 
 
 @dataclass(frozen=True)
@@ -21,6 +41,7 @@ class ParsedSkillFrontMatter:
     description: str
     category: str | None
     tags: list[str]
+    secrets: list[str]
     body: str
 
 
@@ -101,5 +122,28 @@ def parse_skill_front_matter(raw: str) -> ParsedSkillFrontMatter | None:
         description=description,
         category=category,
         tags=tags,
+        secrets=parse_declared_secrets(extract_yaml_value(yaml_block, "secrets")),
         body=body,
     )
+
+
+def parse_declared_secrets(raw: str | None) -> list[str]:
+    """Parse the comma-separated environment variable names a skill asks for.
+
+    Declaring them is what lets the UI name the credential a skill needs instead
+    of asking a person to remember it. Order is preserved because it is the
+    author's order, duplicates collapse, and anything unbindable or beyond the
+    cap is dropped rather than surfaced.
+    """
+    if not raw:
+        return []
+
+    declared: list[str] = []
+    for candidate in raw.split(","):
+        cleaned = candidate.strip().strip("\"'")
+        if not cleaned or cleaned in declared or not is_valid_secret_name(cleaned):
+            continue
+        declared.append(cleaned)
+        if len(declared) == _MAX_DECLARED_SECRETS:
+            break
+    return declared

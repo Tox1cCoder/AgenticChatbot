@@ -147,7 +147,7 @@ Both services speak the same schemas (`app/schemas/`). The **client backend** ex
 │   ├── services/                     runtime_bridge, server_api, local_mcp_manager,
 │   │                                 local_skills_registry, upstream_auth
 │   ├── storage/                      per-user profile storage root
-│   ├── cli.py                        codex-client-backend entrypoint (run / doctor)
+│   ├── cli.py                        kani-client-backend entrypoint (run / doctor)
 │   └── main.py                       FastAPI app factory
 ├── shared/skills/                    Shared skill parsing helpers (front matter)
 ├── skills/                           Optional user-local skills (ignored, not distributed)
@@ -159,7 +159,7 @@ Both services speak the same schemas (`app/schemas/`). The **client backend** ex
 ├── demo.py                           Streamlit demo UI
 ├── demo_requirements.txt             Demo-only dependencies
 ├── upload_support.py                 Streamlit document upload helper
-├── pyproject.toml                    Project metadata, deps, scripts (codex-client-backend)
+├── pyproject.toml                    Project metadata, deps, scripts (kani-client-backend)
 ├── environment.yml                   Conda environment snapshot
 ├── Chatbot API.postman_collection.json
 └── README.md
@@ -587,7 +587,7 @@ On startup the worker prints a banner: `Starting Celery worker: pool=threads con
 ### Local client backend
 
 ```bash
-codex-client-backend run --config .env.client
+kani-client-backend run --config .env.client
 # or
 python -m client_backend
 ```
@@ -595,8 +595,8 @@ python -m client_backend
 Additional CLI:
 
 ```bash
-codex-client-backend doctor --config .env.client        # validate configuration
-codex-client-backend doctor --config .env.client --json # machine-readable diagnostics
+kani-client-backend doctor --config .env.client        # validate configuration
+kani-client-backend doctor --config .env.client --json # machine-readable diagnostics
 ```
 
 ### Demo UI
@@ -609,7 +609,7 @@ codex-client-backend doctor --config .env.client --json # machine-readable diagn
    ```
 2. **Sidecar** (port 8100) — set `CLIENT_SKILLS_ROOT` to the absolute path of `<repo>/skills` so the bundled examples are served (uploads then install into that same folder):
    ```bash
-   codex-client-backend run --config .env.client
+   kani-client-backend run --config .env.client
    ```
 3. **Demo UI** (talks to the sidecar):
    ```bash
@@ -797,8 +797,10 @@ The frontend owns component rendering. Unknown render types must fall back to JS
 ## Skills System
 
 Skills are Markdown files with YAML frontmatter describing a capability. The
-current parser accepts `name`, `description`, `category`, and comma-separated
-`tags`; unsupported metadata is not treated as a security policy. They are loaded by:
+current parser accepts `name`, `description`, `category`, comma-separated
+`tags`, and comma-separated `secrets` (environment-variable names the skill
+needs, at most 20, each dropped if the secret store would refuse it);
+unsupported metadata is not treated as a security policy. They are loaded by:
 
 - **Client (only source of skills)** — [`LocalSkillsRegistry`](client_backend/services/local_skills_registry.py), scanning the one skills root; synced per-device to the server and resolved at chat time by [`skill_resolver.py`](app/ai/skill_resolver.py) strictly for the originating device.
 - To serve this repo's `skills/` folder during development, set the sidecar's `CLIENT_SKILLS_ROOT` to its absolute path.
@@ -834,7 +836,7 @@ Highlights:
 - **Scoped execution** — argv zero resolves only from that skill's bundle or prepared Python environment; no global `PATH` mutation and no arbitrary system-command fallback.
 - **Readiness** — `ready` / `not_ready` / `instruction_only`, with explicit setup and rebuild hints; unsafe bundles are rejected or omitted.
 - **Python setup** — approved projects are installed into staged, per-skill virtual environments and atomically promoted.
-- **Secrets** — the operator manually enters a name documented by the skill and a password-style value. Values are encrypted, per-skill, per-user, and per-machine; they are injected only at execution time and redacted from output/audit. They never synchronize to the server or another device, and never appear in chat history.
+- **Secrets** — a skill declares the environment-variable names it needs in its front matter (`secrets: TAVILY_API_KEY, ACCOUNT_ID`), so the credential form can name them instead of asking the operator to remember them; `GET /skills/{name}/secrets` marks each name `declared` and `configured`. The operator supplies the password-style value. Values are encrypted, per-skill, per-user, and per-machine; they are injected only at execution time and redacted from output/audit. They never synchronize to the server or another device, and never appear in chat history.
 - **Permissions & HITL** — every skill command is treated as mutating and passes the existing approval-policy path before secrets or process creation (human confirmation by default, with explicit per-tool preapproval supported).
 - **Audit** — one JSONL record per execution under the profile (no secrets or raw output).
 
@@ -1048,7 +1050,10 @@ separate, fully independent devices.
 > it mints a new device identity and no longer sees the previous installation's
 > installed skills, MCP configuration, or stored secrets. Point
 > `CLIENT_PROFILE_ROOT` at the old directory, or move it to the new name, to keep
-> an existing profile.
+> an existing profile. The console script was renamed in the same pass —
+> `codex-client-backend` is now `kani-client-backend`, so reinstall the package
+> (`pip install -e .`) for the new command to appear and rebuild any client
+> bundle in `dist/`.
 
 ---
 
@@ -1510,7 +1515,7 @@ non-zero exit codes.
 
 ```toml
 [project.scripts]
-codex-client-backend = "client_backend.cli:main"
+kani-client-backend = "client_backend.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app", "client_backend"]

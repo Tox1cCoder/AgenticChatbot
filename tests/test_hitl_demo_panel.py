@@ -145,6 +145,29 @@ def test_demo_has_names_only_local_skill_credential_seams_and_runtime_guidance()
     assert "Command runtime is not ready" in src
 
 
+def test_demo_suggests_the_credential_name_the_skill_declares():
+    """The person binding a secret should not have to remember its name."""
+    import demo
+
+    bindings = [
+        {"name": "CALENDAR_TOKEN", "declared": True, "configured": True},
+        {"name": "CALENDAR_ID", "declared": True, "configured": False},
+        {"name": "LEGACY_TOKEN", "declared": False, "configured": True},
+    ]
+
+    assert demo._missing_declared_secret_names(bindings) == ["CALENDAR_ID"]
+    assert demo._secret_name_placeholder(bindings) == "CALENDAR_ID"
+    # All declared names bound: fall back to naming one rather than a shape hint.
+    assert (
+        demo._secret_name_placeholder(
+            [{"name": "CALENDAR_TOKEN", "declared": True, "configured": True}]
+        )
+        == "CALENDAR_TOKEN"
+    )
+    # A skill that declares nothing gets a shape hint, not a guessed name.
+    assert demo._secret_name_placeholder([]) == "e.g. ACCESS_TOKEN"
+
+
 def test_demo_skill_hitl_state_is_callback_driven_and_cleared_on_logout():
     src = _demo_source()
     assert "def _persist_skill_hitl_mode(" in src

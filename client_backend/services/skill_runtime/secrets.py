@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import re
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -17,13 +16,13 @@ from client_backend.core.security import (
     encrypt_local_secret,
 )
 from client_backend.services.upstream_auth import get_upstream_auth_service
+from shared.skills.front_matter import is_valid_secret_name
 
 logger = get_logger(__name__)
 
 
 _SECRETS_FILENAME = "secrets.json"
 _STORAGE_VERSION = 1
-_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _REDACTION_PLACEHOLDER = "<redacted>"
 
 
@@ -84,7 +83,7 @@ class SkillSecretStore:
     def _validate_binding(skill_name: str, name: str) -> None:
         if not skill_name.strip():
             raise ValueError("skill name must not be empty")
-        if not _ENV_NAME.fullmatch(name):
+        if not is_valid_secret_name(name):
             raise ValueError("secret name must be a valid environment variable identifier")
 
     @staticmethod

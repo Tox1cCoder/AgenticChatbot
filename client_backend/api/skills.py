@@ -358,12 +358,24 @@ async def get_skill_secrets(
     name: str,
     _session: LocalSessionPayload = Depends(require_local_session),
 ):
-    """List configured binding names for one skill, never their values."""
-    await _require_known_skill(name)
-    store = get_secret_store()
+    """List binding names for one skill -- declared and configured -- never values.
+
+    A skill declares the credentials it needs in its front matter, which is what
+    lets a client name them instead of asking a person to remember them. Declared
+    names come first, in the author's order, so the first unconfigured one is the
+    natural thing to suggest.
+    """
+    skill = await _require_known_skill(name)
+    configured = set(get_secret_store().list_for_skill(name))
+    declared = list(getattr(skill, "declared_secrets", None) or [])
     secrets = [
-        {"name": secret_name, "configured": True} for secret_name in store.list_for_skill(name)
+        {"name": secret_name, "declared": True, "configured": secret_name in configured}
+        for secret_name in declared
     ]
+    secrets.extend(
+        {"name": secret_name, "declared": False, "configured": True}
+        for secret_name in sorted(configured.difference(declared))
+    )
     return make_api_response(
         success=True,
         message=f"Secrets for skill '{name}' retrieved",

@@ -27,6 +27,14 @@ Reads are confined to the selected, enabled skill's bundle: the path is re-check
 
 The front-matter `name` must be 1-64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen.
 
+A skill declares the credentials it needs in the same front matter:
+
+```yaml
+secrets: TAVILY_API_KEY, ACCOUNT_ID
+```
+
+Names only — a bundle never carries a value. Declaring them is what lets the credential form name the binding instead of asking a person to remember it; `GET /skills/{name}/secrets` returns each name with `declared` and `configured` flags, declared ones first in the author's order. The list is untrusted content, so it is capped at 20 entries and any name the secret store would refuse (not an environment-variable identifier, longer than 64 characters) is dropped rather than displayed. Declared names stay device-local: they are served to the local client and are absent from the catalog synced to the canonical server.
+
 Discovery is one directory deep in principle: the sidecar scans `CLIENT_SKILLS_ROOT` — or, unset, `<profile>/<server-hash>/<user-id>/skills/installed` — and installs uploaded bundles into that same directory, so a skill it installs is a skill it can find. Scanning itself never executes setup code or installs dependencies; only an approved `POST /skills/{name}/setup` or an approved install does. Installer staging (`<name>.stage-*`) and backup (`<name>.backup-*`) directories are skipped by every scan.
 
 ## Readiness

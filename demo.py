@@ -5019,6 +5019,29 @@ def _save_skill_secret(
     st.session_state[status_key] = ("success", f"{secret_name} configured")
 
 
+def _missing_declared_secret_names(bindings: list[dict[str, Any]]) -> list[str]:
+    """Return the credential names this skill declares but nobody has bound yet."""
+    return [
+        str(item.get("name") or "")
+        for item in bindings
+        if item.get("declared") and not item.get("configured") and item.get("name")
+    ]
+
+
+def _secret_name_placeholder(bindings: list[dict[str, Any]]) -> str:
+    """Suggest which credential name to type.
+
+    The first name the skill declares and nobody has bound is the one the person
+    is almost certainly here for. A skill that declares nothing gets a shape hint
+    rather than a name, because guessing one would be worse than saying nothing.
+    """
+    missing = _missing_declared_secret_names(bindings)
+    if missing:
+        return missing[0]
+    declared = [str(item.get("name") or "") for item in bindings if item.get("declared")]
+    return declared[0] if declared else "e.g. ACCESS_TOKEN"
+
+
 def _delete_skill_secret(skill_name: str, secret_name: str, status_key: str) -> None:
     """Delete one named credential binding and retain only a safe status message."""
     if delete_skill_secret(skill_name, secret_name) is None:
@@ -9461,11 +9484,23 @@ def render_skills_tab():
             value_key = f"skill_secret_value_{skill_secret_scope}"
             secret_status_key = f"{value_key}_status"
             with st.expander("Local credentials", expanded=False):
+                bindings = (get_skill_secrets(skill_name) or {}).get("secrets") or []
+                declared_missing = _missing_declared_secret_names(bindings)
+
+                if declared_missing:
+                    st.warning(
+                        "This skill needs: " + ", ".join(declared_missing),
+                        icon=":material/key_off:",
+                    )
                 st.caption(
-                    "Use the environment-variable name documented by this skill. "
+                    "Use the environment-variable name this skill declares. "
                     "Values stay encrypted on this device."
                 )
-                st.text_input("Credential name", key=secret_name_key)
+                st.text_input(
+                    "Credential name",
+                    key=secret_name_key,
+                    placeholder=_secret_name_placeholder(bindings),
+                )
                 st.text_input("Secret value", type="password", key=value_key)
                 st.button(
                     "Save credential",
@@ -9479,10 +9514,9 @@ def render_skills_tab():
                     level, message = secret_status
                     getattr(st, level)(message)
 
-                configured = get_skill_secrets(skill_name) or {"secrets": []}
-                for item in configured.get("secrets", []):
+                for item in bindings:
                     secret_name = str(item.get("name") or "")
-                    if not secret_name:
+                    if not secret_name or not item.get("configured"):
                         continue
                     st.caption(f"{secret_name} configured")
                     st.button(
