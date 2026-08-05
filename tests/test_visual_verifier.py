@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import warnings
 
 import pytest
 
@@ -9,6 +11,7 @@ from app.ai.visual_verifier import (
     VisualCandidateDecision,
     VisualVerificationResult,
     admit_candidates,
+    build_verifier_model,
     verify_candidates,
 )
 from app.services.thumbnail_batch import FetchedThumbnail
@@ -64,6 +67,12 @@ def test_rejects_a_relevant_image_that_does_not_support_the_answer():
     submitted = [_submitted("c1")]
 
     assert _admit([_decision("c1", materially_supports_answer=False)], submitted) == []
+
+
+def test_rejects_an_image_that_does_not_depict_the_requested_subject():
+    submitted = [_submitted("c1")]
+
+    assert _admit([_decision("c1", depicts_requested_subject=False)], submitted) == []
 
 
 def test_rejects_a_portrait_unless_the_user_asked_for_one():
@@ -150,6 +159,38 @@ async def test_verifier_provider_error_returns_none():
 
 
 @pytest.mark.asyncio
+async def test_a_batch_level_parse_failure_rejects_the_whole_response():
+    class _MalformedModel:
+        async def ainvoke(self, _messages):
+            # Missing every required field but candidate_id: the strict
+            # structured-output model can't coerce this into a decision, and
+            # that failure is not isolated to one record — it sinks the batch.
+            return {"decisions": [{"candidate_id": "c1"}]}
+
+    result = await verify_candidates(
+        [_submitted("c1")],
+        user_request="q",
+        image_query="i",
+        factual_query="f",
+        result_titles=[],
+        model=_MalformedModel(),
+        timeout=1.0,
+    )
+
+    assert result is None
+    assert (
+        admit_candidates(
+            result,
+            [_submitted("c1")],
+            threshold=0.85,
+            max_items=2,
+            requested_kinds=frozenset(),
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
 async def test_verifier_sends_one_message_with_every_thumbnail():
     captured: list = []
 
@@ -173,13 +214,78 @@ async def test_verifier_sends_one_message_with_every_thumbnail():
     assert sum(1 for block in blocks if block.get("type") == "image_url") == 2
 
 
-def test_configured_timeouts_fit_inside_the_image_deadline():
-    from app.core.config import settings
+def _settings_with(**overrides):
+    from app.core.config import Settings
 
-    brave_timeout = float(settings.brave_image_search_timeout_seconds)
-    thumbnail_timeout = float(settings.image_verification_thumbnail_timeout_seconds)
-    deadline = float(settings.image_verification_deadline_seconds)
+    return Settings(
+        _env_file=None,
+        secret_key="test-secret",
+        environment="development",
+        **overrides,
+    )
 
-    assert brave_timeout + thumbnail_timeout < deadline, (
-        "image search plus one thumbnail must leave room for the verifier call"
+
+def test_shipped_defaults_leave_headroom_inside_the_image_deadline():
+    """Guard the shipped code defaults, not whatever a live `.env` happens to set.
+
+    A test that reads the live ``settings`` singleton only proves that
+    whatever is loaded right now satisfies the arithmetic — it would pass in
+    a clean CI environment while a real deployment silently violated the
+    deadline. `Field.default` is env-independent: it is what ships.
+    """
+    from app.core.config import Settings
+
+    fields = Settings.model_fields
+    brave_default = float(fields["brave_image_search_timeout_seconds"].default)
+    thumbnail_default = float(fields["image_verification_thumbnail_timeout_seconds"].default)
+    deadline_default = float(fields["image_verification_deadline_seconds"].default)
+
+    assert brave_default + thumbnail_default < deadline_default, (
+        "shipped image search plus thumbnail timeout defaults must leave verifier headroom"
+    )
+
+
+def test_warns_when_the_image_verification_budget_has_no_headroom(caplog):
+    with caplog.at_level(logging.WARNING, logger="app.core.config"):
+        _settings_with(
+            brave_image_search_timeout_seconds=3.0,
+            image_verification_thumbnail_timeout_seconds=1.5,
+            image_verification_deadline_seconds=4.0,
+        )
+
+    assert "headroom" in caplog.text
+
+
+def test_does_not_warn_when_the_image_verification_budget_has_headroom(caplog):
+    with caplog.at_level(logging.WARNING, logger="app.core.config"):
+        _settings_with(
+            brave_image_search_timeout_seconds=2.0,
+            image_verification_thumbnail_timeout_seconds=1.5,
+            image_verification_deadline_seconds=4.0,
+        )
+
+    assert "headroom" not in caplog.text
+
+
+def test_build_verifier_model_maps_media_resolution_to_a_canonical_value(monkeypatch):
+    from google.genai.types import MediaResolution
+
+    from app.ai import visual_verifier
+
+    monkeypatch.setattr(visual_verifier.settings, "gemini_api_key", "dummy-test-key")
+    monkeypatch.setattr(
+        visual_verifier.settings, "image_verification_model", "gemini-3-flash-preview"
+    )
+    monkeypatch.setattr(visual_verifier.settings, "image_verification_media_resolution", "low")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = build_verifier_model()
+
+    assert not any(issubclass(item.category, UserWarning) for item in caught)
+    assert model is not None
+    resolved = model.first.media_resolution
+    assert resolved in set(MediaResolution), (
+        "media_resolution must be a canonical enum member, not a synthetic one "
+        "the SDK invents for an unrecognized string"
     )

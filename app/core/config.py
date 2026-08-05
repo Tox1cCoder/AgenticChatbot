@@ -2006,6 +2006,28 @@ class Settings(BaseSettings):
                 )
         return self
 
+    @model_validator(mode="after")
+    def _warn_if_image_verification_budget_is_tight(self) -> "Settings":
+        # A tuning concern, not a startup-blocking one: this machine's own local
+        # environment can violate the invariant today, and raising here would
+        # break app startup over a budget the operator hasn't gotten to yet.
+        combined = (
+            self.brave_image_search_timeout_seconds
+            + self.image_verification_thumbnail_timeout_seconds
+        )
+        if combined >= self.image_verification_deadline_seconds:
+            logging.getLogger(__name__).warning(
+                "Image search timeout (%.2fs) plus thumbnail timeout (%.2fs) leaves no "
+                "headroom inside the %.2fs image-verification deadline; the verifier call "
+                "may never get to run. Lower brave_image_search_timeout_seconds or "
+                "image_verification_thumbnail_timeout_seconds, or raise "
+                "image_verification_deadline_seconds.",
+                self.brave_image_search_timeout_seconds,
+                self.image_verification_thumbnail_timeout_seconds,
+                self.image_verification_deadline_seconds,
+            )
+        return self
+
 
 def _log_startup_warnings(s: "Settings") -> None:
     """Log warnings for settings that may indicate misconfiguration."""

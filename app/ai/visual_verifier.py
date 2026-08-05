@@ -7,6 +7,18 @@ disambiguate what the model can already see.
 
 Nothing here is persisted. Decisions, confidence values and content kinds live
 for the duration of one answer.
+
+Two different things fail closed, at two different levels. A single decision
+record that names an unknown or duplicate candidate id, or carries an
+out-of-range confidence, only sinks *that* candidate: ``admit_candidates``
+drops it and keeps evaluating the rest. A response that the structured-output
+model cannot parse at all sinks the *whole batch*: ``verify_candidates``
+returns ``None`` and ``admit_candidates(None, ...)`` returns ``[]``. The
+response is validated as one strict object, not record-by-record, so a
+malformed record cannot be isolated from its neighbours without parsing into a
+permissive shape and hand-validating each entry — which would also weaken the
+schema that constrains what the model can generate in the first place. Batch
+rejection is the deliberate, fail-safe choice here.
 """
 
 from __future__ import annotations
@@ -101,18 +113,22 @@ def admit_candidates(
 
     if result is None or not submitted:
         return []
-    submitted_ids = {candidate.candidate_id for candidate in submitted}
     approved: set[str] = set()
     seen: set[str] = set()
     for decision in result.decisions:
         candidate_id = decision.candidate_id
-        if candidate_id not in submitted_ids or candidate_id in seen:
+        if candidate_id in seen:
+            # A repeated id is a structural failure: distrust both copies
+            # rather than pick one, so discard whatever the first copy earned.
             approved.discard(candidate_id)
-            seen.add(candidate_id)
             continue
         seen.add(candidate_id)
         if _passes(decision, threshold=threshold, requested_kinds=requested_kinds):
             approved.add(candidate_id)
+    # A hallucinated id — one the model invents that was never submitted —
+    # needs no separate guard: this comprehension projects onto `submitted`,
+    # so an id absent from `submitted` can never appear in the result no
+    # matter what ends up in `approved`.
     return [
         candidate for candidate in submitted if candidate.candidate_id in approved
     ][: max(0, int(max_items))]
@@ -214,6 +230,29 @@ def _bounded(value: Any, limit: int = _MAX_TITLE_CHARS) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
+_MEDIA_RESOLUTIONS = {
+    "low": "MEDIA_RESOLUTION_LOW",
+    "medium": "MEDIA_RESOLUTION_MEDIUM",
+    "high": "MEDIA_RESOLUTION_HIGH",
+}
+
+
+def _resolve_media_resolution(value: str) -> str:
+    """Map the human-friendly config value to the canonical API enum name.
+
+    The installed ``google.genai.types.MediaResolution`` only recognizes
+    ``MEDIA_RESOLUTION_*`` strings. Forwarding a bare word like ``"low"``
+    raises no exception — it silently produces a synthetic, non-canonical
+    enum member and a ``UserWarning``, so the live API call would reject or
+    ignore it and ``verify_candidates`` would swallow the resulting failure
+    as if the verifier were merely unavailable. An unrecognized config value
+    falls back to the safest, cheapest resolution rather than being forwarded
+    raw.
+    """
+
+    return _MEDIA_RESOLUTIONS.get(str(value or "").strip().lower(), _MEDIA_RESOLUTIONS["low"])
+
+
 def build_verifier_model() -> Any | None:
     """Build the configured vision model with structured output, or None."""
 
@@ -225,7 +264,7 @@ def build_verifier_model() -> Any | None:
             model=str(settings.image_verification_model),
             api_key=str(settings.gemini_api_key or ""),
             temperature=0.0,
-            media_resolution=str(settings.image_verification_media_resolution),
+            media_resolution=_resolve_media_resolution(settings.image_verification_media_resolution),
         )
         return model.with_structured_output(VisualVerificationResult)
     except Exception as exc:
