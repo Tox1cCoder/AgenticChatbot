@@ -13,6 +13,7 @@ threshold does not already provide.
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 import unicodedata
@@ -22,9 +23,17 @@ from typing import Any
 
 from ..core.config import settings
 
+logger = logging.getLogger(__name__)
+
 _TOKEN_PATTERN = re.compile(r"[^\W_]+", flags=re.UNICODE)
 _MAX_QUERY_CHARS = 2048
 _MAX_TOKENS = 128
+# A turn that happens to fetch many *other* conversations' budgets between two
+# lookups of its own can push its own entry out of this LRU, silently
+# resetting its dedup memory and call count mid-turn. Bounded storage is still
+# the right tradeoff for a process that must not leak memory across an
+# unbounded number of conversations; the debug log on eviction below is how
+# the next reader learns this failure mode exists instead of hitting it blind.
 _MAX_TRACKED_CONVERSATIONS = 256
 
 
@@ -52,8 +61,12 @@ class ResearchBudget:
     max_search_calls: int = 2
     near_duplicate_threshold: float = 0.75
     _searches: list[tuple[frozenset[str], str]] = field(default_factory=list)
+    _in_flight: int = 0
     _image_searched: bool = False
     _image_candidates: list[dict[str, Any]] = field(default_factory=list)
+    _instance_lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False, compare=False
+    )
 
     @property
     def search_calls(self) -> int:
@@ -70,13 +83,37 @@ class ResearchBudget:
                 return result_text
         return None
 
-    def may_search(self, query: str) -> bool:
-        if self.find_reuse(query) is not None:
-            return False
-        return self.search_calls < max(1, int(self.max_search_calls))
+    def reserve_search(self, query: str) -> bool:
+        """Atomically claim a search slot, or refuse if none remain.
+
+        A caller checks the budget, awaits a network call, then records the
+        result — two steps with an await in between. The model can emit
+        parallel tool calls, so two concurrent callers could both pass a plain
+        boolean check before either records its result, silently letting the
+        turn exceed its cap. Comparing completed searches plus in-flight
+        reservations to the cap inside one lock closes that window: the check
+        and the claim happen as a single step.
+        """
+
+        with self._instance_lock:
+            if self.find_reuse(query) is not None:
+                return False
+            if self.search_calls + self._in_flight >= max(1, int(self.max_search_calls)):
+                return False
+            self._in_flight += 1
+            return True
 
     def record_search(self, query: str, result_text: str) -> None:
-        self._searches.append((normalize_query_tokens(query), result_text))
+        """Append a completed result and release the reservation it used.
+
+        A failed search never reaches this method, so its reservation is never
+        released: a provider error must not buy the model a second attempt at
+        the same broken query within the same turn.
+        """
+
+        with self._instance_lock:
+            self._searches.append((normalize_query_tokens(query), result_text))
+            self._in_flight = max(0, self._in_flight - 1)
 
     def accumulated(self) -> list[str]:
         return [result_text for _, result_text in self._searches]
@@ -114,7 +151,13 @@ def get_research_budget(conversation_id: str | None) -> ResearchBudget:
             _budgets[key] = budget
         _budgets.move_to_end(key)
         while len(_budgets) > _MAX_TRACKED_CONVERSATIONS:
-            _budgets.popitem(last=False)
+            evicted_key, _ = _budgets.popitem(last=False)
+            logger.debug(
+                "Evicted research budget for conversation %r; a turn still in "
+                "progress for it would silently lose its dedup memory and "
+                "call count.",
+                evicted_key,
+            )
         return budget
 
 

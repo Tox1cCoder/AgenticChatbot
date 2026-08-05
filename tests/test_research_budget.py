@@ -27,15 +27,23 @@ def test_non_ascii_queries_normalize_without_losing_tokens():
 
 
 def test_trace_second_query_is_a_near_duplicate_of_the_first():
-    assert near_duplicate(
-        normalize_query_tokens(TRACE_Q1), normalize_query_tokens(TRACE_Q2), threshold=0.75
-    )
+    tokens_q1 = normalize_query_tokens(TRACE_Q1)
+    tokens_q2 = normalize_query_tokens(TRACE_Q2)
+
+    # Pin the actual overlap so this fails if tokenization drifts, not only
+    # if the near-duplicate verdict happens to flip.
+    assert len(tokens_q1 & tokens_q2) == 8
+    assert min(len(tokens_q1), len(tokens_q2)) == 9
+    assert near_duplicate(tokens_q1, tokens_q2, threshold=0.75)
 
 
 def test_trace_third_query_is_genuinely_distinct():
-    assert not near_duplicate(
-        normalize_query_tokens(TRACE_Q1), normalize_query_tokens(TRACE_Q3), threshold=0.75
-    )
+    tokens_q1 = normalize_query_tokens(TRACE_Q1)
+    tokens_q3 = normalize_query_tokens(TRACE_Q3)
+
+    assert len(tokens_q1 & tokens_q3) == 6
+    assert min(len(tokens_q1), len(tokens_q3)) == 9
+    assert not near_duplicate(tokens_q1, tokens_q3, threshold=0.75)
 
 
 def test_trace_produces_two_network_searches_and_one_reuse():
@@ -47,7 +55,7 @@ def test_trace_produces_two_network_searches_and_one_reuse():
     assert budget.find_reuse(TRACE_Q2) == "first result"
 
     assert budget.find_reuse(TRACE_Q3) is None
-    assert budget.may_search(TRACE_Q3) is True
+    assert budget.reserve_search(TRACE_Q3) is True
     budget.record_search(TRACE_Q3, "third result")
 
     assert budget.search_calls == 2
@@ -58,8 +66,37 @@ def test_a_fourth_distinct_query_is_refused_and_returns_accumulated_results():
     budget.record_search("alpha topic one", "A")
     budget.record_search("beta topic two", "B")
 
-    assert budget.may_search("gamma topic three") is False
+    assert budget.reserve_search("gamma topic three") is False
     assert budget.accumulated() == ["A", "B"]
+
+
+def test_reserve_search_enforces_the_cap_before_any_result_is_recorded():
+    # Expresses the race sequentially: two reservations land before either
+    # result is recorded, exactly like two parallel tool calls racing ahead
+    # of their awaits. The cap must hold on reservations alone.
+    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+
+    assert budget.reserve_search("alpha topic one") is True
+    assert budget.reserve_search("beta topic two") is True
+    assert budget.reserve_search("gamma topic three") is False
+    assert budget.search_calls == 0
+
+
+def test_reserve_search_refuses_a_near_duplicate_of_an_already_recorded_query():
+    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget.record_search(TRACE_Q1, "first result")
+
+    assert budget.reserve_search(TRACE_Q2) is False
+
+
+def test_record_search_releases_the_reservation_for_a_further_distinct_query():
+    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+
+    assert budget.reserve_search("alpha topic one") is True
+    budget.record_search("alpha topic one", "A")
+
+    assert budget.search_calls == 1
+    assert budget.reserve_search("beta topic two") is True
 
 
 def test_only_one_image_search_per_turn():
