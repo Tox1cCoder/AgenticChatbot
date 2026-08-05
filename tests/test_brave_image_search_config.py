@@ -27,7 +27,7 @@ def test_brave_image_search_defaults(monkeypatch):
     assert settings.brave_search_api_key == ""
     assert settings.brave_image_search_default_count == 6
     assert settings.brave_image_search_max_count == 10
-    assert settings.brave_image_search_timeout_seconds == pytest.approx(2.5)
+    assert settings.brave_image_search_timeout_seconds == pytest.approx(2.0)
     assert settings.brave_image_search_default_safesearch == "strict"
 
 

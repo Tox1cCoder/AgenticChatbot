@@ -302,8 +302,11 @@ class Settings(BaseSettings):
         description="Hard cap on image results returned per Brave Image Search call.",
     )
     brave_image_search_timeout_seconds: float = Field(
-        default=2.5,
-        description="HTTP timeout for a single Brave Image Search request, in seconds.",
+        default=2.0,
+        description=(
+            "Brave image search request timeout. Kept under the image-path "
+            "deadline so a slow provider cannot consume the verifier's budget."
+        ),
     )
     brave_image_search_default_safesearch: str = Field(
         default="strict",
@@ -1171,6 +1174,56 @@ class Settings(BaseSettings):
     research_budget_enabled: bool = Field(
         default=True,
         description="Kill switch for turn-local research dedup and call caps.",
+    )
+    vision_image_verification_enabled: bool = Field(
+        default=False,
+        description=(
+            "Rollout flag for vision-verified remote web images. When False, no "
+            "remote web image reaches an answer."
+        ),
+    )
+    image_verification_model: str = Field(
+        default="gemini-3-flash-preview",
+        description="Vision model used to verify remote image relevance.",
+    )
+    image_verification_media_resolution: str = Field(
+        default="low",
+        description="Media resolution for verifier thumbnails: low, medium, or high.",
+    )
+    image_verification_confidence_threshold: float = Field(
+        default=0.85,
+        ge=0.0,
+        le=1.0,
+        description="Minimum verifier confidence for admitting a remote image.",
+    )
+    image_verification_max_candidates: int = Field(
+        default=6,
+        ge=1,
+        le=10,
+        description="Maximum candidates submitted to one verifier call.",
+    )
+    image_verification_deadline_seconds: float = Field(
+        default=4.0,
+        gt=0,
+        description=(
+            "Hard end-to-end deadline for the image path, from image-search "
+            "dispatch to verifier verdict. Exceeding it yields a text-only answer."
+        ),
+    )
+    image_verification_thumbnail_timeout_seconds: float = Field(
+        default=1.5,
+        gt=0,
+        description="Per-thumbnail download timeout during verification.",
+    )
+    rich_image_gallery_max_items: int = Field(
+        default=6,
+        ge=2,
+        le=8,
+        description=(
+            "Images in one verified gallery grid. Only reachable through "
+            "image_intent='gallery'; figure mode stays bound by "
+            "rich_auto_place_max_images."
+        ),
     )
     tool_result_blob_storage_dir: str = Field(
         default="data/tool_result_blobs",
