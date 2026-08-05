@@ -48,6 +48,7 @@ from .tool_result_rendering import normalize_tool_result_for_rendering
 from .tool_scope import is_client_only_scope
 from .tool_search_tool import create_tool_search_tool
 from .utils import make_json_safe, normalize_tool_call
+from .verified_image_sink import verified_image_sink
 
 if TYPE_CHECKING:
     pass
@@ -585,6 +586,7 @@ def _attach_rich_candidates_to_artifact(
     render: dict[str, Any] | None,
     tool_call_id: str | None,
     tool_name: str,
+    verified_images: list[dict[str, Any]] | None = None,
 ) -> None:
     """Compute rich-item candidates for a tool result and attach them as
     ``artifact["_rich_item_candidates"]`` for the graph layer to lift into
@@ -614,6 +616,12 @@ def _attach_rich_candidates_to_artifact(
     )
     if tool_render is not None:
         candidates.append(tool_render)
+    # Verified remote images arrive out-of-band: they must never be serialized
+    # into the model-visible result, because that is also how a rejected
+    # candidate would become placeable.
+    for candidate in verified_images or []:
+        if isinstance(candidate, dict):
+            candidates.append(candidate)
     if candidates:
         artifact["_rich_item_candidates"] = candidates
 
@@ -1997,12 +2005,18 @@ async def execute_tool_calls(
             continue
 
         try:
-            result, error_detail, error_content, execution_detail = await invoke_tool_with_policy(
-                tool,
-                tool_args,
-                tool_name=tool_name,
-                tool_map=tool_map,
-            )
+            with verified_image_sink() as offered_images:
+                (
+                    result,
+                    error_detail,
+                    error_content,
+                    execution_detail,
+                ) = await invoke_tool_with_policy(
+                    tool,
+                    tool_args,
+                    tool_name=tool_name,
+                    tool_map=tool_map,
+                )
             if error_detail is not None:
                 _append_tool_error_output(
                     tool_call_id=tool_id,
@@ -2046,6 +2060,7 @@ async def execute_tool_calls(
                 render=normalized_result.render,
                 tool_call_id=tool_id,
                 tool_name=tool_name,
+                verified_images=offered_images,
             )
             artifacts.append(artifact)
             if capture_images and tool_name not in _TYPED_WEB_IMAGE_TOOLS:
