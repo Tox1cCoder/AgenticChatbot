@@ -52,6 +52,21 @@ async def test_offers_from_a_child_task_reach_the_sink():
     assert [item["id"] for item in sink] == ["from-task"]
 
 
+@pytest.mark.asyncio
+async def test_concurrent_sibling_sinks_do_not_leak_into_each_other():
+    async def _run(label: str) -> list[dict[str, object]]:
+        with verified_image_sink() as sink:
+            offer_verified_images([{"id": f"{label}-1"}])
+            await asyncio.sleep(0)
+            offer_verified_images([{"id": f"{label}-2"}])
+        return sink
+
+    sink_a, sink_b = await asyncio.gather(_run("a"), _run("b"))
+
+    assert [item["id"] for item in sink_a] == ["a-1", "a-2"]
+    assert [item["id"] for item in sink_b] == ["b-1", "b-2"]
+
+
 def test_verified_images_are_attached_to_the_artifact():
     artifact: dict = {}
 
