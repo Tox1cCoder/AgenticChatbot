@@ -60,10 +60,10 @@ from client_backend.services.skill_runtime.uploads import (
     get_skill_upload_service,
 )
 from shared.skills.errors import (
-    SKILL_CONFIGURED_ROOT_CONFLICT,
-    SKILL_INSTALL_CONFLICT,
+    SKILL_INSTALL_INVALID,
     SKILL_SETUP_FAILED,
     SkillRuntimeError,
+    publish_code,
 )
 
 logger = get_logger(__name__)
@@ -312,14 +312,16 @@ class SkillInstallationService:
             )
             return
         except SkillRuntimeError as exc:
-            self._fail(user_id, operation_id, self._public_code(exc.code), exc.message)
+            # A client reads this receipt, so it stores the published code rather
+            # than the internal one the installer raised.
+            self._fail(user_id, operation_id, publish_code(exc.code), exc.message)
             return
         except Exception as exc:  # noqa: BLE001 - a receipt must never be left running
             logger.error("skill installation %s failed unexpectedly", operation_id, exc_info=True)
             self._fail(
                 user_id,
                 operation_id,
-                "SKILL_INSTALL_INVALID",
+                publish_code(SKILL_INSTALL_INVALID),
                 str(exc) or "The installation failed unexpectedly.",
             )
             return
@@ -493,18 +495,6 @@ class SkillInstallationService:
             sync_status=str(catalog.get("catalogSyncStatus") or ""),
             duration_ms=int((finished - started).total_seconds() * 1000),
         )
-
-    @staticmethod
-    def _public_code(code: str) -> str:
-        """Map internal codes onto the published contract.
-
-        ``SKILL_CONFIGURED_ROOT_CONFLICT`` is intentionally internal: the contract
-        expresses non-replaceability through ``preview.existingSkill.replaceable``
-        and publishes only ``SKILL_INSTALL_CONFLICT`` for the collision itself.
-        """
-        if code == SKILL_CONFIGURED_ROOT_CONFLICT:
-            return SKILL_INSTALL_CONFLICT
-        return code
 
     # ----------------------------------------------------------- transitions
 

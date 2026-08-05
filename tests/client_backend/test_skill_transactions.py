@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from client_backend.core.config import client_settings
-from client_backend.core.paths import get_installed_skills_root, get_skill_operations_root
+from client_backend.core.paths import get_skill_operations_root, resolve_skills_root
 from client_backend.services import local_skills_registry as registry_module
 from client_backend.services.local_skills_registry import LocalSkillsRegistry
 from client_backend.services.skill_runtime.collection import DiscoveredSkill
@@ -48,7 +48,7 @@ def transaction_env(tmp_path, monkeypatch):
         "get_upstream_auth_service",
         lambda: SimpleNamespace(get_current_user_id=lambda: USER_ID),
     )
-    registry = LocalSkillsRegistry(skill_roots=[])
+    registry = LocalSkillsRegistry()
     environment = SkillEnvironmentManager(runtime_base=tmp_path / "runtimes")
     secrets = _SecretStore()
     installer = SkillBundleInstaller(
@@ -80,7 +80,7 @@ async def _spec(installer: SkillBundleInstaller, discovered: DiscoveredSkill, **
 
 
 def _installed_payloads() -> list[dict]:
-    root = get_installed_skills_root(USER_ID)
+    root = resolve_skills_root(USER_ID)
     if not root.is_dir():
         return []
     return [
@@ -251,7 +251,7 @@ async def test_failed_update_preserves_a_preexisting_same_hash_runtime(
 async def test_transaction_refreshes_stale_registry_before_authorizing_install(transaction_env):
     await transaction_env.registry.initialize()
     existing = _write_skill(transaction_env.root / "existing" / "one", "one", "existing")
-    other_registry = LocalSkillsRegistry(skill_roots=[])
+    other_registry = LocalSkillsRegistry()
     other_installer = SkillBundleInstaller(
         registry=other_registry,
         environment_manager=transaction_env.environment,
@@ -272,7 +272,7 @@ async def test_committed_recovery_rejects_tampered_bundle_content(transaction_en
     one = _write_skill(transaction_env.root / "sources" / "one", "one", "original")
     specs = [await _spec(transaction_env.installer, one)]
     installed = await transaction_env.installer.install_many(specs, transaction_id="tx-tampered")
-    target = get_installed_skills_root(USER_ID) / installed[0]["install_id"]
+    target = resolve_skills_root(USER_ID) / installed[0]["install_id"]
     (target / "SKILL.md").write_text(
         "---\nname: one\ndescription: one\n---\ntampered\n", encoding="utf-8"
     )
@@ -322,7 +322,7 @@ async def test_recovery_holds_the_global_mutation_lock(transaction_env, monkeypa
 
 @pytest.mark.asyncio
 async def test_recovery_removes_an_unjournaled_cancelled_install_stage(transaction_env):
-    orphan = get_installed_skills_root(USER_ID) / "one-deadbeef.stage-cancelled"
+    orphan = resolve_skills_root(USER_ID) / "one-deadbeef.stage-cancelled"
     orphan.mkdir(parents=True)
     (orphan / "SKILL.md").write_text("partial", encoding="utf-8")
     from client_backend.services.skill_runtime import transactions

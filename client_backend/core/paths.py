@@ -210,15 +210,39 @@ def get_device_profile_subdir(
     return path
 
 
-def get_installed_skills_root(user_id: str) -> Path:
-    """Return the profile directory that holds profile-installed skill bundles.
+def resolve_skills_root(user_id: str) -> Path:
+    """Return the one directory this profile reads and writes skill bundles in.
 
-    Single source of truth for the installed-bundle location so the installer
-    (which writes here) and the registry scanner (which reads here) cannot
-    drift. Resolution only: the directory legitimately does not exist until the
-    first bundle is installed, and the installer creates it then.
+    Single source of truth for the bundle location so the installer (which
+    writes here) and the registry scanner (which reads here) cannot drift.
+
+    ``CLIENT_SKILLS_ROOT`` wins when the operator sets it: they named the folder
+    they want to see their skills in, so the sidecar scans *and* installs there.
+    Unset, bundles live under the profile, where the ``{server_hash}/{user_id}``
+    prefix keeps two users on one machine from sharing a catalog.
+
+    Resolution only: the directory legitimately does not exist until the first
+    bundle is installed, and the installer creates it then.
     """
-    return profile_subdir_path(user_id, "skills") / "installed"
+    configured = str(client_settings.skills_root or "").strip()
+    if configured:
+        return Path(configured)
+    return _user_skills_root(user_id) / "installed"
+
+
+def is_promotable_bundle(bundle_root: Path, skills_root: Path) -> bool:
+    """Report whether the installer can swap ``bundle_root`` in place.
+
+    The installer promotes, backs up, and rolls back bundles as direct children
+    of the skills root, so that is the only shape it can replace. A bundle nested
+    deeper -- a cloned repository of skills dropped into the root, say -- would
+    have to be moved to be replaced, and a rollback could not put it back where
+    it came from. Those are the operator's folders to reorganize, not ours.
+    """
+    try:
+        return bundle_root.resolve().parent == skills_root.resolve()
+    except OSError:
+        return False
 
 
 def get_skill_runtimes_root(user_id: str) -> Path:
@@ -230,11 +254,10 @@ def get_skill_runtimes_root(user_id: str) -> Path:
 
 
 def _user_skills_root(user_id: str) -> Path:
-    """Resolve one user's skill root from a validated single path component.
+    """Resolve one user's profile skill directory from a validated path component.
 
-    Unlike :func:`get_installed_skills_root`, the upload/operation/lock helpers
-    below are reached with a user id that arrived over HTTP, so the component is
-    validated here rather than trusted.
+    The upload/operation/lock helpers below are reached with a user id that
+    arrived over HTTP, so the component is validated here rather than trusted.
     """
     return profile_subdir_path(_validate_profile_component(user_id, "user_id"), "skills")
 

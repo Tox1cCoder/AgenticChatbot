@@ -38,10 +38,11 @@ from typing import Any, Protocol
 from client_backend.core.config import client_settings
 from client_backend.core.logging import get_logger
 from client_backend.core.paths import (
-    get_installed_skills_root,
     get_skill_locks_root,
     get_skill_uploads_root,
+    is_promotable_bundle,
     is_under_root,
+    resolve_skills_root,
     sanitize_filename,
 )
 from client_backend.schemas.skill_installation import (
@@ -52,6 +53,7 @@ from client_backend.schemas.skill_installation import (
     SkillExistingSkill,
     SkillUploadRecord,
 )
+from client_backend.services.local_skills_registry import publishes_single_skill
 from client_backend.services.skill_runtime.archive import (
     SkillArchiveError,
     SkillArchiveValidator,
@@ -474,12 +476,16 @@ class SkillUploadService:
         user_id: str,
         name: str,
     ) -> SkillExistingSkill | None:
-        """Report the installed skill this upload would replace, if any.
+        """Report the skill this upload would replace, if any.
 
-        Replaceability is decided by *location*: only a bundle under the profile's
-        installed root is ours to overwrite. A skill discovered from a
-        user-configured root stays untouched even though its metadata may look
-        identical, so the UI must not offer an update for it.
+        Everything in the skills root is the sidecar's to overwrite, so a
+        collision is normally replaceable. What makes one unreplaceable is the
+        shape of its directory, not its ownership: replacement swaps a whole
+        directory that is a direct child of the root, so a bundle published by the
+        root itself, or one sharing a folder with other skills, is left alone.
+        These two conditions must stay in step with
+        ``SkillBundleInstaller._resolve_replacement_action``; a preview promising
+        an update the installer then refuses is worse than no preview at all.
         """
         if self._registry is None:
             return None
@@ -487,13 +493,15 @@ class SkillUploadService:
         existing = self._registry.get_skill(name)
         if existing is None:
             return None
-        installed = is_under_root(existing.bundle_root, get_installed_skills_root(user_id))
+        skills_root = resolve_skills_root(user_id)
         return SkillExistingSkill(
             name=existing.name,
             source_hash=existing.source_hash,
-            install_source="profile" if installed else "configured_root",
             enabled=bool(getattr(existing, "enabled", False)),
-            replaceable=installed,
+            replaceable=(
+                is_promotable_bundle(existing.bundle_root, skills_root)
+                and publishes_single_skill(existing.bundle_root)
+            ),
         )
 
     # ---------------------------------------------------------------- lookups
@@ -882,7 +890,6 @@ __all__ = [
     "SkillUploadService",
     "SkillUploadStateError",
     "available_bytes",
-    "get_installed_skills_root",
     "get_skill_locks_root",
     "get_skill_upload_service",
     "get_skill_uploads_root",

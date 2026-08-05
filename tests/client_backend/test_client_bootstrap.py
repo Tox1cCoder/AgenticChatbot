@@ -1,6 +1,8 @@
 import logging
 from pathlib import Path
 
+import pytest
+
 from client_backend.core import logging as logging_module
 from client_backend.core.config import ClientSettings, initialize_client_environment
 
@@ -17,6 +19,38 @@ def test_initialize_client_environment_defers_profile_side_effects(tmp_path):
     assert profile_root.is_dir()
     assert settings.local_session_secret
     assert (profile_root / ".local_session_secret").exists()
+
+
+def test_skills_root_defaults_to_the_profile(tmp_path):
+    """Unset means "resolve per user under the profile", not "no skills"."""
+    assert ClientSettings(profile_root=str(tmp_path)).skills_root == ""
+
+
+def test_skills_root_rejects_a_list_of_paths(tmp_path):
+    """Uploads install into this directory, so several of them have no meaning."""
+    with pytest.raises(ValueError, match="single directory"):
+        ClientSettings(skills_root=f"{tmp_path},{tmp_path / 'other'}")
+
+
+def test_skills_root_rejects_a_relative_path():
+    """The sidecar's working directory depends on its launcher."""
+    with pytest.raises(ValueError, match="absolute"):
+        ClientSettings(skills_root="skills")
+
+
+def test_removed_plural_setting_names_its_replacement(tmp_path, monkeypatch):
+    """A stale CLIENT_SKILLS_ROOTS in an env file must say what replaced it.
+
+    The dotenv source is what reports unknown keys -- an unknown *environment*
+    variable is ignored by pydantic-settings -- and an operator's env file is
+    exactly where the removed name survives an upgrade.
+    """
+    env_file = tmp_path / "client-settings"
+    env_file.write_text("CLIENT_SKILLS_ROOTS=C:/skills\n", encoding="utf-8")
+    monkeypatch.setenv("CLIENT_ENV_FILE", str(env_file))
+
+    with pytest.raises(ValueError, match="CLIENT_SKILLS_ROOT to a single absolute"):
+        ClientSettings()
 
 
 def test_setup_logging_defers_log_directory_creation_until_called(tmp_path, monkeypatch):

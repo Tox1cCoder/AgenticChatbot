@@ -21,7 +21,7 @@ class _Audit:
 @pytest.mark.asyncio
 async def test_standard_skill_bundle_executes_named_cli_without_global_install(monkeypatch):
     fixture_root = Path(__file__).parents[1] / "fixtures" / "skills"
-    registry = LocalSkillsRegistry(skill_roots=[str(fixture_root)])
+    registry = LocalSkillsRegistry(skill_root=str(fixture_root))
     await registry.initialize()
     skill = registry.get_skill("echo-python")
     assert skill is not None
@@ -49,7 +49,7 @@ async def test_standard_skill_bundle_executes_named_cli_without_global_install(m
 @pytest.mark.asyncio
 async def test_calendar_skill_dry_run_uses_its_bundled_cli_without_global_install(monkeypatch):
     fixture_root = Path(__file__).parents[1] / "fixtures" / "skills"
-    registry = LocalSkillsRegistry(skill_roots=[str(fixture_root)])
+    registry = LocalSkillsRegistry(skill_root=str(fixture_root))
     await registry.initialize()
     skill = registry.get_skill("cli-anything-google-calendar")
     assert skill is not None

@@ -171,7 +171,7 @@ def live_client_backend(tmp_path):
         "server_api_timeout_seconds": client_settings.server_api_timeout_seconds,
         "profile_root": client_settings.profile_root,
         "workspace_roots": list(client_settings.workspace_roots),
-        "skills_roots": list(client_settings.skills_roots),
+        "skills_root": client_settings.skills_root,
         "mcp_config_path": client_settings.mcp_config_path,
         "local_session_secret": client_settings.local_session_secret,
         "max_reconnect_attempts": client_settings.max_reconnect_attempts,
@@ -182,7 +182,7 @@ def live_client_backend(tmp_path):
     client_settings.server_api_timeout_seconds = 120
     client_settings.profile_root = str(profile_root)
     client_settings.workspace_roots = [str(Path.cwd())]
-    client_settings.skills_roots = []
+    client_settings.skills_root = str(tmp_path / "skills")
     client_settings.mcp_config_path = ""
     client_settings.local_session_secret = "integration-test-local-secret-32-bytes"
     client_settings.max_reconnect_attempts = 1

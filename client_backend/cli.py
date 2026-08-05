@@ -86,8 +86,10 @@ def _run_doctor(args: argparse.Namespace) -> int:
     checks = {
         "server_api_base_url_has_scheme": bool(parsed_server.scheme and parsed_server.netloc),
         "profile_root_exists": Path(settings.profile_root).exists(),
-        "skills_roots_exist": all(
-            Path(root).expanduser().exists() for root in settings.skills_roots
+        # An unset skills root resolves per user under the profile and is created
+        # by the first install, so only a configured one can be missing here.
+        "skills_root_exists": (
+            Path(settings.skills_root).exists() if settings.skills_root else True
         ),
     }
 
@@ -100,7 +102,7 @@ def _run_doctor(args: argparse.Namespace) -> int:
             "backend_port": settings.backend_port,
             "profile_root": settings.profile_root,
             "environment": settings.environment,
-            "skills_roots": settings.skills_roots,
+            "skills_root": settings.skills_root or "(profile default)",
         },
     }
 

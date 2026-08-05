@@ -109,7 +109,6 @@ catalog shape:
         "enabled": true,
         "folderPath": "C:\\Users\\…\\skills\\installed\\google-calendar-a1b2c3",
         "sourceHash": "64-hex-characters",
-        "installSource": "profile",
         "commandCapable": true,
         "runtimeStatus": "ready",
         "setupStatus": "ready"
@@ -129,7 +128,6 @@ catalog shape:
 | `deviceId` | Device cache boundary. Never merge catalogs from different values. |
 | `catalogGeneration` | Monotonic per-user value. A lower generation must not replace a higher cached generation for the same device. |
 | `catalogSyncStatus` | `synced`, `pending`, or `disconnected`. |
-| `installSource` | `profile` for installed bundles, `configured` for read-only configured roots. |
 | `runtimeStatus` | `ready`, `not_ready`, or `instruction_only`. |
 | `setupStatus` | `not_applicable`, `ready`, `setup_required`, `failed`, or `stale`. |
 | `commandCapable` | `true` only when the runtime status is `ready`. |
@@ -233,7 +231,7 @@ Replacement differs by shape:
   skill with its own installed hash from the preview you displayed. Skills in the
   archive with no collision install fresh.
 
-A library whose skills collide with a configured-root skill
+A library whose skills collide with a non-replaceable skill
 (`existingSkill.replaceable: false`) cannot be installed; the UI must block it
 rather than install a subset.
 
@@ -255,14 +253,16 @@ When a skill with the same name exists, `preview.existingSkill` is:
 {
   "name": "google-calendar",
   "sourceHash": "current-installed-hash",
-  "installSource": "profile",
   "enabled": true,
   "replaceable": true
 }
 ```
 
-A configured-root collision reports `replaceable: false`. The UI must not show
-an update action for it.
+`replaceable` is `false` only when the colliding skill sits in a folder nested
+below a direct child of the skills root (a cloned skill repository dropped into
+the root, for example). The sidecar promotes and rolls back direct children, so
+it will not rewrite a nested tree. The UI must not show an update action for it;
+the operator moves or renames that folder first.
 
 Uploading never executes setup code.
 
@@ -665,8 +665,10 @@ Content-Type: application/json
 { "name": "google-calendar" }
 ```
 
-Only profile-installed skills can be uninstalled. Configured-root skills remain
-read-only.
+Uninstall removes what the sidecar installed: a bundle carrying `install.json`,
+which is also what `GET /skills/installed` lists. A bundle an operator wrote into
+the skills root by hand is not deleted this way — offer uninstall only for skills
+that appear in `GET /skills/installed`.
 
 ### Secrets
 
@@ -689,7 +691,10 @@ operation metadata.
 - Existing snake_case request fields remain accepted during migration.
 - `/api/skills/*` remains an alias of `/skills/*`.
 - The AI SDK UI Message Stream is unchanged.
-- Existing configured-root discovery remains read-only.
+- One directory holds every skill. `CLIENT_SKILLS_ROOT` names it; unset, it is
+  the per-user directory under the sidecar profile. Uploads install into that
+  same directory, so an installed skill always appears in `GET /skills` without
+  any further configuration.
 - `POST /skills/reload` remains supported but now returns the refreshed
   catalog instead of only a message.
 

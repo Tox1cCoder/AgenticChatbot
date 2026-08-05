@@ -17,11 +17,7 @@ UNSAFE_BUNDLE_PATH = "UNSAFE_BUNDLE_PATH"
 # either the uploaded bundle or the installed bundle changed in between. The
 # client must re-preview rather than retry with a fresh hash.
 SKILL_SOURCE_CHANGED = "SKILL_SOURCE_CHANGED"
-# Raised when the colliding skill lives in a user-configured skills root. The
-# sidecar owns only the bundles it installed into the profile, so it never
-# rewrites a directory the user manages. Routes surface this as the documented
-# SKILL_INSTALL_CONFLICT.
-SKILL_CONFIGURED_ROOT_CONFLICT = "SKILL_CONFIGURED_ROOT_CONFLICT"
+SKILL_BUNDLE_INVALID = "SKILL_BUNDLE_INVALID"
 SKILL_SETUP_REQUIRED = "SKILL_SETUP_REQUIRED"
 SKILL_SETUP_FAILED = "SKILL_SETUP_FAILED"
 SKILL_RUNTIME_STALE = "SKILL_RUNTIME_STALE"
@@ -62,6 +58,22 @@ class SkillRuntimeError(Exception):
 
     def __str__(self) -> str:
         return self.message
+
+
+# Internal codes that must not reach a client under their own name:
+# UNSAFE_BUNDLE_PATH and SKILL_INSTALL_INVALID both describe bundle problems the
+# published contract names SKILL_BUNDLE_INVALID. This table lives here rather
+# than in the route layer because the async installation receipt also stores a
+# code that a client later reads, and both boundaries must agree.
+_PUBLISHED_ALIASES = {
+    SKILL_INSTALL_INVALID: SKILL_BUNDLE_INVALID,
+    UNSAFE_BUNDLE_PATH: SKILL_BUNDLE_INVALID,
+}
+
+
+def publish_code(code: str) -> str:
+    """Map an internal error code onto the published contract."""
+    return _PUBLISHED_ALIASES.get(code, code)
 
 
 def error_payload(code: str, message: str, repair: dict | None = None) -> dict:

@@ -494,15 +494,18 @@ async def test_installer_failure_becomes_a_terminal_failed_operation(operation_e
 
 
 @pytest.mark.asyncio
-async def test_configured_root_conflict_is_published_as_install_conflict(operation_env):
+async def test_internal_code_is_published_in_the_stored_receipt(operation_env):
+    """A client reads this receipt, so an internal code must not survive into it."""
+    from shared.skills.errors import UNSAFE_BUNDLE_PATH
+
     operation_env.installer.error = _service_globals()["SkillRuntimeError"](
-        _service_globals()["SKILL_CONFIGURED_ROOT_CONFLICT"],
-        "skill comes from a configured skills root",
+        UNSAFE_BUNDLE_PATH,
+        "install path escapes the skills root",
     )
 
     operation = await operation_env.start_and_wait()
 
-    assert operation.failure.code == "SKILL_INSTALL_CONFLICT"
+    assert operation.failure.code == "SKILL_BUNDLE_INVALID"
     assert operation.failure.retryable is False
 
 

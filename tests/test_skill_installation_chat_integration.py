@@ -149,7 +149,7 @@ def sidecar_profile(tmp_path, monkeypatch):
         "SkillRuntimeManager",
         _ReadinessManager,
     )
-    registry = LocalSkillsRegistry(skill_roots=[])
+    registry = LocalSkillsRegistry()
     environment = _EnvironmentManager()
     device_id = str(uuid4())
     bridge = _BridgeStub(device_id)

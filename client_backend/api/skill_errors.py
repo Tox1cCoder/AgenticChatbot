@@ -37,20 +37,18 @@ from client_backend.services.skill_runtime.operations import (
 )
 from client_backend.services.skill_runtime.uploads import SkillUploadError
 from shared.skills.errors import (
-    SKILL_CONFIGURED_ROOT_CONFLICT,
+    SKILL_BUNDLE_INVALID,
     SKILL_INSTALL_CONFLICT,
-    SKILL_INSTALL_INVALID,
     SKILL_SETUP_FAILED,
     SKILL_SETUP_REQUIRED,
     SKILL_SOURCE_CHANGED,
-    UNSAFE_BUNDLE_PATH,
     SkillRuntimeError,
+    publish_code,
 )
 
 logger = get_logger(__name__)
 
 UNAUTHENTICATED = "UNAUTHENTICATED"
-SKILL_BUNDLE_INVALID = "SKILL_BUNDLE_INVALID"
 
 # The single authoritative code-to-status table for skill routes.
 SKILL_ERROR_STATUS: dict[str, int] = {
@@ -80,23 +78,6 @@ SKILL_ERROR_STATUS: dict[str, int] = {
 RETRYABLE_CODES = frozenset(
     {SKILL_INSTALL_LOCKED, "SKILL_STORAGE_INSUFFICIENT", SKILL_SETUP_FAILED}
 )
-
-# Internal codes that must not reach a client under their own name. The contract
-# expresses a configured-root collision through preview.existingSkill.replaceable
-# and publishes only the generic conflict; UNSAFE_BUNDLE_PATH and
-# SKILL_INSTALL_INVALID describe bundle problems the contract names
-# SKILL_BUNDLE_INVALID.
-_INTERNAL_CODE_ALIASES = {
-    SKILL_CONFIGURED_ROOT_CONFLICT: SKILL_INSTALL_CONFLICT,
-    SKILL_INSTALL_INVALID: SKILL_BUNDLE_INVALID,
-    UNSAFE_BUNDLE_PATH: SKILL_BUNDLE_INVALID,
-}
-
-
-def publish_code(code: str) -> str:
-    """Map an internal error code onto the published contract."""
-    return _INTERNAL_CODE_ALIASES.get(code, code)
-
 
 def status_for(code: str) -> int:
     """Return the documented status for ``code``, defaulting to 400."""

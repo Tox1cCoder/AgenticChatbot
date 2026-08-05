@@ -23,6 +23,14 @@ _PYTEST_RUNTIME = tempfile.TemporaryDirectory(
 os.environ["CLIENT_PROFILE_ROOT"] = _PYTEST_RUNTIME.name
 atexit.register(_PYTEST_RUNTIME.cleanup)
 
+# Client settings also read a dotenv file, defaulting to the repository's own
+# .env.client. Whatever a developer keeps in that file would otherwise leak into
+# the suite, so point the loader at an empty file instead.
+_PYTEST_CLIENT_ENV_FILE = os.path.join(_PYTEST_RUNTIME.name, "client-settings-empty")
+with open(_PYTEST_CLIENT_ENV_FILE, "w", encoding="utf-8") as _handle:
+    _handle.write("")
+os.environ["CLIENT_ENV_FILE"] = _PYTEST_CLIENT_ENV_FILE
+
 
 class FakePopen:
     """Minimal subprocess.Popen stub that records the command and supports wait()."""

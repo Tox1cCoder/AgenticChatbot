@@ -12,16 +12,25 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, DotEnvSettingsSource, PydanticBaseSettingsSource
 
 # Determine platform-appropriate default paths
 _IS_WINDOWS = platform.system() == "Windows"
 _DEFAULT_PROFILE_ROOT = (
-    Path(os.environ.get("LOCALAPPDATA", "~")) / "CodexDesktop"
+    Path(os.environ.get("LOCALAPPDATA", "~")) / "KaniDesktop"
     if _IS_WINDOWS
-    else Path("~/.config/codex-desktop")
+    else Path("~/.config/kani-desktop")
 )
+
+
+# Settings that were removed rather than renamed in place. A stale entry in an
+# operator's .env.client would otherwise stop the sidecar with pydantic's generic
+# "extra inputs are not permitted", which does not say what to do about it.
+_REMOVED_SETTINGS = {
+    "client_skills_roots": "CLIENT_SKILLS_ROOT",
+    "skills_roots": "CLIENT_SKILLS_ROOT",
+}
 
 
 def _load_or_create_local_secret(secret_path: Path) -> str:
@@ -107,9 +116,12 @@ class ClientSettings(BaseSettings):
     )
 
     # Skills Configuration
-    skills_roots: list[str] = Field(
-        default=[],
-        description="List of directory paths to scan for local skills.",
+    skills_root: str = Field(
+        default="",
+        description=(
+            "Single directory the sidecar scans for skills and installs uploaded "
+            "bundles into. Empty means the per-user directory under the profile root."
+        ),
     )
 
     # Workspace Configuration
@@ -242,17 +254,50 @@ class ClientSettings(BaseSettings):
         description="Environment (development, staging, production).",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_settings(cls, data):
+        """Fail with the replacement's name instead of "unknown extra field"."""
+        if isinstance(data, dict):
+            for key, replacement in _REMOVED_SETTINGS.items():
+                if key in data:
+                    raise ValueError(
+                        f"{key.upper()} was removed; set {replacement} to a single "
+                        "absolute directory path instead"
+                    )
+        return data
+
     @field_validator("log_level", mode="before")
     @classmethod
     def _normalize_log_level(cls, v: str) -> str:
         return v.upper()
 
-    @field_validator("workspace_roots", "skills_roots", mode="before")
+    @field_validator("workspace_roots", mode="before")
     @classmethod
     def _parse_path_list(cls, v):
         if isinstance(v, str):
             return [p.strip() for p in v.split(",") if p.strip()]
         return v
+
+    @field_validator("skills_root", mode="before")
+    @classmethod
+    def _normalize_skills_root(cls, v) -> str:
+        # One directory, not a list: the sidecar installs uploaded bundles into
+        # this path, and "install into one of several roots" has no answer. A
+        # comma is therefore an error rather than a path with a comma in it.
+        raw = str(v or "").strip()
+        if not raw:
+            return ""
+        if "," in raw:
+            raise ValueError(
+                "skills_root takes a single directory; CLIENT_SKILLS_ROOT is not a list"
+            )
+        expanded = Path(raw).expanduser()
+        if not expanded.is_absolute():
+            # The sidecar's working directory depends on how it was launched, so
+            # a relative root would resolve differently per launcher.
+            raise ValueError(f"skills_root '{raw}' must be an absolute path")
+        return str(expanded)
 
     @field_validator("profile_root", mode="before")
     @classmethod
@@ -275,7 +320,7 @@ class ClientSettings(BaseSettings):
             return ""
         return str(Path(v).expanduser())
 
-    @field_validator("workspace_roots", "skills_roots", mode="after")
+    @field_validator("workspace_roots", mode="after")
     @classmethod
     def _normalize_path_list(cls, values: list[str]) -> list[str]:
         return [str(Path(value).expanduser()) for value in values]

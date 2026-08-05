@@ -27,7 +27,7 @@ Reads are confined to the selected, enabled skill's bundle: the path is re-check
 
 The front-matter `name` must be 1-64 lowercase letters, digits, or single hyphens, with no leading or trailing hyphen.
 
-`CLIENT_SKILLS_ROOTS` scanning is read-only. It discovers assets and readiness but never executes setup code or installs dependencies.
+Discovery is one directory deep in principle: the sidecar scans `CLIENT_SKILLS_ROOT` — or, unset, `<profile>/<server-hash>/<user-id>/skills/installed` — and installs uploaded bundles into that same directory, so a skill it installs is a skill it can find. Scanning itself never executes setup code or installs dependencies; only an approved `POST /skills/{name}/setup` or an approved install does. Installer staging (`<name>.stage-*`) and backup (`<name>.backup-*`) directories are skipped by every scan.
 
 ## Readiness
 
@@ -35,7 +35,7 @@ The front-matter `name` must be 1-64 lowercase letters, digits, or single hyphen
 - `ready`: `bin/` or `scripts/` contains a directly runnable asset, or a matching prepared environment exists.
 - `not_ready`: Python setup is required, failed, or stale.
 
-Structurally unsafe bundles are rejected during installation or omitted during configured-root scanning; they are not published as runnable catalog entries.
+Structurally unsafe bundles are rejected during installation or omitted during scanning; they are not published as runnable catalog entries.
 
 Prepared Python environments live below the active user's sidecar profile under `skills/runtimes/<skill>/<source-hash>/`. Setup uses a staged virtual environment and atomically promotes it only after installation and console-command discovery succeed. It never modifies the global interpreter.
 
@@ -139,9 +139,11 @@ available disk space. An unknown, expired, or foreign upload id returns the same
 
 **Installation** (`POST /skills/uploads/{uploadId}/install`) requires the
 `expectedSourceHash` the user previewed, `approveSetup` for a Python project, and
-`replaceSourceHash` to overwrite an existing skill. Replacement is permitted only
-for bundles under the profile's installed root; a skill from a configured root is
-never rewritten. For collections, the receipt preserves each exact previewed
+`replaceSourceHash` to overwrite an existing skill. Every bundle in the skills
+root is replaceable that way, including one written there by hand; the exception
+is a bundle nested below a direct child of the root, which promotion and rollback
+cannot move and which is therefore never rewritten. For collections, the receipt
+preserves each exact previewed
 bundle and `SKILL.md` member; install revalidates those paths and hashes instead
 of rediscovering archive contents. The work runs asynchronously against a
 persisted receipt:
@@ -175,7 +177,7 @@ with `pending`, never a failure.
 |---|---|
 | `SKILL_INSTALL_INVALID` | The bundle source, structure, or preview hash is invalid. |
 | `SKILL_SOURCE_CHANGED` | The uploaded or installed hash is stale; re-preview before retrying. |
-| `SKILL_CONFIGURED_ROOT_CONFLICT` | The colliding skill lives in a configured root the sidecar does not manage. Published to clients as `SKILL_INSTALL_CONFLICT`. |
+| `SKILL_INSTALL_CONFLICT` | A skill of that name already exists: either no `replaceSourceHash` was sent, or the colliding bundle is nested below a direct child of the skills root and cannot be promoted in place. |
 | `SKILL_ARCHIVE_INVALID` | The ZIP is malformed, encrypted, corrupt, or uses unsupported compression. |
 | `SKILL_ARCHIVE_PATH_UNSAFE` | A member path escapes the bundle, collides on this filesystem, or is not portable. |
 | `SKILL_ARCHIVE_TOO_LARGE` | An upload, expansion, per-file, or compression-ratio limit was exceeded. |

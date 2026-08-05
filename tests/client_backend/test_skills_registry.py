@@ -9,9 +9,9 @@ import pytest
 
 from client_backend.core.config import client_settings
 from client_backend.core.paths import (
-    get_installed_skills_root,
     get_profile_subdir,
     profile_subdir_path,
+    resolve_skills_root,
 )
 from client_backend.services import local_skills_registry as local_skills_registry_module
 from client_backend.services.local_skills_registry import LocalSkillsRegistry, SkillMetadata
@@ -37,7 +37,7 @@ async def test_direct_bundle_records_root_hash_and_executable_assets(tmp_path):
     (skill_dir / "scripts").mkdir()
     (skill_dir / "scripts" / "inspect.py").write_text("print('inspect')\n", encoding="utf-8")
 
-    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
+    registry = LocalSkillsRegistry(skill_root=str(skill_root))
     await registry.initialize()
 
     skill = registry.get_skill("demo-skill")
@@ -70,7 +70,7 @@ async def test_nested_installed_bundle_uses_install_marker_as_authoritative_root
         encoding="utf-8",
     )
 
-    registry = LocalSkillsRegistry(skill_roots=[str(install_root)])
+    registry = LocalSkillsRegistry(skill_root=str(install_root))
     await registry.initialize()
 
     skill = registry.get_skill("demo-skill")
@@ -90,7 +90,7 @@ async def test_source_hash_changes_when_executable_changes(tmp_path):
     script.parent.mkdir()
     script.write_text("print('one')\n", encoding="utf-8")
 
-    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
+    registry = LocalSkillsRegistry(skill_root=str(skill_root))
     await registry.initialize()
     first_hash = registry.get_skill("demo-skill").source_hash
 
@@ -133,10 +133,39 @@ def test_source_hash_rejects_fifo_without_blocking(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_scanner_skips_installer_staging_and_backup_copies(tmp_path):
+    """The installer stages inside the root it owns, which is now this root too.
+
+    A staging copy is half-written and a backup copy is superseded; publishing
+    either would surface a skill that is mid-install or already replaced.
+    """
+    skill_root = tmp_path / "skills"
+    _write_skill(skill_root / "demo-skill", name="demo-skill")
+    _write_skill(skill_root / "demo-skill-abc.stage-1234", name="staged-skill")
+    _write_skill(skill_root / "demo-skill-abc.backup-1234", name="backed-up-skill")
+
+    registry = LocalSkillsRegistry(skill_root=str(skill_root))
+    await registry.initialize()
+
+    assert [skill.name for skill in registry.get_all_skills()] == ["demo-skill"]
+
+
+def test_publishes_single_skill_distinguishes_a_bundle_from_a_container(tmp_path):
+    """Replacement swaps a whole directory, so it must publish only one skill."""
+    lone = _write_skill(tmp_path / "lone" / "demo", name="demo-skill").parent
+    shared = tmp_path / "shared"
+    _write_skill(shared / "first", name="first-skill")
+    _write_skill(shared / "second", name="second-skill")
+
+    assert local_skills_registry_module.publishes_single_skill(lone) is True
+    assert local_skills_registry_module.publishes_single_skill(shared) is False
+
+
+@pytest.mark.asyncio
 async def test_scanner_omits_front_matter_with_nonstandard_skill_name(tmp_path):
     skill_root = tmp_path / "skills"
     _write_skill(skill_root / "invalid", name="invalid::skill")
-    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
+    registry = LocalSkillsRegistry(skill_root=str(skill_root))
 
     await registry.initialize()
 
@@ -153,7 +182,7 @@ async def test_scanner_rejects_symlinked_skill_document_outside_root(tmp_path):
         os.symlink(outside, bundle / "SKILL.md")
     except (OSError, NotImplementedError):
         pytest.skip("symlink creation not permitted")
-    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
+    registry = LocalSkillsRegistry(skill_root=str(skill_root))
 
     await registry.initialize()
 
@@ -165,7 +194,7 @@ async def test_loader_rejects_resolved_skill_document_outside_scan_root(tmp_path
     skill_root = tmp_path / "skills"
     skill_root.mkdir()
     outside_skill = _write_skill(tmp_path / "outside") / "SKILL.md"
-    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
+    registry = LocalSkillsRegistry(skill_root=str(skill_root))
 
     loaded = await registry._load_skill(outside_skill, skill_root.resolve())
 
@@ -183,7 +212,7 @@ async def test_scanner_rejects_bundle_with_symlinked_executable(tmp_path):
         os.symlink(outside, skill_dir / "bin" / "demo-cli.py")
     except (OSError, NotImplementedError):
         pytest.skip("symlink creation not permitted")
-    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
+    registry = LocalSkillsRegistry(skill_root=str(skill_root))
 
     await registry.initialize()
 
@@ -204,7 +233,7 @@ async def test_scanner_rejects_link_like_asset_without_platform_symlink_support(
         "is_link_like",
         lambda path: path.name == "demo-cli.py" or real_is_link_like(path),
     )
-    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
+    registry = LocalSkillsRegistry(skill_root=str(skill_root))
 
     await registry.initialize()
 
@@ -219,7 +248,7 @@ async def test_unsupported_bin_assets_are_not_published_as_commands(tmp_path):
     bin_dir.mkdir()
     (bin_dir / "notes.txt").write_text("not a command", encoding="utf-8")
     (bin_dir / "blocked.cmd").write_text("echo blocked", encoding="utf-8")
-    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
+    registry = LocalSkillsRegistry(skill_root=str(skill_root))
 
     await registry.initialize()
 
@@ -231,14 +260,14 @@ async def test_skill_catalog_sync_omits_absolute_paths_and_roots(tmp_path):
     skill_root = tmp_path / "skills"
     _write_skill(skill_root / "demo-skill")
 
-    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
+    registry = LocalSkillsRegistry(skill_root=str(skill_root))
     await registry.initialize()
 
     catalog = registry.get_skill_catalog(include_content=True)
     serialized_catalog = json.dumps(catalog)
 
-    assert catalog["skill_root_count"] == 1
-    assert "skill_roots" not in catalog
+    assert "skill_root" not in catalog
+    assert "skill_root_count" not in catalog
     assert catalog["skills"][0]["name"] == "demo-skill"
     assert "content" in catalog["skills"][0]
     assert "path" not in catalog["skills"][0]
@@ -252,7 +281,7 @@ async def test_refresh_only_reports_new_skills_not_removed_ones(tmp_path):
     skill_root = tmp_path / "skills"
     skill_dir = _write_skill(skill_root / "demo-skill")
 
-    registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
+    registry = LocalSkillsRegistry(skill_root=str(skill_root))
     await registry.initialize()
     shutil.rmtree(skill_dir)
 
@@ -276,7 +305,7 @@ async def test_skill_enabled_state_is_isolated_per_user_profile(tmp_path, monkey
     )
 
     try:
-        registry = LocalSkillsRegistry(skill_roots=[str(skill_root)])
+        registry = LocalSkillsRegistry(skill_root=str(skill_root))
         await registry.initialize()
         registry.set_skill_enabled("demo-skill", False)
 
@@ -324,14 +353,29 @@ def test_install_metadata_never_leaks_absolute_paths_in_sync_dict(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_absent_installed_root_is_silent_while_missing_configured_root_warns(
-    tmp_path, monkeypatch, caplog
-):
-    """The implicit installed root is absent until the first bundle install.
-
-    Only roots the user actually configured should warn when missing.
-    """
+async def test_missing_configured_root_warns(tmp_path, monkeypatch, caplog):
+    """A root the operator named and that does not exist is a misconfiguration."""
     missing_configured_root = tmp_path / "configured-but-absent"
+    monkeypatch.setattr(
+        local_skills_registry_module,
+        "get_upstream_auth_service",
+        lambda: SimpleNamespace(get_current_user_id=lambda: "user-a"),
+    )
+
+    registry = LocalSkillsRegistry(skill_root=str(missing_configured_root))
+    with caplog.at_level(logging.WARNING):
+        await registry.initialize()
+
+    assert any(
+        "Skill root does not exist" in record.getMessage()
+        and str(missing_configured_root) in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_absent_profile_root_is_silent(tmp_path, monkeypatch, caplog):
+    """The profile-owned root is absent until the first install; that is normal."""
     original_profile_root = client_settings.profile_root
     client_settings.profile_root = str(tmp_path / "profiles")
     monkeypatch.setattr(
@@ -341,21 +385,20 @@ async def test_absent_installed_root_is_silent_while_missing_configured_root_war
     )
 
     try:
-        registry = LocalSkillsRegistry(skill_roots=[str(missing_configured_root)])
+        registry = LocalSkillsRegistry()
         with caplog.at_level(logging.WARNING):
             await registry.initialize()
-        installed_root = str(get_installed_skills_root("user-a"))
+        resolved_root = str(resolve_skills_root("user-a"))
     finally:
         client_settings.profile_root = original_profile_root
 
-    assert not Path(installed_root).exists()
-    missing_root_warnings = [
+    assert not Path(resolved_root).exists()
+    assert registry.skill_root == resolved_root
+    assert not [
         record.getMessage()
         for record in caplog.records
         if "Skill root does not exist" in record.getMessage()
     ]
-    assert any(str(missing_configured_root) in message for message in missing_root_warnings)
-    assert not any(installed_root in message for message in missing_root_warnings)
 
 
 def test_read_only_profile_access_does_not_create_skill_directories(tmp_path, monkeypatch):
@@ -369,9 +412,9 @@ def test_read_only_profile_access_does_not_create_skill_directories(tmp_path, mo
     )
 
     try:
-        registry = LocalSkillsRegistry(skill_roots=[])
+        registry = LocalSkillsRegistry()
         assert registry._load_persisted_skill_state() == {}
-        assert registry._resolve_skill_roots()
+        assert registry._resolve_skill_root()
 
         assert not profile_subdir_path("user-a", "skills").exists()
     finally:

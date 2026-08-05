@@ -257,22 +257,30 @@ async def test_stage_streams_once_previews_without_setup_and_persists_record(upl
     assert upload_env.service.get_owned(USER_A, record.upload_id).upload_id == record.upload_id
 
 
-@pytest.mark.asyncio
-async def test_stage_reports_existing_replaceable_skill(upload_env, monkeypatch):
+def _register_existing_skill(upload_env, monkeypatch, *, name: str, bundle_root: Path, hash_: str):
+    """Publish one already-present skill in the skills root the service resolves."""
     from types import SimpleNamespace
 
-    uploads = _upload_globals()
-
-    installed_root = upload_env.root.parent / "installed"
-    monkeypatch.setitem(uploads, "get_installed_skills_root", lambda user_id: installed_root)
-    bundle = installed_root / "demo-abc"
-    bundle.mkdir(parents=True)
-    upload_env.registry.skills["demo"] = SimpleNamespace(
-        name="demo",
-        source_hash="b" * 64,
-        bundle_root=bundle,
+    skills_root = upload_env.root.parent / "skills"
+    monkeypatch.setitem(_upload_globals(), "resolve_skills_root", lambda user_id: skills_root)
+    bundle_root.mkdir(parents=True, exist_ok=True)
+    upload_env.registry.skills[name] = SimpleNamespace(
+        name=name,
+        source_hash=hash_,
+        bundle_root=bundle_root,
         enabled=True,
     )
+    return skills_root
+
+
+@pytest.mark.asyncio
+async def test_stage_reports_existing_replaceable_skill(upload_env, monkeypatch):
+    skills_root = upload_env.root.parent / "skills"
+    bundle = skills_root / "demo-abc"
+    _register_existing_skill(
+        upload_env, monkeypatch, name="demo", bundle_root=bundle, hash_="b" * 64
+    )
+    (bundle / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
 
     record = await upload_env.service.stage(
         user_id=USER_A,
@@ -281,25 +289,20 @@ async def test_stage_reports_existing_replaceable_skill(upload_env, monkeypatch)
     )
 
     assert record.preview.existing_skill.replaceable is True
-    assert record.preview.existing_skill.install_source == "profile"
     assert record.preview.existing_skill.source_hash == "b" * 64
 
 
 @pytest.mark.asyncio
-async def test_stage_marks_configured_root_collision_not_replaceable(upload_env, monkeypatch):
-    from types import SimpleNamespace
-
-    monkeypatch.setitem(
-        _upload_globals(),
-        "get_installed_skills_root",
-        lambda user_id: upload_env.root.parent / "installed",
+async def test_stage_marks_shared_folder_collision_not_replaceable(upload_env, monkeypatch):
+    """Replacing a folder that publishes other skills would delete them."""
+    skills_root = upload_env.root.parent / "skills"
+    container = skills_root / "vendor"
+    _register_existing_skill(
+        upload_env, monkeypatch, name="demo", bundle_root=container, hash_="c" * 64
     )
-    upload_env.registry.skills["demo"] = SimpleNamespace(
-        name="demo",
-        source_hash="c" * 64,
-        bundle_root=upload_env.root.parent / "user-configured" / "demo",
-        enabled=False,
-    )
+    for member in ("demo", "other"):
+        (container / member).mkdir(parents=True, exist_ok=True)
+        (container / member / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
 
     record = await upload_env.service.stage(
         user_id=USER_A,
@@ -308,7 +311,24 @@ async def test_stage_marks_configured_root_collision_not_replaceable(upload_env,
     )
 
     assert record.preview.existing_skill.replaceable is False
-    assert record.preview.existing_skill.install_source == "configured_root"
+
+
+@pytest.mark.asyncio
+async def test_stage_marks_root_published_collision_not_replaceable(upload_env, monkeypatch):
+    """The skills root itself is never the directory a replacement swaps."""
+    skills_root = upload_env.root.parent / "skills"
+    _register_existing_skill(
+        upload_env, monkeypatch, name="demo", bundle_root=skills_root, hash_="d" * 64
+    )
+    (skills_root / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
+
+    record = await upload_env.service.stage(
+        user_id=USER_A,
+        filename="demo.zip",
+        stream=_AsyncReader(_valid_skill_zip_bytes()),
+    )
+
+    assert record.preview.existing_skill.replaceable is False
 
 
 @pytest.mark.asyncio
@@ -879,22 +899,16 @@ async def test_persisted_member_paths_cannot_escape_the_staged_archive(upload_en
 
 @pytest.mark.asyncio
 async def test_collection_previews_report_each_skills_own_collision(upload_env, monkeypatch):
-    from types import SimpleNamespace
-
-    installed_root = upload_env.root.parent / "installed"
-    monkeypatch.setitem(
-        _upload_globals(),
-        "get_installed_skills_root",
-        lambda user_id: installed_root,
-    )
-    bundle = installed_root / "brainstorming-abc"
-    bundle.mkdir(parents=True)
-    upload_env.registry.skills["brainstorming"] = SimpleNamespace(
+    skills_root = upload_env.root.parent / "skills"
+    bundle = skills_root / "brainstorming-abc"
+    _register_existing_skill(
+        upload_env,
+        monkeypatch,
         name="brainstorming",
-        source_hash="c" * 64,
         bundle_root=bundle,
-        enabled=True,
+        hash_="c" * 64,
     )
+    (bundle / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")
 
     record = await upload_env.service.stage(
         user_id=USER_A,

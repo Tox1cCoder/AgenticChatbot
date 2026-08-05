@@ -13,9 +13,9 @@ from pathlib import Path
 from client_backend.core.config import client_settings
 from client_backend.core.logging import get_logger
 from client_backend.core.paths import (
-    get_installed_skills_root,
     is_under_root,
     profile_subdir_path,
+    resolve_skills_root,
 )
 from client_backend.services.upstream_auth import get_upstream_auth_service
 from shared.skills.commands import is_link_like, is_supported_bundle_command
@@ -60,6 +60,41 @@ def _looks_like_absolute_path(value: object) -> bool:
     return False
 
 
+def is_transient_bundle_path(relative: Path) -> bool:
+    """Report whether a discovered path sits inside installer scratch state.
+
+    The installer stages and backs up bundles as siblings of the promoted
+    directory (``<name>.stage-<uuid>``, ``<name>.backup-<uuid>``). Those copies
+    are half-written or already superseded, so publishing one would surface a
+    skill that is mid-install or has been replaced. The installer writes them
+    into whichever root it owns, which is now the same root the operator
+    configures, so this filter applies to every scan rather than only to the
+    profile-owned default.
+    """
+    return any(".stage-" in part or ".backup-" in part for part in relative.parts)
+
+
+def publishes_single_skill(bundle_root: Path) -> bool:
+    """Report whether ``bundle_root`` publishes exactly one skill.
+
+    Replacing a bundle removes its whole directory, so the installer needs this
+    before it swaps one. A bundle without ``install.json`` resolves to the first
+    directory below the skills root (see :meth:`_resolve_bundle_root`), which means
+    a container holding several hand-written skills resolves to the same directory
+    for each of them -- replacing one that way would delete its siblings. Counting
+    the ``SKILL.md`` files answers the question directly, ignoring installer
+    scratch copies the way discovery ignores them.
+    """
+    found = 0
+    for candidate in bundle_root.rglob("SKILL.md"):
+        if is_transient_bundle_path(candidate.relative_to(bundle_root)):
+            continue
+        found += 1
+        if found > 1:
+            return False
+    return True
+
+
 @dataclass
 class SkillMetadata:
     """Metadata for a skill."""
@@ -75,7 +110,7 @@ class SkillMetadata:
     category: str | None = None
     tags: list[str] = None
     # Populated by the installer (source hash, bundle name, etc.). Always None
-    # for freshly scanned configured-root skills; declared here so
+    # for a hand-authored bundle the sidecar never installed; declared here so
     # to_dict()/to_sync_dict() have a stable, redacted place to surface it.
     install_metadata: dict | None = None
 
@@ -167,113 +202,97 @@ class LocalSkillsRegistry:
     """
     Registry for local skills on the device.
 
-    Scans configured skill roots and manages skill metadata and content.
+    Scans the one configured skill root and manages skill metadata and content.
     """
 
-    def __init__(self, skill_roots: list[str] | None = None):
-        self._explicit_skill_roots = list(skill_roots) if skill_roots is not None else None
-        self.skill_roots = (
-            list(self._explicit_skill_roots)
-            if self._explicit_skill_roots is not None
-            else list(client_settings.skills_roots)
-        )
+    def __init__(self, skill_root: str | Path | None = None):
+        self._explicit_skill_root = str(skill_root) if skill_root is not None else None
+        self.skill_root: str | None = self._explicit_skill_root
         self.skills: dict[str, SkillMetadata] = {}
         self._initialized = False
         self._active_user_id: str | None = None
-        self._active_skill_roots: tuple[str, ...] = ()
-        # Roots this class adds on its own behalf rather than ones the user
-        # configured. Their absence is normal and must not be warned about.
-        self._implicit_skill_roots: set[str] = set()
+        self._active_skill_root: str | None = None
 
     async def initialize(self) -> None:
         """
-        Initialize the registry by scanning skill roots.
+        Initialize the registry by scanning the skill root.
         """
         current_user_id = self._resolve_current_user_id()
-        resolved_skill_roots = tuple(self._resolve_skill_roots())
-        roots_changed = resolved_skill_roots != self._active_skill_roots
+        resolved_skill_root = self._resolve_skill_root()
+        root_changed = resolved_skill_root != self._active_skill_root
 
-        if self._initialized and not roots_changed:
+        if self._initialized and not root_changed:
             self._apply_persisted_skill_state()
             self._active_user_id = current_user_id
             return
 
         logger.info("Initializing local skills registry...")
-        self.skill_roots = list(resolved_skill_roots)
+        self.skill_root = resolved_skill_root
 
-        if not self.skill_roots:
-            logger.warning("No skill roots configured")
+        if resolved_skill_root is None:
+            # No configured root and no session yet: the profile-owned root is
+            # per-user, so there is nothing to scan until a user is known.
+            logger.warning("No skill root resolved")
             self.skills = {}
             self._initialized = True
             self._active_user_id = current_user_id
-            self._active_skill_roots = resolved_skill_roots
+            self._active_skill_root = None
             return
 
         await self.scan_skills()
 
         self._initialized = True
         self._active_user_id = current_user_id
-        self._active_skill_roots = resolved_skill_roots
+        self._active_skill_root = resolved_skill_root
         logger.info(f"Skills registry initialized with {len(self.skills)} skills")
 
     async def scan_skills(self) -> int:
         """
-        Scan all configured skill roots for SKILL.md files.
+        Scan the skill root for SKILL.md files.
 
         Returns:
             Number of skills discovered.
         """
         discovered = 0
         discovered_skills: dict[str, SkillMetadata] = {}
+        root = self.skill_root
 
-        for root in self.skill_roots:
+        if root is not None:
             try:
                 root_path = Path(root).expanduser().resolve()
 
-                if not root_path.exists():
-                    if root in self._implicit_skill_roots:
-                        logger.debug("Installed-skills root not created yet: %s", root)
-                    else:
-                        logger.warning(f"Skill root does not exist: {root}")
-                    continue
-
                 if not root_path.is_dir():
-                    logger.warning(f"Skill root is not a directory: {root}")
-                    continue
+                    if root_path.exists():
+                        logger.warning("Skill root is not a directory: %s", root)
+                    elif self._root_is_configured():
+                        logger.warning("Skill root does not exist: %s", root)
+                    else:
+                        # The profile-owned root is created by the first install.
+                        logger.debug("Skill root not created yet: %s", root)
+                else:
+                    logger.info(f"Scanning skill root: {root_path}")
 
-                logger.info(f"Scanning skill root: {root_path}")
+                    for skill_file in root_path.rglob("SKILL.md"):
+                        if is_transient_bundle_path(skill_file.relative_to(root_path)):
+                            continue
+                        try:
+                            skill = await self._load_skill(skill_file, root_path)
+                            if skill:
+                                # Two bundles in the root can declare one name.
+                                if skill.name in discovered_skills:
+                                    logger.warning(
+                                        "Skill %s already exists, skipping duplicate from %s",
+                                        skill.name,
+                                        skill_file,
+                                    )
+                                    continue
 
-                # Find all SKILL.md files
-                skill_files = list(root_path.rglob("SKILL.md"))
-                if root in self._implicit_skill_roots:
-                    skill_files = [
-                        path
-                        for path in skill_files
-                        if not any(
-                            ".stage-" in part or ".backup-" in part
-                            for part in path.relative_to(root_path).parts
-                        )
-                    ]
+                                discovered_skills[skill.name] = skill
+                                discovered += 1
+                                logger.debug(f"Loaded skill: {skill.name}")
 
-                for skill_file in skill_files:
-                    try:
-                        skill = await self._load_skill(skill_file, root_path)
-                        if skill:
-                            # Check if skill already exists (from another root)
-                            if skill.name in discovered_skills:
-                                logger.warning(
-                                    "Skill %s already exists, skipping duplicate from %s",
-                                    skill.name,
-                                    skill_file,
-                                )
-                                continue
-
-                            discovered_skills[skill.name] = skill
-                            discovered += 1
-                            logger.debug(f"Loaded skill: {skill.name}")
-
-                    except Exception as e:
-                        logger.error(f"Failed to load skill from {skill_file}: {e}")
+                        except Exception as e:
+                            logger.error(f"Failed to load skill from {skill_file}: {e}")
 
             except Exception as e:
                 logger.error(f"Failed to scan skill root {root}: {e}")
@@ -547,7 +566,6 @@ class LocalSkillsRegistry:
             "skills": skills_list,
             "total_count": len(self.skills),
             "enabled_count": len(self.get_enabled_skills()),
-            "skill_root_count": len(self.skill_roots),
         }
 
     def search_skills(
@@ -602,7 +620,7 @@ class LocalSkillsRegistry:
             Number of newly discovered skills.
         """
         logger.info("Refreshing skills registry...")
-        self.skill_roots = self._resolve_skill_roots()
+        self.skill_root = self._resolve_skill_root()
 
         # Keep track of existing skills
         old_count = len(self.skills)
@@ -621,33 +639,41 @@ class LocalSkillsRegistry:
             removed,
         )
         self._active_user_id = self._resolve_current_user_id()
-        self._active_skill_roots = tuple(self.skill_roots)
+        self._active_skill_root = self.skill_root
         return discovered
 
     def _resolve_current_user_id(self) -> str | None:
         auth_service = get_upstream_auth_service()
         return auth_service.get_current_user_id()
 
-    def _resolve_skill_roots(self) -> list[str]:
-        if self._explicit_skill_roots is not None:
-            roots = list(self._explicit_skill_roots)
-        else:
-            roots = list(client_settings.skills_roots)
+    def _resolve_skill_root(self) -> str | None:
+        """Resolve the single directory this registry scans.
 
-        # Installer-managed bundles live under the active user's profile, not
-        # CLIENT_SKILLS_ROOTS, so they must be
-        # scanned unconditionally here. The directory only exists once a bundle
-        # has actually been installed, so it is tracked as implicit and its
-        # absence is not reported as a misconfiguration.
-        implicit: set[str] = set()
+        The installer writes into the same directory, so this must agree with
+        :func:`resolve_skills_root` -- an uploaded bundle that landed somewhere
+        the scanner does not read would simply never appear in the catalog.
+        """
+        if self._explicit_skill_root is not None:
+            return self._explicit_skill_root
+
         current_user_id = self._resolve_current_user_id()
         if current_user_id:
-            installed_root = str(get_installed_skills_root(current_user_id))
-            roots.append(installed_root)
-            implicit.add(installed_root)
+            return str(resolve_skills_root(current_user_id))
 
-        self._implicit_skill_roots = implicit
-        return roots
+        # Without a session the profile-owned default has no user to resolve,
+        # but an explicitly configured root is still scannable.
+        return str(client_settings.skills_root or "").strip() or None
+
+    def _root_is_configured(self) -> bool:
+        """Report whether the active root was named by the operator.
+
+        A configured root that does not exist is a misconfiguration worth a
+        warning; the profile-owned default is simply not created until the first
+        install.
+        """
+        if self._explicit_skill_root is not None:
+            return True
+        return bool(str(client_settings.skills_root or "").strip())
 
     def _get_skill_state_path(self) -> Path | None:
         current_user_id = self._resolve_current_user_id()

@@ -8999,7 +8999,7 @@ def _render_collection_preview(
         for skill in skills:
             existing = skill.get("existingSkill") or {}
             if existing and not existing.get("replaceable"):
-                marker = " — from a configured folder, cannot be replaced"
+                marker = " — in a nested folder, cannot be replaced"
             elif existing:
                 marker = " — replaces the installed version"
             else:
@@ -9008,9 +9008,9 @@ def _render_collection_preview(
 
     if blocked:
         st.error(
-            f"{len(blocked)} skill(s) in this library share a name with a skill from a "
-            "configured folder the sidecar does not manage. Installing is blocked until "
-            "those names differ.",
+            f"{len(blocked)} skill(s) in this library share a name with a skill in a "
+            "nested folder inside the skills root. Installing is blocked until those "
+            "folders move or those names differ.",
             icon=":material/block:",
         )
     elif replacing:
@@ -9056,9 +9056,9 @@ def _render_existing_skill_notice(existing: dict[str, Any] | None) -> bool:
         return False
     if not existing.get("replaceable"):
         st.error(
-            f"A skill named '{existing.get('name')}' already comes from a configured "
-            "skills folder. The sidecar does not manage that folder, so it cannot be "
-            "replaced from here.",
+            f"A skill named '{existing.get('name')}' already exists in a nested folder "
+            "inside the skills root. Move or remove that folder before installing this "
+            "archive.",
             icon=":material/block:",
         )
         return False

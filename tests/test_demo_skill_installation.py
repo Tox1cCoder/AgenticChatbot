@@ -627,7 +627,7 @@ def test_pending_sync_is_never_described_as_a_failure(demo_module):
     assert "Installed locally" in message
 
 
-def test_configured_root_collision_is_not_replaceable(demo_module, monkeypatch):
+def test_unreplaceable_collision_explains_why(demo_module, monkeypatch):
     rendered: list[str] = []
     monkeypatch.setattr(
         demo_module.st,
@@ -641,10 +641,10 @@ def test_configured_root_collision_is_not_replaceable(demo_module, monkeypatch):
     )
 
     assert replaceable is False
-    assert "configured skills folder" in rendered[0]
+    assert "nested folder" in rendered[0]
 
 
-def test_profile_installed_collision_offers_an_update(demo_module, monkeypatch):
+def test_installed_collision_offers_an_update(demo_module, monkeypatch):
     monkeypatch.setattr(demo_module.st, "info", lambda *args, **kwargs: None, raising=False)
 
     replaceable = demo_module._render_existing_skill_notice(

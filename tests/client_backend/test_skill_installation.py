@@ -11,14 +11,13 @@ from fastapi.testclient import TestClient
 
 from client_backend.api import skills as skills_api
 from client_backend.core.config import client_settings
-from client_backend.core.paths import get_installed_skills_root
+from client_backend.core.paths import resolve_skills_root
 from client_backend.services import local_skills_registry as registry_module
 from client_backend.services.local_skills_registry import LocalSkillsRegistry
 from client_backend.services.skill_runtime import install as install_module
 from client_backend.services.skill_runtime.collection import DiscoveredSkill
 from client_backend.services.skill_runtime.install import SkillBundleInstaller
 from shared.skills.errors import (
-    SKILL_CONFIGURED_ROOT_CONFLICT,
     SKILL_INSTALL_CONFLICT,
     SKILL_INSTALL_INVALID,
     SKILL_SETUP_REQUIRED,
@@ -90,7 +89,13 @@ class _SecretStore:
 @pytest.fixture
 def install_env(tmp_path, monkeypatch):
     original_profile_root = client_settings.profile_root
+    original_skills_root = client_settings.skills_root
     client_settings.profile_root = str(tmp_path / "profiles")
+    # One configured root for both sides: the registry scans it and the installer
+    # writes into it, which is what CLIENT_SKILLS_ROOT means.
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    client_settings.skills_root = str(skills_root)
     monkeypatch.setattr(
         registry_module,
         "get_upstream_auth_service",
@@ -98,25 +103,24 @@ def install_env(tmp_path, monkeypatch):
     )
     # install.py no longer touches the runtime bridge at all; a bridge double
     # here would hide a regression rather than prevent one.
-    configured = tmp_path / "configured"
-    configured.mkdir()
     sources = tmp_path / "sources"
     sources.mkdir()
     environment = _EnvironmentManager()
     secrets = _SecretStore()
     try:
         yield SimpleNamespace(
-            configured=configured,
+            skills_root=skills_root,
             sources=sources,
             environment=environment,
             secrets=secrets,
         )
     finally:
         client_settings.profile_root = original_profile_root
+        client_settings.skills_root = original_skills_root
 
 
 def _installer(install_env):
-    registry = LocalSkillsRegistry(skill_roots=[str(install_env.configured)])
+    registry = LocalSkillsRegistry()
     return registry, SkillBundleInstaller(
         registry=registry,
         environment_manager=install_env.environment,
@@ -156,7 +160,7 @@ async def test_install_copies_complete_nested_bundle_and_preserves_bundle_root(i
         approve_setup=False,
     )
 
-    installed = get_installed_skills_root(USER_ID) / result["install_id"]
+    installed = resolve_skills_root(USER_ID) / result["install_id"]
     assert (installed / "skills" / "demo-skill" / "SKILL.md").is_file()
     assert (installed / "bin" / "demo-skill-cli.py").is_file()
     skill = registry.get_skill("demo-skill")
@@ -176,7 +180,7 @@ async def test_install_rejects_changed_source_hash_before_copy(install_env):
         await installer.install(source, expected_source_hash=preview["source_hash"])
 
     assert exc_info.value.code == SKILL_INSTALL_INVALID
-    install_root = get_installed_skills_root(USER_ID)
+    install_root = resolve_skills_root(USER_ID)
     assert not install_root.exists() or not any(install_root.iterdir())
 
 
@@ -203,7 +207,7 @@ async def test_install_rejects_bundle_changed_while_it_is_being_copied(install_e
         await installer.install(source, expected_source_hash=preview["source_hash"])
 
     assert exc_info.value.code == SKILL_INSTALL_INVALID
-    install_root = get_installed_skills_root(USER_ID)
+    install_root = resolve_skills_root(USER_ID)
     assert not install_root.exists() or not any(install_root.iterdir())
 
 
@@ -231,7 +235,7 @@ async def test_python_project_requires_approval_then_prepares_installed_copy(ins
     assert result["runtime_status"] == "ready"
     _, prepared_root, approved, _ = install_env.environment.prepared[0]
     assert approved is True
-    assert prepared_root.parent == get_installed_skills_root(USER_ID)
+    assert prepared_root.parent == resolve_skills_root(USER_ID)
 
 
 @pytest.mark.asyncio
@@ -313,7 +317,7 @@ async def test_uninstall_removes_bundle_runtime_and_registry_entry(install_env):
     source = _write_skill(install_env.sources / "demo")
     registry, installer = _installer(install_env)
     result = await installer.install(source)
-    installed = get_installed_skills_root(USER_ID) / result["install_id"]
+    installed = resolve_skills_root(USER_ID) / result["install_id"]
 
     await installer.uninstall("demo-skill")
 
@@ -490,7 +494,7 @@ async def test_failed_update_preserves_the_previous_bundle_and_runtime(install_e
     surviving = registry.get_skill("demo-skill")
     assert "v1" in surviving.content
     assert surviving.source_hash == installed["source_hash"]
-    assert (get_installed_skills_root(USER_ID) / installed["install_id"]).is_dir()
+    assert (resolve_skills_root(USER_ID) / installed["install_id"]).is_dir()
 
 
 @pytest.mark.asyncio
@@ -500,7 +504,7 @@ async def test_prepare_install_stages_replacement_without_mutating_old_bundle(in
     _, installer = _installer(install_env)
     installed = await installer.install(first)
     preview = await installer.preview(second)
-    old_bundle = get_installed_skills_root(USER_ID) / installed["install_id"]
+    old_bundle = resolve_skills_root(USER_ID) / installed["install_id"]
     assert hasattr(install_module, "SkillInstallSpec"), "transactions require install specs"
     spec = install_module.SkillInstallSpec(
         discovered=DiscoveredSkill(second, second / "SKILL.md"),
@@ -521,12 +525,50 @@ async def test_prepare_install_stages_replacement_without_mutating_old_bundle(in
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enabled", [True, False])
-async def test_configured_root_skill_cannot_be_replaced(install_env, enabled):
-    """A skills root the user manages is never rewritten by an install."""
-    _write_skill(install_env.configured / "demo", body="configured")
+async def test_hand_written_bundle_in_the_root_is_replaced_with_its_hash(install_env, enabled):
+    """The sidecar owns the whole root, so a hand-written bundle updates in place."""
+    hand_written = _write_skill(install_env.skills_root / "demo", body="hand-written")
     registry, installer = _installer(install_env)
     await registry.initialize()
     registry.set_skill_enabled("demo-skill", enabled)
+    replacement = _write_skill(install_env.sources / "replacement", body="new")
+
+    result = await installer.install(
+        replacement,
+        replace_source_hash=registry.get_skill("demo-skill").source_hash,
+    )
+
+    assert result["action"] == "updated"
+    assert not hand_written.exists(), "the replaced bundle must not survive as a duplicate"
+    await registry.initialize()
+    assert "new" in registry.get_skill("demo-skill").content
+    # One bundle, one name: a leftover copy would shadow the installed one.
+    assert [entry.name for entry in install_env.skills_root.iterdir()] == [result["install_id"]]
+
+
+@pytest.mark.asyncio
+async def test_replacement_without_the_installed_hash_is_a_conflict(install_env):
+    """A collision is only overwritten on purpose, hand-written or not."""
+    _write_skill(install_env.skills_root / "demo", body="hand-written")
+    registry, installer = _installer(install_env)
+    await registry.initialize()
+    replacement = _write_skill(install_env.sources / "replacement", body="new")
+
+    with pytest.raises(SkillRuntimeError) as exc_info:
+        await installer.install(replacement)
+
+    assert exc_info.value.code == SKILL_INSTALL_CONFLICT
+    assert "hand-written" in registry.get_skill("demo-skill").content
+
+
+@pytest.mark.asyncio
+async def test_shared_folder_collision_is_refused_rather_than_deleting_siblings(install_env):
+    """Replacement swaps a whole folder, so it must not hold another skill."""
+    container = install_env.skills_root / "vendor"
+    _write_skill(container / "demo", body="nested")
+    _write_skill(container / "other", name="other-skill", body="sibling")
+    registry, installer = _installer(install_env)
+    await registry.initialize()
     replacement = _write_skill(install_env.sources / "replacement", body="new")
 
     with pytest.raises(SkillRuntimeError) as exc_info:
@@ -535,8 +577,32 @@ async def test_configured_root_skill_cannot_be_replaced(install_env, enabled):
             replace_source_hash=registry.get_skill("demo-skill").source_hash,
         )
 
-    assert exc_info.value.code == SKILL_CONFIGURED_ROOT_CONFLICT
-    assert "configured" in registry.get_skill("demo-skill").content
+    assert exc_info.value.code == SKILL_INSTALL_CONFLICT
+    assert "vendor" in exc_info.value.message
+    assert (container / "demo" / "SKILL.md").is_file()
+    assert (container / "other" / "SKILL.md").is_file()
+    assert "nested" in registry.get_skill("demo-skill").content
+
+
+@pytest.mark.asyncio
+async def test_skill_published_by_the_root_itself_is_refused(install_env):
+    """The skills root is never the directory a replacement swaps."""
+    (install_env.skills_root / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: Demo skill.\n---\n\nroot-level\n",
+        encoding="utf-8",
+    )
+    registry, installer = _installer(install_env)
+    await registry.initialize()
+    replacement = _write_skill(install_env.sources / "replacement", body="new")
+
+    with pytest.raises(SkillRuntimeError) as exc_info:
+        await installer.install(
+            replacement,
+            replace_source_hash=registry.get_skill("demo-skill").source_hash,
+        )
+
+    assert exc_info.value.code == SKILL_INSTALL_CONFLICT
+    assert (install_env.skills_root / "SKILL.md").is_file()
 
 
 @pytest.mark.asyncio
@@ -547,7 +613,7 @@ async def test_upload_provenance_never_persists_staging_path(install_env):
     result = await installer.install(source, source_kind="upload")
 
     metadata = install_module._read_install_metadata(
-        get_installed_skills_root(USER_ID) / result["install_id"]
+        resolve_skills_root(USER_ID) / result["install_id"]
     )
     assert metadata["source"] == "upload"
     assert "source_path" not in metadata
@@ -562,7 +628,7 @@ async def test_path_install_still_records_its_source_path(install_env):
     result = await installer.install(source)
 
     metadata = install_module._read_install_metadata(
-        get_installed_skills_root(USER_ID) / result["install_id"]
+        resolve_skills_root(USER_ID) / result["install_id"]
     )
     assert metadata["source"] == "profile"
     assert metadata["source_path"] == str(source)
@@ -618,7 +684,7 @@ async def test_observer_cancellation_before_commit_installs_nothing(install_env)
 
     await registry.initialize()
     assert registry.get_skill("demo-skill") is None
-    install_root = get_installed_skills_root(USER_ID)
+    install_root = resolve_skills_root(USER_ID)
     assert not install_root.exists() or not any(install_root.iterdir())
 
 
@@ -657,7 +723,7 @@ async def test_runtime_preparation_cancellation_returns_before_worker_and_cleans
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=0.5)
 
-    install_root = get_installed_skills_root(USER_ID)
+    install_root = resolve_skills_root(USER_ID)
     assert any(install_root.glob("*.stage-*"))
     retry = asyncio.create_task(
         installer.install(
@@ -798,7 +864,7 @@ async def test_install_setup_and_uninstall_never_touch_the_runtime_bridge(instal
 
 def test_list_installed_omits_a_bundle_that_cannot_be_safely_hashed(install_env, monkeypatch):
     _, installer = _installer(install_env)
-    bundle = get_installed_skills_root(USER_ID) / "demo-skill-deadbeef"
+    bundle = resolve_skills_root(USER_ID) / "demo-skill-deadbeef"
     bundle.mkdir(parents=True)
     (bundle / "install.json").write_text(
         json.dumps({"bundle_name": "demo-skill", "source_hash": "a" * 64}),

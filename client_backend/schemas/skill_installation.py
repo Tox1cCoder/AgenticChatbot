@@ -35,7 +35,6 @@ OperationPhase = Literal[
 ]
 CatalogSyncStatus = Literal["synced", "pending", "disconnected"]
 InstallAction = Literal["installed", "updated"]
-InstallSource = Literal["profile", "configured_root"]
 
 
 def to_camel(value: str) -> str:
@@ -89,14 +88,14 @@ class SkillArchiveSetupPreview(CamelModel):
 class SkillExistingSkill(CamelModel):
     """The installed skill an upload would collide with, if any.
 
-    ``replaceable`` is what the UI branches on. It is ``False`` for a skill
-    discovered from a configured root, which the sidecar does not own and must
-    never overwrite -- the user's own directory is not ours to rewrite.
+    ``replaceable`` is what the UI branches on. It is ``False`` only for a bundle
+    nested below a direct child of the skills root: the installer promotes and
+    rolls back direct children, so a nested folder is the operator's to
+    reorganize before the sidecar can replace what it publishes.
     """
 
     name: str
     source_hash: str
-    install_source: InstallSource
     enabled: bool
     replaceable: bool
 

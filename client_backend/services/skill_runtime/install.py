@@ -17,15 +17,18 @@ import filelock
 
 from client_backend.core.logging import get_logger
 from client_backend.core.paths import (
-    get_installed_skills_root,
     get_skill_operations_root,
+    is_promotable_bundle,
     is_under_root,
+    make_relative_to_root,
+    resolve_skills_root,
     sanitize_filename,
 )
 from client_backend.services.local_skills_registry import (
     LocalSkillsRegistry,
     SkillMetadata,
     get_skills_registry,
+    publishes_single_skill,
 )
 from client_backend.services.skill_runtime.collection import DiscoveredSkill
 from client_backend.services.skill_runtime.environment import (
@@ -40,7 +43,6 @@ from client_backend.services.skill_runtime.locks import (
 from client_backend.services.skill_runtime.secrets import SkillSecretStore
 from client_backend.services.skill_runtime.state import atomic_write_json, read_json_object
 from shared.skills.errors import (
-    SKILL_CONFIGURED_ROOT_CONFLICT,
     SKILL_INSTALL_CONFLICT,
     SKILL_INSTALL_INVALID,
     SKILL_SETUP_REQUIRED,
@@ -388,13 +390,13 @@ class SkillBundleInstaller:
             f"{sanitize_filename(source_skill.name)}-{source_skill.source_hash[:12]}"
         )
         stage = install_root / f"{target.name}.stage-{uuid.uuid4().hex}"
-        previous = _find_installed_bundle(install_root, source_skill.name)
+        previous = self._resolve_previous_bundle(install_root, source_skill.name, existing)
         backup_basis = previous.name if previous is not None else target.name
         backup = install_root / f"{backup_basis}.backup-{uuid.uuid4().hex}"
         for path in (target, stage, backup):
             if not is_under_root(path, install_root):
                 raise SkillRuntimeError(
-                    UNSAFE_BUNDLE_PATH, "install path escapes the profile skill root"
+                    UNSAFE_BUNDLE_PATH, "install path escapes the skills root"
                 )
 
         runtime_cleanup_deferred = False
@@ -515,6 +517,25 @@ class SkillBundleInstaller:
             previous_source_hash=existing.source_hash if existing is not None else None,
         )
 
+    @staticmethod
+    def _resolve_previous_bundle(
+        install_root: Path,
+        name: str,
+        existing: SkillMetadata | None,
+    ) -> Path | None:
+        """Return the directory this install replaces, if any.
+
+        The catalog decides, not ``install.json``: a bundle the operator wrote by
+        hand carries no install metadata, so scanning for metadata alone would
+        miss it and promote a second directory publishing the same skill name --
+        two bundles, one name, and whichever the scanner reaches first wins.
+        The metadata scan remains as a fallback for a bundle the registry has not
+        picked up yet.
+        """
+        if existing is not None and is_promotable_bundle(existing.bundle_root, install_root):
+            return existing.bundle_root
+        return _find_installed_bundle(install_root, name)
+
     def _resolve_replacement_action(
         self,
         name: str,
@@ -525,11 +546,9 @@ class SkillBundleInstaller:
     ) -> Literal["installed", "updated"]:
         """Decide whether this request may overwrite an existing skill.
 
-        Ownership is decided by *location*. The registry copies
-        ``install_metadata`` out of any ``install.json`` it finds under any
-        configured root, so trusting that file's ``installed`` flag would let a
-        hand-copied bundle claim to be profile-installed. Only a bundle under the
-        profile's installed root is ours to replace.
+        There is one skill root and the sidecar owns it, so a colliding skill is
+        replaceable -- but only deliberately, and only when it is a direct child
+        of that root, which is the only shape promotion and rollback can move.
         """
         if existing is None:
             if replace_source_hash is not None:
@@ -539,10 +558,28 @@ class SkillBundleInstaller:
                 )
             return "installed"
 
-        if not is_under_root(existing.bundle_root, get_installed_skills_root(user_id)):
+        skills_root = resolve_skills_root(user_id)
+        if not is_under_root(existing.bundle_root, skills_root):
+            # The registry scans the root the installer writes to, so a skill
+            # outside it means those two disagree. Refuse rather than write
+            # outside the directory we own.
             raise SkillRuntimeError(
-                SKILL_CONFIGURED_ROOT_CONFLICT,
-                f"skill '{name}' comes from a configured skills root and cannot be replaced",
+                UNSAFE_BUNDLE_PATH,
+                f"skill '{name}' resolves outside the skills root",
+            )
+        if not is_promotable_bundle(existing.bundle_root, skills_root):
+            raise SkillRuntimeError(
+                SKILL_INSTALL_CONFLICT,
+                f"skill '{name}' is published by the skills root itself rather than by a "
+                "folder inside it; move it into its own folder before installing",
+            )
+        if not publishes_single_skill(existing.bundle_root):
+            raise SkillRuntimeError(
+                SKILL_INSTALL_CONFLICT,
+                f"skill '{name}' shares the folder "
+                f"'{make_relative_to_root(existing.bundle_root, skills_root)}' with other "
+                "skills, and replacing it would remove them too; give it its own folder "
+                "inside the skills root first",
             )
         if replace_source_hash is None:
             raise SkillRuntimeError(
@@ -623,7 +660,7 @@ class SkillBundleInstaller:
                 raise SkillRuntimeError(SKILL_INSTALL_INVALID, f"no installed skill named '{name}'")
             if bundle is not None and not is_under_root(bundle, install_root):
                 raise SkillRuntimeError(
-                    UNSAFE_BUNDLE_PATH, "installed bundle path escapes the profile root"
+                    UNSAFE_BUNDLE_PATH, "installed bundle path escapes the skills root"
                 )
 
             removed_now = bundle is not None
@@ -694,7 +731,7 @@ class SkillBundleInstaller:
         user_id = self._registry._resolve_current_user_id()
         if not user_id:
             return []
-        root = get_installed_skills_root(user_id)
+        root = resolve_skills_root(user_id)
         if not root.is_dir():
             return []
         installed: list[dict] = []
@@ -805,6 +842,6 @@ class SkillBundleInstaller:
         return str(user_id)
 
     def _resolve_install_root(self) -> Path:
-        root = get_installed_skills_root(self._resolve_user_id())
+        root = resolve_skills_root(self._resolve_user_id())
         root.mkdir(parents=True, exist_ok=True)
         return root

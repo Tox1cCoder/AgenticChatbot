@@ -613,9 +613,9 @@ def test_every_emittable_skill_error_code_is_documented() -> None:
 def test_internal_error_codes_never_reach_a_client() -> None:
     """Internal codes are aliased at the boundary, so they must not be published."""
     from client_backend.api.skill_errors import SKILL_ERROR_STATUS, publish_code
-    from shared.skills.errors import SKILL_CONFIGURED_ROOT_CONFLICT, SKILL_INSTALL_INVALID
+    from shared.skills.errors import SKILL_INSTALL_INVALID, UNSAFE_BUNDLE_PATH
 
-    for internal in (SKILL_CONFIGURED_ROOT_CONFLICT, SKILL_INSTALL_INVALID):
+    for internal in (SKILL_INSTALL_INVALID, UNSAFE_BUNDLE_PATH):
         assert internal not in SKILL_ERROR_STATUS
         assert publish_code(internal) in SKILL_ERROR_STATUS
 

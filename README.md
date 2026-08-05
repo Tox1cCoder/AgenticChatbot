@@ -53,7 +53,7 @@ A Streamlit **demo UI** ([`demo.py`](demo.py)) and a ready-to-import **Postman c
 | **MCP-native** | Server-managed MCP registry ([`/mcp/*`](app/api/mcp.py)) plus deferred tool search ([`tool_search`](app/ai/tool_search_tool.py)) to keep agent schemas small at prompt time. |
 | **Custom agents** | Per-user agents with their own prompt, model, tools, and skills. MCP/skill selections are stored as **account-wide desired capabilities** (keyed by stable logical identity) but **execute device-locally**: on each request they resolve against the requesting device's live catalog, rebinding to its current session identity. Capabilities missing on the active device are reported as non-blocking `degraded`/`device_unavailable` availability and skipped at runtime — the agent still runs — while another device is never scanned for a match. |
 | **Client runtime bridge** | Devices register, heartbeat, sync tool/skill catalogs, and receive WebSocket-dispatched tool calls — enabling local shell/filesystem/MCP execution without exposing them to the public network. |
-| **Skills** | Markdown-defined skills with YAML frontmatter, owned by each client device. The sidecar scans `CLIENT_SKILLS_ROOTS`, syncs a per-device catalog to the server, and serves skill content over the runtime bridge ([`client_backend/services/local_skills_registry.py`](client_backend/services/local_skills_registry.py)). The server has no skills of its own. |
+| **Skills** | Markdown-defined skills with YAML frontmatter, owned by each client device. The sidecar scans one skills root (`CLIENT_SKILLS_ROOT`, or a per-user directory under the profile), syncs a per-device catalog to the server, and serves skill content over the runtime bridge ([`client_backend/services/local_skills_registry.py`](client_backend/services/local_skills_registry.py)). The server has no skills of its own. |
 | **Live widgets** | Token-minted handshake (`POST /widgets/{id}/connection`) followed by a stateful WebSocket (`/widgets/{id}/connect`) for interactive, server-driven UI components. |
 | **Durable conversation compaction** | PostgreSQL-backed compacted memory with sequence cursors, leased Celery jobs, request-budget preflight, and a bounded emergency path. |
 | **Auto-continue** | Automatic continuation rounds when an agent hits iteration limits (`auto_continue_enabled`), with absolute wall-clock and iteration safety caps. |
@@ -481,9 +481,9 @@ The server accepts either a fully-formed URL (`REDIS_URL`) or a hostname + conve
 | `CLIENT_SERVER_API_TIMEOUT_SECONDS` | `60` |
 | `CLIENT_BACKEND_HOST` / `CLIENT_BACKEND_PORT` | `127.0.0.1` / `8100` |
 | `CLIENT_ENVIRONMENT` | `development` |
-| `CLIENT_PROFILE_ROOT` | *(OS-default — `%LOCALAPPDATA%\CodexDesktop` on Windows)* |
+| `CLIENT_PROFILE_ROOT` | *(OS-default — `%LOCALAPPDATA%\KaniDesktop` on Windows, `~/.config/kani-desktop` elsewhere)* |
 | `CLIENT_DEVICE_NAME` | — |
-| `CLIENT_SKILLS_ROOTS` | comma-separated absolute paths for local skill scanning |
+| `CLIENT_SKILLS_ROOT` | one absolute path holding every skill; unset means `<profile>/<server-hash>/<user-id>/skills/installed` |
 | `CLIENT_WORKSPACE_ROOTS` | comma-separated absolute paths for local filesystem tools |
 | `CLIENT_MCP_CONFIG_PATH` | optional legacy source path for the one-time `mcp migrate` command |
 | `CLIENT_MCP_STARTUP_TIMEOUT_SECONDS` | `30` |
@@ -607,7 +607,7 @@ codex-client-backend doctor --config .env.client --json # machine-readable diagn
    ```bash
    uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
    ```
-2. **Sidecar** (port 8100) — set `CLIENT_SKILLS_ROOTS` to the absolute path of `<repo>/skills` so the bundled examples are served:
+2. **Sidecar** (port 8100) — set `CLIENT_SKILLS_ROOT` to the absolute path of `<repo>/skills` so the bundled examples are served (uploads then install into that same folder):
    ```bash
    codex-client-backend run --config .env.client
    ```
@@ -800,8 +800,17 @@ Skills are Markdown files with YAML frontmatter describing a capability. The
 current parser accepts `name`, `description`, `category`, and comma-separated
 `tags`; unsupported metadata is not treated as a security policy. They are loaded by:
 
-- **Client (only source of skills)** — [`LocalSkillsRegistry`](client_backend/services/local_skills_registry.py), scanning `CLIENT_SKILLS_ROOTS`; synced per-device to the server and resolved at chat time by [`skill_resolver.py`](app/ai/skill_resolver.py) strictly for the originating device.
-- To serve this repo's `skills/` folder during development, add its absolute path to the local sidecar's `CLIENT_SKILLS_ROOTS`.
+- **Client (only source of skills)** — [`LocalSkillsRegistry`](client_backend/services/local_skills_registry.py), scanning the one skills root; synced per-device to the server and resolved at chat time by [`skill_resolver.py`](app/ai/skill_resolver.py) strictly for the originating device.
+- To serve this repo's `skills/` folder during development, set the sidecar's `CLIENT_SKILLS_ROOT` to its absolute path.
+
+**One skills root.** `CLIENT_SKILLS_ROOT` is the single directory the sidecar
+reads *and* writes: scanning, ZIP installation, guarded updates, and uninstall
+all act on it. Leave it unset and it resolves to
+`<profile>/<server-hash>/<user-id>/skills/installed`, which keeps two users on
+one machine from sharing a catalog. Set it and the sidecar uses that path
+verbatim — including installing uploads into it — so pointing it at a working
+copy means the installer writes `install.json`, staging directories, and updated
+bundles there. It is not a read-only view of someone else's folder.
 
 Frontmatter parsing is shared in [`shared/skills/front_matter.py`](shared/skills/front_matter.py).
 Optional user-local examples such as `skills/playwright-cli/` and
@@ -821,7 +830,7 @@ An executable skill uses the standard Agent Skills layout: `SKILL.md` plus optio
 
 Highlights:
 
-- **Three install paths** — read-only `CLIENT_SKILLS_ROOTS` scanning; hash-bound `POST /skills/install/preview` plus `POST /skills/install` for local tooling; or a browser ZIP upload (below).
+- **Three install paths** — writing a bundle into the skills root by hand; hash-bound `POST /skills/install/preview` plus `POST /skills/install` for local tooling; or a browser ZIP upload (below). All three land in the same directory.
 - **Scoped execution** — argv zero resolves only from that skill's bundle or prepared Python environment; no global `PATH` mutation and no arbitrary system-command fallback.
 - **Readiness** — `ready` / `not_ready` / `instruction_only`, with explicit setup and rebuild hints; unsafe bundles are rejected or omitted.
 - **Python setup** — approved projects are installed into staged, per-skill virtual environments and atomically promoted.
@@ -850,9 +859,11 @@ its secrets are device-local.
 The flow is deliberately two-step. Uploading validates and previews; it never
 runs setup code. Installing requires the `expectedSourceHash` from that preview,
 plus `approveSetup` when the bundle declares a Python project, plus
-`replaceSourceHash` when a skill of the same name is already installed. A skill
-discovered from a configured root reports `preview.existingSkill.replaceable:
-false` and is never overwritten — the sidecar does not manage those folders.
+`replaceSourceHash` when a skill of the same name already exists — including one
+written into the root by hand, since the sidecar owns the whole root. The one
+exception is shape: a colliding skill nested below a direct child of the root
+reports `preview.existingSkill.replaceable: false` and is never overwritten,
+because promotion and rollback move direct children only.
 
 Installation runs asynchronously because a dependency build outlasts an HTTP
 request. Poll the returned `statusUrl` with bounded backoff; a failed
@@ -1030,6 +1041,14 @@ separate, fully independent devices.
 > device on next start; previously registered device rows become inert and can
 > be cleaned up at any time. Deleting `device_identity.json` likewise
 > re-registers the installation as a new device.
+
+> **Migration note (2026-08):** the default profile directory moved from
+> `CodexDesktop` / `codex-desktop` to `KaniDesktop` / `kani-desktop`. Nothing is
+> copied across: a sidecar started after this change finds an empty profile, so
+> it mints a new device identity and no longer sees the previous installation's
+> installed skills, MCP configuration, or stored secrets. Point
+> `CLIENT_PROFILE_ROOT` at the old directory, or move it to the new name, to keep
+> an existing profile.
 
 ---
 

@@ -14,7 +14,7 @@ import filelock
 from pydantic import BaseModel, ConfigDict
 
 from client_backend.core.logging import get_logger
-from client_backend.core.paths import get_installed_skills_root, get_skill_operations_root
+from client_backend.core.paths import get_skill_operations_root, resolve_skills_root
 from client_backend.services.skill_runtime.environment import PREPARATION_LEASE_FILENAME
 from client_backend.services.skill_runtime.locks import (
     SKILLS_MUTATION_SCOPE,
@@ -205,7 +205,7 @@ class SkillInstallTransaction:
         record.state = "rolling_back"
         self._persist(record)
         failures: list[str] = []
-        root = get_installed_skills_root(self._user_id)
+        root = resolve_skills_root(self._user_id)
         for member in reversed(record.members):
             try:
                 target = self._member_path(root, member.target_name)
@@ -244,7 +244,7 @@ class SkillInstallTransaction:
         self._persist(record)
 
     async def _finish_committed_cleanup(self, record: InstallTransactionRecord) -> None:
-        root = get_installed_skills_root(self._user_id)
+        root = resolve_skills_root(self._user_id)
         failures: list[str] = []
         for member in record.members:
             try:
@@ -293,7 +293,7 @@ class SkillInstallTransaction:
         self._journal_path().unlink(missing_ok=True)
 
     async def _committed_members_match(self, record: InstallTransactionRecord) -> bool:
-        root = get_installed_skills_root(self._user_id)
+        root = resolve_skills_root(self._user_id)
         for member in record.members:
             target = self._member_path(root, member.target_name)
             payload = read_json_object(target / "install.json")
@@ -384,7 +384,7 @@ async def recover_install_transactions_locked(
                 outcomes[identifier] = "failed"
             preserve_unknown_stages = True
     if not preserve_unknown_stages:
-        installed_root = get_installed_skills_root(user_id)
+        installed_root = resolve_skills_root(user_id)
         if installed_root.is_dir():
             for candidate in installed_root.iterdir():
                 if (
