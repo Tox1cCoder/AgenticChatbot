@@ -36,6 +36,46 @@ def _web_image(index: int) -> dict[str, Any]:
     }
 
 
+def _image_search_image(index: int, *, result_rank: int = 0) -> dict[str, Any]:
+    return {
+        "id": f"image:search:{index}",
+        "type": "image",
+        "source": "image_search",
+        "display_policy": "inline_only",
+        "alt_text": "T1 roster image",
+        "payload": {
+            "url": f"https://media.example/roster-{index}.jpg",
+            "description": "T1 roster image",
+            "width": 1200,
+            "height": 800,
+            "mime_type": "image/jpeg",
+        },
+        "provenance": {
+            "provider": "brave_image_search",
+            "query": "T1 roster",
+            "result_rank": result_rank,
+        },
+    }
+
+
+def _direct_image(index: int = 0) -> dict[str, Any]:
+    return {
+        "id": f"image:direct:{index}",
+        "type": "image",
+        "source": "tool_image",
+        "display_policy": "inline_only",
+        "alt_text": "Generated diagram",
+        "payload": {
+            "url": f"https://media.example/direct-{index}.jpg",
+            "description": "Generated diagram",
+            "width": 1200,
+            "height": 800,
+            "mime_type": "image/jpeg",
+        },
+        "provenance": {"provider": "test"},
+    }
+
+
 def _image_search_group() -> dict[str, Any]:
     return {
         "id": "imagegroup:brave:0",
@@ -87,18 +127,21 @@ def test_lift_selects_from_complete_parallel_tool_batch() -> None:
     assert all("_rich_item_candidates" not in artifact for artifact in artifacts)
 
 
-def test_later_dedicated_search_replaces_earlier_web_candidate() -> None:
+def test_later_direct_source_image_outranks_earlier_dedicated_search_images() -> None:
+    """A second, later ``_lift_rich_candidates`` call must re-rank the whole
+    accumulated pool, not just append: a higher-priority direct-source image
+    lifted afterward still displaces a lower-priority one already selected."""
     context: dict[str, Any] = {"rich_item_candidates": []}
     ToolLoopMixin._lift_rich_candidates(
         context,
-        [{"_rich_item_candidates": [_web_image(0), _web_image(1)]}],
+        [{"_rich_item_candidates": [_image_search_image(0), _image_search_image(1)]}],
     )
     ToolLoopMixin._lift_rich_candidates(
         context,
-        [{"_rich_item_candidates": [_image_search_group()]}],
+        [{"_rich_item_candidates": [_direct_image()]}],
     )
 
-    assert context["rich_item_candidates"][0]["id"] == "imagegroup:brave:0"
+    assert context["rich_item_candidates"][0]["id"] == "image:direct:0"
     assert len(context["rich_item_candidates"]) == settings.rich_auto_place_max_images
 
 
@@ -178,7 +221,10 @@ def test_adapter_records_duration_when_selector_fails(
 
 def test_document_registration_reuses_canonical_selector() -> None:
     context: dict[str, Any] = {
-        "rich_item_candidates": [_web_image(0), _web_image(1)]
+        "rich_item_candidates": [
+            _image_search_image(0, result_rank=0),
+            _image_search_image(1, result_rank=1),
+        ]
     }
 
     added = register_document_image_candidates(
@@ -204,7 +250,7 @@ def test_prompt_and_placement_preserve_canonical_image_order() -> None:
     ToolLoopMixin._lift_rich_candidates(
         context,
         [
-            {"_rich_item_candidates": [_web_image(0), _web_image(1)]},
+            {"_rich_item_candidates": [_image_search_image(0, result_rank=1)]},
             {"_rich_item_candidates": [_image_search_group()]},
         ],
     )
@@ -223,6 +269,6 @@ def test_prompt_and_placement_preserve_canonical_image_order() -> None:
         )
     ]
 
-    assert selected_ids == ["imagegroup:brave:0", "image:tavily:0"]
+    assert selected_ids == ["image:search:0", "imagegroup:brave:0"]
     assert guidance.index(selected_ids[0]) < guidance.index(selected_ids[1])
     assert anchor_ids == selected_ids

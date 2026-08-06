@@ -1,8 +1,12 @@
 """End-to-end guard for the image search → inline display path.
 
-Covers the "cannot send images" complaint: a Tavily-shaped tool result must
-produce image candidates that survive into the persisted message as inline
-rich items even when the model writes no marker itself (auto-placement).
+Covers the "cannot send images" complaint: a dedicated-search (Brave image
+search) tool result must produce image candidates that survive into the
+persisted message as inline rich items even when the model writes no marker
+itself (auto-placement). Tavily no longer discovers images at all — page-
+scraped images cannot establish relevance from page metadata (see
+``build_image_candidates_from_tool_result``), so that provider is out of
+scope for this guard.
 """
 
 import json
@@ -25,21 +29,6 @@ from app.services.event_streaming.ai_sdk_projection import (
     project_ai_sdk_message_event,
 )
 from app.services.message_service import MessageService
-
-TAVILY_RESULT = json.dumps(
-    {
-        "query": "eiffel tower at night",
-        "answer": "The Eiffel Tower is lit nightly.",
-        "images": [
-            {
-                "url": "https://example.com/eiffel.jpg",
-                "description": "Eiffel Tower illuminated at night in Paris",
-            }
-        ],
-        "results": [],
-        "total_results": 0,
-    }
-)
 
 ANSWER = (
     "The Eiffel Tower is stunning at night, illuminated by thousands of lamps "
@@ -159,46 +148,29 @@ async def test_trace_shaped_parallel_search_selects_brave_without_legacy_gallery
     assert metadata["rich_items"][0]["id"] == "imagegroup:tool:call-brave"
 
 
-def test_tavily_image_lands_inline_in_persisted_message(monkeypatch):
+def test_tavily_results_never_land_inline(monkeypatch):
+    """Tavily results carry no image candidates at all now, relevant-looking
+    or not — there is no metadata-relevance filter left to bypass."""
     monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
     monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
 
-    candidates = build_image_candidates_from_tool_result(
-        TAVILY_RESULT, tool_call_id="call-1", tool_name="tavily_search"
-    )
-    assert candidates, "tavily-shaped results must produce image candidates"
-    assert candidates[0]["id"] == "image:tool:call-1:0"
-
-    response = _workflow_response(ANSWER, candidates)
-    content = finalize_article_content(response, ANSWER)
-    assert "<!--rich:image:tool:call-1:0-->" in content
-
-    metadata = build_bot_metadata(response)
-    rich_items = metadata.get("rich_items") or []
-    image_items = [item for item in rich_items if item.get("type") == "image"]
-    assert len(image_items) == 1
-    assert image_items[0]["id"] == "image:tool:call-1:0"
-    assert image_items[0]["payload"]["url"] == "https://example.com/eiffel.jpg"
-    assert metadata.get("rich_reference_warnings") == []
-
-
-def test_irrelevant_image_stays_dropped(monkeypatch):
-    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
-    monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
-
-    irrelevant = json.dumps(
+    payload = json.dumps(
         {
+            "query": "eiffel tower at night",
             "images": [
                 {
-                    "url": "https://example.com/cat.jpg",
-                    "description": "A cat sleeping on a windowsill",
+                    "url": "https://example.com/eiffel.jpg",
+                    "description": "Eiffel Tower illuminated at night in Paris",
                 }
-            ]
+            ],
+            "results": [],
         }
     )
     candidates = build_image_candidates_from_tool_result(
-        irrelevant, tool_call_id="call-2", tool_name="tavily_search"
+        payload, tool_call_id="call-1", tool_name="tavily_search"
     )
+    assert candidates == []
+
     response = _workflow_response(ANSWER, candidates)
     content = finalize_article_content(response, ANSWER)
     assert "<!--rich:" not in content

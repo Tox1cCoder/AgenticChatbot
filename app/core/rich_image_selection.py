@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
@@ -18,9 +17,7 @@ from .rich_response import (
 
 _IMAGE_TYPES = frozenset({"image", "image_group"})
 _DIRECT_SOURCES = frozenset({"rag_document", "tool_image", "generated_image"})
-_REMOTE_DISCOVERY_SOURCES = frozenset({"web_search", "image_search"})
-_RELEVANCE_FIELD_MAX_CHARS = 2048
-_RELEVANCE_FIELD_MAX_TOKENS = 128
+_REMOTE_DISCOVERY_SOURCES = frozenset({"image_search"})
 _BASE64_DATA_PATTERN = re.compile(
     r"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?\Z"
 )
@@ -39,26 +36,6 @@ _JUNK_IMAGE_URL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?:default[-_]?avatar|avatar[-_]?placeholder)", re.IGNORECASE),
     re.compile(r"/avatars?/default(?:[/_.-]|$)", re.IGNORECASE),
     re.compile(r"(?:^|[/_.-])placeholder(?:[/_.-]|$)", re.IGNORECASE),
-)
-_URL_WIDTH_PATTERNS = (
-    re.compile(
-        r"/scale-to-width-down/(?P<width>\d{1,5})(?:[/?.]|$)",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?:[?&])(?:w|width)=(?P<width>\d{1,5})(?:&|$)",
-        re.IGNORECASE,
-    ),
-)
-_URL_HEIGHT_PATTERNS = (
-    re.compile(
-        r"(?:[?&])(?:h|height)=(?P<height>\d{1,5})(?:&|$)",
-        re.IGNORECASE,
-    ),
-)
-_URL_SIZE_PATTERN = re.compile(
-    r"(?:^|[./_-])(?P<width>\d{1,5})x(?P<height>\d{1,5})(?:[./_-]|$)",
-    re.IGNORECASE,
 )
 
 
@@ -120,66 +97,13 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 
 def _intent_rank(candidate: Mapping[str, Any]) -> int | None:
     source = str(candidate.get("source") or "")
-    provenance = _mapping(candidate.get("provenance"))
-    payload = _mapping(candidate.get("payload"))
-    if source == "web_search" and bool(provenance.get("query_level")):
-        return None
     if source in _DIRECT_SOURCES:
         return 0
     if source == "image_search":
         return 1
-    if source == "web_search" and payload.get("source_url"):
-        return 2
     if source == "web_search":
         return None
     return 1
-
-
-def _normalized_tokens(value: object) -> frozenset[str]:
-    bounded = str(value or "")[:_RELEVANCE_FIELD_MAX_CHARS]
-    normalized = unicodedata.normalize("NFKC", bounded).casefold()
-    return frozenset(
-        token
-        for token in re.findall(r"[^\W_]+", normalized, flags=re.UNICODE)[
-            :_RELEVANCE_FIELD_MAX_TOKENS
-        ]
-        if len(token) >= 3
-    )
-
-
-def _description_overlap(candidate: Mapping[str, Any]) -> float:
-    provenance = _mapping(candidate.get("provenance"))
-    payload = _mapping(candidate.get("payload"))
-    query_tokens = _normalized_tokens(provenance.get("query"))
-    if not query_tokens:
-        return 0.0
-    descriptive_tokens: set[str] = set()
-    for value in (
-        candidate.get("title"),
-        candidate.get("alt_text"),
-        payload.get("description"),
-        provenance.get("source_title"),
-    ):
-        descriptive_tokens.update(_normalized_tokens(value))
-    return len(query_tokens & descriptive_tokens) / len(query_tokens)
-
-
-def _url_dimension_hint(url: str) -> tuple[int | None, int | None]:
-    width: int | None = None
-    height: int | None = None
-    size_match = _URL_SIZE_PATTERN.search(url)
-    if size_match:
-        width = int(size_match.group("width"))
-        height = int(size_match.group("height"))
-    for pattern in _URL_WIDTH_PATTERNS:
-        if match := pattern.search(url):
-            width = int(match.group("width"))
-            break
-    for pattern in _URL_HEIGHT_PATTERNS:
-        if match := pattern.search(url):
-            height = int(match.group("height"))
-            break
-    return width, height
 
 
 def _positive_dimension(value: Any) -> int | None:
@@ -187,11 +111,15 @@ def _positive_dimension(value: Any) -> int | None:
 
 
 def _payload_dimensions(payload: Mapping[str, Any]) -> tuple[int | None, int | None]:
-    url = str(payload.get("url") or "")
-    hinted_width, hinted_height = _url_dimension_hint(url)
+    """Dimensions come from decoded bytes only.
+
+    A URL's resize parameter is not an intrinsic dimension: reading ``&w=3840``
+    beside a real height of 565 fabricated a 6.8 aspect ratio and rejected the
+    one relevant image in the T1 trace.
+    """
     return (
-        _positive_dimension(payload.get("width")) or hinted_width,
-        _positive_dimension(payload.get("height")) or hinted_height,
+        _positive_dimension(payload.get("width")),
+        _positive_dimension(payload.get("height")),
     )
 
 
@@ -307,7 +235,6 @@ def _rank_key(
     return (
         99 if intent is None else intent,
         _quality_rank(candidate, policy),
-        -_description_overlap(candidate),
         result_rank,
         index,
     )

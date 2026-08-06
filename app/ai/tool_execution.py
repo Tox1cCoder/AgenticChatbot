@@ -92,27 +92,6 @@ def _short_digest(value: str) -> str:
     return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:8]
 
 
-def order_tavily_images(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Order Tavily image dicts by provenance strength.
-
-    Source-bound before query-level, then higher parent score, then lower parent
-    rank, with original provider order as the stable tie-breaker. Ordering never
-    rejects a candidate.
-    """
-
-    def sort_key(indexed: tuple[int, dict[str, Any]]) -> tuple[int, int, float, int, int]:
-        index, image = indexed
-        query_level = 1 if image.get("query_level") else 0
-        raw_score = image.get("result_score")
-        has_score = 0 if isinstance(raw_score, (int, float)) else 1
-        score = -float(raw_score) if isinstance(raw_score, (int, float)) else 0.0
-        raw_rank = image.get("result_rank")
-        rank = int(raw_rank) if isinstance(raw_rank, int) and raw_rank >= 0 else 10**6
-        return (query_level, has_score, score, rank, index)
-
-    return [image for _, image in sorted(enumerate(images), key=sort_key)]
-
-
 def build_image_candidates_from_tool_result(
     result_text: str,
     *,
@@ -171,18 +150,9 @@ def build_image_candidates_from_tool_result(
             rich_image_metrics.record_candidate(provider=metric_provider, outcome=reason)
 
     if metric_provider == "tavily":
-        # This pre-filter runs before the candidate loop below, so a non-dict
-        # entry must be counted here (once) rather than silently dropped —
-        # otherwise Tavily malformed entries would never reach the loop's own
-        # `rejected_malformed` branch and the counters would diverge by
-        # provider for no reason.
-        dict_images: list[dict[str, Any]] = []
-        for image in images:
-            if isinstance(image, dict):
-                dict_images.append(image)
-            else:
-                _reject("rejected_malformed")
-        images = order_tavily_images(dict_images)
+        # Page-scraped images cannot establish relevance from page metadata, and
+        # the search tool no longer returns them. Nothing to build.
+        return []
 
     result_query = str(parsed.get("query") or "").strip()
     candidates: list[dict[str, Any]] = []

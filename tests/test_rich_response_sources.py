@@ -18,7 +18,6 @@ from app.ai.tool_execution import (
     extract_images_from_tool_result,
     image_aspect_ratio_ok,
     is_junk_image_url,
-    order_tavily_images,
 )
 from app.core.rich_image_selection import (
     ImageSelectionPolicy,
@@ -46,22 +45,6 @@ def _tavily_payload():
             ]
         }
     )
-
-
-def test_image_candidates_carry_stable_ids_and_provenance():
-    payload = _tavily_payload()
-    candidates = build_image_candidates_from_tool_result(
-        payload, tool_call_id="call_7", tool_name="tavily_search"
-    )
-    ids = [c["id"] for c in candidates]
-    assert ids == ["image:tool:call_7:0", "image:tool:call_7:1"]
-    for candidate in candidates:
-        assert candidate["type"] == "image"
-        assert candidate["display_policy"] == "inline_only"
-        assert candidate["source"] == "web_search"
-        assert candidate["provenance"]["tool_call_id"] == "call_7"
-        assert candidate["provenance"]["tool"] == "tavily_search"
-        assert "url" in candidate["payload"]
 
 
 def test_image_candidate_inventory_view_excludes_base64():
@@ -107,7 +90,7 @@ def test_image_candidates_skip_entries_missing_url_and_data():
         }
     )
     candidates = build_image_candidates_from_tool_result(
-        payload, tool_call_id="call_1", tool_name="tavily_search"
+        payload, tool_call_id="call_1", tool_name="image_search"
     )
     assert len(candidates) == 1
     assert candidates[0]["payload"]["url"] == "https://img.test/good.png"
@@ -123,7 +106,7 @@ def test_image_candidates_default_mime_when_absent():
         }
     )
     candidates = build_image_candidates_from_tool_result(
-        payload, tool_call_id="call_2", tool_name="tavily_search"
+        payload, tool_call_id="call_2", tool_name="image_search"
     )
     assert candidates[0]["payload"]["mime_type"] == "image/png"
     assert candidates[1]["payload"]["mime_type"] == "image/jpeg"
@@ -132,7 +115,7 @@ def test_image_candidates_default_mime_when_absent():
 def test_candidate_provenance_keeps_source_title_and_query():
     payload = json.dumps(
         {
-            "provider": "tavily",
+            "provider": "brave_image_search",
             "query": "apple park cupertino aerial",
             "images": [
                 {
@@ -150,7 +133,7 @@ def test_candidate_provenance_keeps_source_title_and_query():
         }
     )
     candidates = build_image_candidates_from_tool_result(
-        payload, tool_call_id="call_1", tool_name="tavily_search"
+        payload, tool_call_id="call_1", tool_name="brave_image_search"
     )
     provenance = candidates[0]["provenance"]
     assert provenance["source_title"] == "Inside Apple Park"
@@ -532,46 +515,6 @@ def test_rejection_survives_record_candidate_raising(monkeypatch):
     )
 
 
-def test_tavily_malformed_entry_is_counted_as_rejected(monkeypatch):
-    """The Tavily-only pre-filter used to drop non-dict entries silently
-    before the counting loop ran, so a Brave malformed entry was counted but
-    an equivalent Tavily one was not. Both providers must record the same
-    outcome for the same shape of bad input, exactly once (no double count)."""
-    from app.ai import tool_execution
-
-    metrics = type(
-        "Metrics",
-        (),
-        {
-            "record_discovery": Mock(),
-            "record_candidate": Mock(),
-        },
-    )()
-    monkeypatch.setattr(tool_execution, "rich_image_metrics", metrics)
-    payload = json.dumps(
-        {
-            "provider": "tavily",
-            "images": [
-                "not-a-dict",
-                {"url": "https://img.test/good.jpg", "description": "ok"},
-            ],
-        }
-    )
-
-    candidates = build_image_candidates_from_tool_result(
-        payload, tool_call_id="call_1", tool_name="tavily_search"
-    )
-
-    assert len(candidates) == 1
-    malformed_calls = [
-        call
-        for call in metrics.record_candidate.call_args_list
-        if call.kwargs.get("outcome") == "rejected_malformed"
-    ]
-    assert len(malformed_calls) == 1
-    assert malformed_calls[0].kwargs["provider"] == "tavily"
-
-
 def test_brave_image_candidate_validates_against_public_schema():
     from app.core.rich_response import validate_public_rich_item
 
@@ -657,23 +600,6 @@ def test_group_provenance_provider_is_never_none():
     provider = candidates[0]["provenance"]["provider"]
     assert provider
     assert provider == "brave"
-
-
-def test_tavily_images_are_never_grouped():
-    payload = json.dumps(
-        {
-            "provider": "tavily",
-            "query": "chip rules",
-            "images": [
-                {"url": "https://e.com/a.jpg", "description": "a", "source_url": "https://e.com/1"},
-                {"url": "https://e.com/b.jpg", "description": "b", "source_url": "https://e.com/2"},
-            ],
-        }
-    )
-    candidates = build_image_candidates_from_tool_result(
-        payload, tool_call_id="c1", tool_name="tavily_search"
-    )
-    assert {c["type"] for c in candidates} == {"image"}
 
 
 def test_group_is_not_emitted_when_all_candidates_are_ineligible():
@@ -861,12 +787,13 @@ def test_rag_document_image_candidates_deduplicate_by_id():
 # ---------------------------------------------------------------------------
 
 
-class _TavilyStyleTool:
-    name = "tavily_search"
+class _SingleImageSearchTool:
+    name = "brave_image_search"
 
     async def ainvoke(self, args):
         return json.dumps(
             {
+                "provider": "brave_image_search",
                 "images": [
                     {
                         "url": "https://img.test/photo-1.png",
@@ -941,8 +868,10 @@ async def test_execute_tool_calls_attaches_rich_candidates_to_artifact():
     from app.ai.tool_execution import execute_tool_calls
 
     outputs, artifacts, _images = await execute_tool_calls(
-        tool_calls=[{"id": "call_99", "name": "tavily_search", "args": {"query": "wings"}}],
-        tool_map={"tavily_search": _TavilyStyleTool()},
+        tool_calls=[
+            {"id": "call_99", "name": "brave_image_search", "args": {"query": "wings"}}
+        ],
+        tool_map={"brave_image_search": _SingleImageSearchTool()},
     )
     candidates = artifacts[0].get("_rich_item_candidates", [])
     image_candidates = [c for c in candidates if c["type"] == "image"]
@@ -958,7 +887,6 @@ async def test_execute_tool_calls_attaches_rich_candidates_to_artifact():
 @pytest.mark.parametrize(
     ("tool_name", "provider"),
     [
-        ("tavily_search", "tavily"),
         ("brave_image_search", "brave_image_search"),
     ],
 )
@@ -1030,54 +958,3 @@ async def test_execute_tool_calls_attaches_dedicated_widget_candidate_to_artifac
     assert candidate["id"] == "widget:w-created"
     assert candidate["type"] == "live_widget"
     assert "private-state-not-in-candidate" not in str(candidate)
-
-
-# ---------------------------------------------------------------------------
-# Tavily image ordering (Task 5)
-# ---------------------------------------------------------------------------
-
-
-def test_source_bound_images_precede_query_level():
-    ordered = order_tavily_images(
-        [
-            {"url": "q", "query_level": True},
-            {"url": "s", "result_rank": 3, "result_score": 0.1},
-        ]
-    )
-    assert [i["url"] for i in ordered] == ["s", "q"]
-
-
-def test_higher_score_then_lower_rank_wins():
-    ordered = order_tavily_images(
-        [
-            {"url": "a", "result_rank": 2, "result_score": 0.5},
-            {"url": "b", "result_rank": 0, "result_score": 0.9},
-            {"url": "c", "result_rank": 1, "result_score": 0.9},
-        ]
-    )
-    assert [i["url"] for i in ordered] == ["b", "c", "a"]
-
-
-def test_absent_score_sorts_after_any_numeric_score():
-    ordered = order_tavily_images(
-        [
-            {"url": "none", "result_rank": 0, "result_score": None},
-            {"url": "low", "result_rank": 9, "result_score": 0.01},
-        ]
-    )
-    assert [i["url"] for i in ordered] == ["low", "none"]
-
-
-def test_ordering_is_stable_for_equivalent_candidates():
-    ordered = order_tavily_images(
-        [
-            {"url": "first", "result_rank": 1, "result_score": 0.5},
-            {"url": "second", "result_rank": 1, "result_score": 0.5},
-        ]
-    )
-    assert [i["url"] for i in ordered] == ["first", "second"]
-
-
-def test_ordering_never_drops_a_candidate():
-    images = [{"url": str(n)} for n in range(7)]
-    assert len(order_tavily_images(images)) == 7

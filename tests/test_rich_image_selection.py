@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from copy import deepcopy
+import json
 from dataclasses import replace
 from typing import Any
 
@@ -18,6 +18,16 @@ POLICY = ImageSelectionPolicy(
     min_aspect_ratio=0.2,
     max_aspect_ratio=5.0,
 )
+
+
+def _policy() -> ImageSelectionPolicy:
+    return ImageSelectionPolicy(
+        max_items=2,
+        min_width_px=320,
+        min_height_px=180,
+        min_aspect_ratio=0.2,
+        max_aspect_ratio=5.0,
+    )
 
 
 def _image(
@@ -89,36 +99,6 @@ def _group(
             "query": query,
         },
     }
-
-
-def test_dedicated_search_outranks_eight_source_bound_web_images() -> None:
-    tavily = [
-        _image(
-            f"image:tavily:{index}",
-            source="web_search",
-            url=f"https://pages.example/assets/{index}.jpg",
-            result_rank=index,
-            source_url=f"https://pages.example/article/{index}",
-            description="team article illustration",
-        )
-        for index in range(8)
-    ]
-    brave = _image(
-        "image:brave:0",
-        source="image_search",
-        url="https://media.example/t1-roster.jpg",
-        description="T1 roster players Faker Zeus Oner Gumayusi Keria",
-    )
-    candidates = [*tavily, brave]
-    original = deepcopy(candidates)
-
-    selected = select_rich_item_candidates(candidates, policy=POLICY)
-
-    assert [item["id"] for item in selected] == [
-        "image:brave:0",
-        "image:tavily:0",
-    ]
-    assert candidates == original
 
 
 def test_query_level_web_asset_is_excluded() -> None:
@@ -198,18 +178,6 @@ def test_direct_sources_keep_their_existing_dimension_contract(source: str) -> N
     selected = select_rich_item_candidates([candidate], policy=POLICY)
 
     assert [item["id"] for item in selected] == [f"image:{source}:tiny"]
-
-
-def test_tiny_resize_url_is_rejected_when_dimensions_are_unknown() -> None:
-    candidate = _image(
-        "image:tiny-url",
-        source="image_search",
-        url="https://cdn.example/scale-to-width-down/45/logo.png",
-        width=None,
-        height=None,
-    )
-
-    assert select_rich_item_candidates([candidate], policy=POLICY) == []
 
 
 def test_unknown_dimensions_rank_after_known_usable_dimensions() -> None:
@@ -522,27 +490,59 @@ def test_repeated_selection_is_deterministic() -> None:
     assert first == second
 
 
-def test_relevance_overlap_ignores_provider_text_beyond_the_bound() -> None:
-    oversized = _image(
-        "image:oversized-description",
-        source="image_search",
-        url="https://media.example/oversized.jpg",
-        query="needle",
-        result_rank=0,
-        description=f"{'x' * 5000} needle",
-    )
-    bounded_match = _image(
-        "image:bounded-match",
-        source="image_search",
-        url="https://media.example/match.jpg",
-        query="needle",
-        result_rank=1,
-        description="needle",
+def test_a_web_search_image_candidate_is_never_selected():
+    candidate = {
+        "id": "image:tool:call-1:0",
+        "type": "image",
+        "source": "web_search",
+        "payload": {
+            "url": "https://cdn.example/photo.jpg",
+            "mime_type": "image/jpeg",
+            "source_url": "https://publisher.example/article",
+            "width": 995,
+            "height": 565,
+        },
+        "provenance": {"query": "t1 roster", "source_title": "T1 roster 2026"},
+    }
+
+    assert select_rich_item_candidates([candidate], policy=_policy()) == []
+
+
+def test_a_resize_parameter_no_longer_fabricates_an_aspect_ratio():
+    candidate = {
+        "id": "image:tool:call-1:0",
+        "type": "image",
+        "source": "image_search",
+        "payload": {
+            "url": (
+                "https://www.sheepesports.com/_next/image?url=https%3A%2F%2Fcdn.sanity.io"
+                "%2Fimages%2Fproduction%2F674b8ca2-995x565.webp&w=3840&q=75"
+            ),
+            "mime_type": "image/webp",
+            "width": 995,
+            "height": 565,
+        },
+        "provenance": {},
+    }
+
+    assert len(select_rich_item_candidates([candidate], policy=_policy())) == 1
+
+
+def test_tavily_results_produce_no_image_candidates():
+    from app.ai.tool_execution import build_image_candidates_from_tool_result
+
+    payload = json.dumps(
+        {
+            "images": [
+                {"url": "https://cdn.example/a.jpg", "description": "Moi", "provider": "tavily"}
+            ],
+            "results": [],
+        }
     )
 
-    selected = select_rich_item_candidates(
-        [oversized, bounded_match],
-        policy=replace(POLICY, max_items=1),
+    assert (
+        build_image_candidates_from_tool_result(
+            payload, tool_call_id="call-1", tool_name="tavily_search"
+        )
+        == []
     )
-
-    assert [item["id"] for item in selected] == ["image:bounded-match"]
