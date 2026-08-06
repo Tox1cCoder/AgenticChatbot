@@ -49,6 +49,7 @@ async def discover_and_verify_images(
     image_query: str,
     factual_query: str,
     image_intent: str | None = None,
+    recorder: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Return public candidate dicts for verifier-approved images only.
 
@@ -111,6 +112,7 @@ async def discover_and_verify_images(
         result_titles=[],
         model=verifier_model,
         timeout=_remaining_seconds(deadline_at),
+        recorder=recorder,
     )
     gallery = str(image_intent or "figure").strip().lower() == "gallery"
     approved = admit_candidates(

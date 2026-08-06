@@ -25,8 +25,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import logging
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -34,6 +35,8 @@ from pydantic import BaseModel, Field
 
 from ..core.config import settings
 from ..services.thumbnail_batch import FetchedThumbnail
+from ..usage import begin_usage_operation, bind_usage_context, current_usage_context
+from ..usage.types import UsageOperation
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +50,7 @@ SPECIALIZED_KINDS: frozenset[str] = frozenset(
 
 _MAX_TITLE_CHARS = 160
 _MAX_TITLES = 5
+_USAGE_OPERATION = "image_verification"
 
 _PROMPT = """You decide whether each attached image may be shown beside an answer.
 
@@ -151,6 +155,29 @@ def _passes(
     return True
 
 
+@contextlib.contextmanager
+def _verification_usage_scope(recorder: Any | None) -> Iterator[UsageOperation | None]:
+    """Bind an ``image_verification`` operation for one verifier call.
+
+    Yields ``None`` when there is no recorder, or when binding the usage
+    context unexpectedly fails. Either way the caller falls back to an
+    unrecorded call rather than losing the verification itself -- a
+    telemetry problem must never be the reason a billed provider call never
+    happens.
+    """
+    if recorder is None:
+        yield None
+        return
+    try:
+        context = current_usage_context().child(operation=_USAGE_OPERATION)
+    except Exception as exc:
+        logger.warning("Visual verification usage context unavailable: %s", type(exc).__name__)
+        yield None
+        return
+    with bind_usage_context(context), begin_usage_operation() as operation:
+        yield operation
+
+
 async def verify_candidates(
     submitted: Sequence[SubmittedCandidate],
     *,
@@ -160,8 +187,15 @@ async def verify_candidates(
     result_titles: Sequence[str],
     model: Any | None = None,
     timeout: float,
+    recorder: Any | None = None,
 ) -> VisualVerificationResult | None:
-    """Run one structured vision call. Returns ``None`` on any failure."""
+    """Run one structured vision call. Returns ``None`` on any failure.
+
+    ``recorder``, when supplied, records this billed attempt exactly once.
+    Its absence -- or any failure setting up the recording -- is not itself a
+    verification failure: the call still proceeds, unrecorded, same as
+    before this call site was instrumented.
+    """
 
     if not submitted:
         return None
@@ -175,9 +209,22 @@ async def verify_candidates(
         factual_query=factual_query,
         result_titles=result_titles,
     )
+
+    async def _call() -> Any:
+        return await resolved_model.ainvoke([message])
+
     try:
         async with asyncio.timeout(max(0.001, float(timeout))):
-            response = await resolved_model.ainvoke([message])
+            with _verification_usage_scope(recorder) as operation:
+                if recorder is not None and operation is not None:
+                    response = await recorder.record_one_async_attempt(
+                        call=_call,
+                        provider="gemini",
+                        model=str(settings.image_verification_model),
+                        operation=operation,
+                    )
+                else:
+                    response = await _call()
     except Exception as exc:
         logger.debug("Visual verification unavailable: %s", type(exc).__name__)
         return None

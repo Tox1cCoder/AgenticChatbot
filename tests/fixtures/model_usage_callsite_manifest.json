@@ -132,6 +132,12 @@
     "exercise_symbol": "generate"
   },
   {
+    "file": "app/ai/image_verification_flow.py",
+    "function": "discover_and_verify_images",
+    "call_chain": "brave_tool.ainvoke",
+    "disposition": "non_provider_tool_dispatch"
+  },
+  {
     "file": "app/ai/mcp_integration.py",
     "function": "MCPManager.execute_tool",
     "call_chain": "fresh_tool.ainvoke",
@@ -186,6 +192,21 @@
     "file": "app/ai/tool_execution.py",
     "function": "invoke_tool",
     "call_chain": "tool.invoke",
+    "disposition": "non_provider_tool_dispatch"
+  },
+  {
+    "file": "app/ai/visual_verifier.py",
+    "function": "verify_candidates._call",
+    "call_chain": "resolved_model.ainvoke",
+    "disposition": "instrumented",
+    "operation": "image_verification",
+    "exercising_test": "tests/test_visual_verifier.py::test_verify_candidates_records_one_image_verification_attempt",
+    "exercise_symbol": "verify_candidates"
+  },
+  {
+    "file": "app/ai/web_research_tool.py",
+    "function": "_run_search",
+    "call_chain": "tool.ainvoke",
     "disposition": "non_provider_tool_dispatch"
   },
   {

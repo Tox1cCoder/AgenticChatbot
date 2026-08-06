@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import warnings
+from dataclasses import asdict
+from uuid import uuid4
 
 import pytest
+from prometheus_client import CollectorRegistry
 
 from app.ai.visual_verifier import (
     SubmittedCandidate,
@@ -14,8 +18,11 @@ from app.ai.visual_verifier import (
     build_verifier_model,
     verify_candidates,
 )
+from app.observability.model_usage import ModelUsageMetrics
+from app.repositories.model_usage import RecordEventCommand, RecordResult
 from app.services.thumbnail_batch import FetchedThumbnail
 from app.services.web_image_service import FetchedWebImage
+from app.usage.recorder import ModelUsageRecorder
 
 
 def _submitted(candidate_id: str, title: str = "t") -> SubmittedCandidate:
@@ -212,6 +219,72 @@ async def test_verifier_sends_one_message_with_every_thumbnail():
     assert len(captured) == 1
     blocks = captured[0][0].content
     assert sum(1 for block in blocks if block.get("type") == "image_url") == 2
+
+
+class _FakeUsageRepo:
+    def __init__(self) -> None:
+        self.commands: list[RecordEventCommand] = []
+
+    def record_event(self, command: RecordEventCommand) -> RecordResult:
+        self.commands.append(command)
+        return RecordResult(inserted=True, event_id=uuid4())
+
+
+def _test_recorder(repo: _FakeUsageRepo) -> ModelUsageRecorder:
+    return ModelUsageRecorder(
+        repository=repo,
+        enqueue_failed_write=lambda payload: None,
+        metrics=ModelUsageMetrics(registry=CollectorRegistry()),
+    )
+
+
+@pytest.mark.asyncio
+async def test_verify_candidates_records_one_image_verification_attempt():
+    """A recorder must see exactly one attempt, carrying no verdict content.
+
+    This is the only test standing between the verifier's real, billed Gemini
+    call and an unnoticed silent-cost regression: if the recording call were
+    ever deleted from ``verify_candidates``, ``repo.commands`` would stay
+    empty and this test would fail.
+    """
+
+    # A UUID is all hex digits and hyphens, so a candidate id containing a
+    # letter outside a-f (like "z") can never collide with the recorded
+    # operation_id/attempt fields the way a hex-like id such as "c1" could.
+    candidate_id = "candidate-zebra"
+
+    class _Model:
+        async def ainvoke(self, _messages):
+            return VisualVerificationResult(
+                decisions=[_decision(candidate_id, confidence=0.97, content_kind="portrait")]
+            )
+
+    repo = _FakeUsageRepo()
+
+    result = await verify_candidates(
+        [_submitted(candidate_id)],
+        user_request="q",
+        image_query="i",
+        factual_query="f",
+        result_titles=[],
+        model=_Model(),
+        timeout=1.0,
+        recorder=_test_recorder(repo),
+    )
+
+    assert result is not None
+    assert len(repo.commands) == 1
+    command = repo.commands[0]
+    assert command.status == "success"
+    assert command.provider == "gemini"
+    assert command.context.operation == "image_verification"
+
+    serialized = json.dumps(asdict(command), default=str)
+    assert candidate_id not in serialized
+    assert "0.97" not in serialized
+    assert "portrait" not in serialized
+    assert "confidence" not in serialized
+    assert "content_kind" not in serialized
 
 
 def _settings_with(**overrides):

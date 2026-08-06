@@ -69,6 +69,7 @@ def create_web_research_tool(
     brave_tool: Any | None = None,
     web_image_service: Any | None = None,
     verifier_model: Any | None = None,
+    recorder: Any | None = None,
 ) -> StructuredTool:
     """Build the ``web_research`` tool. Dependencies are injected in tests."""
 
@@ -105,6 +106,7 @@ def create_web_research_tool(
                     image_query=str(image_query).strip(),
                     factual_query=query,
                     image_intent=image_intent,
+                    recorder=recorder,
                 )
             )
 
@@ -191,6 +193,7 @@ async def _discover_and_verify(
     image_query: str,
     factual_query: str,
     image_intent: str | None = None,
+    recorder: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Return public candidate dicts for approved images, or an empty list."""
 
@@ -206,6 +209,7 @@ async def _discover_and_verify(
                 image_query=image_query,
                 factual_query=factual_query,
                 image_intent=image_intent,
+                recorder=recorder,
             )
     except Exception as exc:
         logger.debug("Image verification abandoned: %s", type(exc).__name__)

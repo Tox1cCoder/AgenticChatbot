@@ -58,6 +58,7 @@ _OPERATIONS = {
     "image_caption",
     "conversation_compaction",
     "document_index",
+    "image_verification",
 }
 _STATUSES = {"success", "error", "cancelled", "timeout"}
 _SOURCES = {
