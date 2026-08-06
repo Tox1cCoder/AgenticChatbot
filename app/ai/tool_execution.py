@@ -118,6 +118,7 @@ def build_image_candidates_from_tool_result(
     *,
     tool_call_id: str | None,
     tool_name: str,
+    group_images: bool = True,
 ) -> list[dict[str, Any]]:
     """Build typed rich-item image candidates from a tool result payload.
 
@@ -130,7 +131,9 @@ def build_image_candidates_from_tool_result(
     single ``image_group`` item (see ``_group_image_candidates``) so the model
     has one marker id to copy instead of choosing among several. Tavily
     results and single-candidate Brave results are returned as individual
-    ``image`` items.
+    ``image`` items. Pass ``group_images=False`` when the caller needs every
+    candidate individually — e.g. visual verification, which must judge each
+    image on its own pixels before any grouping happens.
     """
     if not result_text:
         return []
@@ -300,7 +303,7 @@ def build_image_candidates_from_tool_result(
             rich_image_metrics.record_candidate(provider=metric_provider, outcome="eligible")
         if len(candidates) >= candidate_cap:
             break
-    if metric_provider == "brave" and len(candidates) >= 2:
+    if group_images and metric_provider == "brave" and len(candidates) >= 2:
         return [
             _group_image_candidates(
                 candidates,
@@ -318,6 +321,7 @@ def _group_image_candidates(
     tool_call_id: str | None,
     query: str,
     metric_provider: str,
+    max_items: int | None = None,
 ) -> dict[str, Any]:
     """Collapse eligible image-search candidates into one image_group item.
 
@@ -327,8 +331,13 @@ def _group_image_candidates(
     anyone reading it. The per-image copy is conditional, so ``metric_provider``
     (the caller's classified "brave"/"tavily"/"other" label) is the fallback that
     keeps the field from ever being None. Both normalize identically for metrics.
+
+    ``max_items`` lets a caller override the legacy ``rich_image_group_max_items``
+    setting — e.g. a verified gallery, whose cap is ``rich_image_gallery_max_items``
+    and is deliberately allowed to exceed the legacy grid's row ceiling.
     """
-    cap = max(2, int(getattr(settings, "rich_image_group_max_items", 3)))
+    legacy_cap = getattr(settings, "rich_image_group_max_items", 3)
+    cap = max(2, int(max_items if max_items is not None else legacy_cap))
     selected: list[dict[str, Any]] = []
     seen_locators: set[str] = set()
     for candidate in candidates:

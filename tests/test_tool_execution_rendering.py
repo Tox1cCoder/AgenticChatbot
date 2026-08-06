@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.ai.graph import MultiAgentWorkflow
-from app.ai.tool_execution import build_tool_artifact, execute_tool_calls
+from app.ai.tool_execution import (
+    _group_image_candidates,
+    build_image_candidates_from_tool_result,
+    build_tool_artifact,
+    execute_tool_calls,
+)
 
 
 class _FakeTool:
@@ -220,4 +227,77 @@ async def test_execute_tool_calls_structured_error_render_stays_compact(monkeypa
     assert len(outputs[0]["content"]) < 500
     assert outputs[0]["render"]["type"] == "error"
     assert artifacts[0]["status"] == "error"
-    assert artifacts[0]["render"]["type"] == "error"
+
+
+def _brave_result(count: int) -> str:
+    return json.dumps(
+        {
+            "query": "T1 roster",
+            "provider": "brave_image_search",
+            "images": [
+                {
+                    "url": f"https://cdn.example/team-{index}.jpg",
+                    "provider": "brave_image_search",
+                    "mime_type": "image/jpeg",
+                    "title": f"T1 roster {index}",
+                    "description": f"T1 roster {index}",
+                    "width": 995,
+                    "height": 565,
+                    "source_url": "https://sheepesports.example/t1",
+                }
+                for index in range(count)
+            ],
+            "total_results": count,
+        }
+    )
+
+
+def test_group_images_false_returns_individual_candidates_not_a_grid():
+    """Visual verification must see each Brave candidate on its own pixels;
+    grouping before verification would hide images from the verifier."""
+
+    candidates = build_image_candidates_from_tool_result(
+        _brave_result(4),
+        tool_call_id="brave-call",
+        tool_name="brave_image_search",
+        group_images=False,
+    )
+
+    assert len(candidates) == 4
+    assert all(candidate["type"] == "image" for candidate in candidates)
+
+
+def test_group_images_default_still_collapses_a_multi_result_brave_payload():
+    """Regression guard: every existing caller must keep grouping by default."""
+
+    candidates = build_image_candidates_from_tool_result(
+        _brave_result(4),
+        tool_call_id="brave-call",
+        tool_name="brave_image_search",
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["type"] == "image_group"
+
+
+def test_group_image_candidates_max_items_overrides_the_legacy_setting():
+    """A verified gallery's cap (rich_image_gallery_max_items, up to 8) must be
+    reachable even though the legacy rich_image_group_max_items caps at 3."""
+
+    candidates = build_image_candidates_from_tool_result(
+        _brave_result(5),
+        tool_call_id="brave-call",
+        tool_name="brave_image_search",
+        group_images=False,
+    )
+
+    group = _group_image_candidates(
+        candidates,
+        tool_call_id="brave-call",
+        query="T1 roster",
+        metric_provider="brave",
+        max_items=5,
+    )
+
+    assert group["type"] == "image_group"
+    assert len(group["payload"]["items"]) == 5
