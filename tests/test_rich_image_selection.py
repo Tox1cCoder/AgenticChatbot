@@ -528,6 +528,30 @@ def test_a_resize_parameter_no_longer_fabricates_an_aspect_ratio():
     assert len(select_rich_item_candidates([candidate], policy=_policy())) == 1
 
 
+def test_a_resize_url_with_unknown_dimensions_is_still_selected():
+    """The real incident: no payload dimensions at all. The old code inferred
+    them solely from the URL — ``&w=3840`` beside the real height parsed out
+    of the same URL — producing a fake 6.8 ratio that rejected the one
+    relevant image. Unlike the sibling test above, this fixture supplies no
+    ``width``/``height``, so it cannot pass by accident of payload precedence:
+    it only passes if dimensions are never inferred from the URL at all."""
+    candidate = {
+        "id": "image:tool:call-1:0",
+        "type": "image",
+        "source": "image_search",
+        "payload": {
+            "url": (
+                "https://www.sheepesports.com/_next/image?url=https%3A%2F%2Fcdn.sanity.io"
+                "%2Fimages%2Fproduction%2F674b8ca2-995x565.webp&w=3840&q=75"
+            ),
+            "mime_type": "image/webp",
+        },
+        "provenance": {},
+    }
+
+    assert len(select_rich_item_candidates([candidate], policy=_policy())) == 1
+
+
 def test_tavily_results_produce_no_image_candidates():
     from app.ai.tool_execution import build_image_candidates_from_tool_result
 
