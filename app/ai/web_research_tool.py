@@ -12,12 +12,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
+from contextlib import suppress
 from typing import Any, Literal
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from ..core.config import settings
+from ..observability.rich_images import rich_image_metrics
 from .research_budget import get_research_budget
 from .tool_context import get_tool_context
 from .verified_image_sink import offer_verified_images
@@ -199,6 +202,7 @@ async def _discover_and_verify(
 
     from .image_verification_flow import discover_and_verify_images
 
+    started = time.perf_counter()
     try:
         async with asyncio.timeout(float(settings.image_verification_deadline_seconds)):
             return await discover_and_verify_images(
@@ -211,6 +215,19 @@ async def _discover_and_verify(
                 image_intent=image_intent,
                 recorder=recorder,
             )
+    except TimeoutError:
+        # This deadline firing means discover_and_verify_images was still
+        # suspended at one of its own internal awaits (Brave, thumbnails, or
+        # the verifier) when the clock ran out: every branch that reaches one
+        # of its own outcome calls returns immediately afterward with no
+        # further await, so cancellation can only land here, before any of
+        # those calls happened. Recording "timeout" here therefore cannot
+        # double up with an outcome the inner flow already recorded.
+        with suppress(Exception):
+            rich_image_metrics.record_verification_outcome(
+                outcome="timeout", duration_seconds=time.perf_counter() - started
+            )
+        return []
     except Exception as exc:
         logger.debug("Image verification abandoned: %s", type(exc).__name__)
         return []
