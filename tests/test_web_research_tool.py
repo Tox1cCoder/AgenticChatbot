@@ -398,6 +398,47 @@ async def test_tavily_failure_is_reported_as_a_research_error():
 
 
 @pytest.mark.asyncio
+async def test_tavily_failure_cancels_a_live_image_task_cleanly():
+    """The image path must be genuinely in flight, not merely absent, when the
+    search fails — otherwise image_task.cancel() is never exercised at all."""
+
+    class _FailingTavily:
+        name = "tavily_search"
+
+        async def ainvoke(self, args):
+            raise RuntimeError("tavily down")
+
+    class _SlowBrave:
+        name = "brave_image_search"
+
+        async def ainvoke(self, args):
+            await asyncio.sleep(0.2)
+            return BRAVE_PAYLOAD
+
+    tasks_before = asyncio.all_tasks()
+
+    payload, sink = await _run(
+        _tool(_FailingTavily(), _SlowBrave(), _FakeImageService(), _ApproveOnlyTeamPhoto()),
+        query="T1 roster 2026",
+        image_query="T1 team photo",
+    )
+
+    assert payload["status"] == "error"
+    assert payload["retryable"] is True
+    assert sink == []
+
+    # image_task.cancel() only schedules cancellation; the loop must run once
+    # more to unwind it. Gather (not bare-await) any leftover task so its
+    # CancelledError is retrieved here rather than logged as "Task exception
+    # was never retrieved" whenever the task object is later garbage collected.
+    leftover = asyncio.all_tasks() - tasks_before - {asyncio.current_task()}
+    if leftover:
+        await asyncio.gather(*leftover, return_exceptions=True)
+    assert all(task.done() for task in leftover), "image task left pending after cancel"
+    assert all(task.cancelled() for task in leftover), "image task did not honor cancellation"
+
+
+@pytest.mark.asyncio
 async def test_disabled_flag_skips_the_image_path_entirely(monkeypatch):
     monkeypatch.setattr(
         "app.ai.web_research_tool.settings.vision_image_verification_enabled",

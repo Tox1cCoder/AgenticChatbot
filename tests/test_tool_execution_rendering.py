@@ -204,8 +204,6 @@ def test_lookup_tool_render_payload_from_state_context():
 
 @pytest.mark.asyncio
 async def test_execute_tool_calls_structured_error_render_stays_compact(monkeypatch):
-    import json
-
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "tool_execution_timeout", 1)
@@ -227,6 +225,7 @@ async def test_execute_tool_calls_structured_error_render_stays_compact(monkeypa
     assert len(outputs[0]["content"]) < 500
     assert outputs[0]["render"]["type"] == "error"
     assert artifacts[0]["status"] == "error"
+    assert artifacts[0]["render"]["type"] == "error"
 
 
 def _brave_result(count: int) -> str:
