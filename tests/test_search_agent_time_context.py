@@ -14,7 +14,9 @@ class _FakeManager:
         return self._server_by_tool_name.get(tool.name)
 
 
-def test_search_agent_auto_pins_time_and_tavily_tools(monkeypatch):
+def test_search_agent_auto_pins_time_only(monkeypatch):
+    """Tavily is no longer a required pin: research now reaches it through the
+    server-orchestrated web_research tool (see test_web_research_binding.py)."""
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "mcp_tool_search_pinned_tools", [], raising=False)
@@ -22,44 +24,42 @@ def test_search_agent_auto_pins_time_and_tavily_tools(monkeypatch):
     pinned_specs = _get_pinned_specs("search")
 
     assert "time::get_current_time" in pinned_specs
-    assert "tavily::tavily_search" in pinned_specs
+    assert "tavily::tavily_search" not in pinned_specs
 
 
-def test_search_agent_pins_brave_image_search(monkeypatch):
+def test_search_agent_does_not_pin_brave_image_search(monkeypatch):
+    """Image search reaches Brave via web_research now; the raw pin is gone."""
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "mcp_tool_search_pinned_tools", [], raising=False)
 
     pinned_specs = _get_pinned_specs("search")
 
-    assert "brave_image_search::brave_image_search" in pinned_specs
+    assert "brave_image_search::brave_image_search" not in pinned_specs
 
 
 def test_search_agent_binding_keeps_all_required_pins_under_default_cap(monkeypatch):
-    """Regression guard: the five-tool pin cap must not drop Brave (the 6th
-    required search pin). All required pins bind under default settings."""
+    """Regression guard: a pin cap smaller than the required set must not drop
+    any of search's four required pins (time + three widget tools). Tavily and
+    Brave are no longer required pins, so the cap no longer needs to cover them."""
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "mcp_tool_search_pinned_tools", [], raising=False)
-    # Default cap is 5; there are six required search pins.
-    monkeypatch.setattr(settings, "mcp_tool_search_max_pinned_tools", 5, raising=False)
+    # Cap below the four required pins to prove required pins bypass the cap.
+    monkeypatch.setattr(settings, "mcp_tool_search_max_pinned_tools", 2, raising=False)
 
     all_tools = [
         SimpleNamespace(name="get_current_time"),
-        SimpleNamespace(name="tavily_search"),
         SimpleNamespace(name="widget_create"),
         SimpleNamespace(name="widget_update"),
         SimpleNamespace(name="widget_get_state"),
-        SimpleNamespace(name="brave_image_search"),
     ]
     manager = _FakeManager(
         {
             "get_current_time": "time",
-            "tavily_search": "tavily",
             "widget_create": "widgets",
             "widget_update": "widgets",
             "widget_get_state": "widgets",
-            "brave_image_search": "brave_image_search",
         }
     )
 
@@ -73,15 +73,15 @@ def test_search_agent_binding_keeps_all_required_pins_under_default_cap(monkeypa
     tool_names = {tool.name for tool in tools}
     assert {
         "get_current_time",
-        "tavily_search",
         "widget_create",
         "widget_update",
         "widget_get_state",
-        "brave_image_search",
     } <= tool_names
 
 
-def test_search_agent_deferred_binding_includes_time_and_tavily(monkeypatch):
+def test_search_agent_deferred_binding_includes_time_only(monkeypatch):
+    """Tavily is no longer auto-pinned at this layer; the agent-level
+    web_research binding (see test_web_research_binding.py) is the research path now."""
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "mcp_tool_search_pinned_tools", [], raising=False)
@@ -105,10 +105,12 @@ def test_search_agent_deferred_binding_includes_time_and_tavily(monkeypatch):
     tool_names = [tool.name for tool in tools]
     assert "tool_search" in tool_names
     assert "get_current_time" in tool_names
-    assert "tavily_search" in tool_names
+    assert "tavily_search" not in tool_names
 
 
-def test_search_agent_binding_exposes_time_and_tavily_tools(monkeypatch):
+def test_search_agent_binding_exposes_time_and_web_research_tools(monkeypatch):
+    """Tavily is no longer pinned directly; the search agent reaches it (and
+    Brave) through the server-orchestrated web_research tool instead."""
     from app.ai.agents.search_agent import SearchAgent
     from app.core.config import settings
 
@@ -135,7 +137,8 @@ def test_search_agent_binding_exposes_time_and_tavily_tools(monkeypatch):
     tool_names = [tool.name for tool in tools]
     assert "tool_search" in tool_names
     assert "get_current_time" in tool_names
-    assert "tavily_search" in tool_names
+    assert "web_research" in tool_names
+    assert "tavily_search" not in tool_names
 
 
 def test_search_prompt_orders_tool_search_time_then_web_search():
@@ -164,14 +167,16 @@ def test_search_prompt_exempts_image_reference_search_from_time_lookup():
     assert "call `get_current_time`, then call that search tool" in prompt
 
 
-def test_search_agent_does_not_pin_heavy_tavily_tools(monkeypatch):
+def test_search_agent_does_not_pin_any_tavily_tools(monkeypatch):
+    """No Tavily tool is pinned directly anymore; web_research is the sole
+    path to Tavily (see test_web_research_binding.py)."""
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "mcp_tool_search_pinned_tools", [], raising=False)
 
     pinned_specs = _get_pinned_specs("search")
 
-    assert "tavily::tavily_search" in pinned_specs
+    assert "tavily::tavily_search" not in pinned_specs
     assert "tavily::tavily_extract" not in pinned_specs
     assert "tavily::tavily_map" not in pinned_specs
     assert "tavily::tavily_crawl" not in pinned_specs

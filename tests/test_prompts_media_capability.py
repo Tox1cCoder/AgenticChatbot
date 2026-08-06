@@ -23,9 +23,11 @@ TAXONOMY_WORDS = ("architecture", "fashion", "cuisine", "brutalist", "gothic")
 def test_snippet_defined_once_and_compact():
     snippet = prompts.MEDIA_CAPABILITY_SNIPPET
     assert "Media and visuals:" in snippet
-    # Raised from 900 when the snippet gained brave_image_search routing and
-    # disambiguated-query guidance (rich-image-selection-hardening Task 2).
-    assert len(snippet) < 1300, "media snippet must stay compact — do not bloat prompts"
+    # Raised from 1300 when the snippet was rewritten to describe the
+    # server-orchestrated web_research tool: image_intent="gallery", the
+    # verified-before-injection guarantee, and the gallery item-count rule
+    # (vision-verified-image-injection Task 6).
+    assert len(snippet) < 1700, "media snippet must stay compact — do not bloat prompts"
 
 
 def test_snippet_uses_available_ids_only_and_forbids_invention():

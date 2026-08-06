@@ -75,6 +75,7 @@ from ..utils import (
     extract_openai_reasoning_tokens,
     extract_public_thinking_summary,
 )
+from ..web_research_tool import create_web_research_tool
 
 logger = logging.getLogger(__name__)
 
@@ -464,6 +465,12 @@ class BaseAgent(ABC):
         # only other recovery is to repeat the search that produced it.
         if getattr(settings, "tool_result_offload_enabled", False):
             _add_internal(create_read_tool_result_tool())
+
+        # Research is server-orchestrated: one operation runs the text and image
+        # providers, spends the turn budget, and verifies images before the model
+        # can place them.
+        if self.agent_config_key in {"chat", "search"}:
+            _add_internal(create_web_research_tool())
 
         # Caller-provided internal tools include the graph-scoped ``hand_off``
         # tool. The graph owns its roster, so BaseAgent never supplies a static

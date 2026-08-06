@@ -1,9 +1,11 @@
-"""Brave Image Search pinning for the chat agent (image_search.md Phase 4).
+"""Brave Image Search reachability (Task 6: route agents through web_research).
 
-Brave is pinned only for ``chat`` and ``search``. Other agents
-(rag/planning/canvas/image_generator) must not pin it by default — they can
-still discover it via ``tool_search``. Required agent pins must survive the
-user-configurable pin cap.
+Brave is no longer pinned for any agent — pinning the raw provider tool
+would let the model bypass the web_research tool's turn budget and visual
+verifier. It stays reachable via ``tool_search`` for any agent, and chat/search
+additionally get ``web_research`` bound directly (see
+test_web_research_binding.py). An operator can still opt a raw tool into the
+pinned set manually via ``mcp_tool_search_pinned_tools``.
 """
 
 from __future__ import annotations
@@ -27,15 +29,20 @@ class _FakeManager:
         return self._server_by_tool_name.get(tool.name)
 
 
-def test_chat_agent_pins_brave_image_search(monkeypatch):
+def test_no_agent_pins_brave_image_search(monkeypatch):
+    """Brave is not a system-required pin for any agent, chat and search
+    included — the pin removal in Task 6 is the intended change."""
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "mcp_tool_search_pinned_tools", [], raising=False)
 
-    assert _BRAVE_SPEC in _get_pinned_specs("chat")
+    for agent_key in ("chat", "search", "rag", "planning", "canvas", "image_generator"):
+        assert _BRAVE_SPEC not in _get_pinned_specs(agent_key)
 
 
-def test_chat_binding_exposes_brave_when_tool_available(monkeypatch):
+def test_chat_binding_does_not_auto_expose_brave(monkeypatch):
+    """Brave is not auto-bound just because the raw tool is available; it
+    stays reachable only through tool_search discovery or web_research."""
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "mcp_tool_search_pinned_tools", [], raising=False)
@@ -48,32 +55,19 @@ def test_chat_binding_exposes_brave_when_tool_available(monkeypatch):
         all_mcp_tools=[SimpleNamespace(name="brave_image_search")],
     )
 
-    assert "brave_image_search" in {tool.name for tool in tools}
+    assert "brave_image_search" not in {tool.name for tool in tools}
 
 
-def test_non_chat_search_agents_do_not_pin_brave(monkeypatch):
+def test_user_configured_brave_pin_still_binds(monkeypatch):
+    """Only the system-required default pin was removed: an operator can still
+    opt Brave into the pinned set explicitly via mcp_tool_search_pinned_tools."""
     from app.core.config import settings
 
-    monkeypatch.setattr(settings, "mcp_tool_search_pinned_tools", [], raising=False)
-
-    for agent_key in ("rag", "planning", "canvas", "image_generator"):
-        assert _BRAVE_SPEC not in _get_pinned_specs(agent_key)
-
-
-def test_user_pins_capped_without_dropping_required_brave(monkeypatch):
-    """A full user-configured pin list (capped at max_pinned) must not evict the
-    agent-required Brave pin."""
-    from app.core.config import settings
-
-    user_pins = [f"extra::tool_{i}" for i in range(5)]
-    monkeypatch.setattr(settings, "mcp_tool_search_pinned_tools", user_pins, raising=False)
+    monkeypatch.setattr(settings, "mcp_tool_search_pinned_tools", [_BRAVE_SPEC], raising=False)
     monkeypatch.setattr(settings, "mcp_tool_search_max_pinned_tools", 5, raising=False)
 
-    server_map = {f"tool_{i}": "extra" for i in range(5)}
-    server_map["brave_image_search"] = "brave_image_search"
-    manager = _FakeManager(server_map)
-    all_tools = [SimpleNamespace(name=f"tool_{i}") for i in range(5)]
-    all_tools.append(SimpleNamespace(name="brave_image_search"))
+    manager = _FakeManager({"brave_image_search": "brave_image_search"})
+    all_tools = [SimpleNamespace(name="brave_image_search")]
 
     pinned = get_pinned_tools(manager, all_tools, agent_key="chat")
 

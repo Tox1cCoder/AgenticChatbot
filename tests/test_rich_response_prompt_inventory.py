@@ -220,13 +220,15 @@ def test_graph_forwards_presented_image_ids_as_transient_response_state(monkeypa
     ]
 
 
-def test_media_guidance_requires_disambiguated_image_query():
+def test_media_guidance_names_web_research_with_disambiguated_query():
+    """Image research is now a single ``web_research`` call with an
+    ``image_query`` parameter, not a second tool call issued in parallel —
+    so there is no more "same tool block"/"parallel" instruction to check."""
     from app.ai.prompts import MEDIA_CAPABILITY_SNIPPET
 
     text = MEDIA_CAPABILITY_SNIPPET.lower()
-    assert "brave_image_search" in text
+    assert "web_research" in text
     assert "disambiguat" in text
-    assert "same tool block" in text or "parallel" in text
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +266,7 @@ def test_media_guidance_triggers_on_concrete_subjects_not_only_explicit_requests
     from app.ai.prompts import MEDIA_CAPABILITY_SNIPPET
 
     text = MEDIA_CAPABILITY_SNIPPET.lower()
-    assert "brave_image_search" in text
+    assert "web_research" in text
     # Framed on the subject, not on the user's phrasing.
     assert "expect to see" in text
     # The categories that must not need an explicit request.

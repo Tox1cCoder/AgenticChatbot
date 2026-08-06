@@ -72,12 +72,10 @@ _WIDGET_PINNED_SPECS = (
     "widgets::widget_update",
     "widgets::widget_get_state",
 )
-_SEARCH_AGENT_PINNED_SPECS = (
-    "time::get_current_time",
-    "tavily::tavily_search",
-)
-_IMAGE_SEARCH_PINNED_AGENT_KEYS = {"chat", "search"}
-_IMAGE_SEARCH_PINNED_SPEC = "brave_image_search::brave_image_search"
+# Research reaches Tavily and Brave through the in-process ``web_research``
+# tool, which owns the turn budget and the visual verifier. Pinning the raw
+# provider tools would let the model bypass both.
+_SEARCH_AGENT_PINNED_SPECS = ("time::get_current_time",)
 
 
 def _get_required_pinned_specs(agent_key: str | None) -> list[str]:
@@ -90,8 +88,6 @@ def _get_required_pinned_specs(agent_key: str | None) -> list[str]:
     specs: list[str] = []
     if agent_key == "search":
         specs.extend(_SEARCH_AGENT_PINNED_SPECS)
-    if agent_key in _IMAGE_SEARCH_PINNED_AGENT_KEYS:
-        specs.append(_IMAGE_SEARCH_PINNED_SPEC)
     if agent_key in _WIDGET_PINNED_AGENT_KEYS:
         specs.extend(_WIDGET_PINNED_SPECS)
     return specs
