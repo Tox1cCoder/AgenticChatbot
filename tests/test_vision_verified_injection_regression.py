@@ -112,6 +112,33 @@ class _Verifier:
         return VisualVerificationResult(decisions=decisions)
 
 
+class _SubjectOnlyVerifier:
+    """Isolates the subject-match gate from every other gate in ``_passes``.
+
+    Both candidates report ``content_kind="photo"`` (non-specialized, so the
+    kind gate is a no-op for either one) and both report
+    ``materially_supports_answer=True`` at a confidence above threshold. Only
+    ``depicts_requested_subject`` differs between them, so it is the only
+    mechanism in ``_passes`` that can reject the portrait here.
+    """
+
+    async def ainvoke(self, messages):
+        text = messages[0].content[0]["text"]
+        decisions = []
+        for candidate_id, line in re.findall(r"^- (c\d+): (.*)$", text, flags=re.MULTILINE):
+            portrait = "Moi" in line
+            decisions.append(
+                VisualCandidateDecision(
+                    candidate_id=candidate_id,
+                    depicts_requested_subject=not portrait,
+                    materially_supports_answer=True,
+                    confidence=0.93,
+                    content_kind="photo",
+                )
+            )
+        return VisualVerificationResult(decisions=decisions)
+
+
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     clear_tool_context()
@@ -128,6 +155,11 @@ def _clean(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_portrait_rejected_team_photo_approved():
+    # NOTE: the portrait's content_kind="portrait" means admit_candidates's
+    # specialized-kind gate alone rejects it here, independent of
+    # depicts_requested_subject — this test does not isolate the subject-match
+    # check. See test_subject_mismatch_rejects_the_portrait_when_kind_gate_is_a_noop
+    # for the test that does.
     tool = create_web_research_tool(
         tavily_tool=_Tool(TAVILY_PAYLOAD),
         brave_tool=_Tool(BRAVE_PAYLOAD),
@@ -200,3 +232,33 @@ async def test_approved_candidate_carries_decoded_dimensions():
     assert sink[0]["payload"]["width"] == 995
     assert sink[0]["payload"]["height"] == 565
     assert sink[0]["payload"]["mime_type"] == "image/webp"
+
+
+@pytest.mark.asyncio
+async def test_subject_mismatch_rejects_the_portrait_when_kind_gate_is_a_noop():
+    """Pins the subject-match check itself, isolated from the kind gate.
+
+    Both candidates report content_kind="photo", so admit_candidates's
+    specialized-kind gate cannot reject either one on its own. If
+    depicts_requested_subject stopped being checked, the portrait would be
+    admitted and both "Moi" and PORTRAIT_URL would reach the sink.
+    """
+    tool = create_web_research_tool(
+        tavily_tool=_Tool(TAVILY_PAYLOAD),
+        brave_tool=_Tool(BRAVE_PAYLOAD),
+        web_image_service=_Service(),
+        verifier_model=_SubjectOnlyVerifier(),
+    )
+
+    with tool_execution_context(
+        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
+    ), verified_image_sink() as sink:
+        await tool.ainvoke(
+            {"query": "T1 roster 2026", "image_query": "T1 League of Legends team photo"}
+        )
+
+    serialized_sink = json.dumps(sink)
+    assert len(sink) == 1
+    assert sink[0]["payload"]["url"] == TEAM_URL
+    assert "Moi" not in serialized_sink
+    assert PORTRAIT_URL not in serialized_sink
