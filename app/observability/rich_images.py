@@ -33,6 +33,15 @@ _FETCH_OUTCOMES = {
     "private_address",
     "redirect_limit",
 }
+_VERIFICATION_STAGES = {"discovered", "fetched", "submitted", "approved"}
+_VERIFICATION_OUTCOMES = {
+    "approved",
+    "no_match",
+    "timeout",
+    "malformed",
+    "transport",
+    "unavailable",
+}
 
 
 class RichImageMetrics:
@@ -93,6 +102,24 @@ class RichImageMetrics:
             ("provider", "outcome"),
             registry=self.registry,
         )
+        self.verification_stages = Counter(
+            "rich_image_verification_stage_total",
+            "Candidates reaching each stage of visual verification.",
+            ("stage",),
+            registry=self.registry,
+        )
+        self.verification_outcomes = Counter(
+            "rich_image_verification_outcome_total",
+            "Terminal outcome of the visual verification path.",
+            ("outcome",),
+            registry=self.registry,
+        )
+        self.verification_duration = Histogram(
+            "rich_image_verification_duration_seconds",
+            "Duration of the visual verification path.",
+            ("outcome",),
+            registry=self.registry,
+        )
 
     def record_discovery(self, *, provider: str, result_count: int) -> None:
         self.discovery_results.labels(provider=_provider(provider)).observe(
@@ -141,6 +168,19 @@ class RichImageMetrics:
         }
         self.fetches.labels(**labels).inc()
         self.fetch_duration.labels(**labels).observe(max(0.0, float(duration_seconds)))
+
+    def record_verification(self, *, stage: str, count: int) -> None:
+        if count > 0:
+            self.verification_stages.labels(
+                stage=_bounded(stage, _VERIFICATION_STAGES)
+            ).inc(int(count))
+
+    def record_verification_outcome(self, *, outcome: str, duration_seconds: float) -> None:
+        label = _bounded(outcome, _VERIFICATION_OUTCOMES)
+        self.verification_outcomes.labels(outcome=label).inc()
+        self.verification_duration.labels(outcome=label).observe(
+            max(0.0, float(duration_seconds))
+        )
 
     def render(self) -> bytes:
         return generate_latest(self.registry)

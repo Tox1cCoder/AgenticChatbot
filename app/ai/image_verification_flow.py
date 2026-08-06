@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import logging
 import time
+from contextlib import suppress
 from typing import Any
 
 from ..core.config import settings
+from ..observability.rich_images import rich_image_metrics
 from ..services.thumbnail_batch import fetch_thumbnails
 from .tool_execution import (
     _group_image_candidates,
@@ -57,7 +59,16 @@ async def discover_and_verify_images(
     returns a single grid item, anything else returns individual images.
     """
 
+    started = time.perf_counter()
+
+    def _outcome(label: str) -> None:
+        with suppress(Exception):
+            rich_image_metrics.record_verification_outcome(
+                outcome=label, duration_seconds=time.perf_counter() - started
+            )
+
     if brave_tool is None or web_image_service is None:
+        _outcome("unavailable")
         return []
 
     # Mirrors the outer asyncio.timeout(image_verification_deadline_seconds)
@@ -76,7 +87,13 @@ async def discover_and_verify_images(
         group_images=False,
     )
     candidates = candidates[: max(1, int(settings.image_verification_max_candidates))]
+    with suppress(Exception):
+        rich_image_metrics.record_verification(stage="discovered", count=len(candidates))
     if not candidates:
+        # Brave returned nothing to verify -- no separate outcome label exists
+        # for "discovery was empty", so this is the same terminal state as
+        # zero approvals: no image is available to show.
+        _outcome("no_match")
         return []
 
     thumbnails = await fetch_thumbnails(
@@ -89,6 +106,10 @@ async def discover_and_verify_images(
         ),
         batch_deadline=_remaining_seconds(deadline_at),
     )
+    with suppress(Exception):
+        rich_image_metrics.record_verification(
+            stage="fetched", count=sum(1 for thumbnail in thumbnails if thumbnail is not None)
+        )
     submitted = [
         SubmittedCandidate(
             candidate_id=f"c{index}",
@@ -101,7 +122,10 @@ async def discover_and_verify_images(
         )
         if thumbnail is not None
     ]
+    with suppress(Exception):
+        rich_image_metrics.record_verification(stage="submitted", count=len(submitted))
     if not submitted:
+        _outcome("transport")
         return []
 
     result = await verify_candidates(
@@ -114,6 +138,9 @@ async def discover_and_verify_images(
         timeout=_remaining_seconds(deadline_at),
         recorder=recorder,
     )
+    if result is None:
+        _outcome("malformed")
+        return []
     gallery = str(image_intent or "figure").strip().lower() == "gallery"
     approved = admit_candidates(
         result,
@@ -126,12 +153,18 @@ async def discover_and_verify_images(
         ),
         requested_kinds=_requested_kinds(f"{user_request} {image_query}"),
     )
+    with suppress(Exception):
+        rich_image_metrics.record_verification(stage="approved", count=len(approved))
+    if not approved:
+        _outcome("no_match")
+        return []
     by_id = {f"c{index}": candidate for index, candidate in enumerate(candidates)}
     public = [
         _with_decoded_dimensions(by_id[item.candidate_id], item)
         for item in approved
         if item.candidate_id in by_id
     ]
+    _outcome("approved")
     if gallery and len(public) >= 2:
         return [
             _group_image_candidates(
