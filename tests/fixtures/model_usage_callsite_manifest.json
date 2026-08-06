@@ -196,7 +196,7 @@
   },
   {
     "file": "app/ai/visual_verifier.py",
-    "function": "verify_candidates._call",
+    "function": "_invoke_verifier._call",
     "call_chain": "resolved_model.ainvoke",
     "disposition": "instrumented",
     "operation": "image_verification",

@@ -27,7 +27,7 @@ import asyncio
 import base64
 import contextlib
 import logging
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -36,7 +36,8 @@ from pydantic import BaseModel, Field
 from ..core.config import settings
 from ..services.thumbnail_batch import FetchedThumbnail
 from ..usage import begin_usage_operation, bind_usage_context, current_usage_context
-from ..usage.types import UsageOperation
+from ..usage.normalizers import normalize_provider_usage
+from ..usage.types import NormalizedUsage, UsageOperation
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,72 @@ def _verification_usage_scope(recorder: Any | None) -> Iterator[UsageOperation |
         yield operation
 
 
+def _verifier_usage_transform(response: Any, usage: NormalizedUsage) -> NormalizedUsage:
+    """Read real provider usage off ``include_raw=True``'s ``raw`` envelope.
+
+    ``normalize_provider_usage`` cannot see it directly on ``response``:
+    a structured-output call built with ``include_raw=True`` returns
+    ``{"raw": AIMessage, "parsed": ..., "parsing_error": ...}``, not a bare
+    provider response, so its top-level ``usage_metadata`` search finds
+    nothing (hence the already-resolved ``usage`` this receives is
+    "unavailable"). Every existing test still injects a bare parsed result
+    with no envelope at all, so anything that isn't the expected mapping
+    shape keeps ``usage`` unchanged rather than raising -- this runs inside
+    the recorder's own try/except, but staying defensive costs nothing.
+    """
+    if isinstance(response, Mapping):
+        raw = response.get("raw")
+        if raw is not None:
+            return normalize_provider_usage(provider="gemini", payload=raw)
+    return usage
+
+
+async def _invoke_verifier(resolved_model: Any, message: Any, recorder: Any | None) -> Any:
+    """Run the verifier's ``ainvoke`` exactly once, recording it when possible."""
+
+    async def _call() -> Any:
+        return await resolved_model.ainvoke([message])
+
+    with _verification_usage_scope(recorder) as operation:
+        if recorder is None or operation is None:
+            return await _call()
+        return await recorder.record_one_async_attempt(
+            call=_call,
+            provider="gemini",
+            model=str(settings.image_verification_model),
+            operation=operation,
+            usage_transform=_verifier_usage_transform,
+        )
+
+
+def _unwrap_verifier_response(response: Any) -> VisualVerificationResult | None:
+    """Return the parsed result, tolerating both response shapes.
+
+    Every existing test injects a bare ``VisualVerificationResult`` (no
+    envelope at all). Production, now that ``build_verifier_model`` uses
+    ``include_raw=True`` for usage capture, gets back ``{"raw": AIMessage,
+    "parsed": ..., "parsing_error": ...}`` instead. A non-``None``
+    ``parsing_error`` -- or a missing/malformed ``parsed`` -- is a genuine
+    parse failure, matching the existing fail-closed contract: sink the
+    whole batch, never guess.
+    """
+    if isinstance(response, VisualVerificationResult):
+        return response
+    if isinstance(response, Mapping) and "parsing_error" in response:
+        parsed = response.get("parsed")
+        if response.get("parsing_error") is not None or not isinstance(
+            parsed, VisualVerificationResult
+        ):
+            logger.debug("Visual verification returned an unusable response shape")
+            return None
+        return parsed
+    try:
+        return VisualVerificationResult.model_validate(response)
+    except Exception:
+        logger.debug("Visual verification returned an unusable response shape")
+        return None
+
+
 async def verify_candidates(
     submitted: Sequence[SubmittedCandidate],
     *,
@@ -209,32 +276,13 @@ async def verify_candidates(
         factual_query=factual_query,
         result_titles=result_titles,
     )
-
-    async def _call() -> Any:
-        return await resolved_model.ainvoke([message])
-
     try:
         async with asyncio.timeout(max(0.001, float(timeout))):
-            with _verification_usage_scope(recorder) as operation:
-                if recorder is not None and operation is not None:
-                    response = await recorder.record_one_async_attempt(
-                        call=_call,
-                        provider="gemini",
-                        model=str(settings.image_verification_model),
-                        operation=operation,
-                    )
-                else:
-                    response = await _call()
+            response = await _invoke_verifier(resolved_model, message, recorder)
     except Exception as exc:
         logger.debug("Visual verification unavailable: %s", type(exc).__name__)
         return None
-    if isinstance(response, VisualVerificationResult):
-        return response
-    try:
-        return VisualVerificationResult.model_validate(response)
-    except Exception:
-        logger.debug("Visual verification returned an unusable response shape")
-        return None
+    return _unwrap_verifier_response(response)
 
 
 def _build_message(
@@ -301,7 +349,17 @@ def _resolve_media_resolution(value: str) -> str:
 
 
 def build_verifier_model() -> Any | None:
-    """Build the configured vision model with structured output, or None."""
+    """Build the configured vision model with structured output, or None.
+
+    ``include_raw=True`` is load-bearing for billing visibility, not just
+    parsing: without it, ``with_structured_output`` returns only the parsed
+    Pydantic object, which carries no ``usage_metadata`` at all, so a billed
+    call would be recorded with a permanent zero-token ``NormalizedUsage``.
+    With it, the runnable returns ``{"raw": AIMessage, "parsed": ...,
+    "parsing_error": ...}``; ``_invoke_verifier``'s usage transform reads
+    tokens off ``raw``, and ``_unwrap_verifier_response`` unwraps ``parsed``
+    back into the plain ``VisualVerificationResult`` every caller expects.
+    """
 
     try:
         from .model_factory import ModelFactory
@@ -313,7 +371,7 @@ def build_verifier_model() -> Any | None:
             temperature=0.0,
             media_resolution=_resolve_media_resolution(settings.image_verification_media_resolution),
         )
-        return model.with_structured_output(VisualVerificationResult)
+        return model.with_structured_output(VisualVerificationResult, include_raw=True)
     except Exception as exc:
         logger.warning("Visual verifier model unavailable: %s", exc)
         return None

@@ -5,6 +5,7 @@ import json
 import logging
 import warnings
 from dataclasses import asdict
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -240,24 +241,36 @@ def _test_recorder(repo: _FakeUsageRepo) -> ModelUsageRecorder:
 
 @pytest.mark.asyncio
 async def test_verify_candidates_records_one_image_verification_attempt():
-    """A recorder must see exactly one attempt, carrying no verdict content.
+    """A recorder must see exactly one attempt, with real tokens, no verdict content.
 
     This is the only test standing between the verifier's real, billed Gemini
     call and an unnoticed silent-cost regression: if the recording call were
     ever deleted from ``verify_candidates``, ``repo.commands`` would stay
-    empty and this test would fail.
+    empty and this test would fail. The fake model returns the
+    ``{"raw": ..., "parsed": ..., "parsing_error": ...}`` shape that
+    ``with_structured_output(..., include_raw=True)`` actually produces, with
+    a real ``usage_metadata`` envelope on ``raw`` -- so the test also fails if
+    usage capture ever regresses back to a permanent ``source="unavailable"``
+    with zero tokens, which is the whole reason this call is worth recording.
     """
 
     # A UUID is all hex digits and hyphens, so a candidate id containing a
     # letter outside a-f (like "z") can never collide with the recorded
     # operation_id/attempt fields the way a hex-like id such as "c1" could.
     candidate_id = "candidate-zebra"
+    parsed_result = VisualVerificationResult(
+        decisions=[_decision(candidate_id, confidence=0.97, content_kind="portrait")]
+    )
 
-    class _Model:
+    class _StructuredOutputModel:
         async def ainvoke(self, _messages):
-            return VisualVerificationResult(
-                decisions=[_decision(candidate_id, confidence=0.97, content_kind="portrait")]
-            )
+            return {
+                "raw": SimpleNamespace(
+                    usage_metadata={"input_tokens": 812, "output_tokens": 47, "total_tokens": 859}
+                ),
+                "parsed": parsed_result,
+                "parsing_error": None,
+            }
 
     repo = _FakeUsageRepo()
 
@@ -267,17 +280,21 @@ async def test_verify_candidates_records_one_image_verification_attempt():
         image_query="i",
         factual_query="f",
         result_titles=[],
-        model=_Model(),
+        model=_StructuredOutputModel(),
         timeout=1.0,
         recorder=_test_recorder(repo),
     )
 
-    assert result is not None
+    assert result == parsed_result
     assert len(repo.commands) == 1
     command = repo.commands[0]
     assert command.status == "success"
     assert command.provider == "gemini"
     assert command.context.operation == "image_verification"
+    assert command.usage.source == "provider_reported"
+    assert command.usage.input_tokens == 812
+    assert command.usage.output_tokens == 47
+    assert command.usage.total_tokens == 859
 
     serialized = json.dumps(asdict(command), default=str)
     assert candidate_id not in serialized
@@ -285,6 +302,37 @@ async def test_verify_candidates_records_one_image_verification_attempt():
     assert "portrait" not in serialized
     assert "confidence" not in serialized
     assert "content_kind" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_verify_candidates_tolerates_a_bare_parsed_response_when_recording():
+    """Every pre-existing test injects a bare parsed result, not the include_raw dict.
+
+    Recording must not assume the wrapped shape: a bare response still records
+    one attempt (with ``source="unavailable"``, since it carries no usage
+    envelope at all) rather than raising and losing the verification.
+    """
+
+    class _BareModel:
+        async def ainvoke(self, _messages):
+            return VisualVerificationResult(decisions=[_decision("c1")])
+
+    repo = _FakeUsageRepo()
+
+    result = await verify_candidates(
+        [_submitted("c1")],
+        user_request="q",
+        image_query="i",
+        factual_query="f",
+        result_titles=[],
+        model=_BareModel(),
+        timeout=1.0,
+        recorder=_test_recorder(repo),
+    )
+
+    assert result is not None
+    assert len(repo.commands) == 1
+    assert repo.commands[0].usage.source == "unavailable"
 
 
 def _settings_with(**overrides):
@@ -357,7 +405,9 @@ def test_build_verifier_model_maps_media_resolution_to_a_canonical_value(monkeyp
 
     assert not any(issubclass(item.category, UserWarning) for item in caught)
     assert model is not None
-    resolved = model.first.media_resolution
+    # include_raw=True (added for usage capture) makes `.first` a RunnableParallel
+    # with a "raw" step wrapping the bound chat model, not the chat model itself.
+    resolved = model.first.steps__["raw"].media_resolution
     assert resolved in set(MediaResolution), (
         "media_resolution must be a canonical enum member, not a synthetic one "
         "the SDK invents for an unrecognized string"
