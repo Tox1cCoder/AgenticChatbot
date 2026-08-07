@@ -29,6 +29,11 @@ from .visual_verifier import (
 
 logger = logging.getLogger(__name__)
 
+# Outcomes that mean the machinery failed, as opposed to it working and finding
+# nothing worth showing. "no_match" is deliberately absent: a verifier that
+# rejects every candidate is the feature doing its job.
+_OPERATIONAL_FAILURES = frozenset({"timeout", "malformed", "transport", "unavailable"})
+
 
 def _remaining_seconds(deadline_at: float) -> float:
     """Return actual wall-clock time left before ``deadline_at``, floored above 0.
@@ -65,9 +70,22 @@ async def discover_and_verify_images(
     started = time.perf_counter()
 
     def _outcome(label: str) -> None:
+        elapsed = time.perf_counter() - started
         with suppress(Exception):
             rich_image_metrics.record_verification_outcome(
-                outcome=label, duration_seconds=time.perf_counter() - started
+                outcome=label, duration_seconds=elapsed
+            )
+        if label in _OPERATIONAL_FAILURES:
+            # Every failure here is a successful text-only answer by design, so
+            # a total outage is indistinguishable from "no good image found"
+            # unless it says so. A misconfigured deadline cancelled every
+            # verifier call for days and looked exactly like normal operation,
+            # because only a metric nobody was watching recorded it.
+            logger.warning(
+                "Image verification produced no image (%s) after %.2fs; "
+                "answers will be text-only until this clears.",
+                label,
+                elapsed,
             )
 
     if brave_tool is None or web_image_service is None:

@@ -239,10 +239,18 @@ async def _discover_and_verify(
         # further await, so cancellation can only land here, before any of
         # those calls happened. Recording "timeout" here therefore cannot
         # double up with an outcome the inner flow already recorded.
+        elapsed = time.perf_counter() - started
         with suppress(Exception):
             rich_image_metrics.record_verification_outcome(
-                outcome="timeout", duration_seconds=time.perf_counter() - started
+                outcome="timeout", duration_seconds=elapsed
             )
+        logger.warning(
+            "Image path hit its %.1fs deadline after %.2fs; answering text-only. "
+            "If this repeats, the deadline is below what the providers actually "
+            "cost — measure the stages rather than lowering it further.",
+            float(settings.image_verification_deadline_seconds),
+            elapsed,
+        )
         return []
     except Exception as exc:
         logger.debug("Image verification abandoned: %s", type(exc).__name__)
