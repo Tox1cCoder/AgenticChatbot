@@ -41,6 +41,10 @@ from ..usage.types import NormalizedUsage, UsageOperation
 
 logger = logging.getLogger(__name__)
 
+class VisualVerifierUnavailable(RuntimeError):
+    """No verifier model could be built, so no batch could be judged."""
+
+
 ContentKind = Literal[
     "photo", "portrait", "logo", "diagram", "map", "chart", "screenshot", "other"
 ]
@@ -256,7 +260,10 @@ async def verify_candidates(
     timeout: float,
     recorder: Any | None = None,
 ) -> VisualVerificationResult | None:
-    """Run one structured vision call. Returns ``None`` on any failure.
+    """Run one structured vision call. ``None`` means malformed output only.
+
+    ``TimeoutError`` and provider exceptions propagate so the caller can tell an
+    outage apart from a batch that parsed but named nothing worth showing.
 
     ``recorder``, when supplied, records this billed attempt exactly once.
     Its absence -- or any failure setting up the recording -- is not itself a
@@ -268,7 +275,7 @@ async def verify_candidates(
         return None
     resolved_model = model if model is not None else build_verifier_model()
     if resolved_model is None:
-        return None
+        raise VisualVerifierUnavailable("no visual verifier model is configured")
     message = _build_message(
         submitted,
         user_request=user_request,
@@ -276,12 +283,8 @@ async def verify_candidates(
         factual_query=factual_query,
         result_titles=result_titles,
     )
-    try:
-        async with asyncio.timeout(max(0.001, float(timeout))):
-            response = await _invoke_verifier(resolved_model, message, recorder)
-    except Exception as exc:
-        logger.debug("Visual verification unavailable: %s", type(exc).__name__)
-        return None
+    async with asyncio.timeout(max(0.001, float(timeout))):
+        response = await _invoke_verifier(resolved_model, message, recorder)
     return _unwrap_verifier_response(response)
 
 
@@ -386,5 +389,5 @@ def build_verifier_model() -> Any | None:
         )
         return model.with_structured_output(VisualVerificationResult, include_raw=True)
     except Exception as exc:
-        logger.warning("Visual verifier model unavailable: %s", exc)
+        logger.debug("Visual verifier model unavailable: %s", type(exc).__name__)
         return None

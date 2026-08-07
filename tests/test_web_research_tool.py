@@ -3,11 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from unittest.mock import Mock
 
 import pytest
 
-from app.ai import web_research_tool as wrt
 from app.ai.research_budget import reset_research_budget
 from app.ai.tool_context import clear_tool_context, tool_execution_context
 from app.ai.verified_image_sink import verified_image_sink
@@ -467,38 +465,6 @@ async def test_tavily_failure_cancels_a_live_image_task_cleanly():
         await asyncio.gather(*leftover, return_exceptions=True)
     assert all(task.done() for task in leftover), "image task left pending after cancel"
     assert all(task.cancelled() for task in leftover), "image task did not honor cancellation"
-
-
-@pytest.mark.asyncio
-async def test_outer_deadline_expiry_records_timeout_once(monkeypatch):
-    """The whole-path deadline, not just the verifier's own timeout, must be
-    observable: a Brave call that outlives it should show up as ``timeout``,
-    not silently as no metric at all."""
-
-    metrics = type("Metrics", (), {"record_verification_outcome": Mock()})()
-    monkeypatch.setattr(wrt, "rich_image_metrics", metrics)
-    monkeypatch.setattr(wrt.settings, "image_verification_deadline_seconds", 0.02, raising=False)
-
-    class _SlowBrave:
-        async def ainvoke(self, args):
-            await asyncio.sleep(0.3)
-            return BRAVE_PAYLOAD
-
-    payload, sink = await _run(
-        _tool(
-            _FakeTool("tavily_search", TAVILY_PAYLOAD),
-            _SlowBrave(),
-            _FakeImageService(),
-            _ApproveOnlyTeamPhoto(),
-        ),
-        query="T1 roster 2026",
-        image_query="T1 team photo",
-    )
-
-    assert sink == []
-    assert payload["results"]
-    metrics.record_verification_outcome.assert_called_once()
-    assert metrics.record_verification_outcome.call_args.kwargs["outcome"] == "timeout"
 
 
 @pytest.mark.asyncio

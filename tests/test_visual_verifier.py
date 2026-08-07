@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import warnings
 from dataclasses import asdict
 from types import SimpleNamespace
@@ -15,6 +14,7 @@ from app.ai.visual_verifier import (
     SubmittedCandidate,
     VisualCandidateDecision,
     VisualVerificationResult,
+    VisualVerifierUnavailable,
     admit_candidates,
     build_verifier_model,
     verify_candidates,
@@ -128,42 +128,57 @@ def test_provider_order_is_preserved_and_capped():
 
 
 @pytest.mark.asyncio
-async def test_verifier_timeout_returns_none():
+async def test_verifier_timeout_propagates():
+    """The caller classifies a timeout; swallowing it hides an outage as no_match."""
+
     class _SlowModel:
         async def ainvoke(self, _messages):
             await asyncio.sleep(1.0)
             return VisualVerificationResult(decisions=[])
 
-    result = await verify_candidates(
-        [_submitted("c1")],
-        user_request="cho t thong tin ve t1",
-        image_query="T1 League of Legends team photo",
-        factual_query="T1 roster 2026",
-        result_titles=["LoL: T1 completed 2026 LCK roster"],
-        model=_SlowModel(),
-        timeout=0.05,
-    )
-
-    assert result is None
+    with pytest.raises(TimeoutError):
+        await verify_candidates(
+            [_submitted("c1")],
+            user_request="u",
+            image_query="i",
+            factual_query="f",
+            result_titles=[],
+            model=_SlowModel(),
+            timeout=0.01,
+        )
 
 
 @pytest.mark.asyncio
-async def test_verifier_provider_error_returns_none():
+async def test_verifier_provider_error_propagates():
     class _BrokenModel:
         async def ainvoke(self, _messages):
             raise RuntimeError("provider refused")
 
-    result = await verify_candidates(
-        [_submitted("c1")],
-        user_request="q",
-        image_query="i",
-        factual_query="f",
-        result_titles=[],
-        model=_BrokenModel(),
-        timeout=1.0,
-    )
+    with pytest.raises(RuntimeError, match="provider refused"):
+        await verify_candidates(
+            [_submitted("c1")],
+            user_request="q",
+            image_query="i",
+            factual_query="f",
+            result_titles=[],
+            model=_BrokenModel(),
+            timeout=1.0,
+        )
 
-    assert result is None
+
+@pytest.mark.asyncio
+async def test_missing_verifier_model_raises_unavailable(monkeypatch):
+    monkeypatch.setattr("app.ai.visual_verifier.build_verifier_model", lambda: None)
+
+    with pytest.raises(VisualVerifierUnavailable):
+        await verify_candidates(
+            [_submitted("c1")],
+            user_request="q",
+            image_query="i",
+            factual_query="f",
+            result_titles=[],
+            timeout=1.0,
+        )
 
 
 @pytest.mark.asyncio
@@ -335,57 +350,15 @@ async def test_verify_candidates_tolerates_a_bare_parsed_response_when_recording
     assert repo.commands[0].usage.source == "unavailable"
 
 
-def _settings_with(**overrides):
-    from app.core.config import Settings
-
-    return Settings(
-        _env_file=None,
-        secret_key="test-secret",
-        environment="development",
-        **overrides,
-    )
-
-
-def test_shipped_defaults_leave_headroom_inside_the_image_deadline():
-    """Guard the shipped code defaults, not whatever a live `.env` happens to set.
-
-    A test that reads the live ``settings`` singleton only proves that
-    whatever is loaded right now satisfies the arithmetic — it would pass in
-    a clean CI environment while a real deployment silently violated the
-    deadline. `Field.default` is env-independent: it is what ships.
-    """
+def test_verifier_has_a_stage_timeout_without_an_image_path_deadline():
+    """Each stage owns its own timeout; nothing bounds the path as a whole."""
     from app.core.config import Settings
 
     fields = Settings.model_fields
-    brave_default = float(fields["brave_image_search_timeout_seconds"].default)
-    thumbnail_default = float(fields["image_verification_thumbnail_timeout_seconds"].default)
-    deadline_default = float(fields["image_verification_deadline_seconds"].default)
 
-    assert brave_default + thumbnail_default < deadline_default, (
-        "shipped image search plus thumbnail timeout defaults must leave verifier headroom"
-    )
-
-
-def test_warns_when_the_image_verification_budget_has_no_headroom(caplog):
-    with caplog.at_level(logging.WARNING, logger="app.core.config"):
-        _settings_with(
-            brave_image_search_timeout_seconds=3.0,
-            image_verification_thumbnail_timeout_seconds=1.5,
-            image_verification_deadline_seconds=4.0,
-        )
-
-    assert "headroom" in caplog.text
-
-
-def test_does_not_warn_when_the_image_verification_budget_has_headroom(caplog):
-    with caplog.at_level(logging.WARNING, logger="app.core.config"):
-        _settings_with(
-            brave_image_search_timeout_seconds=2.0,
-            image_verification_thumbnail_timeout_seconds=1.5,
-            image_verification_deadline_seconds=4.0,
-        )
-
-    assert "headroom" not in caplog.text
+    assert "image_verification_deadline_seconds" not in fields
+    assert fields["image_verification_timeout_seconds"].default == 10.0
+    assert fields["image_verification_thumbnail_timeout_seconds"].default == 2.0
 
 
 def test_build_verifier_model_maps_media_resolution_to_a_canonical_value(monkeypatch):
@@ -466,24 +439,3 @@ def test_verifier_thinking_level_is_configurable(monkeypatch):
     build_verifier_model()
 
     assert captured["thinking_config"] == {"enabled": True, "level": "high"}
-
-
-def test_the_deadline_leaves_room_for_a_measured_verifier_call():
-    """Arithmetic consistency is not sufficiency.
-
-    The previous guard only asserted brave + thumbnail < deadline, which held
-    at 2.5 + 1.0 < 4.0 while leaving the verifier 0.5s for a call that measures
-    ~3.5s. The feature could never fire. This asserts the leftover is enough
-    for the call that actually has to happen.
-    """
-    from app.core.config import Settings
-
-    fields = Settings.model_fields
-    brave = float(fields["brave_image_search_timeout_seconds"].default)
-    thumbnail = float(fields["image_verification_thumbnail_timeout_seconds"].default)
-    deadline = float(fields["image_verification_deadline_seconds"].default)
-
-    # Measured 3.46s for four thumbnails at thinking_level="low"; require margin.
-    assert deadline - brave - thumbnail >= 4.5, (
-        "the verifier needs ~3.5s at low thinking; leave real margin, not arithmetic headroom"
-    )

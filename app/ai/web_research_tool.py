@@ -12,15 +12,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
-from contextlib import suppress
 from typing import Any, Literal
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from ..core.config import settings
-from ..observability.rich_images import rich_image_metrics
 from .research_budget import get_research_budget
 from .tool_context import get_tool_context
 from .tool_result_rendering import provider_result_text
@@ -215,51 +212,21 @@ async def _discover_and_verify(
 
     from .image_verification_flow import discover_and_verify_images
 
-    # Resolved before the deadline starts: a cold MCP server start is
-    # provisioning, not image work, and charging it to the image budget would
-    # make the first visual turn of a process time out on principle.
     if brave_tool is None:
         brave_tool = await _resolve_tool("brave_image_search", "brave_image_search")
     if web_image_service is None:
         web_image_service = _from_container("web_image_service")
 
-    started = time.perf_counter()
-    try:
-        async with asyncio.timeout(float(settings.image_verification_deadline_seconds)):
-            return await discover_and_verify_images(
-                brave_tool=brave_tool,
-                web_image_service=web_image_service,
-                verifier_model=verifier_model,
-                user_request=user_request,
-                image_query=image_query,
-                factual_query=factual_query,
-                image_intent=image_intent,
-                recorder=recorder,
-            )
-    except TimeoutError:
-        # This deadline firing means discover_and_verify_images was still
-        # suspended at one of its own internal awaits (Brave, thumbnails, or
-        # the verifier) when the clock ran out: every branch that reaches one
-        # of its own outcome calls returns immediately afterward with no
-        # further await, so cancellation can only land here, before any of
-        # those calls happened. Recording "timeout" here therefore cannot
-        # double up with an outcome the inner flow already recorded.
-        elapsed = time.perf_counter() - started
-        with suppress(Exception):
-            rich_image_metrics.record_verification_outcome(
-                outcome="timeout", duration_seconds=elapsed
-            )
-        logger.warning(
-            "Image path hit its %.1fs deadline after %.2fs; answering text-only. "
-            "If this repeats, the deadline is below what the providers actually "
-            "cost — measure the stages rather than lowering it further.",
-            float(settings.image_verification_deadline_seconds),
-            elapsed,
-        )
-        return []
-    except Exception as exc:
-        logger.debug("Image verification abandoned: %s", type(exc).__name__)
-        return []
+    return await discover_and_verify_images(
+        brave_tool=brave_tool,
+        web_image_service=web_image_service,
+        verifier_model=verifier_model,
+        user_request=user_request,
+        image_query=image_query,
+        factual_query=factual_query,
+        image_intent=image_intent,
+        recorder=recorder,
+    )
 
 
 async def _resolve_tool(server_name: str, tool_name: str) -> Any | None:

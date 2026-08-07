@@ -35,21 +35,6 @@ logger = logging.getLogger(__name__)
 _OPERATIONAL_FAILURES = frozenset({"timeout", "malformed", "transport", "unavailable"})
 
 
-def _remaining_seconds(deadline_at: float) -> float:
-    """Return actual wall-clock time left before ``deadline_at``, floored above 0.
-
-    The configured per-stage settings (Brave's own timeout, the thumbnail
-    timeout) are independent knobs that can drift out of sync with the overall
-    image-verification deadline — e.g. a slow Brave call plus the full
-    thumbnail timeout can already exceed the deadline, leaving the verifier
-    call no time at all even though it was handed the full nominal setting.
-    Deriving each stage's budget from what is actually left avoids handing a
-    later stage a timeout the outer deadline will never let it use.
-    """
-
-    return max(0.001, deadline_at - time.monotonic())
-
-
 async def discover_and_verify_images(
     *,
     brave_tool: Any | None,
@@ -92,11 +77,6 @@ async def discover_and_verify_images(
         _outcome("unavailable")
         return []
 
-    # Mirrors the outer asyncio.timeout(image_verification_deadline_seconds)
-    # the caller wraps this whole call in, so "remaining" below reflects real
-    # time left against that same deadline rather than the raw setting.
-    deadline_at = time.monotonic() + float(settings.image_verification_deadline_seconds)
-
     raw = provider_result_text(
         await brave_tool.ainvoke({"query": image_query}), tool_name="brave_image_search"
     )
@@ -123,11 +103,8 @@ async def discover_and_verify_images(
         web_image_service,
         [candidate["payload"]["url"] for candidate in candidates],
         provider="brave",
-        per_item_timeout=min(
-            float(settings.image_verification_thumbnail_timeout_seconds),
-            _remaining_seconds(deadline_at),
-        ),
-        batch_deadline=_remaining_seconds(deadline_at),
+        per_item_timeout=float(settings.image_verification_thumbnail_timeout_seconds),
+        batch_deadline=float(settings.image_verification_thumbnail_timeout_seconds),
     )
     with suppress(Exception):
         rich_image_metrics.record_verification(
@@ -158,7 +135,7 @@ async def discover_and_verify_images(
         factual_query=factual_query,
         result_titles=[],
         model=verifier_model,
-        timeout=_remaining_seconds(deadline_at),
+        timeout=float(settings.image_verification_timeout_seconds),
         recorder=recorder,
     )
     if result is None:

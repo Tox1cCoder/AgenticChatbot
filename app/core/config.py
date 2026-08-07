@@ -303,10 +303,7 @@ class Settings(BaseSettings):
     )
     brave_image_search_timeout_seconds: float = Field(
         default=2.5,
-        description=(
-            "Brave image search request timeout. Kept under the image-path "
-            "deadline so a slow provider cannot consume the verifier's budget."
-        ),
+        description="Brave image search request timeout.",
     )
     brave_image_search_default_safesearch: str = Field(
         default="strict",
@@ -1193,9 +1190,8 @@ class Settings(BaseSettings):
     image_verification_thinking_level: str = Field(
         default="low",
         description=(
-            "Reasoning budget for the verifier call. Deliberation is its dominant "
-            "cost and buys a classification task nothing: measured 12.65s on the "
-            "provider default versus 3.46s at 'low' for four thumbnails."
+            "Reasoning budget for the verifier call. Deliberation dominates its "
+            "latency and buys a classification task nothing."
         ),
     )
     image_verification_confidence_threshold: float = Field(
@@ -1209,31 +1205,20 @@ class Settings(BaseSettings):
         ge=1,
         le=10,
         description=(
-            "Maximum candidates submitted to one verifier call. Batch size, not "
-            "per-image cost, dominates the image path: measured end to end, 6 "
-            "candidates took 12.5s and lost a whole turn's images to the "
-            "deadline, while 3 took 3.9s and kept them. A gallery is therefore "
-            "bounded by this before rich_image_gallery_max_items."
+            "Maximum candidates submitted to one verifier call. Batch size "
+            "dominates verifier latency, so a gallery is bounded by this before "
+            "rich_image_gallery_max_items."
         ),
     )
-    image_verification_deadline_seconds: float = Field(
-        default=9.0,
+    image_verification_timeout_seconds: float = Field(
+        default=10.0,
         gt=0,
-        description=(
-            "Hard end-to-end deadline for the image path, from image-search "
-            "dispatch to verifier verdict. Exceeding it yields a text-only answer. "
-            "Measured stages: image search ~0.8s, four thumbnails ~1.6s, verifier "
-            "~3.5s at low thinking — so a 4s deadline cancelled every verifier "
-            "call and no image could ever be shown."
-        ),
+        description="Timeout for the single visual-verification model call.",
     )
     image_verification_thumbnail_timeout_seconds: float = Field(
         default=2.0,
         gt=0,
-        description=(
-            "Per-thumbnail download timeout during verification. A four-image "
-            "batch measured 1.63s wall, so 1.0s dropped its slowest members."
-        ),
+        description="Per-thumbnail download timeout during verification.",
     )
     verified_image_cache_max_bytes: int = Field(
         default=64 * 1024 * 1024,
@@ -2033,28 +2018,6 @@ class Settings(BaseSettings):
                     "model_usage_user_hash_secret must be set in production when "
                     "LangSmith tracing is enabled"
                 )
-        return self
-
-    @model_validator(mode="after")
-    def _warn_if_image_verification_budget_is_tight(self) -> "Settings":
-        # A tuning concern, not a startup-blocking one: this machine's own local
-        # environment can violate the invariant today, and raising here would
-        # break app startup over a budget the operator hasn't gotten to yet.
-        combined = (
-            self.brave_image_search_timeout_seconds
-            + self.image_verification_thumbnail_timeout_seconds
-        )
-        if combined >= self.image_verification_deadline_seconds:
-            logging.getLogger(__name__).warning(
-                "Image search timeout (%.2fs) plus thumbnail timeout (%.2fs) leaves no "
-                "headroom inside the %.2fs image-verification deadline; the verifier call "
-                "may never get to run. Lower brave_image_search_timeout_seconds or "
-                "image_verification_thumbnail_timeout_seconds, or raise "
-                "image_verification_deadline_seconds.",
-                self.brave_image_search_timeout_seconds,
-                self.image_verification_thumbnail_timeout_seconds,
-                self.image_verification_deadline_seconds,
-            )
         return self
 
 
