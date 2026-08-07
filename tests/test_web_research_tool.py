@@ -293,13 +293,28 @@ async def test_gallery_with_a_single_survivor_is_not_a_one_cell_grid():
 
 
 @pytest.mark.asyncio
-async def test_no_image_query_skips_brave_and_the_verifier():
+async def test_missing_image_query_uses_the_factual_query_for_images():
     tavily = _FakeTool("tavily_search", TAVILY_PAYLOAD)
+    brave = _FakeTool("brave_image_search", BRAVE_PAYLOAD)
+
+    _, sink = await _run(
+        _tool(tavily, brave, _FakeImageService(), _ApproveOnlyTeamPhoto()),
+        query="cho t thông tin về T1",
+    )
+
+    assert brave.calls == [{"query": "cho t thông tin về T1"}]
+    assert sink
+
+
+@pytest.mark.asyncio
+async def test_skip_images_prevents_brave_and_verifier_calls():
     brave = _FakeTool("brave_image_search", BRAVE_PAYLOAD)
     verifier = _ApproveOnlyTeamPhoto()
 
     payload, sink = await _run(
-        _tool(tavily, brave, _FakeImageService(), verifier), query="explain big-O notation"
+        _tool(_FakeTool("tavily_search", TAVILY_PAYLOAD), brave, _FakeImageService(), verifier),
+        query="explain big-O notation",
+        skip_images=True,
     )
 
     assert brave.calls == []

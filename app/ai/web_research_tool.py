@@ -30,22 +30,18 @@ logger = logging.getLogger(__name__)
 
 _DESCRIPTION = (
     "Research the web. Returns a synthesized answer plus ranked sources with URLs.\n\n"
-    "Set image_query to a short, concrete visual subject when a picture would help "
-    "the reader see what the answer is about — a product, device, place, building, "
-    "artwork, organism, vehicle, or screen. Write the subject yourself: no question "
-    "words, one subject, plus a disambiguator or a form word (photo, diagram, map, "
-    "chart) when it matters.\n\n"
-    "Leave image_query unset for abstract subjects (code, math, policy, definitions, "
-    "planning) and whenever you are unsure whether an image would help. An uncertain "
-    "image decision uses no image_query at all.\n\n"
-    "Set image_intent='gallery' when the user asks to SEE several instances or to "
-    "compare things — a roster, a set of logos, colour options, a lineup. Otherwise "
-    "leave it unset: the default places up to two images beside the prose they "
-    "support. Never state how many images you want; the layout decides, and only "
-    "images verified against the subject survive.\n\n"
-    "Approved images appear in your available rich items. Not every image_query "
-    "produces one, and a complete answer never depends on an image. A gallery "
-    "arrives as ONE grid item with one marker."
+    "This tool automatically considers a verified image. Set image_query only to "
+    "make the visual subject more precise than the factual query: one concrete "
+    "subject, no question words, plus a disambiguator or a form word (photo, "
+    "diagram, map, chart) when it matters.\n\n"
+    "Set skip_images=true only when a visual cannot support the answer.\n\n"
+    "Set image_intent='gallery' only when the user asks to see or compare several "
+    "instances — a roster, a set of logos, colour options. Otherwise leave it "
+    "unset: the default places up to two images beside the prose they support. "
+    "Never state how many images you want; the layout decides.\n\n"
+    "Approved images appear in your available rich items. Not every call produces "
+    "one, and a complete answer never depends on an image. A gallery arrives as "
+    "ONE grid item with one marker."
 )
 
 
@@ -65,6 +61,10 @@ class WebResearchInput(BaseModel):
             "'gallery' for a grid when the user asks to see several instances or "
             "to compare things. Never state a count."
         ),
+    )
+    skip_images: bool = Field(
+        default=False,
+        description="Set true only when an image cannot help the answer.",
     )
     max_results: int | None = Field(default=None, description="Optional result count.")
     search_depth: str | None = Field(default=None, description="Optional Tavily depth.")
@@ -86,10 +86,12 @@ def create_web_research_tool(
         image_intent: str | None = None,
         max_results: int | None = None,
         search_depth: str | None = None,
+        skip_images: bool = False,
     ) -> str:
         context = get_tool_context()
         budget = get_research_budget(context.conversation_id)
-        wants_image = bool(str(image_query or "").strip())
+        visual_query = str(image_query or query).strip()
+        wants_image = bool(visual_query) and not skip_images
 
         reused = budget.find_reuse(query) if settings.research_budget_enabled else None
         search_task: asyncio.Task[str] | None = None
@@ -110,7 +112,7 @@ def create_web_research_tool(
                     web_image_service=web_image_service,
                     verifier_model=verifier_model,
                     user_request=query,
-                    image_query=str(image_query).strip(),
+                    image_query=visual_query,
                     factual_query=query,
                     image_intent=image_intent,
                     recorder=recorder,

@@ -127,9 +127,7 @@ async def _approved_candidates() -> list[dict]:
     with tool_execution_context(
         conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
     ), verified_image_sink() as sink:
-        await tool.ainvoke(
-            {"query": "T1 roster 2026", "image_query": "T1 League of Legends team photo"}
-        )
+        await tool.ainvoke({"query": "cho t thông tin về T1"})
     return list(sink)
 
 

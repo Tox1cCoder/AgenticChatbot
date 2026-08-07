@@ -41,6 +41,15 @@ def test_snippet_uses_available_ids_only_and_forbids_invention():
     assert "never invent" in snippet
 
 
+def test_media_guidance_describes_automatic_visual_enrichment_without_taxonomy():
+    snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
+
+    assert "automatically considers" in snippet
+    assert "skip_images" in snippet
+    assert "product, device" not in snippet
+    assert "code, math" not in snippet
+
+
 def test_snippet_has_no_hardcoded_visual_topic_list():
     snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
     for word in TAXONOMY_WORDS:
