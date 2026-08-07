@@ -31,8 +31,13 @@ def test_snippet_defined_once_and_compact():
 
 
 def test_snippet_uses_available_ids_only_and_forbids_invention():
+    """The snippet must name where IDs come from, not just say "available".
+
+    "use only available IDs" left the source of an ID unstated, so on a turn
+    with no inventory the instruction had no referent at all.
+    """
     snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
-    assert "available ids" in snippet
+    assert "available rich items" in snippet
     assert "never invent" in snippet
 
 
@@ -45,7 +50,8 @@ def test_snippet_has_no_hardcoded_visual_topic_list():
 def test_all_answer_prompts_carry_media_capability():
     for prompt in ANSWER_PROMPTS:
         assert "Media and visuals:" in prompt
-        assert "available IDs" in prompt
+        # The exact header the inventory block emits, so the reference resolves.
+        assert "AVAILABLE RICH ITEMS" in prompt
 
 
 def test_non_answer_prompts_unchanged():
@@ -56,3 +62,26 @@ def test_non_answer_prompts_unchanged():
         prompts.IMAGE_GENERATOR_SYSTEM_PROMPT,
     ):
         assert "Media and visuals:" not in prompt
+
+
+def test_snippet_forbids_inventing_an_ID_not_only_a_URL():
+    """The standing snippet is the only marker guidance on a no-inventory turn.
+
+    ``build_rich_response_guidance`` — which carries "Never invent an ID" —
+    returns "" when the turn produced no candidates, which the design says is
+    the common case. So on those turns the model was told the marker syntax
+    with no inventory and no prohibition, and invented one
+    (`<!--rich:widget:t1_roster_2026-->`), which rendered as
+    "rich item ... is unavailable".
+    """
+    snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
+
+    assert "never invent an id" in snippet
+
+
+def test_snippet_says_what_an_absent_inventory_means():
+    """Absence of an inventory must be stated, not left to inference."""
+    snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
+
+    assert "available rich items" in snippet
+    assert "no rich items" in snippet

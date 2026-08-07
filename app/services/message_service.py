@@ -2395,6 +2395,15 @@ class MessageService(IMessageService):
             kept_items.append(item)
 
         updated["rich_items"] = kept_items
+        # A marker whose id resolves to nothing renders as "rich item <id> is
+        # unavailable". That is right for an item that existed and failed to
+        # register — the reader is told a visual is missing — but a model
+        # invented id names nothing that ever existed, so the caption is pure
+        # noise about the model's own mistake. Strip those markers and let the
+        # prose stand; the warning list is recomputed from the cleaned content.
+        for warning in validate_rich_references(updated_content, kept_items):
+            updated_content = remove_inline_rich_reference(updated_content, warning["id"])
+        updated_content = updated_content.strip()
         updated["rich_reference_warnings"] = validate_rich_references(
             updated_content,
             kept_items,

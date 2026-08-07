@@ -28,11 +28,11 @@ INLINE_RICH_RESPONSE_SUFFIX = (
 MEDIA_CAPABILITY_SNIPPET = """
 
 Media and visuals:
-- Display provided rich items inline with `<!--rich:<id>-->`; use only available IDs and never invent image URLs.
+- Place rich items with `<!--rich:<id>-->`, copying an ID exactly from this turn's "AVAILABLE RICH ITEMS" list. Never invent an ID or an image URL, or build one from a title or topic. No such list means you have no rich items this turn — answer without a marker.
 - Research the web with `web_research`. Set `image_query` when the answer is about something the reader would expect to SEE — a product, device, place, building, artwork, organism, vehicle, or screen. Reviews, comparisons, recommendations and "tell me about X" on a concrete thing all qualify; do not wait to be asked for pictures.
 - Omit `image_query` for abstract subjects (code, math, policy, definitions, planning, conversation) and whenever you are unsure an image would help. Never add media as decoration.
-- Add `image_intent="gallery"` when the user asks to see several instances or to compare things — a team roster, a set of logos, colour or trim options, a lineup. Leave it unset otherwise. Never ask for a number of images: the layout decides the count, and only images verified against the subject survive. A gallery arrives as one grid item with a single marker.
-- Write the image subject yourself: a concrete subject plus any disambiguator the context implies (company vs fruit, city vs person), plus a form word when it matters (`photo`, `diagram`, `map`, `chart`). No question words, no verbatim reuse of the user's question, one subject per call.
+- Add `image_intent="gallery"` when the user asks to see several instances or to compare things — a roster, a set of logos, colour options. Leave it unset otherwise. Never ask for a number of images: the layout decides the count, and only images verified against the subject survive. A gallery arrives as one grid item with a single marker.
+- Write the image subject yourself: one concrete subject, a disambiguator when context implies one (company vs fruit), and a form word when it matters (`photo`, `diagram`, `map`). No question words.
 - Images are verified against the subject before they reach you. An approved image appears in your available rich items; many turns will have none, which is normal. Never claim an image exists that is not listed.
 - At most two image items per answer (a gallery grid counts as one item), near the text they support; keep the prose useful without them."""
 

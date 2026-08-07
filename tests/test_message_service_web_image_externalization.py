@@ -361,3 +361,43 @@ async def test_resume_workflow_externalizes_before_message_create(monkeypatch):
     assert persisted["metadata"]["rich_items"][0]["payload"]["url"] == (
         f"/web-images/{reference_id}"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_marker_for_an_unknown_item_is_removed_from_the_content():
+    """A hallucinated marker must not reach the reader as an error caption.
+
+    The renderer shows "rich item `<id>` is unavailable" for any marker whose
+    id resolves to nothing. That is right for an item that existed and failed,
+    but a model-invented id is pure noise the user should never see.
+    """
+    metadata = {
+        "rich_items_version": 1,
+        "rich_items": [],
+        "rich_reference_warnings": [],
+    }
+    content = "T1's 2026 roster is settled.\n\n<!--rich:widget:t1_roster_2026-->\n\nMore text."
+
+    updated_content, updated = await _service(AsyncMock())._externalize_remote_rich_images(
+        content, metadata, uuid4(), uuid4()
+    )
+
+    assert "<!--rich:widget:t1_roster_2026-->" not in updated_content
+    assert "T1's 2026 roster is settled." in updated_content
+    assert "More text." in updated_content
+    assert updated["rich_reference_warnings"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_marker_for_a_real_item_survives():
+    """Only unresolvable markers are stripped; a real one must still render."""
+    web_images = AsyncMock()
+    web_images.register.return_value = SimpleNamespace(id=uuid4())
+    content = f"Body\n\n<!--rich:{IMAGE_ID}-->\n"
+
+    updated_content, updated = await _service(web_images)._externalize_remote_rich_images(
+        content, _metadata(), uuid4(), uuid4()
+    )
+
+    assert f"<!--rich:{IMAGE_ID}-->" in updated_content
+    assert updated["rich_reference_warnings"] == []
