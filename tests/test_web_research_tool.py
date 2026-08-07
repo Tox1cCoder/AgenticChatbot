@@ -193,7 +193,16 @@ def _brave_payload(count: int) -> str:
 
 
 @pytest.mark.asyncio
-async def test_gallery_intent_returns_one_grid_item_holding_every_survivor():
+async def test_gallery_intent_returns_one_grid_item_holding_every_survivor(monkeypatch):
+    # Pinned rather than inherited: this asserts that every survivor lands in
+    # one grid, which is a property of the grouping code. Reading the shipped
+    # default would silently re-scope the test whenever that default moves for
+    # latency reasons, as it did when 6 candidates proved 3x slower than 3.
+    monkeypatch.setattr(
+        "app.ai.image_verification_flow.settings.image_verification_max_candidates",
+        6,
+        raising=False,
+    )
     verifier = _ApproveOnlyTeamPhoto()
 
     _, sink = await _run(
@@ -215,9 +224,14 @@ async def test_gallery_intent_returns_one_grid_item_holding_every_survivor():
 
 
 @pytest.mark.asyncio
-async def test_gallery_candidates_reach_the_verifier_individually():
+async def test_gallery_candidates_reach_the_verifier_individually(monkeypatch):
     """Grouping before verification would hide images and cap discovery."""
 
+    monkeypatch.setattr(
+        "app.ai.image_verification_flow.settings.image_verification_max_candidates",
+        6,
+        raising=False,
+    )
     seen: list[str] = []
 
     class _Recorder:

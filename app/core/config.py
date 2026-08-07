@@ -1176,7 +1176,7 @@ class Settings(BaseSettings):
         description="Kill switch for turn-local research dedup and call caps.",
     )
     vision_image_verification_enabled: bool = Field(
-        default=False,
+        default=True,
         description=(
             "Rollout flag for vision-verified remote web images. When False, no "
             "remote web image reaches an answer."
@@ -1190,6 +1190,14 @@ class Settings(BaseSettings):
         default="low",
         description="Media resolution for verifier thumbnails: low, medium, or high.",
     )
+    image_verification_thinking_level: str = Field(
+        default="low",
+        description=(
+            "Reasoning budget for the verifier call. Deliberation is its dominant "
+            "cost and buys a classification task nothing: measured 12.65s on the "
+            "provider default versus 3.46s at 'low' for four thumbnails."
+        ),
+    )
     image_verification_confidence_threshold: float = Field(
         default=0.85,
         ge=0.0,
@@ -1197,27 +1205,34 @@ class Settings(BaseSettings):
         description="Minimum verifier confidence for admitting a remote image.",
     )
     image_verification_max_candidates: int = Field(
-        default=6,
+        default=3,
         ge=1,
         le=10,
-        description="Maximum candidates submitted to one verifier call.",
+        description=(
+            "Maximum candidates submitted to one verifier call. Batch size, not "
+            "per-image cost, dominates the image path: measured end to end, 6 "
+            "candidates took 12.5s and lost a whole turn's images to the "
+            "deadline, while 3 took 3.9s and kept them. A gallery is therefore "
+            "bounded by this before rich_image_gallery_max_items."
+        ),
     )
     image_verification_deadline_seconds: float = Field(
-        default=4.0,
+        default=9.0,
         gt=0,
         description=(
             "Hard end-to-end deadline for the image path, from image-search "
-            "dispatch to verifier verdict. Exceeding it yields a text-only answer."
+            "dispatch to verifier verdict. Exceeding it yields a text-only answer. "
+            "Measured stages: image search ~0.8s, four thumbnails ~1.6s, verifier "
+            "~3.5s at low thinking — so a 4s deadline cancelled every verifier "
+            "call and no image could ever be shown."
         ),
     )
     image_verification_thumbnail_timeout_seconds: float = Field(
-        default=1.0,
+        default=2.0,
         gt=0,
         description=(
-            "Per-thumbnail download timeout during verification. Sized so that "
-            "brave_image_search_timeout_seconds plus this stays under "
-            "image_verification_deadline_seconds; the deadline is fixed, so this "
-            "is the knob that gives when the image search timeout rises."
+            "Per-thumbnail download timeout during verification. A four-image "
+            "batch measured 1.63s wall, so 1.0s dropped its slowest members."
         ),
     )
     verified_image_cache_max_bytes: int = Field(

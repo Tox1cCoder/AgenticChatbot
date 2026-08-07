@@ -85,3 +85,17 @@ def test_snippet_says_what_an_absent_inventory_means():
 
     assert "available rich items" in snippet
     assert "no rich items" in snippet
+
+
+def test_snippet_forbids_claiming_the_assistant_cannot_show_images():
+    """The trace's actual failure text was a fabricated capability limit.
+
+    With no image available the model wrote that it "cannot send image files
+    through this chat window" — inventing a limitation of a system that renders
+    images fine. It needed to be told what an empty turn means for the user,
+    not only what it means for the marker.
+    """
+    snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
+
+    assert "unable to show images" in snippet
+    assert "no suitable one" in snippet

@@ -412,3 +412,78 @@ def test_build_verifier_model_maps_media_resolution_to_a_canonical_value(monkeyp
         "media_resolution must be a canonical enum member, not a synthetic one "
         "the SDK invents for an unrecognized string"
     )
+
+
+def test_verifier_model_requests_a_low_thinking_level(monkeypatch):
+    """Deliberation is the verifier's dominant cost and buys it nothing.
+
+    Measured 2026-08-07 on gemini-3-flash-preview with four MEDIA_RESOLUTION_LOW
+    thumbnails: 12.65s with the provider's default thinking, 3.46s at
+    thinking_level="low". At the 4s image deadline the default meant the call
+    was cancelled every single time, so no image ever reached an answer. The
+    task is per-image classification against a stated subject — it does not
+    need a reasoning budget.
+    """
+    from app.ai import visual_verifier
+
+    captured: dict = {}
+
+    def _create_model(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop after capture")
+
+    # build_verifier_model imports ModelFactory inside the function, so the
+    # patch has to land on the defining module rather than the caller.
+    monkeypatch.setattr(
+        "app.ai.model_factory.ModelFactory.create_model", staticmethod(_create_model)
+    )
+    monkeypatch.setattr(visual_verifier.settings, "gemini_api_key", "dummy-test-key")
+
+    assert build_verifier_model() is None
+
+    assert captured["thinking_config"] == {"enabled": True, "level": "low"}
+
+
+def test_verifier_thinking_level_is_configurable(monkeypatch):
+    from app.ai import visual_verifier
+
+    captured: dict = {}
+
+    def _create_model(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop after capture")
+
+    # build_verifier_model imports ModelFactory inside the function, so the
+    # patch has to land on the defining module rather than the caller.
+    monkeypatch.setattr(
+        "app.ai.model_factory.ModelFactory.create_model", staticmethod(_create_model)
+    )
+    monkeypatch.setattr(visual_verifier.settings, "gemini_api_key", "dummy-test-key")
+    monkeypatch.setattr(
+        visual_verifier.settings, "image_verification_thinking_level", "high", raising=False
+    )
+
+    build_verifier_model()
+
+    assert captured["thinking_config"] == {"enabled": True, "level": "high"}
+
+
+def test_the_deadline_leaves_room_for_a_measured_verifier_call():
+    """Arithmetic consistency is not sufficiency.
+
+    The previous guard only asserted brave + thumbnail < deadline, which held
+    at 2.5 + 1.0 < 4.0 while leaving the verifier 0.5s for a call that measures
+    ~3.5s. The feature could never fire. This asserts the leftover is enough
+    for the call that actually has to happen.
+    """
+    from app.core.config import Settings
+
+    fields = Settings.model_fields
+    brave = float(fields["brave_image_search_timeout_seconds"].default)
+    thumbnail = float(fields["image_verification_thumbnail_timeout_seconds"].default)
+    deadline = float(fields["image_verification_deadline_seconds"].default)
+
+    # Measured 3.46s for four thumbnails at thinking_level="low"; require margin.
+    assert deadline - brave - thumbnail >= 4.5, (
+        "the verifier needs ~3.5s at low thinking; leave real margin, not arithmetic headroom"
+    )

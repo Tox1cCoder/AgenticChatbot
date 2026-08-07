@@ -370,6 +370,19 @@ def build_verifier_model() -> Any | None:
             api_key=str(settings.gemini_api_key or ""),
             temperature=0.0,
             media_resolution=_resolve_media_resolution(settings.image_verification_media_resolution),
+            # Deliberation is this call's dominant cost and buys it nothing.
+            # Measured on gemini-3-flash-preview with four low-resolution
+            # thumbnails: 12.65s on the provider default, 3.46s at "low". The
+            # default exceeded the whole image deadline by 3x, so the call was
+            # cancelled every time and no image ever reached an answer. Judging
+            # whether a picture shows a stated subject is classification, not
+            # reasoning.
+            thinking_config={
+                "enabled": True,
+                "level": str(
+                    getattr(settings, "image_verification_thinking_level", "low") or "low"
+                ),
+            },
         )
         return model.with_structured_output(VisualVerificationResult, include_raw=True)
     except Exception as exc:
