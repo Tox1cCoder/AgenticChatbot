@@ -1,14 +1,9 @@
 """The full chain from an approved image to the marker the model can copy.
 
-Every existing test stops at one seam: the regression test proves the verifier
-approves the right image and stops at the sink; the prompt tests build an
-inventory from hand-written candidates. Nothing joined them, so a break in
+Other suites stop at one seam: the verifier tests stop at the sink, the prompt
+tests build an inventory from hand-written candidates. A break anywhere in
 sink -> artifact -> turn context -> selection -> inventory would surface only as
-"the assistant never shows an image", with every suite green.
-
-That is exactly the failure mode being guarded here, because the answer to
-"why is there no image" was a disabled flag once already, and the next time it
-could as easily be a dropped candidate three layers down.
+"the assistant never shows an image", with every other suite green.
 """
 
 from __future__ import annotations

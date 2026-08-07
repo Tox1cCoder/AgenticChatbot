@@ -1,16 +1,9 @@
 """Flow-level proof that each branch of ``discover_and_verify_images`` records
-exactly one terminal outcome.
+exactly one terminal outcome, and the right one.
 
-The unit tests in ``test_visual_verification_metrics.py`` exercise
-``RichImageMetrics`` directly, and prove the labels are bounded. They cannot
-catch a future refactor that reorders an early return or silently drops one
-of the ``_outcome(...)`` calls from the flow itself -- which would defeat the
-whole point of this instrumentation, since the flow's job is to make a silent
-collapse to text-only visible. These tests patch ``rich_image_metrics`` in
-``app.ai.image_verification_flow`` and assert the exact stage/outcome calls
-recorded for each of the six branches, including that exactly one outcome is
-recorded per call (a double-record would pass a test that only checked which
-label appeared).
+``test_visual_verification_metrics.py`` proves the labels are bounded; these
+tests prove each stage's failure reaches the metric under its own name, and
+that no branch records twice.
 """
 
 from __future__ import annotations

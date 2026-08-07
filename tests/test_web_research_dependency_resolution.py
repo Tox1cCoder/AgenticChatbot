@@ -104,7 +104,8 @@ async def test_tavily_resolves_from_mcp_when_it_was_not_injected(monkeypatch):
 
     payload, _ = await _run(create_web_research_tool(), query="T1 roster 2026")
 
-    assert manager.requested == ["tavily"]
+    # Images are default-on, so the un-injected image path resolves too.
+    assert sorted(manager.requested) == ["brave_image_search", "tavily"]
     assert len(tavily.calls) == 1
     assert payload["answer"].startswith("T1 is a South Korean")
     assert "status" not in payload
@@ -168,12 +169,21 @@ async def test_brave_and_the_image_service_resolve_when_they_were_not_injected(
 async def test_injected_dependencies_are_never_overridden_by_resolution(monkeypatch):
     """Injection must short-circuit resolution, or every test would hit MCP."""
 
+    class _Service:
+        async def fetch_url(self, url: str, *, provider: str = "other"):
+            raise AssertionError("no candidate should be discovered")
+
     manager = _FakeManager({"tavily": [_NamedTool("tavily_search", "{}")]})
     _patch_manager(monkeypatch, manager)
     injected = _NamedTool("tavily_search", TAVILY_PAYLOAD)
 
     payload, _ = await _run(
-        create_web_research_tool(tavily_tool=injected), query="T1 roster 2026"
+        create_web_research_tool(
+            tavily_tool=injected,
+            brave_tool=_NamedTool("brave_image_search", json.dumps({"images": []})),
+            web_image_service=_Service(),
+        ),
+        query="T1 roster 2026",
     )
 
     assert manager.requested == []

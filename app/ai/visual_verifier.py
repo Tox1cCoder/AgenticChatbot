@@ -11,14 +11,11 @@ for the duration of one answer.
 Two different things fail closed, at two different levels. A single decision
 record that names an unknown or duplicate candidate id, or carries an
 out-of-range confidence, only sinks *that* candidate: ``admit_candidates``
-drops it and keeps evaluating the rest. A response that the structured-output
-model cannot parse at all sinks the *whole batch*: ``verify_candidates``
-returns ``None`` and ``admit_candidates(None, ...)`` returns ``[]``. The
-response is validated as one strict object, not record-by-record, so a
-malformed record cannot be isolated from its neighbours without parsing into a
-permissive shape and hand-validating each entry — which would also weaken the
-schema that constrains what the model can generate in the first place. Batch
-rejection is the deliberate, fail-safe choice here.
+drops it and keeps evaluating the rest. A response the structured-output model
+cannot parse at all sinks the *whole batch*, because the response is validated
+as one strict object: isolating a malformed record from its neighbours would
+require a permissive shape and hand-validation, weakening the schema that
+constrains what the model can generate in the first place.
 """
 
 from __future__ import annotations
@@ -186,15 +183,11 @@ def _verification_usage_scope(recorder: Any | None) -> Iterator[UsageOperation |
 def _verifier_usage_transform(response: Any, usage: NormalizedUsage) -> NormalizedUsage:
     """Read real provider usage off ``include_raw=True``'s ``raw`` envelope.
 
-    ``normalize_provider_usage`` cannot see it directly on ``response``:
-    a structured-output call built with ``include_raw=True`` returns
-    ``{"raw": AIMessage, "parsed": ..., "parsing_error": ...}``, not a bare
-    provider response, so its top-level ``usage_metadata`` search finds
-    nothing (hence the already-resolved ``usage`` this receives is
-    "unavailable"). Every existing test still injects a bare parsed result
-    with no envelope at all, so anything that isn't the expected mapping
-    shape keeps ``usage`` unchanged rather than raising -- this runs inside
-    the recorder's own try/except, but staying defensive costs nothing.
+    ``normalize_provider_usage`` cannot see it directly on ``response``: a
+    structured-output call built with ``include_raw=True`` returns ``{"raw":
+    AIMessage, "parsed": ..., "parsing_error": ...}``, not a bare provider
+    response, so its top-level ``usage_metadata`` search finds nothing. Any
+    other shape keeps ``usage`` unchanged rather than raising.
     """
     if isinstance(response, Mapping):
         raw = response.get("raw")
@@ -222,15 +215,10 @@ async def _invoke_verifier(resolved_model: Any, message: Any, recorder: Any | No
 
 
 def _unwrap_verifier_response(response: Any) -> VisualVerificationResult | None:
-    """Return the parsed result, tolerating both response shapes.
+    """Return the parsed result from either a bare or ``include_raw`` response.
 
-    Every existing test injects a bare ``VisualVerificationResult`` (no
-    envelope at all). Production, now that ``build_verifier_model`` uses
-    ``include_raw=True`` for usage capture, gets back ``{"raw": AIMessage,
-    "parsed": ..., "parsing_error": ...}`` instead. A non-``None``
-    ``parsing_error`` -- or a missing/malformed ``parsed`` -- is a genuine
-    parse failure, matching the existing fail-closed contract: sink the
-    whole batch, never guess.
+    A non-``None`` ``parsing_error`` -- or a missing/malformed ``parsed`` -- is
+    a genuine parse failure: sink the whole batch, never guess.
     """
     if isinstance(response, VisualVerificationResult):
         return response
@@ -338,14 +326,10 @@ _MEDIA_RESOLUTIONS = {
 def _resolve_media_resolution(value: str) -> str:
     """Map the human-friendly config value to the canonical API enum name.
 
-    The installed ``google.genai.types.MediaResolution`` only recognizes
-    ``MEDIA_RESOLUTION_*`` strings. Forwarding a bare word like ``"low"``
-    raises no exception — it silently produces a synthetic, non-canonical
-    enum member and a ``UserWarning``, so the live API call would reject or
-    ignore it and ``verify_candidates`` would swallow the resulting failure
-    as if the verifier were merely unavailable. An unrecognized config value
-    falls back to the safest, cheapest resolution rather than being forwarded
-    raw.
+    ``google.genai.types.MediaResolution`` only recognizes ``MEDIA_RESOLUTION_*``
+    strings. Forwarding a bare word like ``"low"`` raises nothing — it silently
+    produces a synthetic, non-canonical enum member the live API then rejects.
+    An unrecognized value falls back to the cheapest resolution.
     """
 
     return _MEDIA_RESOLUTIONS.get(str(value or "").strip().lower(), _MEDIA_RESOLUTIONS["low"])
@@ -355,13 +339,9 @@ def build_verifier_model() -> Any | None:
     """Build the configured vision model with structured output, or None.
 
     ``include_raw=True`` is load-bearing for billing visibility, not just
-    parsing: without it, ``with_structured_output`` returns only the parsed
-    Pydantic object, which carries no ``usage_metadata`` at all, so a billed
-    call would be recorded with a permanent zero-token ``NormalizedUsage``.
-    With it, the runnable returns ``{"raw": AIMessage, "parsed": ...,
-    "parsing_error": ...}``; ``_invoke_verifier``'s usage transform reads
-    tokens off ``raw``, and ``_unwrap_verifier_response`` unwraps ``parsed``
-    back into the plain ``VisualVerificationResult`` every caller expects.
+    parsing: without it ``with_structured_output`` returns only the parsed
+    Pydantic object, which carries no ``usage_metadata``, so a billed call
+    would record permanently zero tokens.
     """
 
     try:
@@ -373,13 +353,9 @@ def build_verifier_model() -> Any | None:
             api_key=str(settings.gemini_api_key or ""),
             temperature=0.0,
             media_resolution=_resolve_media_resolution(settings.image_verification_media_resolution),
-            # Deliberation is this call's dominant cost and buys it nothing.
-            # Measured on gemini-3-flash-preview with four low-resolution
-            # thumbnails: 12.65s on the provider default, 3.46s at "low". The
-            # default exceeded the whole image deadline by 3x, so the call was
-            # cancelled every time and no image ever reached an answer. Judging
-            # whether a picture shows a stated subject is classification, not
-            # reasoning.
+            # Deliberation dominates this call's latency and buys it nothing:
+            # judging whether a picture shows a stated subject is
+            # classification, not reasoning.
             thinking_config={
                 "enabled": True,
                 "level": str(

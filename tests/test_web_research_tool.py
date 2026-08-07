@@ -192,10 +192,9 @@ def _brave_payload(count: int) -> str:
 
 @pytest.mark.asyncio
 async def test_gallery_intent_returns_one_grid_item_holding_every_survivor(monkeypatch):
-    # Pinned rather than inherited: this asserts that every survivor lands in
-    # one grid, which is a property of the grouping code. Reading the shipped
-    # default would silently re-scope the test whenever that default moves for
-    # latency reasons, as it did when 6 candidates proved 3x slower than 3.
+    # Pinned rather than inherited: this asserts every survivor lands in one
+    # grid, a property of the grouping code, so it must not re-scope itself
+    # whenever the shipped candidate cap moves.
     monkeypatch.setattr(
         "app.ai.image_verification_flow.settings.image_verification_max_candidates",
         6,
@@ -502,10 +501,9 @@ def test_tool_identity_is_internal():
 async def test_a_request_without_the_rich_capability_skips_the_image_path():
     """No marker inventory reaches a non-rich answer, so the work is provably wasted.
 
-    Injection is already gated downstream in ``graph.py``: candidates offered
-    for a request that never advertised ``inline_rich_response_v1`` are
-    discarded. Running Brave, the thumbnail batch and a billed vision call to
-    produce them anyway costs money and up to the full image deadline.
+    ``graph.py`` discards candidates offered for a request that never
+    advertised ``inline_rich_response_v1``, so producing them costs a Brave
+    call, a thumbnail batch and a billed vision call for nothing.
     """
 
     brave = _FakeTool("brave_image_search", BRAVE_PAYLOAD)

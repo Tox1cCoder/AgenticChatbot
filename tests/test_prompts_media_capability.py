@@ -23,10 +23,6 @@ TAXONOMY_WORDS = ("architecture", "fashion", "cuisine", "brutalist", "gothic")
 def test_snippet_defined_once_and_compact():
     snippet = prompts.MEDIA_CAPABILITY_SNIPPET
     assert "Media and visuals:" in snippet
-    # Raised from 1300 when the snippet was rewritten to describe the
-    # server-orchestrated web_research tool: image_intent="gallery", the
-    # verified-before-injection guarantee, and the gallery item-count rule
-    # (vision-verified-image-injection Task 6).
     assert len(snippet) < 1700, "media snippet must stay compact — do not bloat prompts"
 
 
@@ -77,11 +73,8 @@ def test_snippet_forbids_inventing_an_ID_not_only_a_URL():
     """The standing snippet is the only marker guidance on a no-inventory turn.
 
     ``build_rich_response_guidance`` — which carries "Never invent an ID" —
-    returns "" when the turn produced no candidates, which the design says is
-    the common case. So on those turns the model was told the marker syntax
-    with no inventory and no prohibition, and invented one
-    (`<!--rich:widget:t1_roster_2026-->`), which rendered as
-    "rich item ... is unavailable".
+    returns "" when the turn produced no candidates, so without this the model
+    is told the marker syntax with no inventory and no prohibition.
     """
     snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
 
@@ -97,12 +90,10 @@ def test_snippet_says_what_an_absent_inventory_means():
 
 
 def test_snippet_forbids_claiming_the_assistant_cannot_show_images():
-    """The trace's actual failure text was a fabricated capability limit.
+    """An empty turn must not read as a fabricated capability limit.
 
-    With no image available the model wrote that it "cannot send image files
-    through this chat window" — inventing a limitation of a system that renders
-    images fine. It needed to be told what an empty turn means for the user,
-    not only what it means for the marker.
+    The model has to be told what "no image this turn" means for the user, not
+    only what it means for the marker.
     """
     snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
 

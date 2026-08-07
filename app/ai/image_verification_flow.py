@@ -205,12 +205,12 @@ def _hold_verified_bytes(approved: list[SubmittedCandidate]) -> None:
     """Keep the approved images' validated bytes for registration to persist.
 
     Registration happens later, in ``message_service``, long after this tool
-    call's ContextVar scope has closed — so the bytes are handed to a bounded
-    turn-scoped store rather than carried in the candidate dict, which is
-    serialized into response metadata and must stay small.
+    call's ContextVar scope has closed — so the bytes go to a bounded
+    turn-scoped store rather than the candidate dict, which is serialized into
+    response metadata and must stay small.
 
     Losing the hand-off is not a failure: registration then stores no bytes and
-    the image is fetched again at render, exactly as before.
+    the image is fetched again at render.
     """
 
     conversation_id = get_tool_context().conversation_id

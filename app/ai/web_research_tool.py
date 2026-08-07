@@ -1,10 +1,8 @@
 """The single model-facing research operation.
 
-The model asks one question and optionally names a visual subject. The server
-decides everything else: whether to hit the network at all, whether to look for
-an image, and whether any image it found may be shown. Prompted coordination of
-two providers proved unreliable — a trace shows three sequential text searches
-and no image search at all — so the sequencing lives here instead.
+The model asks one question and may refine the visual subject. The server owns
+the rest: whether to hit the network at all, whether to look for an image, and
+whether any image it found may be shown.
 """
 
 from __future__ import annotations

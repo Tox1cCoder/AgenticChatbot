@@ -258,19 +258,15 @@ def _test_recorder(repo: _FakeUsageRepo) -> ModelUsageRecorder:
 async def test_verify_candidates_records_one_image_verification_attempt():
     """A recorder must see exactly one attempt, with real tokens, no verdict content.
 
-    This is the only test standing between the verifier's real, billed Gemini
-    call and an unnoticed silent-cost regression: if the recording call were
-    ever deleted from ``verify_candidates``, ``repo.commands`` would stay
-    empty and this test would fail. The fake model returns the
-    ``{"raw": ..., "parsed": ..., "parsing_error": ...}`` shape that
-    ``with_structured_output(..., include_raw=True)`` actually produces, with
-    a real ``usage_metadata`` envelope on ``raw`` -- so the test also fails if
-    usage capture ever regresses back to a permanent ``source="unavailable"``
-    with zero tokens, which is the whole reason this call is worth recording.
+    The fake model returns the ``{"raw": ..., "parsed": ...,
+    "parsing_error": ...}`` shape ``with_structured_output(...,
+    include_raw=True)`` produces, with a real ``usage_metadata`` envelope on
+    ``raw``, so this also fails if usage capture regresses to a permanent
+    ``source="unavailable"`` with zero tokens.
     """
 
     # A UUID is all hex digits and hyphens, so a candidate id containing a
-    # letter outside a-f (like "z") can never collide with the recorded
+    # letter outside a-f can never collide with the recorded
     # operation_id/attempt fields the way a hex-like id such as "c1" could.
     candidate_id = "candidate-zebra"
     parsed_result = VisualVerificationResult(
@@ -321,11 +317,11 @@ async def test_verify_candidates_records_one_image_verification_attempt():
 
 @pytest.mark.asyncio
 async def test_verify_candidates_tolerates_a_bare_parsed_response_when_recording():
-    """Every pre-existing test injects a bare parsed result, not the include_raw dict.
+    """Recording must not assume the ``include_raw`` shape.
 
-    Recording must not assume the wrapped shape: a bare response still records
-    one attempt (with ``source="unavailable"``, since it carries no usage
-    envelope at all) rather than raising and losing the verification.
+    A bare parsed response still records one attempt — with
+    ``source="unavailable"``, since it carries no usage envelope — rather than
+    raising and losing the verification.
     """
 
     class _BareModel:
@@ -388,14 +384,10 @@ def test_build_verifier_model_maps_media_resolution_to_a_canonical_value(monkeyp
 
 
 def test_verifier_model_requests_a_low_thinking_level(monkeypatch):
-    """Deliberation is the verifier's dominant cost and buys it nothing.
+    """Deliberation dominates the verifier's latency and buys it nothing.
 
-    Measured 2026-08-07 on gemini-3-flash-preview with four MEDIA_RESOLUTION_LOW
-    thumbnails: 12.65s with the provider's default thinking, 3.46s at
-    thinking_level="low". At the 4s image deadline the default meant the call
-    was cancelled every single time, so no image ever reached an answer. The
-    task is per-image classification against a stated subject — it does not
-    need a reasoning budget.
+    The task is per-image classification against a stated subject, so the
+    shipped default must not spend a reasoning budget on it.
     """
     from app.ai import visual_verifier
 

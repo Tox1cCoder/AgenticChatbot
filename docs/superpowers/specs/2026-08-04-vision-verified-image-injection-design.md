@@ -415,22 +415,18 @@ Verification necessarily precedes answer generation, because the marker
 inventory is part of the answering prompt. Streaming prose first and attaching
 figures afterwards was considered and rejected: it would move placement from the
 model to a server-side heuristic and change the streaming contract. The image
-path therefore blocks the first token, under a hard cap.
+path therefore blocks the first token.
 
-Tavily and Brave start concurrently when `image_query` is present. Visual
-verification begins as soon as the Brave candidates and safe thumbnails are
-available. It may use bounded Tavily result titles if that parallel request has
-already completed, but it never waits solely for Tavily because the user request
-and factual query provide the required subject context.
+Tavily and Brave start concurrently. Visual verification begins as soon as the
+Brave candidates and safe thumbnails are available. It may use bounded Tavily
+result titles if that parallel request has already completed, but it never
+waits solely for Tavily because the user request and factual query provide the
+required subject context.
 
-- Configurable end-to-end image-path deadline, initially four seconds, measured
-  from dispatch of the Brave call to the verifier verdict.
-- The existing 2.5-second Brave timeout, the thumbnail batch deadline, and the
-  verifier timeout are configured so their sum cannot exceed that deadline. The
-  Brave timeout is lowered if it cannot fit.
-- Expected added latency on a visual question is one to three seconds. The
-  four-second cap is the guarantee; a sub-two-second typical case is a target,
-  not a contract.
+- Each stage owns an independent timeout: the Brave image search, the thumbnail
+  batch, and the single verifier call. No timeout bounds the path as a whole.
+- The internal-tool execution policy is the outer bound on the image path, the
+  same as for every other internal tool.
 - No verification retry in the same answer.
 - No persistent or cross-turn decision cache.
 - Brave failure, thumbnail failure, verifier timeout, provider refusal, invalid
@@ -439,8 +435,7 @@ and factual query provide the required subject context.
 - Tavily failure remains a research error and is handled independently from the
   optional image path.
 
-The response must never wait beyond the hard image deadline. The image path may
-be abandoned while factual answer generation continues.
+The image path may be abandoned while factual answer generation continues.
 
 ## Observability
 
@@ -529,7 +524,7 @@ Recreate the essential `example_run.txt` conditions:
   through the existing web-image guards rather than a new fetcher.
 - Hallucinated verifier IDs and malformed structured responses fail closed.
 - Partial thumbnail failures do not discard other valid candidates.
-- Verifier timeout produces a text-only answer inside the hard deadline.
+- Verifier timeout produces a text-only answer.
 - No verifier output fields appear in persisted or public metadata.
 - An approved image is served from cached verified bytes; a cache write failure
   falls back to render-time fetch without breaking the figure.
@@ -539,8 +534,6 @@ Recreate the essential `example_run.txt` conditions:
 - Tavily and Brave concurrency is proven with a controlled integration test.
 - Thumbnail downloads are concurrent and obey the batch deadline.
 - The verifier is called at most once with no more than six images.
-- The configured Brave, thumbnail, and verifier timeouts sum to no more than the
-  image-path deadline.
 - Metrics contain only aggregate counts, durations, and bounded reason enums.
 
 ## Migration and Rollout
