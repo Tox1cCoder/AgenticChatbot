@@ -470,7 +470,9 @@ class BaseAgent(ABC):
         # providers, spends the turn budget, and verifies images before the model
         # can place them.
         if self.agent_config_key in {"chat", "search"}:
-            _add_internal(create_web_research_tool())
+            # The verifier's vision call is billed to the same request as this
+            # agent's own calls, so it records through the same recorder.
+            _add_internal(create_web_research_tool(recorder=self.recorder))
 
         # Caller-provided internal tools include the graph-scoped ``hand_off``
         # tool. The graph owns its roster, so BaseAgent never supplies a static

@@ -23,6 +23,7 @@ from ..core.config import settings
 from ..observability.rich_images import rich_image_metrics
 from .research_budget import get_research_budget
 from .tool_context import get_tool_context
+from .tool_result_rendering import provider_result_text
 from .verified_image_sink import offer_verified_images
 
 logger = logging.getLogger(__name__)
@@ -184,7 +185,7 @@ async def _run_search(
         args["max_results"] = max_results
     if search_depth is not None:
         args["search_depth"] = search_depth
-    return str(await tool.ainvoke(args))
+    return provider_result_text(await tool.ainvoke(args), tool_name="tavily_search")
 
 
 async def _discover_and_verify(
@@ -201,6 +202,14 @@ async def _discover_and_verify(
     """Return public candidate dicts for approved images, or an empty list."""
 
     from .image_verification_flow import discover_and_verify_images
+
+    # Resolved before the deadline starts: a cold MCP server start is
+    # provisioning, not image work, and charging it to the image budget would
+    # make the first visual turn of a process time out on principle.
+    if brave_tool is None:
+        brave_tool = await _resolve_tool("brave_image_search", "brave_image_search")
+    if web_image_service is None:
+        web_image_service = _from_container("web_image_service")
 
     started = time.perf_counter()
     try:
@@ -237,13 +246,30 @@ async def _resolve_tool(server_name: str, tool_name: str) -> Any | None:
     try:
         from .mcp_registry import get_global_mcp_manager
 
-        manager = get_global_mcp_manager()
+        manager = await get_global_mcp_manager()
         for tool in await manager.get_server_tools(server_name):
             if getattr(tool, "name", None) == tool_name:
                 return tool
     except Exception as exc:
         logger.warning("MCP tool %s unavailable: %s", tool_name, exc)
     return None
+
+
+def _from_container(provider_name: str) -> Any | None:
+    """Resolve one DI provider off the process-wide container.
+
+    ``get_container()`` rather than ``Container()``: instantiating the
+    declarative container builds a second ``Database`` singleton, and with it a
+    second SQLAlchemy engine and connection pool, on every call.
+    """
+
+    try:
+        from ..core.container import get_container
+
+        return getattr(get_container(), provider_name)()
+    except Exception as exc:
+        logger.warning("DI provider %s unavailable: %s", provider_name, exc)
+        return None
 
 
 def _with_research_meta(search_text: str, *, reused: bool, budget: Any) -> str:

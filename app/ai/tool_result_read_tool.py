@@ -170,9 +170,12 @@ def _resolve(repository: Any | None, service: Any | None) -> tuple[Any | None, A
     if repository is not None and service is not None:
         return repository, service
     try:
-        from ..core.container import Container
+        from ..core.container import get_container
 
-        container = Container()
+        # The process-wide container, not a fresh ``Container()``: instantiating
+        # the declarative container rebuilds its ``Database`` singleton, so every
+        # read_tool_result call would open a new engine and connection pool.
+        container = get_container()
         return (
             repository or container.tool_result_blob_repository(),
             service or container.tool_result_blob_service(),

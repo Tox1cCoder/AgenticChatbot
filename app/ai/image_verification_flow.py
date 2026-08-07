@@ -18,6 +18,7 @@ from .tool_execution import (
     _group_image_candidates,
     build_image_candidates_from_tool_result,
 )
+from .tool_result_rendering import provider_result_text
 from .visual_verifier import (
     SubmittedCandidate,
     admit_candidates,
@@ -76,7 +77,9 @@ async def discover_and_verify_images(
     # time left against that same deadline rather than the raw setting.
     deadline_at = time.monotonic() + float(settings.image_verification_deadline_seconds)
 
-    raw = str(await brave_tool.ainvoke({"query": image_query}))
+    raw = provider_result_text(
+        await brave_tool.ainvoke({"query": image_query}), tool_name="brave_image_search"
+    )
     # group_images=False is load-bearing: the legacy path collapses two or more
     # Brave results into one capped grid, which would both hide individual images
     # from the verifier and cap discovery below the candidate budget.

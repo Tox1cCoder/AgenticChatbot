@@ -18,12 +18,28 @@ router = APIRouter(prefix="/tool-results", tags=["tool-results"])
 _NOT_FOUND_DETAIL = "Tool result not found"
 
 
+def _container() -> Container:
+    """The process-wide container, not a fresh ``Container()``.
+
+    Instantiating the declarative container rebuilds its ``Database``
+    singleton, so a per-request container would open a new engine and
+    connection pool on every download. Imported inside the function because
+    ``get_container`` is defined after the module-level instance it returns,
+    and ``app.api`` is imported while ``app.core.container`` is still
+    initializing.
+    """
+
+    from app.core.container import get_container
+
+    return get_container()
+
+
 def _get_repository() -> ToolResultBlobRepository:
-    return Container().tool_result_blob_repository()
+    return _container().tool_result_blob_repository()
 
 
 def _get_service() -> ToolResultBlobService:
-    return Container().tool_result_blob_service()
+    return _container().tool_result_blob_service()
 
 
 @router.get("/{blob_id}", response_class=PlainTextResponse)

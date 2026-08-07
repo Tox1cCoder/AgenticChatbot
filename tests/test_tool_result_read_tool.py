@@ -281,3 +281,23 @@ async def test_offloaded_blob_from_another_conversation_is_not_found(tmp_path):
     payload = await _invoke(tool, blob_id=offloaded["blob_id"])
 
     assert payload["error_type"] == "not_found"
+
+
+def test_di_resolution_reuses_the_process_container():
+    """A per-call ``Container()`` builds a second engine and connection pool.
+
+    ``tool_result_blob_service`` is a container Singleton, so resolving twice
+    off the shared container returns the same object. A fresh declarative
+    container each call re-instantiates it — and, behind it, ``Database`` —
+    which is the leak this guards.
+    """
+    from app.ai.tool_result_read_tool import _resolve
+    from app.core.container import get_container
+
+    first_repository, first_service = _resolve(None, None)
+    second_repository, second_service = _resolve(None, None)
+
+    assert first_service is not None
+    assert first_service is second_service
+    assert first_service is get_container().tool_result_blob_service()
+    assert type(first_repository) is type(second_repository)

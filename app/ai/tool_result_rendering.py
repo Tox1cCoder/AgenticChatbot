@@ -26,6 +26,22 @@ class NormalizedToolRender:
     render: dict[str, Any]
 
 
+def provider_result_text(result: Any, *, tool_name: str) -> str:
+    """Return the text an MCP tool produced, whatever shape it arrived in.
+
+    ``load_mcp_tools`` hands back a list of content blocks
+    (``[{"type": "text", "text": "{...}"}]``), not the JSON string the server
+    printed. ``str()`` on that yields a Python repr that no downstream
+    ``json.loads`` can parse. A plain string passes through unchanged, which is
+    the shape in-process callers and test fakes supply.
+
+    For callers that want only the model-facing text and none of the render
+    envelope around it.
+    """
+
+    return normalize_tool_result_for_rendering(result, tool_name=tool_name).model_content
+
+
 def normalize_tool_result_for_rendering(
     result: Any,
     *,

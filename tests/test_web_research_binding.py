@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from app.ai.agents.base_agent import BaseAgent
 from app.ai.deferred_tool_binding import _get_required_pinned_specs
 from app.ai.schemas import AgentType
@@ -56,6 +58,40 @@ def test_web_research_is_bound_for_chat_and_search(monkeypatch):
 
 def test_web_research_is_not_bound_for_other_agents(monkeypatch):
     assert "web_research" not in _bound_names(monkeypatch, "rag")
+
+
+def test_bound_web_research_carries_the_agent_usage_recorder(monkeypatch):
+    """The verifier's Gemini call is billed; an unrecorded one is invisible spend.
+
+    ``visual_verifier`` grew a ``recorder`` seam so the verification call lands
+    in the usage ledger, but the binding site constructed the tool with no
+    arguments, so production always took the unrecorded branch.
+    """
+
+    captured: dict = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(name="web_research", metadata={})
+
+    monkeypatch.setattr("app.ai.agents.base_agent.create_web_research_tool", _capture)
+    recorder = object()
+    agent = _BindingTestAgent(agent_config_key="search", recorder=recorder)
+    agent.tools = []
+    agent.mcp_manager = None
+    monkeypatch.setattr(
+        "app.ai.agents.base_agent.should_use_deferred_loading", lambda _key: True
+    )
+    monkeypatch.setattr(
+        "app.ai.agents.base_agent.build_deferred_tool_list",
+        lambda **kwargs: list(kwargs.get("internal_tools") or []),
+    )
+    monkeypatch.setattr(agent, "_get_client_runtime_tools", lambda **kwargs: [])
+    monkeypatch.setattr(agent, "_get_skills_internal_tools", lambda **kwargs: [])
+
+    agent._get_tools_for_binding(conversation_id="c1")
+
+    assert captured["recorder"] is recorder
 
 
 def test_media_guidance_describes_web_research_only():

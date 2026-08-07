@@ -656,10 +656,12 @@ def _resolve_offload_service():
     if not getattr(settings, "tool_result_offload_enabled", False):
         return None
     try:
-        from ..core.container import Container
+        from ..core.container import get_container
 
-        container = Container()
-        return container.tool_result_blob_service()
+        # The process-wide container, not a fresh ``Container()``: instantiating
+        # the declarative container rebuilds its ``Database`` singleton, so every
+        # over-threshold tool result would open a new engine and connection pool.
+        return get_container().tool_result_blob_service()
     except Exception as exc:
         logger.debug("Tool result offload service unavailable: %s", exc)
         return None
