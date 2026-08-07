@@ -84,8 +84,8 @@ def create_web_research_tool(
         max_results: int | None = None,
         search_depth: str | None = None,
     ) -> str:
-        conversation_id = get_tool_context().conversation_id
-        budget = get_research_budget(conversation_id)
+        context = get_tool_context()
+        budget = get_research_budget(context.conversation_id)
         wants_image = bool(str(image_query or "").strip())
 
         reused = budget.find_reuse(query) if settings.research_budget_enabled else None
@@ -100,7 +100,7 @@ def create_web_research_tool(
             )
 
         image_task: asyncio.Task[list[dict[str, Any]]] | None = None
-        if wants_image and _image_path_open(budget):
+        if wants_image and _image_path_open(budget, context.rich_response_capable):
             image_task = asyncio.create_task(
                 _discover_and_verify(
                     brave_tool=brave_tool,
@@ -145,10 +145,17 @@ def create_web_research_tool(
     )
 
 
-def _image_path_open(budget: Any) -> bool:
+def _image_path_open(budget: Any, rich_response_capable: bool) -> bool:
     if not settings.vision_image_verification_enabled:
         return False
     if not settings.inline_rich_response_enabled:
+        return False
+    if not rich_response_capable:
+        # An approved candidate reaches the answer only through the rich-item
+        # inventory, which the graph withholds from a request that never
+        # advertised the capability. Discovering and verifying one anyway spends
+        # a Brave call, a thumbnail batch and a billed vision call on output
+        # that is discarded.
         return False
     return budget.may_image_search()
 

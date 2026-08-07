@@ -104,8 +104,14 @@ class WebImageService:
         upstream_url: str,
         expected_mime: str | None,
         provider: str,
+        cached: FetchedWebImage | None = None,
     ) -> Any:
-        """Persist metadata only; never contact the upstream here."""
+        """Persist metadata, plus already-validated bytes when they are supplied.
+
+        Never contacts the upstream. ``cached`` carries bytes this service
+        itself fetched and decoded earlier in the turn, so persisting them
+        cannot admit anything the fetch path would have rejected.
+        """
         self._https_hostname(upstream_url)
         normalized_provider = str(provider or "other").strip().lower()[:32] or "other"
         return await self.repository.acreate(
@@ -116,10 +122,16 @@ class WebImageService:
                 "upstream_url": upstream_url,
                 "expected_mime": expected_mime,
                 "provider": normalized_provider,
+                "content": cached.content if cached is not None else None,
+                "cached_width": cached.width if cached is not None else None,
+                "cached_height": cached.height if cached is not None else None,
             }
         )
 
     async def fetch(self, record: Any) -> FetchedWebImage:
+        cached = self._cached_image(record)
+        if cached is not None:
+            return cached
         started = time.perf_counter()
         provider = self._record_value(record, "provider") or "other"
         outcome = "success"
@@ -158,6 +170,35 @@ class WebImageService:
                         outcome=outcome,
                         duration_seconds=time.perf_counter() - started,
                     )
+
+    def _cached_image(self, record: Any) -> FetchedWebImage | None:
+        """Return the verified bytes stored at registration, if the row has them.
+
+        Anything incomplete or outside the MIME allowlist falls through to a
+        normal fetch rather than being served: the cache is an optimisation and
+        must never widen what the fetch path would accept.
+        """
+
+        content = self._record_attribute(record, "content")
+        if not content:
+            return None
+        media_type = self._record_value(record, "expected_mime")
+        width = self._record_attribute(record, "cached_width")
+        height = self._record_attribute(record, "cached_height")
+        if media_type not in ALLOWED_WEB_IMAGE_MIME_TYPES or not width or not height:
+            return None
+        return FetchedWebImage(
+            content=bytes(content),
+            media_type=media_type,
+            width=int(width),
+            height=int(height),
+        )
+
+    @staticmethod
+    def _record_attribute(record: Any, key: str) -> Any:
+        if isinstance(record, dict):
+            return record.get(key)
+        return getattr(record, key, None)
 
     async def _fetch_redirects(self, record: Any) -> FetchedWebImage:
         return await self._fetch_url_with_redirects(self._record_value(record, "upstream_url"))

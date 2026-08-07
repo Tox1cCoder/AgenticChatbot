@@ -302,7 +302,7 @@ class Settings(BaseSettings):
         description="Hard cap on image results returned per Brave Image Search call.",
     )
     brave_image_search_timeout_seconds: float = Field(
-        default=2.0,
+        default=2.5,
         description=(
             "Brave image search request timeout. Kept under the image-path "
             "deadline so a slow provider cannot consume the verifier's budget."
@@ -1211,9 +1211,23 @@ class Settings(BaseSettings):
         ),
     )
     image_verification_thumbnail_timeout_seconds: float = Field(
-        default=1.5,
+        default=1.0,
         gt=0,
-        description="Per-thumbnail download timeout during verification.",
+        description=(
+            "Per-thumbnail download timeout during verification. Sized so that "
+            "brave_image_search_timeout_seconds plus this stays under "
+            "image_verification_deadline_seconds; the deadline is fixed, so this "
+            "is the knob that gives when the image search timeout rises."
+        ),
+    )
+    verified_image_cache_max_bytes: int = Field(
+        default=64 * 1024 * 1024,
+        ge=0,
+        description=(
+            "Total in-memory budget for verified image bytes held between "
+            "verification and registration. Oldest entries are evicted first; "
+            "0 disables the hand-off and every placed image is fetched again."
+        ),
     )
     rich_image_gallery_max_items: int = Field(
         default=6,

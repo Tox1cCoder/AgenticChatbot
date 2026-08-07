@@ -78,7 +78,7 @@ from .schemas import (
     TodoStatus,
     WorkflowExecutionRequest,
 )
-from .tool_context import tool_execution_context
+from .tool_context import rich_response_capable_from_context, tool_execution_context
 from .tool_execution import (
     apply_tool_output_offload,
     build_tool_artifact,
@@ -1980,7 +1980,13 @@ class MultiAgentWorkflow(
                             device_id=device_id,
                         )
                     with tool_execution_context(
-                        conversation_id, user_id, tool_state_key, device_id
+                        conversation_id,
+                        user_id,
+                        tool_state_key,
+                        device_id,
+                        rich_response_capable=rich_response_capable_from_context(
+                            parent_state.get("context")
+                        ),
                     ):
                         outputs, artifacts, _images = await execute_tool_calls(
                             tool_calls=[tool_call_data],
@@ -2114,7 +2120,15 @@ class MultiAgentWorkflow(
                 ai_kwargs["tool_calls"] = tool_calls
             worker_messages.append(AIMessage(**ai_kwargs))
 
-            with tool_execution_context(conversation_id, user_id, tool_state_key, device_id):
+            with tool_execution_context(
+                conversation_id,
+                user_id,
+                tool_state_key,
+                device_id,
+                rich_response_capable=rich_response_capable_from_context(
+                    parent_state.get("context")
+                ),
+            ):
                 outputs, artifacts, _images = await execute_tool_calls(
                     tool_calls=tool_calls,
                     tool_map=tool_map,

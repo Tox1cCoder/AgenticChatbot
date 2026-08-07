@@ -14,6 +14,8 @@ from typing import Any
 from ..core.config import settings
 from ..observability.rich_images import rich_image_metrics
 from ..services.thumbnail_batch import fetch_thumbnails
+from ..services.verified_image_bytes import remember_verified_bytes
+from .tool_context import get_tool_context
 from .tool_execution import (
     _group_image_candidates,
     build_image_candidates_from_tool_result,
@@ -167,6 +169,7 @@ async def discover_and_verify_images(
         for item in approved
         if item.candidate_id in by_id
     ]
+    _hold_verified_bytes(approved)
     _outcome("approved")
     if gallery and len(public) >= 2:
         return [
@@ -179,6 +182,28 @@ async def discover_and_verify_images(
             )
         ]
     return public
+
+
+def _hold_verified_bytes(approved: list[SubmittedCandidate]) -> None:
+    """Keep the approved images' validated bytes for registration to persist.
+
+    Registration happens later, in ``message_service``, long after this tool
+    call's ContextVar scope has closed — so the bytes are handed to a bounded
+    turn-scoped store rather than carried in the candidate dict, which is
+    serialized into response metadata and must stay small.
+
+    Losing the hand-off is not a failure: registration then stores no bytes and
+    the image is fetched again at render, exactly as before.
+    """
+
+    conversation_id = get_tool_context().conversation_id
+    for candidate in approved:
+        with suppress(Exception):
+            remember_verified_bytes(
+                conversation_id,
+                candidate.thumbnail.url,
+                candidate.thumbnail.image,
+            )
 
 
 def _with_decoded_dimensions(

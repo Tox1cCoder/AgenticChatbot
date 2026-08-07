@@ -2,7 +2,7 @@
 
 import uuid
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, func
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, LargeBinary, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -12,8 +12,14 @@ from app.models.base import Base
 class WebImageReference(Base):
     """A user-owned, opaque reference to one selected upstream image.
 
-    The row stores retrieval metadata only. Image bytes remain upstream and are
-    fetched through the protected media route when a client renders the item.
+    The row stores retrieval metadata, and — when the image was admitted by
+    visual verification — the validated bytes that verification already
+    downloaded and decoded. Serving those makes an approved image one fetch
+    instead of two, and removes the window in which an image passes every check,
+    is placed in the answer, and then dies at render time.
+
+    ``content`` is nullable: an image registered without it still renders, by
+    fetching upstream exactly as before.
     """
 
     __tablename__ = "web_image_references"
@@ -26,6 +32,9 @@ class WebImageReference(Base):
     upstream_url = Column(String(4096), nullable=False)
     expected_mime = Column(String(128), nullable=True)
     provider = Column(String(32), nullable=False)
+    content = Column(LargeBinary, nullable=True)
+    cached_width = Column(Integer, nullable=True)
+    cached_height = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 

@@ -13,7 +13,10 @@ from langgraph.types import interrupt
 
 from app.ai.rag_tool_actions import canonicalize_rag_tool_call, execute_search_documents_action
 from app.ai.schemas import AgentMessage, GraphState, MessageRole
-from app.ai.tool_context import tool_execution_context
+from app.ai.tool_context import (
+    rich_response_capable_from_context,
+    tool_execution_context,
+)
 from app.ai.tool_execution import (
     apply_tool_output_offload,
     build_rejected_tool_artifacts,
@@ -222,6 +225,9 @@ class RagLoopMixin:
                     user_id,
                     agent_key,
                     device_id,
+                    rich_response_capable=rich_response_capable_from_context(
+                        state.get("context")
+                    ),
                 ):
                     outputs, artifacts, images = await execute_tool_calls(
                         tool_calls=tool_calls_to_execute,

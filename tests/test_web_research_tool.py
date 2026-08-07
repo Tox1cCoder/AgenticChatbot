@@ -501,3 +501,61 @@ def test_tool_identity_is_internal():
 
     assert tool.name == "web_research"
     assert tool.metadata["qualified_tool_id"] == "internal::web_research"
+
+
+@pytest.mark.asyncio
+async def test_a_request_without_the_rich_capability_skips_the_image_path():
+    """No marker inventory reaches a non-rich answer, so the work is provably wasted.
+
+    Injection is already gated downstream in ``graph.py``: candidates offered
+    for a request that never advertised ``inline_rich_response_v1`` are
+    discarded. Running Brave, the thumbnail batch and a billed vision call to
+    produce them anyway costs money and up to the full image deadline.
+    """
+
+    brave = _FakeTool("brave_image_search", BRAVE_PAYLOAD)
+    verifier = _ApproveOnlyTeamPhoto()
+    tool = _tool(_FakeTool("tavily_search", TAVILY_PAYLOAD), brave, _FakeImageService(), verifier)
+
+    with tool_execution_context(
+        conversation_id=CONVERSATION_ID,
+        user_id="u1",
+        agent_key="search",
+        rich_response_capable=False,
+    ), verified_image_sink() as sink:
+        raw = await tool.ainvoke(
+            {"query": "T1 roster 2026", "image_query": "T1 League of Legends team photo"}
+        )
+
+    assert brave.calls == []
+    assert verifier.calls == 0
+    assert sink == []
+    assert json.loads(raw)["results"], "the text answer must be unaffected"
+
+
+@pytest.mark.asyncio
+async def test_an_unstated_capability_keeps_the_image_path_open():
+    """Omission must not disable the feature.
+
+    This gate skips provably-wasted work; it is not the correctness boundary.
+    A caller that forgets to thread the flag should behave exactly as before,
+    so the default is open and only an explicit False closes it.
+    """
+
+    brave = _FakeTool("brave_image_search", BRAVE_PAYLOAD)
+
+    tool = _tool(
+        _FakeTool("tavily_search", TAVILY_PAYLOAD),
+        brave,
+        _FakeImageService(),
+        _ApproveOnlyTeamPhoto(),
+    )
+
+    _, sink = await _run(
+        tool,
+        query="T1 roster 2026",
+        image_query="T1 League of Legends team photo",
+    )
+
+    assert len(brave.calls) == 1
+    assert len(sink) == 1

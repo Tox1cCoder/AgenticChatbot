@@ -20,7 +20,10 @@ from app.ai.mcp_registry import get_global_mcp_manager
 from app.ai.rich_image_selection import apply_rich_image_selection
 from app.ai.schemas import GraphState, GraphStateView
 from app.ai.token_instrumentation import truncate_tool_result
-from app.ai.tool_context import tool_execution_context
+from app.ai.tool_context import (
+    rich_response_capable_from_context,
+    tool_execution_context,
+)
 from app.ai.tool_execution import (
     build_rejected_tool_artifacts,
     ensure_agent_tool_map,
@@ -511,6 +514,7 @@ class ToolLoopMixin:
             user_id,
             agent_key,
             device_id,
+            rich_response_capable=rich_response_capable_from_context(state.get("context")),
         ):
             outputs, artifacts, images = await execute_tool_calls(
                 tool_calls=tool_calls,

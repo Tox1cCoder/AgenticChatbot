@@ -8,13 +8,26 @@ The context is set by the graph during tool execution and includes:
 """
 
 import logging
+from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import Any
 
 from .tool_scope import ToolScope, resolve_tool_scope
 
 logger = logging.getLogger(__name__)
+
+
+def rich_response_capable_from_context(context: Any) -> bool:
+    """Read the per-request inline rich-response capability off graph context.
+
+    Kept here rather than in the graph so every ``tool_execution_context``
+    call site reads the flag the same way, and so this module stays free of
+    any graph-state import.
+    """
+
+    return bool(isinstance(context, Mapping) and context.get("inline_rich_response_v1"))
 
 
 @dataclass(frozen=True)
@@ -26,6 +39,12 @@ class ToolContext:
         conversation_id: The ID of the current conversation (may be None)
         user_id: The ID of the user making the request (may be None)
         agent_key: The key of the agent (e.g., "chat", "rag", "search")
+        rich_response_capable: Whether this request advertised the inline
+            rich-response capability. Tools that can only produce rich items
+            use it to skip work whose output would be discarded downstream.
+            Defaults to True so a caller that never sets it behaves exactly as
+            it did before the field existed — this is a waste-avoidance hint,
+            not the correctness gate, which lives in the graph.
     """
 
     conversation_id: str | None = None
@@ -33,6 +52,7 @@ class ToolContext:
     agent_key: str | None = None
     device_id: str | None = None
     tool_scope: str | None = None
+    rich_response_capable: bool = True
 
     def __bool__(self) -> bool:
         """Return True if any context field is set."""
@@ -97,6 +117,7 @@ def tool_execution_context(
     agent_key: str | None = None,
     device_id: str | None = None,
     tool_scope: str | ToolScope | None = None,
+    rich_response_capable: bool = True,
 ):
     """
     Context manager that sets tool execution context for the duration of a block.
@@ -123,6 +144,7 @@ def tool_execution_context(
         agent_key=agent_key,
         device_id=device_id,
         tool_scope=resolve_tool_scope(device_id=device_id, tool_scope=tool_scope).value,
+        rich_response_capable=bool(rich_response_capable),
     )
 
     # Save previous context (for nested contexts, though unlikely)
