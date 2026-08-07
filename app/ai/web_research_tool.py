@@ -53,7 +53,10 @@ class WebResearchInput(BaseModel):
     query: str = Field(description="The factual research query.")
     image_query: str | None = Field(
         default=None,
-        description="Short concrete visual subject, or omit when an image would not help.",
+        description=(
+            "Short concrete visual subject. Set it whenever seeing the thing would "
+            "help the reader; omit for abstract topics."
+        ),
     )
     image_intent: Literal["figure", "gallery"] | None = Field(
         default=None,
