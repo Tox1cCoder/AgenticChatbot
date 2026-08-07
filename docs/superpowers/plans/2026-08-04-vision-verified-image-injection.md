@@ -52,7 +52,20 @@ Normalizes and deduplicates factual queries within one user turn, and caps Tavil
 - Produces:
   - `normalize_query_tokens(query: str) -> frozenset[str]` — NFKC case-folded alphanumeric tokens with short identifiers retained.
   - `near_duplicate(a: frozenset[str], b: frozenset[str], *, threshold: float) -> bool`
-  - `ResearchBudget` with `find_reuse(query: str) -> str | None`, `may_search(query: str) -> bool`, `record_search(query: str, result_text: str) -> None`, `may_image_search() -> bool`, `record_image_search(candidates: list[dict]) -> None`, `image_result() -> list[dict]`, `accumulated() -> list[str]`, and read-only `search_calls: int`.
+  - `ResearchBudget` with `find_reuse(query: str) -> str | None`, `reserve_search(query: str) -> bool`, `record_search(query: str, result_text: str) -> None`, `may_image_search() -> bool`, `record_image_search(candidates: list[dict]) -> None`, `image_result() -> list[dict]`, `accumulated() -> list[str]`, and read-only `search_calls: int`.
+
+**Reservation must be atomic, and `may_search` is not.** A caller checks the
+budget, then awaits a network call, then records the result — so with two
+concurrent `web_research` calls in one turn (the model can emit parallel tool
+calls) both would pass a `may_search` check before either recorded, and the
+"at most two network requests" invariant would not hold. `reserve_search` claims
+a slot and returns whether the caller may proceed, in one indivisible step:
+it refuses when a reuse exists or when claimed-plus-completed searches already
+fill the budget, and otherwise increments an in-flight count that
+`record_search` clears as it stores the result. A search that fails does **not**
+release its slot: a provider error should not buy the model another attempt at
+the same broken call. Guard the compound operations with a `threading.Lock` on
+the instance so a threaded caller cannot interleave either.
   - `get_research_budget(conversation_id: str | None) -> ResearchBudget` and `reset_research_budget(conversation_id: str | None) -> None`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -463,15 +476,26 @@ async def test_downloads_run_concurrently_within_the_batch_deadline():
 
 
 @pytest.mark.asyncio
-async def test_batch_deadline_returns_partial_results():
-    urls = ["https://a.example/1.jpg", "https://b.example/2.jpg"]
-    service = _FakeService({url: _image() for url in urls}, delay=0.5)
+async def test_batch_deadline_fires_when_it_is_the_tighter_bound():
+    """The outer deadline must bound the batch even when per-item timeouts cannot.
 
+    Corrected 2026-08-05: this test originally used per_item_timeout=0.05 against
+    batch_deadline=0.1, so every fetch resolved to None through its own inner
+    timeout and the outer `except TimeoutError` branch was never entered. Deleting
+    the entire outer wrapper and its cancellation loop left the whole file green.
+    per_item_timeout must exceed batch_deadline for this test to mean anything.
+    """
+    urls = ["https://a.example/1.jpg", "https://b.example/2.jpg"]
+    service = _FakeService({url: _image() for url in urls}, delay=2.0)
+
+    started = asyncio.get_running_loop().time()
     fetched = await fetch_thumbnails(
-        service, urls, provider="brave", per_item_timeout=0.05, batch_deadline=0.1
+        service, urls, provider="brave", per_item_timeout=10.0, batch_deadline=0.2
     )
+    elapsed = asyncio.get_running_loop().time() - started
 
     assert fetched == [None, None]
+    assert elapsed < 1.0, "the batch deadline, not the per-item timeout, must bound this"
 
 
 @pytest.mark.asyncio
@@ -1125,6 +1149,29 @@ In `app/core/config.py`, after `research_budget_enabled`:
         default="low",
         description="Media resolution for verifier thumbnails: low, medium, or high.",
     )
+```
+
+**Corrected 2026-08-05.** `"low"` is a friendly name, not the wire value.
+`google.genai.types.MediaResolution` accepts only `MEDIA_RESOLUTION_UNSPECIFIED`,
+`MEDIA_RESOLUTION_LOW`, `MEDIA_RESOLUTION_MEDIUM`, `MEDIA_RESOLUTION_HIGH`.
+Passing `"low"` produces `UserWarning: low is not a valid MediaResolution` and a
+synthetic non-canonical enum member that the live API will reject or ignore —
+which means the vision call never actually works, silently, because
+`verify_candidates` catches the failure and returns `None`. The setting stays
+human-friendly; `build_verifier_model` maps it:
+
+```python
+_MEDIA_RESOLUTIONS = {
+    "low": "MEDIA_RESOLUTION_LOW",
+    "medium": "MEDIA_RESOLUTION_MEDIUM",
+    "high": "MEDIA_RESOLUTION_HIGH",
+}
+```
+
+An unrecognized value falls back to `MEDIA_RESOLUTION_LOW` rather than being
+forwarded raw. A test must construct the real model and assert no
+`UserWarning` is emitted — every async test injects a fake model, so nothing
+otherwise exercises `build_verifier_model` at all.
     image_verification_confidence_threshold: float = Field(
         default=0.85,
         ge=0.0,
@@ -1977,7 +2024,9 @@ def create_web_research_tool(
         reused = budget.find_reuse(query) if settings.research_budget_enabled else None
         search_task: asyncio.Task[str] | None = None
         if reused is None:
-            if settings.research_budget_enabled and not budget.may_search(query):
+            # reserve_search claims the slot in one step; a bare check here would
+            # race a concurrent web_research call across the await below.
+            if settings.research_budget_enabled and not budget.reserve_search(query):
                 return _budget_reused_payload(budget)
             search_task = asyncio.create_task(
                 _run_search(tavily_tool, query, max_results, search_depth)
@@ -2593,6 +2642,33 @@ def test_a_resize_parameter_no_longer_fabricates_an_aspect_ratio():
             "mime_type": "image/webp",
             "width": 995,
             "height": 565,
+        },
+        "provenance": {},
+    }
+
+    assert len(select_rich_item_candidates([candidate], policy=_policy())) == 1
+
+
+def test_a_resize_url_with_unknown_dimensions_is_still_selected():
+    """The actual production failure: no payload dimensions at all.
+
+    Corrected 2026-08-06. The test above supplies explicit width/height, and the
+    old code read `_positive_dimension(payload.get("width")) or hinted_width` —
+    a truthy payload width short-circuited the URL fallback, so that test passed
+    identically with and without the bug. The incident had NO payload dimensions;
+    they were inferred solely from `&w=3840` beside the real height parsed from
+    the same URL, producing a fake 6.8 ratio that failed the bounds check.
+    """
+    candidate = {
+        "id": "image:tool:call-1:0",
+        "type": "image",
+        "source": "image_search",
+        "payload": {
+            "url": (
+                "https://www.sheepesports.com/_next/image?url=https%3A%2F%2Fcdn.sanity.io"
+                "%2Fimages%2Fproduction%2F674b8ca2-995x565.webp&w=3840&q=75"
+            ),
+            "mime_type": "image/webp",
         },
         "provenance": {},
     }

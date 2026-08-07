@@ -194,11 +194,26 @@ search without persisting either outside the turn.
 - At most one Brave request is allowed per user turn. Later `image_query` values
   reuse the existing approved image result and never launch another search.
 
-Applied to the trace, the second query is a near-duplicate of the first (7 of 8
-shared tokens, 88 percent) and is served from the turn cache. The third query is
-genuinely distinct (5 of 8, 63 percent) and consumes the second budgeted
+Applied to the trace, the second query is a near-duplicate of the first (8 of 9
+shared tokens, 88.9 percent) and is served from the turn cache. The third query is
+genuinely distinct (6 of 9, 66.7 percent) and consumes the second budgeted
 request. Three tool calls therefore become two network calls plus one reuse —
-not one call. The acceptance tests assert that number, not a smaller one.
+not one call. The acceptance tests assert those overlap counts explicitly, not
+merely which side of the threshold they fall on.
+
+**Corrected 2026-08-05.** An earlier draft stated 7 of 8 (88 percent) and 5 of 8
+(63 percent). Those were the counts with stopwords removed, which contradicts the
+no-stopword rule stated three paragraphs above — `of` is retained, so both token
+sets hold nine members, not eight. The qualitative outcome is unchanged; only the
+figures were wrong.
+
+Reserving a search must be atomic. A caller checks the budget, awaits a network
+call, then records the result, so two concurrent research calls in one turn would
+both pass a bare check before either recorded, and the two-request bound would not
+hold. The budget therefore exposes a single reservation step that refuses when a
+reuse exists or when claimed-plus-completed searches already fill the budget. A
+failed search does not release its slot: a provider error must not buy the model
+another attempt at the same broken call.
 
 ## Tool-Result Offload Repair
 
@@ -309,10 +324,19 @@ class VisualCandidateDecision:
     ]
 ```
 
-Only IDs from the submitted batch are accepted. Duplicate IDs, missing fields,
-out-of-range confidence, extra records, malformed output, or an unrecognized ID
-cause the affected candidate to be rejected. A response-level parse failure
-rejects the entire remote batch.
+Only IDs from the submitted batch are accepted. Duplicate IDs, out-of-range
+confidence, extra records, or an unrecognized ID cause the affected candidate to
+be rejected — these are checked after parsing, so one bad record costs only
+itself. A malformed record or any response-level parse failure rejects the
+entire remote batch.
+
+**Corrected 2026-08-05.** An earlier draft said malformed output rejected only
+the affected candidate. It cannot: the response is validated as one strict
+structured-output object, so a single unparseable field sinks the whole batch.
+Tolerating per-record failures would mean parsing into a permissive shape and
+validating each record by hand, which also weakens the schema that constrains
+generation in the first place. Batch rejection is the simpler contract, it fails
+safe, and it is what the code does — so the contract says that.
 
 ### Admission policy
 
