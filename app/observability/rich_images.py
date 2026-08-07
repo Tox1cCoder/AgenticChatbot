@@ -36,11 +36,14 @@ _FETCH_OUTCOMES = {
 _VERIFICATION_STAGES = {"discovered", "fetched", "submitted", "approved"}
 _VERIFICATION_OUTCOMES = {
     "approved",
-    "no_match",
-    "timeout",
-    "malformed",
-    "transport",
+    "skipped",
     "unavailable",
+    "search_failure",
+    "fetch_failure",
+    "verifier_timeout",
+    "verifier_failure",
+    "malformed",
+    "no_match",
 }
 
 

@@ -34,13 +34,12 @@ def test_an_unknown_outcome_is_bucketed():
     assert 'outcome="other"' in rendered
 
 
-def test_an_operational_failure_is_logged_not_only_counted(caplog):
+def test_an_operational_failure_is_logged_exactly_once(caplog):
     """A silent total outage is the failure mode that actually happened.
 
-    Every image-path failure is a successful text-only answer by design, so
-    "the deadline cancels every verifier call" and "no candidate was good
-    enough" are indistinguishable from the outside. Only a metric recorded the
-    difference, and nothing was watching it.
+    Every image-path failure is a successful text-only answer by design, so an
+    outage and "no candidate was good enough" are indistinguishable from the
+    outside unless one warning names which it was.
     """
     import asyncio
     import logging
@@ -59,6 +58,12 @@ def test_an_operational_failure_is_logged_not_only_counted(caplog):
             )
         )
 
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == "app.ai.image_verification_flow"
+    ]
+    assert len(warnings) == 1
     assert "text-only" in caplog.text
     assert "unavailable" in caplog.text
 
@@ -69,7 +74,19 @@ def test_finding_nothing_worth_showing_is_not_logged_as_a_failure(caplog):
 
     from app.ai import image_verification_flow
 
-    assert "no_match" not in image_verification_flow._OPERATIONAL_FAILURES
     with caplog.at_level(logging.WARNING, logger="app.ai.image_verification_flow"):
-        pass
+        image_verification_flow.record_image_outcome("no_match", started=0.0)
+
+    assert caplog.text == ""
+
+
+def test_a_skipped_image_path_is_not_logged_as_a_failure(caplog):
+    """Explicit opt-out and closed server gates never asked the path to run."""
+    import logging
+
+    from app.ai import image_verification_flow
+
+    with caplog.at_level(logging.WARNING, logger="app.ai.image_verification_flow"):
+        image_verification_flow.record_image_outcome("skipped")
+
     assert caplog.text == ""

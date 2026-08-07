@@ -23,6 +23,7 @@ from .tool_execution import (
 from .tool_result_rendering import provider_result_text
 from .visual_verifier import (
     SubmittedCandidate,
+    VisualVerifierUnavailable,
     admit_candidates,
     verify_candidates,
 )
@@ -30,9 +31,42 @@ from .visual_verifier import (
 logger = logging.getLogger(__name__)
 
 # Outcomes that mean the machinery failed, as opposed to it working and finding
-# nothing worth showing. "no_match" is deliberately absent: a verifier that
-# rejects every candidate is the feature doing its job.
-_OPERATIONAL_FAILURES = frozenset({"timeout", "malformed", "transport", "unavailable"})
+# nothing worth showing. "no_match" and "skipped" are deliberately absent: a
+# verifier that rejects every candidate, or a path that was never asked to run,
+# is the feature doing its job.
+_OPERATIONAL_FAILURES = frozenset(
+    {
+        "unavailable",
+        "search_failure",
+        "fetch_failure",
+        "verifier_timeout",
+        "verifier_failure",
+        "malformed",
+    }
+)
+
+
+def record_image_outcome(outcome: str, *, started: float | None = None) -> list[dict[str, Any]]:
+    """Record the image path's single terminal outcome and return no images.
+
+    The only terminal logger for the image path: every failure here still
+    produces a successful text-only answer, so an outage is indistinguishable
+    from "nothing was good enough" unless one warning says which it was.
+    """
+
+    elapsed = 0.0 if started is None else time.perf_counter() - started
+    with suppress(Exception):
+        rich_image_metrics.record_verification_outcome(
+            outcome=outcome, duration_seconds=elapsed
+        )
+    if outcome in _OPERATIONAL_FAILURES:
+        logger.warning(
+            "Image verification produced no image (%s) after %.2fs; "
+            "answers will be text-only until this clears.",
+            outcome,
+            elapsed,
+        )
+    return []
 
 
 async def discover_and_verify_images(
@@ -54,32 +88,17 @@ async def discover_and_verify_images(
 
     started = time.perf_counter()
 
-    def _outcome(label: str) -> None:
-        elapsed = time.perf_counter() - started
-        with suppress(Exception):
-            rich_image_metrics.record_verification_outcome(
-                outcome=label, duration_seconds=elapsed
-            )
-        if label in _OPERATIONAL_FAILURES:
-            # Every failure here is a successful text-only answer by design, so
-            # a total outage is indistinguishable from "no good image found"
-            # unless it says so. A misconfigured deadline cancelled every
-            # verifier call for days and looked exactly like normal operation,
-            # because only a metric nobody was watching recorded it.
-            logger.warning(
-                "Image verification produced no image (%s) after %.2fs; "
-                "answers will be text-only until this clears.",
-                label,
-                elapsed,
-            )
-
     if brave_tool is None or web_image_service is None:
-        _outcome("unavailable")
-        return []
+        return record_image_outcome("unavailable", started=started)
 
-    raw = provider_result_text(
-        await brave_tool.ainvoke({"query": image_query}), tool_name="brave_image_search"
-    )
+    try:
+        raw = provider_result_text(
+            await brave_tool.ainvoke({"query": image_query}), tool_name="brave_image_search"
+        )
+    except Exception as exc:
+        logger.debug("Image search failed: %s", type(exc).__name__)
+        return record_image_outcome("search_failure", started=started)
+
     # group_images=False is load-bearing: the legacy path collapses two or more
     # Brave results into one capped grid, which would both hide individual images
     # from the verifier and cap discovery below the candidate budget.
@@ -93,11 +112,9 @@ async def discover_and_verify_images(
     with suppress(Exception):
         rich_image_metrics.record_verification(stage="discovered", count=len(candidates))
     if not candidates:
-        # Brave returned nothing to verify -- no separate outcome label exists
-        # for "discovery was empty", so this is the same terminal state as
-        # zero approvals: no image is available to show.
-        _outcome("no_match")
-        return []
+        # Discovery worked and returned nothing: the same terminal state for the
+        # reader as a batch where no candidate was good enough.
+        return record_image_outcome("no_match", started=started)
 
     thumbnails = await fetch_thumbnails(
         web_image_service,
@@ -125,22 +142,28 @@ async def discover_and_verify_images(
     with suppress(Exception):
         rich_image_metrics.record_verification(stage="submitted", count=len(submitted))
     if not submitted:
-        _outcome("transport")
-        return []
+        return record_image_outcome("fetch_failure", started=started)
 
-    result = await verify_candidates(
-        submitted,
-        user_request=user_request,
-        image_query=image_query,
-        factual_query=factual_query,
-        result_titles=[],
-        model=verifier_model,
-        timeout=float(settings.image_verification_timeout_seconds),
-        recorder=recorder,
-    )
+    try:
+        result = await verify_candidates(
+            submitted,
+            user_request=user_request,
+            image_query=image_query,
+            factual_query=factual_query,
+            result_titles=[],
+            model=verifier_model,
+            timeout=float(settings.image_verification_timeout_seconds),
+            recorder=recorder,
+        )
+    except TimeoutError:
+        return record_image_outcome("verifier_timeout", started=started)
+    except VisualVerifierUnavailable:
+        return record_image_outcome("unavailable", started=started)
+    except Exception as exc:
+        logger.debug("Visual verification failed: %s", type(exc).__name__)
+        return record_image_outcome("verifier_failure", started=started)
     if result is None:
-        _outcome("malformed")
-        return []
+        return record_image_outcome("malformed", started=started)
     gallery = str(image_intent or "figure").strip().lower() == "gallery"
     approved = admit_candidates(
         result,
@@ -156,8 +179,7 @@ async def discover_and_verify_images(
     with suppress(Exception):
         rich_image_metrics.record_verification(stage="approved", count=len(approved))
     if not approved:
-        _outcome("no_match")
-        return []
+        return record_image_outcome("no_match", started=started)
     by_id = {f"c{index}": candidate for index, candidate in enumerate(candidates)}
     public = [
         _with_decoded_dimensions(by_id[item.candidate_id], item)
@@ -165,7 +187,7 @@ async def discover_and_verify_images(
         if item.candidate_id in by_id
     ]
     _hold_verified_bytes(approved)
-    _outcome("approved")
+    record_image_outcome("approved", started=started)
     if gallery and len(public) >= 2:
         return [
             _group_image_candidates(

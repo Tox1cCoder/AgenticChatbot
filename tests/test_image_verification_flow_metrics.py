@@ -15,6 +15,7 @@ label appeared).
 
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import Mock, call
 
@@ -67,9 +68,25 @@ class _FailingImageService:
         raise RuntimeError("network down")
 
 
+class _RaisingBraveTool:
+    async def ainvoke(self, args: dict) -> str:
+        raise RuntimeError("brave down")
+
+
 class _RaisingVerifier:
     async def ainvoke(self, messages):
         raise RuntimeError("model unavailable")
+
+
+class _SlowVerifier:
+    async def ainvoke(self, messages):
+        await asyncio.sleep(1.0)
+        return VisualVerificationResult(decisions=[])
+
+
+class _MalformedVerifier:
+    async def ainvoke(self, messages):
+        return {"decisions": [{"candidate_id": "c0"}]}
 
 
 class _RejectAllVerifier:
@@ -142,7 +159,17 @@ async def test_empty_discovery_records_no_match_once(metrics):
 
 
 @pytest.mark.asyncio
-async def test_all_thumbnails_failing_records_transport_once(metrics):
+async def test_a_failing_image_search_records_search_failure_once(metrics):
+    result = await _discover(brave_tool=_RaisingBraveTool())
+
+    assert result == []
+    metrics.record_verification.assert_not_called()
+    metrics.record_verification_outcome.assert_called_once()
+    assert _outcome_labels(metrics) == ["search_failure"]
+
+
+@pytest.mark.asyncio
+async def test_all_thumbnails_failing_records_fetch_failure_once(metrics):
     result = await _discover(web_image_service=_FailingImageService())
 
     assert result == []
@@ -152,11 +179,27 @@ async def test_all_thumbnails_failing_records_transport_once(metrics):
         call(stage="submitted", count=0),
     ]
     metrics.record_verification_outcome.assert_called_once()
-    assert _outcome_labels(metrics) == ["transport"]
+    assert _outcome_labels(metrics) == ["fetch_failure"]
 
 
 @pytest.mark.asyncio
-async def test_verifier_failure_records_malformed_once(metrics):
+async def test_a_verifier_timeout_records_verifier_timeout_once(metrics, monkeypatch):
+    monkeypatch.setattr(
+        image_verification_flow.settings,
+        "image_verification_timeout_seconds",
+        0.01,
+        raising=False,
+    )
+
+    result = await _discover(verifier_model=_SlowVerifier())
+
+    assert result == []
+    metrics.record_verification_outcome.assert_called_once()
+    assert _outcome_labels(metrics) == ["verifier_timeout"]
+
+
+@pytest.mark.asyncio
+async def test_a_raising_verifier_records_verifier_failure_once(metrics):
     result = await _discover(verifier_model=_RaisingVerifier())
 
     assert result == []
@@ -165,6 +208,15 @@ async def test_verifier_failure_records_malformed_once(metrics):
         call(stage="fetched", count=1),
         call(stage="submitted", count=1),
     ]
+    metrics.record_verification_outcome.assert_called_once()
+    assert _outcome_labels(metrics) == ["verifier_failure"]
+
+
+@pytest.mark.asyncio
+async def test_unparsable_verifier_output_records_malformed_once(metrics):
+    result = await _discover(verifier_model=_MalformedVerifier())
+
+    assert result == []
     metrics.record_verification_outcome.assert_called_once()
     assert _outcome_labels(metrics) == ["malformed"]
 

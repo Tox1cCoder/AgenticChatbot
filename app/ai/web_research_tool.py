@@ -167,12 +167,22 @@ async def _collect_images(
     budget: Any,
     wants_image: bool,
 ) -> list[dict[str, Any]]:
+    from .image_verification_flow import record_image_outcome
+
     if image_task is None:
-        return budget.image_result() if wants_image else []
+        cached = budget.image_result() if wants_image else []
+        if not cached:
+            # Explicit opt-out or a closed server gate. Bounded and unlogged:
+            # the path was never asked to run, so nothing failed.
+            record_image_outcome("skipped")
+        return cached
     try:
         approved = await image_task
-    except Exception as exc:
-        logger.debug("Image path abandoned: %s", type(exc).__name__)
+    except Exception:
+        # The flow classifies and reports every expected failure itself, so
+        # anything arriving here is a programming error. Factual research still
+        # survives it.
+        logger.exception("Image enrichment failed unexpectedly")
         approved = []
     budget.record_image_search(approved)
     return approved
@@ -230,6 +240,8 @@ async def _discover_and_verify(
 
 
 async def _resolve_tool(server_name: str, tool_name: str) -> Any | None:
+    """Find one MCP tool, or None. Absence is reported by whoever needed it."""
+
     try:
         from .mcp_registry import get_global_mcp_manager
 
@@ -238,12 +250,12 @@ async def _resolve_tool(server_name: str, tool_name: str) -> Any | None:
             if getattr(tool, "name", None) == tool_name:
                 return tool
     except Exception as exc:
-        logger.warning("MCP tool %s unavailable: %s", tool_name, exc)
+        logger.debug("MCP tool %s unavailable: %s", tool_name, type(exc).__name__)
     return None
 
 
 def _from_container(provider_name: str) -> Any | None:
-    """Resolve one DI provider off the process-wide container.
+    """Resolve one DI provider off the process-wide container, or None.
 
     ``get_container()`` rather than ``Container()``: instantiating the
     declarative container builds a second ``Database`` singleton, and with it a
@@ -255,7 +267,7 @@ def _from_container(provider_name: str) -> Any | None:
 
         return getattr(get_container(), provider_name)()
     except Exception as exc:
-        logger.warning("DI provider %s unavailable: %s", provider_name, exc)
+        logger.debug("DI provider %s unavailable: %s", provider_name, type(exc).__name__)
         return None
 
 
