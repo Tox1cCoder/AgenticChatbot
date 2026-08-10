@@ -103,13 +103,20 @@ def create_web_research_tool(
         budget = get_research_budget(context.conversation_id)
         visual_query = str(image_query or query).strip()
         wants_image = bool(visual_query) and not skip_images
+        tavily_scope = (topic, time_range, max_results, search_depth)
 
-        reused = budget.find_reuse(query) if settings.research_budget_enabled else None
+        reused = (
+            budget.find_reuse(query, scope=tavily_scope)
+            if settings.research_budget_enabled
+            else None
+        )
         search_task: asyncio.Task[str] | None = None
         if reused is None:
             # reserve_search claims the slot in one step; a bare check here would
             # race a concurrent web_research call across the await below.
-            if settings.research_budget_enabled and not budget.reserve_search(query):
+            if settings.research_budget_enabled and not budget.reserve_search(
+                query, scope=tavily_scope
+            ):
                 return _budget_reused_payload(budget)
             search_task = asyncio.create_task(
                 _run_search(
@@ -145,7 +152,7 @@ def create_web_research_tool(
                     image_task.cancel()
                 logger.warning("Research search failed: %s", exc)
                 return _error_payload(str(exc))
-            budget.record_search(query, search_text)
+            budget.record_search(query, search_text, scope=tavily_scope)
             search_reused = False
         else:
             search_text = reused or ""

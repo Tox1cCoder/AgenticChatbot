@@ -61,6 +61,18 @@ def test_trace_produces_two_network_searches_and_one_reuse():
     assert budget.search_calls == 2
 
 
+def test_tavily_controls_scope_near_duplicate_reuse():
+    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    general_scope = (None, None, None, None)
+    news_scope = ("news", "week", None, None)
+
+    budget.record_search(TRACE_Q1, "general result", scope=general_scope)
+
+    assert budget.find_reuse(TRACE_Q2, scope=general_scope) == "general result"
+    assert budget.find_reuse(TRACE_Q2, scope=news_scope) is None
+    assert budget.reserve_search(TRACE_Q2, scope=news_scope) is True
+
+
 def test_a_fourth_distinct_query_is_refused_and_returns_accumulated_results():
     budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
     budget.record_search("alpha topic one", "A")

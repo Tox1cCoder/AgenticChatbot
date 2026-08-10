@@ -272,6 +272,30 @@ async def test_near_duplicate_query_reuses_the_first_result():
 
 
 @pytest.mark.asyncio
+async def test_different_tavily_controls_do_not_reuse_the_same_query():
+    tavily = _FakeTool("tavily_search", TAVILY_PAYLOAD)
+    tool = _tool(tavily, None)
+
+    await _run(tool, query="T1 roster 2026", skip_images=True)
+    await _run(
+        tool,
+        query="T1 roster 2026",
+        topic="news",
+        time_range="week",
+        skip_images=True,
+    )
+
+    assert tavily.calls == [
+        {"query": "T1 roster 2026"},
+        {
+            "query": "T1 roster 2026",
+            "topic": "news",
+            "time_range": "week",
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_second_image_query_reuses_the_first_selected_images():
     brave = _FakeTool("brave_image_search", _brave_payload())
     tool = _tool(_FakeTool("tavily_search", TAVILY_PAYLOAD), brave)

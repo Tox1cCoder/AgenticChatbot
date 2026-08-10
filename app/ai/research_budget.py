@@ -35,6 +35,7 @@ _MAX_TOKENS = 128
 # unbounded number of conversations; the debug log on eviction below is how
 # the next reader learns this failure mode exists instead of hitting it blind.
 _MAX_TRACKED_CONVERSATIONS = 256
+SearchScope = tuple[str | int | None, ...]
 
 
 def normalize_query_tokens(query: str) -> frozenset[str]:
@@ -60,7 +61,7 @@ class ResearchBudget:
 
     max_search_calls: int = 2
     near_duplicate_threshold: float = 0.75
-    _searches: list[tuple[frozenset[str], str]] = field(default_factory=list)
+    _searches: list[tuple[frozenset[str], SearchScope, str]] = field(default_factory=list)
     _in_flight: int = 0
     _image_searched: bool = False
     _image_candidates: list[dict[str, Any]] = field(default_factory=list)
@@ -72,18 +73,20 @@ class ResearchBudget:
     def search_calls(self) -> int:
         return len(self._searches)
 
-    def find_reuse(self, query: str) -> str | None:
-        """Return an existing result for an exact or near-duplicate query."""
+    def find_reuse(self, query: str, *, scope: SearchScope = ()) -> str | None:
+        """Return a result for a matching query made with the same controls."""
 
         tokens = normalize_query_tokens(query)
-        for recorded_tokens, result_text in self._searches:
+        for recorded_tokens, recorded_scope, result_text in self._searches:
+            if recorded_scope != scope:
+                continue
             if recorded_tokens == tokens or near_duplicate(
                 recorded_tokens, tokens, threshold=self.near_duplicate_threshold
             ):
                 return result_text
         return None
 
-    def reserve_search(self, query: str) -> bool:
+    def reserve_search(self, query: str, *, scope: SearchScope = ()) -> bool:
         """Atomically claim a search slot, or refuse if none remain.
 
         A caller checks the budget, awaits a network call, then records the
@@ -96,14 +99,16 @@ class ResearchBudget:
         """
 
         with self._instance_lock:
-            if self.find_reuse(query) is not None:
+            if self.find_reuse(query, scope=scope) is not None:
                 return False
             if self.search_calls + self._in_flight >= max(1, int(self.max_search_calls)):
                 return False
             self._in_flight += 1
             return True
 
-    def record_search(self, query: str, result_text: str) -> None:
+    def record_search(
+        self, query: str, result_text: str, *, scope: SearchScope = ()
+    ) -> None:
         """Append a completed result and release the reservation it used.
 
         A failed search never reaches this method, so its reservation is never
@@ -112,11 +117,11 @@ class ResearchBudget:
         """
 
         with self._instance_lock:
-            self._searches.append((normalize_query_tokens(query), result_text))
+            self._searches.append((normalize_query_tokens(query), scope, result_text))
             self._in_flight = max(0, self._in_flight - 1)
 
     def accumulated(self) -> list[str]:
-        return [result_text for _, result_text in self._searches]
+        return [result_text for _, _, result_text in self._searches]
 
     def may_image_search(self) -> bool:
         return not self._image_searched
