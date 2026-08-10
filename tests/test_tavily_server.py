@@ -251,6 +251,17 @@ def test_unclassified_http_5xx_error_is_retryable(monkeypatch):
     assert payload["retryable"] is True
 
 
+def test_raw_http_429_is_a_retryable_rate_limit(monkeypatch):
+    error = requests.HTTPError("too many requests")
+    error.response = type("Response", (), {"status_code": 429})()
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: _RaisingClient(error))
+
+    payload = json.loads(tavily_server.tavily_search("T1"))
+
+    assert payload["error"] == "Tavily search rate_limit."
+    assert payload["retryable"] is True
+
+
 def test_unclassified_errors_are_not_retryable_and_do_not_leak_details(monkeypatch):
     monkeypatch.setattr(
         tavily_server,

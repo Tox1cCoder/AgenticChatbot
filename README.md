@@ -636,9 +636,9 @@ The agent workflow is a **LangGraph state machine** defined in [`app/ai/graph.py
 
 | Agent | Responsibility | Key tools |
 |---|---|---|
-| `chat_agent` | General chat + tool use | MCP tools, `tool_search`, Brave image search, skills, handoff |
+| `chat_agent` | General chat + tool use | `web_research`, MCP tools, `tool_search`, skills, handoff |
 | `rag_agent` | Document-grounded QA with citation verification | `search_documents`, optional reranker, agentic RAG phases |
-| `search_agent` | Web/news answers | Tavily, Brave image search, time-context helpers |
+| `search_agent` | Web/news answers | `web_research`, `tool_search`, time-context helpers |
 | `image_generator_agent` | Gemini image generation | Aspect-ratio / count controls |
 | `planning_agent` | Creates / edits task plans | `write_todos`, plan tools |
 | `canvas_agent` | Produces canvas/artifact replies | Custom canvas writers |
@@ -755,9 +755,9 @@ The bundled in-process MCP servers are under [`app/ai/mcp_servers/`](app/ai/mcp_
 
 The same endpoints are exposed by `client_backend` at `/mcp/*` so a desktop UI can configure MCP both globally (server) and per-device (client).
 
-**Global default tools.** Enabled servers in [`app/ai/mcp_config.json`](app/ai/mcp_config.json) are by definition global-default tools, visible to every client (currently `time`, `tavily`, `widgets`, `brave_image_search` — enforced by `tests/test_mcp_global_allowlist.py`). `brave_image_search` is pinned by default for the chat and search agents; other agents can discover it via `tool_search`. Machine-specific servers (for example, desktop-commander or Excel) belong to the sidecar schema-v2 profile at `<profile>/<server-hash>/<user-id>/devices/<device-identifier>/mcp/config.v2.json`; credentials are stored separately in encrypted form. Use `python -m client_backend mcp migrate` once for an authenticated session, then verify with `python -m client_backend mcp doctor --servers widgets,tavily,time`.
+**Global default tools.** Enabled servers in [`app/ai/mcp_config.json`](app/ai/mcp_config.json) are by definition part of the global server catalog, visible to every client (currently `time`, `tavily`, `widgets`, `brave_image_search` — enforced by `tests/test_mcp_global_allowlist.py`). Their raw provider tools remain discoverable through `tool_search`; Tavily and Brave are not system-pinned for the chat or search agent. Those agents instead receive the internal `web_research` tool directly, which centrally runs Tavily retrieval and optional Brave enrichment under one budget and fallback contract. Operators may still opt a raw provider tool into the configurable pinned set. Machine-specific servers (for example, desktop-commander or Excel) belong to the sidecar schema-v2 profile at `<profile>/<server-hash>/<user-id>/devices/<device-identifier>/mcp/config.v2.json`; credentials are stored separately in encrypted form. Use `python -m client_backend mcp migrate` once for an authenticated session, then verify with `python -m client_backend mcp doctor --servers widgets,tavily,time`.
 
-`tavily` is one global server with multiple retrieval tools. Only `tavily_search` is pinned for the search agent; `tavily_extract`, `tavily_map`, and `tavily_crawl` are discovered through `tool_search` when needed. `tavily_search` returns ranked sources and query-aligned content; it requests no provider-generated answer by default (`include_answer=false`) because the answer model performs final synthesis.
+`tavily` is one global server with multiple retrieval tools. `web_research` resolves `tavily_search` internally for ranked factual retrieval; no raw Tavily tool is system-pinned for the search agent. `tavily_search`, `tavily_extract`, `tavily_map`, and `tavily_crawl` remain discoverable through `tool_search` when needed. `tavily_search` returns ranked sources and query-aligned content; it requests no provider-generated answer by default (`include_answer=false`) because the answer model performs final synthesis.
 
 Tavily defaults keep broad search cheap and site-level operations bounded.
 Use `TAVILY_SEARCH_DEFAULT_DEPTH=basic` unless you need advanced search by

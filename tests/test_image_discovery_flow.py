@@ -133,6 +133,19 @@ def test_thumbnail_dimensions_do_not_trigger_source_minimum_rejection():
     assert len(selected) == 1
 
 
+def test_extreme_thumbnail_aspect_is_rejected_when_original_dimensions_are_unknown():
+    selected = select_brave_candidates(
+        _payload(
+            [("high", 1)],
+            original_dimensions=None,
+            thumbnail_dimensions=(500, 20),
+        ),
+        image_query="T1 team photo",
+    )
+
+    assert selected == []
+
+
 def test_gallery_groups_selected_candidates_after_confidence_selection():
     selected = select_brave_candidates(
         _payload([("high", 1), ("high", 2), ("medium", 3)]),

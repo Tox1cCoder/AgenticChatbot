@@ -25,7 +25,10 @@ from .tool_result_rendering import provider_result_text
 logger = logging.getLogger(__name__)
 
 _DESCRIPTION = (
-    "Research the web. Returns a synthesized answer plus ranked sources with URLs.\n\n"
+    "Research the web. Returns ranked sources with URLs and relevant content for you "
+    "to synthesize into the final answer.\n\n"
+    "Use topic='news' for current events. Set time_range only when the user "
+    "explicitly requests a recency window.\n\n"
     "This tool automatically considers a provider-selected image. Set image_query only to "
     "make the visual subject more precise than the factual query: one concrete "
     "subject, no question words, plus a disambiguator or a form word (photo, "

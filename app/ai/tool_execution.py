@@ -184,6 +184,14 @@ def build_image_candidates_from_tool_result(
         original_url = str(image.get("original_image_url") or display_url).strip()
         width = image.get("width")
         height = image.get("height")
+        original_aspect_known = (
+            isinstance(width, int)
+            and width > 0
+            and isinstance(height, int)
+            and height > 0
+        )
+        aspect_width = width if original_aspect_known else image.get("thumbnail_width")
+        aspect_height = height if original_aspect_known else image.get("thumbnail_height")
         if display_url:
             if image_url_scheme(display_url) != "https":
                 _reject("rejected_scheme")
@@ -195,8 +203,8 @@ def build_image_candidates_from_tool_result(
                 _reject("rejected_junk_url")
                 continue
             if not image_aspect_ratio_ok(
-                width,
-                height,
+                aspect_width,
+                aspect_height,
                 minimum=float(getattr(settings, "rich_image_min_aspect_ratio", 0.2)),
                 maximum=float(getattr(settings, "rich_image_max_aspect_ratio", 5.0)),
             ):

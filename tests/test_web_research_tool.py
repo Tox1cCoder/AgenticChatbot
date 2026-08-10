@@ -400,6 +400,18 @@ def test_tool_identity_is_internal():
     assert tool.metadata["qualified_tool_id"] == "internal::web_research"
 
 
+def test_tool_description_assigns_synthesis_and_recency_controls_to_the_model():
+    description = _tool(None, None).description.lower()
+
+    assert "ranked sources" in description
+    assert "for you to synthesize" in description
+    assert "returns a synthesized answer" not in description
+    assert "topic='news'" in description
+    assert "current events" in description
+    assert "time_range" in description
+    assert "explicitly requests" in description
+
+
 @pytest.mark.asyncio
 async def test_a_request_without_the_rich_capability_skips_the_image_path():
     brave = _FakeTool("brave_image_search", _brave_payload())

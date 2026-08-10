@@ -226,6 +226,8 @@ def _classify_tavily_error(exc: Exception) -> tuple[str, bool]:
         return "subscription", False
     if isinstance(exc, requests.HTTPError):
         status = getattr(getattr(exc, "response", None), "status_code", 0)
+        if status == 429:
+            return "rate_limit", True
         return ("upstream", True) if status >= 500 else ("provider_error", False)
     return "provider_error", False
 
