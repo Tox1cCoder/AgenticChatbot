@@ -1,11 +1,4 @@
-"""Production wiring for ``web_research``'s injected-in-tests dependencies.
-
-Every other ``web_research`` test injects ``tavily_tool``, ``brave_tool`` and
-``web_image_service`` directly, so nothing exercised the ``None`` defaults that
-``base_agent`` actually binds with. Those defaults are the production path: if
-they resolve to nothing, research reports "tavily_search is unavailable" and the
-image path silently returns text-only forever, and no existing test notices.
-"""
+"""Production MCP resolution for ``web_research`` dependencies."""
 
 from __future__ import annotations
 
@@ -15,8 +8,8 @@ import pytest
 
 from app.ai import web_research_tool
 from app.ai.research_budget import reset_research_budget
+from app.ai.selected_image_sink import selected_image_sink
 from app.ai.tool_context import clear_tool_context, tool_execution_context
-from app.ai.verified_image_sink import verified_image_sink
 from app.ai.web_research_tool import create_web_research_tool
 
 CONVERSATION_ID = "33333333-3333-3333-3333-333333333333"
@@ -65,23 +58,18 @@ class _FakeManager:
 
 
 @pytest.fixture(autouse=True)
-def _clean():
+def _clean(monkeypatch):
     clear_tool_context()
     reset_research_budget(CONVERSATION_ID)
+    monkeypatch.setattr(
+        web_research_tool.settings, "remote_image_enrichment_enabled", True, raising=False
+    )
     yield
     clear_tool_context()
     reset_research_budget(CONVERSATION_ID)
 
 
 def _patch_manager(monkeypatch, manager: _FakeManager) -> None:
-    """Patch the *async* factory, exactly as production defines it.
-
-    ``get_global_mcp_manager`` is ``async def``; a caller that forgets to await
-    it holds a coroutine, and ``coroutine.get_server_tools`` raises
-    ``AttributeError`` inside ``_resolve_tool``'s blanket ``except``. Patching
-    with an async function is what makes that mistake visible here.
-    """
-
     async def _factory():
         return manager
 
@@ -91,9 +79,32 @@ def _patch_manager(monkeypatch, manager: _FakeManager) -> None:
 async def _run(tool, **kwargs):
     with tool_execution_context(
         conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
-    ), verified_image_sink() as sink:
+    ), selected_image_sink() as sink:
         raw = await tool.ainvoke(kwargs)
     return json.loads(raw), sink
+
+
+def _brave_payload() -> str:
+    return json.dumps(
+        {
+            "images": [
+                {
+                    "url": "https://imgs.search.brave.com/team.jpg",
+                    "original_image_url": "https://origin.example/team.jpg",
+                    "thumbnail_url": "https://imgs.search.brave.com/team-thumb.jpg",
+                    "confidence": "high",
+                    "result_rank": 1,
+                    "provider": "brave_image_search",
+                    "mime_type": "image/jpeg",
+                    "title": "T1 roster",
+                    "description": "T1 roster",
+                    "width": 995,
+                    "height": 565,
+                    "source_url": "https://sheepesports.example/t1",
+                }
+            ]
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -104,7 +115,6 @@ async def test_tavily_resolves_from_mcp_when_it_was_not_injected(monkeypatch):
 
     payload, _ = await _run(create_web_research_tool(), query="T1 roster 2026")
 
-    # Images are default-on, so the un-injected image path resolves too.
     assert sorted(manager.requested) == ["brave_image_search", "tavily"]
     assert len(tavily.calls) == 1
     assert payload["answer"].startswith("T1 is a South Korean")
@@ -122,17 +132,8 @@ async def test_an_unresolvable_tavily_still_reports_a_provider_error(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_brave_and_the_image_service_resolve_when_they_were_not_injected(
-    monkeypatch,
-):
-    """The image path must reach real dependencies, not silently no-op.
-
-    Both were left at ``None`` by ``base_agent``, and
-    ``discover_and_verify_images`` returns ``[]`` when either is missing — so
-    an enabled verifier produced text-only answers with no error anywhere.
-    """
-
-    brave = _NamedTool("brave_image_search", json.dumps({"images": []}))
+async def test_brave_resolves_when_it_was_not_injected(monkeypatch):
+    brave = _NamedTool("brave_image_search", _brave_payload())
     manager = _FakeManager(
         {
             "tavily": [_NamedTool("tavily_search", TAVILY_PAYLOAD)],
@@ -140,38 +141,20 @@ async def test_brave_and_the_image_service_resolve_when_they_were_not_injected(
         }
     )
     _patch_manager(monkeypatch, manager)
-    monkeypatch.setattr(
-        web_research_tool.settings, "vision_image_verification_enabled", True, raising=False
-    )
 
-    seen: dict[str, object] = {}
-
-    async def _capture(**kwargs):
-        seen.update(kwargs)
-        return []
-
-    monkeypatch.setattr(
-        "app.ai.image_verification_flow.discover_and_verify_images", _capture
-    )
-
-    await _run(
+    _, sink = await _run(
         create_web_research_tool(),
         query="T1 roster 2026",
         image_query="T1 League of Legends team photo",
     )
 
-    assert seen["brave_tool"] is brave
-    assert seen["web_image_service"] is not None
-    assert hasattr(seen["web_image_service"], "fetch_url")
+    assert brave.calls == [{"query": "T1 League of Legends team photo"}]
+    assert sink
 
 
 @pytest.mark.asyncio
 async def test_injected_dependencies_are_never_overridden_by_resolution(monkeypatch):
     """Injection must short-circuit resolution, or every test would hit MCP."""
-
-    class _Service:
-        async def fetch_url(self, url: str, *, provider: str = "other"):
-            raise AssertionError("no candidate should be discovered")
 
     manager = _FakeManager({"tavily": [_NamedTool("tavily_search", "{}")]})
     _patch_manager(monkeypatch, manager)
@@ -181,7 +164,6 @@ async def test_injected_dependencies_are_never_overridden_by_resolution(monkeypa
         create_web_research_tool(
             tavily_tool=injected,
             brave_tool=_NamedTool("brave_image_search", json.dumps({"images": []})),
-            web_image_service=_Service(),
         ),
         query="T1 roster 2026",
     )
@@ -192,12 +174,7 @@ async def test_injected_dependencies_are_never_overridden_by_resolution(monkeypa
 
 
 class _McpShapedTool:
-    """An MCP tool as ``load_mcp_tools`` actually returns it.
-
-    ``ainvoke`` yields a list of content blocks, not the JSON string the tool
-    printed. Every other test in the suite fakes a bare string, so nothing
-    covered the shape production sees.
-    """
+    """An MCP tool as ``load_mcp_tools`` actually returns it."""
 
     def __init__(self, name: str, payload: str):
         self.name = name
@@ -218,51 +195,18 @@ async def test_mcp_content_blocks_are_unwrapped_into_the_research_payload(monkey
 
     assert payload["answer"].startswith("T1 is a South Korean")
     assert payload["results"][0]["url"] == "https://sheepesports.example/t1"
-    # research metadata only lands when the payload parsed as JSON, so its
-    # presence is what proves the block wrapper was stripped rather than
-    # str()-ed into a Python repr.
     assert payload["research"] == {"reused": False, "searches_used": 1}
 
 
 @pytest.mark.asyncio
-async def test_mcp_content_blocks_from_brave_still_yield_image_candidates(monkeypatch):
-    """Brave's payload is unwrapped too, or discovery finds zero candidates."""
+async def test_mcp_content_blocks_from_brave_still_yield_selected_candidates():
+    """Brave's payload is unwrapped before deterministic selection."""
 
-    from app.ai.image_verification_flow import discover_and_verify_images
+    from app.ai.image_discovery_flow import discover_images
 
-    brave_payload = json.dumps(
-        {
-            "query": "T1 team photo",
-            "provider": "brave_image_search",
-            "images": [
-                {
-                    "url": "https://cdn.example/team.jpg",
-                    "provider": "brave_image_search",
-                    "mime_type": "image/jpeg",
-                    "title": "T1 roster",
-                    "description": "T1 roster",
-                    "width": 995,
-                    "height": 565,
-                    "source_url": "https://sheepesports.example/t1",
-                }
-            ],
-            "total_results": 1,
-        }
-    )
-    seen: list[str] = []
-
-    class _Service:
-        async def fetch_url(self, url: str, *, provider: str = "other"):
-            seen.append(url)
-            raise RuntimeError("stop after discovery")
-
-    await discover_and_verify_images(
-        brave_tool=_McpShapedTool("brave_image_search", brave_payload),
-        web_image_service=_Service(),
-        verifier_model=None,
-        user_request="T1 roster 2026",
+    selected = await discover_images(
+        brave_tool=_McpShapedTool("brave_image_search", _brave_payload()),
         image_query="T1 team photo",
-        factual_query="T1 roster 2026",
     )
 
-    assert seen == ["https://cdn.example/team.jpg"]
+    assert len(selected) == 1

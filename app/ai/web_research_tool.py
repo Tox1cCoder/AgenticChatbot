@@ -2,7 +2,7 @@
 
 The model asks one question and may refine the visual subject. The server owns
 the rest: whether to hit the network at all, whether to look for an image, and
-whether any image it found may be shown.
+which provider-selected results may be shown.
 """
 
 from __future__ import annotations
@@ -16,16 +16,17 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from ..core.config import settings
+from .image_discovery_flow import discover_images, record_discovery_outcome
 from .research_budget import get_research_budget
+from .selected_image_sink import offer_selected_images
 from .tool_context import get_tool_context
 from .tool_result_rendering import provider_result_text
-from .verified_image_sink import offer_verified_images
 
 logger = logging.getLogger(__name__)
 
 _DESCRIPTION = (
     "Research the web. Returns a synthesized answer plus ranked sources with URLs.\n\n"
-    "This tool automatically considers a verified image. Set image_query only to "
+    "This tool automatically considers a provider-selected image. Set image_query only to "
     "make the visual subject more precise than the factual query: one concrete "
     "subject, no question words, plus a disambiguator or a form word (photo, "
     "diagram, map, chart) when it matters.\n\n"
@@ -34,7 +35,7 @@ _DESCRIPTION = (
     "instances — a roster, a set of logos, colour options. Otherwise leave it "
     "unset: the default places up to two images beside the prose they support. "
     "Never state how many images you want; the layout decides.\n\n"
-    "Approved images appear in your available rich items. Not every call produces "
+    "Selected images appear in your available rich items. Not every call produces "
     "one, and a complete answer never depends on an image. A gallery arrives as "
     "ONE grid item with one marker."
 )
@@ -69,9 +70,6 @@ def create_web_research_tool(
     *,
     tavily_tool: Any | None = None,
     brave_tool: Any | None = None,
-    web_image_service: Any | None = None,
-    verifier_model: Any | None = None,
-    recorder: Any | None = None,
 ) -> StructuredTool:
     """Build the ``web_research`` tool. Dependencies are injected in tests."""
 
@@ -102,15 +100,10 @@ def create_web_research_tool(
         image_task: asyncio.Task[list[dict[str, Any]]] | None = None
         if wants_image and _image_path_open(budget, context.rich_response_capable):
             image_task = asyncio.create_task(
-                _discover_and_verify(
+                _discover_selected(
                     brave_tool=brave_tool,
-                    web_image_service=web_image_service,
-                    verifier_model=verifier_model,
-                    user_request=query,
                     image_query=visual_query,
-                    factual_query=query,
                     image_intent=image_intent,
-                    recorder=recorder,
                 )
             )
 
@@ -128,9 +121,9 @@ def create_web_research_tool(
             search_text = reused or ""
             search_reused = True
 
-        approved = await _collect_images(image_task, budget, wants_image)
-        if approved:
-            offer_verified_images(approved)
+        selected = await _collect_images(image_task, budget, wants_image)
+        if selected:
+            offer_selected_images(selected)
         return _with_research_meta(search_text, reused=search_reused, budget=budget)
 
     return StructuredTool.from_function(
@@ -146,16 +139,15 @@ def create_web_research_tool(
 
 
 def _image_path_open(budget: Any, rich_response_capable: bool) -> bool:
-    if not settings.vision_image_verification_enabled:
+    if not settings.remote_image_enrichment_enabled:
         return False
     if not settings.inline_rich_response_enabled:
         return False
     if not rich_response_capable:
-        # An approved candidate reaches the answer only through the rich-item
+        # A selected candidate reaches the answer only through the rich-item
         # inventory, which the graph withholds from a request that never
-        # advertised the capability. Discovering and verifying one anyway spends
-        # a Brave call, a thumbnail batch and a billed vision call on output
-        # that is discarded.
+        # advertised the capability. Discovering one anyway spends a Brave call
+        # on output that is discarded.
         return False
     return budget.may_image_search()
 
@@ -165,25 +157,23 @@ async def _collect_images(
     budget: Any,
     wants_image: bool,
 ) -> list[dict[str, Any]]:
-    from .image_verification_flow import record_image_outcome
-
     if image_task is None:
         cached = budget.image_result() if wants_image else []
         if not cached:
             # Explicit opt-out or a closed server gate. Bounded and unlogged:
             # the path was never asked to run, so nothing failed.
-            record_image_outcome("skipped")
+            record_discovery_outcome("skipped")
         return cached
     try:
-        approved = await image_task
+        selected = await image_task
     except Exception:
-        # The flow classifies and reports every expected failure itself, so
+        # The flow classifies and reports expected provider failures itself, so
         # anything arriving here is a programming error. Factual research still
         # survives it.
         logger.exception("Image enrichment failed unexpectedly")
-        approved = []
-    budget.record_image_search(approved)
-    return approved
+        selected = []
+    budget.record_image_search(selected)
+    return selected
 
 
 async def _run_search(
@@ -205,35 +195,20 @@ async def _run_search(
     return provider_result_text(await tool.ainvoke(args), tool_name="tavily_search")
 
 
-async def _discover_and_verify(
+async def _discover_selected(
     *,
     brave_tool: Any | None,
-    web_image_service: Any | None,
-    verifier_model: Any | None,
-    user_request: str,
     image_query: str,
-    factual_query: str,
     image_intent: str | None = None,
-    recorder: Any | None = None,
 ) -> list[dict[str, Any]]:
-    """Return public candidate dicts for approved images, or an empty list."""
-
-    from .image_verification_flow import discover_and_verify_images
+    """Return provider-selected candidate dicts, or an empty list."""
 
     if brave_tool is None:
         brave_tool = await _resolve_tool("brave_image_search", "brave_image_search")
-    if web_image_service is None:
-        web_image_service = _from_container("web_image_service")
-
-    return await discover_and_verify_images(
+    return await discover_images(
         brave_tool=brave_tool,
-        web_image_service=web_image_service,
-        verifier_model=verifier_model,
-        user_request=user_request,
         image_query=image_query,
-        factual_query=factual_query,
         image_intent=image_intent,
-        recorder=recorder,
     )
 
 
@@ -250,23 +225,6 @@ async def _resolve_tool(server_name: str, tool_name: str) -> Any | None:
     except Exception as exc:
         logger.debug("MCP tool %s unavailable: %s", tool_name, type(exc).__name__)
     return None
-
-
-def _from_container(provider_name: str) -> Any | None:
-    """Resolve one DI provider off the process-wide container, or None.
-
-    ``get_container()`` rather than ``Container()``: instantiating the
-    declarative container builds a second ``Database`` singleton, and with it a
-    second SQLAlchemy engine and connection pool, on every call.
-    """
-
-    try:
-        from ..core.container import get_container
-
-        return getattr(get_container(), provider_name)()
-    except Exception as exc:
-        logger.debug("DI provider %s unavailable: %s", provider_name, type(exc).__name__)
-        return None
 
 
 def _with_research_meta(search_text: str, *, reused: bool, budget: Any) -> str:

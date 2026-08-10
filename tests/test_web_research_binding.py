@@ -60,13 +60,8 @@ def test_web_research_is_not_bound_for_other_agents(monkeypatch):
     assert "web_research" not in _bound_names(monkeypatch, "rag")
 
 
-def test_bound_web_research_carries_the_agent_usage_recorder(monkeypatch):
-    """The verifier's Gemini call is billed; an unrecorded one is invisible spend.
-
-    ``visual_verifier`` grew a ``recorder`` seam so the verification call lands
-    in the usage ledger, but the binding site constructed the tool with no
-    arguments, so production always took the unrecorded branch.
-    """
+def test_bound_web_research_has_no_usage_recorder_dependency(monkeypatch):
+    """Provider-native selection makes the internal tool independent of billing."""
 
     captured: dict = {}
 
@@ -75,8 +70,7 @@ def test_bound_web_research_carries_the_agent_usage_recorder(monkeypatch):
         return SimpleNamespace(name="web_research", metadata={})
 
     monkeypatch.setattr("app.ai.agents.base_agent.create_web_research_tool", _capture)
-    recorder = object()
-    agent = _BindingTestAgent(agent_config_key="search", recorder=recorder)
+    agent = _BindingTestAgent(agent_config_key="search", recorder=object())
     agent.tools = []
     agent.mcp_manager = None
     monkeypatch.setattr(
@@ -91,7 +85,7 @@ def test_bound_web_research_carries_the_agent_usage_recorder(monkeypatch):
 
     agent._get_tools_for_binding(conversation_id="c1")
 
-    assert captured["recorder"] is recorder
+    assert captured == {}
 
 
 def test_media_guidance_describes_web_research_only():

@@ -467,12 +467,10 @@ class BaseAgent(ABC):
             _add_internal(create_read_tool_result_tool())
 
         # Research is server-orchestrated: one operation runs the text and image
-        # providers, spends the turn budget, and verifies images before the model
-        # can place them.
+        # providers, spends the turn budget, and offers provider-selected images
+        # only through the rich-item inventory.
         if self.agent_config_key in {"chat", "search"}:
-            # The verifier's vision call is billed to the same request as this
-            # agent's own calls, so it records through the same recorder.
-            _add_internal(create_web_research_tool(recorder=self.recorder))
+            _add_internal(create_web_research_tool())
 
         # Caller-provided internal tools include the graph-scoped ``hand_off``
         # tool. The graph owns its roster, so BaseAgent never supplies a static

@@ -1179,6 +1179,10 @@ class Settings(BaseSettings):
             "remote web image reaches an answer."
         ),
     )
+    remote_image_enrichment_enabled: bool = Field(
+        default=True,
+        description="Enable Brave-backed remote image enrichment for rich responses.",
+    )
     image_verification_model: str = Field(
         default="gemini-3-flash-preview",
         description="Vision model used to verify remote image relevance.",

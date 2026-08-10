@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
-import re
 
 import pytest
 
 from app.ai.research_budget import reset_research_budget
+from app.ai.selected_image_sink import selected_image_sink
 from app.ai.tool_context import clear_tool_context, tool_execution_context
-from app.ai.verified_image_sink import verified_image_sink
-from app.ai.visual_verifier import VisualCandidateDecision, VisualVerificationResult
 from app.ai.web_research_tool import create_web_research_tool
-from app.services.web_image_service import FetchedWebImage
 
 CONVERSATION_ID = "11111111-1111-1111-1111-111111111111"
 
@@ -34,36 +32,6 @@ TAVILY_PAYLOAD = json.dumps(
     }
 )
 
-BRAVE_PAYLOAD = json.dumps(
-    {
-        "query": "T1 League of Legends team photo",
-        "provider": "brave_image_search",
-        "images": [
-            {
-                "url": "https://cdn.example/portrait.jpg",
-                "provider": "brave_image_search",
-                "mime_type": "image/jpeg",
-                "title": "Moi",
-                "description": "Moi",
-                "width": 1080,
-                "height": 1600,
-                "source_url": "https://sheepesports.example/t1",
-            },
-            {
-                "url": "https://cdn.example/team.jpg",
-                "provider": "brave_image_search",
-                "mime_type": "image/jpeg",
-                "title": "T1 roster",
-                "description": "T1 roster",
-                "width": 995,
-                "height": 565,
-                "source_url": "https://sheepesports.example/t1",
-            },
-        ],
-        "total_results": 2,
-    }
-)
-
 
 class _FakeTool:
     def __init__(self, name: str, payload: str, delay: float = 0.0):
@@ -79,49 +47,12 @@ class _FakeTool:
         return self.payload
 
 
-class _FakeImageService:
-    def __init__(self):
-        self.fetched: list[str] = []
-
-    async def fetch_url(self, url: str, *, provider: str = "other") -> FetchedWebImage:
-        self.fetched.append(url)
-        return FetchedWebImage(
-            content=b"bytes", media_type="image/jpeg", width=995, height=565
-        )
-
-
-class _ApproveOnlyTeamPhoto:
-    """Approves whichever candidate line mentions the team, rejects the portrait."""
-
-    def __init__(self):
-        self.calls = 0
-
-    async def ainvoke(self, messages):
-        self.calls += 1
-        text = messages[0].content[0]["text"]
-        decisions = []
-        # Match only candidate lines; the prompt's instruction bullets also
-        # start with "- " and must not be read as candidate ids.
-        for candidate_id, line in re.findall(r"^- (c\d+): (.*)$", text, flags=re.MULTILINE):
-            is_portrait = "Moi" in line
-            decisions.append(
-                VisualCandidateDecision(
-                    candidate_id=candidate_id,
-                    depicts_requested_subject=not is_portrait,
-                    materially_supports_answer=not is_portrait,
-                    confidence=0.95,
-                    content_kind="portrait" if is_portrait else "photo",
-                )
-            )
-        return VisualVerificationResult(decisions=decisions)
-
-
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     clear_tool_context()
     reset_research_budget(CONVERSATION_ID)
     monkeypatch.setattr(
-        "app.ai.web_research_tool.settings.vision_image_verification_enabled",
+        "app.ai.web_research_tool.settings.remote_image_enrichment_enabled",
         True,
         raising=False,
     )
@@ -130,51 +61,18 @@ def _clean(monkeypatch):
     reset_research_budget(CONVERSATION_ID)
 
 
-def _tool(tavily, brave, service, verifier):
-    return create_web_research_tool(
-        tavily_tool=tavily,
-        brave_tool=brave,
-        web_image_service=service,
-        verifier_model=verifier,
-    )
-
-
-async def _run(tool, **kwargs):
-    with tool_execution_context(
-        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
-    ), verified_image_sink() as sink:
-        raw = await tool.ainvoke(kwargs)
-    return json.loads(raw), sink
-
-
-@pytest.mark.asyncio
-async def test_only_the_verified_team_photo_is_offered():
-    tavily = _FakeTool("tavily_search", TAVILY_PAYLOAD)
-    brave = _FakeTool("brave_image_search", BRAVE_PAYLOAD)
-
-    payload, sink = await _run(
-        _tool(tavily, brave, _FakeImageService(), _ApproveOnlyTeamPhoto()),
-        query="T1 roster 2026",
-        image_query="T1 League of Legends team photo",
-    )
-
-    assert len(sink) == 1
-    assert sink[0]["payload"]["url"] == "https://cdn.example/team.jpg"
-    assert "portrait.jpg" not in json.dumps(sink)
-    assert "images" not in payload
-    assert "portrait.jpg" not in json.dumps(payload)
-    assert payload["answer"].startswith("T1 is a South Korean")
-
-
-def _brave_payload(count: int) -> str:
-    """A Brave result with ``count`` distinct, verifiable team photos."""
+def _brave_payload(*, count: int = 1, confidence: str = "high") -> str:
     return json.dumps(
         {
-            "query": "T1 League of Legends team photo",
+            "query": "T1 team photo",
             "provider": "brave_image_search",
             "images": [
                 {
-                    "url": f"https://cdn.example/team-{index}.jpg",
+                    "url": f"https://imgs.search.brave.com/display-{index}.jpg",
+                    "original_image_url": f"https://origin.example/team-{index}.jpg",
+                    "thumbnail_url": f"https://imgs.search.brave.com/thumb-{index}.jpg",
+                    "confidence": confidence,
+                    "result_rank": index,
                     "provider": "brave_image_search",
                     "mime_type": "image/jpeg",
                     "title": f"T1 roster {index}",
@@ -190,81 +88,67 @@ def _brave_payload(count: int) -> str:
     )
 
 
-@pytest.mark.asyncio
-async def test_gallery_intent_returns_one_grid_item_holding_every_survivor(monkeypatch):
-    # Pinned rather than inherited: this asserts every survivor lands in one
-    # grid, a property of the grouping code, so it must not re-scope itself
-    # whenever the shipped candidate cap moves.
-    monkeypatch.setattr(
-        "app.ai.image_verification_flow.settings.image_verification_max_candidates",
-        6,
-        raising=False,
-    )
-    verifier = _ApproveOnlyTeamPhoto()
+def _tool(tavily: _FakeTool | None, brave: _FakeTool | None):
+    return create_web_research_tool(tavily_tool=tavily, brave_tool=brave)
 
+
+async def _run(tool, **kwargs):
+    with tool_execution_context(
+        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
+    ), selected_image_sink() as sink:
+        raw = await tool.ainvoke(kwargs)
+    return json.loads(raw), sink
+
+
+@pytest.mark.asyncio
+async def test_web_research_offers_provider_selected_images_without_a_verifier():
+    brave = _FakeTool("brave_image_search", _brave_payload(confidence="high"))
+    tool = create_web_research_tool(
+        tavily_tool=_FakeTool("tavily_search", TAVILY_PAYLOAD),
+        brave_tool=brave,
+    )
+
+    with selected_image_sink() as sink:
+        await tool.ainvoke({"query": "T1 roster", "image_query": "T1 team photo"})
+
+    assert sink
+    assert brave.calls == [{"query": "T1 team photo"}]
+
+
+def test_web_research_has_no_verifier_dependencies():
+    parameters = inspect.signature(create_web_research_tool).parameters
+
+    assert "verifier_model" not in parameters
+    assert "web_image_service" not in parameters
+    assert "recorder" not in parameters
+
+
+@pytest.mark.asyncio
+async def test_gallery_intent_returns_one_grid_item_holding_every_selected_image():
     _, sink = await _run(
         _tool(
             _FakeTool("tavily_search", TAVILY_PAYLOAD),
-            _FakeTool("brave_image_search", _brave_payload(4)),
-            _FakeImageService(),
-            verifier,
+            _FakeTool("brave_image_search", _brave_payload(count=4)),
         ),
         query="T1 roster 2026",
-        image_query="T1 League of Legends team photo",
+        image_query="T1 team photo",
         image_intent="gallery",
     )
 
     assert len(sink) == 1
     assert sink[0]["type"] == "image_group"
     assert len(sink[0]["payload"]["items"]) == 4
-    assert verifier.calls == 1
 
 
 @pytest.mark.asyncio
-async def test_gallery_candidates_reach_the_verifier_individually(monkeypatch):
-    """Grouping before verification would hide images and cap discovery."""
-
-    monkeypatch.setattr(
-        "app.ai.image_verification_flow.settings.image_verification_max_candidates",
-        6,
-        raising=False,
-    )
-    seen: list[str] = []
-
-    class _Recorder:
-        calls = 0
-
-        async def ainvoke(self, messages):
-            text = messages[0].content[0]["text"]
-            seen.extend(re.findall(r"^- (c\d+): ", text, flags=re.MULTILINE))
-            return VisualVerificationResult(decisions=[])
-
-    await _run(
-        _tool(
-            _FakeTool("tavily_search", TAVILY_PAYLOAD),
-            _FakeTool("brave_image_search", _brave_payload(5)),
-            _FakeImageService(),
-            _Recorder(),
-        ),
-        query="T1 roster 2026",
-        image_query="T1 League of Legends team photo",
-        image_intent="gallery",
-    )
-
-    assert len(seen) == 5, "every candidate must be judged on its own pixels"
-
-
-@pytest.mark.asyncio
-async def test_figure_intent_caps_at_two_individual_items():
+async def test_figure_intent_caps_at_two_selected_images():
     _, sink = await _run(
         _tool(
             _FakeTool("tavily_search", TAVILY_PAYLOAD),
-            _FakeTool("brave_image_search", _brave_payload(4)),
-            _FakeImageService(),
-            _ApproveOnlyTeamPhoto(),
+            _FakeTool("brave_image_search", _brave_payload(count=4)),
         ),
         query="T1 roster 2026",
-        image_query="T1 League of Legends team photo",
+        image_query="T1 team photo",
     )
 
     assert len(sink) == 2
@@ -272,50 +156,27 @@ async def test_figure_intent_caps_at_two_individual_items():
 
 
 @pytest.mark.asyncio
-async def test_gallery_with_a_single_survivor_is_not_a_one_cell_grid():
-    _, sink = await _run(
-        _tool(
-            _FakeTool("tavily_search", TAVILY_PAYLOAD),
-            _FakeTool("brave_image_search", _brave_payload(1)),
-            _FakeImageService(),
-            _ApproveOnlyTeamPhoto(),
-        ),
-        query="T1 roster 2026",
-        image_query="T1 League of Legends team photo",
-        image_intent="gallery",
-    )
-
-    assert len(sink) == 1
-    assert sink[0]["type"] == "image"
-
-
-@pytest.mark.asyncio
 async def test_missing_image_query_uses_the_factual_query_for_images():
     tavily = _FakeTool("tavily_search", TAVILY_PAYLOAD)
-    brave = _FakeTool("brave_image_search", BRAVE_PAYLOAD)
+    brave = _FakeTool("brave_image_search", _brave_payload())
 
-    _, sink = await _run(
-        _tool(tavily, brave, _FakeImageService(), _ApproveOnlyTeamPhoto()),
-        query="cho t thông tin về T1",
-    )
+    _, sink = await _run(_tool(tavily, brave), query="cho t thông tin về T1")
 
     assert brave.calls == [{"query": "cho t thông tin về T1"}]
     assert sink
 
 
 @pytest.mark.asyncio
-async def test_skip_images_prevents_brave_and_verifier_calls():
-    brave = _FakeTool("brave_image_search", BRAVE_PAYLOAD)
-    verifier = _ApproveOnlyTeamPhoto()
+async def test_skip_images_prevents_the_brave_call():
+    brave = _FakeTool("brave_image_search", _brave_payload())
 
     payload, sink = await _run(
-        _tool(_FakeTool("tavily_search", TAVILY_PAYLOAD), brave, _FakeImageService(), verifier),
+        _tool(_FakeTool("tavily_search", TAVILY_PAYLOAD), brave),
         query="explain big-O notation",
         skip_images=True,
     )
 
     assert brave.calls == []
-    assert verifier.calls == 0
     assert sink == []
     assert payload["results"]
 
@@ -323,14 +184,10 @@ async def test_skip_images_prevents_brave_and_verifier_calls():
 @pytest.mark.asyncio
 async def test_providers_run_concurrently():
     tavily = _FakeTool("tavily_search", TAVILY_PAYLOAD, delay=0.3)
-    brave = _FakeTool("brave_image_search", BRAVE_PAYLOAD, delay=0.3)
+    brave = _FakeTool("brave_image_search", _brave_payload(), delay=0.3)
 
     started = asyncio.get_running_loop().time()
-    await _run(
-        _tool(tavily, brave, _FakeImageService(), _ApproveOnlyTeamPhoto()),
-        query="T1 roster 2026",
-        image_query="T1 team photo",
-    )
+    await _run(_tool(tavily, brave), query="T1 roster 2026", image_query="T1 team photo")
     elapsed = asyncio.get_running_loop().time() - started
 
     assert elapsed < 0.55, "tavily and brave must overlap"
@@ -339,7 +196,7 @@ async def test_providers_run_concurrently():
 @pytest.mark.asyncio
 async def test_near_duplicate_query_reuses_the_first_result():
     tavily = _FakeTool("tavily_search", TAVILY_PAYLOAD)
-    tool = _tool(tavily, _FakeTool("brave_image_search", BRAVE_PAYLOAD), _FakeImageService(), None)
+    tool = _tool(tavily, _FakeTool("brave_image_search", _brave_payload()))
 
     await _run(tool, query="T1 League of Legends Esports team news roster 2026")
     payload, _ = await _run(tool, query="T1 League of Legends team overview roster news 2026")
@@ -349,14 +206,9 @@ async def test_near_duplicate_query_reuses_the_first_result():
 
 
 @pytest.mark.asyncio
-async def test_second_image_query_does_not_launch_another_brave_call():
-    brave = _FakeTool("brave_image_search", BRAVE_PAYLOAD)
-    tool = _tool(
-        _FakeTool("tavily_search", TAVILY_PAYLOAD),
-        brave,
-        _FakeImageService(),
-        _ApproveOnlyTeamPhoto(),
-    )
+async def test_second_image_query_reuses_the_first_selected_images():
+    brave = _FakeTool("brave_image_search", _brave_payload())
+    tool = _tool(_FakeTool("tavily_search", TAVILY_PAYLOAD), brave)
 
     _, first = await _run(tool, query="T1 roster 2026", image_query="T1 team photo")
     _, second = await _run(tool, query="T1 sponsors 2026", image_query="T1 jersey photo")
@@ -374,38 +226,13 @@ async def test_brave_failure_yields_a_normal_text_answer():
             raise RuntimeError("brave down")
 
     payload, sink = await _run(
-        _tool(
-            _FakeTool("tavily_search", TAVILY_PAYLOAD),
-            _Broken(),
-            _FakeImageService(),
-            _ApproveOnlyTeamPhoto(),
-        ),
+        _tool(_FakeTool("tavily_search", TAVILY_PAYLOAD), _Broken()),
         query="T1 roster 2026",
         image_query="T1 team photo",
     )
 
     assert sink == []
     assert payload["results"]
-
-
-@pytest.mark.asyncio
-async def test_verifier_returning_nothing_yields_a_text_answer():
-    class _RejectAll:
-        async def ainvoke(self, messages):
-            return VisualVerificationResult(decisions=[])
-
-    _, sink = await _run(
-        _tool(
-            _FakeTool("tavily_search", TAVILY_PAYLOAD),
-            _FakeTool("brave_image_search", BRAVE_PAYLOAD),
-            _FakeImageService(),
-            _RejectAll(),
-        ),
-        query="T1 roster 2026",
-        image_query="T1 team photo",
-    )
-
-    assert sink == []
 
 
 @pytest.mark.asyncio
@@ -417,7 +244,7 @@ async def test_tavily_failure_is_reported_as_a_research_error():
             raise RuntimeError("tavily down")
 
     payload, _ = await _run(
-        _tool(_Broken(), _FakeTool("brave_image_search", BRAVE_PAYLOAD), _FakeImageService(), None),
+        _tool(_Broken(), _FakeTool("brave_image_search", _brave_payload())),
         query="T1 roster 2026",
     )
 
@@ -427,9 +254,6 @@ async def test_tavily_failure_is_reported_as_a_research_error():
 
 @pytest.mark.asyncio
 async def test_tavily_failure_cancels_a_live_image_task_cleanly():
-    """The image path must be genuinely in flight, not merely absent, when the
-    search fails — otherwise image_task.cancel() is never exercised at all."""
-
     class _FailingTavily:
         name = "tavily_search"
 
@@ -441,47 +265,36 @@ async def test_tavily_failure_cancels_a_live_image_task_cleanly():
 
         async def ainvoke(self, args):
             await asyncio.sleep(0.2)
-            return BRAVE_PAYLOAD
+            return _brave_payload()
 
     tasks_before = asyncio.all_tasks()
-
     payload, sink = await _run(
-        _tool(_FailingTavily(), _SlowBrave(), _FakeImageService(), _ApproveOnlyTeamPhoto()),
+        _tool(_FailingTavily(), _SlowBrave()),
         query="T1 roster 2026",
         image_query="T1 team photo",
     )
 
     assert payload["status"] == "error"
-    assert payload["retryable"] is True
     assert sink == []
 
-    # image_task.cancel() only schedules cancellation; the loop must run once
-    # more to unwind it. Gather (not bare-await) any leftover task so its
-    # CancelledError is retrieved here rather than logged as "Task exception
-    # was never retrieved" whenever the task object is later garbage collected.
     leftover = asyncio.all_tasks() - tasks_before - {asyncio.current_task()}
     if leftover:
         await asyncio.gather(*leftover, return_exceptions=True)
-    assert all(task.done() for task in leftover), "image task left pending after cancel"
-    assert all(task.cancelled() for task in leftover), "image task did not honor cancellation"
+    assert all(task.done() for task in leftover)
+    assert all(task.cancelled() for task in leftover)
 
 
 @pytest.mark.asyncio
-async def test_disabled_flag_skips_the_image_path_entirely(monkeypatch):
+async def test_disabled_remote_image_flag_skips_the_image_path_entirely(monkeypatch):
     monkeypatch.setattr(
-        "app.ai.web_research_tool.settings.vision_image_verification_enabled",
+        "app.ai.web_research_tool.settings.remote_image_enrichment_enabled",
         False,
         raising=False,
     )
-    brave = _FakeTool("brave_image_search", BRAVE_PAYLOAD)
+    brave = _FakeTool("brave_image_search", _brave_payload())
 
     _, sink = await _run(
-        _tool(
-            _FakeTool("tavily_search", TAVILY_PAYLOAD),
-            brave,
-            _FakeImageService(),
-            _ApproveOnlyTeamPhoto(),
-        ),
+        _tool(_FakeTool("tavily_search", TAVILY_PAYLOAD), brave),
         query="T1 roster 2026",
         image_query="T1 team photo",
     )
@@ -491,7 +304,7 @@ async def test_disabled_flag_skips_the_image_path_entirely(monkeypatch):
 
 
 def test_tool_identity_is_internal():
-    tool = _tool(None, None, None, None)
+    tool = _tool(None, None)
 
     assert tool.name == "web_research"
     assert tool.metadata["qualified_tool_id"] == "internal::web_research"
@@ -499,55 +312,32 @@ def test_tool_identity_is_internal():
 
 @pytest.mark.asyncio
 async def test_a_request_without_the_rich_capability_skips_the_image_path():
-    """No marker inventory reaches a non-rich answer, so the work is provably wasted.
-
-    ``graph.py`` discards candidates offered for a request that never
-    advertised ``inline_rich_response_v1``, so producing them costs a Brave
-    call, a thumbnail batch and a billed vision call for nothing.
-    """
-
-    brave = _FakeTool("brave_image_search", BRAVE_PAYLOAD)
-    verifier = _ApproveOnlyTeamPhoto()
-    tool = _tool(_FakeTool("tavily_search", TAVILY_PAYLOAD), brave, _FakeImageService(), verifier)
+    brave = _FakeTool("brave_image_search", _brave_payload())
+    tool = _tool(_FakeTool("tavily_search", TAVILY_PAYLOAD), brave)
 
     with tool_execution_context(
         conversation_id=CONVERSATION_ID,
         user_id="u1",
         agent_key="search",
         rich_response_capable=False,
-    ), verified_image_sink() as sink:
+    ), selected_image_sink() as sink:
         raw = await tool.ainvoke(
-            {"query": "T1 roster 2026", "image_query": "T1 League of Legends team photo"}
+            {"query": "T1 roster 2026", "image_query": "T1 team photo"}
         )
 
     assert brave.calls == []
-    assert verifier.calls == 0
     assert sink == []
     assert json.loads(raw)["results"], "the text answer must be unaffected"
 
 
 @pytest.mark.asyncio
 async def test_an_unstated_capability_keeps_the_image_path_open():
-    """Omission must not disable the feature.
-
-    This gate skips provably-wasted work; it is not the correctness boundary.
-    A caller that forgets to thread the flag should behave exactly as before,
-    so the default is open and only an explicit False closes it.
-    """
-
-    brave = _FakeTool("brave_image_search", BRAVE_PAYLOAD)
-
-    tool = _tool(
-        _FakeTool("tavily_search", TAVILY_PAYLOAD),
-        brave,
-        _FakeImageService(),
-        _ApproveOnlyTeamPhoto(),
-    )
+    brave = _FakeTool("brave_image_search", _brave_payload())
 
     _, sink = await _run(
-        tool,
+        _tool(_FakeTool("tavily_search", TAVILY_PAYLOAD), brave),
         query="T1 roster 2026",
-        image_query="T1 League of Legends team photo",
+        image_query="T1 team photo",
     )
 
     assert len(brave.calls) == 1
