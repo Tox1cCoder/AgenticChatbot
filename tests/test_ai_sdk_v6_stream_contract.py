@@ -7,6 +7,7 @@ from contextvars import ContextVar
 
 import pytest
 
+from app.ai.tool_execution import execute_tool_calls
 from app.api.ai_sdk import _extract_user_attachments, _has_user_attachment_candidates
 from app.core.exceptions import CustomHTTPException
 from app.services.event_streaming.ai_sdk_v6 import AISDKV6StreamAdapter, AISDKV6StreamState
@@ -252,6 +253,89 @@ async def test_tool_call_and_tool_output_map_to_ai_sdk_tool_chunks():
     assert tool_payloads[1]["input"] == {"query": "x"}
     assert tool_payloads[2]["output"] == "result"
     assert tool_payloads[2]["render"]["type"] == "text"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_proxy", [True, False])
+@pytest.mark.parametrize(
+    "tool_name", ["brave_image_search", "brave_image_search__brave_image_search"]
+)
+async def test_direct_brave_tool_output_never_exposes_original_url_in_ai_sdk_stream(
+    with_proxy,
+    tool_name,
+):
+    original_url = "https://private-origin.example/full.jpg?token=secret"
+    thumbnail_url = "https://imgs.search.brave.com/proxy.jpg"
+    display_url = thumbnail_url if with_proxy else original_url
+
+    class _BraveTool:
+        name = tool_name
+        metadata = (
+            {
+                "tool_origin": "server_mcp",
+                "qualified_tool_id": "brave_image_search::brave_image_search",
+                "source_tool_name": "brave_image_search",
+                "server_name": "brave_image_search",
+            }
+            if tool_name != "brave_image_search"
+            else {}
+        )
+
+        async def ainvoke(self, args):
+            image = {
+                "url": display_url,
+                "original_image_url": original_url,
+                "provider": "brave_image_search",
+                "confidence": "high",
+                "mime_type": "image/jpeg",
+                "width": 1200,
+                "height": 800,
+            }
+            if with_proxy:
+                image["thumbnail_url"] = thumbnail_url
+            return [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "provider": "brave_image_search",
+                            "images": [image],
+                        }
+                    ),
+                }
+            ]
+
+    outputs, _, _ = await execute_tool_calls(
+        tool_calls=[
+            {
+                "id": "brave-call",
+                "name": tool_name,
+                "args": {"query": "T1 photo"},
+            }
+        ],
+        tool_map={tool_name: _BraveTool()},
+    )
+
+    async def source():
+        yield make_event(
+            "tool_execution_end",
+            sequence=1,
+            tool_call_id="brave-call",
+            tool_name=tool_name,
+            data={
+                "output": outputs[0]["content"],
+                "render": outputs[0]["render"],
+            },
+        )
+        yield make_event("complete", sequence=2, data={"message": {"id": "m-1"}})
+
+    payloads = await _collect_payloads(source)
+    serialized = json.dumps(payloads, ensure_ascii=False)
+
+    assert "original_image_url" not in serialized
+    assert original_url not in serialized
+    if with_proxy:
+        assert thumbnail_url in serialized
 
 
 @pytest.mark.asyncio

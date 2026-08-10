@@ -96,6 +96,21 @@ def test_tavily_error_payload_is_compact_json():
     }
 
 
+def test_tavily_error_payload_bounds_and_redacts_untrusted_details():
+    payload = json.loads(
+        tavily_server._error(
+            "request failed api_key=supersecret at "
+            "https://private.example/path?token=supersecret "
+            + ("x" * 600),
+            operation="search",
+        )
+    )
+
+    assert "supersecret" not in payload["error"]
+    assert "private.example" not in payload["error"]
+    assert len(payload["error"]) <= 200
+
+
 class _FakeTavilyClient:
     def __init__(self, response):
         self.response = response
@@ -215,6 +230,32 @@ def test_duplicate_urls_merge_unique_chunks_and_keep_first_rank():
     assert payload["results"][0]["content"] == "A [...] B [...] C"
 
 
+def test_malformed_result_url_does_not_discard_later_valid_results():
+    payload = tavily_server._normalize_search_response(
+        query="T1 roster",
+        response={
+            "results": [
+                {
+                    "title": "Malformed",
+                    "url": "https://[broken.example/path",
+                    "content": "Do not keep this row.",
+                    "score": 0.95,
+                },
+                {
+                    "title": "Valid",
+                    "url": "https://news.example/t1",
+                    "content": "Keep this row.",
+                    "score": 0.9,
+                },
+            ]
+        },
+    )
+
+    assert [(item["title"], item["index"]) for item in payload["results"]] == [
+        ("Valid", 2)
+    ]
+
+
 class _RaisingClient:
     def __init__(self, exc):
         self.exc = exc
@@ -281,7 +322,19 @@ def test_invalid_topic_returns_error_without_calling_tavily(monkeypatch):
 
     payload = json.loads(tavily_server.tavily_search("T1", topic="sports"))
 
-    assert payload["error"] == "Unsupported topic 'sports'"
+    assert payload["error"] == "Unsupported topic."
+    assert client.calls == []
+
+
+def test_invalid_control_error_does_not_echo_an_untrusted_value(monkeypatch):
+    client = _FakeTavilyClient({"results": []})
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: client)
+    untrusted = "api_key=supersecret-" + ("x" * 600)
+
+    payload = json.loads(tavily_server.tavily_search("T1", topic=untrusted))
+
+    assert "supersecret" not in payload["error"]
+    assert len(payload["error"]) <= 200
     assert client.calls == []
 
 
@@ -392,6 +445,37 @@ class _FakeSiteClient:
             "results": [{"url": "https://docs.example.com/a", "raw_content": "A"}],
             "usage": {"credits": 1},
         }
+
+
+class _ExplodingNonSearchClient:
+    def extract(self, **kwargs):
+        raise RuntimeError(
+            "api_key=supersecret at https://private.example/extract?token=supersecret"
+        )
+
+    def map(self, **kwargs):
+        raise RuntimeError("token=supersecret at https://private.example/map")
+
+    def crawl(self, **kwargs):
+        raise RuntimeError("password=supersecret at https://private.example/crawl")
+
+
+@pytest.mark.parametrize(
+    "invoke",
+    [
+        lambda: tavily_server.tavily_extract("https://example.com"),
+        lambda: tavily_server.tavily_map("https://example.com"),
+        lambda: tavily_server.tavily_crawl("https://example.com"),
+    ],
+)
+def test_nonsearch_provider_errors_do_not_expose_client_details(monkeypatch, invoke):
+    monkeypatch.setattr(tavily_server, "_make_client", _ExplodingNonSearchClient)
+
+    payload = json.loads(invoke())
+
+    assert "supersecret" not in payload["error"]
+    assert "private.example" not in payload["error"]
+    assert len(payload["error"]) <= 200
 
 
 def test_map_clamps_site_traversal(monkeypatch):

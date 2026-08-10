@@ -232,6 +232,17 @@ def _rank_key(
         if isinstance(raw_result_rank, int) and raw_result_rank >= 0
         else 1_000_000
     )
+    provider = str(provenance.get("provider") or "").strip().lower()
+    if (
+        str(candidate.get("source") or "") == "image_search"
+        and provider.startswith("brave")
+    ):
+        return (
+            99 if intent is None else intent,
+            result_rank,
+            _quality_rank(candidate, policy),
+            index,
+        )
     return (
         99 if intent is None else intent,
         _quality_rank(candidate, policy),

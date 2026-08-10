@@ -66,7 +66,7 @@ from ..token_instrumentation import (
 )
 from ..tool_execution import _WIDGET_SESSION_BOUND_TOOLS, _bind_widget_session_args
 from ..tool_result_read_tool import create_read_tool_result_tool
-from ..tool_scope import is_client_only_scope
+from ..tool_scope import ToolScope, resolve_tool_scope
 from ..user_memory_tools import create_user_memory_tools
 from ..utils import (
     coerce_response_text,
@@ -448,6 +448,9 @@ class BaseAgent(ABC):
         Returns:
             List of tools to bind to the model
         """
+        effective_scope = resolve_tool_scope(device_id=device_id, tool_scope=tool_scope)
+        client_only_scope = effective_scope is ToolScope.CLIENT_ONLY
+
         # Keep always-on internal tools available even in deferred mode.
         skills_tools = self._get_skills_internal_tools(user_id=user_id, device_id=device_id)
         merged_internal: list[BaseTool] = []
@@ -469,8 +472,8 @@ class BaseAgent(ABC):
         # Research is server-orchestrated: one operation runs the text and image
         # providers, spends the turn budget, and offers provider-selected images
         # only through the rich-item inventory.
-        if self.agent_config_key in {"chat", "search"}:
-            _add_internal(create_web_research_tool())
+        if self.agent_config_key in {"chat", "search"} and not client_only_scope:
+            _add_internal(create_web_research_tool(tool_scope=effective_scope.value))
 
         # Caller-provided internal tools include the graph-scoped ``hand_off``
         # tool. The graph owns its roster, so BaseAgent never supplies a static
@@ -495,7 +498,6 @@ class BaseAgent(ABC):
         internal_tools = merged_internal or None
 
         use_deferred = should_use_deferred_loading(self.agent_config_key)
-        client_only_scope = is_client_only_scope(device_id=device_id, tool_scope=tool_scope)
         # When bridge is enabled and device_id is absent, bind zero client tools.
         # This prevents a missing device_id (by accident rather than by design)
         # from falling through to include all loaded client tools.

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -24,6 +25,13 @@ SUPPORTED_EXTRACT_DEPTHS = {"basic", "advanced"}
 SUPPORTED_FORMATS = {"markdown", "text"}
 SUPPORTED_TOPICS = {"general", "news", "finance"}
 SUPPORTED_TIME_RANGES = {"day", "week", "month", "year"}
+_ERROR_MESSAGE_MAX_LENGTH = 200
+_ERROR_URL_RE = re.compile(r"https?://[^\s'\"<>]+", flags=re.IGNORECASE)
+_ERROR_SECRET_RE = re.compile(
+    r"\b(api[_ -]?key|authorization|bearer|token|secret|password)\b"
+    r"\s*[:=]\s*[^\s,'\";]+",
+    flags=re.IGNORECASE,
+)
 
 
 def _json(payload: dict[str, Any]) -> str:
@@ -33,12 +41,23 @@ def _json(payload: dict[str, Any]) -> str:
 def _error(message: str, *, operation: str, retryable: bool = False) -> str:
     return _json(
         {
-            "error": message,
+            "error": _sanitize_error_message(message),
             "provider": "tavily",
             "operation": operation,
             "retryable": retryable,
         }
     )
+
+
+def _sanitize_error_message(message: Any) -> str:
+    """Return a bounded diagnostic without URLs or credential-shaped values."""
+
+    cleaned = str(message or "Tavily request failed.")[:2000]
+    cleaned = _ERROR_URL_RE.sub("[redacted-url]", cleaned)
+    cleaned = _ERROR_SECRET_RE.sub(
+        lambda match: f"{match.group(1)}=[redacted]", cleaned
+    )
+    return cleaned.strip()[:_ERROR_MESSAGE_MAX_LENGTH]
 
 
 def _resolve_api_key() -> str | None:
@@ -79,7 +98,7 @@ def _optional_choice(value: str | None, *, allowed: set[str], name: str) -> str 
         return None
     candidate = str(value).strip().lower()
     if candidate not in allowed:
-        raise ValueError(f"Unsupported {name} {value!r}")
+        raise ValueError(f"Unsupported {name}.")
     return candidate
 
 
@@ -214,7 +233,7 @@ def tavily_search(
 
 
 def _classify_tavily_error(exc: Exception) -> tuple[str, bool]:
-    if isinstance(exc, tavily_errors.TimeoutError):
+    if isinstance(exc, (tavily_errors.TimeoutError, TimeoutError)):
         return "timeout", True
     if isinstance(exc, tavily_errors.UsageLimitExceededError):
         return "rate_limit", True
@@ -232,9 +251,12 @@ def _classify_tavily_error(exc: Exception) -> tuple[str, bool]:
     return "provider_error", False
 
 
-def _canonical_result_key(url: str) -> str:
-    parsed = urlsplit(str(url or "").strip())
-    host = str(parsed.hostname or "").lower()
+def _canonical_result_key(url: str) -> str | None:
+    try:
+        parsed = urlsplit(str(url or "").strip())
+        host = str(parsed.hostname or "").lower()
+    except (UnicodeError, ValueError):
+        return None
     path = parsed.path or "/"
     if path != "/":
         path = path.rstrip("/")
@@ -272,6 +294,8 @@ def _normalize_search_response(*, query: str, response: Any) -> dict[str, Any]:
         if "published_date" in result:
             item["published_date"] = result["published_date"]
         canonical_key = _canonical_result_key(item["url"])
+        if canonical_key is None:
+            continue
         if existing := results_by_key.get(canonical_key):
             existing["content"] = _merge_content_chunks(existing["content"], item["content"])
             continue
@@ -315,8 +339,8 @@ def tavily_extract(
         return _error("At least one URL is required for extraction.", operation=operation)
     try:
         client = _make_client()
-    except Exception as exc:
-        return _error(str(exc), operation=operation)
+    except Exception:
+        return _error("Tavily client unavailable.", operation=operation)
 
     params: dict[str, Any] = {
         "urls": cleaned_urls,
@@ -341,10 +365,13 @@ def tavily_extract(
         params["chunks_per_source"] = 3
     try:
         response = client.extract(**params)
-    except TimeoutError as exc:
-        return _error(str(exc), operation=operation, retryable=True)
     except Exception as exc:
-        return _error(f"Extract failed: {exc}", operation=operation)
+        error_code, retryable = _classify_tavily_error(exc)
+        return _error(
+            f"Tavily extract {error_code}.",
+            operation=operation,
+            retryable=retryable,
+        )
     return _json(_normalize_extract_response(urls=cleaned_urls, response=response))
 
 
@@ -385,8 +412,8 @@ def tavily_map(
         return _error("A root URL is required for mapping.", operation=operation)
     try:
         client = _make_client()
-    except Exception as exc:
-        return _error(str(exc), operation=operation)
+    except Exception:
+        return _error("Tavily client unavailable.", operation=operation)
 
     params: dict[str, Any] = {
         "url": str(url).strip(),
@@ -415,10 +442,11 @@ def tavily_map(
         params["instructions"] = instructions
     try:
         response = client.map(**params)
-    except TimeoutError as exc:
-        return _error(str(exc), operation=operation, retryable=True)
     except Exception as exc:
-        return _error(f"Map failed: {exc}", operation=operation)
+        error_code, retryable = _classify_tavily_error(exc)
+        return _error(
+            f"Tavily map {error_code}.", operation=operation, retryable=retryable
+        )
     return _json(_normalize_site_response(operation=operation, response=response))
 
 
@@ -444,8 +472,8 @@ def tavily_crawl(
         return _error("A root URL is required for crawling.", operation=operation)
     try:
         client = _make_client()
-    except Exception as exc:
-        return _error(str(exc), operation=operation)
+    except Exception:
+        return _error("Tavily client unavailable.", operation=operation)
 
     params: dict[str, Any] = {
         "url": str(url).strip(),
@@ -478,10 +506,13 @@ def tavily_crawl(
         params["chunks_per_source"] = 3
     try:
         response = client.crawl(**params)
-    except TimeoutError as exc:
-        return _error(str(exc), operation=operation, retryable=True)
     except Exception as exc:
-        return _error(f"Crawl failed: {exc}", operation=operation)
+        error_code, retryable = _classify_tavily_error(exc)
+        return _error(
+            f"Tavily crawl {error_code}.",
+            operation=operation,
+            retryable=retryable,
+        )
     return _json(_normalize_site_response(operation=operation, response=response))
 
 

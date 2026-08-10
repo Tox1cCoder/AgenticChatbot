@@ -21,6 +21,7 @@ from .research_budget import get_research_budget
 from .selected_image_sink import offer_selected_images
 from .tool_context import get_tool_context
 from .tool_result_rendering import provider_result_text
+from .tool_scope import is_client_only_scope
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,7 @@ def create_web_research_tool(
     *,
     tavily_tool: Any | None = None,
     brave_tool: Any | None = None,
+    tool_scope: str | None = None,
 ) -> StructuredTool:
     """Build the ``web_research`` tool. Dependencies are injected in tests."""
 
@@ -103,6 +105,16 @@ def create_web_research_tool(
         skip_images: bool = False,
     ) -> str:
         context = get_tool_context()
+        bound_scope = str(getattr(tool_scope, "value", tool_scope) or "default")
+        if bound_scope == "client_only" or is_client_only_scope(
+            device_id=context.device_id,
+            tool_scope=context.tool_scope,
+        ):
+            return _error_payload(
+                "Server research is unavailable in client-only tool scope.",
+                retryable=False,
+                error_type="permission_error",
+            )
         budget = get_research_budget(context.conversation_id)
         visual_query = str(image_query or query).strip()
         wants_image = bool(visual_query) and not skip_images
@@ -133,7 +145,7 @@ def create_web_research_tool(
             )
 
         image_task: asyncio.Task[list[dict[str, Any]]] | None = None
-        if wants_image and _image_path_open(budget, context.rich_response_capable):
+        if wants_image and _reserve_image_path(budget, context.rich_response_capable):
             image_task = asyncio.create_task(
                 _discover_selected(
                     brave_tool=brave_tool,
@@ -145,14 +157,15 @@ def create_web_research_tool(
         if search_task is not None:
             try:
                 search_text = await search_task
+            except asyncio.CancelledError:
+                await _cancel_and_wait(image_task)
+                raise
             except ResearchProviderError as exc:
-                if image_task is not None:
-                    image_task.cancel()
+                await _cancel_and_wait(image_task)
                 logger.warning("Research provider failed: %s", exc)
                 return _error_payload(str(exc), retryable=exc.retryable)
             except Exception as exc:
-                if image_task is not None:
-                    image_task.cancel()
+                await _cancel_and_wait(image_task)
                 logger.warning("Research search failed: %s", exc)
                 return _error_payload(str(exc))
             budget.record_search(query, search_text, scope=tavily_scope)
@@ -174,11 +187,12 @@ def create_web_research_tool(
         metadata={
             "tool_origin": "internal",
             "qualified_tool_id": "internal::web_research",
+            "tool_scope": str(tool_scope or "default"),
         },
     )
 
 
-def _image_path_open(budget: Any, rich_response_capable: bool) -> bool:
+def _reserve_image_path(budget: Any, rich_response_capable: bool) -> bool:
     if not settings.remote_image_enrichment_enabled:
         return False
     if not settings.inline_rich_response_enabled:
@@ -189,7 +203,7 @@ def _image_path_open(budget: Any, rich_response_capable: bool) -> bool:
         # advertised the capability. Discovering one anyway spends a Brave call
         # on output that is discarded.
         return False
-    return budget.may_image_search()
+    return budget.reserve_image_search()
 
 
 async def _collect_images(
@@ -214,6 +228,22 @@ async def _collect_images(
         selected = []
     budget.record_image_search(selected)
     return selected
+
+
+async def _cancel_and_wait(task: asyncio.Task[Any] | None) -> None:
+    """Cancel a sibling provider call and consume its terminal outcome."""
+
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        # The factual failure remains the result of this combined operation;
+        # awaiting here exists to finish and consume sibling cleanup.
+        pass
 
 
 async def _run_search(
@@ -263,6 +293,12 @@ async def _discover_selected(
 async def _resolve_tool(server_name: str, tool_name: str) -> Any | None:
     """Find one MCP tool, or None. Absence is reported by whoever needed it."""
 
+    context = get_tool_context()
+    if is_client_only_scope(
+        device_id=context.device_id,
+        tool_scope=context.tool_scope,
+    ):
+        return None
     try:
         from .mcp_registry import get_global_mcp_manager
 
@@ -318,11 +354,16 @@ def _budget_reused_payload(budget: Any) -> str:
     )
 
 
-def _error_payload(message: str, *, retryable: bool = True) -> str:
+def _error_payload(
+    message: str,
+    *,
+    retryable: bool = True,
+    error_type: str = "provider_error",
+) -> str:
     return json.dumps(
         {
             "status": "error",
-            "error_type": "provider_error",
+            "error_type": error_type,
             "retryable": retryable,
             "hint": "Research is temporarily unavailable. Say so rather than guessing.",
             "message": message[:500],

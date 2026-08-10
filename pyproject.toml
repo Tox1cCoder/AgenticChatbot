@@ -52,7 +52,7 @@ dependencies = [
     "langchain-openai>=1.2.2,<2.0.0",
     "langchain-mcp-adapters>=0.2.2,<1.0.0",
     "openai>=1.0.0",
-    "tavily-python>=0.3.0",
+    "tavily-python==0.7.15",
     "langchain-tavily>=0.2.0",
     
     # Vector Database & Embeddings

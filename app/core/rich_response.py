@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import re
 from collections.abc import Iterable
 from enum import Enum
@@ -300,26 +301,100 @@ _RICH_ITEM_ADAPTER = TypeAdapter(RichItem)
 _PUBLIC_RICH_PROVENANCE_OMIT_KEYS = frozenset(
     {"original_image_url", "original_image_digests"}
 )
+_PRIVATE_IMAGE_URL_KEY = "original_image_url"
+_PRIVATE_IMAGE_REDACTION = "[private image metadata redacted]"
+
+
+def _collect_private_image_urls(value: Any, collected: set[str]) -> None:
+    """Collect private original-image URL values, including JSON strings."""
+
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == _PRIVATE_IMAGE_URL_KEY and isinstance(item, str) and item.strip():
+                collected.add(item.strip())
+            _collect_private_image_urls(item, collected)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _collect_private_image_urls(item, collected)
+        return
+    if not isinstance(value, str) or _PRIVATE_IMAGE_URL_KEY not in value:
+        return
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return
+    if isinstance(parsed, (dict, list)):
+        _collect_private_image_urls(parsed, collected)
+
+
+def sanitize_public_image_fields(
+    value: Any,
+    *,
+    _private_urls: set[str] | None = None,
+) -> Any:
+    """Copy public data without private image keys or duplicated URL values.
+
+    Older artifacts can contain JSON serialized inside text fields. Malformed
+    strings that mention the reserved private key fail closed because a
+    truncated legacy payload cannot be proven safe.
+    """
+
+    private_urls = _private_urls
+    if private_urls is None:
+        private_urls = set()
+        _collect_private_image_urls(value, private_urls)
+
+    if isinstance(value, dict):
+        sanitized: dict[Any, Any] = {}
+        for key, item in value.items():
+            if key in _PUBLIC_RICH_PROVENANCE_OMIT_KEYS:
+                continue
+            if isinstance(item, str) and item.strip() in private_urls:
+                continue
+            sanitized[key] = sanitize_public_image_fields(
+                item,
+                _private_urls=private_urls,
+            )
+        return sanitized
+    if isinstance(value, list):
+        return [
+            sanitize_public_image_fields(item, _private_urls=private_urls)
+            for item in value
+        ]
+    if not isinstance(value, str):
+        return value
+    if _PRIVATE_IMAGE_URL_KEY in value:
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return _PRIVATE_IMAGE_REDACTION
+        if isinstance(parsed, (dict, list)):
+            return json.dumps(
+                sanitize_public_image_fields(parsed, _private_urls=private_urls),
+                ensure_ascii=False,
+            )
+        return _PRIVATE_IMAGE_REDACTION
+    sanitized_text = value
+    for private_url in private_urls:
+        if private_url and private_url in sanitized_text:
+            sanitized_text = sanitized_text.replace(
+                private_url,
+                _PRIVATE_IMAGE_REDACTION,
+            )
+    return sanitized_text
 
 
 def sanitize_public_rich_item(item: Any) -> Any:
     """Return a public-safe rich item without mutating its input."""
     if not isinstance(item, dict):
         return item
-    sanitized = dict(item)
-    provenance = sanitized.get("provenance")
-    if isinstance(provenance, dict):
-        sanitized["provenance"] = {
-            key: value
-            for key, value in provenance.items()
-            if key not in _PUBLIC_RICH_PROVENANCE_OMIT_KEYS
-        }
-    return sanitized
+    return sanitize_public_image_fields(item)
 
 
 def sanitize_public_rich_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     """Copy message metadata and sanitize every public rich-item record."""
-    sanitized = dict(metadata)
+    sanitized = sanitize_public_image_fields(metadata)
     rich_items = sanitized.get("rich_items")
     if isinstance(rich_items, list):
         sanitized["rich_items"] = [sanitize_public_rich_item(item) for item in rich_items]
@@ -846,6 +921,7 @@ __all__ = [
     "build_rich_item_inventory_block",
     "parse_inline_rich_references",
     "remove_inline_rich_reference",
+    "sanitize_public_image_fields",
     "sanitize_public_rich_item",
     "sanitize_public_rich_metadata",
     "select_append_fallback_items",

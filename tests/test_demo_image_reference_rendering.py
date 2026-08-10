@@ -217,6 +217,47 @@ def test_inline_group_preserves_failed_protected_cell_in_place(monkeypatch):
     assert "Visual unavailable" in html
 
 
+def test_inline_group_loads_and_renders_every_provider_selected_cell(monkeypatch):
+    rendered: list[str] = []
+    fetched: list[str] = []
+    monkeypatch.setattr(
+        demo,
+        "st",
+        SimpleNamespace(
+            session_state={"auth_token": "tok"},
+            markdown=lambda html, **_kwargs: rendered.append(html),
+        ),
+    )
+
+    def fetch(url, _token):
+        fetched.append(url)
+        return f"data:image/jpeg;base64,CELL{url.rsplit('/', 1)[-1]}"
+
+    monkeypatch.setattr(demo, "_fetch_protected_image_data_uri", fetch)
+    demo._render_inline_rich_item(
+        {
+            "type": "image_group",
+            "alt_text": "Six selected images",
+            "payload": {
+                "items": [
+                    {"url": f"/web-images/{index}", "mime_type": "image/jpeg"}
+                    for index in range(1, 7)
+                ]
+            },
+        },
+        message_metadata={},
+        message_key="m1",
+        auto_mount=False,
+    )
+
+    html = rendered[0]
+    assert fetched == [f"/web-images/{index}" for index in range(1, 7)]
+    assert html.count("<img") == 6
+    assert [html.index(f"CELL{index}") for index in range(1, 7)] == sorted(
+        html.index(f"CELL{index}") for index in range(1, 7)
+    )
+
+
 class _PlaceholderStub:
     def __init__(self):
         self.emptied = 0

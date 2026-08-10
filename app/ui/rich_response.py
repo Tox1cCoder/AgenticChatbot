@@ -98,8 +98,8 @@ def build_inline_image_html(
     )
 
 
-#: Maximum cells rendered in one inline group row. Beyond this the row stops
-#: being readable at chat width.
+#: Maximum columns in one inline group row. Additional approved cells wrap to
+#: later rows instead of being discarded.
 INLINE_IMAGE_GROUP_MAX_CELLS: int = 3
 
 
@@ -123,7 +123,6 @@ def build_inline_image_group_html(
     ]
     if not usable:
         return ""
-    usable = usable[:INLINE_IMAGE_GROUP_MAX_CELLS]
     if len(usable) == 1:
         cell = usable[0]
         if cell.get("_load_failed") is True:
@@ -158,6 +157,7 @@ def build_inline_image_group_html(
         "this.remove();"
     )
     rendered: list[str] = []
+    cell_basis = 100 / INLINE_IMAGE_GROUP_MAX_CELLS
     for cell in usable:
         load_failed = cell.get("_load_failed") is True
         fallback_display = "block" if load_failed else "none"
@@ -169,7 +169,8 @@ def build_inline_image_group_html(
         if load_failed:
             rendered.append(
                 '<div data-role="cell" data-state="failed" '
-                f'style="flex:1 1 0;min-width:0;">{fallback}</div>'
+                f'style="flex:1 1 calc({cell_basis:.3f}% - 8px);min-width:0;">'
+                f"{fallback}</div>"
             )
             continue
         src = _html.escape(str(cell.get("url") or ""), quote=True)
@@ -182,7 +183,8 @@ def build_inline_image_group_html(
             else ""
         )
         rendered.append(
-            f'<div data-role="cell" style="flex:1 1 0;min-width:0;">'
+            f'<div data-role="cell" '
+            f'style="flex:1 1 calc({cell_basis:.3f}% - 8px);min-width:0;">'
             f'<img src="{src}" alt="{cell_alt}" class="img-thumb" loading="lazy" '
             f'style="width:100%;height:auto;border-radius:8px;cursor:zoom-in;" '
             f'onerror="{onerror}" />{fallback}{caption}</div>'
@@ -190,7 +192,8 @@ def build_inline_image_group_html(
     row = "".join(rendered)
     return (
         f'<figure data-state="loaded" aria-label="{group_alt}" '
-        f'style="margin:8px 0;display:flex;gap:8px;align-items:flex-start;'
+        f'style="margin:8px 0;display:flex;flex-wrap:wrap;gap:8px;'
+        f'align-items:flex-start;'
         f'width:min({int(max_width_px) * 2}px, 100%);">{row}</figure>'
     )
 

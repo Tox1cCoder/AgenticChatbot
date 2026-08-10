@@ -62,7 +62,7 @@ class ResearchBudget:
     max_search_calls: int = 2
     near_duplicate_threshold: float = 0.75
     _searches: list[tuple[frozenset[str], SearchScope, str]] = field(default_factory=list)
-    _in_flight: int = 0
+    _in_flight: list[tuple[frozenset[str], SearchScope]] = field(default_factory=list)
     _image_searched: bool = False
     _image_candidates: list[dict[str, Any]] = field(default_factory=list)
     _instance_lock: threading.Lock = field(
@@ -99,11 +99,23 @@ class ResearchBudget:
         """
 
         with self._instance_lock:
+            tokens = normalize_query_tokens(query)
             if self.find_reuse(query, scope=scope) is not None:
                 return False
-            if self.search_calls + self._in_flight >= max(1, int(self.max_search_calls)):
+            for reserved_tokens, reserved_scope in self._in_flight:
+                if reserved_scope != scope:
+                    continue
+                if reserved_tokens == tokens or near_duplicate(
+                    reserved_tokens,
+                    tokens,
+                    threshold=self.near_duplicate_threshold,
+                ):
+                    return False
+            if self.search_calls + len(self._in_flight) >= max(
+                1, int(self.max_search_calls)
+            ):
                 return False
-            self._in_flight += 1
+            self._in_flight.append((tokens, scope))
             return True
 
     def record_search(
@@ -117,21 +129,37 @@ class ResearchBudget:
         """
 
         with self._instance_lock:
-            self._searches.append((normalize_query_tokens(query), scope, result_text))
-            self._in_flight = max(0, self._in_flight - 1)
+            tokens = normalize_query_tokens(query)
+            self._searches.append((tokens, scope, result_text))
+            for index, reservation in enumerate(self._in_flight):
+                if reservation == (tokens, scope):
+                    self._in_flight.pop(index)
+                    break
 
     def accumulated(self) -> list[str]:
         return [result_text for _, _, result_text in self._searches]
 
     def may_image_search(self) -> bool:
-        return not self._image_searched
+        with self._instance_lock:
+            return not self._image_searched
+
+    def reserve_image_search(self) -> bool:
+        """Atomically claim the turn's single image-discovery slot."""
+
+        with self._instance_lock:
+            if self._image_searched:
+                return False
+            self._image_searched = True
+            return True
 
     def record_image_search(self, candidates: list[dict[str, Any]]) -> None:
-        self._image_searched = True
-        self._image_candidates = list(candidates)
+        with self._instance_lock:
+            self._image_searched = True
+            self._image_candidates = list(candidates)
 
     def image_result(self) -> list[dict[str, Any]]:
-        return list(self._image_candidates)
+        with self._instance_lock:
+            return list(self._image_candidates)
 
 
 _lock = threading.Lock()

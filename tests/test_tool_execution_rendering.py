@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -87,6 +88,37 @@ class _StructuredErrorTool:
         return {"error": "image search is not configured"}
 
 
+class _DirectBraveTool:
+    name = "brave_image_search"
+
+    def __init__(self, *, with_proxy: bool = True):
+        self.original_url = "https://private-origin.example/full/team.jpg?token=secret"
+        self.thumbnail_url = "https://imgs.search.brave.com/proxy/team.jpg"
+        display_url = self.thumbnail_url if with_proxy else self.original_url
+        image = {
+            "url": display_url,
+            "original_image_url": self.original_url,
+            "provider": "brave_image_search",
+            "confidence": "high",
+            "result_rank": 1,
+            "mime_type": "image/jpeg",
+            "width": 1200,
+            "height": 800,
+        }
+        if with_proxy:
+            image["thumbnail_url"] = self.thumbnail_url
+        self.payload = json.dumps(
+            {
+                "provider": "brave_image_search",
+                "query": "T1 team photo",
+                "images": [image],
+            }
+        )
+
+    async def ainvoke(self, args):
+        return [{"type": "text", "text": self.payload}]
+
+
 @pytest.mark.asyncio
 async def test_execute_tool_calls_preserves_mcp_image_content_blocks():
     """Tool execution must forward MCP content blocks to the normalizer intact.
@@ -166,6 +198,90 @@ async def test_execute_tool_calls_marks_structured_error_results_as_errors():
     assert artifacts[0]["status"] == "error"
     assert artifacts[0]["error"] == "image search is not configured"
     assert images == []
+
+
+@pytest.mark.asyncio
+async def test_direct_brave_execution_keeps_original_url_private_but_preserves_digest():
+    tool = _DirectBraveTool()
+
+    outputs, artifacts, images = await execute_tool_calls(
+        tool_calls=[
+            {
+                "id": "direct-brave",
+                "name": "brave_image_search",
+                "args": {"query": "T1 team photo"},
+            }
+        ],
+        tool_map={"brave_image_search": tool},
+    )
+
+    public_serialization = json.dumps(
+        {"outputs": outputs, "artifacts": artifacts}, ensure_ascii=False
+    )
+    assert "original_image_url" not in public_serialization
+    assert tool.original_url not in public_serialization
+    assert tool.thumbnail_url in public_serialization
+    assert images == []
+
+    [candidate] = artifacts[0]["_rich_item_candidates"]
+    assert candidate["provenance"]["original_image_digests"] == {
+        tool.thumbnail_url: hashlib.sha256(tool.original_url.encode()).hexdigest()
+    }
+    assert tool.original_url in tool.payload
+
+
+@pytest.mark.asyncio
+async def test_direct_only_brave_execution_drops_the_private_display_url():
+    tool = _DirectBraveTool(with_proxy=False)
+
+    outputs, artifacts, images = await execute_tool_calls(
+        tool_calls=[
+            {
+                "id": "direct-only-brave",
+                "name": "brave_image_search",
+                "args": {"query": "T1 team photo"},
+            }
+        ],
+        tool_map={"brave_image_search": tool},
+    )
+
+    public_serialization = json.dumps(
+        {"outputs": outputs, "artifacts": artifacts}, ensure_ascii=False
+    )
+    assert "original_image_url" not in public_serialization
+    assert tool.original_url not in public_serialization
+    assert "_rich_item_candidates" not in artifacts[0]
+    assert images == []
+    assert tool.original_url in tool.payload
+
+
+@pytest.mark.asyncio
+async def test_aliased_brave_execution_uses_canonical_identity_for_privacy():
+    alias = "brave_image_search__brave_image_search"
+    tool = _DirectBraveTool()
+    tool.name = alias
+    tool.metadata = {
+        "tool_origin": "server_mcp",
+        "qualified_tool_id": "brave_image_search::brave_image_search",
+        "source_tool_name": "brave_image_search",
+        "server_name": "brave_image_search",
+    }
+
+    outputs, artifacts, images = await execute_tool_calls(
+        tool_calls=[{"id": "aliased-brave", "name": alias, "args": {"query": "T1"}}],
+        tool_map={alias: tool},
+    )
+
+    public_serialization = json.dumps(
+        {"outputs": outputs, "artifacts": artifacts}, ensure_ascii=False
+    )
+    assert "original_image_url" not in public_serialization
+    assert tool.original_url not in public_serialization
+    assert images == []
+    [candidate] = artifacts[0]["_rich_item_candidates"]
+    assert candidate["provenance"]["original_image_digests"] == {
+        tool.thumbnail_url: hashlib.sha256(tool.original_url.encode()).hexdigest()
+    }
 
 
 def test_tool_artifact_preserves_full_output_by_default():

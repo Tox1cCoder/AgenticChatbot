@@ -272,6 +272,32 @@ async def test_near_duplicate_query_reuses_the_first_result():
 
 
 @pytest.mark.asyncio
+async def test_concurrent_matching_queries_share_one_tavily_reservation():
+    tavily = _FakeTool("tavily_search", TAVILY_PAYLOAD, delay=0.05)
+    tool = _tool(tavily, None)
+
+    await asyncio.gather(
+        _run(tool, query="T1 roster 2026", skip_images=True),
+        _run(tool, query="T1 roster 2026", skip_images=True),
+    )
+
+    assert tavily.calls == [{"query": "T1 roster 2026"}]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_research_calls_share_one_brave_reservation():
+    brave = _FakeTool("brave_image_search", _brave_payload(), delay=0.05)
+    tool = _tool(_FakeTool("tavily_search", TAVILY_PAYLOAD, delay=0.05), brave)
+
+    await asyncio.gather(
+        _run(tool, query="T1 roster 2026", image_query="T1 team photo"),
+        _run(tool, query="Gen.G roster 2026", image_query="Gen.G team photo"),
+    )
+
+    assert brave.calls == [{"query": "T1 team photo"}]
+
+
+@pytest.mark.asyncio
 async def test_different_tavily_controls_do_not_reuse_the_same_query():
     tavily = _FakeTool("tavily_search", TAVILY_PAYLOAD)
     tool = _tool(tavily, None)
@@ -372,6 +398,104 @@ async def test_tavily_failure_cancels_a_live_image_task_cleanly():
         await asyncio.gather(*leftover, return_exceptions=True)
     assert all(task.done() for task in leftover)
     assert all(task.cancelled() for task in leftover)
+
+
+@pytest.mark.asyncio
+async def test_tavily_failure_waits_for_image_cancellation_cleanup():
+    image_started = asyncio.Event()
+    cancellation_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    class _FailingAfterImageStarts:
+        name = "tavily_search"
+
+        async def ainvoke(self, args):
+            await image_started.wait()
+            raise RuntimeError("tavily down")
+
+    class _CleanupAwareBrave:
+        name = "brave_image_search"
+
+        async def ainvoke(self, args):
+            image_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_started.set()
+                await allow_cleanup.wait()
+                raise
+            finally:
+                cleanup_finished.set()
+
+    research_task = asyncio.create_task(
+        _run(
+            _tool(_FailingAfterImageStarts(), _CleanupAwareBrave()),
+            query="T1 roster 2026",
+            image_query="T1 team photo",
+        )
+    )
+    await cancellation_started.wait()
+    await asyncio.sleep(0)
+    returned_before_cleanup = research_task.done()
+    allow_cleanup.set()
+    payload, sink = await research_task
+
+    assert returned_before_cleanup is False
+    assert cleanup_finished.is_set()
+    assert payload["status"] == "error"
+    assert sink == []
+
+
+@pytest.mark.asyncio
+async def test_cancelling_research_cancels_and_awaits_the_image_task():
+    search_started = asyncio.Event()
+    image_started = asyncio.Event()
+    release_image = asyncio.Event()
+    image_cancelled = asyncio.Event()
+    image_finished = asyncio.Event()
+
+    class _BlockingTavily:
+        name = "tavily_search"
+
+        async def ainvoke(self, args):
+            search_started.set()
+            await asyncio.Event().wait()
+
+    class _BlockingBrave:
+        name = "brave_image_search"
+
+        async def ainvoke(self, args):
+            image_started.set()
+            try:
+                await release_image.wait()
+                return _brave_payload()
+            except asyncio.CancelledError:
+                image_cancelled.set()
+                raise
+            finally:
+                image_finished.set()
+
+    with tool_execution_context(
+        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
+    ), selected_image_sink():
+        research_task = asyncio.create_task(
+            _tool(_BlockingTavily(), _BlockingBrave()).ainvoke(
+                {"query": "T1 roster 2026", "image_query": "T1 team photo"}
+            )
+        )
+        await asyncio.gather(search_started.wait(), image_started.wait())
+        research_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await research_task
+
+    was_cancelled = image_cancelled.is_set()
+    finished_before_research_returned = image_finished.is_set()
+    release_image.set()
+    await image_finished.wait()
+
+    assert was_cancelled is True
+    assert finished_before_research_returned is True
 
 
 @pytest.mark.asyncio

@@ -186,6 +186,112 @@ def test_message_read_strips_original_image_url_from_historical_rich_items():
     assert row.message_metadata["rich_items"][0]["provenance"]["original_image_url"]
 
 
+def test_message_read_strips_original_image_url_from_historical_tool_artifacts():
+    original_url = "https://private-origin.example/full.jpg?token=secret"
+    thumbnail_url = "https://imgs.search.brave.com/proxy.jpg"
+    raw_payload = {
+        "provider": "brave_image_search",
+        "images": [
+            {
+                "url": thumbnail_url,
+                "original_image_url": original_url,
+            }
+        ],
+    }
+    row = _message_row(
+        conversation_id=uuid4(),
+        sender=MessageRole.assistant.value,
+        content="Answer",
+        metadata={
+            "tool_artifacts": [
+                {
+                    "tool": "brave_image_search",
+                    "output": json.dumps(raw_payload),
+                    "render": {
+                        "type": "json",
+                        "model_content": json.dumps(raw_payload),
+                        "text": json.dumps(raw_payload),
+                        "structured_content": raw_payload,
+                    },
+                }
+            ]
+        },
+    )
+
+    message = MessageRead.model_validate(row)
+    public_metadata = json.dumps(message.message_metadata, ensure_ascii=False)
+
+    assert "original_image_url" not in public_metadata
+    assert original_url not in public_metadata
+    assert thumbnail_url in public_metadata
+    assert original_url in row.message_metadata["tool_artifacts"][0]["output"]
+
+
+def test_message_read_drops_a_direct_only_original_url_value_from_artifacts():
+    original_url = "https://private-origin.example/full.jpg?token=secret"
+    raw_payload = {
+        "provider": "brave_image_search",
+        "images": [
+            {
+                "url": original_url,
+                "original_image_url": original_url,
+            }
+        ],
+    }
+    row = _message_row(
+        conversation_id=uuid4(),
+        sender=MessageRole.assistant.value,
+        content="Answer",
+        metadata={
+            "tool_artifacts": [
+                {
+                    "tool": "brave_image_search",
+                    "output": json.dumps(raw_payload),
+                    "render": {"structured_content": raw_payload},
+                }
+            ]
+        },
+    )
+
+    message = MessageRead.model_validate(row)
+    public_metadata = json.dumps(message.message_metadata, ensure_ascii=False)
+
+    assert "original_image_url" not in public_metadata
+    assert original_url not in public_metadata
+    assert original_url in row.message_metadata["tool_artifacts"][0]["output"]
+
+
+@pytest.mark.parametrize(
+    "unsafe_output",
+    [
+        "original_image_url=https://private-origin.example/full.jpg?token=secret",
+        '{"images":[{"original_image_url":"https://private-origin.example/full.jpg',
+    ],
+)
+def test_message_read_fails_closed_on_malformed_private_image_metadata(unsafe_output):
+    row = _message_row(
+        conversation_id=uuid4(),
+        sender=MessageRole.assistant.value,
+        content="Answer",
+        metadata={
+            "tool_artifacts": [
+                {
+                    "tool": "brave_image_search",
+                    "output": unsafe_output,
+                    "render": {"text": unsafe_output},
+                }
+            ]
+        },
+    )
+
+    message = MessageRead.model_validate(row)
+    public_metadata = json.dumps(message.message_metadata, ensure_ascii=False)
+
+    assert "original_image_url" not in public_metadata
+    assert "private-origin.example" not in public_metadata
+    assert row.message_metadata["tool_artifacts"][0]["output"] == unsafe_output
+
+
 class _HarnessImageStorage:
     """Deterministic ChatImageStorageService stand-in for the media delivery
     seam. Returns a fixed protected reference (the test's ``image_url``) so the

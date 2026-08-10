@@ -173,6 +173,65 @@ async def test_injected_dependencies_are_never_overridden_by_resolution(monkeypa
     assert payload["answer"].startswith("T1 is a South Korean")
 
 
+@pytest.mark.asyncio
+async def test_client_only_direct_invocation_never_calls_server_dependencies(monkeypatch):
+    manager = _FakeManager({"tavily": [_NamedTool("tavily_search", TAVILY_PAYLOAD)]})
+    _patch_manager(monkeypatch, manager)
+    tavily = _NamedTool("tavily_search", TAVILY_PAYLOAD)
+    brave = _NamedTool("brave_image_search", _brave_payload())
+    tool = create_web_research_tool(tavily_tool=tavily, brave_tool=brave)
+
+    with tool_execution_context(
+        conversation_id=CONVERSATION_ID,
+        user_id="u1",
+        agent_key="search",
+        device_id="device-a",
+        tool_scope="client_only",
+    ), selected_image_sink() as sink:
+        payload = json.loads(
+            await tool.ainvoke(
+                {"query": "T1 roster 2026", "image_query": "T1 team photo"}
+            )
+        )
+
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "permission_error"
+    assert payload["retryable"] is False
+    assert manager.requested == []
+    assert tavily.calls == []
+    assert brave.calls == []
+    assert sink == []
+
+
+@pytest.mark.asyncio
+async def test_client_only_without_device_never_calls_server_dependencies(monkeypatch):
+    manager = _FakeManager({"tavily": [_NamedTool("tavily_search", TAVILY_PAYLOAD)]})
+    _patch_manager(monkeypatch, manager)
+    tavily = _NamedTool("tavily_search", TAVILY_PAYLOAD)
+    brave = _NamedTool("brave_image_search", _brave_payload())
+    tool = create_web_research_tool(tavily_tool=tavily, brave_tool=brave)
+
+    with tool_execution_context(
+        conversation_id=CONVERSATION_ID,
+        user_id="u1",
+        agent_key="search",
+        tool_scope="client_only",
+    ), selected_image_sink() as sink:
+        payload = json.loads(
+            await tool.ainvoke(
+                {"query": "T1 roster 2026", "image_query": "T1 team photo"}
+            )
+        )
+
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "permission_error"
+    assert payload["retryable"] is False
+    assert manager.requested == []
+    assert tavily.calls == []
+    assert brave.calls == []
+    assert sink == []
+
+
 class _McpShapedTool:
     """An MCP tool as ``load_mcp_tools`` actually returns it."""
 

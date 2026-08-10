@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -423,6 +424,35 @@ def test_ai_sdk_rich_history_uses_image_rich_item_without_file_part():
     assert payload["metadata"]["rich_items"][0]["type"] == "image"
     assert "original_image_url" not in payload["metadata"]["rich_items"][0]["provenance"]
     assert all(part["type"] != "file" for part in payload["parts"])
+
+
+def test_ai_sdk_history_fails_closed_on_malformed_private_image_metadata():
+    unsafe_output = (
+        '{"images":[{"original_image_url":'
+        '"https://private-origin.example/full.jpg?token=secret"'
+    )
+    assistant_msg = SimpleNamespace(
+        id=uuid4(),
+        sender=2,
+        content="Answer",
+        created_at=datetime.now(UTC),
+        message_metadata={
+            "tool_artifacts": [
+                {
+                    "tool": "brave_image_search",
+                    "output": unsafe_output,
+                    "render": {"text": unsafe_output},
+                }
+            ]
+        },
+    )
+
+    payload = _history_payload(assistant_msg, capable=True)
+    serialized = json.dumps(payload, ensure_ascii=False)
+
+    assert "original_image_url" not in serialized
+    assert "private-origin.example" not in serialized
+    assert assistant_msg.message_metadata["tool_artifacts"][0]["output"] == unsafe_output
 
 
 def test_ai_sdk_non_rich_history_projects_selected_image_once():

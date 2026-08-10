@@ -22,6 +22,7 @@ from ..core.rich_response import (
     GENERIC_IMAGE_ALT_TEXT,
     RichDisplayPolicy,
     RichItemType,
+    sanitize_public_image_fields,
 )
 from ..observability.rich_images import rich_image_metrics
 from .client_runtime_tools import (
@@ -43,9 +44,10 @@ from .tool_execution_policy import (
     ToolExecutionPolicy,
     ToolExecutionPolicyValidationError,
     resolve_tool_execution_policy,
+    resolve_tool_identity,
     tool_policy_context,
 )
-from .tool_result_rendering import normalize_tool_result_for_rendering
+from .tool_result_rendering import normalize_tool_result_for_rendering, provider_result_text
 from .tool_scope import is_client_only_scope
 from .tool_search_tool import create_tool_search_tool
 from .utils import make_json_safe, normalize_tool_call
@@ -90,6 +92,30 @@ def _guess_mime_from_url(url: str) -> str:
 def _short_digest(value: str) -> str:
     """Return a short stable digest, used only to keep ids distinct."""
     return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:8]
+
+
+def _canonical_source_tool_name(tool: Any, *, exposed_tool_name: str) -> str:
+    """Return the trusted source name even when the callable uses an alias."""
+
+    try:
+        return resolve_tool_identity(
+            tool,
+            exposed_tool_name=exposed_tool_name,
+        ).source_tool_name
+    except (AmbiguousToolExecutionPolicyError, ToolExecutionPolicyValidationError):
+        metadata = getattr(tool, "metadata", None)
+        metadata = metadata if isinstance(metadata, dict) else {}
+        return str(
+            metadata.get("source_tool_name")
+            or getattr(tool, "name", "")
+            or exposed_tool_name
+        ).strip()
+
+
+def _public_tool_result(result: Any, *, private_image_result: bool) -> Any:
+    if not private_image_result:
+        return result
+    return sanitize_public_image_fields(make_json_safe(result))
 
 
 def build_image_candidates_from_tool_result(
@@ -181,7 +207,14 @@ def build_image_candidates_from_tool_result(
         thumbnail_url = str(image.get("thumbnail_url") or "").strip()
         is_brave = provider.startswith("brave") or tool_name == "brave_image_search"
         display_url = thumbnail_url if is_brave and thumbnail_url else display_source_url
-        original_url = str(image.get("original_image_url") or display_url).strip()
+        private_original_url = str(image.get("original_image_url") or "").strip()
+        if is_brave and private_original_url and display_url == private_original_url:
+            # The provider's direct origin is private input for digest/dedupe,
+            # never a browser/model-facing display URL. A result without a
+            # distinct proxy thumbnail therefore cannot become a rich item.
+            _reject("rejected_private_url")
+            continue
+        original_url = private_original_url or display_url
         width = image.get("width")
         height = image.get("height")
         original_aspect_known = (
@@ -581,9 +614,11 @@ def _attach_rich_candidates_to_artifact(
     *,
     raw_result: Any,
     result_text: str,
+    private_result_text: str | None = None,
     render: dict[str, Any] | None,
     tool_call_id: str | None,
     tool_name: str,
+    provider_tool_name: str | None = None,
     selected_images: list[dict[str, Any]] | None = None,
 ) -> None:
     """Compute rich-item candidates for a tool result and attach them as
@@ -591,9 +626,12 @@ def _attach_rich_candidates_to_artifact(
     ``context["rich_item_candidates"]``.
     """
     candidates: list[dict[str, Any]] = []
+    image_tool_name = provider_tool_name or tool_name
     candidates.extend(
         build_image_candidates_from_tool_result(
-            result_text, tool_call_id=tool_call_id, tool_name=tool_name
+            private_result_text if private_result_text is not None else result_text,
+            tool_call_id=tool_call_id,
+            tool_name=image_tool_name,
         )
     )
     candidates.extend(
@@ -1847,6 +1885,10 @@ async def execute_tool_calls(
     outputs: list[dict[str, Any]] = []
     artifacts: list[dict[str, Any]] = []
     images: list[dict[str, str]] = []
+    client_only_scope = is_client_only_scope(
+        device_id=device_id,
+        tool_scope=tool_scope,
+    )
 
     def _append_tool_error_output(
         *,
@@ -1976,6 +2018,29 @@ async def execute_tool_calls(
             )
             continue
 
+        if client_only_scope and tool_name == "web_research":
+            summary = ToolErrorSummary(
+                error_type=ToolErrorKind.PERMISSION.value,
+                failure_retryable=False,
+                message="Server research is unavailable in client-only tool scope.",
+                hint="Use a suitable tool from the active client device instead.",
+                attempts=1,
+            )
+            model_content, artifact_detail = build_tool_error_payloads(
+                summary,
+                tool_name=tool_name,
+                exception=PermissionError(summary.message),
+                policy_retry_allowed=False,
+            )
+            _append_tool_error_output(
+                tool_call_id=tool_id,
+                tool_name=tool_name,
+                tool_args=tool_args,
+                model_content=model_content,
+                artifact_detail=artifact_detail,
+            )
+            continue
+
         # Validate client tool device binding before execution
         device_error = _validate_client_tool_device_binding(tool, device_id, tool_name)
         if device_error:
@@ -2003,6 +2068,12 @@ async def execute_tool_calls(
             )
             continue
 
+        canonical_tool_name = _canonical_source_tool_name(
+            tool,
+            exposed_tool_name=tool_name,
+        )
+        private_image_result = canonical_tool_name == "brave_image_search"
+
         try:
             with selected_image_sink() as offered_images:
                 (
@@ -2026,13 +2097,22 @@ async def execute_tool_calls(
                 )
                 continue
 
-            normalized_result = normalize_tool_result_for_rendering(
+            private_result_text = (
+                provider_result_text(result, tool_name=canonical_tool_name)
+                if private_image_result
+                else None
+            )
+            public_result = _public_tool_result(
                 result,
+                private_image_result=private_image_result,
+            )
+            normalized_result = normalize_tool_result_for_rendering(
+                public_result,
                 tool_name=tool_name,
-                error=_structured_tool_error(result),
+                error=_structured_tool_error(public_result),
             )
             result_text = normalized_result.model_content
-            structured_error = _structured_tool_error(result)
+            structured_error = _structured_tool_error(public_result)
 
             outputs.append(
                 {
@@ -2056,13 +2136,15 @@ async def execute_tool_calls(
                 artifact,
                 raw_result=result,
                 result_text=result_text,
+                private_result_text=private_result_text,
                 render=normalized_result.render,
                 tool_call_id=tool_id,
                 tool_name=tool_name,
+                provider_tool_name=canonical_tool_name,
                 selected_images=offered_images,
             )
             artifacts.append(artifact)
-            if capture_images and tool_name not in _TYPED_WEB_IMAGE_TOOLS:
+            if capture_images and canonical_tool_name not in _TYPED_WEB_IMAGE_TOOLS:
                 images.extend(extract_images_from_tool_result(result_text))
                 images.extend(extract_images_from_tool_content(result))
 

@@ -203,6 +203,34 @@ def test_unknown_dimensions_rank_after_known_usable_dimensions() -> None:
     assert [item["id"] for item in selected] == ["image:known"]
 
 
+def test_provider_rank_precedes_dimension_quality_for_brave_candidates() -> None:
+    provider_first = _image(
+        "image:brave:rank-1",
+        source="image_search",
+        url="https://media.example/rank-1.jpg",
+        result_rank=1,
+        width=None,
+        height=None,
+    )
+    provider_first["provenance"]["provider"] = "brave_image_search"
+    provider_second = _image(
+        "image:brave:rank-2",
+        source="image_search",
+        url="https://media.example/rank-2.jpg",
+        result_rank=2,
+        width=1200,
+        height=800,
+    )
+    provider_second["provenance"]["provider"] = "brave_image_search"
+
+    selected = select_rich_item_candidates(
+        [provider_first, provider_second],
+        policy=replace(POLICY, max_items=1),
+    )
+
+    assert [item["id"] for item in selected] == ["image:brave:rank-1"]
+
+
 @pytest.mark.parametrize(
     "invalid_payload_update",
     [

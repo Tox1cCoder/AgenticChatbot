@@ -89,7 +89,7 @@ def _representative_brave_payload() -> dict:
                 "url": "https://example.com/sagrada-page",
                 "source": "example.com",
                 "confidence": "HIGH",
-                "crawl_time": "2026-08-10T00:00:00Z",
+                "page_fetched": "2026-08-10T00:00:00Z",
                 "thumbnail": {
                     "src": "https://img.test/thumb-1.jpg",
                     "width": 500,
@@ -227,8 +227,42 @@ def test_normalization_preserves_native_relevance_and_proxy_metadata(monkeypatch
     assert payload["images"][0]["confidence"] == "high"
     assert payload["images"][0]["thumbnail_width"] == 500
     assert payload["images"][0]["thumbnail_height"] == 281
+    assert payload["images"][0]["page_fetched"] == "2026-08-10T00:00:00Z"
     assert payload["images"][1]["url"] == "https://img.test/thumb-only.jpg"
     assert "original_image_url" not in payload["images"][1]
+
+
+def test_current_contract_page_fetched_and_source_attribution_are_normalized():
+    payload = srv._normalize_results(
+        "T1 team photo",
+        {
+            "results": [
+                {
+                    "source": "fallback.example",
+                    "page_fetched": "2026-08-10T01:00:00Z",
+                    "thumbnail": {"src": "https://img.test/current.jpg"},
+                    "properties": {},
+                },
+                {
+                    "source": "ignored.example",
+                    "meta_url": {"hostname": "preferred.example"},
+                    "crawl_time": "2026-08-09T01:00:00Z",
+                    "thumbnail": {"src": "https://img.test/legacy.jpg"},
+                    "properties": {},
+                },
+            ]
+        },
+    )
+
+    first, second = payload["images"]
+    assert first["source_domain"] == "fallback.example"
+    assert first["description"] == "fallback.example"
+    assert first["page_fetched"] == "2026-08-10T01:00:00Z"
+    assert second["source_domain"] == "preferred.example"
+    assert second["description"] == "preferred.example"
+    assert second["page_fetched"] == "2026-08-09T01:00:00Z"
+    assert "crawl_time" not in first
+    assert "crawl_time" not in second
 
 
 @pytest.mark.parametrize(

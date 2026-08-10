@@ -39,6 +39,30 @@ def _confidence(candidate: Mapping[str, Any]) -> str:
     return str(provenance.get("confidence") or "").strip().lower()
 
 
+def _stable_deduplicate(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the first candidate for each display URL or original-image digest."""
+
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        payload = candidate.get("payload")
+        payload = payload if isinstance(payload, Mapping) else {}
+        display_url = str(payload.get("url") or "").strip()
+        locators = {f"display::{display_url}"} if display_url else set()
+        provenance = candidate.get("provenance")
+        provenance = provenance if isinstance(provenance, Mapping) else {}
+        digests = provenance.get("original_image_digests")
+        if display_url and isinstance(digests, Mapping):
+            digest = digests.get(display_url)
+            if digest:
+                locators.add(f"original::{digest}")
+        if seen.intersection(locators):
+            continue
+        selected.append(candidate)
+        seen.update(locators)
+    return selected
+
+
 def select_brave_candidates(
     raw: str,
     *,
@@ -58,7 +82,7 @@ def select_brave_candidates(
     )
     high = [item for item in candidates if _confidence(item) == "high"]
     medium = [item for item in candidates if _confidence(item) == "medium"]
-    tier = high or medium
+    tier = _stable_deduplicate(high or medium)
     if str(image_intent or "figure").lower() == "gallery" and len(tier) >= 2:
         return [
             _group_image_candidates(

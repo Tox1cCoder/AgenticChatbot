@@ -9,6 +9,10 @@ import pytest
 
 from app.core.config import settings
 from app.core.response_constants import build_bot_metadata
+from app.core.rich_image_selection import (
+    ImageSelectionPolicy,
+    select_rich_item_candidates,
+)
 from app.schemas.workflow import WorkflowResponse, WorkflowResponseMessage
 
 
@@ -80,6 +84,53 @@ def test_build_bot_metadata_strips_original_image_url_from_public_provenance():
 
     assert "original_image_url" not in metadata["rich_items"][0]["provenance"]
     assert candidate["provenance"]["original_image_url"].endswith("original.png")
+
+
+def test_provider_selected_inventory_and_persistence_keep_brave_rank_order():
+    def candidate(rank: int, *, known_dimensions: bool) -> dict:
+        payload = {
+            "url": f"https://imgs.search.brave.com/rank-{rank}.jpg",
+            "mime_type": "image/jpeg",
+        }
+        if known_dimensions:
+            payload.update({"width": 1200, "height": 800})
+        return {
+            "id": f"image:brave:{rank}",
+            "type": "image",
+            "source": "image_search",
+            "display_policy": "inline_only",
+            "alt_text": f"Brave rank {rank}",
+            "payload": payload,
+            "provenance": {
+                "provider": "brave_image_search",
+                "result_rank": rank,
+            },
+        }
+
+    selected = select_rich_item_candidates(
+        [candidate(1, known_dimensions=False), candidate(2, known_dimensions=True)],
+        policy=ImageSelectionPolicy(
+            max_items=2,
+            min_width_px=320,
+            min_height_px=180,
+            min_aspect_ratio=0.2,
+            max_aspect_ratio=5.0,
+        ),
+    )
+    response = WorkflowResponse(
+        message=WorkflowResponseMessage(
+            content="\n\n".join(f"<!--rich:{item['id']}-->" for item in selected)
+        ),
+        metadata={"_rich_item_candidates": selected},
+    )
+
+    metadata = build_bot_metadata(response)
+
+    assert [item["provenance"]["result_rank"] for item in selected] == [1, 2]
+    assert [item["provenance"]["result_rank"] for item in metadata["rich_items"]] == [
+        1,
+        2,
+    ]
 
 
 def test_build_bot_metadata_persists_embedded_selected_images():

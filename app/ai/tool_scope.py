@@ -8,9 +8,10 @@ request. Two scopes are supported:
 - ``CLIENT_ONLY``: the model and tool_search operate only against the active
   device's client-local catalog. Server MCP tools are suppressed.
 
-``CLIENT_ONLY`` only has meaning when the request carries a concrete
-``device_id`` — without one there are no client tools to scope to, so the
-helpers fall back to ``DEFAULT`` in that case.
+``CLIENT_ONLY`` remains restrictive even when a request has no concrete
+``device_id``. In that case there are no eligible client tools, but silently
+falling back to ``DEFAULT`` would expose server tools against the caller's
+explicit scope request.
 """
 
 from __future__ import annotations
@@ -33,9 +34,9 @@ def resolve_tool_scope(
     """Resolve a scope hint into a concrete ``ToolScope``.
 
     Accepts either a ``ToolScope`` instance or a string value. Unknown string
-    values resolve to ``DEFAULT``. A ``CLIENT_ONLY`` hint is downgraded to
-    ``DEFAULT`` when no ``device_id`` is available, since there would be no
-    client catalog to scope to.
+    values resolve to ``DEFAULT``. An explicit ``CLIENT_ONLY`` hint remains
+    client-only when no ``device_id`` is available, yielding an empty client
+    catalog while continuing to suppress server tools.
     """
     if isinstance(tool_scope, ToolScope):
         candidate = tool_scope
@@ -47,8 +48,6 @@ def resolve_tool_scope(
     else:
         candidate = ToolScope.DEFAULT
 
-    if candidate is ToolScope.CLIENT_ONLY and not device_id:
-        return ToolScope.DEFAULT
     return candidate
 
 

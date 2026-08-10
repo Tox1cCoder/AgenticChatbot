@@ -1327,6 +1327,7 @@ Marker rules:
 |---|---|
 | Tool result render | `tool:<tool_call_id>` |
 | Image from a tool result | `image:tool:<tool_call_id>:<zero_based_index>` |
+| Image group from a tool result | `imagegroup:tool:<tool_call_id_or_query_digest>` |
 | RAG document image | `image:document:<document_image_id>` |
 | Generated image | `image:generated:<assistant_message_id>:<zero_based_index>` |
 | Live widget | `widget:<widget_id>` |
@@ -1360,11 +1361,11 @@ Capable assistant messages persist:
 }
 ```
 
-Item types emitted today: `image`, `live_widget`, `tool_render`, `canvas_artifact`. The schema also reserves `citation` and `resource_link` for forward compatibility, but no backend path constructs them yet. Payloads are type-validated through a Pydantic discriminated union with `extra="forbid"`; only renderer-consumed fields are accepted, and items are serialized with null-valued keys omitted. Image payloads accept exactly one of `url` (https / dev-only http) or `data` (base64 of an allowed raster MIME).
+Item types emitted today: `image`, `image_group`, `live_widget`, `tool_render`, `canvas_artifact`. The schema also reserves `citation` and `resource_link` for forward compatibility, but no backend path constructs them yet. Payloads are type-validated through a Pydantic discriminated union with `extra="forbid"`; only renderer-consumed fields are accepted, and items are serialized with null-valued keys omitted. An `image` payload accepts exactly one of `url` (https / dev-only http) or `data` (base64 of an allowed raster MIME); an `image_group` contains an ordered `items` list of URL-backed image cells.
 
 ### Display policy
 
-- `inline_only` — render only at its marker. Image items use this policy and are **never** appended as a gallery. Unreferenced image candidates are dropped entirely.
+- `inline_only` — render only at its marker. Both `image` and `image_group` items use this policy and are **never** appended implicitly. Unreferenced image candidates are dropped entirely.
 - `inline_or_append` — render inline when referenced, otherwise append below the body. Used by `live_widget`, `tool_render`, `canvas_artifact` (and the reserved `citation`/`resource_link` types).
 
 For capable responses, widget placement is authored dynamically in the response body: a `<!--rich:widget:<widget_id>-->` marker selects its position. The server does not insert a marker when the response omits one.
@@ -1403,9 +1404,9 @@ Image candidates are **never** streamed transiently — they only surface in the
 
 Brave Image Search is the preferred adapter for focused visual discovery because it supplies native confidence, rank, and dedicated thumbnail metadata. Eligible high-confidence results are selected in provider order; medium-confidence results are considered only when no high-confidence candidate survives. Selection is confidence-based metadata processing: the path does not inspect image pixels or run an image-quality model. The Brave-proxied thumbnail is the preferred display URL and remains eligible when no original image URL is available; original image URLs are never exposed in public message metadata. `tavily_search` returns text and sources only — it never returns images, so `brave_image_search` is the only source of web images.
 
-Candidate filtering is deterministic and bounded by `RICH_IMAGE_CANDIDATE_MAX_COUNT` (default `8`), `RICH_IMAGE_MIN_WIDTH_PX` (`320`), and `RICH_IMAGE_MIN_HEIGHT_PX` (`180`). The model chooses placement from this bounded inventory; there is no model-based image evaluator, labeled-dataset dependency, or additional evaluation latency.
+Candidate filtering is deterministic, but retrieval and presentation have separate bounds. `BRAVE_IMAGE_SEARCH_DEFAULT_COUNT` requests `6` raw provider results by default (with `BRAVE_IMAGE_SEARCH_MAX_COUNT=10` as the request ceiling). Provider-native discovery inspects that bounded response before confidence-tier selection and original-image deduplication; it intentionally does not use the generic raw-tool harvesting cap. `RICH_IMAGE_CANDIDATE_MAX_COUNT` (default `8`) bounds generic/raw tool-result candidate harvesting. Both paths apply `RICH_IMAGE_MIN_WIDTH_PX` (`320`) and `RICH_IMAGE_MIN_HEIGHT_PX` (`180`) when original dimensions are known.
 
-`RICH_AUTO_PLACE_MAX_IMAGES` (default `2`) caps image items per answer, governing both the model-facing inventory (an image group counts as one) and the placement path. An image the model did not place itself is anchored on its own image-search query — there is a single image-placement path, with no description-matching alternative and no rollback flag. `RICH_AUTO_PLACE_MIN_SCORE` governs widget auto-placement only; `RICH_IMAGE_ANCHOR_MIN_SCORE` (`0.34`) is the image-query threshold. See the [rich image rendering contract](docs/frontend/rich-image-rendering.md) for the per-origin anchoring rules.
+Presentation is bounded separately: `RICH_AUTO_PLACE_MAX_IMAGES` (default `2`) caps figure-mode image items per answer, while `RICH_IMAGE_GALLERY_MAX_ITEMS` (default `6`, hard maximum `8`) caps the ordered cells inside one provider-native `image_group`. The legacy raw-Brave grouping path remains capped by `RICH_IMAGE_GROUP_MAX_ITEMS=3`. An image group counts as one model-facing inventory item and one marker, but the renderer loads and displays every selected cell. An image the model did not place itself is anchored on its own image-search query — there is a single image-placement path, with no description-matching alternative and no rollback flag. `RICH_AUTO_PLACE_MIN_SCORE` governs widget auto-placement only; `RICH_IMAGE_ANCHOR_MIN_SCORE` (`0.34`) is the image-query threshold. See the [rich image rendering contract](docs/frontend/rich-image-rendering.md) for the per-origin anchoring rules.
 
 Creating `/web-images/{id}` references is a persistence-time database-only operation. Upstream image bytes are fetched later, only when an authenticated client requests the media route, so the configured connect/read timeouts do not extend text time-to-first-token or assistant completion. A fetch failure affects only the optional figure; reference-registration failure removes the item and its exact marker while preserving the complete text answer.
 

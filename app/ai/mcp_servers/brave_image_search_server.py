@@ -127,6 +127,7 @@ def _normalize_results(query: str, data: Any) -> dict[str, Any]:
             source = result.get("source")
             meta_url = result.get("meta_url")
             hostname = meta_url.get("hostname") if isinstance(meta_url, dict) else None
+            source_domain = str(hostname or source or "").strip()
             thumbnail = result.get("thumbnail")
             thumbnail_url = thumbnail.get("src") if isinstance(thumbnail, dict) else None
             display_url = thumbnail_url or direct_url
@@ -150,11 +151,11 @@ def _normalize_results(query: str, data: Any) -> dict[str, Any]:
                 image["original_image_url"] = str(direct_url)
             if title:
                 image["title"] = str(title)
-            description = title or source or hostname
+            description = title or source_domain
             if description:
                 image["description"] = str(description)
-            if hostname:
-                image["source_domain"] = str(hostname)
+            if source_domain:
+                image["source_domain"] = source_domain
             width = properties.get("width")
             height = properties.get("height")
             if isinstance(width, int):
@@ -167,8 +168,9 @@ def _normalize_results(query: str, data: Any) -> dict[str, Any]:
                 image["thumbnail_width"] = thumbnail_width
             if isinstance(thumbnail_height, int):
                 image["thumbnail_height"] = thumbnail_height
-            if result.get("crawl_time"):
-                image["crawl_time"] = str(result["crawl_time"])
+            page_fetched = result.get("page_fetched") or result.get("crawl_time")
+            if page_fetched:
+                image["page_fetched"] = str(page_fetched)
 
             images.append(image)
 

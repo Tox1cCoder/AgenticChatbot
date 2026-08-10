@@ -85,7 +85,7 @@ def test_bound_web_research_has_no_usage_recorder_dependency(monkeypatch):
 
     agent._get_tools_for_binding(conversation_id="c1")
 
-    assert captured == {}
+    assert captured == {"tool_scope": "default"}
 
 
 def test_media_guidance_describes_web_research_only():

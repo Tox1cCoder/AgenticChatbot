@@ -108,6 +108,21 @@ def test_later_high_confidence_candidate_wins_past_builder_cap(monkeypatch):
     assert [item["provenance"]["result_rank"] for item in selected] == [9]
 
 
+def test_figure_deduplicates_originals_before_cap_and_backfills_next_rank(monkeypatch):
+    monkeypatch.setattr(image_discovery_flow.settings, "rich_auto_place_max_images", 2)
+    payload = json.loads(_payload([("high", 1), ("high", 2), ("high", 3)]))
+    payload["images"][1]["original_image_url"] = payload["images"][0][
+        "original_image_url"
+    ]
+
+    selected = select_brave_candidates(
+        json.dumps(payload),
+        image_query="T1 team photo",
+    )
+
+    assert [item["provenance"]["result_rank"] for item in selected] == [1, 3]
+
+
 @pytest.mark.parametrize("confidence", ["low", "", "unknown"])
 def test_low_missing_and_unknown_confidence_are_rejected(confidence):
     assert select_brave_candidates(

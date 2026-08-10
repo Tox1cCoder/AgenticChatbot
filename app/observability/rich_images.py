@@ -33,7 +33,13 @@ _FETCH_OUTCOMES = {
     "private_address",
     "redirect_limit",
 }
-_DISCOVERY_OUTCOMES = {"selected", "no_match", "unavailable", "search_failure"}
+_DISCOVERY_OUTCOMES = {
+    "selected",
+    "no_match",
+    "skipped",
+    "unavailable",
+    "search_failure",
+}
 
 
 class RichImageMetrics:
