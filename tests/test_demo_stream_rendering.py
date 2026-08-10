@@ -63,6 +63,163 @@ def test_persisted_message_rendering_escapes_currency_before_streamlit(monkeypat
     assert rendered == [r"\$150–\$160"]
 
 
+def test_persisted_message_rendering_escapes_unparseable_math(monkeypatch):
+    """The post-stream rerun must not resurrect the KaTeX error.
+
+    The live placeholder and the persisted bubble render the same text, so a
+    guard on the streaming path alone would only move the error one frame
+    later.
+    """
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    rendered: list[str] = []
+    streamlit_stub.chat_message = lambda _avatar: nullcontext()
+    streamlit_stub.markdown = lambda text, **_kwargs: rendered.append(text)
+    monkeypatch.setattr(
+        demo,
+        "_build_rich_response_view_for_msg",
+        lambda *_args: SimpleNamespace(is_v1=False, use_legacy_image_gallery=False),
+    )
+
+    message = {
+        "content": "We spent $500 on R&D and $200 on ops.",
+        "createdAt": "2026-08-10T00:00:00Z",
+    }
+    demo.render_message_bubble(message, is_user=True)
+
+    assert message["content"] == "We spent $500 on R&D and $200 on ops."
+    assert rendered == [r"We spent \$500 on R&D and \$200 on ops."]
+
+
+def test_escape_unterminated_math_fence_escapes_dangling_opener():
+    """A ``$$`` block still in flight must not reach KaTeX.
+
+    ``micromark-extension-math`` treats end-of-input as a successful close for
+    a ``$$`` *flow* fence, so every partial prefix streamed while the block is
+    open is parsed as display math and KaTeX reports a parse error until the
+    closing fence arrives.
+    """
+    from app.ui.stream_markdown import escape_unterminated_math_fence
+
+    partial = "Derivation:\n\n$$\n\\begin{aligned}\nx &= 1\n"
+
+    assert escape_unterminated_math_fence(partial) == (
+        "Derivation:\n\n\\$\\$\n\\begin{aligned}\nx &= 1\n"
+    )
+
+
+def test_escape_unterminated_math_fence_keeps_closed_block_verbatim():
+    from app.ui.stream_markdown import escape_unterminated_math_fence
+
+    raw = "$$\n\\begin{aligned}\nx &= 1\n\\end{aligned}\n$$\n"
+
+    assert escape_unterminated_math_fence(raw) == raw
+
+
+def test_escape_unterminated_math_fence_ignores_fenced_code():
+    """``$$`` inside a code fence is sample text, not an open math block."""
+    from app.ui.stream_markdown import escape_unterminated_math_fence
+
+    raw = "```text\n$$\nnot math\n```\n"
+
+    assert escape_unterminated_math_fence(raw) == raw
+
+
+def test_escape_unparseable_math_escapes_prose_captured_between_dollars():
+    """Prose KaTeX cannot parse was never math — render it literally.
+
+    ``$500 on R&D and $200`` is not an adjacent price run, so the currency
+    escaper leaves it alone and Streamlit renders the span as inline math.
+    The ``&`` at top level makes KaTeX fail with ``Expected 'EOF', got '&'``.
+    """
+    from app.ui.stream_markdown import escape_unparseable_math
+
+    raw = "We spent $500 on R&D and $200 on ops."
+
+    assert escape_unparseable_math(raw) == r"We spent \$500 on R&D and \$200 on ops."
+
+
+def test_escape_unparseable_math_escapes_span_with_unbalanced_brace():
+    from app.ui.stream_markdown import escape_unparseable_math
+
+    raw = "Set $x = {a$ before the run."
+
+    assert escape_unparseable_math(raw) == r"Set \$x = {a\$ before the run."
+
+
+def test_escape_unparseable_math_escapes_span_with_stray_group_command():
+    r"""``\endgroup`` is in KaTeX's ``endOfExpression`` set like ``}``.
+
+    ``Parser.endOfExpression = new Set(["}", "\\endgroup", "\\end",
+    "\\right", "&"])`` — an unmatched member of that set is what produces the
+    ``Expected 'EOF', got ...`` error, so all five are treated alike.
+    """
+    from app.ui.stream_markdown import escape_unparseable_math
+
+    raw = "Before $a \\endgroup b$ after."
+
+    assert escape_unparseable_math(raw) == r"Before \$a \endgroup b\$ after."
+
+
+def test_escape_unparseable_math_preserves_balanced_group_commands():
+    from app.ui.stream_markdown import escape_unparseable_math
+
+    raw = "$\\begingroup a + b \\endgroup$"
+
+    assert escape_unparseable_math(raw) == raw
+
+
+def test_escape_unparseable_math_preserves_valid_math():
+    """Only spans KaTeX would certainly reject may be rewritten."""
+    from app.ui.stream_markdown import escape_unparseable_math
+
+    raw = (
+        "$x^2 + y^2 = z^2$ and $\\text{cost}_{i}$\n\n"
+        "$$\n\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}\n$$\n"
+    )
+
+    assert escape_unparseable_math(raw) == raw
+
+
+def test_escape_unparseable_math_preserves_code_spans():
+    from app.ui.stream_markdown import escape_unparseable_math
+
+    raw = "```text\n$500 on R&D and $200\n```\n`$5 & $6`"
+
+    assert escape_unparseable_math(raw) == raw
+
+
+def test_normalize_stream_markdown_text_guards_partial_display_math():
+    """The live path must never hand KaTeX an in-flight math block."""
+    from app.ui.stream_markdown import normalize_stream_markdown_text
+
+    partial = "Here it is:\n\n$$\n\\frac{a}{b"
+
+    assert normalize_stream_markdown_text(partial) == "Here it is:\n\n\\$\\$\n\\frac{a}{b"
+
+
+def test_every_streamed_prefix_keeps_display_math_fence_paired():
+    """The live path renders every prefix, so no frame may leave ``$$`` open.
+
+    An escaped fence (``\\$\\$``) no longer starts a line with a dollar
+    marker, so the count of *unescaped* fence lines staying even proves no
+    frame was handed a half-written display-math block.
+    """
+    import re
+
+    from app.ui.stream_markdown import normalize_stream_markdown_text
+
+    message = (
+        "Derivation:\n\n$$\n\\begin{aligned}\nx &= 1 \\\\\ny &= 2\n"
+        "\\end{aligned}\n$$\n\nThat costs $500 for R&D and $200 for ops."
+    )
+    fence_line_re = re.compile(r"^[ ]{0,3}\${2,}[^$\n]*$", re.MULTILINE)
+
+    for end in range(1, len(message) + 1):
+        rendered = normalize_stream_markdown_text(message[:end])
+        fences = fence_line_re.findall(rendered)
+        assert len(fences) % 2 == 0, f"unpaired $$ fence at prefix {end}: {rendered!r}"
+
+
 def test_normalize_stream_markdown_text_unescapes_quotes_only():
     """Quote entities (``&quot;``, ``&#34;``, ``&#x22;``, ``&#39;``,
     ``&#x27;``) must be unescaped. Angle-bracket entities must be left
