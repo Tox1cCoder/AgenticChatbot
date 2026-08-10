@@ -53,10 +53,9 @@ def test_search_result_carries_facts_and_no_image_metadata(monkeypatch):
     raw = tavily_server.tavily_search("T1 League of Legends Esports team news roster 2026")
     payload = json.loads(raw)
 
-    # A regression that stops requesting an answer from the provider reproduces
-    # "the model received no facts" even though this mock ignores params and
-    # always returns one; assert on the request, not just the canned response.
-    assert captured_params.get("include_answer") is True
+    # Search is source retrieval: provider-generated synthesis is intentionally
+    # disabled even though this compatibility fixture still includes an answer.
+    assert captured_params.get("include_answer") is False
     assert "images" not in payload
     assert "cdn.example" not in raw
     assert payload["answer"].startswith("T1 is a South Korean")

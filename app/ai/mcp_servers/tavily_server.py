@@ -9,8 +9,11 @@ sys.path.insert(0, str(project_root))
 
 import contextlib  # noqa: E402
 from typing import Any  # noqa: E402
+from urllib.parse import urlsplit, urlunsplit  # noqa: E402
 
+import requests  # noqa: E402
 from mcp.server.fastmcp import FastMCP  # noqa: E402
+from tavily import errors as tavily_errors  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
 
@@ -19,6 +22,8 @@ mcp = FastMCP("Tavily")
 SUPPORTED_SEARCH_DEPTHS = {"basic", "fast", "ultra-fast", "advanced"}
 SUPPORTED_EXTRACT_DEPTHS = {"basic", "advanced"}
 SUPPORTED_FORMATS = {"markdown", "text"}
+SUPPORTED_TOPICS = {"general", "news", "finance"}
+SUPPORTED_TIME_RANGES = {"day", "week", "month", "year"}
 
 
 def _json(payload: dict[str, Any]) -> str:
@@ -67,6 +72,15 @@ def _clamp_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
 def _choice(value: str | None, *, default: str, allowed: set[str]) -> str:
     candidate = str(value or default).strip().lower()
     return candidate if candidate in allowed else default
+
+
+def _optional_choice(value: str | None, *, allowed: set[str], name: str) -> str | None:
+    if value is None:
+        return None
+    candidate = str(value).strip().lower()
+    if candidate not in allowed:
+        raise ValueError(f"Unsupported {name} {value!r}")
+    return candidate
 
 
 def _coerce_urls(urls: str | list[str], *, maximum: int) -> list[str]:
@@ -137,11 +151,13 @@ def tavily_search(
     search_depth: str | None = None,
     include_raw_content: bool = False,
     auto_parameters: bool | None = None,
+    topic: str | None = None,
+    time_range: str | None = None,
 ) -> str:
     """Search the web for current facts, news, recent information, or source discovery.
 
-    Returns a synthesized ``answer`` plus ranked text results with their source
-    URLs. This tool never returns images; ``brave_image_search`` is the only
+    Returns ranked text results with their source URLs. This tool never requests
+    a provider-generated answer or images; ``brave_image_search`` is the only
     source of web images.
 
     Pass ``auto_parameters=True`` to let Tavily pick the search depth when the
@@ -152,11 +168,11 @@ def tavily_search(
     operation = "search"
     try:
         cleaned_query = validate_tavily_query(query)
+        resolved_topic = _optional_choice(topic, allowed=SUPPORTED_TOPICS, name="topic")
+        resolved_time_range = _optional_choice(
+            time_range, allowed=SUPPORTED_TIME_RANGES, name="time_range"
+        )
     except ValueError as exc:
-        return _error(str(exc), operation=operation)
-    try:
-        client = _make_client()
-    except Exception as exc:
         return _error(str(exc), operation=operation)
 
     result_count = _clamp_int(
@@ -174,25 +190,69 @@ def tavily_search(
     params: dict[str, Any] = {
         "query": cleaned_query,
         "max_results": result_count,
-        "include_answer": True,
+        "include_answer": False,
         "include_raw_content": include_raw_content,
         "auto_parameters": resolved["auto_parameters"],
         "include_usage": True,
+        "timeout": 10,
+        "topic": resolved_topic or "general",
     }
     if resolved["search_depth"] is not None:
         params["search_depth"] = resolved["search_depth"]
+    if resolved_time_range is not None:
+        params["time_range"] = resolved_time_range
+    try:
+        client = _make_client()
+    except Exception:
+        return _error("Tavily client unavailable.", operation=operation)
     try:
         response = client.search(**params)
-    except TimeoutError as exc:
-        return _error(str(exc), operation=operation, retryable=True)
     except Exception as exc:
-        return _error(f"Search failed: {exc}", operation=operation)
+        error_code, retryable = _classify_tavily_error(exc)
+        return _error(f"Tavily search {error_code}.", operation=operation, retryable=retryable)
     return _json(_normalize_search_response(query=cleaned_query, response=response))
+
+
+def _classify_tavily_error(exc: Exception) -> tuple[str, bool]:
+    if isinstance(exc, tavily_errors.TimeoutError):
+        return "timeout", True
+    if isinstance(exc, tavily_errors.UsageLimitExceededError):
+        return "rate_limit", True
+    if isinstance(exc, tavily_errors.BadRequestError):
+        return "invalid_request", False
+    if isinstance(exc, (tavily_errors.InvalidAPIKeyError, tavily_errors.MissingAPIKeyError)):
+        return "authentication", False
+    if isinstance(exc, tavily_errors.ForbiddenError):
+        return "subscription", False
+    if isinstance(exc, requests.HTTPError):
+        status = getattr(getattr(exc, "response", None), "status_code", 0)
+        return ("upstream", True) if status >= 500 else ("provider_error", False)
+    return "provider_error", False
+
+
+def _canonical_result_key(url: str) -> str:
+    parsed = urlsplit(str(url or "").strip())
+    host = str(parsed.hostname or "").lower()
+    path = parsed.path or "/"
+    if path != "/":
+        path = path.rstrip("/")
+    return urlunsplit((parsed.scheme.lower(), host, path, "", ""))
+
+
+def _merge_content_chunks(existing: str, duplicate: str) -> str:
+    chunks: list[str] = []
+    for content in (existing, duplicate):
+        for chunk in str(content or "").split("[...]"):
+            cleaned = chunk.strip()
+            if cleaned and cleaned not in chunks:
+                chunks.append(cleaned)
+    return " [...] ".join(chunks)
 
 
 def _normalize_search_response(*, query: str, response: Any) -> dict[str, Any]:
     response = response if isinstance(response, dict) else {}
-    results = []
+    results: list[dict[str, Any]] = []
+    results_by_key: dict[str, dict[str, Any]] = {}
     for idx, result in enumerate(response.get("results") or [], 1):
         if not isinstance(result, dict):
             continue
@@ -207,6 +267,13 @@ def _normalize_search_response(*, query: str, response: Any) -> dict[str, Any]:
             item["raw_content"] = result.get("raw_content")
         if result.get("favicon"):
             item["favicon"] = result.get("favicon")
+        if "published_date" in result:
+            item["published_date"] = result["published_date"]
+        canonical_key = _canonical_result_key(item["url"])
+        if existing := results_by_key.get(canonical_key):
+            existing["content"] = _merge_content_chunks(existing["content"], item["content"])
+            continue
+        results_by_key[canonical_key] = item
         results.append(item)
 
     # Field order is contractual: a truncated preview must keep facts, so

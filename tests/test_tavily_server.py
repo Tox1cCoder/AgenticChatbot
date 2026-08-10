@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import inspect
 import json
 
 import pytest
+import requests
+from tavily import errors as tavily_errors
 
 from app.ai.mcp_servers import tavily_server
 from app.ai.mcp_servers.tavily_server import (
@@ -103,7 +106,7 @@ class _FakeTavilyClient:
         return self.response
 
 
-def test_search_requests_answer_and_never_requests_images(monkeypatch):
+def test_search_requests_ranked_sources_without_provider_answer(monkeypatch):
     client = _FakeTavilyClient(
         {
             "query": "openai news",
@@ -131,17 +134,144 @@ def test_search_requests_answer_and_never_requests_images(monkeypatch):
         tavily_server.settings, "tavily_search_auto_parameters", False, raising=False
     )
 
-    payload = json.loads(tavily_server.tavily_search("openai news", max_results=25))
+    payload = json.loads(tavily_server.tavily_search("openai news"))
 
     assert client.calls[0]["search_depth"] == "basic"
-    assert client.calls[0]["max_results"] == 10
-    assert client.calls[0]["include_answer"] is True
+    assert client.calls[0]["max_results"] == 5
+    assert client.calls[0]["include_answer"] is False
+    assert client.calls[0]["include_raw_content"] is False
+    assert client.calls[0]["include_usage"] is True
+    assert client.calls[0]["timeout"] == 10
     assert "include_images" not in client.calls[0]
     assert "include_image_descriptions" not in client.calls[0]
     assert "images" not in payload
-    assert payload["answer"] == "OpenAI shipped a model."
     assert payload["results"][0]["raw_content"] == "Full text"
     assert payload["usage"] == {"credits": 1}
+
+
+def test_search_uses_only_sdk_timeout_control():
+    source = inspect.getsource(tavily_server)
+
+    assert "asyncio.timeout" not in source
+    assert "asyncio.wait_for" not in source
+    assert "tavily_search_timeout" not in source
+
+
+def test_topic_and_time_range_are_forwarded(monkeypatch):
+    client = _FakeTavilyClient({"results": []})
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: client)
+
+    tavily_server.tavily_search("latest T1 results", topic="news", time_range="week")
+
+    assert client.calls[0]["topic"] == "news"
+    assert client.calls[0]["time_range"] == "week"
+
+
+def test_news_publication_date_survives_normalization(monkeypatch):
+    client = _FakeTavilyClient(
+        {
+            "results": [
+                {
+                    "title": "T1 wins",
+                    "url": "https://news.example/t1",
+                    "content": "Result",
+                    "score": 0.9,
+                    "published_date": "2026-08-09",
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: client)
+
+    payload = json.loads(tavily_server.tavily_search("T1", topic="news"))
+
+    assert payload["results"][0]["published_date"] == "2026-08-09"
+
+
+def test_duplicate_urls_merge_unique_chunks_and_keep_first_rank():
+    payload = tavily_server._normalize_search_response(
+        query="T1 roster",
+        response={
+            "results": [
+                {
+                    "title": "First",
+                    "url": "https://EXAMPLE.com/team/?utm_source=x#roster",
+                    "content": "A [...] B",
+                    "score": 0.9,
+                },
+                {
+                    "title": "Duplicate",
+                    "url": "https://example.com/team",
+                    "content": "B [...] C",
+                    "score": 0.8,
+                },
+            ]
+        },
+    )
+
+    assert len(payload["results"]) == 1
+    assert payload["results"][0]["title"] == "First"
+    assert payload["results"][0]["url"].startswith("https://EXAMPLE.com")
+    assert payload["results"][0]["content"] == "A [...] B [...] C"
+
+
+class _RaisingClient:
+    def __init__(self, exc):
+        self.exc = exc
+
+    def search(self, **kwargs):
+        raise self.exc
+
+
+@pytest.mark.parametrize(
+    ("exc", "retryable"),
+    [
+        (tavily_errors.TimeoutError(10), True),
+        (tavily_errors.UsageLimitExceededError("rate limited"), True),
+        (tavily_errors.BadRequestError("bad query"), False),
+        (tavily_errors.InvalidAPIKeyError("bad key"), False),
+        (tavily_errors.ForbiddenError("plan"), False),
+    ],
+)
+def test_search_errors_have_bounded_retryability(monkeypatch, exc, retryable):
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: _RaisingClient(exc))
+
+    payload = json.loads(tavily_server.tavily_search("T1"))
+
+    assert payload["retryable"] is retryable
+
+
+def test_unclassified_http_5xx_error_is_retryable(monkeypatch):
+    error = requests.HTTPError("gateway failure")
+    error.response = type("Response", (), {"status_code": 502})()
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: _RaisingClient(error))
+
+    payload = json.loads(tavily_server.tavily_search("T1"))
+
+    assert payload["retryable"] is True
+
+
+def test_unclassified_errors_are_not_retryable_and_do_not_leak_details(monkeypatch):
+    monkeypatch.setattr(
+        tavily_server,
+        "_make_client",
+        lambda: _RaisingClient(RuntimeError("secret-token-value")),
+    )
+
+    payload = json.loads(tavily_server.tavily_search("T1"))
+
+    assert payload["retryable"] is False
+    assert "secret-token-value" not in payload["error"]
+
+
+def test_invalid_topic_returns_error_without_calling_tavily(monkeypatch):
+    client = _FakeTavilyClient({"results": []})
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: client)
+
+    payload = json.loads(tavily_server.tavily_search("T1", topic="sports"))
+
+    assert payload["error"] == "Unsupported topic 'sports'"
+    assert client.calls == []
 
 
 def test_search_payload_orders_results_before_diagnostics(monkeypatch):
