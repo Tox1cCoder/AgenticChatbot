@@ -45,6 +45,7 @@ _VERIFICATION_OUTCOMES = {
     "malformed",
     "no_match",
 }
+_DISCOVERY_OUTCOMES = {"selected", "no_match", "unavailable", "search_failure"}
 
 
 class RichImageMetrics:
@@ -123,6 +124,18 @@ class RichImageMetrics:
             ("outcome",),
             registry=self.registry,
         )
+        self.discovery_outcomes = Counter(
+            "rich_image_discovery_outcome_total",
+            "Terminal outcome of the native image discovery path.",
+            ("outcome",),
+            registry=self.registry,
+        )
+        self.discovery_duration = Histogram(
+            "rich_image_discovery_duration_seconds",
+            "Duration of the native image discovery path.",
+            ("outcome",),
+            registry=self.registry,
+        )
 
     def record_discovery(self, *, provider: str, result_count: int) -> None:
         self.discovery_results.labels(provider=_provider(provider)).observe(
@@ -182,6 +195,13 @@ class RichImageMetrics:
         label = _bounded(outcome, _VERIFICATION_OUTCOMES)
         self.verification_outcomes.labels(outcome=label).inc()
         self.verification_duration.labels(outcome=label).observe(
+            max(0.0, float(duration_seconds))
+        )
+
+    def record_discovery_outcome(self, *, outcome: str, duration_seconds: float) -> None:
+        label = _bounded(outcome, _DISCOVERY_OUTCOMES)
+        self.discovery_outcomes.labels(outcome=label).inc()
+        self.discovery_duration.labels(outcome=label).observe(
             max(0.0, float(duration_seconds))
         )
 

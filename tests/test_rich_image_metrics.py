@@ -43,6 +43,22 @@ def test_rich_image_metrics_are_bounded_and_content_free():
     assert secret not in payload
 
 
+def test_discovery_outcomes_are_bounded_and_content_free():
+    metrics = RichImageMetrics()
+    tenant_content = f"T1 roster {uuid4()}"
+
+    metrics.record_discovery_outcome(outcome="selected", duration_seconds=0.2)
+    metrics.record_discovery_outcome(outcome=tenant_content, duration_seconds=0.1)
+
+    payload = metrics.render().decode("utf-8")
+
+    assert "rich_image_discovery_outcome_total" in payload
+    assert "rich_image_discovery_duration_seconds" in payload
+    assert 'outcome="selected"' in payload
+    assert 'outcome="other"' in payload
+    assert tenant_content not in payload
+
+
 def test_health_router_exposes_rich_image_metrics():
     metrics = RichImageMetrics()
     metrics.record_fetch(provider="tavily", outcome="timeout", duration_seconds=0.1)

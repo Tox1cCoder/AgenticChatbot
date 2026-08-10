@@ -5,6 +5,7 @@ deduplication, RAG document image candidates).
 
 from __future__ import annotations
 
+import hashlib
 import json
 from unittest.mock import Mock
 
@@ -209,6 +210,54 @@ def test_brave_image_candidate_keeps_safe_provider_provenance_only():
     assert "original_image_digests" not in public["provenance"]
 
 
+def test_brave_candidate_digests_private_original_url_and_keeps_selection_metadata():
+    """The display thumbnail is public, but its original URL must stay private."""
+    original_url = "https://origin.example/private-original.jpg"
+    display_url = "https://imgs.search.brave.com/display.jpg"
+    [candidate] = build_image_candidates_from_tool_result(
+        json.dumps(
+            {
+                "provider": "brave_image_search",
+                "images": [
+                    {
+                        "url": display_url,
+                        "original_image_url": original_url,
+                        "thumbnail_url": "https://imgs.search.brave.com/thumb.jpg",
+                        "thumbnail_width": 200,
+                        "thumbnail_height": 112,
+                        "confidence": "high",
+                        "result_rank": 4,
+                        "width": 1200,
+                        "height": 800,
+                    }
+                ],
+            }
+        ),
+        tool_call_id="call_private-original",
+        tool_name="brave_image_search",
+    )
+
+    provenance = candidate["provenance"]
+    assert candidate["payload"]["url"] == "https://imgs.search.brave.com/thumb.jpg"
+    assert candidate["payload"]["width"] == 1200
+    assert candidate["payload"]["height"] == 800
+    assert provenance["confidence"] == "high"
+    assert provenance["result_rank"] == 4
+    assert provenance["thumbnail_width"] == 200
+    assert provenance["thumbnail_height"] == 112
+    assert provenance["original_image_digests"] == {
+        "https://imgs.search.brave.com/thumb.jpg": hashlib.sha256(
+            original_url.encode("utf-8")
+        ).hexdigest()
+    }
+    assert "original_image_url" not in provenance
+    assert original_url not in json.dumps(candidate)
+    public_provenance = sanitize_public_rich_item(candidate)["provenance"]
+    assert public_provenance["confidence"] == "high"
+    assert public_provenance["result_rank"] == 4
+    assert "original_image_url" not in public_provenance
+
+
 def test_brave_thumbnails_of_same_original_image_are_deduplicated() -> None:
     payload = json.dumps(
         {
@@ -217,6 +266,7 @@ def test_brave_thumbnails_of_same_original_image_are_deduplicated() -> None:
             "images": [
                 {
                     "url": "https://origin.example/shared.jpg",
+                    "original_image_url": "https://origin.example/shared.jpg",
                     "thumbnail_url": f"https://thumbs.example/variant-{index}.jpg",
                     "source_url": f"https://pages.example/article-{index}",
                     "description": "team roster",
@@ -262,6 +312,7 @@ def test_brave_originals_are_deduplicated_before_group_cell_cap() -> None:
                 *[
                     {
                         "url": "https://origin.example/shared.jpg",
+                        "original_image_url": "https://origin.example/shared.jpg",
                         "thumbnail_url": f"https://thumbs.example/variant-{index}.jpg",
                         "description": "team roster",
                         "mime_type": "image/jpeg",
@@ -273,6 +324,7 @@ def test_brave_originals_are_deduplicated_before_group_cell_cap() -> None:
                 ],
                 {
                     "url": "https://origin.example/unique.jpg",
+                    "original_image_url": "https://origin.example/unique.jpg",
                     "thumbnail_url": "https://thumbs.example/unique.jpg",
                     "description": "team roster unique view",
                     "mime_type": "image/jpeg",

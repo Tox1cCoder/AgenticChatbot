@@ -98,6 +98,7 @@ def build_image_candidates_from_tool_result(
     tool_call_id: str | None,
     tool_name: str,
     group_images: bool = True,
+    apply_candidate_cap: bool = True,
 ) -> list[dict[str, Any]]:
     """Build typed rich-item image candidates from a tool result payload.
 
@@ -113,6 +114,11 @@ def build_image_candidates_from_tool_result(
     ``image`` items. Pass ``group_images=False`` when the caller needs every
     candidate individually — e.g. visual verification, which must judge each
     image on its own pixels before any grouping happens.
+
+    ``apply_candidate_cap=False`` is for a caller that must inspect every
+    eligible result before applying its own outcome-specific cap, such as
+    confidence-tiered Brave discovery. The default protects all existing tool
+    result consumers with the configured candidate budget.
     """
     if not result_text:
         return []
@@ -171,10 +177,11 @@ def build_image_candidates_from_tool_result(
             _reject("rejected_malformed")
             continue
         provider = str(image.get("provider") or "").strip().lower()
-        original_url = str(url or "").strip()
+        display_source_url = str(url or "").strip()
         thumbnail_url = str(image.get("thumbnail_url") or "").strip()
         is_brave = provider.startswith("brave") or tool_name == "brave_image_search"
-        display_url = thumbnail_url if is_brave and thumbnail_url else original_url
+        display_url = thumbnail_url if is_brave and thumbnail_url else display_source_url
+        original_url = str(image.get("original_image_url") or display_url).strip()
         width = image.get("width")
         height = image.get("height")
         if display_url:
@@ -239,6 +246,9 @@ def build_image_candidates_from_tool_result(
             "result_rank",
             "result_score",
             "query_level",
+            "confidence",
+            "thumbnail_width",
+            "thumbnail_height",
         ):
             meta_value = image.get(meta_key)
             if meta_value is not None:
@@ -271,7 +281,7 @@ def build_image_candidates_from_tool_result(
             seen_display_urls.add(display_url)
         with suppress(Exception):
             rich_image_metrics.record_candidate(provider=metric_provider, outcome="eligible")
-        if len(candidates) >= candidate_cap:
+        if apply_candidate_cap and len(candidates) >= candidate_cap:
             break
     if group_images and metric_provider == "brave" and len(candidates) >= 2:
         return [
