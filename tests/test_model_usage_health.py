@@ -193,3 +193,19 @@ def test_manifest_instrumented_operations_are_bounded_metric_labels():
     }
     assert operations <= _OPERATIONS
     assert {_operation_family(operation) for operation in operations} == operations
+
+
+def test_retired_remote_image_operation_is_bounded_to_other():
+    metrics = ModelUsageMetrics(failure_store=AvailableFailureStore())
+    retired_operation = "image_" + "verification"
+
+    metrics.record_attempt(
+        provider="gemini",
+        operation=retired_operation,
+        status="success",
+        source="provider_reported",
+    )
+
+    rendered = metrics.render().decode("utf-8")
+    assert 'operation="other"' in rendered
+    assert retired_operation not in rendered
