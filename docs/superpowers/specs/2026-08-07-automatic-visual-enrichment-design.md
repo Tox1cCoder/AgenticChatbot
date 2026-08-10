@@ -4,6 +4,10 @@
 
 **Status:** Approved
 
+> **Superseded on 2026-08-10:** This design is retained as historical context.
+> The active contract is the
+> [Provider-Native Retrieval Simplification Design](2026-08-10-provider-native-retrieval-simplification-design.md).
+
 ## Goal
 
 Make web-researched answers proactively include useful, verified images without

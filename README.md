@@ -280,12 +280,13 @@ The full schema lives in [`app/core/config.py`](app/core/config.py). Selected hi
 | Variable | Default | Purpose |
 |---|---|---|
 | `GEMINI_API_KEY` | — | Default provider; still supported via env |
-| `TAVILY_API_KEY` | — | Tavily Search, Extract, Map, and Crawl |
-| `BRAVE_SEARCH_API_KEY` | — | Brave Image Search (visual references) |
+| `TAVILY_API_KEY` | — | Tavily ranked-source Search plus Extract, Map, and Crawl |
+| `BRAVE_SEARCH_API_KEY` | — | Brave Image Search (provider-confidence visual references) |
 | `BRAVE_IMAGE_SEARCH_DEFAULT_COUNT` | `6` | Default image results per call |
 | `BRAVE_IMAGE_SEARCH_MAX_COUNT` | `10` | Hard cap on image results per call |
 | `BRAVE_IMAGE_SEARCH_TIMEOUT_SECONDS` | `2.5` | Per-request timeout for image search |
 | `BRAVE_IMAGE_SEARCH_DEFAULT_SAFESEARCH` | `strict` | Brave safesearch level (`off` or `strict`) |
+| `REMOTE_IMAGE_ENRICHMENT_ENABLED` | `true` | Enables optional Brave-backed remote image enrichment for rich responses |
 | `SMITHERY_API_KEY` | — | Hosted MCP registry |
 | `MODEL_ENCRYPTION_KEY` | — | Fernet key for per-user provider credentials |
 | `RAG_AGENT_MODEL` | `gemini-3.1-pro-preview` | |
@@ -756,13 +757,22 @@ The same endpoints are exposed by `client_backend` at `/mcp/*` so a desktop UI c
 
 **Global default tools.** Enabled servers in [`app/ai/mcp_config.json`](app/ai/mcp_config.json) are by definition global-default tools, visible to every client (currently `time`, `tavily`, `widgets`, `brave_image_search` — enforced by `tests/test_mcp_global_allowlist.py`). `brave_image_search` is pinned by default for the chat and search agents; other agents can discover it via `tool_search`. Machine-specific servers (for example, desktop-commander or Excel) belong to the sidecar schema-v2 profile at `<profile>/<server-hash>/<user-id>/devices/<device-identifier>/mcp/config.v2.json`; credentials are stored separately in encrypted form. Use `python -m client_backend mcp migrate` once for an authenticated session, then verify with `python -m client_backend mcp doctor --servers widgets,tavily,time`.
 
-`tavily` is one global server with multiple retrieval tools. Only `tavily_search` is pinned for the search agent; `tavily_extract`, `tavily_map`, and `tavily_crawl` are discovered through `tool_search` when needed.
+`tavily` is one global server with multiple retrieval tools. Only `tavily_search` is pinned for the search agent; `tavily_extract`, `tavily_map`, and `tavily_crawl` are discovered through `tool_search` when needed. `tavily_search` returns ranked sources and query-aligned content; it requests no provider-generated answer by default (`include_answer=false`) because the answer model performs final synthesis.
 
 Tavily defaults keep broad search cheap and site-level operations bounded.
 Use `TAVILY_SEARCH_DEFAULT_DEPTH=basic` unless you need advanced search by
 default. Use existing HITL settings or per-user approval policy to require
 approval for `tavily::tavily_crawl` in production deployments where crawl cost
 or external traffic needs review.
+
+The model-facing `web_research` tool exposes two optional Tavily controls:
+
+- `topic`: `general`, `news`, or `finance`;
+- `time_range`: `day`, `week`, `month`, or `year`.
+
+Its Tavily search call passes `timeout=10` directly to the Tavily SDK/API. This
+fixed provider timeout has no environment setting and is not implemented by a
+local timeout wrapper.
 
 ### Deferred tool binding
 
@@ -1391,7 +1401,7 @@ Image candidates are **never** streamed transiently — they only surface in the
 
 ### Rich image provider, latency, and failure policy
 
-Brave Image Search is the preferred adapter for focused visual discovery because it supplies dedicated thumbnail and image metadata. `tavily_search` returns text and sources only — it never returns images, so `brave_image_search` is the only source of web images.
+Brave Image Search is the preferred adapter for focused visual discovery because it supplies native confidence, rank, and dedicated thumbnail metadata. Eligible high-confidence results are selected in provider order; medium-confidence results are considered only when no high-confidence candidate survives. Selection is confidence-based metadata processing: the path does not inspect image pixels or run an image-quality model. The Brave-proxied thumbnail is the preferred display URL and remains eligible when no original image URL is available; original image URLs are never exposed in public message metadata. `tavily_search` returns text and sources only — it never returns images, so `brave_image_search` is the only source of web images.
 
 Candidate filtering is deterministic and bounded by `RICH_IMAGE_CANDIDATE_MAX_COUNT` (default `8`), `RICH_IMAGE_MIN_WIDTH_PX` (`320`), and `RICH_IMAGE_MIN_HEIGHT_PX` (`180`). The model chooses placement from this bounded inventory; there is no model-based image evaluator, labeled-dataset dependency, or additional evaluation latency.
 
@@ -1399,7 +1409,7 @@ Candidate filtering is deterministic and bounded by `RICH_IMAGE_CANDIDATE_MAX_CO
 
 Creating `/web-images/{id}` references is a persistence-time database-only operation. Upstream image bytes are fetched later, only when an authenticated client requests the media route, so the configured connect/read timeouts do not extend text time-to-first-token or assistant completion. A fetch failure affects only the optional figure; reference-registration failure removes the item and its exact marker while preserving the complete text answer.
 
-Operational metrics are exposed at `GET /metrics/rich-images`. Labels are bounded to provider and fixed outcome codes; queries, URLs, captions, tenant IDs, and other user content are never labels. `INLINE_RICH_RESPONSE_ENABLED` remains the server-side rollback switch. Frontend teams should implement the full [rich image rendering contract](docs/frontend/rich-image-rendering.md), including Bearer fetch, object-URL cleanup, file-part deduplication, one-footer ownership, and whole-figure failure replacement.
+Operational metrics are exposed at `GET /metrics/rich-images`. Labels are bounded to provider and fixed outcome codes; queries, URLs, captions, tenant IDs, and other user content are never labels. `REMOTE_IMAGE_ENRICHMENT_ENABLED` disables Brave discovery independently, while `INLINE_RICH_RESPONSE_ENABLED` remains the complete server-side rich-response rollback switch. Frontend teams should implement the full [rich image rendering contract](docs/frontend/rich-image-rendering.md), including Bearer fetch, object-URL cleanup, file-part deduplication, one-footer ownership, and whole-figure failure replacement.
 
 ### Client renderer algorithm
 

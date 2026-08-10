@@ -4,6 +4,10 @@
 
 **Status:** Approved for implementation planning
 
+> **Superseded on 2026-08-10:** This design is retained as historical context.
+> The active contract is the
+> [Provider-Native Retrieval Simplification Design](2026-08-10-provider-native-retrieval-simplification-design.md).
+
 **Revision:** 2026-08-04, after verifying the original draft against the
 codebase and replaying the `example_run.txt` trace through the live selection
 path. The image-relevance replacement is unchanged in intent. The research

@@ -12,14 +12,10 @@ from app.models.base import Base
 class WebImageReference(Base):
     """A user-owned, opaque reference to one selected upstream image.
 
-    The row stores retrieval metadata, and — when the image was admitted by
-    visual verification — the validated bytes that verification already
-    downloaded and decoded. Serving those makes an approved image one fetch
-    instead of two, and removes the window in which an image passes every check,
-    is placed in the answer, and then dies at render time.
-
-    ``content`` is nullable: an image registered without it still renders, by
-    fetching upstream exactly as before.
+    New provider-selected references store retrieval metadata without fetching
+    the upstream during registration. On render, ``WebImageService`` fetches and
+    validates the remote bytes before serving them. ``content`` remains nullable
+    for records that already carry cached bytes.
     """
 
     __tablename__ = "web_image_references"

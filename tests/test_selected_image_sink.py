@@ -4,8 +4,8 @@ import asyncio
 
 import pytest
 
-from app.ai.tool_execution import _attach_rich_candidates_to_artifact
 from app.ai.selected_image_sink import offer_selected_images, selected_image_sink
+from app.ai.tool_execution import _attach_rich_candidates_to_artifact
 
 
 def test_selected_images_are_collected_in_order():
