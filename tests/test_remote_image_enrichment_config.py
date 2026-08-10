@@ -25,6 +25,23 @@ _RETIRED_MODULES = (
     ("services", "thumbnail_" + "batch.py"),
     ("services", "verified_image_" + "bytes.py"),
 )
+_ACTIVE_REMOTE_IMAGE_CONTRACT_FILES = (
+    _ROOT / "app" / "ai" / "prompts.py",
+    _ROOT / "app" / "ai" / "deferred_tool_binding.py",
+    _ROOT / "app" / "ai" / "tool_execution.py",
+    _ROOT / "app" / "core" / "config.py",
+)
+_STALE_ASSURANCES = (
+    "visual " + "verifier",
+    "visual " + "verification",
+    "visually " + "verified",
+    "image " + "verification",
+    "image-" + "verification",
+    "verified " + "image",
+    "images are " + "verified",
+    "verified " + "gallery",
+    "verified " + "against",
+)
 
 
 def test_remote_image_enrichment_replaces_retired_settings() -> None:
@@ -56,3 +73,15 @@ def test_retired_remote_image_modules_are_absent_from_application() -> None:
                 imported_retired_modules.append(f"{path.relative_to(_ROOT)}: {name}")
 
     assert imported_retired_modules == []
+
+
+def test_active_remote_image_contracts_describe_provider_native_selection() -> None:
+    for path in _ACTIVE_REMOTE_IMAGE_CONTRACT_FILES:
+        source = path.read_text(encoding="utf-8").lower()
+
+        assert "provider-native" in source, path.relative_to(_ROOT)
+        for stale_assurance in _STALE_ASSURANCES:
+            assert stale_assurance not in source, (
+                path.relative_to(_ROOT),
+                stale_assurance,
+            )

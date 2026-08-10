@@ -1181,7 +1181,8 @@ class Settings(BaseSettings):
         ge=2,
         le=8,
         description=(
-            "Images in one verified gallery grid. Only reachable through "
+            "Maximum images in one provider-native discovery gallery grid. "
+            "Only reachable through "
             "image_intent='gallery'; figure mode stays bound by "
             "rich_auto_place_max_images."
         ),

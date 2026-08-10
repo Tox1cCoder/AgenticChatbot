@@ -73,8 +73,8 @@ _WIDGET_PINNED_SPECS = (
     "widgets::widget_get_state",
 )
 # Research reaches Tavily and Brave through the in-process ``web_research``
-# tool, which owns the turn budget and the visual verifier. Pinning the raw
-# provider tools would let the model bypass both.
+# tool, which owns the turn budget and provider-native image discovery. Pinning
+# the raw provider tools would let the model bypass both.
 _SEARCH_AGENT_PINNED_SPECS = ("time::get_current_time",)
 
 

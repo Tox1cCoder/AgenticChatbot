@@ -112,8 +112,8 @@ def build_image_candidates_from_tool_result(
     has one marker id to copy instead of choosing among several. Tavily
     results and single-candidate Brave results are returned as individual
     ``image`` items. Pass ``group_images=False`` when the caller needs every
-    candidate individually — e.g. visual verification, which must judge each
-    image on its own pixels before any grouping happens.
+    candidate individually — e.g. provider-native discovery, which ranks each
+    image from provider metadata before any grouping happens.
 
     ``apply_candidate_cap=False`` is for a caller that must inspect every
     eligible result before applying its own outcome-specific cap, such as
@@ -313,8 +313,9 @@ def _group_image_candidates(
     keeps the field from ever being None. Both normalize identically for metrics.
 
     ``max_items`` lets a caller override the legacy ``rich_image_group_max_items``
-    setting — e.g. a verified gallery, whose cap is ``rich_image_gallery_max_items``
-    and is deliberately allowed to exceed the legacy grid's row ceiling.
+    setting — e.g. a provider-native discovery gallery, whose cap is
+    ``rich_image_gallery_max_items`` and is deliberately allowed to exceed the
+    legacy grid's row ceiling.
     """
     legacy_cap = getattr(settings, "rich_image_group_max_items", 3)
     cap = max(2, int(max_items if max_items is not None else legacy_cap))

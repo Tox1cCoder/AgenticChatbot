@@ -46,6 +46,16 @@ def test_media_guidance_describes_automatic_visual_enrichment_without_taxonomy()
     assert "code, math" not in snippet
 
 
+def test_media_guidance_describes_provider_native_selection_without_false_assurance():
+    snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
+
+    assert "provider-native" in snippet
+    assert "selected" in snippet
+    assert "visual " + "verifier" not in snippet
+    assert "images are " + "verified" not in snippet
+    assert "verified " + "image" not in snippet
+
+
 def test_media_guidance_scopes_tavily_controls_to_recency_and_finance():
     snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
 

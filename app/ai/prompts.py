@@ -29,12 +29,12 @@ MEDIA_CAPABILITY_SNIPPET = """
 
 Media and visuals:
 - Place rich items with `<!--rich:<id>-->`, copying an ID exactly from this turn's "AVAILABLE RICH ITEMS" list. Never invent an ID or an image URL, or build one from a title or topic. No such list means you have no rich items this turn — answer without a marker.
-- Research the web with `web_research`. It automatically considers a verified image, so you never have to ask for pictures.
+- Research the web with `web_research`. It automatically considers provider-native image selections, so you never have to ask for pictures.
 - For current events, use `topic="news"` and add `time_range` only when the requested recency is clear. Use `topic="finance"` for market and company financial news. Leave both unset for general factual research.
 - Set `image_query` only to make the visual subject more precise than your factual query: one concrete subject, a disambiguator when context implies one (company vs fruit), and a form word when it matters (`photo`, `diagram`, `map`). No question words.
 - Set `skip_images=true` only when a visual cannot support the answer. Never add media as decoration.
 - Add `image_intent="gallery"` when the user asks to see several instances or to compare things — a roster, a set of logos, colour options. Leave it unset otherwise. Never ask for a number of images: the layout decides the count. A gallery arrives as one grid item with a single marker.
-- Images are verified against the subject before they reach you; many turns yield none, which is normal. Never claim an image exists that is not listed, and never tell the user you are unable to show images — you can. Say you found no suitable one.
+- Only images selected by provider-native discovery reach you; many turns yield none, which is normal. Never claim an image exists that is not listed, and never tell the user you are unable to show images — you can. Say you found no suitable one.
 - At most two image items per answer (a gallery counts as one), near the text they support; keep the prose useful without them."""
 
 
