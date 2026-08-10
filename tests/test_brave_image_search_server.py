@@ -10,24 +10,30 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 
 from app.ai.mcp_servers import brave_image_search_server as srv
 
 
 class _FakeResponse:
-    def __init__(self, payload: dict):
+    def __init__(self, payload: dict, status_code: int):
         self._payload = payload
+        self.status_code = status_code
 
     def raise_for_status(self) -> None:
-        return None
+        if self.status_code >= 400:
+            request = httpx.Request("GET", srv.BRAVE_IMAGE_SEARCH_URL)
+            response = httpx.Response(self.status_code, request=request)
+            raise httpx.HTTPStatusError("Brave request failed", request=request, response=response)
 
     def json(self) -> dict:
         return self._payload
 
 
 class _FakeClient:
-    def __init__(self, *, payload, exc, recorder, **kwargs):
+    def __init__(self, *, payload, status_code, exc, recorder, **kwargs):
         self._payload = payload
+        self._status_code = status_code
         self._exc = exc
         self._recorder = recorder
         self._init_kwargs = kwargs
@@ -49,14 +55,20 @@ class _FakeClient:
         )
         if self._exc is not None:
             raise self._exc
-        return _FakeResponse(self._payload)
+        return _FakeResponse(self._payload, self._status_code)
 
 
-def _install_fake_httpx(monkeypatch, *, payload=None, exc=None):
+def _install_fake_httpx(monkeypatch, *, payload=None, status_code=200, exc=None):
     calls: list[dict] = []
 
     def factory(**kwargs):
-        return _FakeClient(payload=payload or {}, exc=exc, recorder=calls, **kwargs)
+        return _FakeClient(
+            payload=payload or {},
+            status_code=status_code,
+            exc=exc,
+            recorder=calls,
+            **kwargs,
+        )
 
     monkeypatch.setattr(srv.httpx, "Client", factory)
     return calls
@@ -64,12 +76,25 @@ def _install_fake_httpx(monkeypatch, *, payload=None, exc=None):
 
 def _representative_brave_payload() -> dict:
     return {
+        "query": {
+            "original": "T1 teem photo",
+            "altered": "T1 team photo",
+            "spellcheck_off": False,
+            "show_strict_warning": False,
+        },
+        "extra": {"might_be_offensive": False},
         "results": [
             {
                 "title": "Sagrada Familia exterior",
                 "url": "https://example.com/sagrada-page",
                 "source": "example.com",
-                "thumbnail": {"src": "https://img.test/thumb-1.jpg"},
+                "confidence": "HIGH",
+                "crawl_time": "2026-08-10T00:00:00Z",
+                "thumbnail": {
+                    "src": "https://img.test/thumb-1.jpg",
+                    "width": 500,
+                    "height": 281,
+                },
                 "properties": {
                     "url": "https://img.test/direct-1.jpg",
                     "width": 1200,
@@ -78,10 +103,10 @@ def _representative_brave_payload() -> dict:
                 "meta_url": {"hostname": "example.com"},
             },
             {
-                # Missing properties.url — must be skipped (page URL is not renderable).
-                "title": "No direct image",
+                # A Brave-proxied thumbnail remains displayable without an original URL.
+                "title": "Thumbnail only image",
                 "url": "https://example.com/no-image-page",
-                "thumbnail": {"src": "https://img.test/thumb-2.jpg"},
+                "thumbnail": {"src": "https://img.test/thumb-only.jpg"},
                 "properties": {"width": 400, "height": 300},
             },
         ]
@@ -113,6 +138,16 @@ def test_request_includes_required_headers_and_default_safesearch(monkeypatch):
     assert headers.get("X-Subscription-Token") == "test-key"
     # Default safesearch is strict and is forwarded to Brave.
     assert calls[0]["params"].get("safesearch") == "strict"
+
+
+def test_request_enables_spellcheck_and_keeps_strict_safesearch(monkeypatch):
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
+    calls = _install_fake_httpx(monkeypatch, payload=_representative_brave_payload())
+
+    srv.brave_image_search("T1 team photo")
+
+    assert calls[0]["params"]["spellcheck"] is True
+    assert calls[0]["params"]["safesearch"] == "strict"
 
 
 def test_count_is_clamped_to_config_maximum(monkeypatch):
@@ -158,7 +193,7 @@ def test_provider_exception_returns_json_error(monkeypatch):
     assert "error" in result
 
 
-def test_response_is_normalized_and_skips_items_without_direct_url(monkeypatch):
+def test_response_is_normalized_with_preferred_thumbnail_urls(monkeypatch):
     monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
     _install_fake_httpx(monkeypatch, payload=_representative_brave_payload())
 
@@ -167,18 +202,56 @@ def test_response_is_normalized_and_skips_items_without_direct_url(monkeypatch):
     assert result["provider"] == "brave_image_search"
     assert result["query"] == "spain architecture"
     images = result["images"]
-    # Second result lacked properties.url and is dropped.
-    assert len(images) == 1
-    assert result["total_results"] == 1
+    assert len(images) == 2
+    assert result["total_results"] == 2
 
     img = images[0]
-    assert img["url"] == "https://img.test/direct-1.jpg"  # properties.url, not page url
+    assert img["url"] == "https://img.test/thumb-1.jpg"  # Brave proxy, not source page
     assert img["source_url"] == "https://example.com/sagrada-page"  # result.url
     assert img["thumbnail_url"] == "https://img.test/thumb-1.jpg"  # thumbnail.src
     assert img["width"] == 1200
     assert img["height"] == 800
     assert img["title"] == "Sagrada Familia exterior"
     assert img["provider"] == "brave_image_search"
+
+
+def test_normalization_preserves_native_relevance_and_proxy_metadata(monkeypatch):
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
+    _install_fake_httpx(monkeypatch, payload=_representative_brave_payload())
+
+    payload = json.loads(srv.brave_image_search("T1 teem photo"))
+
+    assert payload["query_metadata"]["altered"] == "T1 team photo"
+    assert payload["safety"] == {"might_be_offensive": False}
+    assert payload["images"][0]["result_rank"] == 1
+    assert payload["images"][0]["confidence"] == "high"
+    assert payload["images"][0]["thumbnail_width"] == 500
+    assert payload["images"][0]["thumbnail_height"] == 281
+    assert payload["images"][1]["url"] == "https://img.test/thumb-only.jpg"
+    assert "original_image_url" not in payload["images"][1]
+
+
+@pytest.mark.parametrize(
+    ("status", "error_type", "retryable"),
+    [
+        (400, "invalid_request", False),
+        (401, "authentication", False),
+        (403, "subscription", False),
+        (422, "invalid_request", False),
+        (429, "rate_limit", True),
+        (500, "upstream", True),
+    ],
+)
+def test_http_errors_remain_classifiable(monkeypatch, status, error_type, retryable):
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
+    _install_fake_httpx(monkeypatch, status_code=status, payload={"error": {}})
+
+    payload = json.loads(srv.brave_image_search("T1 team photo"))
+
+    assert payload["status_code"] == status
+    assert payload["error_type"] == error_type
+    assert payload["retryable"] is retryable
+    assert payload["images"] == []
 
 
 def test_empty_results_returns_empty_images(monkeypatch):

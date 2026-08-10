@@ -21,15 +21,23 @@ SUPPORTED_SAFESEARCH = ("off", "strict")
 mcp = FastMCP("Brave Image Search")
 
 
-def _error(message: str, *, retryable: bool = False) -> str:
+def _error(
+    message: str,
+    *,
+    error_type: str,
+    retryable: bool = False,
+    status_code: int | None = None,
+) -> str:
     payload: dict[str, Any] = {
-        "error": message,
+        "error": message[:300],
+        "error_type": error_type,
         "provider": "brave_image_search",
+        "retryable": retryable,
         "images": [],
         "total_results": 0,
     }
-    if retryable:
-        payload["retryable"] = True
+    if status_code is not None:
+        payload["status_code"] = status_code
     return json.dumps(payload)
 
 
@@ -44,6 +52,20 @@ def _guess_mime_from_url(url: str) -> str | None:
     if lowered.endswith(".png"):
         return "image/png"
     return None
+
+
+def _classify_http_status(status_code: int) -> tuple[str, bool]:
+    if status_code == 429:
+        return "rate_limit", True
+    if status_code >= 500:
+        return "upstream", True
+    if status_code == 401:
+        return "authentication", False
+    if status_code == 403:
+        return "subscription", False
+    if status_code in {400, 404, 422}:
+        return "invalid_request", False
+    return "provider_error", False
 
 
 def _resolve_api_key() -> str | None:
@@ -84,40 +106,48 @@ def _resolve_safesearch(safesearch: str | None) -> tuple[str | None, str | None]
 def _normalize_results(query: str, data: Any) -> dict[str, Any]:
     """Map raw Brave image results to the compact rich-pipeline shape.
 
-    Brave distinguishes the page URL (``result.url``) from the direct image URL
-    (``result.properties.url``). Only the direct image URL is renderable, so
-    entries without it are skipped rather than falling back to the page URL.
+    Brave distinguishes the page URL (``result.url``), the proxied thumbnail,
+    and the direct image URL (``result.properties.url``). The thumbnail is the
+    preferred renderable URL; entries without either image URL are skipped.
     """
     results = data.get("results") if isinstance(data, dict) else None
+    query_data = data.get("query") if isinstance(data, dict) else None
+    query_data = query_data if isinstance(query_data, dict) else {}
+    extra = data.get("extra") if isinstance(data, dict) else None
+    extra = extra if isinstance(extra, dict) else {}
     images: list[dict[str, Any]] = []
     if isinstance(results, list):
-        for result in results:
+        for rank, result in enumerate(results, start=1):
             if not isinstance(result, dict):
                 continue
             properties = result.get("properties")
             properties = properties if isinstance(properties, dict) else {}
             direct_url = properties.get("url")
-            if not direct_url:
-                continue
-
             title = result.get("title")
             source = result.get("source")
             meta_url = result.get("meta_url")
             hostname = meta_url.get("hostname") if isinstance(meta_url, dict) else None
             thumbnail = result.get("thumbnail")
             thumbnail_url = thumbnail.get("src") if isinstance(thumbnail, dict) else None
+            display_url = thumbnail_url or direct_url
+            if not display_url:
+                continue
 
             image: dict[str, Any] = {
-                "url": str(direct_url),
+                "url": str(display_url),
                 "provider": "brave_image_search",
+                "result_rank": rank,
+                "confidence": str(result.get("confidence") or "").lower(),
             }
-            mime_type = _guess_mime_from_url(str(direct_url))
+            mime_type = _guess_mime_from_url(str(display_url))
             if mime_type:
                 image["mime_type"] = mime_type
             if result.get("url"):
                 image["source_url"] = str(result["url"])
             if thumbnail_url:
                 image["thumbnail_url"] = str(thumbnail_url)
+            if direct_url:
+                image["original_image_url"] = str(direct_url)
             if title:
                 image["title"] = str(title)
             description = title or source or hostname
@@ -131,11 +161,28 @@ def _normalize_results(query: str, data: Any) -> dict[str, Any]:
                 image["width"] = width
             if isinstance(height, int):
                 image["height"] = height
+            thumbnail_width = thumbnail.get("width") if isinstance(thumbnail, dict) else None
+            thumbnail_height = thumbnail.get("height") if isinstance(thumbnail, dict) else None
+            if isinstance(thumbnail_width, int):
+                image["thumbnail_width"] = thumbnail_width
+            if isinstance(thumbnail_height, int):
+                image["thumbnail_height"] = thumbnail_height
+            if result.get("crawl_time"):
+                image["crawl_time"] = str(result["crawl_time"])
 
             images.append(image)
 
     return {
         "query": query,
+        "query_metadata": {
+            "original": str(query_data.get("original") or query),
+            "altered": query_data.get("altered"),
+            "spellcheck_off": bool(query_data.get("spellcheck_off", False)),
+            "show_strict_warning": bool(query_data.get("show_strict_warning", False)),
+        },
+        "safety": {
+            "might_be_offensive": bool(extra.get("might_be_offensive", False)),
+        },
         "provider": "brave_image_search",
         "images": images,
         "total_results": len(images),
@@ -172,18 +219,23 @@ def brave_image_search(
     """
     api_key = _resolve_api_key()
     if not api_key:
-        return _error("BRAVE_SEARCH_API_KEY not configured. Set it in environment or config.py")
+        return _error(
+            "BRAVE_SEARCH_API_KEY not configured. Set it in environment or config.py",
+            error_type="configuration",
+        )
 
     safesearch_value, invalid = _resolve_safesearch(safesearch)
     if invalid is not None:
         return _error(
-            f"Unsupported safesearch '{invalid}'. Use one of {list(SUPPORTED_SAFESEARCH)}."
+            f"Unsupported safesearch '{invalid}'. Use one of {list(SUPPORTED_SAFESEARCH)}.",
+            error_type="invalid_request",
         )
 
     params: dict[str, Any] = {
         "q": query,
         "count": _clamp_count(count),
         "safesearch": safesearch_value,
+        "spellcheck": True,
     }
     if country:
         params["country"] = country
@@ -203,9 +255,28 @@ def brave_image_search(
             response.raise_for_status()
             data = response.json()
     except httpx.TimeoutException:
-        return _error(f"Brave image search timed out after {timeout}s.", retryable=True)
+        return _error(
+            f"Brave image search timed out after {timeout}s.",
+            error_type="timeout",
+            retryable=True,
+        )
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code
+        error_type, retryable = _classify_http_status(status_code)
+        return _error(
+            f"Brave image search returned HTTP {status_code}.",
+            error_type=error_type,
+            retryable=retryable,
+            status_code=status_code,
+        )
+    except httpx.TransportError as exc:
+        return _error(
+            f"Brave image search failed: {exc}",
+            error_type="transport",
+            retryable=True,
+        )
     except Exception as exc:
-        return _error(f"Brave image search failed: {exc}")
+        return _error(f"Brave image search failed: {exc}", error_type="provider_error")
 
     return json.dumps(_normalize_results(query, data))
 
