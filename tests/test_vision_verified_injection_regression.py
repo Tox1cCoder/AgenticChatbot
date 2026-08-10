@@ -1,27 +1,21 @@
-"""Trace-shaped regression for the T1 turn in example_run.txt.
-
-Original failure: the model was offered an author portrait labelled "Moi" and a
-wiki asset labelled "research", while the one image that depicted the team was
-rejected by a URL resize parameter. Relevance was inferred from the page title.
-"""
+"""Trace-shaped regressions for provider-native T1 image selection."""
 
 from __future__ import annotations
 
 import json
-import re
 
 import pytest
 
+from app.ai import web_research_tool
 from app.ai.research_budget import reset_research_budget
+from app.ai.selected_image_sink import selected_image_sink
 from app.ai.tool_context import clear_tool_context, tool_execution_context
-from app.ai.verified_image_sink import verified_image_sink
-from app.ai.visual_verifier import VisualCandidateDecision, VisualVerificationResult
 from app.ai.web_research_tool import create_web_research_tool
-from app.services.web_image_service import FetchedWebImage
 
 CONVERSATION_ID = "22222222-2222-2222-2222-222222222222"
-PORTRAIT_URL = "https://cdn.example/moi-1200x1600.jpg"
-TEAM_URL = "https://cdn.example/t1-team-995x565.webp?w=3840&q=75"
+PORTRAIT_ORIGINAL_URL = "https://origin.example/moi-1200x1600.jpg?private=1"
+TEAM_ORIGINAL_URL = "https://origin.example/t1-team-995x565.webp?private=1"
+TEAM_THUMBNAIL_URL = "https://imgs.search.brave.com/t1-team-thumb.webp"
 
 TAVILY_PAYLOAD = json.dumps(
     {
@@ -48,7 +42,11 @@ BRAVE_PAYLOAD = json.dumps(
         "provider": "brave_image_search",
         "images": [
             {
-                "url": PORTRAIT_URL,
+                "url": "https://imgs.search.brave.com/moi-display.jpg",
+                "original_image_url": PORTRAIT_ORIGINAL_URL,
+                "thumbnail_url": "https://imgs.search.brave.com/moi-thumb.jpg",
+                "confidence": "low",
+                "result_rank": 1,
                 "provider": "brave_image_search",
                 "mime_type": "image/jpeg",
                 "title": "Moi",
@@ -58,7 +56,11 @@ BRAVE_PAYLOAD = json.dumps(
                 "source_url": "https://sheepesports.example/t1",
             },
             {
-                "url": TEAM_URL,
+                "url": "https://imgs.search.brave.com/t1-team-display.webp",
+                "original_image_url": TEAM_ORIGINAL_URL,
+                "thumbnail_url": TEAM_THUMBNAIL_URL,
+                "confidence": "high",
+                "result_rank": 2,
                 "provider": "brave_image_search",
                 "mime_type": "image/webp",
                 "title": "T1 2026 roster",
@@ -81,70 +83,13 @@ class _Tool:
         return self.payload
 
 
-class _Service:
-    async def fetch_url(self, url: str, *, provider: str = "other") -> FetchedWebImage:
-        if url == PORTRAIT_URL:
-            return FetchedWebImage(
-                content=b"portrait", media_type="image/jpeg", width=1200, height=1600
-            )
-        return FetchedWebImage(
-            content=b"team", media_type="image/webp", width=995, height=565
-        )
-
-
-class _Verifier:
-    """Rejects the portrait on visible content, approves the team photo."""
-
-    async def ainvoke(self, messages):
-        text = messages[0].content[0]["text"]
-        decisions = []
-        for candidate_id, line in re.findall(r"^- (c\d+): (.*)$", text, flags=re.MULTILINE):
-            portrait = "Moi" in line
-            decisions.append(
-                VisualCandidateDecision(
-                    candidate_id=candidate_id,
-                    depicts_requested_subject=not portrait,
-                    materially_supports_answer=not portrait,
-                    confidence=0.93 if not portrait else 0.91,
-                    content_kind="portrait" if portrait else "photo",
-                )
-            )
-        return VisualVerificationResult(decisions=decisions)
-
-
-class _SubjectOnlyVerifier:
-    """Isolates the subject-match gate from every other gate in ``_passes``.
-
-    Both candidates report ``content_kind="photo"`` (non-specialized, so the
-    kind gate is a no-op for either one) and both report
-    ``materially_supports_answer=True`` at a confidence above threshold. Only
-    ``depicts_requested_subject`` differs between them, so it is the only
-    mechanism in ``_passes`` that can reject the portrait here.
-    """
-
-    async def ainvoke(self, messages):
-        text = messages[0].content[0]["text"]
-        decisions = []
-        for candidate_id, line in re.findall(r"^- (c\d+): (.*)$", text, flags=re.MULTILINE):
-            portrait = "Moi" in line
-            decisions.append(
-                VisualCandidateDecision(
-                    candidate_id=candidate_id,
-                    depicts_requested_subject=not portrait,
-                    materially_supports_answer=True,
-                    confidence=0.93,
-                    content_kind="photo",
-                )
-            )
-        return VisualVerificationResult(decisions=decisions)
-
-
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     clear_tool_context()
     reset_research_budget(CONVERSATION_ID)
     monkeypatch.setattr(
-        "app.ai.web_research_tool.settings.vision_image_verification_enabled",
+        web_research_tool.settings,
+        "remote_image_enrichment_enabled",
         True,
         raising=False,
     )
@@ -153,112 +98,54 @@ def _clean(monkeypatch):
     reset_research_budget(CONVERSATION_ID)
 
 
-@pytest.mark.asyncio
-async def test_portrait_rejected_team_photo_approved():
-    # NOTE: the portrait's content_kind="portrait" means admit_candidates's
-    # specialized-kind gate alone rejects it here, independent of
-    # depicts_requested_subject — this test does not isolate the subject-match
-    # check. See test_subject_mismatch_rejects_the_portrait_when_kind_gate_is_a_noop
-    # for the test that does.
+async def _run(brave_payload: str = BRAVE_PAYLOAD) -> tuple[str, list[dict]]:
     tool = create_web_research_tool(
         tavily_tool=_Tool(TAVILY_PAYLOAD),
-        brave_tool=_Tool(BRAVE_PAYLOAD),
-        web_image_service=_Service(),
-        verifier_model=_Verifier(),
+        brave_tool=_Tool(brave_payload),
     )
-
     with tool_execution_context(
         conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
-    ), verified_image_sink() as sink:
+    ), selected_image_sink() as sink:
         raw = await tool.ainvoke(
             {
                 "query": "T1 League of Legends Esports team news roster 2026",
                 "image_query": "T1 League of Legends team photo",
             }
         )
-
-    serialized_sink = json.dumps(sink)
-    assert len(sink) == 1
-    assert sink[0]["payload"]["url"] == TEAM_URL
-    assert "Moi" not in serialized_sink
-    assert PORTRAIT_URL not in serialized_sink
-    assert PORTRAIT_URL not in raw
-    assert "Moi" not in raw
+    return raw, list(sink)
 
 
 @pytest.mark.asyncio
-async def test_no_verifier_field_reaches_the_public_candidate():
-    tool = create_web_research_tool(
-        tavily_tool=_Tool(TAVILY_PAYLOAD),
-        brave_tool=_Tool(BRAVE_PAYLOAD),
-        web_image_service=_Service(),
-        verifier_model=_Verifier(),
-    )
+async def test_high_confidence_team_image_excludes_the_low_confidence_portrait():
+    raw, selected = await _run()
 
-    with tool_execution_context(
-        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
-    ), verified_image_sink() as sink:
-        await tool.ainvoke(
-            {"query": "T1 roster 2026", "image_query": "T1 League of Legends team photo"}
-        )
-
-    serialized = json.dumps(sink)
-    for forbidden in (
-        "confidence",
-        "content_kind",
-        "depicts_requested_subject",
-        "materially_supports_answer",
-        "candidate_id",
-    ):
-        assert forbidden not in serialized
+    serialized = json.dumps(selected)
+    assert len(selected) == 1
+    assert selected[0]["payload"]["url"] == TEAM_THUMBNAIL_URL
+    assert "Moi" not in serialized
+    assert PORTRAIT_ORIGINAL_URL not in serialized
+    assert PORTRAIT_ORIGINAL_URL not in raw
 
 
 @pytest.mark.asyncio
-async def test_approved_candidate_carries_decoded_dimensions():
-    tool = create_web_research_tool(
-        tavily_tool=_Tool(TAVILY_PAYLOAD),
-        brave_tool=_Tool(BRAVE_PAYLOAD),
-        web_image_service=_Service(),
-        verifier_model=_Verifier(),
-    )
+async def test_selected_candidate_keeps_dimensions_and_digests_the_original_url():
+    _, selected = await _run()
 
-    with tool_execution_context(
-        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
-    ), verified_image_sink() as sink:
-        await tool.ainvoke(
-            {"query": "T1 roster 2026", "image_query": "T1 League of Legends team photo"}
-        )
-
-    assert sink[0]["payload"]["width"] == 995
-    assert sink[0]["payload"]["height"] == 565
-    assert sink[0]["payload"]["mime_type"] == "image/webp"
+    payload = selected[0]["payload"]
+    assert payload["width"] == 995
+    assert payload["height"] == 565
+    assert payload["mime_type"] == "image/webp"
+    assert TEAM_ORIGINAL_URL not in json.dumps(selected)
+    digests = selected[0]["provenance"]["original_image_digests"]
+    assert digests[TEAM_THUMBNAIL_URL] != TEAM_ORIGINAL_URL
+    assert len(digests[TEAM_THUMBNAIL_URL]) == 64
 
 
 @pytest.mark.asyncio
-async def test_subject_mismatch_rejects_the_portrait_when_kind_gate_is_a_noop():
-    """Pins the subject-match check itself, isolated from the kind gate.
+async def test_only_low_confidence_results_offer_no_selected_image():
+    low_only = json.loads(BRAVE_PAYLOAD)
+    low_only["images"] = low_only["images"][:1]
 
-    Both candidates report content_kind="photo", so admit_candidates's
-    specialized-kind gate cannot reject either one on its own. If
-    depicts_requested_subject stopped being checked, the portrait would be
-    admitted and both "Moi" and PORTRAIT_URL would reach the sink.
-    """
-    tool = create_web_research_tool(
-        tavily_tool=_Tool(TAVILY_PAYLOAD),
-        brave_tool=_Tool(BRAVE_PAYLOAD),
-        web_image_service=_Service(),
-        verifier_model=_SubjectOnlyVerifier(),
-    )
+    _, selected = await _run(json.dumps(low_only))
 
-    with tool_execution_context(
-        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
-    ), verified_image_sink() as sink:
-        await tool.ainvoke(
-            {"query": "T1 roster 2026", "image_query": "T1 League of Legends team photo"}
-        )
-
-    serialized_sink = json.dumps(sink)
-    assert len(sink) == 1
-    assert sink[0]["payload"]["url"] == TEAM_URL
-    assert "Moi" not in serialized_sink
-    assert PORTRAIT_URL not in serialized_sink
+    assert selected == []

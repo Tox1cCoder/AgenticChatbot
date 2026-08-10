@@ -1,10 +1,4 @@
-"""The full chain from an approved image to the marker the model can copy.
-
-Other suites stop at one seam: the verifier tests stop at the sink, the prompt
-tests build an inventory from hand-written candidates. A break anywhere in
-sink -> artifact -> turn context -> selection -> inventory would surface only as
-"the assistant never shows an image", with every other suite green.
-"""
+"""The full chain from a provider-selected image to a model-copyable marker."""
 
 from __future__ import annotations
 
@@ -16,16 +10,15 @@ from app.ai import web_research_tool
 from app.ai.prompts import build_rich_response_guidance
 from app.ai.research_budget import reset_research_budget
 from app.ai.rich_image_selection import apply_rich_image_selection
+from app.ai.selected_image_sink import selected_image_sink
 from app.ai.tool_context import clear_tool_context, tool_execution_context
 from app.ai.tool_execution import _attach_rich_candidates_to_artifact
-from app.ai.verified_image_sink import verified_image_sink
-from app.ai.visual_verifier import VisualCandidateDecision, VisualVerificationResult
 from app.ai.web_research_tool import create_web_research_tool
 from app.ai.workflow.tool_loop import ToolLoopMixin
-from app.services.web_image_service import FetchedWebImage
 
 CONVERSATION_ID = "77777777-7777-7777-7777-777777777777"
-TEAM_URL = "https://cdn.example/t1-team.webp"
+TEAM_ORIGINAL_URL = "https://origin.example/t1-team.webp?private=1"
+TEAM_THUMBNAIL_URL = "https://imgs.search.brave.com/t1-team-thumbnail.webp"
 
 TAVILY_PAYLOAD = json.dumps(
     {
@@ -52,7 +45,11 @@ BRAVE_PAYLOAD = json.dumps(
         "provider": "brave_image_search",
         "images": [
             {
-                "url": TEAM_URL,
+                "url": "https://imgs.search.brave.com/t1-team-display.webp",
+                "original_image_url": TEAM_ORIGINAL_URL,
+                "thumbnail_url": TEAM_THUMBNAIL_URL,
+                "confidence": "high",
+                "result_rank": 1,
                 "provider": "brave_image_search",
                 "mime_type": "image/webp",
                 "title": "T1 2026 roster",
@@ -75,35 +72,13 @@ class _Tool:
         return self.payload
 
 
-class _Service:
-    async def fetch_url(self, url: str, *, provider: str = "other") -> FetchedWebImage:
-        return FetchedWebImage(
-            content=b"team", media_type="image/webp", width=995, height=565
-        )
-
-
-class _ApproveAll:
-    async def ainvoke(self, messages):
-        return VisualVerificationResult(
-            decisions=[
-                VisualCandidateDecision(
-                    candidate_id="c0",
-                    depicts_requested_subject=True,
-                    materially_supports_answer=True,
-                    confidence=0.95,
-                    content_kind="photo",
-                )
-            ]
-        )
-
-
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     clear_tool_context()
     reset_research_budget(CONVERSATION_ID)
     monkeypatch.setattr(
         web_research_tool.settings,
-        "vision_image_verification_enabled",
+        "remote_image_enrichment_enabled",
         True,
         raising=False,
     )
@@ -112,24 +87,22 @@ def _clean(monkeypatch):
     reset_research_budget(CONVERSATION_ID)
 
 
-async def _approved_candidates() -> list[dict]:
+async def _selected_candidates() -> list[dict]:
     tool = create_web_research_tool(
         tavily_tool=_Tool(TAVILY_PAYLOAD),
         brave_tool=_Tool(BRAVE_PAYLOAD),
-        web_image_service=_Service(),
-        verifier_model=_ApproveAll(),
     )
     with tool_execution_context(
         conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
-    ), verified_image_sink() as sink:
+    ), selected_image_sink() as sink:
         await tool.ainvoke({"query": "cho t thông tin về T1"})
     return list(sink)
 
 
 @pytest.mark.asyncio
-async def test_an_approved_image_becomes_a_marker_the_model_can_copy():
-    offered = await _approved_candidates()
-    assert offered, "verification approved nothing — the chain starts empty"
+async def test_selected_image_becomes_a_marker_the_model_can_copy():
+    selected = await _selected_candidates()
+    assert selected, "provider selection produced no candidate for the chain"
 
     artifact: dict = {}
     _attach_rich_candidates_to_artifact(
@@ -139,7 +112,7 @@ async def test_an_approved_image_becomes_a_marker_the_model_can_copy():
         render=None,
         tool_call_id="call-1",
         tool_name="web_research",
-        verified_images=offered,
+        selected_images=selected,
     )
 
     context: dict = {}
@@ -147,7 +120,7 @@ async def test_an_approved_image_becomes_a_marker_the_model_can_copy():
     apply_rich_image_selection(context)
 
     candidates = context.get("rich_item_candidates") or []
-    assert candidates, "the approved image was dropped between the sink and selection"
+    assert candidates, "the selected image was dropped before rich-item selection"
 
     guidance = build_rich_response_guidance(
         candidates=candidates, enabled=True, capability=True
@@ -159,25 +132,25 @@ async def test_an_approved_image_becomes_a_marker_the_model_can_copy():
 
 
 @pytest.mark.asyncio
-async def test_the_offered_marker_carries_the_decoded_dimensions():
-    """Selection rejects on dimensions, so wrong ones silently empty the list."""
-    offered = await _approved_candidates()
+async def test_selected_marker_carries_dimensions_without_the_private_original_url():
+    selected = await _selected_candidates()
 
-    payload = offered[0]["payload"]
+    payload = selected[0]["payload"]
+    assert payload["url"] == TEAM_THUMBNAIL_URL
     assert payload["width"] == 995
     assert payload["height"] == 565
     assert payload["mime_type"] == "image/webp"
+    assert TEAM_ORIGINAL_URL not in json.dumps(selected)
 
 
 @pytest.mark.asyncio
-async def test_no_inventory_is_offered_when_the_flag_is_off(monkeypatch):
-    """The current production state: the whole chain yields nothing by design."""
+async def test_no_inventory_is_offered_when_the_remote_image_flag_is_off(monkeypatch):
     monkeypatch.setattr(
         web_research_tool.settings,
-        "vision_image_verification_enabled",
+        "remote_image_enrichment_enabled",
         False,
         raising=False,
     )
 
-    assert await _approved_candidates() == []
+    assert await _selected_candidates() == []
     assert build_rich_response_guidance(candidates=[], enabled=True, capability=True) == ""
