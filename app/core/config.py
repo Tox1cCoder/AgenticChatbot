@@ -1172,66 +1172,9 @@ class Settings(BaseSettings):
         default=True,
         description="Kill switch for turn-local research dedup and call caps.",
     )
-    vision_image_verification_enabled: bool = Field(
-        default=True,
-        description=(
-            "Rollout flag for vision-verified remote web images. When False, no "
-            "remote web image reaches an answer."
-        ),
-    )
     remote_image_enrichment_enabled: bool = Field(
         default=True,
         description="Enable Brave-backed remote image enrichment for rich responses.",
-    )
-    image_verification_model: str = Field(
-        default="gemini-3-flash-preview",
-        description="Vision model used to verify remote image relevance.",
-    )
-    image_verification_media_resolution: str = Field(
-        default="low",
-        description="Media resolution for verifier thumbnails: low, medium, or high.",
-    )
-    image_verification_thinking_level: str = Field(
-        default="low",
-        description=(
-            "Reasoning budget for the verifier call. Deliberation dominates its "
-            "latency and buys a classification task nothing."
-        ),
-    )
-    image_verification_confidence_threshold: float = Field(
-        default=0.85,
-        ge=0.0,
-        le=1.0,
-        description="Minimum verifier confidence for admitting a remote image.",
-    )
-    image_verification_max_candidates: int = Field(
-        default=3,
-        ge=1,
-        le=10,
-        description=(
-            "Maximum candidates submitted to one verifier call. Batch size "
-            "dominates verifier latency, so a gallery is bounded by this before "
-            "rich_image_gallery_max_items."
-        ),
-    )
-    image_verification_timeout_seconds: float = Field(
-        default=10.0,
-        gt=0,
-        description="Timeout for the single visual-verification model call.",
-    )
-    image_verification_thumbnail_timeout_seconds: float = Field(
-        default=2.0,
-        gt=0,
-        description="Per-thumbnail download timeout during verification.",
-    )
-    verified_image_cache_max_bytes: int = Field(
-        default=64 * 1024 * 1024,
-        ge=0,
-        description=(
-            "Total in-memory budget for verified image bytes held between "
-            "verification and registration. Oldest entries are evicted first; "
-            "0 disables the hand-off and every placed image is fetched again."
-        ),
     )
     rich_image_gallery_max_items: int = Field(
         default=6,

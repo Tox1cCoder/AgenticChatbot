@@ -44,8 +44,8 @@ def test_rich_image_metrics_are_bounded_and_content_free():
 
 
 def test_discovery_outcomes_are_bounded_and_content_free():
-    metrics = RichImageMetrics()
-    tenant_content = f"T1 roster {uuid4()}"
+    metrics = RichImageMetrics(registry=CollectorRegistry())
+    tenant_content = f"https://tenant.example/private/{uuid4()}"
 
     metrics.record_discovery_outcome(outcome="selected", duration_seconds=0.2)
     metrics.record_discovery_outcome(outcome=tenant_content, duration_seconds=0.1)
@@ -57,6 +57,8 @@ def test_discovery_outcomes_are_bounded_and_content_free():
     assert 'outcome="selected"' in payload
     assert 'outcome="other"' in payload
     assert tenant_content not in payload
+    assert "tenant.example" not in payload
+    assert "rich_image_" + "verification" not in payload
 
 
 def test_health_router_exposes_rich_image_metrics():

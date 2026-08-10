@@ -60,7 +60,6 @@ from app.services.ai_service import AIService
 from app.services.client_device_service import ClientDeviceService
 from app.services.event_streaming.events import V3StreamEvent, make_event
 from app.services.generation_registry import get_generation_registry
-from app.services.verified_image_bytes import take_verified_bytes
 from app.usage import UsageContext
 from app.utils.text_processing import fix_markdown_code_blocks, sanitize_persona
 from app.utils.validation.conversation_validation import ConversationValidationUtils
@@ -2497,15 +2496,6 @@ class MessageService(IMessageService):
             with contextlib.suppress(Exception):
                 rich_image_metrics.record_registration(provider=provider, outcome="skipped_scheme")
             return None
-        # Visual verification already fetched, validated and decoded this image
-        # earlier in the turn. Persisting those bytes makes an approved image
-        # one fetch rather than two, and removes the window where an image
-        # passes every check, is placed, and then dies at render. Nothing here
-        # depends on it: no hand-off means no bytes, and the upstream fetch
-        # path runs exactly as before.
-        cached = None
-        with contextlib.suppress(Exception):
-            cached = take_verified_bytes(str(conversation_id), image_url)
         try:
             reference = await self.web_image_service.register(
                 conversation_id=conversation_id,
@@ -2513,7 +2503,6 @@ class MessageService(IMessageService):
                 upstream_url=image_url,
                 expected_mime=expected_mime,
                 provider=provider,
-                cached=cached,
             )
             reference_id = (
                 reference.get("id")

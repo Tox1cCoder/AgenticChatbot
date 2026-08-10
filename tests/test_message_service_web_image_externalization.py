@@ -108,9 +108,6 @@ async def test_selected_remote_image_becomes_protected_reference_without_fetch()
         upstream_url="https://img.example/a.jpg",
         expected_mime="image/jpeg",
         provider="tavily",
-        # No visual verification ran for this image, so there are no verified
-        # bytes to hand over and registration stays metadata-only.
-        cached=None,
     )
     web_images.fetch.assert_not_called()
 

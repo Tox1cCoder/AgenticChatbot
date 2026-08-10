@@ -1,9 +1,4 @@
-"""Verified bytes stored at registration are served without a second fetch.
-
-Before this, an image could pass every check — public-address assertion, byte
-cap, decoded MIME, and the visual verifier — be placed in the answer, and then
-die at render time on a fetch nobody was watching.
-"""
+"""Already-owned bytes stored at registration are served without a fetch."""
 
 from __future__ import annotations
 
@@ -132,7 +127,7 @@ async def test_register_persists_supplied_bytes():
 
 @pytest.mark.asyncio
 async def test_register_without_bytes_stores_none_and_still_works():
-    """The fallback path: verification was skipped or its hand-off expired."""
+    """Registration remains metadata-only when the caller owns no bytes."""
 
     repository = _RecordingRepository()
 
@@ -147,110 +142,3 @@ async def test_register_without_bytes_stores_none_and_still_works():
     stored = repository.created[0]
     assert stored["content"] is None
     assert stored["cached_width"] is None
-
-
-@pytest.mark.asyncio
-async def test_verification_hands_its_bytes_to_registration(monkeypatch):
-    """End to end: the bytes the verifier validated are the bytes persisted.
-
-    The two halves live in different layers and run at different times, so a
-    test that only covers one of them proves nothing about the round trip.
-    """
-    import json
-
-    from app.ai.image_verification_flow import discover_and_verify_images
-    from app.ai.tool_context import clear_tool_context, tool_execution_context
-    from app.ai.visual_verifier import VisualCandidateDecision, VisualVerificationResult
-    from app.services.verified_image_bytes import (
-        forget_conversation_bytes,
-        take_verified_bytes,
-    )
-
-    conversation_id = "55555555-5555-5555-5555-555555555555"
-    url = "https://cdn.example/team.jpg"
-    brave_payload = json.dumps(
-        {
-            "query": "T1 team photo",
-            "provider": "brave_image_search",
-            "images": [
-                {
-                    "url": url,
-                    "provider": "brave_image_search",
-                    "mime_type": "image/jpeg",
-                    "title": "T1 roster",
-                    "description": "T1 roster",
-                    "width": 995,
-                    "height": 565,
-                    "source_url": "https://sheepesports.example/t1",
-                }
-            ],
-            "total_results": 1,
-        }
-    )
-
-    class _Brave:
-        async def ainvoke(self, args):
-            return brave_payload
-
-    class _Service:
-        async def fetch_url(self, target, *, provider="other"):
-            return FetchedWebImage(
-                content=b"verified-team-bytes",
-                media_type="image/jpeg",
-                width=995,
-                height=565,
-            )
-
-    class _Verifier:
-        async def ainvoke(self, messages):
-            return VisualVerificationResult(
-                decisions=[
-                    VisualCandidateDecision(
-                        candidate_id="c0",
-                        depicts_requested_subject=True,
-                        materially_supports_answer=True,
-                        confidence=0.95,
-                        content_kind="photo",
-                    )
-                ]
-            )
-
-    clear_tool_context()
-    forget_conversation_bytes(conversation_id)
-    monkeypatch.setattr(
-        "app.ai.image_verification_flow.settings.image_verification_confidence_threshold",
-        0.85,
-        raising=False,
-    )
-    try:
-        with tool_execution_context(
-            conversation_id=conversation_id, user_id="u1", agent_key="search"
-        ):
-            approved = await discover_and_verify_images(
-                brave_tool=_Brave(),
-                web_image_service=_Service(),
-                verifier_model=_Verifier(),
-                user_request="T1 roster 2026",
-                image_query="T1 team photo",
-                factual_query="T1 roster 2026",
-            )
-
-        assert len(approved) == 1
-
-        held = take_verified_bytes(conversation_id, url)
-        assert held is not None, "approved bytes must survive the tool call"
-        assert held.content == b"verified-team-bytes"
-
-        repository = _RecordingRepository()
-        await _service(repository).register(
-            conversation_id=uuid4(),
-            user_id=uuid4(),
-            upstream_url=url,
-            expected_mime="image/jpeg",
-            provider="brave",
-            cached=held,
-        )
-        assert repository.created[0]["content"] == b"verified-team-bytes"
-    finally:
-        clear_tool_context()
-        forget_conversation_bytes(conversation_id)
