@@ -5,6 +5,7 @@ import inspect
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from app.ai.research_budget import reset_research_budget
 from app.ai.selected_image_sink import selected_image_sink
@@ -179,6 +180,71 @@ async def test_skip_images_prevents_the_brave_call():
     assert brave.calls == []
     assert sink == []
     assert payload["results"]
+
+
+@pytest.mark.asyncio
+async def test_news_topic_and_time_range_reach_tavily():
+    tavily = _FakeTool("tavily_search", TAVILY_PAYLOAD)
+
+    await _run(
+        _tool(tavily, None),
+        query="latest T1 match",
+        topic="news",
+        time_range="week",
+        skip_images=True,
+    )
+
+    assert tavily.calls == [
+        {
+            "query": "latest T1 match",
+            "topic": "news",
+            "time_range": "week",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("topic", "sports"), ("time_range", "quarter")],
+)
+async def test_unsupported_tavily_controls_are_rejected_before_the_provider(field, value):
+    tavily = _FakeTool("tavily_search", TAVILY_PAYLOAD)
+
+    with pytest.raises(ValidationError):
+        await _run(
+            _tool(tavily, None),
+            query="latest T1 match",
+            skip_images=True,
+            **{field: value},
+        )
+
+    assert tavily.calls == []
+
+
+@pytest.mark.asyncio
+async def test_tavily_error_is_not_reported_as_successful_research():
+    tavily = _FakeTool(
+        "tavily_search",
+        json.dumps(
+            {
+                "provider": "tavily",
+                "operation": "search",
+                "error": "rate limited",
+                "retryable": True,
+            }
+        ),
+    )
+
+    payload, _ = await _run(
+        _tool(tavily, None),
+        query="latest T1 match",
+        skip_images=True,
+    )
+
+    assert payload["status"] == "error"
+    assert payload["retryable"] is True
+    assert "research" not in payload
 
 
 @pytest.mark.asyncio

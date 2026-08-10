@@ -41,6 +41,14 @@ _DESCRIPTION = (
 )
 
 
+class ResearchProviderError(RuntimeError):
+    """A structured provider failure surfaced through the research boundary."""
+
+    def __init__(self, message: str, *, retryable: bool) -> None:
+        self.retryable = bool(retryable)
+        super().__init__(str(message or "Research provider failed")[:300])
+
+
 class WebResearchInput(BaseModel):
     query: str = Field(description="The factual research query.")
     image_query: str | None = Field(
@@ -62,6 +70,14 @@ class WebResearchInput(BaseModel):
         default=False,
         description="Set true only when an image cannot help the answer.",
     )
+    topic: Literal["general", "news", "finance"] | None = Field(
+        default=None,
+        description="Optional Tavily topic for general, news, or finance research.",
+    )
+    time_range: Literal["day", "week", "month", "year"] | None = Field(
+        default=None,
+        description="Optional Tavily recency window when the requested recency is clear.",
+    )
     max_results: int | None = Field(default=None, description="Optional result count.")
     search_depth: str | None = Field(default=None, description="Optional Tavily depth.")
 
@@ -77,6 +93,8 @@ def create_web_research_tool(
         query: str,
         image_query: str | None = None,
         image_intent: str | None = None,
+        topic: Literal["general", "news", "finance"] | None = None,
+        time_range: Literal["day", "week", "month", "year"] | None = None,
         max_results: int | None = None,
         search_depth: str | None = None,
         skip_images: bool = False,
@@ -94,7 +112,14 @@ def create_web_research_tool(
             if settings.research_budget_enabled and not budget.reserve_search(query):
                 return _budget_reused_payload(budget)
             search_task = asyncio.create_task(
-                _run_search(tavily_tool, query, max_results, search_depth)
+                _run_search(
+                    tavily_tool,
+                    query,
+                    max_results,
+                    search_depth,
+                    topic,
+                    time_range,
+                )
             )
 
         image_task: asyncio.Task[list[dict[str, Any]]] | None = None
@@ -110,6 +135,11 @@ def create_web_research_tool(
         if search_task is not None:
             try:
                 search_text = await search_task
+            except ResearchProviderError as exc:
+                if image_task is not None:
+                    image_task.cancel()
+                logger.warning("Research provider failed: %s", exc)
+                return _error_payload(str(exc), retryable=exc.retryable)
             except Exception as exc:
                 if image_task is not None:
                     image_task.cancel()
@@ -181,6 +211,8 @@ async def _run_search(
     query: str,
     max_results: int | None,
     search_depth: str | None,
+    topic: Literal["general", "news", "finance"] | None,
+    time_range: Literal["day", "week", "month", "year"] | None,
 ) -> str:
     tool = tavily_tool
     if tool is None:
@@ -192,7 +224,13 @@ async def _run_search(
         args["max_results"] = max_results
     if search_depth is not None:
         args["search_depth"] = search_depth
-    return provider_result_text(await tool.ainvoke(args), tool_name="tavily_search")
+    if topic is not None:
+        args["topic"] = topic
+    if time_range is not None:
+        args["time_range"] = time_range
+    return _raise_for_provider_error(
+        provider_result_text(await tool.ainvoke(args), tool_name="tavily_search")
+    )
 
 
 async def _discover_selected(
@@ -239,6 +277,18 @@ def _with_research_meta(search_text: str, *, reused: bool, budget: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+def _raise_for_provider_error(result_text: str) -> str:
+    try:
+        payload = json.loads(result_text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return result_text
+    if isinstance(payload, dict) and payload.get("error"):
+        raise ResearchProviderError(
+            str(payload["error"]), retryable=bool(payload.get("retryable"))
+        )
+    return result_text
+
+
 def _budget_reused_payload(budget: Any) -> str:
     return json.dumps(
         {
@@ -258,12 +308,12 @@ def _budget_reused_payload(budget: Any) -> str:
     )
 
 
-def _error_payload(message: str) -> str:
+def _error_payload(message: str, *, retryable: bool = True) -> str:
     return json.dumps(
         {
             "status": "error",
             "error_type": "provider_error",
-            "retryable": True,
+            "retryable": retryable,
             "hint": "Research is temporarily unavailable. Say so rather than guessing.",
             "message": message[:500],
         },

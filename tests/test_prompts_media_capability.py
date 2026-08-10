@@ -46,6 +46,16 @@ def test_media_guidance_describes_automatic_visual_enrichment_without_taxonomy()
     assert "code, math" not in snippet
 
 
+def test_media_guidance_scopes_tavily_controls_to_recency_and_finance():
+    snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
+
+    assert "current events" in snippet
+    assert 'topic="news"' in snippet
+    assert "time_range" in snippet
+    assert 'topic="finance"' in snippet
+    assert "general factual research" in snippet
+
+
 def test_snippet_has_no_hardcoded_visual_topic_list():
     snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
     for word in TAXONOMY_WORDS:

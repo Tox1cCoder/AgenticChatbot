@@ -271,6 +271,15 @@ def test_media_guidance_never_requires_the_user_to_ask_for_images():
     assert "decoration" in text
 
 
+def test_recency_guidance_preserves_text_independence_from_images():
+    from app.ai.prompts import MEDIA_CAPABILITY_SNIPPET
+
+    text = MEDIA_CAPABILITY_SNIPPET.lower()
+    assert 'topic="news"' in text
+    assert "time_range" in text
+    assert "without them" in text
+
+
 # ---------------------------------------------------------------------------
 # Presentation counter: record_presentation was defined in an earlier task
 # with no caller. It must be wired where items actually enter the model-facing
