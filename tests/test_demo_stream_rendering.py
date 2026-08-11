@@ -146,6 +146,106 @@ def test_escape_unparseable_math_escapes_span_with_unbalanced_brace():
     assert escape_unparseable_math(raw) == r"Set \$x = {a\$ before the run."
 
 
+def test_tool_text_payload_rendering_escapes_dollar_markers(monkeypatch):
+    """Tool output is model/server text, not Markdown authored for Streamlit."""
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    rendered: list[str] = []
+    streamlit_stub.markdown = lambda text, **_kwargs: rendered.append(text)
+    streamlit_stub.expander = lambda *_args, **_kwargs: nullcontext()
+
+    demo.render_tool_render_payload({"type": "text", "text": "Quote #7: $500 R&D, $200 ops."})
+
+    assert rendered[0] == r"Quote #7: \$500 R&D, \$200 ops."
+
+
+def test_image_tool_text_block_rendering_escapes_dollar_markers(monkeypatch):
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    rendered: list[str] = []
+    streamlit_stub.markdown = lambda text, **_kwargs: rendered.append(text)
+
+    demo._render_image_tool_result(
+        {"content": [{"type": "text", "text": "Render #3 cost $5 for R&D and $9 total."}]}
+    )
+
+    assert rendered == [r"Render #3 cost \$5 for R&D and \$9 total."]
+
+
+def test_rag_chunk_rendering_escapes_dollar_markers(monkeypatch):
+    """Retrieved document text is arbitrary source material."""
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    rendered: list[str] = []
+    streamlit_stub.markdown = lambda text, **_kwargs: rendered.append(text)
+
+    chunk = SimpleNamespace(
+        rank=1,
+        source="invoice.pdf",
+        score=None,
+        page_label="",
+        document_id="",
+        chunk_id="",
+        image_count=0,
+        table_count=None,
+        has_tables=False,
+        image_captions=[],
+        content="Line #4 lists $500 for R&D and $200 for ops.",
+    )
+
+    demo._render_rag_chunk_card(SimpleNamespace(), chunk)
+
+    assert rendered[-1] == r"> Line #4 lists \$500 for R&D and \$200 for ops."
+
+
+def test_escape_currency_prose_math_escapes_amounts_separated_by_prose():
+    """Prices joined by ordinary prose are not a recognised price run.
+
+    ``$500 for express and $200`` parses as math *successfully*, so there is
+    no error to see — the markers are swallowed and the sentence renders as
+    run-together italics instead.
+    """
+    from app.ui.stream_markdown import escape_currency_prose_math
+
+    raw = "Shipping is $500 for express and $200 for standard."
+
+    assert escape_currency_prose_math(raw) == (
+        r"Shipping is \$500 for express and \$200 for standard."
+    )
+
+
+def test_escape_currency_prose_math_preserves_numeric_math():
+    """A numeric span with no prose word is math, not a price pair."""
+    from app.ui.stream_markdown import escape_currency_prose_math
+
+    raw = "$1 + 2 = 3$ and $2 \\cdot 3$"
+
+    assert escape_currency_prose_math(raw) == raw
+
+
+def test_escape_currency_prose_math_preserves_symbolic_and_latex_math():
+    from app.ui.stream_markdown import escape_currency_prose_math
+
+    raw = "$x + y$ costs $z$, and $1 \\text{ apple} + 2$ stays math."
+
+    assert escape_currency_prose_math(raw) == raw
+
+
+def test_escape_currency_prose_math_preserves_code_spans():
+    from app.ui.stream_markdown import escape_currency_prose_math
+
+    raw = "`$500 for express and $200`"
+
+    assert escape_currency_prose_math(raw) == raw
+
+
+def test_normalize_display_markdown_text_escapes_prose_separated_prices():
+    from app.ui.stream_markdown import normalize_display_markdown_text
+
+    raw = "Shipping is $500 for express and $200 for standard."
+
+    assert normalize_display_markdown_text(raw) == (
+        r"Shipping is \$500 for express and \$200 for standard."
+    )
+
+
 def test_escape_unparseable_math_escapes_span_with_stray_group_command():
     r"""``\endgroup`` is in KaTeX's ``endOfExpression`` set like ``}``.
 

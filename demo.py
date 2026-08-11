@@ -4766,7 +4766,7 @@ def _render_image_tool_result(render: dict[str, Any]) -> bool:
         if block_type == "text":
             text = block.get("text")
             if isinstance(text, str) and text.strip():
-                st.markdown(text.strip())
+                st.markdown(normalize_display_markdown_text(text.strip()))
                 rendered = True
             continue
         if block_type != "image":
@@ -4870,7 +4870,7 @@ def _render_subagent_dispatch_tool_result(render: dict[str, Any]) -> bool:
 
             summary = item.get("summary")
             if isinstance(summary, str) and summary.strip():
-                st.markdown(summary.strip())
+                st.markdown(normalize_display_markdown_text(summary.strip()))
             else:
                 st.caption("Worker returned no summary.")
 
@@ -4915,7 +4915,7 @@ def render_tool_render_payload(render: Any, fallback_output: Any = None) -> bool
     elif render_type == "text":
         text = render.get("text") or fallback_output
         if text not in (None, ""):
-            st.markdown(str(text))
+            st.markdown(normalize_display_markdown_text(str(text)))
             rendered = True
         else:
             rendered = False
@@ -6893,7 +6893,7 @@ def _render_rag_chunk_card(view: RAGArtifactView, chunk: RAGChunkView) -> None:
         st.caption(f"image captions: {captions}{more}")
 
     if chunk.content:
-        st.markdown(f"> {chunk.content.strip()}")
+        st.markdown(f"> {normalize_display_markdown_text(chunk.content.strip())}")
 
 
 def _render_rag_document_listing(listing: RAGDocumentListing) -> None:
@@ -9575,7 +9575,7 @@ def render_skills_tab():
                     content = detail.get("content", "_No content_")
                     st.markdown("---")
                     st.markdown("#### Skill Instructions")
-                    st.markdown(content)
+                    st.markdown(normalize_display_markdown_text(content))
 
                     if st.button(
                         "Hide Content",
@@ -9657,10 +9657,10 @@ def render_interrupt_approval_ui():
     # streamed thinking/content is lost on the rerun into this approval view.
     agent_thinking, agent_partial_content = interrupt_stream_context(interrupt_info)
     if agent_partial_content:
-        st.markdown(agent_partial_content)
+        st.markdown(normalize_display_markdown_text(agent_partial_content))
     if agent_thinking:
         with st.expander("Agent reasoning", icon=":material/neurology:"):
-            st.markdown(agent_thinking)
+            st.markdown(normalize_display_markdown_text(agent_thinking))
 
     if not action_requests:
         if st.button("Cancel"):

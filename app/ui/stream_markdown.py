@@ -88,6 +88,12 @@ _INLINE_MATH_SPAN_RE = re.compile(
     r"(?<![\\$])(\$)(?!\$)((?:[^$\n]|\n(?![ \t]*\n))*?)(?<![\\$])(\$)(?!\$)"
 )
 
+# Prose-versus-math signals for a candidate span. LaTeX syntax or the absence
+# of a prose word means the span is math, however price-like it starts.
+_CURRENCY_OPENING_AMOUNT_RE = re.compile(rf"^{_CURRENCY_AMOUNT_RE}")
+_LATEX_SIGNAL_RE = re.compile(r"[\\^_{}]")
+_PROSE_WORD_RE = re.compile(r"[A-Za-z]{2,}")
+
 _MATH_COMMAND_RE = re.compile(r"\\([a-zA-Z]+|.)")
 _MATH_MACRO_DEFINITION_RE = re.compile(
     r"\\(?:def|gdef|edef|xdef|newcommand|renewcommand|providecommand|let)\b"
@@ -259,16 +265,60 @@ def _math_span_is_unparseable(body: str) -> bool:
     return bool(brace_depth or environment_depth or left_depth or group_depth)
 
 
-def _escape_math_span_if_unparseable(match: re.Match[str]) -> str:
-    opener, body, closer = match.group(1), match.group(2), match.group(3)
-    if not _math_span_is_unparseable(body):
-        return match.group(0)
-    return f"{_escape_dollars(opener)}{body}{_escape_dollars(closer)}"
+def _math_span_is_currency_prose(body: str) -> bool:
+    """Report whether a span is a pair of prices with prose between them.
+
+    KaTeX parses ``500 for express and `` without complaint, so this failure
+    is silent: the markers are swallowed and the sentence renders as
+    run-together italics. Three signals must agree before a span is demoted,
+    so numeric math such as ``$1 + 2 = 3$`` is left alone: the span opens on
+    an amount, carries no LaTeX syntax, and contains a prose word.
+    """
+    if not _CURRENCY_OPENING_AMOUNT_RE.match(body):
+        return False
+    if _LATEX_SIGNAL_RE.search(body):
+        return False
+    return bool(_PROSE_WORD_RE.search(body))
+
+
+def _span_escaper(predicate: Callable[[str], bool]) -> Callable[[re.Match[str]], str]:
+    """Build a substitution that escapes a span's delimiters when flagged."""
+
+    def replace(match: re.Match[str]) -> str:
+        opener, body, closer = match.group(1), match.group(2), match.group(3)
+        if not predicate(body):
+            return match.group(0)
+        return f"{_escape_dollars(opener)}{body}{_escape_dollars(closer)}"
+
+    return replace
+
+
+_escape_math_span_if_unparseable = _span_escaper(_math_span_is_unparseable)
+_escape_math_span_if_currency_prose = _span_escaper(_math_span_is_currency_prose)
 
 
 def _escape_unparseable_math_spans(chunk: str) -> str:
     chunk = _DISPLAY_MATH_SPAN_RE.sub(_escape_math_span_if_unparseable, chunk)
     return _INLINE_MATH_SPAN_RE.sub(_escape_math_span_if_unparseable, chunk)
+
+
+def escape_currency_prose_math(text: str) -> str:
+    r"""Escape price pairs that Streamlit would render as inline math.
+
+    Only inline spans are considered: a ``$$...$$`` block is a deliberate
+    display-math delimiter, never a price. Complements
+    :func:`escape_markdown_currency`, which handles amounts written adjacently
+    (``$150–$160``), and :func:`escape_unparseable_math`, which handles the
+    spans that fail outright.
+    """
+    if not isinstance(text, str) or not text:
+        return ""
+    if "$" not in text:
+        return text
+    return _apply_outside_code(
+        text,
+        lambda chunk: _INLINE_MATH_SPAN_RE.sub(_escape_math_span_if_currency_prose, chunk),
+    )
 
 
 def escape_unparseable_math(text: str) -> str:
@@ -291,14 +341,17 @@ def escape_unparseable_math(text: str) -> str:
 def normalize_display_markdown_text(content: str) -> str:
     """Prepare stored Markdown for ``st.markdown`` without mutating storage.
 
-    Applies the display-only dollar-marker guards: recognised price runs are
-    escaped, an unterminated ``$$`` block is neutralised, and spans KaTeX
-    would reject are rendered literally instead of as a parse error.
+    Applies the display-only dollar-marker guards: an unterminated ``$$``
+    block is neutralised, recognised price runs and price-plus-prose spans are
+    escaped, and spans KaTeX would reject are rendered literally instead of as
+    a parse error. Use this for any text an agent, tool, or document supplied
+    — none of it is authored against Streamlit's LaTeX syntax.
     """
     if not isinstance(content, str) or not content:
         return ""
     normalized = escape_unterminated_math_fence(content)
     normalized = escape_markdown_currency(normalized)
+    normalized = escape_currency_prose_math(normalized)
     return escape_unparseable_math(normalized)
 
 
