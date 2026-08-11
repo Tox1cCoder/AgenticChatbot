@@ -79,6 +79,29 @@ def test_all_answer_prompts_carry_media_capability():
         assert "AVAILABLE RICH ITEMS" in prompt
 
 
+def test_image_query_guidance_covers_subjects_whose_look_changes():
+    """Brave's image endpoint has no freshness parameter, so the query text is
+    the only way to ask for a current picture. The guidance used to describe
+    image_query purely as a subject disambiguator, which suppressed exactly the
+    year/version qualifier that returns an up-to-date image."""
+    snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
+
+    assert "image_query" in snippet
+    assert "year" in snippet
+    assert "current" in snippet
+
+
+def test_web_research_tool_description_covers_the_same_recency_lever():
+    """The tool description is read at call time and is where the argument is
+    actually chosen."""
+    from app.ai.web_research_tool import _DESCRIPTION
+
+    description = _DESCRIPTION.lower()
+
+    assert "year" in description
+    assert "current" in description
+
+
 def test_rag_prompts_omit_research_controls_they_cannot_use():
     """``web_research`` is internal and bound only for the chat and search agents,
     and internal tools never surface through ``tool_search`` — so naming it in a

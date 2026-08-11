@@ -531,7 +531,10 @@ def test_anchors_after_the_block_matching_the_image_query():
     assert outcomes["imagegroup:tool:c1"] == "query_anchored"
 
 
-def test_image_search_falls_back_to_first_prose_block_when_nothing_matches():
+def test_image_search_is_dropped_when_its_query_matches_no_block():
+    """A searched image whose subject appears nowhere in the answer is not about
+    the answer. It used to be fallback-anchored under the first prose block
+    anyway, which is how an unrelated picture ended up beside unrelated text."""
     content, outcomes = anchor_image_items_by_query(
         BODY,
         entries=[
@@ -542,6 +545,26 @@ def test_image_search_falls_back_to_first_prose_block_when_nothing_matches():
             )
         ],
         min_score=0.34,
+        max_images=2,
+    )
+    assert content == BODY
+    assert outcomes["imagegroup:tool:c1"] == "unplaced"
+
+
+def test_image_search_with_a_weak_but_real_match_still_anchors():
+    """The gate is "does the subject appear at all", not the full min_score. A
+    query sharing one real token with a block is still about the answer, and
+    dropping it would cost images on every answer that paraphrases its subject."""
+    content, outcomes = anchor_image_items_by_query(
+        BODY,
+        entries=[
+            ImageAnchorEntry(
+                item_id="imagegroup:tool:c1",
+                query="Cupertino ring campus aerial photograph exterior view",
+                origin="image_search",
+            )
+        ],
+        min_score=0.99,
         max_images=2,
     )
     assert "<!--rich:imagegroup:tool:c1-->" in content
@@ -744,11 +767,11 @@ def test_finalize_leaves_source_bound_web_search_image_unplaced_without_query(mo
     assert finalize_article_content(response, content) == content
 
 
-def test_single_brave_image_result_is_placed_via_fallback(monkeypatch):
-    """A single eligible Brave candidate keeps deliberate-search fallback.
+def test_single_brave_image_result_is_placed_like_a_group(monkeypatch):
+    """A single eligible Brave candidate is anchored like a Brave group.
 
-    Grouping needs two candidates, but a single result still uses the same
-    ``image_search`` intent and fallback-anchor origin as a Brave group.
+    Grouping needs two candidates, but a single result carries the same
+    ``image_search`` intent and travels the same anchoring path.
     """
     import json
 
@@ -779,11 +802,12 @@ def test_single_brave_image_result_is_placed_via_fallback(monkeypatch):
     assert candidate["type"] == "image"
     assert candidate["source"] == "image_search"
 
-    # Deliberately shares no tokens with "red panda photo" so the query-match
-    # path scores zero and only the fallback anchor can place the image.
+    # Shares the subject with "red panda photo", which is what makes the image
+    # about this answer. Content sharing no token at all is covered by
+    # test_image_search_is_dropped_when_its_query_matches_no_block.
     content = (
-        "Quarterly revenue grew across every product line this period, driven "
-        "by strong subscription renewals and enterprise contract expansion."
+        "The red panda spends most of its day asleep in the forest canopy and "
+        "descends only to forage among the bamboo understory below."
     )
     response = _make_response(content, candidates=[candidate])
     new_content = finalize_article_content(response, content)

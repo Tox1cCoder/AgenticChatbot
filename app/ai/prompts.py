@@ -38,12 +38,12 @@ Media and visuals:
 # (see BaseAgent._get_bound_tools) and internal tools are invisible to
 # ``tool_search``, so an agent that never binds it must not be told to call it.
 WEB_RESEARCH_MEDIA_SNIPPET = """
-- Research the web with `web_research`. It automatically considers provider-native image selections, so you never have to ask for pictures.
-- For current events, use `topic="news"` and add `time_range` only when the requested recency is clear. Use `topic="finance"` for market and company financial news. Leave both unset for general factual research.
-- Set `image_query` only to make the visual subject more precise than your factual query: one concrete subject, a disambiguator when context implies one (company vs fruit), and a form word when it matters (`photo`, `diagram`, `map`). No question words.
+- Research the web with `web_research`; it automatically considers provider-native image selections, so you never ask for pictures.
+- For current events use `topic="news"`, adding `time_range` only when the requested recency is clear; `topic="finance"` for market and company news. Leave both unset for general factual research.
+- Set `image_query` only to sharpen the visual subject: one concrete subject, a disambiguator when context implies one (company vs fruit), a form word when it matters (`photo`, `diagram`, `map`), and the year or version when what matters is how the subject looks now — the provider has no recency filter, so those words are the only way to ask for a current picture. No question words.
 - Set `skip_images=true` only when a visual cannot support the answer. Never add media as decoration.
-- Add `image_intent="gallery"` when the user asks to see several instances or to compare things — a roster, a set of logos, colour options. Leave it unset otherwise. Never ask for a number of images: the layout decides the count. A gallery arrives as one grid item with a single marker.
-- Only images selected by provider-native discovery reach you; many turns yield none, which is normal. Never claim an image exists that is not listed, and never tell the user you are unable to show images — you can. Say you found no suitable one."""
+- Add `image_intent="gallery"` when the user asks to see or compare several instances — a roster, a set of logos, colour options. Leave it unset otherwise; never state a count. A gallery arrives as one grid item with one marker.
+- Only images selected by provider-native discovery reach you; many turns yield none, which is normal. Never claim an image that is not listed, and never tell the user you are unable to show images — you can. Say you found no suitable one."""
 
 # The block for agents that bind ``web_research``: placement mechanics plus the
 # research controls that produce image candidates in the first place.

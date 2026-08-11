@@ -7,6 +7,7 @@ import logging
 import time
 from collections.abc import Mapping
 from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..core.config import settings
@@ -17,6 +18,59 @@ from .tool_result_rendering import provider_result_text
 logger = logging.getLogger(__name__)
 
 _OPERATIONAL_FAILURES = frozenset({"unavailable", "search_failure"})
+
+_TIME_RANGE_WINDOW_DAYS = {"day": 1, "week": 7, "month": 31, "year": 366}
+# A news answer usually arrives with no explicit ``time_range``: the model is
+# told to set one only when the requested recency is clear. Its pictures are
+# still expected to show the current state of the subject, so the topic carries
+# a window of its own.
+_NEWS_DEFAULT_WINDOW_DAYS = 30
+
+
+def _window_days(time_range: str | None, topic: str | None) -> int | None:
+    """Return the recency window the answer itself claims, or ``None``.
+
+    Absent a claim there is no window: ``page_fetched`` is a crawl time, not a
+    subject date, and for most subjects a decades-old photograph is the right
+    picture.
+    """
+    window = _TIME_RANGE_WINDOW_DAYS.get(str(time_range or "").strip().lower())
+    if window is not None:
+        return window
+    if str(topic or "").strip().lower() == "news":
+        return _NEWS_DEFAULT_WINDOW_DAYS
+    return None
+
+
+def _crawled_at(candidate: Mapping[str, Any]) -> datetime | None:
+    provenance = candidate.get("provenance")
+    raw = provenance.get("page_fetched") if isinstance(provenance, Mapping) else None
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _drop_stale(
+    candidates: list[dict[str, Any]], *, window_days: int | None
+) -> list[dict[str, Any]]:
+    """Drop candidates whose crawl date is known to precede the claimed window.
+
+    An unknown crawl date is never stale: the provider does not stamp every
+    result, and treating silence as staleness would disable discovery for whole
+    classes of query.
+    """
+    if window_days is None:
+        return candidates
+    cutoff = datetime.now(UTC) - timedelta(days=window_days)
+    return [
+        candidate
+        for candidate in candidates
+        if (crawled := _crawled_at(candidate)) is None or crawled >= cutoff
+    ]
 
 
 def _object_payload(raw: str) -> dict[str, Any]:
@@ -68,6 +122,8 @@ def select_brave_candidates(
     *,
     image_query: str,
     image_intent: str | None = None,
+    time_range: str | None = None,
+    topic: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return only high-confidence Brave candidates, or medium as a fallback."""
     payload = _object_payload(raw)
@@ -80,6 +136,9 @@ def select_brave_candidates(
         group_images=False,
         apply_candidate_cap=False,
     )
+    # Staleness is settled before the confidence tier: an all-stale high tier
+    # would otherwise shadow the fresh medium results that should be shown.
+    candidates = _drop_stale(candidates, window_days=_window_days(time_range, topic))
     high = [item for item in candidates if _confidence(item) == "high"]
     medium = [item for item in candidates if _confidence(item) == "medium"]
     tier = _stable_deduplicate(high or medium)
@@ -117,6 +176,8 @@ async def discover_images(
     brave_tool: Any | None,
     image_query: str,
     image_intent: str | None = None,
+    time_range: str | None = None,
+    topic: str | None = None,
 ) -> list[dict[str, Any]]:
     """Discover and deterministically select Brave images without verification."""
     started = time.perf_counter()
@@ -133,7 +194,11 @@ async def discover_images(
     if payload.get("error"):
         return record_discovery_outcome("search_failure", started=started)
     selected = select_brave_candidates(
-        raw, image_query=image_query, image_intent=image_intent
+        raw,
+        image_query=image_query,
+        image_intent=image_intent,
+        time_range=time_range,
+        topic=topic,
     )
     record_discovery_outcome("selected" if selected else "no_match", started=started)
     return selected

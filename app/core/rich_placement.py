@@ -199,15 +199,26 @@ def auto_place_rich_items(
     return _apply_insertions(lines, insertions), placed
 
 
-#: Origins allowed to anchor without a scoring match. Running an image search is
-#: itself the intent to display, so a missed keyword match must not silently
-#: discard the result. A tool-produced image carries the same intent: the tool
-#: call itself implies display. Such an image may or may not carry a query — a
-#: chart or rendered diagram has none, while a single ungrouped Brave
-#: image-search candidate is stamped ``tool_image`` and does carry its
-#: provenance query — so the fallback exists for the queryless case and for the
-#: case where a real query simply matched no paragraph.
-_FALLBACK_ANCHOR_ORIGINS = frozenset({"image_search", "tool_image"})
+#: Origins allowed to anchor without clearing ``min_score``.
+#:
+#: ``tool_image`` is unconditional. A chart or rendered diagram carries no query
+#: at all, so it scores zero against every block by construction, and the tool
+#: call itself is the intent to display.
+#:
+#: ``image_search`` must show some evidence — at least one shared token with
+#: some block. Running the search is an intent to display, but an image whose
+#: subject appears nowhere in the finished answer is not about that answer, and
+#: anchoring it under the first paragraph regardless is how an unrelated picture
+#: ends up beside unrelated text. Full ``min_score`` is deliberately not the bar
+#: here: an answer that paraphrases its subject still deserves its picture.
+_UNCONDITIONAL_FALLBACK_ORIGINS = frozenset({"tool_image"})
+_EVIDENCE_FALLBACK_ORIGINS = frozenset({"image_search"})
+
+
+def _may_fallback_anchor(origin: str, best_score: float) -> bool:
+    if origin in _UNCONDITIONAL_FALLBACK_ORIGINS:
+        return True
+    return origin in _EVIDENCE_FALLBACK_ORIGINS and best_score > 0.0
 
 #: Minimum post-stopword token count for a block to accept a fallback anchor, so
 #: the image never lands under a bare heading or a two-word line.
@@ -278,7 +289,7 @@ def anchor_image_items_by_query(
 
         if best_line >= 0 and best >= min_score:
             outcome = "query_anchored"
-        elif entry.origin in _FALLBACK_ANCHOR_ORIGINS:
+        elif _may_fallback_anchor(entry.origin, best):
             best_line = _first_fallback_block_line(blocks, insertions)
             outcome = "fallback_anchored" if best_line >= 0 else "unplaced"
         else:

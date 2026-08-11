@@ -29,11 +29,14 @@ _DESCRIPTION = (
     "Research the web. Returns ranked sources with URLs and relevant content for you "
     "to synthesize into the final answer.\n\n"
     "Use topic='news' for current events. Set time_range only when the user "
-    "explicitly requests a recency window.\n\n"
+    "explicitly requests a recency window. Both also bound the picture: inside a "
+    "declared window, an image whose page was last crawled before it is dropped.\n\n"
     "This tool automatically considers a provider-selected image. Set image_query only to "
     "make the visual subject more precise than the factual query: one concrete "
     "subject, no question words, plus a disambiguator or a form word (photo, "
-    "diagram, map, chart) when it matters.\n\n"
+    "diagram, map, chart) when it matters. Add the year or version when what "
+    "matters is how the subject looks now — the image provider has no recency "
+    "filter, so the query text is the only way to ask for a current picture.\n\n"
     "Set skip_images=true only when a visual cannot support the answer.\n\n"
     "Set image_intent='gallery' only when the user asks to see or compare several "
     "instances — a roster, a set of logos, colour options. Otherwise leave it "
@@ -151,6 +154,8 @@ def create_web_research_tool(
                     brave_tool=brave_tool,
                     image_query=visual_query,
                     image_intent=image_intent,
+                    time_range=time_range,
+                    topic=topic,
                 )
             )
 
@@ -278,8 +283,15 @@ async def _discover_selected(
     brave_tool: Any | None,
     image_query: str,
     image_intent: str | None = None,
+    time_range: str | None = None,
+    topic: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Return provider-selected candidate dicts, or an empty list."""
+    """Return provider-selected candidate dicts, or an empty list.
+
+    The recency scope the model declared for the facts also bounds the picture:
+    a window that makes a month-old source stale makes a month-old photograph of
+    the same subject stale too.
+    """
 
     if brave_tool is None:
         brave_tool = await _resolve_tool("brave_image_search", "brave_image_search")
@@ -287,6 +299,8 @@ async def _discover_selected(
         brave_tool=brave_tool,
         image_query=image_query,
         image_intent=image_intent,
+        time_range=time_range,
+        topic=topic,
     )
 
 

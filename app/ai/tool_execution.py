@@ -290,6 +290,9 @@ def build_image_candidates_from_tool_result(
             "confidence",
             "thumbnail_width",
             "thumbnail_height",
+            # When the provider last crawled the hosting page — the only recency
+            # signal an image endpoint without a freshness filter gives us.
+            "page_fetched",
         ):
             meta_value = image.get(meta_key)
             if meta_value is not None:
