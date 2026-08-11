@@ -1669,7 +1669,9 @@ class Settings(BaseSettings):
             "Minimum keyword-overlap score (fraction of an item's descriptive tokens "
             "found in a paragraph) required to auto-place the item after that paragraph. "
             "Governs widget auto-placement only; images use "
-            "RICH_IMAGE_ANCHOR_MIN_SCORE on the query-anchoring path."
+            "RICH_IMAGE_ANCHOR_MIN_SCORE on the query-anchoring path. The score is "
+            "quantized by token count, so at the default a widget title of four tokens "
+            "or fewer needs exactly one matching token — the same as any match at all."
         ),
     )
     rich_image_anchor_min_score: float = Field(
@@ -1677,8 +1679,13 @@ class Settings(BaseSettings):
         ge=0.0,
         le=1.0,
         description=(
-            "Minimum fraction of image-query tokens a paragraph must contain to "
-            "receive that image's marker."
+            "Fraction of image-query tokens a paragraph must contain to receive that "
+            "image's marker directly. This selects the placement, not whether the image "
+            "appears: below it the image anchors at the first substantial paragraph "
+            "instead, and only an image matching no paragraph at all is dropped. The "
+            "score is quantized by query length, so at the default a one- or two-token "
+            "query cannot land below the threshold, and a three- to five-token query "
+            "needs two matching tokens."
         ),
     )
 

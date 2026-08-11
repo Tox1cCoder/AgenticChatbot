@@ -20,26 +20,19 @@ logger = logging.getLogger(__name__)
 _OPERATIONAL_FAILURES = frozenset({"unavailable", "search_failure"})
 
 _TIME_RANGE_WINDOW_DAYS = {"day": 1, "week": 7, "month": 31, "year": 366}
-# A news answer usually arrives with no explicit ``time_range``: the model is
-# told to set one only when the requested recency is clear. Its pictures are
-# still expected to show the current state of the subject, so the topic carries
-# a window of its own.
-_NEWS_DEFAULT_WINDOW_DAYS = 30
 
 
-def _window_days(time_range: str | None, topic: str | None) -> int | None:
-    """Return the recency window the answer itself claims, or ``None``.
+def _window_days(time_range: str | None) -> int | None:
+    """Return the recency window the request explicitly declared, or ``None``.
 
-    Absent a claim there is no window: ``page_fetched`` is a crawl time, not a
+    Only ``time_range`` declares one. ``topic`` states what kind of source to
+    search, not how recent the answer must be, and a window inferred from it
+    would discard images against a cutoff nobody asked for. Absent a declared
+    window there is no window at all: ``page_fetched`` is a crawl time, not a
     subject date, and for most subjects a decades-old photograph is the right
     picture.
     """
-    window = _TIME_RANGE_WINDOW_DAYS.get(str(time_range or "").strip().lower())
-    if window is not None:
-        return window
-    if str(topic or "").strip().lower() == "news":
-        return _NEWS_DEFAULT_WINDOW_DAYS
-    return None
+    return _TIME_RANGE_WINDOW_DAYS.get(str(time_range or "").strip().lower())
 
 
 def _crawled_at(candidate: Mapping[str, Any]) -> datetime | None:
@@ -123,7 +116,6 @@ def select_brave_candidates(
     image_query: str,
     image_intent: str | None = None,
     time_range: str | None = None,
-    topic: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return only high-confidence Brave candidates, or medium as a fallback."""
     payload = _object_payload(raw)
@@ -138,7 +130,7 @@ def select_brave_candidates(
     )
     # Staleness is settled before the confidence tier: an all-stale high tier
     # would otherwise shadow the fresh medium results that should be shown.
-    candidates = _drop_stale(candidates, window_days=_window_days(time_range, topic))
+    candidates = _drop_stale(candidates, window_days=_window_days(time_range))
     high = [item for item in candidates if _confidence(item) == "high"]
     medium = [item for item in candidates if _confidence(item) == "medium"]
     tier = _stable_deduplicate(high or medium)
@@ -177,7 +169,6 @@ async def discover_images(
     image_query: str,
     image_intent: str | None = None,
     time_range: str | None = None,
-    topic: str | None = None,
 ) -> list[dict[str, Any]]:
     """Discover and deterministically select Brave images without verification."""
     started = time.perf_counter()
@@ -198,7 +189,6 @@ async def discover_images(
         image_query=image_query,
         image_intent=image_intent,
         time_range=time_range,
-        topic=topic,
     )
     record_discovery_outcome("selected" if selected else "no_match", started=started)
     return selected

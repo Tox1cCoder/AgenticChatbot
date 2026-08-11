@@ -123,22 +123,6 @@ def test_without_a_declared_window_an_old_image_is_still_eligible():
     assert _urls(selected) == ["https://imgs.search.brave.com/thumb-1.webp"]
 
 
-def test_a_news_topic_applies_a_window_without_an_explicit_time_range():
-    """The model is told to set time_range only when the user names a recency
-    window, so news answers usually arrive with topic alone. A months-old crawl
-    is still stale for those."""
-    selected = select_brave_candidates(
-        _payload(
-            _image(1, page_fetched=_iso(200)),
-            _image(2, page_fetched=_iso(2)),
-        ),
-        image_query="stadium photo",
-        topic="news",
-    )
-
-    assert _urls(selected) == ["https://imgs.search.brave.com/thumb-2.webp"]
-
-
 def test_a_stale_high_confidence_result_yields_to_a_fresh_lower_tier_one():
     """Filtering has to run before the confidence tier, or an all-stale high
     tier shadows the fresh medium results that should have been shown."""
@@ -190,10 +174,7 @@ def _clean(monkeypatch):
     reset_research_budget(CONVERSATION_ID)
 
 
-@pytest.mark.asyncio
-async def test_web_research_forwards_its_recency_scope_to_image_discovery():
-    """The recency window the model declared for the facts is the same window
-    the picture beside those facts has to satisfy."""
+async def _research(**call_args: object) -> list[dict]:
     brave = _Tool(
         _payload(
             _image(1, page_fetched=_iso(120)),
@@ -201,17 +182,32 @@ async def test_web_research_forwards_its_recency_scope_to_image_discovery():
         )
     )
     tool = create_web_research_tool(tavily_tool=_Tool(TAVILY_PAYLOAD), brave_tool=brave)
-
     with tool_execution_context(
         conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
     ), selected_image_sink() as sink:
         await tool.ainvoke(
-            {
-                "query": "stadium renovation",
-                "image_query": "stadium photo",
-                "topic": "news",
-                "time_range": "week",
-            }
+            {"query": "stadium renovation", "image_query": "stadium photo", **call_args}
         )
+    return list(sink)
 
-    assert _urls(list(sink)) == ["https://imgs.search.brave.com/thumb-2.webp"]
+
+@pytest.mark.asyncio
+async def test_web_research_forwards_its_recency_scope_to_image_discovery():
+    """The recency window the model declared for the facts is the same window
+    the picture beside those facts has to satisfy."""
+    selected = await _research(time_range="week")
+
+    assert _urls(selected) == ["https://imgs.search.brave.com/thumb-2.webp"]
+
+
+@pytest.mark.asyncio
+async def test_a_news_topic_alone_declares_no_window():
+    """``topic`` states what kind of source to search, not how recent the answer
+    must be. Inventing a window from it guessed at the user's intent, and a
+    guessed cutoff silently discards images nobody asked to exclude."""
+    selected = await _research(topic="news")
+
+    assert _urls(selected) == [
+        "https://imgs.search.brave.com/thumb-1.webp",
+        "https://imgs.search.brave.com/thumb-2.webp",
+    ]

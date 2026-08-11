@@ -29,8 +29,9 @@ _DESCRIPTION = (
     "Research the web. Returns ranked sources with URLs and relevant content for you "
     "to synthesize into the final answer.\n\n"
     "Use topic='news' for current events. Set time_range only when the user "
-    "explicitly requests a recency window. Both also bound the picture: inside a "
-    "declared window, an image whose page was last crawled before it is dropped.\n\n"
+    "explicitly requests a recency window. time_range also bounds the picture: "
+    "inside a declared window, an image whose page was last crawled before it is "
+    "dropped.\n\n"
     "This tool automatically considers a provider-selected image. Set image_query only to "
     "make the visual subject more precise than the factual query: one concrete "
     "subject, no question words, plus a disambiguator or a form word (photo, "
@@ -155,7 +156,6 @@ def create_web_research_tool(
                     image_query=visual_query,
                     image_intent=image_intent,
                     time_range=time_range,
-                    topic=topic,
                 )
             )
 
@@ -284,11 +284,10 @@ async def _discover_selected(
     image_query: str,
     image_intent: str | None = None,
     time_range: str | None = None,
-    topic: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return provider-selected candidate dicts, or an empty list.
 
-    The recency scope the model declared for the facts also bounds the picture:
+    The recency window the model declared for the facts also bounds the picture:
     a window that makes a month-old source stale makes a month-old photograph of
     the same subject stale too.
     """
@@ -300,7 +299,6 @@ async def _discover_selected(
         image_query=image_query,
         image_intent=image_intent,
         time_range=time_range,
-        topic=topic,
     )
 
 

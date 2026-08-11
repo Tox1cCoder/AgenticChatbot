@@ -571,6 +571,52 @@ def test_image_search_with_a_weak_but_real_match_still_anchors():
     assert outcomes["imagegroup:tool:c1"] == "fallback_anchored"
 
 
+def test_a_short_image_query_can_never_land_below_the_threshold():
+    """Characterization. The score is ``matched / query_tokens``, so a two-token
+    query scores only 0, 0.5 or 1.0 — the default 0.34 threshold is unreachable
+    from below. Image queries are one or two tokens after stopword removal most
+    of the time ("photo"/"picture"/"view" are stopwords), so for those the
+    threshold decides nothing: any match anchors at the best block.
+    """
+    content, outcomes = anchor_image_items_by_query(
+        BODY,
+        entries=[
+            ImageAnchorEntry(
+                item_id="imagegroup:tool:c1",
+                query="Cupertino photo",
+                origin="image_search",
+            )
+        ],
+        min_score=0.34,
+        max_images=2,
+    )
+    lines = content.split("\n")
+    assert "Cupertino" in lines[lines.index("<!--rich:imagegroup:tool:c1-->") - 2]
+    assert outcomes["imagegroup:tool:c1"] == "query_anchored"
+
+
+def test_a_longer_query_matching_one_token_falls_to_the_first_paragraph():
+    """Characterization of the only band the threshold governs. At the default
+    it resolves to a single rule for every query of three to five tokens: two
+    must match to anchor at the best block. One match still shows the image,
+    just at the first substantial paragraph rather than the matching one.
+    """
+    content, outcomes = anchor_image_items_by_query(
+        BODY,
+        entries=[
+            ImageAnchorEntry(
+                item_id="imagegroup:tool:c1",
+                query="Cupertino ring campus aerial",
+                origin="image_search",
+            )
+        ],
+        min_score=0.34,
+        max_images=2,
+    )
+    assert "<!--rich:imagegroup:tool:c1-->" in content
+    assert outcomes["imagegroup:tool:c1"] == "fallback_anchored"
+
+
 def test_source_bound_tavily_image_has_no_fallback():
     content, outcomes = anchor_image_items_by_query(
         BODY,
