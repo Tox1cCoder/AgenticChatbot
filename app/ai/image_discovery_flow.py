@@ -152,7 +152,12 @@ def select_brave_candidates(
                 max_items=max(2, int(settings.rich_image_gallery_max_items)),
             )
         ]
-    return tier[: max(0, int(settings.rich_auto_place_max_images))]
+    # One figure per call, deliberately not ``rich_auto_place_max_images``.
+    # That setting bounds the whole answer; a turn gets a single image search
+    # (ResearchBudget.reserve_image_search), so slicing two off one query's
+    # results returns two renderings of one subject rather than two subjects.
+    # A second, different picture needs a second query, not a deeper slice.
+    return tier[:1]
 
 
 def record_discovery_outcome(

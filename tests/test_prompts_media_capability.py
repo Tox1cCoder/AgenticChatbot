@@ -24,15 +24,21 @@ def test_snippet_defined_once_and_compact():
     """The bound guards against unbounded growth, not against content.
 
     It was 1700 while the snippet was purely mechanical. It has since taken on
-    two load-bearing behaviours — the recency qualifier in image_query, which is
-    the only way to ask Brave for a current picture, and the statement that
-    web_research is the sole path an image can take. Redundancy was trimmed
-    twice to absorb them; the remaining growth is meaning, so the bound moves
-    rather than the prose.
+    four load-bearing behaviours: web_research is the sole path an image can
+    take, the recency qualifier that is the only way to ask Brave for a current
+    picture, the form word that decides whether "what is X" returns identity art
+    or an in-use shot, and one figure per call.
+
+    Known debt, deliberately not paid here: the topic/time_range, skip_images
+    and image_intent bullets restate the web_research tool description almost
+    verbatim, and both texts sit in context on every call. Deleting them from
+    the prompt would recover roughly 500 characters and put argument
+    documentation in one place — a refactor that also has to retarget the
+    assertions below onto _DESCRIPTION.
     """
     snippet = prompts.MEDIA_CAPABILITY_SNIPPET
     assert "Media and visuals:" in snippet
-    assert len(snippet) < 1900, "media snippet must stay compact — do not bloat prompts"
+    assert len(snippet) < 2100, "media snippet must stay compact — do not bloat prompts"
 
 
 def test_snippet_uses_available_ids_only_and_forbids_invention():
@@ -87,6 +93,19 @@ def test_all_answer_prompts_carry_media_capability():
         assert "Media and visuals:" in prompt
         # The exact header the inventory block emits, so the reference resolves.
         assert "AVAILABLE RICH ITEMS" in prompt
+
+
+def test_image_query_guidance_ties_the_form_word_to_what_was_asked():
+    """"What is X" was returning in-use screenshots because the form words on
+    offer were all depiction words (photo, diagram, map). A thing's identity
+    image — its logo, key art, cover — is what answers "what is this", and the
+    query has to name it. Keyed to the kind of question, not to the subject.
+    """
+    snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
+
+    assert "logo" in snippet
+    assert "key art" in snippet
+    assert "what a thing is" in snippet
 
 
 def test_image_query_guidance_covers_subjects_whose_look_changes():

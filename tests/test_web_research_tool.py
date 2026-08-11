@@ -142,7 +142,10 @@ async def test_gallery_intent_returns_one_grid_item_holding_every_selected_image
 
 
 @pytest.mark.asyncio
-async def test_figure_intent_caps_at_two_selected_images():
+async def test_figure_intent_offers_one_selected_image():
+    """Four eligible results still yield one figure. The turn allows a single
+    image search, so a deeper slice of one query returns the same subject twice
+    rather than a second subject."""
     _, sink = await _run(
         _tool(
             _FakeTool("tavily_search", TAVILY_PAYLOAD),
@@ -152,7 +155,7 @@ async def test_figure_intent_caps_at_two_selected_images():
         image_query="T1 team photo",
     )
 
-    assert len(sink) == 2
+    assert len(sink) == 1
     assert all(item["type"] == "image" for item in sink)
 
 

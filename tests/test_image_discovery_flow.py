@@ -84,7 +84,7 @@ def test_high_confidence_wins_in_provider_order():
         image_query="T1 team photo",
     )
 
-    assert [item["provenance"]["result_rank"] for item in selected] == [2, 3]
+    assert [item["provenance"]["result_rank"] for item in selected] == [2]
 
 
 def test_medium_is_used_only_when_no_high_candidate_survives():
@@ -93,7 +93,36 @@ def test_medium_is_used_only_when_no_high_candidate_survives():
         image_query="T1 team photo",
     )
 
-    assert [item["provenance"]["result_rank"] for item in selected] == [1, 3]
+    assert [item["provenance"]["result_rank"] for item in selected] == [1]
+
+
+def test_a_figure_call_offers_exactly_one_image():
+    """A turn gets one image search (ResearchBudget.reserve_image_search), so
+    every picture in an answer comes from a single query. Taking the top two of
+    one query therefore yields two versions of the same subject — which is what
+    put two near-identical gameplay screenshots in one answer. Distinct subjects
+    need distinct queries, not a deeper slice of one.
+    """
+    selected = select_brave_candidates(
+        _payload([("high", 1), ("high", 2), ("high", 3), ("high", 4)]),
+        image_query="T1 team photo",
+    )
+
+    assert len(selected) == 1
+
+
+def test_the_per_answer_image_cap_does_not_widen_a_single_call(monkeypatch):
+    """rich_auto_place_max_images bounds the whole answer and the inventory. It
+    was being reused as the per-call slice, so raising the answer ceiling
+    silently deepened one query instead of allowing another subject."""
+    monkeypatch.setattr(image_discovery_flow.settings, "rich_auto_place_max_images", 4)
+
+    selected = select_brave_candidates(
+        _payload([("high", 1), ("high", 2), ("high", 3), ("high", 4)]),
+        image_query="T1 team photo",
+    )
+
+    assert len(selected) == 1
 
 
 def test_later_high_confidence_candidate_wins_past_builder_cap(monkeypatch):
@@ -108,7 +137,10 @@ def test_later_high_confidence_candidate_wins_past_builder_cap(monkeypatch):
     assert [item["provenance"]["result_rank"] for item in selected] == [9]
 
 
-def test_figure_deduplicates_originals_before_cap_and_backfills_next_rank(monkeypatch):
+def test_figure_deduplicates_originals_before_choosing(monkeypatch):
+    """Deduplication still runs ahead of the pick: when the top result is a
+    repeat of an earlier original it must not consume the single figure slot.
+    Here rank 1 and rank 2 share an original, so rank 1 is the one offered."""
     monkeypatch.setattr(image_discovery_flow.settings, "rich_auto_place_max_images", 2)
     payload = json.loads(_payload([("high", 1), ("high", 2), ("high", 3)]))
     payload["images"][1]["original_image_url"] = payload["images"][0][
@@ -120,7 +152,7 @@ def test_figure_deduplicates_originals_before_cap_and_backfills_next_rank(monkey
         image_query="T1 team photo",
     )
 
-    assert [item["provenance"]["result_rank"] for item in selected] == [1, 3]
+    assert [item["provenance"]["result_rank"] for item in selected] == [1]
 
 
 @pytest.mark.parametrize("confidence", ["low", "", "unknown"])

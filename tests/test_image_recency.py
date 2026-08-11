@@ -252,9 +252,9 @@ async def test_a_news_topic_alone_declares_no_window():
     """``topic`` states what kind of source to search, not how recent the answer
     must be. Inventing a window from it guessed at the user's intent, and a
     guessed cutoff silently discards images nobody asked to exclude."""
+    # rank 1 was crawled 120 days ago and rank 2 yesterday. With no window the
+    # stale one is simply the best result and wins; a declared window is what
+    # drops it, as the sibling test above shows.
     selected = await _research(topic="news")
 
-    assert _urls(selected) == [
-        "https://imgs.search.brave.com/thumb-1.webp",
-        "https://imgs.search.brave.com/thumb-2.webp",
-    ]
+    assert _urls(selected) == ["https://imgs.search.brave.com/thumb-1.webp"]

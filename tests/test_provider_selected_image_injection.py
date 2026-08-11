@@ -147,9 +147,10 @@ async def test_medium_confidence_is_the_fallback_when_high_is_absent():
         brave_payload=_brave_payload("low", "medium", "medium")
     )
 
+    # rank 1 is low-confidence and rejected outright, so the medium tier
+    # supplies the single figure.
     assert [item["payload"]["url"] for item in selected] == [
         "https://imgs.search.brave.com/thumb-2.webp",
-        "https://imgs.search.brave.com/thumb-3.webp",
     ]
 
 
