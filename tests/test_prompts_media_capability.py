@@ -21,9 +21,18 @@ TAXONOMY_WORDS = ("architecture", "fashion", "cuisine", "brutalist", "gothic")
 
 
 def test_snippet_defined_once_and_compact():
+    """The bound guards against unbounded growth, not against content.
+
+    It was 1700 while the snippet was purely mechanical. It has since taken on
+    two load-bearing behaviours — the recency qualifier in image_query, which is
+    the only way to ask Brave for a current picture, and the statement that
+    web_research is the sole path an image can take. Redundancy was trimmed
+    twice to absorb them; the remaining growth is meaning, so the bound moves
+    rather than the prose.
+    """
     snippet = prompts.MEDIA_CAPABILITY_SNIPPET
     assert "Media and visuals:" in snippet
-    assert len(snippet) < 1700, "media snippet must stay compact — do not bloat prompts"
+    assert len(snippet) < 1900, "media snippet must stay compact — do not bloat prompts"
 
 
 def test_snippet_uses_available_ids_only_and_forbids_invention():
@@ -40,7 +49,8 @@ def test_snippet_uses_available_ids_only_and_forbids_invention():
 def test_media_guidance_describes_automatic_visual_enrichment_without_taxonomy():
     snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
 
-    assert "automatically considers" in snippet
+    assert "considers a provider-native image" in snippet
+    assert "every call" in snippet
     assert "skip_images" in snippet
     assert "product, device" not in snippet
     assert "code, math" not in snippet
@@ -89,6 +99,40 @@ def test_image_query_guidance_covers_subjects_whose_look_changes():
     assert "image_query" in snippet
     assert "year" in snippet
     assert "current" in snippet
+
+
+def test_research_tool_leads_with_both_of_the_jobs_it_does():
+    """A model deciding whether to call a tool reads its description first. The
+    description opened by promising sources to synthesize, so a question the
+    model could already answer ("pokemon unite là gì") resolved to "no sources
+    needed" and the only image path in the product was never entered. The
+    picture job has to be in the opening line, not the third paragraph.
+    """
+    from app.ai.web_research_tool import _DESCRIPTION
+
+    opening = _DESCRIPTION.split("\n\n")[0].lower()
+
+    assert "image" in opening
+    assert "already know" in opening
+
+
+def test_media_guidance_names_the_tool_before_saying_there_is_no_inventory():
+    """On a turn that has called nothing, the inventory is always absent — so
+    "no rich items this turn" is the first thing the model reads about media
+    unless acquisition comes first. Stating the dead end before the way out
+    reads as a capability limit."""
+    snippet = prompts.MEDIA_CAPABILITY_SNIPPET
+
+    assert snippet.index("web_research") < snippet.index("no rich items")
+
+
+def test_media_guidance_never_tells_the_model_not_to_ask_for_pictures():
+    """"you never ask for pictures" was meant as "there is no separate image
+    tool". It reads as an instruction to stay passive about images."""
+    snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
+
+    assert "never ask for pictures" not in snippet
+    assert "you never ask" not in snippet
 
 
 def test_web_research_tool_description_covers_the_same_recency_lever():

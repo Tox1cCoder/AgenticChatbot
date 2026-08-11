@@ -59,11 +59,19 @@ def _drop_stale(
     if window_days is None:
         return candidates
     cutoff = datetime.now(UTC) - timedelta(days=window_days)
-    return [
-        candidate
-        for candidate in candidates
-        if (crawled := _crawled_at(candidate)) is None or crawled >= cutoff
-    ]
+    fresh: list[dict[str, Any]] = []
+    for candidate in candidates:
+        crawled = _crawled_at(candidate)
+        with suppress(Exception):
+            rich_image_metrics.record_crawl_date(known=crawled is not None)
+        if crawled is not None and crawled < cutoff:
+            with suppress(Exception):
+                rich_image_metrics.record_candidate(
+                    provider="brave", outcome="rejected_stale"
+                )
+            continue
+        fresh.append(candidate)
+    return fresh
 
 
 def _object_payload(raw: str) -> dict[str, Any]:

@@ -32,8 +32,12 @@ def test_brave_image_search_defaults(monkeypatch):
     monkeypatch.delenv("BRAVE_IMAGE_SEARCH_DEFAULT_SAFESEARCH", raising=False)
     settings = _settings()
     assert settings.brave_search_api_key == ""
-    assert settings.brave_image_search_default_count == 6
-    assert settings.brave_image_search_max_count == 10
+    # Widened deliberately: confidence tiering, the recency window and
+    # deduplication all cut this pool before two survivors are chosen, and the
+    # results never reach the model, so extra results cost one response body and
+    # no tokens.
+    assert settings.brave_image_search_default_count == 12
+    assert settings.brave_image_search_max_count == 20
     assert settings.brave_image_search_timeout_seconds == pytest.approx(2.5)
     assert settings.brave_image_search_default_safesearch == "strict"
 

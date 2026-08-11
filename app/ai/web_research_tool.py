@@ -26,8 +26,11 @@ from .tool_scope import is_client_only_scope
 logger = logging.getLogger(__name__)
 
 _DESCRIPTION = (
-    "Research the web. Returns ranked sources with URLs and relevant content for you "
-    "to synthesize into the final answer.\n\n"
+    "Research the web and find a picture of the subject. Returns ranked sources with "
+    "URLs and relevant content to synthesize into the answer, and separately offers a "
+    "provider-selected image. This is the only way an image reaches the answer, so "
+    "call it when the reader would benefit from seeing the subject even if you already "
+    "know the facts and need no sources.\n\n"
     "Use topic='news' for current events. Set time_range only when the user "
     "explicitly requests a recency window. time_range also bounds the picture: "
     "inside a declared window, an image whose page was last crawled before it is "

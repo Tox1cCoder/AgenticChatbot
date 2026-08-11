@@ -15,6 +15,7 @@ _CANDIDATE_OUTCOMES = {
     "rejected_dimensions",
     "rejected_aspect_ratio",
     "rejected_junk_url",
+    "rejected_stale",
 }
 _ANCHOR_OUTCOMES = {"marker", "query_anchored", "fallback_anchored", "unplaced"}
 _REGISTRATION_OUTCOMES = {"registered", "reused", "skipped_scheme", "failed"}
@@ -100,6 +101,14 @@ class RichImageMetrics:
             ("provider", "outcome"),
             registry=self.registry,
         )
+        self.crawl_dates = Counter(
+            "rich_image_crawl_dates_total",
+            "Whether a discovered image carried a provider crawl date. Brave does "
+            "not document page_fetched, so coverage decides whether the recency "
+            "window is doing anything at all.",
+            ("known",),
+            registry=self.registry,
+        )
         self.discovery_outcomes = Counter(
             "rich_image_discovery_outcome_total",
             "Terminal outcome of the native image discovery path.",
@@ -160,6 +169,10 @@ class RichImageMetrics:
         }
         self.fetches.labels(**labels).inc()
         self.fetch_duration.labels(**labels).observe(max(0.0, float(duration_seconds)))
+
+    def record_crawl_date(self, *, known: bool) -> None:
+        """Record whether one discovered image carried a usable crawl date."""
+        self.crawl_dates.labels(known="true" if known else "false").inc()
 
     def record_discovery_outcome(self, *, outcome: str, duration_seconds: float) -> None:
         label = _bounded(outcome, _DISCOVERY_OUTCOMES)

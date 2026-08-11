@@ -528,7 +528,9 @@ def test_tool_description_assigns_synthesis_and_recency_controls_to_the_model():
     description = _tool(None, None).description.lower()
 
     assert "ranked sources" in description
-    assert "for you to synthesize" in description
+    # Synthesis is the model's job, not the tool's — however the sentence is
+    # phrased. The tool returns material; it never returns a finished answer.
+    assert "to synthesize" in description
     assert "returns a synthesized answer" not in description
     assert "topic='news'" in description
     assert "current events" in description

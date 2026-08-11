@@ -25,29 +25,38 @@ INLINE_RICH_RESPONSE_SUFFIX = (
     "marker appears in the response. Do not mention hidden candidates."
 )
 
+_MEDIA_HEADER = """
+
+Media and visuals:"""
+
 # Marker mechanics only — true for every answering agent, including the ones
 # that cannot reach the network. Widgets are rich items too, so an agent with no
 # image path still needs this to place what it created.
-RICH_PLACEMENT_SNIPPET = """
-
-Media and visuals:
-- Place rich items with `<!--rich:<id>-->`, copying an ID exactly from this turn's "AVAILABLE RICH ITEMS" list. Never invent an ID or an image URL, or build one from a title or topic. No such list means you have no rich items this turn — answer without a marker.
+#
+# These bullets come last for an agent that can research: the inventory is
+# always absent on a turn that has called nothing, so leading with "you have no
+# rich items" states the dead end before the way out of it.
+_PLACEMENT_BULLETS = """
+- Place rich items with `<!--rich:<id>-->`, copying an ID exactly from this turn's "AVAILABLE RICH ITEMS" list. Never invent an ID or an image URL, or build one from a title or topic. A turn that called nothing has no rich items and no list — answer without a marker, or go get one.
 - At most two image items per answer (a gallery counts as one), near the text they support; keep the prose useful without them."""
+
+RICH_PLACEMENT_SNIPPET = _MEDIA_HEADER + _PLACEMENT_BULLETS
 
 # ``web_research`` is an internal tool bound only for the chat and search agents
 # (see BaseAgent._get_bound_tools) and internal tools are invisible to
 # ``tool_search``, so an agent that never binds it must not be told to call it.
 WEB_RESEARCH_MEDIA_SNIPPET = """
-- Research the web with `web_research`; it automatically considers provider-native image selections, so you never ask for pictures.
+- `web_research` is the only path an image can take to the answer, and it considers a provider-native image on every call. Reaching for it is how you show something — not a step reserved for when you need sources.
 - For current events use `topic="news"`, adding `time_range` only when the requested recency is clear; `topic="finance"` for market and company news. Leave both unset for general factual research.
 - Set `image_query` only to sharpen the visual subject: one concrete subject, a disambiguator when context implies one (company vs fruit), a form word when it matters (`photo`, `diagram`, `map`), and the year or version when what matters is how the subject looks now — the provider has no recency filter, so those words are the only way to ask for a current picture. No question words.
 - Set `skip_images=true` only when a visual cannot support the answer. Never add media as decoration.
 - Add `image_intent="gallery"` when the user asks to see or compare several instances — a roster, a set of logos, colour options. Leave it unset otherwise; never state a count. A gallery arrives as one grid item with one marker.
-- Only images selected by provider-native discovery reach you; many turns yield none, which is normal. Never claim an image that is not listed, and never tell the user you are unable to show images — you can. Say you found no suitable one."""
+- Only images selected by provider-native discovery reach you; many calls yield none, which is normal. Never claim an image that is not listed, and never tell the user you are unable to show images — you can. Say you found no suitable one."""
 
-# The block for agents that bind ``web_research``: placement mechanics plus the
-# research controls that produce image candidates in the first place.
-MEDIA_CAPABILITY_SNIPPET = RICH_PLACEMENT_SNIPPET + WEB_RESEARCH_MEDIA_SNIPPET
+# The block for agents that bind ``web_research``: how a visual is acquired
+# first, then how it is placed. A RAG agent, which has no research tool, gets
+# RICH_PLACEMENT_SNIPPET alone.
+MEDIA_CAPABILITY_SNIPPET = _MEDIA_HEADER + WEB_RESEARCH_MEDIA_SNIPPET + _PLACEMENT_BULLETS
 
 # Kept separate from the mechanics above on purpose: this block answers "is a
 # visual worth having here", the media snippet answers "how do I place one".

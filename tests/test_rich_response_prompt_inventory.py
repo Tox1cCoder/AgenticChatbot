@@ -264,7 +264,10 @@ def test_media_guidance_never_requires_the_user_to_ask_for_images():
 
     text = MEDIA_CAPABILITY_SNIPPET.lower()
     assert "web_research" in text
-    assert "automatically considers" in text
+    # An image is attempted on every call rather than gated on the model
+    # recognising a visual topic. Any phrasing that says so satisfies this.
+    assert "considers a provider-native image" in text
+    assert "every call" in text
     # Opting out is the only decision left to the model.
     assert "skip_images" in text
     # The precision counterweight must survive alongside the automatic trigger.

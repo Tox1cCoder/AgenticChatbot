@@ -139,6 +139,53 @@ def test_a_stale_high_confidence_result_yields_to_a_fresh_lower_tier_one():
 
 
 # ---------------------------------------------------------------------------
+# Measurability: both halves of this feature are invisible without it
+# ---------------------------------------------------------------------------
+def test_a_staleness_drop_is_counted(monkeypatch):
+    """A filter nobody can see firing is indistinguishable from a filter that
+    never fires."""
+    from app.ai import image_discovery_flow
+
+    recorded: list[dict] = []
+    monkeypatch.setattr(
+        image_discovery_flow.rich_image_metrics,
+        "record_candidate",
+        lambda **kwargs: recorded.append(kwargs),
+    )
+
+    select_brave_candidates(
+        _payload(_image(1, page_fetched=_iso(90))),
+        image_query="stadium photo",
+        time_range="week",
+    )
+
+    assert {"provider": "brave", "outcome": "rejected_stale"} in recorded
+
+
+def test_crawl_date_coverage_is_counted(monkeypatch):
+    """Brave does not document page_fetched, so how often it arrives is an
+    open question. Until it is counted, the recency window cannot be told
+    apart from a no-op."""
+    from app.ai import image_discovery_flow
+
+    recorded: list[dict] = []
+    monkeypatch.setattr(
+        image_discovery_flow.rich_image_metrics,
+        "record_crawl_date",
+        lambda **kwargs: recorded.append(kwargs),
+        raising=False,
+    )
+
+    select_brave_candidates(
+        _payload(_image(1, page_fetched=_iso(1)), _image(2)),
+        image_query="stadium photo",
+        time_range="week",
+    )
+
+    assert recorded == [{"known": True}, {"known": False}]
+
+
+# ---------------------------------------------------------------------------
 # The scope actually reaching discovery
 # ---------------------------------------------------------------------------
 class _Tool:

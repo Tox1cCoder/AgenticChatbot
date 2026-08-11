@@ -294,11 +294,17 @@ class Settings(BaseSettings):
 
     # Brave Image Search budget/safety limits (operational, not behavior hardcoding)
     brave_image_search_default_count: int = Field(
-        default=6,
-        description="Default number of image results requested from Brave Image Search.",
+        default=12,
+        description=(
+            "Default number of image results requested from Brave Image Search. "
+            "Confidence tiering, the recency window and deduplication all cut this "
+            "pool before two survivors are chosen, so a thin pool collapses to none. "
+            "Results are private to the server and never reach the model, so a larger "
+            "pool costs one response body and no tokens."
+        ),
     )
     brave_image_search_max_count: int = Field(
-        default=10,
+        default=20,
         description="Hard cap on image results returned per Brave Image Search call.",
     )
     brave_image_search_timeout_seconds: float = Field(
