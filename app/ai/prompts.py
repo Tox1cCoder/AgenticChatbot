@@ -37,6 +37,22 @@ Media and visuals:
 - Only images selected by provider-native discovery reach you; many turns yield none, which is normal. Never claim an image exists that is not listed, and never tell the user you are unable to show images — you can. Say you found no suitable one.
 - At most two image items per answer (a gallery counts as one), near the text they support; keep the prose useful without them."""
 
+# Kept separate from the mechanics above on purpose: this block answers "is a
+# visual worth having here", the media snippet answers "how do I place one".
+# Both ride on every answering prompt, so the widget-capable agents (chat, rag,
+# search) share one decision procedure instead of chat owning it alone.
+VISUAL_STRATEGY_SNIPPET = """
+
+Show, don't only tell:
+- Before writing, ask what the reader needs to see. A visual earns its place when it does work prose cannot: what something looks like, how its parts fit together, how a quantity moves as conditions change, or how two things differ side by side.
+- Wanting to show something is reason enough to go and get it — research for a visual even when you already know the facts and need no sources, or open a document's own figures when the answer is grounded there. Answering straight from memory is the usual reason a good explanation ends up with nothing to look at.
+- A fetched image needs a concrete subject someone could photograph or draw. Abstract ideas and general scene-setting have none, so leave the image out rather than illustrate the topic at large.
+- Build a live widget when the subject has moving parts the reader could set or watch: parameters that drive an outcome, a process that unfolds, a system that reacts. When turning a knob would teach more than another paragraph, build it instead of writing the paragraph.
+- Stay in prose for a fact, a definition, a short list, a single computed number, a judgement call, or writing the user asked you to produce. Many good answers carry no visual at all; that is a normal answer, not a failure.
+- Whatever you show, the prose stands on its own, the visual sits beside what it supports, and one line tells the reader what to notice in it.
+- A live widget is a self-contained HTML micro-app in a sandboxed iframe: responsive inline CSS and vanilla JavaScript, no external dependencies, no network calls, everything inside the one `html` document. Give it something to do — animation or manipulable state, sliders for the parameters that matter, live readouts, a canvas/SVG/DOM drawing when it clarifies — and label it in the user's language.
+- Pass widget `initial_state` / `state` as one native object with self-contained `html` and a numeric `height`; never serialize it as a JSON string or wrap it in Markdown. Keep widgets bounded in-chat aids; standalone sites and multi-page apps belong to `canvas_agent`."""
+
 
 def build_rich_response_guidance(
     *,
@@ -126,14 +142,6 @@ When using tools:
 - If one tool result suggests another would help, chain them together
 - Synthesize all tool results into coherent, comprehensive responses
 - Don't repeat identical tool calls with the same arguments in a single turn
-- Live widgets are self-contained HTML micro-apps rendered in a sandboxed iframe. Reach for one whenever showing beats telling: motion, changing variables, systems, physics, math, processes, or any "show how it works" explanation
-- Lean toward a widget when a concept has something to animate, manipulate, or watch update live; lean on prose alone when the question is abstract, conversational, or already short
-- Build the micro-app to be explored: animation or manipulable visual state, sliders or controls for the key parameters, live numeric readouts, and a canvas/SVG/DOM diagram or graph when it helps. Label everything in the user's language
-- Use responsive inline CSS and vanilla JavaScript with no external dependencies, no auth assumptions, and no cross-window requirements — the whole experience lives inside the single `html` document
-- Place the widget marker `<!--rich:widget:<id>-->` near the paragraph it supports, and keep the surrounding prose useful on its own — the widget should amplify, not replace, the explanation
-- Pass widget `initial_state` / `state` as one native object with self-contained `html` and numeric `height`; never serialize it as a JSON string or wrap it in Markdown
-- Example — explaining harmonic oscillation: animate the oscillator position `x(t)`, draw a time graph of displacement, expose sliders for amplitude, angular frequency, and phase, add pause/reset controls, and show live values for time and displacement (label it in Vietnamese when the user writes in Vietnamese)
-- Keep widgets bounded in-chat micro experiences; full websites and multi-page apps belong in `canvas_agent`
 
 Critical:
 - Do NOT give shallow, one-sentence responses unless the question truly warrants brevity
@@ -141,6 +149,7 @@ Critical:
 - Do NOT ignore tool results - meaningfully incorporate them into your answer
 - Always respond in the same language the user is using
 - If you cannot help, explain why clearly and suggest alternatives"""
+    + VISUAL_STRATEGY_SNIPPET
     + MEDIA_CAPABILITY_SNIPPET
 )
 
@@ -174,6 +183,7 @@ Constraints:
 - ALWAYS cite sources for every factual claim
 - For calculations on document data, show your work step-by-step
 - Match the user's language exactly"""
+    + VISUAL_STRATEGY_SNIPPET
     + MEDIA_CAPABILITY_SNIPPET
 )
 
@@ -232,6 +242,7 @@ Critical:
 - Follow cross-references by backtracking when discovered
 - Cite every factual claim with source and location
 - Match the user's language"""
+    + VISUAL_STRATEGY_SNIPPET
     + MEDIA_CAPABILITY_SNIPPET
 )
 
@@ -294,6 +305,7 @@ Constraints:
 - ALWAYS extract title and url from search results and format as [Title](URL)
 - ACKNOWLEDGE when sources conflict or information is uncertain
 - Match the user's language"""
+    + VISUAL_STRATEGY_SNIPPET
     + MEDIA_CAPABILITY_SNIPPET
 )
 
@@ -528,6 +540,7 @@ RESPONSE FORMAT:
 - Support claims with evidence from the tool results
 
 LANGUAGE: Match the user's language."""
+    + VISUAL_STRATEGY_SNIPPET
     + MEDIA_CAPABILITY_SNIPPET
 )
 
