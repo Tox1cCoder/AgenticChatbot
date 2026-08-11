@@ -70,8 +70,23 @@ async def widget_create(
     - live numeric readouts
     - canvas, SVG, or DOM diagrams/graphs when useful
     - labels and captions in the user's language
-    - responsive inline CSS and vanilla JavaScript, with no external
-      dependencies, no auth assumptions, and no cross-window requirements
+    - responsive inline CSS, with no auth assumptions and no cross-window
+      requirements
+
+    Vanilla JavaScript covers most widgets. When the subject genuinely calls for
+    more, load one focused library from a public CDN with a plain
+    `<script src="...">` tag — for example Matter.js for rigid-body physics,
+    Three.js for a 3D scene, D3 for axes and scales over a dataset, Math.js for
+    symbolic or matrix math, Anime.js for tweened motion. Prefer one library over
+    three, and prefer a hand-drawn canvas over a library that only saves you a
+    few lines.
+
+    The iframe is sandboxed without same-origin privileges, so the document has
+    no localStorage, sessionStorage, cookies, or access to the surrounding app,
+    and it cannot call this app's APIs. Anything it needs must be inline or
+    CDN-hosted. Guard startup — a `window.onerror` handler or a check that the
+    library's global is defined — so a CDN that fails to answer leaves a readable
+    message rather than an empty box.
 
     Place the widget's `<!--rich:widget:<id>-->` marker near the paragraph it
     supports so it reads like an inline figure in an article.

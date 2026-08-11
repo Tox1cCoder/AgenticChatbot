@@ -79,6 +79,34 @@ def test_all_answer_prompts_carry_media_capability():
         assert "AVAILABLE RICH ITEMS" in prompt
 
 
+def test_rag_prompts_omit_research_controls_they_cannot_use():
+    """``web_research`` is internal and bound only for the chat and search agents,
+    and internal tools never surface through ``tool_search`` — so naming it in a
+    RAG prompt advertises a tool that agent can never call."""
+    for prompt in (prompts.RAG_SYSTEM_PROMPT, prompts.AGENTIC_RAG_SYSTEM_PROMPT):
+        assert "web_research" not in prompt
+        assert "skip_images" not in prompt
+        assert "image_intent" not in prompt
+
+
+def test_research_capable_prompts_keep_research_controls():
+    for prompt in (
+        prompts.CHAT_SYSTEM_PROMPT,
+        prompts.SEARCH_SYSTEM_PROMPT,
+        prompts.SEARCH_WITH_RESULTS_SYSTEM_PROMPT,
+    ):
+        assert "web_research" in prompt
+        assert "skip_images" in prompt
+
+
+def test_placement_mechanics_reach_every_answer_prompt():
+    """Widgets are rich items too, so an agent with no image path still needs the
+    marker contract to place what it built."""
+    for prompt in ANSWER_PROMPTS:
+        assert "<!--rich:<id>-->" in prompt
+        assert "Never invent an ID" in prompt
+
+
 def test_non_answer_prompts_unchanged():
     for prompt in (
         prompts.ROUTER_SYSTEM_PROMPT,

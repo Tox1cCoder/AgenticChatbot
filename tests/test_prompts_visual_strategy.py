@@ -19,12 +19,14 @@ ANSWER_PROMPTS = (
 )
 
 # Words that would signal visual routing hardcoded to subject matter rather than
-# to what the reader needs to see.
-TAXONOMY_WORDS = ("physics", "chemistry", "biology", "anatomy", "recipe", "sports")
+# to what the reader needs to see. Capability words a library is chosen by
+# ("physics", "math") are deliberately absent: those describe what the widget has
+# to do, not a school subject the answer belongs to.
+TAXONOMY_WORDS = ("chemistry", "biology", "anatomy", "recipe", "sports", "finance")
 
 
 def test_block_is_compact():
-    assert len(prompts.VISUAL_STRATEGY_SNIPPET) < 2400, (
+    assert len(prompts.VISUAL_STRATEGY_SNIPPET) < 2800, (
         "visual strategy block must stay compact — it rides on every answering prompt"
     )
 
@@ -74,6 +76,42 @@ def test_widget_guidance_reaches_every_widget_capable_agent():
 
 def test_widget_guidance_is_not_duplicated_in_the_chat_prompt():
     assert prompts.CHAT_SYSTEM_PROMPT.lower().count("micro-app") == 1
+
+
+def test_widget_library_guidance_stays_capability_keyed():
+    """Libraries are allowed, but chosen by what the widget must do — the prompt
+    must not name a library the model is expected to reach for by default."""
+    block = prompts.VISUAL_STRATEGY_SNIPPET.lower()
+
+    assert "vanilla javascript handles most widgets" in block
+    assert "public cdn" in block
+    for capability in ("physics", "3d scene", "axes and scales", "math", "tweened"):
+        assert capability in block, f"library guidance must name the need: {capability!r}"
+
+
+def test_prompt_states_the_sandbox_limits_that_break_libraries():
+    """The frame is sandboxed without same-origin, so storage-backed libraries
+    fail at runtime and an unreachable CDN renders an empty box."""
+    block = prompts.VISUAL_STRATEGY_SNIPPET.lower()
+
+    assert "no storage" in block
+    assert "fails to load" in block
+
+
+def test_widget_tool_description_carries_the_full_library_contract():
+    """The tool description is what the model reads while writing the html, so
+    the concrete named libraries and sandbox limits live there, not in every
+    system prompt."""
+    from app.ai.mcp_servers.widgets_server import widget_create
+
+    # Collapsed: the docstring is hard-wrapped, so phrases straddle line breaks.
+    doc = " ".join((widget_create.__doc__ or "").lower().split())
+
+    assert "public cdn" in doc
+    assert "matter.js" in doc
+    assert "three.js" in doc
+    assert "localstorage" in doc
+    assert "readable message" in doc
 
 
 def test_block_has_no_hardcoded_visual_topic_list():

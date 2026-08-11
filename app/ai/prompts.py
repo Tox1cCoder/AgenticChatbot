@@ -25,17 +25,29 @@ INLINE_RICH_RESPONSE_SUFFIX = (
     "marker appears in the response. Do not mention hidden candidates."
 )
 
-MEDIA_CAPABILITY_SNIPPET = """
+# Marker mechanics only — true for every answering agent, including the ones
+# that cannot reach the network. Widgets are rich items too, so an agent with no
+# image path still needs this to place what it created.
+RICH_PLACEMENT_SNIPPET = """
 
 Media and visuals:
 - Place rich items with `<!--rich:<id>-->`, copying an ID exactly from this turn's "AVAILABLE RICH ITEMS" list. Never invent an ID or an image URL, or build one from a title or topic. No such list means you have no rich items this turn — answer without a marker.
+- At most two image items per answer (a gallery counts as one), near the text they support; keep the prose useful without them."""
+
+# ``web_research`` is an internal tool bound only for the chat and search agents
+# (see BaseAgent._get_bound_tools) and internal tools are invisible to
+# ``tool_search``, so an agent that never binds it must not be told to call it.
+WEB_RESEARCH_MEDIA_SNIPPET = """
 - Research the web with `web_research`. It automatically considers provider-native image selections, so you never have to ask for pictures.
 - For current events, use `topic="news"` and add `time_range` only when the requested recency is clear. Use `topic="finance"` for market and company financial news. Leave both unset for general factual research.
 - Set `image_query` only to make the visual subject more precise than your factual query: one concrete subject, a disambiguator when context implies one (company vs fruit), and a form word when it matters (`photo`, `diagram`, `map`). No question words.
 - Set `skip_images=true` only when a visual cannot support the answer. Never add media as decoration.
 - Add `image_intent="gallery"` when the user asks to see several instances or to compare things — a roster, a set of logos, colour options. Leave it unset otherwise. Never ask for a number of images: the layout decides the count. A gallery arrives as one grid item with a single marker.
-- Only images selected by provider-native discovery reach you; many turns yield none, which is normal. Never claim an image exists that is not listed, and never tell the user you are unable to show images — you can. Say you found no suitable one.
-- At most two image items per answer (a gallery counts as one), near the text they support; keep the prose useful without them."""
+- Only images selected by provider-native discovery reach you; many turns yield none, which is normal. Never claim an image exists that is not listed, and never tell the user you are unable to show images — you can. Say you found no suitable one."""
+
+# The block for agents that bind ``web_research``: placement mechanics plus the
+# research controls that produce image candidates in the first place.
+MEDIA_CAPABILITY_SNIPPET = RICH_PLACEMENT_SNIPPET + WEB_RESEARCH_MEDIA_SNIPPET
 
 # Kept separate from the mechanics above on purpose: this block answers "is a
 # visual worth having here", the media snippet answers "how do I place one".
@@ -50,7 +62,8 @@ Show, don't only tell:
 - Build a live widget when the subject has moving parts the reader could set or watch: parameters that drive an outcome, a process that unfolds, a system that reacts. When turning a knob would teach more than another paragraph, build it instead of writing the paragraph.
 - Stay in prose for a fact, a definition, a short list, a single computed number, a judgement call, or writing the user asked you to produce. Many good answers carry no visual at all; that is a normal answer, not a failure.
 - Whatever you show, the prose stands on its own, the visual sits beside what it supports, and one line tells the reader what to notice in it.
-- A live widget is a self-contained HTML micro-app in a sandboxed iframe: responsive inline CSS and vanilla JavaScript, no external dependencies, no network calls, everything inside the one `html` document. Give it something to do — animation or manipulable state, sliders for the parameters that matter, live readouts, a canvas/SVG/DOM drawing when it clarifies — and label it in the user's language.
+- A live widget is a self-contained HTML micro-app in a sandboxed iframe: one `html` document, responsive inline CSS, its own JavaScript, labelled in the user's language. Give it something to do — animation or manipulable state, sliders for the parameters that matter, live readouts, a canvas/SVG/DOM drawing when it clarifies.
+- Vanilla JavaScript handles most widgets. When the subject genuinely needs more — rigid-body physics, a 3D scene, real axes and scales over a dataset, symbolic or matrix math, tweened motion — pull one focused library from a public CDN with a plain script tag and build on it rather than reimplementing it badly. The frame has no storage, no cookies, and no access to this app; guard startup so a library that fails to load leaves a readable message instead of an empty box.
 - Pass widget `initial_state` / `state` as one native object with self-contained `html` and a numeric `height`; never serialize it as a JSON string or wrap it in Markdown. Keep widgets bounded in-chat aids; standalone sites and multi-page apps belong to `canvas_agent`."""
 
 
@@ -184,7 +197,7 @@ Constraints:
 - For calculations on document data, show your work step-by-step
 - Match the user's language exactly"""
     + VISUAL_STRATEGY_SNIPPET
-    + MEDIA_CAPABILITY_SNIPPET
+    + RICH_PLACEMENT_SNIPPET
 )
 
 AGENTIC_RAG_SYSTEM_PROMPT = (
@@ -243,7 +256,7 @@ Critical:
 - Cite every factual claim with source and location
 - Match the user's language"""
     + VISUAL_STRATEGY_SNIPPET
-    + MEDIA_CAPABILITY_SNIPPET
+    + RICH_PLACEMENT_SNIPPET
 )
 
 SEARCH_SYSTEM_PROMPT = (
