@@ -288,13 +288,16 @@ async def test_concurrent_matching_queries_share_one_tavily_reservation():
 
 
 @pytest.mark.asyncio
-async def test_concurrent_research_calls_share_one_brave_reservation():
+async def test_concurrent_calls_for_one_subject_share_a_brave_reservation():
+    """Slots are per visual subject, so the race that matters is two concurrent
+    claims on the *same* subject: a bare check-then-claim would let both through
+    and put the same picture in the answer twice."""
     brave = _FakeTool("brave_image_search", _brave_payload(), delay=0.05)
     tool = _tool(_FakeTool("tavily_search", TAVILY_PAYLOAD, delay=0.05), brave)
 
     await asyncio.gather(
         _run(tool, query="T1 roster 2026", image_query="T1 team photo"),
-        _run(tool, query="Gen.G roster 2026", image_query="Gen.G team photo"),
+        _run(tool, query="Gen.G roster 2026", image_query="T1 team photo"),
     )
 
     assert brave.calls == [{"query": "T1 team photo"}]
@@ -325,15 +328,17 @@ async def test_different_tavily_controls_do_not_reuse_the_same_query():
 
 
 @pytest.mark.asyncio
-async def test_second_image_query_reuses_the_first_selected_images():
+async def test_a_second_visual_subject_gets_its_own_search():
+    """The turn used to hold a single image slot, so a second subject silently
+    returned the first subject's picture. An answer decides how many distinct
+    visuals it needs; each one is its own request."""
     brave = _FakeTool("brave_image_search", _brave_payload())
     tool = _tool(_FakeTool("tavily_search", TAVILY_PAYLOAD), brave)
 
-    _, first = await _run(tool, query="T1 roster 2026", image_query="T1 team photo")
-    _, second = await _run(tool, query="T1 sponsors 2026", image_query="T1 jersey photo")
+    await _run(tool, query="T1 roster 2026", image_query="T1 team photo")
+    await _run(tool, query="T1 sponsors 2026", image_query="T1 jersey photo")
 
-    assert len(brave.calls) == 1
-    assert [item["id"] for item in second] == [item["id"] for item in first]
+    assert brave.calls == [{"query": "T1 team photo"}, {"query": "T1 jersey photo"}]
 
 
 @pytest.mark.asyncio

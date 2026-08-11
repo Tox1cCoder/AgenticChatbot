@@ -275,12 +275,15 @@ def test_media_guidance_never_requires_the_user_to_ask_for_images():
 
 
 def test_recency_guidance_preserves_text_independence_from_images():
+    """Recency controls belong to the tool description; the prompt keeps the
+    rule that the prose has to stand without the picture."""
     from app.ai.prompts import MEDIA_CAPABILITY_SNIPPET
+    from app.ai.web_research_tool import _DESCRIPTION
 
-    text = MEDIA_CAPABILITY_SNIPPET.lower()
-    assert 'topic="news"' in text
-    assert "time_range" in text
-    assert "without them" in text
+    description = _DESCRIPTION.lower()
+    assert "topic='news'" in description
+    assert "time_range" in description
+    assert "without them" in MEDIA_CAPABILITY_SNIPPET.lower()
 
 
 # ---------------------------------------------------------------------------

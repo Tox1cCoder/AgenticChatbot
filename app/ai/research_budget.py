@@ -61,9 +61,10 @@ class ResearchBudget:
 
     max_search_calls: int = 2
     near_duplicate_threshold: float = 0.75
+    max_image_searches: int = 1
     _searches: list[tuple[frozenset[str], SearchScope, str]] = field(default_factory=list)
     _in_flight: list[tuple[frozenset[str], SearchScope]] = field(default_factory=list)
-    _image_searched: bool = False
+    _image_searches: list[frozenset[str]] = field(default_factory=list)
     _image_candidates: list[dict[str, Any]] = field(default_factory=list)
     _instance_lock: threading.Lock = field(
         default_factory=threading.Lock, repr=False, compare=False
@@ -141,21 +142,37 @@ class ResearchBudget:
 
     def may_image_search(self) -> bool:
         with self._instance_lock:
-            return not self._image_searched
+            return len(self._image_searches) < max(1, int(self.max_image_searches))
 
-    def reserve_image_search(self) -> bool:
-        """Atomically claim the turn's single image-discovery slot."""
+    def reserve_image_search(self, image_query: str) -> bool:
+        """Atomically claim an image-discovery slot for one visual subject.
+
+        An answer may want more than one picture — a thing's own identity art
+        and a shot of it in use are different subjects — so slots are per
+        subject rather than per turn. A repeat of a subject already searched is
+        refused: it would return the same picture again, which is what a deeper
+        slice of one query already did.
+
+        Like ``reserve_search``, the slot is consumed on claim, so a provider
+        failure does not buy a second attempt inside the same turn.
+        """
 
         with self._instance_lock:
-            if self._image_searched:
+            tokens = normalize_query_tokens(image_query)
+            for searched in self._image_searches:
+                if searched == tokens or near_duplicate(
+                    searched, tokens, threshold=self.near_duplicate_threshold
+                ):
+                    return False
+            if len(self._image_searches) >= max(1, int(self.max_image_searches)):
                 return False
-            self._image_searched = True
+            self._image_searches.append(tokens)
             return True
 
     def record_image_search(self, candidates: list[dict[str, Any]]) -> None:
+        """Accumulate one search's selections alongside earlier subjects'."""
         with self._instance_lock:
-            self._image_searched = True
-            self._image_candidates = list(candidates)
+            self._image_candidates.extend(candidates)
 
     def image_result(self) -> list[dict[str, Any]]:
         with self._instance_lock:
@@ -180,6 +197,9 @@ def get_research_budget(conversation_id: str | None) -> ResearchBudget:
             budget = ResearchBudget(
                 max_search_calls=max(1, int(settings.research_max_search_calls_per_turn)),
                 near_duplicate_threshold=float(settings.research_near_duplicate_threshold),
+                max_image_searches=max(
+                    1, int(settings.research_max_image_searches_per_turn)
+                ),
             )
             _budgets[key] = budget
         _budgets.move_to_end(key)

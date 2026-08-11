@@ -38,7 +38,7 @@ Media and visuals:"""
 # rich items" states the dead end before the way out of it.
 _PLACEMENT_BULLETS = """
 - Place rich items with `<!--rich:<id>-->`, copying an ID exactly from this turn's "AVAILABLE RICH ITEMS" list. Never invent an ID or an image URL, or build one from a title or topic. A turn that called nothing has no rich items and no list — answer without a marker, or go get one.
-- One call offers one figure; a different second picture needs a second call with a different `image_query`. At most two per answer, near the text they support, and keep the prose useful without them."""
+- One call, one subject, one figure. Call again with the same `query` and a different `image_query` for each further subject the answer needs, and let the answer decide how many that is — introducing a thing often wants its identity art and a shot of it in use; a how-to usually wants the one screen being described. Place each near the text it supports, and keep the prose useful without them."""
 
 RICH_PLACEMENT_SNIPPET = _MEDIA_HEADER + _PLACEMENT_BULLETS
 
@@ -47,10 +47,8 @@ RICH_PLACEMENT_SNIPPET = _MEDIA_HEADER + _PLACEMENT_BULLETS
 # ``tool_search``, so an agent that never binds it must not be told to call it.
 WEB_RESEARCH_MEDIA_SNIPPET = """
 - `web_research` is the only path an image can take to the answer, and it considers a provider-native image on every call. Reaching for it is how you show something — not a step reserved for when you need sources.
-- For current events use `topic="news"`, adding `time_range` only when the requested recency is clear; `topic="finance"` for market and company news. Leave both unset for general factual research.
 - Set `image_query` only to sharpen the visual subject: one concrete subject, a disambiguator when context implies one (company vs fruit), and a form word matched to the question — `logo` or `key art` for what a thing is, `photo`, `screenshot`, `diagram` or `map` for how it works or looks in use. Without one the provider returns whatever is most photographed, rarely what introduces a subject. Add the year or version when what matters is how the subject looks now; the provider has no recency filter, so those words are the only way to ask for a current picture. No question words.
 - Set `skip_images=true` only when a visual cannot support the answer. Never add media as decoration.
-- Use `image_intent="gallery"` when the user asks to see or compare several instances (a roster, logos, colour options); leave it unset otherwise and never state a count. A gallery is one grid item with one marker.
 - Only images selected by provider-native discovery reach you; many calls yield none, which is normal. Never claim an image that is not listed, and never tell the user you are unable to show images — you can. Say you found no suitable one."""
 
 # The block for agents that bind ``web_research``: how a visual is acquired

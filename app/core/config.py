@@ -1165,6 +1165,16 @@ class Settings(BaseSettings):
             "return the accumulated research result instead of searching again."
         ),
     )
+    research_max_image_searches_per_turn: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Distinct visual subjects an answer may search for per turn. One "
+            "subject per request: an answer wanting a thing's identity art and a "
+            "shot of it in use needs two, while a how-to usually needs one. A "
+            "repeat of a subject already searched is refused rather than counted."
+        ),
+    )
     research_near_duplicate_threshold: float = Field(
         default=0.75,
         gt=0.0,

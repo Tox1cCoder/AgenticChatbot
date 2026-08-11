@@ -31,10 +31,11 @@ _DESCRIPTION = (
     "provider-selected image. This is the only way an image reaches the answer, so "
     "call it when the reader would benefit from seeing the subject even if you already "
     "know the facts and need no sources.\n\n"
-    "Use topic='news' for current events. Set time_range only when the user "
-    "explicitly requests a recency window. time_range also bounds the picture: "
-    "inside a declared window, an image whose page was last crawled before it is "
-    "dropped.\n\n"
+    "Use topic='news' for current events and topic='finance' for market and "
+    "company news; leave both unset for general factual research. Set time_range "
+    "only when the user explicitly requests a recency window. time_range also "
+    "bounds the picture: inside a declared window, an image whose page was last "
+    "crawled before it is dropped.\n\n"
     "This tool automatically considers a provider-selected image. Set image_query only to "
     "make the visual subject more precise than the factual query: one concrete "
     "subject, no question words, plus a disambiguator when one is implied. Name "
@@ -43,8 +44,13 @@ _DESCRIPTION = (
     "screenshot, diagram, map or chart. Add the year or version when what "
     "matters is how the subject looks now — the image provider has no recency "
     "filter, so the query text is the only way to ask for a current picture.\n\n"
-    "One call offers at most one figure. A second, different picture needs a "
-    "second call with a different image_query, not a bigger one.\n\n"
+    "One call offers one figure, so ask for one subject at a time and call again "
+    "for each further subject the answer needs — same query, different "
+    "image_query. The research text is reused, so another picture costs no "
+    "extra web search. Let the answer decide the number: a subject introduced "
+    "from scratch often wants its identity art and a shot of it in use, while a "
+    "how-to usually wants the one screen being described. Repeating a subject "
+    "returns nothing new.\n\n"
     "Set skip_images=true only when a visual cannot support the answer.\n\n"
     "Set image_intent='gallery' only when the user asks to see or compare several "
     "instances — a roster, a set of logos, colour options. Otherwise leave it "
@@ -156,7 +162,9 @@ def create_web_research_tool(
             )
 
         image_task: asyncio.Task[list[dict[str, Any]]] | None = None
-        if wants_image and _reserve_image_path(budget, context.rich_response_capable):
+        if wants_image and _reserve_image_path(
+            budget, context.rich_response_capable, visual_query
+        ):
             image_task = asyncio.create_task(
                 _discover_selected(
                     brave_tool=brave_tool,
@@ -204,7 +212,9 @@ def create_web_research_tool(
     )
 
 
-def _reserve_image_path(budget: Any, rich_response_capable: bool) -> bool:
+def _reserve_image_path(
+    budget: Any, rich_response_capable: bool, visual_query: str
+) -> bool:
     if not settings.remote_image_enrichment_enabled:
         return False
     if not settings.inline_rich_response_enabled:
@@ -215,7 +225,7 @@ def _reserve_image_path(budget: Any, rich_response_capable: bool) -> bool:
         # advertised the capability. Discovering one anyway spends a Brave call
         # on output that is discarded.
         return False
-    return budget.reserve_image_search()
+    return budget.reserve_image_search(visual_query)
 
 
 async def _collect_images(

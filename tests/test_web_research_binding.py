@@ -89,10 +89,20 @@ def test_bound_web_research_has_no_usage_recorder_dependency(monkeypatch):
 
 
 def test_media_guidance_describes_web_research_only():
+    """The model reaches images through web_research and nothing else.
+
+    The guidance spans two texts that are both always in context: the system
+    prompt says when a visual is worth having, the tool description says how to
+    drive the arguments. Neither may name the raw provider tool or Tavily's own
+    image flag.
+    """
     from app.ai.prompts import MEDIA_CAPABILITY_SNIPPET
+    from app.ai.web_research_tool import _DESCRIPTION
+
+    guidance = f"{MEDIA_CAPABILITY_SNIPPET}\n{_DESCRIPTION}"
 
     assert "web_research" in MEDIA_CAPABILITY_SNIPPET
-    assert "image_query" in MEDIA_CAPABILITY_SNIPPET
-    assert "image_intent" in MEDIA_CAPABILITY_SNIPPET
-    assert "brave_image_search" not in MEDIA_CAPABILITY_SNIPPET
-    assert "include_images" not in MEDIA_CAPABILITY_SNIPPET
+    assert "image_query" in guidance
+    assert "image_intent" in _DESCRIPTION
+    assert "brave_image_search" not in guidance
+    assert "include_images" not in guidance

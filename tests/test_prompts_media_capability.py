@@ -29,12 +29,11 @@ def test_snippet_defined_once_and_compact():
     picture, the form word that decides whether "what is X" returns identity art
     or an in-use shot, and one figure per call.
 
-    Known debt, deliberately not paid here: the topic/time_range, skip_images
-    and image_intent bullets restate the web_research tool description almost
-    verbatim, and both texts sit in context on every call. Deleting them from
-    the prompt would recover roughly 500 characters and put argument
-    documentation in one place — a refactor that also has to retarget the
-    assertions below onto _DESCRIPTION.
+    The topic/time_range and image_intent bullets have since moved out to the
+    web_research description, which is where argument mechanics belong: both
+    texts sit in context on every call, and the description is what the model
+    reads while choosing arguments. The prompt keeps what is behavioural —
+    when a visual is worth having, which form to ask for, and how to place it.
     """
     snippet = prompts.MEDIA_CAPABILITY_SNIPPET
     assert "Media and visuals:" in snippet
@@ -73,13 +72,21 @@ def test_media_guidance_describes_provider_native_selection_without_false_assura
 
 
 def test_media_guidance_scopes_tavily_controls_to_recency_and_finance():
-    snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
+    """Argument mechanics live in the tool description, not the system prompt.
 
-    assert "current events" in snippet
-    assert 'topic="news"' in snippet
-    assert "time_range" in snippet
-    assert 'topic="finance"' in snippet
-    assert "general factual research" in snippet
+    Both texts sit in context on every call, and the description is what the
+    model reads while choosing arguments — so duplicating them into the prompt
+    bought nothing but length.
+    """
+    from app.ai.web_research_tool import _DESCRIPTION
+
+    description = _DESCRIPTION.lower()
+
+    assert "current events" in description
+    assert "topic='news'" in description
+    assert "time_range" in description
+    assert "topic='finance'" in description
+    assert "general factual research" in description
 
 
 def test_snippet_has_no_hardcoded_visual_topic_list():
