@@ -102,29 +102,69 @@ def test_all_answer_prompts_carry_media_capability():
         assert "AVAILABLE RICH ITEMS" in prompt
 
 
+def _query_guidance() -> str:
+    """Everything the model reads while writing an image query.
+
+    Query construction is argument mechanics, so it lives in the tool
+    description rather than the system prompt — see
+    test_snippet_defined_once_and_compact.
+    """
+    from app.ai.web_research_tool import _DESCRIPTION
+
+    return _DESCRIPTION.lower()
+
+
 def test_image_query_guidance_ties_the_form_word_to_what_was_asked():
     """"What is X" was returning in-use screenshots because the form words on
     offer were all depiction words (photo, diagram, map). A thing's identity
     image — its logo, key art, cover — is what answers "what is this", and the
     query has to name it. Keyed to the kind of question, not to the subject.
     """
-    snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
+    guidance = _query_guidance()
 
-    assert "logo" in snippet
-    assert "key art" in snippet
-    assert "what a thing is" in snippet
+    assert "logo" in guidance
+    assert "key art" in guidance
+
+
+def test_image_query_guidance_asks_for_the_part_the_answer_is_about():
+    """Naming the product returns the most-photographed view of it — a press
+    shot of a whole scooter for a question about its warning lights. The image
+    has to show the thing the reader must look at, which is usually a component,
+    a screen or a panel rather than the product that contains it.
+    """
+    guidance = _query_guidance()
+
+    assert "part" in guidance
+    assert "look at" in guidance
+
+
+def test_image_query_guidance_requires_resolving_what_the_user_referred_to():
+    """"my scooter", "this game", "it" cannot be searched. The named thing has
+    to be recovered from the conversation before it becomes a query."""
+    guidance = _query_guidance()
+
+    assert "my scooter" in guidance or "pronoun" in guidance
+    assert "conversation" in guidance
+
+
+def test_image_query_guidance_covers_the_language_the_subject_lives_in():
+    """A scooter sold mainly in Vietnam is photographed on Vietnamese sites. An
+    English query cannot reach them, and the answer's own language is the wrong
+    signal too — a global subject is best served in English whatever language
+    the user writes in."""
+    guidance = _query_guidance()
+
+    assert "language" in guidance
 
 
 def test_image_query_guidance_covers_subjects_whose_look_changes():
     """Brave's image endpoint has no freshness parameter, so the query text is
-    the only way to ask for a current picture. The guidance used to describe
-    image_query purely as a subject disambiguator, which suppressed exactly the
-    year/version qualifier that returns an up-to-date image."""
-    snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
+    the only way to ask for a current picture."""
+    guidance = _query_guidance()
 
-    assert "image_query" in snippet
-    assert "year" in snippet
-    assert "current" in snippet
+    assert "image_query" in guidance
+    assert "year" in guidance
+    assert "current" in guidance
 
 
 def test_research_tool_leads_with_both_of_the_jobs_it_does():

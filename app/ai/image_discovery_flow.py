@@ -12,6 +12,7 @@ from typing import Any
 
 from ..core.config import settings
 from ..observability.rich_images import rich_image_metrics
+from .research_budget import normalize_query_tokens
 from .tool_execution import _group_image_candidates, build_image_candidates_from_tool_result
 from .tool_result_rendering import provider_result_text
 
@@ -94,6 +95,42 @@ def _confidence(candidate: Mapping[str, Any]) -> str:
     return str(provenance.get("confidence") or "").strip().lower()
 
 
+def _subject_overlap(candidate: Mapping[str, Any], query_tokens: frozenset[str]) -> float:
+    """Share of the model's query words that the result's own caption carries.
+
+    Only the provider's text is read — the title and description it returned.
+    Nothing here rewrites or extends the query: the model's words are compared
+    as written against what the provider says each picture is of.
+    """
+    if not query_tokens:
+        return 0.0
+    title = candidate.get("title")
+    payload = candidate.get("payload")
+    description = payload.get("description") if isinstance(payload, Mapping) else None
+    text = " ".join(str(part) for part in (title, description) if part)
+    if not text:
+        return 0.0
+    return len(query_tokens & normalize_query_tokens(text)) / len(query_tokens)
+
+
+def _rank_by_subject(
+    candidates: list[dict[str, Any]], image_query: str
+) -> list[dict[str, Any]]:
+    """Order one confidence tier by how well each caption answers the query.
+
+    Twelve results are fetched and one is shown, so this choice is most of the
+    felt quality of the picture. Provider order alone put a whole-product press
+    shot ahead of the component a question was actually about, because both are
+    "about" the product. Sorting is stable, so equal overlap — including the
+    common case of no overlap at all — leaves the provider's own order intact.
+    """
+    query_tokens = normalize_query_tokens(image_query)
+    return sorted(
+        candidates,
+        key=lambda candidate: -_subject_overlap(candidate, query_tokens),
+    )
+
+
 def _stable_deduplicate(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep the first candidate for each display URL or original-image digest."""
 
@@ -141,7 +178,9 @@ def select_brave_candidates(
     candidates = _drop_stale(candidates, window_days=_window_days(time_range))
     high = [item for item in candidates if _confidence(item) == "high"]
     medium = [item for item in candidates if _confidence(item) == "medium"]
-    tier = _stable_deduplicate(high or medium)
+    # Confidence stays the outer sort: subject overlap reorders within the tier
+    # the provider already judged relevant, never across tiers.
+    tier = _rank_by_subject(_stable_deduplicate(high or medium), image_query)
     if str(image_intent or "figure").lower() == "gallery" and len(tier) >= 2:
         return [
             _group_image_candidates(

@@ -155,6 +155,89 @@ def test_figure_deduplicates_originals_before_choosing(monkeypatch):
     assert [item["provenance"]["result_rank"] for item in selected] == [1]
 
 
+def _titled_payload(*entries: tuple[str, int, str]) -> str:
+    """Normalized Brave shape with a caller-controlled title per result."""
+    return json.dumps(
+        {
+            "query": "q",
+            "provider": "brave_image_search",
+            "images": [
+                {
+                    "url": f"https://imgs.search.brave.com/display-{rank}.jpg",
+                    "original_image_url": f"https://origin.example/image-{rank}.jpg",
+                    "thumbnail_url": f"https://imgs.search.brave.com/thumb-{rank}.jpg",
+                    "confidence": confidence,
+                    "result_rank": rank,
+                    "provider": "brave_image_search",
+                    "mime_type": "image/jpeg",
+                    "title": title,
+                    "description": title,
+                    "source_url": f"https://source.example/{rank}",
+                    "width": 1200,
+                    "height": 800,
+                }
+                for confidence, rank, title in entries
+            ],
+            "total_results": len(entries),
+        }
+    )
+
+
+def test_the_candidate_whose_title_answers_the_query_beats_provider_order():
+    """Twelve results are fetched and one is shown, so which one is chosen is
+    most of the felt quality. Provider order alone put a whole-product press
+    shot ahead of the component the question was actually about."""
+    selected = select_brave_candidates(
+        _titled_payload(
+            ("high", 1, "Honda Air Blade 2023 review and first ride"),
+            ("high", 2, "Air Blade instrument cluster warning lights explained"),
+        ),
+        image_query="Air Blade instrument cluster warning lights",
+    )
+
+    assert [item["provenance"]["result_rank"] for item in selected] == [2]
+
+
+def test_provider_order_still_breaks_ties():
+    """Ranking only reorders within what the provider already judged relevant;
+    with nothing to separate two candidates, Brave's own order stands."""
+    selected = select_brave_candidates(
+        _titled_payload(
+            ("high", 1, "Air Blade dashboard"),
+            ("high", 2, "Air Blade dashboard"),
+        ),
+        image_query="Air Blade dashboard",
+    )
+
+    assert [item["provenance"]["result_rank"] for item in selected] == [1]
+
+
+def test_title_ranking_never_promotes_a_weaker_confidence_tier():
+    """The provider's own confidence stays the outer sort. A medium result that
+    happens to echo the query text must not displace a high-confidence one."""
+    selected = select_brave_candidates(
+        _titled_payload(
+            ("high", 1, "Some loosely related photograph"),
+            ("medium", 2, "Air Blade instrument cluster warning lights"),
+        ),
+        image_query="Air Blade instrument cluster warning lights",
+    )
+
+    assert [item["provenance"]["result_rank"] for item in selected] == [1]
+
+
+def test_a_query_sharing_nothing_with_any_title_keeps_provider_order():
+    selected = select_brave_candidates(
+        _titled_payload(
+            ("high", 1, "First result"),
+            ("high", 2, "Second result"),
+        ),
+        image_query="entirely unrelated subject",
+    )
+
+    assert [item["provenance"]["result_rank"] for item in selected] == [1]
+
+
 @pytest.mark.parametrize("confidence", ["low", "", "unknown"])
 def test_low_missing_and_unknown_confidence_are_rejected(confidence):
     assert select_brave_candidates(

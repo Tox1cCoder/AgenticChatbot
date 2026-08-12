@@ -225,10 +225,13 @@ def test_media_guidance_names_web_research_with_disambiguated_query():
     ``image_query`` parameter, not a second tool call issued in parallel —
     so there is no more "same tool block"/"parallel" instruction to check."""
     from app.ai.prompts import MEDIA_CAPABILITY_SNIPPET
+    from app.ai.web_research_tool import _DESCRIPTION
 
-    text = MEDIA_CAPABILITY_SNIPPET.lower()
-    assert "web_research" in text
-    assert "disambiguat" in text
+    # The prompt names the tool; how to shape the query it carries is argument
+    # mechanics and lives in the tool description.
+    assert "web_research" in MEDIA_CAPABILITY_SNIPPET.lower()
+    assert "image_query" in _DESCRIPTION.lower()
+    assert "disambiguat" in _DESCRIPTION.lower()
 
 
 # ---------------------------------------------------------------------------
