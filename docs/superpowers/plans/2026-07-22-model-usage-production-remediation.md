@@ -808,7 +808,7 @@ Near the main contract's endpoint overview and context-window section add:
 ```markdown
 For dashboard analytics, capability discovery, refresh behavior, and the complete
 context-gauge UI contract, use
-[`TOKEN_USAGE_AI_SDK_FE_CONTRACT.md`](TOKEN_USAGE_AI_SDK_FE_CONTRACT.md).
+[`TOKEN_USAGE_AI_SDK_FE_CONTRACT.md`](../../../plans/TOKEN_USAGE_AI_SDK_FE_CONTRACT.md).
 ```
 
 Keep the detailed usage contract in one file; do not duplicate all TypeScript types in the main AI SDK contract.

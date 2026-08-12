@@ -483,7 +483,7 @@ Claims investigated and disproved against current code:
 
 Real gap found and fixed:
 
-- When a server MCP tool was autoloaded via `tool_search`, the graph paused for HITL, and the in-memory `DeferredToolState` was subsequently lost (process restart, multi-worker migration, or LRU eviction past the approval wait window), the approved tool was not found at resume time. `_recover_missing_tool` at [tool_execution.py:443-493](app/ai/tool_execution.py#L443-L493) previously only recovered `client__`-prefixed tools.
+- When a server MCP tool was autoloaded via `tool_search`, the graph paused for HITL, and the in-memory `DeferredToolState` was subsequently lost (process restart, multi-worker migration, or LRU eviction past the approval wait window), the approved tool was not found at resume time. `_recover_missing_tool` at [tool_execution.py:443-493](../app/ai/tool_execution.py#L443-L493) previously only recovered `client__`-prefixed tools.
 - **Fix (2026-04-17)**: extended `_recover_missing_tool` to look up non-prefixed tool names directly from the live MCP manager (`manager.get_tools()`) by exact name when the request is not `client_only` scoped. Client-tool recovery is unchanged. This closes the single real resume-time gap without expanding scope or changing binding semantics.
 
 Other cleanup bundled with this pass:

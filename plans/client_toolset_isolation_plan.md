@@ -536,20 +536,20 @@ git commit -m "feat: demo.py authenticates and chats through the local sidecar (
 
 Replace the row's text with:
 
-> **Skills** | Markdown-defined skills with YAML frontmatter, owned by each client device. The sidecar scans `CLIENT_SKILLS_ROOTS`, syncs a per-device catalog to the server, and serves skill content over the runtime bridge ([`client_backend/services/local_skills_registry.py`](client_backend/services/local_skills_registry.py)). The server has no skills of its own.
+> **Skills** | Markdown-defined skills with YAML frontmatter, owned by each client device. The sidecar scans `CLIENT_SKILLS_ROOTS`, syncs a per-device catalog to the server, and serves skill content over the runtime bridge ([`client_backend/services/local_skills_registry.py`](../client_backend/services/local_skills_registry.py)). The server has no skills of its own.
 
 - [ ] **Step 2: README — Skills architecture section (~lines 673-676)**
 
 Replace the Server/Client bullet list with:
 
-> - **Client (only source of skills)** — [`LocalSkillsRegistry`](client_backend/services/local_skills_registry.py), scanning `CLIENT_SKILLS_ROOTS`; synced per-device to the server and resolved at chat time by [`skill_resolver.py`](app/ai/skill_resolver.py) strictly for the originating device.
+> - **Client (only source of skills)** — [`LocalSkillsRegistry`](../client_backend/services/local_skills_registry.py), scanning `CLIENT_SKILLS_ROOTS`; synced per-device to the server and resolved at chat time by [`skill_resolver.py`](../app/ai/skill_resolver.py) strictly for the originating device.
 > - To serve this repo's `skills/` folder during development, add its absolute path to the local sidecar's `CLIENT_SKILLS_ROOTS`.
 
 - [ ] **Step 3: README — add the global-tools contract + dev run setup**
 
 In the MCP section, add:
 
-> **Global default tools.** Enabled servers in [`app/ai/mcp_config.json`](app/ai/mcp_config.json) are by definition global-default tools, visible to every client (currently `time`, `tavily`, `widgets` — enforced by `tests/test_mcp_global_allowlist.py`). Anything machine-specific (e.g. desktop-commander, excel) belongs in a sidecar's local MCP config (`<profile>/mcp/mcp_config.json`, same `mcpServers` JSON shape), where it becomes a device-scoped `client__` tool.
+> **Global default tools.** Enabled servers in [`app/ai/mcp_config.json`](../app/ai/mcp_config.json) are by definition global-default tools, visible to every client (currently `time`, `tavily`, `widgets` — enforced by `tests/test_mcp_global_allowlist.py`). Anything machine-specific (e.g. desktop-commander, excel) belongs in a sidecar's local MCP config (`<profile>/mcp/mcp_config.json`, same `mcpServers` JSON shape), where it becomes a device-scoped `client__` tool.
 
 In the development/run docs (where the demo is described), document the three-process dev setup:
 

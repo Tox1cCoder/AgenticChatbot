@@ -18,11 +18,11 @@
 
 ## Current Codebase Findings
 
-- Widget creation already exists in [app/ai/mcp_servers/widgets_server.py](app/ai/mcp_servers/widgets_server.py). Agents create live widgets through `widget_create`, `widget_update`, `widget_get_state`, and related MCP tools.
-- Runtime state already exists in [app/services/widget_runtime.py](app/services/widget_runtime.py). It stores widget state, accepts shallow `user_state_patch` updates, and hydrates widgets over `/widgets/{id}/connect`.
+- Widget creation already exists in [app/ai/mcp_servers/widgets_server.py](../app/ai/mcp_servers/widgets_server.py). Agents create live widgets through `widget_create`, `widget_update`, `widget_get_state`, and related MCP tools.
+- Runtime state already exists in [app/services/widget_runtime.py](../app/services/widget_runtime.py). It stores widget state, accepts shallow `user_state_patch` updates, and hydrates widgets over `/widgets/{id}/connect`.
 - Inline rich response placement already exists through `rich_items` and markers such as `<!--rich:widget:<id>-->`.
 - AI SDK clients already receive transient widget records via `data-rich-items` and final records via `messageMetadata.rich_items`.
-- Streamlit already renders widgets in [demo.py](demo.py), including table search/sort, chart type toggles, series toggles, controls, forms, lists, dashboards, HTML iframes, and WebSocket patching.
+- Streamlit already renders widgets in [demo.py](../demo.py), including table search/sort, chart type toggles, series toggles, controls, forms, lists, dashboards, HTML iframes, and WebSocket patching.
 - The main gaps are generation quality, a stronger state contract, chart hover values, article-like presentation, action semantics, and documentation/tests that keep AI SDK renderers aligned with Streamlit.
 
 ## Product Direction

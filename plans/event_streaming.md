@@ -2329,12 +2329,12 @@ git commit --allow-empty -m "test: verify event streaming refactor"
 
 ### Background facts (verified 2026-06-10)
 
-- `PlanningSubagentDispatcher.dispatch` runs workers concurrently via `asyncio.gather` ([planning_subagents.py:501](app/ai/planning_subagents.py#L501)); each `run_one` emits `subagent_start` → per-artifact `subagent_tool_execution_end` → `subagent_end` into the sink.
-- `SubagentEventSink` is queue-backed; the live sink is resolved from a weakref registry via a state-carried token ([subagents.py](app/services/event_streaming/subagents.py)). The streaming generator owns the only strong reference.
-- `execute_request_stream` creates+registers the sink and currently drains it between graph events ([graph.py:4624-4633](app/ai/graph.py#L4624-L4633)). `resume_with_decisions_stream` uses no sink ([graph.py:4399-4404](app/ai/graph.py#L4399-L4404)).
-- `_map_v3_stream_event` already maps canonical `subagent_*` events to legacy public dicts ([graph.py:4068-4084](app/ai/graph.py#L4068-L4084)).
-- AI SDK adapter drops `subagent_*` ([ai_sdk_v6.py:241-242](app/services/event_streaming/ai_sdk_v6.py#L241-L242)); internal SSE adapter drops them at `return None` ([internal_sse.py:106](app/services/event_streaming/internal_sse.py#L106)).
-- The Streamlit demo's live view is currently driven by the `dispatch_subagents` **tool** start/end ([subagent_activity.py:305-371](app/ui/subagent_activity.py#L305-L371)), so it jumps from "N pending" to "N done" with no per-worker progress. The demo already calls `_upsert_stream_subagent_activity(event)` for `node_complete` events ([demo.py:8017-8021](demo.py#L8017-L8021), [demo.py:8650-8653](demo.py#L8650-L8653)).
+- `PlanningSubagentDispatcher.dispatch` runs workers concurrently via `asyncio.gather` ([planning_subagents.py:501](../app/ai/planning_subagents.py#L501)); each `run_one` emits `subagent_start` → per-artifact `subagent_tool_execution_end` → `subagent_end` into the sink.
+- `SubagentEventSink` is queue-backed; the live sink is resolved from a weakref registry via a state-carried token ([subagents.py](../app/services/event_streaming/subagents.py)). The streaming generator owns the only strong reference.
+- `execute_request_stream` creates+registers the sink and currently drains it between graph events ([graph.py:4624-4633](../app/ai/graph.py#L4624-L4633)). `resume_with_decisions_stream` uses no sink ([graph.py:4399-4404](../app/ai/graph.py#L4399-L4404)).
+- `_map_v3_stream_event` already maps canonical `subagent_*` events to legacy public dicts ([graph.py:4068-4084](../app/ai/graph.py#L4068-L4084)).
+- AI SDK adapter drops `subagent_*` ([ai_sdk_v6.py:241-242](../app/services/event_streaming/ai_sdk_v6.py#L241-L242)); internal SSE adapter drops them at `return None` ([internal_sse.py:106](../app/services/event_streaming/internal_sse.py#L106)).
+- The Streamlit demo's live view is currently driven by the `dispatch_subagents` **tool** start/end ([subagent_activity.py:305-371](../app/ui/subagent_activity.py#L305-L371)), so it jumps from "N pending" to "N done" with no per-worker progress. The demo already calls `_upsert_stream_subagent_activity(event)` for `node_complete` events ([demo.py:8017-8021](../demo.py#L8017-L8021), [demo.py:8650-8653](../demo.py#L8650-L8653)).
 
 ### Scope decisions
 
@@ -2519,7 +2519,7 @@ from ..services.event_streaming.subagents import (
 )
 ```
 
-Replace the drain loop at [graph.py:4624-4633](app/ai/graph.py#L4624-L4633):
+Replace the drain loop at [graph.py:4624-4633](../app/ai/graph.py#L4624-L4633):
 
 ```python
                 async for event in iter_v3_events_from_graph(
@@ -2929,7 +2929,7 @@ Expected: PASS.
 
 - [x] **Step 5: Route `subagent` events into both demo stream loops**
 
-In `demo.py`, add a branch immediately after the streaming-loop `node_complete` handler at [demo.py:8017-8021](demo.py#L8017-L8021):
+In `demo.py`, add a branch immediately after the streaming-loop `node_complete` handler at [demo.py:8017-8021](../demo.py#L8017-L8021):
 
 ```python
             if event_type == "subagent":
@@ -2939,7 +2939,7 @@ In `demo.py`, add a branch immediately after the streaming-loop `node_complete` 
                 continue
 ```
 
-And after the resume-loop `node_complete` handler at [demo.py:8650-8653](demo.py#L8650-L8653):
+And after the resume-loop `node_complete` handler at [demo.py:8650-8653](../demo.py#L8650-L8653):
 
 ```python
                         elif event_type == "subagent":

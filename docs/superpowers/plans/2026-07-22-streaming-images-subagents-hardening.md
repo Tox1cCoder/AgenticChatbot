@@ -1129,7 +1129,7 @@ git commit -m "feat: externalize generated images and render chat images by refe
 
 # Phase P2 — Bound the subagent event-sink queue (backpressure)
 
-**Problem:** `SubagentEventSink._queue = asyncio.Queue()` is unbounded ([subagents.py:27](app/services/event_streaming/subagents.py#L27)); `emit_event` uses `put_nowait` "because the queue is unbounded so put_nowait never fails" ([subagents.py:61-67](app/services/event_streaming/subagents.py#L61)). Image previews push up to ~3 MB base64 per event onto it. A slow SSE client + a fast multi-image run grows memory without bound.
+**Problem:** `SubagentEventSink._queue = asyncio.Queue()` is unbounded ([subagents.py:27](../../../app/services/event_streaming/subagents.py#L27)); `emit_event` uses `put_nowait` "because the queue is unbounded so put_nowait never fails" ([subagents.py:61-67](../../../app/services/event_streaming/subagents.py#L61)). Image previews push up to ~3 MB base64 per event onto it. A slow SSE client + a fast multi-image run grows memory without bound.
 
 **Approach:** Bound the queue with a **type-aware overflow policy**: lifecycle events (`subagent_start`/`subagent_end`/`subagent_tool_execution_end`) are lossless (must never be dropped — the frontend upsert keys off them); transient `image_preview` `partial` frames and `subagent_message_delta` frames are **coalesce/drop-oldest** (they are already replace-in-place by `item_id`+`seq`, so dropping a stale partial is correct). Emit a single `log`/counter when frames are dropped (`no silent caps`).
 
@@ -1223,7 +1223,7 @@ git commit -m "feat: bound subagent event-sink queue with transient-drop policy"
 
 ## Task P4.2: schema drift contract-test
 **Files:** `tests/test_workflow_request_schema_parity.py`.
-- [ ] Test asserts the field sets of `app/schemas/workflow.py:WorkflowExecutionRequest` and `app/ai/schemas.py:AIWorkflowExecutionRequest` are identical (`set(A.model_fields) == set(B.model_fields)`), so `_to_ai_request` ([ai_service.py:145](app/services/ai_service.py#L145)) can never silently drop a newly-added field. This is a pure guard test; no production change. Commit.
+- [ ] Test asserts the field sets of `app/schemas/workflow.py:WorkflowExecutionRequest` and `app/ai/schemas.py:AIWorkflowExecutionRequest` are identical (`set(A.model_fields) == set(B.model_fields)`), so `_to_ai_request` ([ai_service.py:145](../../../app/services/ai_service.py#L145)) can never silently drop a newly-added field. This is a pure guard test; no production change. Commit.
 
 ## Task P4.3: resume-path subagent progress — decision, then optional wiring
 **Files:** `app/ai/graph.py` `resume_with_decisions_stream` (~`:2416`).

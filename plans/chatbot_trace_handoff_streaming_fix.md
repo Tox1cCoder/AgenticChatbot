@@ -681,16 +681,16 @@ Manual checks:
 Plan executed end-to-end on branch `Thai-Postgre-FastAPI`. All tasks completed and verified.
 
 ### Task 1 — DONE
-- Added failing test `test_checkpoint_compaction_disables_langsmith_tracing` in [tests/test_message_history_pipeline.py](tests/test_message_history_pipeline.py).
-- Imported `tracing_context` from `langsmith` in [app/ai/graph.py](app/ai/graph.py) and wrapped `self.graph.aupdate_state(...)` inside `with tracing_context(enabled=False):` in `_compact_checkpoint_after_terminal_response`.
+- Added failing test `test_checkpoint_compaction_disables_langsmith_tracing` in [tests/test_message_history_pipeline.py](../tests/test_message_history_pipeline.py).
+- Imported `tracing_context` from `langsmith` in [app/ai/graph.py](../app/ai/graph.py) and wrapped `self.graph.aupdate_state(...)` inside `with tracing_context(enabled=False):` in `_compact_checkpoint_after_terminal_response`.
 - Verification: `python -m pytest tests/test_message_history_pipeline.py -q` → 7 passed.
 
 ### Task 2 — DONE
-- Extended `_apply_hand_off_if_present` in [app/ai/graph.py](app/ai/graph.py) to stamp `state["context"]["handoff"] = {active, source_agent, target_agent, reason, tool_call_id}` whenever it successfully reroutes.
+- Extended `_apply_hand_off_if_present` in [app/ai/graph.py](../app/ai/graph.py) to stamp `state["context"]["handoff"] = {active, source_agent, target_agent, reason, tool_call_id}` whenever it successfully reroutes.
 - Added new helper `_messages_for_selected_agent(state, agent_name, messages)` that strips the source-agent handoff AIMessage and matching `ToolMessage(name="hand_off")` when an active handoff targets `agent_name`. Falls back to `_get_current_turn_messages` semantics otherwise.
 - Wired the helper into `_chat_node`, `_search_node`, `_image_generator_node`, and `_canvas_node` (replacing the previous `_get_current_turn_messages` calls).
 - `_rag_node` now skips `ToolMessage(name="hand_off")` when building `tool_context` so handoff JSON does not leak into RAG evidence.
-- Added regression tests in [tests/test_graph_planning_subagents.py](tests/test_graph_planning_subagents.py):
+- Added regression tests in [tests/test_graph_planning_subagents.py](../tests/test_graph_planning_subagents.py):
   - `test_delegated_agent_messages_strip_handoff_control_messages`
   - `test_apply_hand_off_records_control_metadata`
   - `test_delegated_agent_messages_passthrough_when_no_active_handoff`
@@ -699,20 +699,20 @@ Plan executed end-to-end on branch `Thai-Postgre-FastAPI`. All tasks completed a
 ### Task 3 — DONE
 - Added `last_emitted_agent` tracking after the initial `agent_selected` yield in both `execute_request_stream` and `resume_with_decisions_stream`.
 - In each stream's `updates` handler, immediately after `last_state_values.update(node_state)`, the streamer now compares `node_state.get("selected_agent")` against `last_emitted_agent` and yields `{"type": "agent_selected", "agent": new_agent, "reason": "handoff"}` whenever the active agent changes.
-- Created [tests/test_graph_handoff_streaming.py](tests/test_graph_handoff_streaming.py) with `test_planning_handoff_stream_returns_delegated_agent_answer` pinning the second `agent_selected` event and the delegated agent's final answer.
+- Created [tests/test_graph_handoff_streaming.py](../tests/test_graph_handoff_streaming.py) with `test_planning_handoff_stream_returns_delegated_agent_answer` pinning the second `agent_selected` event and the delegated agent's final answer.
 - Verification: `python -m pytest tests/test_graph_handoff_streaming.py tests/test_graph_planning_subagents.py -q` → all green.
 
 ### Task 4 — DONE (no impl change needed)
-- Added `test_recover_terminal_response_ignores_handoff_narration` to [tests/test_graph_handoff_streaming.py](tests/test_graph_handoff_streaming.py).
+- Added `test_recover_terminal_response_ignores_handoff_narration` to [tests/test_graph_handoff_streaming.py](../tests/test_graph_handoff_streaming.py).
 - The existing `_recover_terminal_response` (graph.py:3122–3127, 3131–3140) already skips AIMessages with `tool_calls`, so the handoff narration cannot become the recovered final response. Kept as regression coverage so future changes cannot regress this.
 - Verification: passes alongside Task 3.
 
 ### Task 5 — DONE
-- Created new module [app/ui/stream_markdown.py](app/ui/stream_markdown.py) hosting `_STREAM_MARKDOWN_ENTITY_MAP` and `normalize_stream_markdown_text(content)`.
-- [demo.py](demo.py) re-exports `normalize_stream_markdown_text` from the new module and uses it in both live markdown call sites:
+- Created new module [app/ui/stream_markdown.py](../app/ui/stream_markdown.py) hosting `_STREAM_MARKDOWN_ENTITY_MAP` and `normalize_stream_markdown_text(content)`.
+- [demo.py](../demo.py) re-exports `normalize_stream_markdown_text` from the new module and uses it in both live markdown call sites:
   - Resume stream around former line 7425.
   - Normal message stream around former line 8001.
-- Created [tests/test_demo_stream_rendering.py](tests/test_demo_stream_rendering.py) with three cases covering the quote-only allowlist, apostrophe-entity coverage, and empty/non-string inputs.
+- Created [tests/test_demo_stream_rendering.py](../tests/test_demo_stream_rendering.py) with three cases covering the quote-only allowlist, apostrophe-entity coverage, and empty/non-string inputs.
 - Verification: `python -m pytest tests/test_demo_stream_rendering.py -q` → 3 passed.
 
 ### Task 6 — DONE
@@ -740,10 +740,10 @@ Plan executed end-to-end on branch `Thai-Postgre-FastAPI`. All tasks completed a
 
 ### Files Touched
 
-- Modified: [app/ai/graph.py](app/ai/graph.py) — `tracing_context` import; trace-suppressing `with` around `aupdate_state`; handoff context metadata; `_messages_for_selected_agent` helper; nodes wired to helper; `_rag_node` hand_off filter; `last_emitted_agent` + handoff-driven `agent_selected` events in both stream functions.
-- Modified: [demo.py](demo.py) — replaced inline helper with re-export from `app.ui.stream_markdown`; both live `markdown(...)` call sites now route through `normalize_stream_markdown_text`.
-- Created: [app/ui/stream_markdown.py](app/ui/stream_markdown.py).
-- Modified: [tests/test_message_history_pipeline.py](tests/test_message_history_pipeline.py) — added `test_checkpoint_compaction_disables_langsmith_tracing`.
-- Modified: [tests/test_graph_planning_subagents.py](tests/test_graph_planning_subagents.py) — added three handoff-scoping regressions.
-- Created: [tests/test_graph_handoff_streaming.py](tests/test_graph_handoff_streaming.py).
-- Created: [tests/test_demo_stream_rendering.py](tests/test_demo_stream_rendering.py).
+- Modified: [app/ai/graph.py](../app/ai/graph.py) — `tracing_context` import; trace-suppressing `with` around `aupdate_state`; handoff context metadata; `_messages_for_selected_agent` helper; nodes wired to helper; `_rag_node` hand_off filter; `last_emitted_agent` + handoff-driven `agent_selected` events in both stream functions.
+- Modified: [demo.py](../demo.py) — replaced inline helper with re-export from `app.ui.stream_markdown`; both live `markdown(...)` call sites now route through `normalize_stream_markdown_text`.
+- Created: [app/ui/stream_markdown.py](../app/ui/stream_markdown.py).
+- Modified: [tests/test_message_history_pipeline.py](../tests/test_message_history_pipeline.py) — added `test_checkpoint_compaction_disables_langsmith_tracing`.
+- Modified: [tests/test_graph_planning_subagents.py](../tests/test_graph_planning_subagents.py) — added three handoff-scoping regressions.
+- Created: [tests/test_graph_handoff_streaming.py](../tests/test_graph_handoff_streaming.py).
+- Created: [tests/test_demo_stream_rendering.py](../tests/test_demo_stream_rendering.py).

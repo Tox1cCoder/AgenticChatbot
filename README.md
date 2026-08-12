@@ -130,13 +130,16 @@ Both services speak the same schemas (`app/schemas/`). The **client backend** ex
 │   ├── api/                          FastAPI route modules (15 routers)
 │   ├── core/                         config, DI container, auth, exceptions, runtime modelling
 │   ├── database/                     session / engine / migration bootstrap
+│   │   └── qdrant/config/config.yaml Local Qdrant server config (binary and
+│   │                                 storage/ state are gitignored)
 │   ├── factories/                    Pydantic/domain factories
 │   ├── interfaces/                   Service interface contracts (ABCs)
 │   ├── models/                       15 SQLAlchemy ORM models
 │   ├── repositories/                 persistence + query strategy + command strategy
 │   ├── schemas/                      Pydantic schemas and API contracts
 │   ├── services/                     business logic, orchestration, event listeners
-│   ├── storage/                      document image storage
+│   ├── storage/                      user content: document images, chat images,
+│   │                                 parse artifacts (gitignored, not distributed)
 │   ├── utils/                        exception handlers, helpers
 │   └── workers/                      Celery app, document processor, cleanup tasks
 ├── client_backend/                   Local sidecar runtime
@@ -152,7 +155,8 @@ Both services speak the same schemas (`app/schemas/`). The **client backend** ex
 ├── shared/skills/                    Shared skill parsing helpers (front matter)
 ├── skills/                           Optional user-local skills (ignored, not distributed)
 ├── tests/                            Unit + integration tests (server and client_backend)
-├── scripts/build-client-backend-bundle.ps1   Client bundle builder
+├── scripts/                          Bundle builders, benchmarks, reindex and
+│                                     verification helpers
 ├── dist/client-backend-bundle/       Generated client bundle output (not tracked)
 ├── docker-compose.redis.yml          Local Redis with persistence + auth
 ├── alembic.ini                       Alembic runtime config
@@ -160,7 +164,10 @@ Both services speak the same schemas (`app/schemas/`). The **client backend** ex
 ├── demo_requirements.txt             Demo-only dependencies
 ├── upload_support.py                 Streamlit document upload helper
 ├── pyproject.toml                    Project metadata, deps, scripts (kani-client-backend)
-├── environment.yml                   Conda environment snapshot
+│                                     — the authoritative dependency declaration
+├── requirements.txt                  Frozen Windows / Python 3.11 / CUDA 13.0
+│                                     snapshot for the GPU MinerU pipeline
+├── environment.yml                   Conda form of the same frozen snapshot
 ├── Chatbot API.postman_collection.json
 └── README.md
 ```
@@ -171,7 +178,7 @@ Both services speak the same schemas (`app/schemas/`). The **client backend** ex
 
 | Component | Requirement | Notes |
 |---|---|---|
-| Python | **3.10+** | 3.11 or 3.12 recommended |
+| Python | **3.10+** | 3.13 is the current development runtime. Use 3.11 only for the frozen CUDA environment (`requirements.txt` / `environment.yml`), which pins packages without 3.13 wheels |
 | PostgreSQL | **14+** | Required; holds auth, conversations, plans, feedback, HITL state, LangGraph checkpoints |
 | Redis | **7+** | Strongly recommended. Required for Celery, live widgets, client runtime state, HITL timeouts |
 | Qdrant | latest | Required for document retrieval / RAG |
@@ -207,23 +214,32 @@ For the Streamlit demo only:
 pip install -r demo_requirements.txt
 ```
 
-A conda environment snapshot is available as [`environment.yml`](environment.yml):
+A conda environment snapshot is available as [`environment.yml`](environment.yml).
+It declares `name: agents`, so that is the environment to activate:
 
 ```bash
 conda env create -f environment.yml
-conda activate sample-chatbot
+conda activate agents
 ```
 
-The frozen `requirements.txt` and `environment.yml` capture the Windows,
-Python 3.11, CUDA 13.0 environment. Validate the complete frozen dependency
-graph from a Windows Python 3.11 interpreter with:
+`requirements.txt` and `environment.yml` are **not** the recommended way to run
+the server. They are frozen snapshots of the Windows / Python 3.11 / CUDA 13.0
+environment used for the GPU document pipeline, and they carry the full MinerU
+stack (`torch+cu130`, `doclayout_yolo`, `ultralytics`, OpenCV). Use them only
+when you need that pipeline locally; use `pip install -e .[dev]` above
+otherwise.
+
+Validate the complete frozen dependency graph from a Windows Python 3.11
+interpreter with:
 
 ```bash
 python scripts/verify_frozen_requirements.py
 ```
 
-The verifier exits with code 2 on other platforms or Python versions. On
-macOS or Linux, use the editable install above instead of these frozen files.
+The verifier exits with code 2 on any other platform or Python version, so it
+cannot run on a machine that has no 3.11 interpreter — check `py -0p` before
+relying on it. On macOS or Linux, use the editable install instead of these
+frozen files.
 
 ### 2. Create environment files
 
@@ -255,6 +271,12 @@ docker compose -f docker-compose.redis.yml up -d redis
 ```bash
 docker run -d --name qdrant -p 6333:6333 -p 6334:6334 qdrant/qdrant
 ```
+
+To run Qdrant as a native Windows process instead, download `qdrant.exe` from
+[the Qdrant releases page](https://github.com/qdrant/qdrant/releases) into
+`app/database/qdrant/` and launch it with the tracked
+[`config/config.yaml`](app/database/qdrant/config/config.yaml). The binary and
+its `storage/` state are gitignored, so they are not part of a fresh clone.
 
 ---
 
