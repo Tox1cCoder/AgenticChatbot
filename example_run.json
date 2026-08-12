@@ -1,0 +1,231 @@
+{
+    "inputs": {
+        "assistant_message_id": "6ea7fa8a-7994-4477-82bb-e2a36ef549cc",
+        "context": {
+            "_presented_rich_image_ids": [],
+            "agents_invoked": [
+                {
+                    "id": "chat_agent",
+                    "kind": "base",
+                    "name": "Chat Agent",
+                    "via": "preselected"
+                }
+            ],
+            "hitl_policy": {
+                "client_rules": {
+                    "client_mcp": {
+                        "servers": {},
+                        "tools": {}
+                    },
+                    "client_skill": {
+                        "servers": {},
+                        "tools": {}
+                    }
+                },
+                "global_tools": [],
+                "master_enabled": true
+            },
+            "inline_rich_response_v1": true,
+            "subagent_event_sink_token": "7bf9b5e6d61443c097d63732429c0344"
+        },
+        "conversation_id": "a9cba03e-9b0c-4a3d-a5e0-1fb8db5d1f25",
+        "custom_agents": {},
+        "delegation_count": 0,
+        "device_id": "aac7f130-8276-4280-bd78-16d1d69ddbf0",
+        "has_existing_plan": false,
+        "iteration_count": null,
+        "messages": [
+            {
+                "additional_kwargs": {},
+                "content": "pokemon unite là gì",
+                "id": "e5ab1620-3332-4483-a512-45bc94866526",
+                "response_metadata": {},
+                "type": "human"
+            }
+        ],
+        "persona": null,
+        "plan_lifecycle": null,
+        "planning_call_count": 0,
+        "planning_mode_enabled": false,
+        "planning_phase": "planning",
+        "response": null,
+        "selected_agent": "chat_agent",
+        "user_id": "c3f04191-895a-4fb4-95c1-9f3fe66ac8f1",
+        "user_message_id": "e5ab1620-3332-4483-a512-45bc94866526"
+    },
+    "outputs": {
+        "assistant_message_id": "6ea7fa8a-7994-4477-82bb-e2a36ef549cc",
+        "context": {
+            "_presented_rich_image_ids": [],
+            "agents_invoked": [
+                {
+                    "id": "chat_agent",
+                    "kind": "base",
+                    "name": "Chat Agent",
+                    "via": "preselected"
+                }
+            ],
+            "hitl_policy": {
+                "client_rules": {
+                    "client_mcp": {
+                        "servers": {},
+                        "tools": {}
+                    },
+                    "client_skill": {
+                        "servers": {},
+                        "tools": {}
+                    }
+                },
+                "global_tools": [],
+                "master_enabled": true
+            },
+            "inline_rich_response_v1": true,
+            "subagent_event_sink_token": "7bf9b5e6d61443c097d63732429c0344"
+        },
+        "conversation_id": "a9cba03e-9b0c-4a3d-a5e0-1fb8db5d1f25",
+        "custom_agents": {},
+        "delegation_count": 0,
+        "device_id": "aac7f130-8276-4280-bd78-16d1d69ddbf0",
+        "has_existing_plan": false,
+        "iteration_count": null,
+        "last_agent": "chat_agent",
+        "messages": [
+            {
+                "additional_kwargs": {},
+                "content": "pokemon unite là gì",
+                "id": "e5ab1620-3332-4483-a512-45bc94866526",
+                "response_metadata": {},
+                "type": "human"
+            },
+            {
+                "additional_kwargs": {},
+                "content": "**Pokémon Unite** là một tựa game chiến thuật đồng đội thuộc thể loại **MOBA** (Đấu trường trực tuyến nhiều người chơi), tương tự như Liên Minh Huyền Thoại hay Liên Quân Mobile, nhưng lấy bối cảnh và sử dụng các nhân vật trong vũ trụ Pokémon. \n\nTrò chơi được phát triển bởi TiMi Studio Group (một công ty con của Tencent) hợp tác cùng The Pokémon Company, và được phát hành **miễn phí** trên các nền tảng **Nintendo Switch, iOS và Android** (có hỗ trợ chơi chéo - crossplay giữa các nền tảng).\n\nDưới đây là những điểm nổi bật và cách chơi cơ bản của Pokémon Unite:\n\n**1. Lối chơi và Mục tiêu:**\n*   Các trận đấu diễn ra theo thể thức **5 đấu 5** và bị giới hạn thời gian (thường là 10 phút cho mỗi trận tiêu chuẩn).\n*   **Không có việc phá hủy \"nhà chính\" (Nexus)** như các game MOBA truyền thống. Thay vào đó, mục tiêu của trò chơi là **ghi điểm**.\n*   Người chơi cần đánh bại các Pokémon hoang dã trên bản đồ hoặc hạ gục người chơi đối phương để thu thập **Năng lượng Aeos (Aeos Energy)**.\n*   Sau đó, bạn phải mang số năng lượng này \"úp rổ\" vào các khu vực ghi điểm (Goal Zones) của phe địch. Đội nào có tổng số điểm cao hơn khi hết giờ sẽ giành chiến thắng.\n\n**2. Sự tiến hóa và Kỹ năng:**\n*   Khi bắt đầu trận đấu, hầu hết các Pokémon đều ở cấp độ 1 (thường là hình thái cơ bản nhất, ví dụ như Charmander).\n*   Thông qua việc đánh quái và ghi điểm, Pokémon sẽ nhận được điểm kinh nghiệm (EXP), từ đó **lên cấp, học kỹ năng mới và tự động tiến hóa** (ví dụ tiến hóa thành Charmeleon rồi đến Charizard) ngay trong quá trình trận đấu diễn ra.\n*   Thay vì mua trang bị bằng vàng trong trận, người chơi sẽ chọn và nâng cấp các \"Vật phẩm cầm tay\" (Held Items) cho Pokémon của mình trước khi trận đấu bắt đầu.\n\n**3. Phân loại vai trò:**\nTương tự các game MOBA khác, Pokémon trong game được chia thành 5 vai trò chính để tạo sự cân bằng cho đội hình:\n*   **Attacker (Tấn công):** Sát thương chính, máu mỏng (như Pikachu, Cinderace).\n*   **Defender (Phòng thủ):** Đỡ đòn, tạo khiên, bảo vệ đồng đội (như Snorlax, Blastoise).\n*   **Speedster (Tốc độ):** Tương tự Sát thủ/Đi rừng, cơ động cao, chuyên diệt mục tiêu đơn lẻ (như Gengar, Zeraora).\n*   **Supporter (Hỗ trợ):** Bơm máu, khống chế kẻ địch (như Blissey, Eldegoss).\n*   **All-Rounder (Toàn diện):** Cân bằng giữa tấn công và phòng thủ, linh hoạt (như Lucario, Machamp).\n\n**4. Quái vật lớn (Boss):**\nỞ giai đoạn cuối trận (2 phút cuối), một Pokémon đặc biệt hùng mạnh (thường là Rayquaza hoặc Zapdos tùy bản đồ) sẽ xuất hiện ở giữa sân. Đội nào hạ gục được nó sẽ nhận được lượng lớn năng lượng và hiệu ứng giúp ghi điểm vào gôn đối phương ngay lập tức (không cần thời gian gồng/niệm chú), tạo ra những pha \"lật kèo\" vô cùng ngoạn mục.\n\nTóm lại, Pokémon Unite mang đến một luồng gió mới cho thể loại MOBA với nhịp độ cực kỳ nhanh, luật chơi dễ hiểu, tập trung vào việc giao tranh liên tục và dĩ nhiên là sự hấp dẫn từ việc được điều khiển các Pokémon yêu thích.",
+                "id": "6ea7fa8a-7994-4477-82bb-e2a36ef549cc",
+                "invalid_tool_calls": [],
+                "response_metadata": {},
+                "tool_calls": [],
+                "type": "ai"
+            }
+        ],
+        "persona": null,
+        "plan_lifecycle": null,
+        "planning_call_count": 0,
+        "planning_mode_enabled": false,
+        "planning_phase": "planning",
+        "response": {
+            "agent_id": "chat_agent",
+            "agent_type": "chat",
+            "message": {
+                "content": "**Pokémon Unite** là một tựa game chiến thuật đồng đội thuộc thể loại **MOBA** (Đấu trường trực tuyến nhiều người chơi), tương tự như Liên Minh Huyền Thoại hay Liên Quân Mobile, nhưng lấy bối cảnh và sử dụng các nhân vật trong vũ trụ Pokémon. \n\nTrò chơi được phát triển bởi TiMi Studio Group (một công ty con của Tencent) hợp tác cùng The Pokémon Company, và được phát hành **miễn phí** trên các nền tảng **Nintendo Switch, iOS và Android** (có hỗ trợ chơi chéo - crossplay giữa các nền tảng).\n\nDưới đây là những điểm nổi bật và cách chơi cơ bản của Pokémon Unite:\n\n**1. Lối chơi và Mục tiêu:**\n*   Các trận đấu diễn ra theo thể thức **5 đấu 5** và bị giới hạn thời gian (thường là 10 phút cho mỗi trận tiêu chuẩn).\n*   **Không có việc phá hủy \"nhà chính\" (Nexus)** như các game MOBA truyền thống. Thay vào đó, mục tiêu của trò chơi là **ghi điểm**.\n*   Người chơi cần đánh bại các Pokémon hoang dã trên bản đồ hoặc hạ gục người chơi đối phương để thu thập **Năng lượng Aeos (Aeos Energy)**.\n*   Sau đó, bạn phải mang số năng lượng này \"úp rổ\" vào các khu vực ghi điểm (Goal Zones) của phe địch. Đội nào có tổng số điểm cao hơn khi hết giờ sẽ giành chiến thắng.\n\n**2. Sự tiến hóa và Kỹ năng:**\n*   Khi bắt đầu trận đấu, hầu hết các Pokémon đều ở cấp độ 1 (thường là hình thái cơ bản nhất, ví dụ như Charmander).\n*   Thông qua việc đánh quái và ghi điểm, Pokémon sẽ nhận được điểm kinh nghiệm (EXP), từ đó **lên cấp, học kỹ năng mới và tự động tiến hóa** (ví dụ tiến hóa thành Charmeleon rồi đến Charizard) ngay trong quá trình trận đấu diễn ra.\n*   Thay vì mua trang bị bằng vàng trong trận, người chơi sẽ chọn và nâng cấp các \"Vật phẩm cầm tay\" (Held Items) cho Pokémon của mình trước khi trận đấu bắt đầu.\n\n**3. Phân loại vai trò:**\nTương tự các game MOBA khác, Pokémon trong game được chia thành 5 vai trò chính để tạo sự cân bằng cho đội hình:\n*   **Attacker (Tấn công):** Sát thương chính, máu mỏng (như Pikachu, Cinderace).\n*   **Defender (Phòng thủ):** Đỡ đòn, tạo khiên, bảo vệ đồng đội (như Snorlax, Blastoise).\n*   **Speedster (Tốc độ):** Tương tự Sát thủ/Đi rừng, cơ động cao, chuyên diệt mục tiêu đơn lẻ (như Gengar, Zeraora).\n*   **Supporter (Hỗ trợ):** Bơm máu, khống chế kẻ địch (như Blissey, Eldegoss).\n*   **All-Rounder (Toàn diện):** Cân bằng giữa tấn công và phòng thủ, linh hoạt (như Lucario, Machamp).\n\n**4. Quái vật lớn (Boss):**\nỞ giai đoạn cuối trận (2 phút cuối), một Pokémon đặc biệt hùng mạnh (thường là Rayquaza hoặc Zapdos tùy bản đồ) sẽ xuất hiện ở giữa sân. Đội nào hạ gục được nó sẽ nhận được lượng lớn năng lượng và hiệu ứng giúp ghi điểm vào gôn đối phương ngay lập tức (không cần thời gian gồng/niệm chú), tạo ra những pha \"lật kèo\" vô cùng ngoạn mục.\n\nTóm lại, Pokémon Unite mang đến một luồng gió mới cho thể loại MOBA với nhịp độ cực kỳ nhanh, luật chơi dễ hiểu, tập trung vào việc giao tranh liên tục và dĩ nhiên là sự hấp dẫn từ việc được điều khiển các Pokémon yêu thích.",
+                "metadata": {},
+                "role": "assistant"
+            },
+            "metadata": {
+                "_inline_rich_response_v1": true,
+                "_presented_rich_image_ids": [],
+                "agent": {
+                    "custom_agent_id": null,
+                    "id": "chat_agent",
+                    "kind": "base",
+                    "name": "Chat Agent",
+                    "source": "response"
+                },
+                "config_source": "persisted",
+                "context_window": {
+                    "context_window_tokens": 1048576,
+                    "display_state": "ok",
+                    "input_tokens": 5748,
+                    "input_usage_ratio": 0.005481719970703125,
+                    "known": true,
+                    "limit_type": "shared_context",
+                    "max_input_tokens": 1048576,
+                    "max_output_tokens": 65536,
+                    "model": "gemini-3.1-pro-preview",
+                    "output_tokens": 1740,
+                    "output_usage_ratio": 0.001659393310546875,
+                    "provider": "gemini",
+                    "source": "provider_api",
+                    "total_tokens": 7488,
+                    "usage_ratio": 0.00714111328125,
+                    "usage_ratio_basis": "shared_context_total",
+                    "usage_source": "provider_reported",
+                    "used_token_source": "provider_reported_total",
+                    "used_tokens": 7488
+                },
+                "conversation_id": "a9cba03e-9b0c-4a3d-a5e0-1fb8db5d1f25",
+                "key_source": "db",
+                "model": "gemini-3.1-pro-preview",
+                "provider": "gemini",
+                "reasoning_effort": "high",
+                "reasoning_tokens": 890,
+                "request_budget": {
+                    "action": "proceed",
+                    "available_input_tokens": 1043456,
+                    "count_strategy": "gemini:utf8_bytes_div_3",
+                    "durable_requested": false,
+                    "emergency_compacted": false,
+                    "input_tokens": 8935,
+                    "removed_groups": 0,
+                    "usage_ratio": 0.008562891008341511
+                },
+                "token_breakdown": {
+                    "actual": {
+                        "input_tokens": 5748,
+                        "output_tokens": 1740,
+                        "reasoning_tokens": 890,
+                        "total_tokens": 7488
+                    },
+                    "bound_tool_names": [
+                        "activate_skill",
+                        "read_skill_resource",
+                        "read_tool_result",
+                        "web_research",
+                        "hand_off",
+                        "tool_search",
+                        "widget_create",
+                        "widget_update",
+                        "widget_get_state"
+                    ],
+                    "counts": {
+                        "bound_tools": 9,
+                        "history_messages": 0,
+                        "tool_messages": 0
+                    },
+                    "estimated": {
+                        "current_turn_tokens": 11,
+                        "history_tokens": 0,
+                        "system_prompt_tokens": 4014,
+                        "tool_message_tokens": 0,
+                        "tool_schema_tokens": 4823,
+                        "total_tokens": 8848
+                    }
+                }
+            }
+        },
+        "selected_agent": "chat_agent",
+        "user_id": "c3f04191-895a-4fb4-95c1-9f3fe66ac8f1",
+        "user_message_id": "e5ab1620-3332-4483-a512-45bc94866526"
+    },
+    "metadata": {
+        "LANGSMITH_PROJECT": "sample-chatbot",
+        "LANGSMITH_TRACING": "true",
+        "ls_integration": "langgraph",
+        "ls_run_depth": 0,
+        "revision_id": "bab1bed",
+        "thread_id": "a9cba03e-9b0c-4a3d-a5e0-1fb8db5d1f25"
+    },
+    "langsmith": {
+        "organization": {
+            "name": "Personal",
+            "id": "a11800e4-fa83-4283-83c5-73643da1eb19"
+        },
+        "workspace": {
+            "name": "Workspace 1",
+            "id": "3bfbc373-21c2-400e-a6e1-84e32a625bbd"
+        },
+        "tracing_project": {
+            "id": "587399a5-ae7d-485a-917c-71dd84ccd380",
+            "name": "sample-chatbot"
+        }
+    }
+}
