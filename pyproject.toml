@@ -27,6 +27,9 @@ dependencies = [
     "sqlalchemy>=2.0.42,<3.0.0",
     "alembic>=1.12.1",
     "psycopg2-binary>=2.9.9",
+    # app/ai/checkpoint.py imports psycopg_pool directly for the LangGraph
+    # Postgres checkpointer.
+    "psycopg-pool>=3.3.1,<4.0.0",
     
     # Authentication & Security
     "PyJWT>=2.8.0",
@@ -44,6 +47,7 @@ dependencies = [
     # AI & LangChain Ecosystem
     "langchain>=1.3.4,<2.0.0",
     "langchain-core>=1.4.2,<2.0.0",
+    "langchain-text-splitters>=1.1.2,<2.0.0",
     "langgraph>=1.2.4,<2.0.0",
     "langgraph-checkpoint>=4.1.1,<5.0.0",
     "langgraph-checkpoint-postgres>=3.1.0,<4.0.0",
@@ -51,6 +55,10 @@ dependencies = [
     "langchain-google-genai>=4.2.4,<5.0.0",
     "langchain-openai>=1.2.2,<2.0.0",
     "langchain-mcp-adapters>=0.2.2,<1.0.0",
+    # Imported directly by app/ai/mcp_servers/*, not only through the adapters.
+    "mcp>=1.28.1,<2.0.0",
+    # `from google.genai import types, errors` in the agent layer.
+    "google-genai>=2.13.0,<3.0.0",
     "openai>=1.0.0",
     "tavily-python==0.7.15",
     "langchain-tavily>=0.2.0",
@@ -78,6 +86,10 @@ dependencies = [
     # Utilities
     "filelock>=3.20.0,<4.0.0",
     "jsonschema>=4.20.0",
+    # All three are imported directly by app/ rather than relied on transitively.
+    "anyio>=4.13.0",
+    "cachetools>=6.2.4",
+    "requests>=2.34.2",
     "fastapi-radar>=0.0.2",
     "python-dotenv>=1.0.0",
     "cryptography>=41.0.0",
@@ -91,6 +103,15 @@ kani-client-backend = "client_backend.cli:main"
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
+    # The linter this file already configures under [tool.ruff].
+    "ruff>=0.15.2",
+]
+# `app/ui/` ships inside the wheel but is imported only by demo.py, the
+# Streamlit frontend. Keeping streamlit out of the core dependency list stops
+# the server from pulling it in; install this extra (or demo_requirements.txt)
+# to run the demo.
+demo = [
+    "streamlit>=1.55.0",
 ]
 
 [tool.hatch.build.targets.wheel]

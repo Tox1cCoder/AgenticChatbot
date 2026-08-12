@@ -15,7 +15,6 @@ dependencies:
   - idna=3.11=py311haa95532_0
   - jsonpatch=1.33=py311haa95532_1
   - jsonpointer=3.1.1=py311haa95532_0
-  - langchain-openai=1.1.7=py311haa95532_0
   - libexpat=2.7.3=h885b0b7_4
   - libffi=3.4.4=hd77b12b_1
   - libzlib=1.3.1=h02ab6af_0
@@ -35,7 +34,6 @@ dependencies:
   - typing-inspection=0.4.2=py311haa95532_0
   - typing_extensions=4.15.0=py311haa95532_0
   - ucrt=10.0.22621.0=haa95532_0
-  - urllib3=2.6.3=py311haa95532_0
   - vc=14.3=h2df5915_10
   - vc14_runtime=14.44.35208=h4927774_10
   - vs2015_runtime=14.44.35208=ha6b5a95_10
@@ -57,7 +55,7 @@ dependencies:
       - aiosqlite==0.22.0
       - albucore==0.0.24
       - albumentations==2.0.8
-      - alembic==1.17.2
+      - alembic==1.18.5
       - altair==6.0.0
       - altgraph==0.17.5
       - amqp==5.3.1
@@ -87,7 +85,7 @@ dependencies:
       - bs4==0.0.2
       - cachetools==6.2.4
       - caio==0.9.25
-      - celery==5.6.0
+      - celery==5.6.3
       - certifi==2026.2.25
       - charset-normalizer==3.4.7
       - click==8.3.2
@@ -102,7 +100,7 @@ dependencies:
       - contourpy==1.3.3
       - coverage==7.14.0
       - croniter==6.0.0
-      - cryptography==46.0.7
+      - cryptography==49.0.0
       - cycler==0.12.1
       - cyclopts==4.10.2
       - dataclasses-json==0.6.7
@@ -114,6 +112,7 @@ dependencies:
       - doclayout-yolo==0.0.4
       - docstring-parser==0.18.0
       - docutils==0.22.4
+      - docx2txt==0.9
       - duckdb==1.1.3
       - duckdb-engine==0.17.0
       - einops==0.8.2
@@ -139,7 +138,7 @@ dependencies:
       - gitdb==4.0.12
       - gitpython==3.1.45
       - google-auth==2.47.0
-      - google-genai==1.57.0
+      - google-genai==2.13.0
       - googleapis-common-protos==1.73.0
       - greenlet==3.3.0
       - griffelib==2.0.2
@@ -150,8 +149,8 @@ dependencies:
       - h2==4.3.0
       - hf-xet==1.2.0
       - hpack==4.1.0
-      - httptools==0.7.1
       - httpcore2==2.3.0
+      - httptools==0.7.1
       - httpx-retries==0.4.6
       - httpx-sse==0.4.3
       - httpx2==2.3.0
@@ -184,22 +183,23 @@ dependencies:
       - keyring==25.7.0
       - kiwisolver==1.4.9
       - kombu==5.6.1
-      - langchain==1.2.15
-      - langchain-classic==1.0.0
-      - langchain-core==1.2.28
-      - langchain-google-genai==4.1.3
-      - langchain-mcp-adapters==0.2.1
-      - langchain-tavily==0.2.14
-      - langchain-text-splitters==1.1.0
-      - langgraph==1.1.6
+      - langchain==1.3.14
+      - langchain-classic==1.0.8
+      - langchain-core==1.5.0
+      - langchain-google-genai==4.3.1
+      - langchain-mcp-adapters==0.3.0
+      - langchain-openai==1.4.0
+      - langchain-tavily==0.2.18
+      - langchain-text-splitters==1.1.2
+      - langgraph==1.2.9
       - langgraph-api==0.7.69
-      - langgraph-checkpoint==3.0.1
-      - langgraph-checkpoint-postgres==3.0.2
+      - langgraph-checkpoint==4.1.1
+      - langgraph-checkpoint-postgres==3.1.0
       - langgraph-cli==0.4.15
-      - langgraph-prebuilt==1.0.9
+      - langgraph-prebuilt==1.1.0
       - langgraph-runtime-inmem==0.26.0
-      - langgraph-sdk==0.3.13
-      - langsmith==0.7.30
+      - langgraph-sdk==0.4.2
+      - langsmith==0.10.9
       - lazy-loader==0.5
       - loguru==0.7.3
       - loro==1.10.3
@@ -213,7 +213,7 @@ dependencies:
       - markupsafe==3.0.3
       - marshmallow==3.26.1
       - matplotlib==3.10.8
-      - mcp==1.24.0
+      - mcp==1.28.1
       - mdurl==0.1.2
       - mineru==3.4.4
       - mineru-vl-utils==1.0.5
@@ -238,7 +238,7 @@ dependencies:
       - numpy==2.4.4
       - omegaconf==2.3.0
       - onnxruntime==1.24.4
-      - openai==2.32.0
+      - openai==2.46.0
       - openai-harmony==0.0.8
       - openapi-pydantic==0.5.1
       - opencv-python==4.13.0.92
@@ -261,11 +261,12 @@ dependencies:
       - pathspec==1.0.4
       - pdfkit==1.0.0
       - pdfminer-six==20260107
+      - pdfplumber==0.11.10
       - pdftext==0.6.3
       - pefile==2024.8.26
       - peft==0.14.0
       - pfzy==0.3.4
-      - pillow==12.2.0
+      - pillow==12.3.0
       - platformdirs==4.9.6
       - playwright==1.58.0
       - pluggy==1.6.0
@@ -278,10 +279,10 @@ dependencies:
       - propcache==0.4.1
       - protobuf==6.33.6
       - psutil==7.2.2
-      - psycopg==3.3.2
+      - psycopg==3.3.4
       - psycopg-binary==3.3.3
-      - psycopg-pool==3.3.0
-      - psycopg2-binary==2.9.11
+      - psycopg-pool==3.3.1
+      - psycopg2-binary==2.9.12
       - py-cpuinfo==9.0.0
       - py-key-value-aio==0.4.4
       - pyarrow==22.0.0
@@ -290,16 +291,16 @@ dependencies:
       - pybase64==1.4.3
       - pyclipper==1.4.0
       - pycparser==3.0
-      - pydantic==2.13.1
-      - pydantic-core==2.46.1
-      - pydantic-settings==2.13.1
+      - pydantic==2.13.4
+      - pydantic-core==2.46.4
+      - pydantic-settings==2.14.2
       - pydeck==0.9.1
       - pydub==0.25.1
       - pyee==13.0.1
       - pygments==2.20.0
       - pyinstaller==6.19.0
       - pyinstaller-hooks-contrib==2026.3
-      - pyjwt==2.10.1
+      - pyjwt==2.13.0
       - pylatexenc==2.10
       - pymdown-extensions==10.21.2
       - pyparsing==3.3.2
@@ -318,14 +319,14 @@ dependencies:
       - pywin32==311
       - pywin32-ctypes==0.2.3
       - pyzmq==27.1.0
-      - qdrant-client==1.16.2
+      - qdrant-client==1.18.0
       - qwen-vl-utils==0.0.14
       - ray==2.55.0
       - redis==6.4.0
       - referencing==0.37.0
       - regex==2026.4.4
       - reportlab==4.4.10
-      - requests==2.33.1
+      - requests==2.34.2
       - rich==15.0.0
       - rich-rst==1.3.2
       - robust-downloader==0.0.2
@@ -340,7 +341,7 @@ dependencies:
       - scipy==1.17.1
       - seaborn==0.13.2
       - semantic-version==2.10.0
-      - sentence-transformers==5.2.0
+      - sentence-transformers==5.6.0
       - sentencepiece==0.2.1
       - setuptools==81.0.0
       - shapely==2.1.2
@@ -351,12 +352,12 @@ dependencies:
       - skillopt==0.1.0
       - smmap==5.0.2
       - soupsieve==2.8.3
-      - sqlalchemy==2.0.45
+      - sqlalchemy==2.0.51
       - sse-starlette==3.0.4
       - starlette==1.3.1
       - stdlibs==2025.10.28
       - stevedore==5.7.0
-      - streamlit==1.55.0
+      - streamlit==1.57.0
       - stringzilla==4.6.0
       - structlog==25.5.0
       - sympy==1.14.0
@@ -364,7 +365,7 @@ dependencies:
       - tavily-python==0.7.15
       - tenacity==9.1.4
       - termcolor==3.3.0
-      - thop==0.1.1-2209072238
+      - thop==0.1.1.post2209072238
       - threadpoolctl==3.6.0
       - tifffile==2026.3.3
       - tinycss2==1.4.0
@@ -390,9 +391,10 @@ dependencies:
       - ultralytics==8.4.14
       - ultralytics-thop==2.0.18
       - uncalled-for==0.3.1
+      - urllib3==2.7.0
       - uuid-utils==0.14.1
       - uv==0.10.8
-      - uvicorn==0.44.0
+      - uvicorn==0.51.0
       - vine==5.1.0
       - watchdog==6.0.0
       - watchfiles==1.1.1

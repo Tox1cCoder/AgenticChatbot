@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import re
 import sys
 import types
 from datetime import date, datetime
@@ -11,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
 import pytest
+from packaging.version import Version
 
 
 class _SessionState(dict):
@@ -934,14 +936,28 @@ def test_timezone_options_are_sorted_and_cached(monkeypatch):
 
 
 def test_streamlit_dependency_supports_keyed_lazy_tabs():
-    root = Path(__file__).resolve().parents[1]
-    full_requirements = (root / "requirements.txt").read_text(encoding="utf-8")
-    demo_requirements = (root / "demo_requirements.txt").read_text(encoding="utf-8")
-    environment = (root / "environment.yml").read_text(encoding="utf-8")
+    """Every dependency file must allow a streamlit new enough for keyed lazy tabs.
 
-    assert "streamlit==1.55.0" in full_requirements
-    assert "streamlit>=1.55.0" in demo_requirements
-    assert "streamlit==1.55.0" in environment
+    Asserts the floor rather than an exact pin so that routine upgrades do not
+    fail this test, while a downgrade below the feature's minimum still does.
+    """
+
+    minimum = Version("1.55.0")
+    root = Path(__file__).resolve().parents[1]
+    sources = {
+        "requirements.txt": r"streamlit==([0-9][^\s]*)",
+        "demo_requirements.txt": r"streamlit>=([0-9][^\s]*)",
+        "environment.yml": r"streamlit==([0-9][^\s]*)",
+    }
+
+    for filename, pattern in sources.items():
+        text = (root / filename).read_text(encoding="utf-8")
+        match = re.search(pattern, text)
+        assert match is not None, f"{filename} does not declare streamlit"
+        assert Version(match.group(1)) >= minimum, (
+            f"{filename} pins streamlit {match.group(1)}, below the {minimum} "
+            "required for keyed lazy tabs"
+        )
 
 
 def test_local_timezone_fallback_is_portable_and_valid(monkeypatch):
