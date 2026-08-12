@@ -9,15 +9,36 @@ venv/
 env/
 ENV/
 venv.bak/
-.env
-.env.client
-.dev_secret_key
+.conda/
 
-# IDEs
+# Secrets and credentials
+# Every dotenv variant is ignored; only the checked-in templates are exceptions.
+.env
+.env.*
+!.env.example
+!.env.client.example
+.dev_secret_key
+*.key
+*.pem
+*.p12
+*.pfx
+*.keystore
+*.secret
+secrets.json
+credentials.json
+
+# IDEs / agent tooling
 .vscode/
 .idea/
 *.swp
 *.swo
+.claude/
+.agent/
+.agents/
+.superpowers/
+.traycer/
+.codex_logs/
+WARP.md
 
 # Jupyter
 .ipynb_checkpoints
@@ -34,17 +55,48 @@ Desktop.ini
 
 # Logs
 *.log
+log.md
 
 # Misc
 *.bak
 *.tmp
+tasksync
 
-# Storage (user uploaded content)
-app/storage/document_images/
+# Storage (user uploaded content: chat images, document images, parse
+# artifacts). Ignore the whole tree — the previous `document_images/`-only rule
+# left chat_images/ and parse_artifacts/ exposed to a broad `git add`.
+app/storage/
 app/temp/
+
+# Streamlit machine-local config. secrets.toml is listed separately so the
+# credential file stays ignored even if the directory rule is ever relaxed.
+.streamlit/
+.streamlit/secrets.toml
+
+# Vendored MCP sidecar servers (unanchored: lives at
+# app/ai/mcp_servers/boring_servers/)
+boring_servers/
+
+# Local Qdrant server: runtime state plus the 80MB vendored binary. No code
+# references the executable (the app talks to Qdrant over the network via
+# qdrant-client), so it is a local convenience download rather than a source
+# artifact. Fetch it from https://github.com/qdrant/qdrant/releases when
+# running Qdrant locally. config/config.yaml stays tracked.
+app/database/qdrant/qdrant.exe
+app/database/qdrant/storage/
+app/database/qdrant/snapshots/
+app/database/qdrant/.qdrant-initialized
+
+# Legacy offloaded tool results (pre-Postgres blobs).
+# Anchored to the repo root so nested source directories named `data/` or
+# `storage/` are not swallowed.
+/data/
+/storage/
+/output/
 
 # Test output
 .pytest_cache/
+.ruff_cache/
 .coverage
 coverage.xml
 htmlcov/
@@ -55,43 +107,19 @@ dist/
 .desloppify/
 *.egg-info/
 .eggs/
-WARP.md
 
-# Others
+# Lockfiles from package managers this project does not use
 Pipfile.lock
 poetry.lock
-tasksync
-log.md
-.traycer/
+
+# Machine-local MCP sidecar profiles. The server's own MCP config is the
+# tracked global-tool allowlist (FR-3, enforced by
+# tests/test_mcp_global_allowlist.py) and must stay checked in.
 mcp_config.json
-# The server's MCP config is the tracked global-tool allowlist (FR-3,
-# enforced by tests/test_mcp_global_allowlist.py); machine-local MCP
-# configs (sidecar profiles) stay ignored by the pattern above.
 !app/ai/mcp_config.json
-output/
-boring_servers/
-scripts/*
-!scripts/client-backend-bundle/
-!scripts/client-backend-bundle/**
-.agent
-.pytest_cache/
-.ruff_cache/
-.streamlit/
-.vscode/
-.claude
-.codex_logs
-.conda
-.pytest_cache
-.ruff_cache
+
 # Anchored to repo root: ignore only the top-level personal skill-bundle
 # directory. `shared/skills/` (importable shared code) and
 # `tests/fixtures/skills/` (CI fixtures) are not matched and stay tracked;
 # bytecode under them is still ignored by the __pycache__/ rule above.
 /skills/
-.codex_logs
-.conda
-.superpowers
-
-# Legacy offloaded tool results (pre-Postgres blobs)
-data/
-storage/
