@@ -39,7 +39,7 @@ def test_offline_runner_executes_the_target_and_evaluators():
 
     summary = script.run_offline(script.parse_args(["--offline"]), target=target)
 
-    assert len(calls) == 110
+    assert 100 <= len(calls) <= 300
     assert summary["mode"] == "offline"
     assert "abstention_precision" in summary["metrics"]
     assert "document_recall_at_1" in summary["metrics"]

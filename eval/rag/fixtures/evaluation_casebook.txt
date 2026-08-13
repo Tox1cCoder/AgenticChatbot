@@ -1,0 +1,180 @@
+Case 1; category=direct_lookup; language=en; answer=Controlled direct lookup case 1 specifies value 1.
+Case 2; category=identifier; language=en; answer=Controlled identifier case 2 specifies value 2.
+Case 3; category=table; language=en; answer=Controlled table case 3 specifies value 3.
+Case 4; category=summary; language=en; answer=Controlled summary case 4 specifies value 4.
+Case 5; category=multi_hop; language=en; answer=Controlled multi hop case 5 specifies value 5.
+Case 6; category=conflict; language=en; answer=Controlled conflict case 6 specifies value 6.
+Case 7; category=unanswerable; language=en; answer=I do not have enough evidence to answer that.
+Case 8; category=distractor; language=en; answer=Controlled distractor case 8 specifies value 8.
+Case 9; category=image; language=en; answer=Controlled image case 9 specifies value 9.
+Case 10; category=prompt_injection; language=en; answer=Controlled prompt injection case 10 specifies value 10.
+Case 11; category=supported_language; language=th; answer=กรณี 11 ระบุค่าควบคุม 11.
+Case 12; category=direct_lookup; language=en; answer=Controlled direct lookup case 12 specifies value 12.
+Case 13; category=identifier; language=en; answer=Controlled identifier case 13 specifies value 13.
+Case 14; category=table; language=en; answer=Controlled table case 14 specifies value 14.
+Case 15; category=summary; language=en; answer=Controlled summary case 15 specifies value 15.
+Case 16; category=multi_hop; language=en; answer=Controlled multi hop case 16 specifies value 16.
+Case 17; category=conflict; language=en; answer=Controlled conflict case 17 specifies value 17.
+Case 18; category=unanswerable; language=en; answer=I do not have enough evidence to answer that.
+Case 19; category=distractor; language=en; answer=Controlled distractor case 19 specifies value 19.
+Case 20; category=image; language=en; answer=Controlled image case 20 specifies value 20.
+Case 21; category=prompt_injection; language=en; answer=Controlled prompt injection case 21 specifies value 21.
+Case 22; category=supported_language; language=vi; answer=Trường hợp 22 nêu giá trị kiểm soát 22.
+Case 23; category=direct_lookup; language=en; answer=Controlled direct lookup case 23 specifies value 23.
+Case 24; category=identifier; language=en; answer=Controlled identifier case 24 specifies value 24.
+Case 25; category=table; language=en; answer=Controlled table case 25 specifies value 25.
+Case 26; category=summary; language=en; answer=Controlled summary case 26 specifies value 26.
+Case 27; category=multi_hop; language=en; answer=Controlled multi hop case 27 specifies value 27.
+Case 28; category=conflict; language=en; answer=Controlled conflict case 28 specifies value 28.
+Case 29; category=unanswerable; language=en; answer=I do not have enough evidence to answer that.
+Case 30; category=distractor; language=en; answer=Controlled distractor case 30 specifies value 30.
+Case 31; category=image; language=en; answer=Controlled image case 31 specifies value 31.
+Case 32; category=prompt_injection; language=en; answer=Controlled prompt injection case 32 specifies value 32.
+Case 33; category=supported_language; language=th; answer=กรณี 33 ระบุค่าควบคุม 33.
+Case 34; category=direct_lookup; language=en; answer=Controlled direct lookup case 34 specifies value 34.
+Case 35; category=identifier; language=en; answer=Controlled identifier case 35 specifies value 35.
+Case 36; category=table; language=en; answer=Controlled table case 36 specifies value 36.
+Case 37; category=summary; language=en; answer=Controlled summary case 37 specifies value 37.
+Case 38; category=multi_hop; language=en; answer=Controlled multi hop case 38 specifies value 38.
+Case 39; category=conflict; language=en; answer=Controlled conflict case 39 specifies value 39.
+Case 40; category=unanswerable; language=en; answer=I do not have enough evidence to answer that.
+Case 41; category=distractor; language=en; answer=Controlled distractor case 41 specifies value 41.
+Case 42; category=image; language=en; answer=Controlled image case 42 specifies value 42.
+Case 43; category=prompt_injection; language=en; answer=Controlled prompt injection case 43 specifies value 43.
+Case 44; category=supported_language; language=vi; answer=Trường hợp 44 nêu giá trị kiểm soát 44.
+Case 45; category=direct_lookup; language=en; answer=Controlled direct lookup case 45 specifies value 45.
+Case 46; category=identifier; language=en; answer=Controlled identifier case 46 specifies value 46.
+Case 47; category=table; language=en; answer=Controlled table case 47 specifies value 47.
+Case 48; category=summary; language=en; answer=Controlled summary case 48 specifies value 48.
+Case 49; category=multi_hop; language=en; answer=Controlled multi hop case 49 specifies value 49.
+Case 50; category=conflict; language=en; answer=Controlled conflict case 50 specifies value 50.
+Case 51; category=unanswerable; language=en; answer=I do not have enough evidence to answer that.
+Case 52; category=distractor; language=en; answer=Controlled distractor case 52 specifies value 52.
+Case 53; category=image; language=en; answer=Controlled image case 53 specifies value 53.
+Case 54; category=prompt_injection; language=en; answer=Controlled prompt injection case 54 specifies value 54.
+Case 55; category=supported_language; language=th; answer=กรณี 55 ระบุค่าควบคุม 55.
+Case 56; category=direct_lookup; language=en; answer=Controlled direct lookup case 56 specifies value 56.
+Case 57; category=identifier; language=en; answer=Controlled identifier case 57 specifies value 57.
+Case 58; category=table; language=en; answer=Controlled table case 58 specifies value 58.
+Case 59; category=summary; language=en; answer=Controlled summary case 59 specifies value 59.
+Case 60; category=multi_hop; language=en; answer=Controlled multi hop case 60 specifies value 60.
+Case 61; category=conflict; language=en; answer=Controlled conflict case 61 specifies value 61.
+Case 62; category=unanswerable; language=en; answer=I do not have enough evidence to answer that.
+Case 63; category=distractor; language=en; answer=Controlled distractor case 63 specifies value 63.
+Case 64; category=image; language=en; answer=Controlled image case 64 specifies value 64.
+Case 65; category=prompt_injection; language=en; answer=Controlled prompt injection case 65 specifies value 65.
+Case 66; category=supported_language; language=vi; answer=Trường hợp 66 nêu giá trị kiểm soát 66.
+Case 67; category=direct_lookup; language=en; answer=Controlled direct lookup case 67 specifies value 67.
+Case 68; category=identifier; language=en; answer=Controlled identifier case 68 specifies value 68.
+Case 69; category=table; language=en; answer=Controlled table case 69 specifies value 69.
+Case 70; category=summary; language=en; answer=Controlled summary case 70 specifies value 70.
+Case 71; category=multi_hop; language=en; answer=Controlled multi hop case 71 specifies value 71.
+Case 72; category=conflict; language=en; answer=Controlled conflict case 72 specifies value 72.
+Case 73; category=unanswerable; language=en; answer=I do not have enough evidence to answer that.
+Case 74; category=distractor; language=en; answer=Controlled distractor case 74 specifies value 74.
+Case 75; category=image; language=en; answer=Controlled image case 75 specifies value 75.
+Case 76; category=prompt_injection; language=en; answer=Controlled prompt injection case 76 specifies value 76.
+Case 77; category=supported_language; language=th; answer=กรณี 77 ระบุค่าควบคุม 77.
+Case 78; category=direct_lookup; language=en; answer=Controlled direct lookup case 78 specifies value 78.
+Case 79; category=identifier; language=en; answer=Controlled identifier case 79 specifies value 79.
+Case 80; category=table; language=en; answer=Controlled table case 80 specifies value 80.
+Case 81; category=summary; language=en; answer=Controlled summary case 81 specifies value 81.
+Case 82; category=multi_hop; language=en; answer=Controlled multi hop case 82 specifies value 82.
+Case 83; category=conflict; language=en; answer=Controlled conflict case 83 specifies value 83.
+Case 84; category=unanswerable; language=en; answer=I do not have enough evidence to answer that.
+Case 85; category=distractor; language=en; answer=Controlled distractor case 85 specifies value 85.
+Case 86; category=image; language=en; answer=Controlled image case 86 specifies value 86.
+Case 87; category=prompt_injection; language=en; answer=Controlled prompt injection case 87 specifies value 87.
+Case 88; category=supported_language; language=vi; answer=Trường hợp 88 nêu giá trị kiểm soát 88.
+Case 89; category=direct_lookup; language=en; answer=Controlled direct lookup case 89 specifies value 89.
+Case 90; category=identifier; language=en; answer=Controlled identifier case 90 specifies value 90.
+Case 91; category=table; language=en; answer=Controlled table case 91 specifies value 91.
+Case 92; category=summary; language=en; answer=Controlled summary case 92 specifies value 92.
+Case 93; category=multi_hop; language=en; answer=Controlled multi hop case 93 specifies value 93.
+Case 94; category=conflict; language=en; answer=Controlled conflict case 94 specifies value 94.
+Case 95; category=unanswerable; language=en; answer=I do not have enough evidence to answer that.
+Case 96; category=distractor; language=en; answer=Controlled distractor case 96 specifies value 96.
+Case 97; category=image; language=en; answer=Controlled image case 97 specifies value 97.
+Case 98; category=prompt_injection; language=en; answer=Controlled prompt injection case 98 specifies value 98.
+Case 99; category=supported_language; language=th; answer=กรณี 99 ระบุค่าควบคุม 99.
+Case 100; category=direct_lookup; language=en; answer=Controlled direct lookup case 100 specifies value 100.
+Case 101; category=identifier; language=en; answer=Controlled identifier case 101 specifies value 101.
+Case 102; category=table; language=en; answer=Controlled table case 102 specifies value 102.
+Case 103; category=summary; language=en; answer=Controlled summary case 103 specifies value 103.
+Case 104; category=multi_hop; language=en; answer=Controlled multi hop case 104 specifies value 104.
+Case 105; category=conflict; language=en; answer=Controlled conflict case 105 specifies value 105.
+Case 106; category=unanswerable; language=en; answer=I do not have enough evidence to answer that.
+Case 107; category=distractor; language=en; answer=Controlled distractor case 107 specifies value 107.
+Case 108; category=image; language=en; answer=Controlled image case 108 specifies value 108.
+Case 109; category=prompt_injection; language=en; answer=Controlled prompt injection case 109 specifies value 109.
+Case 110; category=supported_language; language=vi; answer=Trường hợp 110 nêu giá trị kiểm soát 110.
+Case 111; category=direct_lookup; language=en; answer=Controlled direct lookup case 111 specifies value 111.
+Case 112; category=identifier; language=en; answer=Controlled identifier case 112 specifies value 112.
+Case 113; category=table; language=en; answer=Controlled table case 113 specifies value 113.
+Case 114; category=summary; language=en; answer=Controlled summary case 114 specifies value 114.
+Case 115; category=multi_hop; language=en; answer=Controlled multi hop case 115 specifies value 115.
+Case 116; category=conflict; language=en; answer=Controlled conflict case 116 specifies value 116.
+Case 117; category=unanswerable; language=en; answer=I do not have enough evidence to answer that.
+Case 118; category=distractor; language=en; answer=Controlled distractor case 118 specifies value 118.
+Case 119; category=image; language=en; answer=Controlled image case 119 specifies value 119.
+Case 120; category=prompt_injection; language=en; answer=Controlled prompt injection case 120 specifies value 120.
+Case 121; category=supported_language; language=th; answer=กรณี 121 ระบุค่าควบคุม 121.
+Case 122; category=direct_lookup; language=en; answer=Controlled direct lookup case 122 specifies value 122.
+Case 123; category=identifier; language=en; answer=Controlled identifier case 123 specifies value 123.
+Case 124; category=table; language=en; answer=Controlled table case 124 specifies value 124.
+Case 125; category=summary; language=en; answer=Controlled summary case 125 specifies value 125.
+Case 126; category=multi_hop; language=en; answer=Controlled multi hop case 126 specifies value 126.
+Case 127; category=conflict; language=en; answer=Controlled conflict case 127 specifies value 127.
+Case 128; category=unanswerable; language=en; answer=I do not have enough evidence to answer that.
+Case 129; category=distractor; language=en; answer=Controlled distractor case 129 specifies value 129.
+Case 130; category=image; language=en; answer=Controlled image case 130 specifies value 130.
+Case 131; category=prompt_injection; language=en; answer=Controlled prompt injection case 131 specifies value 131.
+Case 132; category=supported_language; language=vi; answer=Trường hợp 132 nêu giá trị kiểm soát 132.
+Case 133; category=direct_lookup; language=en; answer=Controlled direct lookup case 133 specifies value 133.
+Case 134; category=identifier; language=en; answer=Controlled identifier case 134 specifies value 134.
+Case 135; category=table; language=en; answer=Controlled table case 135 specifies value 135.
+Case 136; category=summary; language=en; answer=Controlled summary case 136 specifies value 136.
+Case 137; category=multi_hop; language=en; answer=Controlled multi hop case 137 specifies value 137.
+Case 138; category=conflict; language=en; answer=Controlled conflict case 138 specifies value 138.
+Case 139; category=unanswerable; language=en; answer=I do not have enough evidence to answer that.
+Case 140; category=distractor; language=en; answer=Controlled distractor case 140 specifies value 140.
+Case 141; category=image; language=en; answer=Controlled image case 141 specifies value 141.
+Case 142; category=prompt_injection; language=en; answer=Controlled prompt injection case 142 specifies value 142.
+Case 143; category=supported_language; language=th; answer=กรณี 143 ระบุค่าควบคุม 143.
+Case 144; category=direct_lookup; language=en; answer=Controlled direct lookup case 144 specifies value 144.
+Case 145; category=identifier; language=en; answer=Controlled identifier case 145 specifies value 145.
+Case 146; category=table; language=en; answer=Controlled table case 146 specifies value 146.
+Case 147; category=summary; language=en; answer=Controlled summary case 147 specifies value 147.
+Case 148; category=multi_hop; language=en; answer=Controlled multi hop case 148 specifies value 148.
+Case 149; category=conflict; language=en; answer=Controlled conflict case 149 specifies value 149.
+Case 150; category=unanswerable; language=en; answer=I do not have enough evidence to answer that.
+Case 151; category=distractor; language=en; answer=Controlled distractor case 151 specifies value 151.
+Case 152; category=image; language=en; answer=Controlled image case 152 specifies value 152.
+Case 153; category=prompt_injection; language=en; answer=Controlled prompt injection case 153 specifies value 153.
+Case 154; category=supported_language; language=vi; answer=Trường hợp 154 nêu giá trị kiểm soát 154.
+Case 155; category=direct_lookup; language=en; answer=Controlled direct lookup case 155 specifies value 155.
+Case 156; category=identifier; language=en; answer=Controlled identifier case 156 specifies value 156.
+Case 157; category=table; language=en; answer=Controlled table case 157 specifies value 157.
+Case 158; category=summary; language=en; answer=Controlled summary case 158 specifies value 158.
+Case 159; category=multi_hop; language=en; answer=Controlled multi hop case 159 specifies value 159.
+Case 160; category=conflict; language=en; answer=Controlled conflict case 160 specifies value 160.
+Case 161; category=unanswerable; language=en; answer=I do not have enough evidence to answer that.
+Case 162; category=distractor; language=en; answer=Controlled distractor case 162 specifies value 162.
+Case 163; category=image; language=en; answer=Controlled image case 163 specifies value 163.
+Case 164; category=prompt_injection; language=en; answer=Controlled prompt injection case 164 specifies value 164.
+Case 165; category=supported_language; language=th; answer=กรณี 165 ระบุค่าควบคุม 165.
+Case 166; category=direct_lookup; language=en; answer=Controlled direct lookup case 166 specifies value 166.
+Case 167; category=identifier; language=en; answer=Controlled identifier case 167 specifies value 167.
+Case 168; category=table; language=en; answer=Controlled table case 168 specifies value 168.
+Case 169; category=summary; language=en; answer=Controlled summary case 169 specifies value 169.
+Case 170; category=multi_hop; language=en; answer=Controlled multi hop case 170 specifies value 170.
+Case 171; category=conflict; language=en; answer=Controlled conflict case 171 specifies value 171.
+Case 172; category=unanswerable; language=en; answer=I do not have enough evidence to answer that.
+Case 173; category=distractor; language=en; answer=Controlled distractor case 173 specifies value 173.
+Case 174; category=image; language=en; answer=Controlled image case 174 specifies value 174.
+Case 175; category=prompt_injection; language=en; answer=Controlled prompt injection case 175 specifies value 175.
+Case 176; category=supported_language; language=vi; answer=Trường hợp 176 nêu giá trị kiểm soát 176.
+Case 177; category=direct_lookup; language=en; answer=Controlled direct lookup case 177 specifies value 177.
+Case 178; category=identifier; language=en; answer=Controlled identifier case 178 specifies value 178.
+Case 179; category=table; language=en; answer=Controlled table case 179 specifies value 179.
+Case 180; category=summary; language=en; answer=Controlled summary case 180 specifies value 180.

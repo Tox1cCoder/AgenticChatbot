@@ -59,9 +59,8 @@ def test_golden_dataset_is_versioned_complete_and_uses_stable_ids():
     assert 100 <= len(rows) <= 300
     assert {row["metadata"]["category"] for row in rows} >= REQUIRED_CATEGORIES
     assert len({row["id"] for row in rows}) == len(rows)
-    assert len({(row["inputs"]["question"], row["reference"]["answer"]) for row in rows}) == len(
-        rows
-    )
+    assert len({row["inputs"]["question"] for row in rows}) == len(rows)
+    assert len({row["reference"]["answer"] for row in rows}) >= 200
     assert {"en", "th", "vi"} <= {row["metadata"]["language"] for row in rows}
     assert all("point_id" not in json.dumps(row["reference"]) for row in rows)
 
