@@ -451,6 +451,26 @@ class Settings(BaseSettings):
         default="cross-encoder/ms-marco-MiniLM-L-6-v2",
         description="Cross-encoder used to rerank top-k retrieved chunks.",
     )
+    rag_rerank_candidate_pool: int = Field(
+        default=40,
+        ge=1,
+        description="Maximum authorized fused candidates sent to the reranker.",
+    )
+    rag_evidence_candidate_limit: int = Field(
+        default=10,
+        ge=1,
+        description="Maximum reranked candidates forwarded to evidence assembly.",
+    )
+    rag_reranker_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description="Total reranker queue and inference timeout in seconds.",
+    )
+    rag_reranker_max_concurrency: int = Field(
+        default=2,
+        ge=1,
+        description="Maximum concurrent reranker model calls per service instance.",
+    )
     rag_chunk_target_tokens: int = Field(
         default=400,
         description="Preferred token count per generated chunk.",

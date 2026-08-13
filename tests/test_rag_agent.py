@@ -10,9 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -340,9 +338,7 @@ def test_scan_all_documents_threads_user_scope_into_helpers():
             }
         )
         return {
-            "documents": [
-                {"document_id": "doc-1", "filename": "a.pdf", "chunk_count": 1}
-            ],
+            "documents": [{"document_id": "doc-1", "filename": "a.pdf", "chunk_count": 1}],
             "total": 1,
             "page": page,
             "page_size": page_size,
@@ -374,9 +370,7 @@ def test_scan_all_documents_threads_user_scope_into_helpers():
             "page": 1,
             "page_size": 10,
         }
-    ], (
-        f"list_conversation_documents not called with user_id: {fake_list.calls}"
-    )
+    ], f"list_conversation_documents not called with user_id: {fake_list.calls}"
     assert fake_preview.calls == [
         {"doc_id": "doc-1", "user_id": "user-1", "conversation_id": "conv-1"}
     ], f"get_document_preview not called with full scope: {fake_preview.calls}"
@@ -935,112 +929,123 @@ def test_rag_process_message_refreshes_tools_every_invocation():
     agent._init_tools.assert_awaited_once()
 
 
-def test_rag_reranker_initialization_is_serialized(monkeypatch):
-    """CrossEncoder construction is not safe to run concurrently during cold start."""
-    active_creations = 0
-    max_active_creations = 0
-    counter_lock = threading.Lock()
-    start_barrier = threading.Barrier(6)
+def test_rag_agent_constructor_keeps_disabled_reranker_lazy(monkeypatch):
+    """Disabling reranking must avoid both provider construction and calls."""
+    from app.services.rag_reranker import RAGReranker
 
-    class FakeCrossEncoder:
-        def __init__(self, model_name, *, local_files_only=False, **_kwargs):
-            nonlocal active_creations, max_active_creations
-            self.model_name = model_name
-            self.local_files_only = local_files_only
-            with counter_lock:
-                active_creations += 1
-                max_active_creations = max(max_active_creations, active_creations)
-            time.sleep(0.05)
-            with counter_lock:
-                active_creations -= 1
+    constructed = 0
 
-    monkeypatch.setattr(rag_agent_module, "CrossEncoder", FakeCrossEncoder)
+    def loader(_model_name):
+        nonlocal constructed
+        constructed += 1
+        return MagicMock()
 
-    def initialize_reranker():
-        agent = object.__new__(RAGAgent)
-        agent.settings = SimpleNamespace(reranker_model="fake-cross-encoder")
-        start_barrier.wait(timeout=5)
-        agent._init_reranker()
-        return agent.reranker
+    reranker = RAGReranker(enabled=False, model_loader=loader)
 
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        rerankers = list(executor.map(lambda _idx: initialize_reranker(), range(6)))
-
-    assert len(rerankers) == 6
-    assert max_active_creations == 1
+    assert reranker.model is None
+    assert asyncio.run(reranker.rank("query", [])) == []
+    assert constructed == 0
 
 
-def test_rag_reranker_uses_canonical_rag_setting(monkeypatch):
-    """RAG_RERANKER_MODEL is the documented setting and must win over the legacy alias."""
-    constructed: list[str] = []
+def test_rag_search_reranks_authorized_typed_pool_before_dict_adapter():
+    """The legacy dict adapter must expose the typed rerank order unchanged."""
+    from app.services.rag_retrieval import RetrievalCandidate, RetrievalScope
 
-    class FakeCrossEncoder:
-        def __init__(self, model_name, *, local_files_only=False, **_kwargs):
-            constructed.append(model_name)
-            self.model_name = model_name
-            self.local_files_only = local_files_only
-
-    monkeypatch.setattr(rag_agent_module, "CrossEncoder", FakeCrossEncoder)
-
+    conversation_id = uuid4()
+    rows = [
+        RetrievalCandidate(
+            document_id=uuid4(),
+            chunk_id=uuid4(),
+            image_id=None,
+            modality="text",
+            content=f"content-{index}",
+            filename=f"doc-{index}.pdf",
+            page_start=index + 1,
+            page_end=index + 1,
+            section_path=("Section",),
+            dense_rank=index + 1,
+            dense_score=0.8 - index / 10,
+            lexical_rank=index + 1,
+            lexical_score=0.7 - index / 10,
+            fused_score=0.1 - index / 100,
+        )
+        for index in range(3)
+    ]
+    ranked = [
+        replace(rows[2], rerank_score=3.0),
+        replace(rows[0], rerank_score=2.0),
+    ]
     agent = object.__new__(RAGAgent)
-    agent.settings = SimpleNamespace(
-        rag_reranker_model="canonical-cross-encoder",
-        reranker_model="legacy-cross-encoder",
+    agent.settings = SimpleNamespace(rag_rerank_candidate_pool=40)
+    agent.qdrant_client = MagicMock()
+    agent.embedding_service = MagicMock()
+    agent.collection_name = "documents"
+    agent.top_k = 10
+    agent.score_threshold = None
+    agent.enable_reranking = True
+    agent.retriever = MagicMock()
+    agent.retriever.search.return_value = rows
+    agent.reranker = MagicMock()
+    agent.reranker.rank = AsyncMock(return_value=ranked)
+
+    with patch("app.ai.agents.rag_agent.DocumentImageRepository") as image_repo_cls:
+        image_repo_cls.return_value.get_by_chunk_id_for_scope.return_value = []
+        results = asyncio.run(
+            agent._search(
+                "query",
+                top_k=1,
+                conversation_id=str(conversation_id),
+                user_id="user-1",
+            )
+        )
+
+    agent.retriever.search.assert_called_once_with(
+        "query",
+        RetrievalScope(user_id="user-1", conversation_id=conversation_id),
+        final_limit=40,
     )
-
-    agent._init_reranker()
-
-    assert constructed == ["canonical-cross-encoder"]
-    assert agent.reranker.model_name == "canonical-cross-encoder"
+    agent.reranker.rank.assert_awaited_once_with("query", rows)
+    assert [result["content"] for result in results] == ["content-2"]
+    assert [result["rerank_score"] for result in results] == [3.0]
 
 
-def test_rag_reranker_loads_from_local_cache_first(monkeypatch):
-    """Cold start must not block on a huggingface.co HEAD request.
-
-    The model is revalidated against the hub on every construction unless
-    local_files_only is set, so a slow/unreachable hub times out even when the
-    model is already cached. The reranker must load offline-first.
-    """
-    calls: list[bool] = []
-
-    class FakeCrossEncoder:
-        def __init__(self, model_name, *, local_files_only=False, **_kwargs):
-            calls.append(local_files_only)
-            self.model_name = model_name
-            self.local_files_only = local_files_only
-
-    monkeypatch.setattr(rag_agent_module, "CrossEncoder", FakeCrossEncoder)
-
+def test_legacy_rerank_dict_adapter_delegates_to_bounded_service():
+    """Keep the legacy helper callable until its Task 15 removal gate."""
     agent = object.__new__(RAGAgent)
-    agent.settings = SimpleNamespace(reranker_model="fake-cross-encoder")
+    agent.reranker = MagicMock()
+    agent.reranker.rank = AsyncMock(
+        side_effect=lambda _query, rows: [replace(rows[1], rerank_score=4.0)]
+    )
+    document_id = uuid4()
+    first_chunk_id = uuid4()
+    second_chunk_id = uuid4()
+    payloads = [
+        {
+            "content": "first",
+            "source": "report.pdf",
+            "document_id": str(document_id),
+            "chunk_id": str(first_chunk_id),
+            "fused_score": 0.2,
+            "custom": "keep-first",
+        },
+        {
+            "content": "second",
+            "source": "report.pdf",
+            "document_id": str(document_id),
+            "chunk_id": str(second_chunk_id),
+            "fused_score": 0.1,
+            "custom": "keep-second",
+        },
+    ]
 
-    agent._init_reranker()
+    ranked = asyncio.run(agent._rerank_results("query", payloads))
 
-    assert calls == [True]
-    assert agent.reranker.local_files_only is True
-
-
-def test_rag_reranker_downloads_when_not_cached(monkeypatch):
-    """When the model is absent from the local cache, fall back to a download."""
-    calls: list[bool] = []
-
-    class FakeCrossEncoder:
-        def __init__(self, model_name, *, local_files_only=False, **_kwargs):
-            calls.append(local_files_only)
-            if local_files_only:
-                raise OSError("not in local cache")
-            self.model_name = model_name
-            self.local_files_only = local_files_only
-
-    monkeypatch.setattr(rag_agent_module, "CrossEncoder", FakeCrossEncoder)
-
-    agent = object.__new__(RAGAgent)
-    agent.settings = SimpleNamespace(reranker_model="fake-cross-encoder")
-
-    agent._init_reranker()
-
-    assert calls == [True, False]
-    assert agent.reranker.local_files_only is False
+    assert ranked == [
+        {
+            **payloads[1],
+            "rerank_score": 4.0,
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------

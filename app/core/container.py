@@ -73,6 +73,7 @@ from app.services.rag_embedding_service import (
     GeminiRAGEmbeddingService,
     SentenceTransformerRAGEmbeddingService,
 )
+from app.services.rag_reranker import RAGReranker
 from app.services.rag_retrieval import RAGRetriever
 from app.services.semantic_breakpoints import EmbeddingSemanticBoundaryDetector
 from app.services.task_plan_service import TaskPlanService
@@ -324,6 +325,16 @@ class Container(containers.DeclarativeContainer):
         score_threshold=settings.rag_score_threshold,
     )
 
+    rag_reranker = providers.Singleton(
+        RAGReranker,
+        model_name=settings.rag_reranker_model,
+        enabled=settings.enable_reranking,
+        candidate_pool=settings.rag_rerank_candidate_pool,
+        output_limit=settings.rag_evidence_candidate_limit,
+        timeout_seconds=settings.rag_reranker_timeout_seconds,
+        max_concurrency=settings.rag_reranker_max_concurrency,
+    )
+
     document_parse_artifact_repository = providers.Factory(
         DocumentParseArtifactRepository,
         session_factory=db.provided.session,
@@ -386,9 +397,7 @@ class Container(containers.DeclarativeContainer):
     web_image_service = providers.Singleton(
         WebImageService,
         repository=web_image_reference_repository,
-        connect_timeout_seconds=providers.Object(
-            settings.web_image_fetch_connect_timeout_seconds
-        ),
+        connect_timeout_seconds=providers.Object(settings.web_image_fetch_connect_timeout_seconds),
         read_timeout_seconds=providers.Object(settings.web_image_fetch_read_timeout_seconds),
         max_redirects=providers.Object(settings.web_image_fetch_max_redirects),
         max_bytes=providers.Object(settings.web_image_fetch_max_bytes),
@@ -488,6 +497,7 @@ class Container(containers.DeclarativeContainer):
         rag_agent = getattr(workflow_runtime, "rag_agent", None)
         if rag_agent is not None:
             rag_agent.retriever = container.rag_retriever()
+            rag_agent.reranker = container.rag_reranker()
 
         return AIService(
             workflow_runtime=workflow_runtime,

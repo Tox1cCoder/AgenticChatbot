@@ -1,7 +1,6 @@
 import base64
 import logging
 import re
-import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -15,7 +14,6 @@ from qdrant_client.models import (
     FilterSelector,
     MatchValue,
 )
-from sentence_transformers import CrossEncoder
 from sqlalchemy import func
 
 from ...core.config import Settings, settings
@@ -28,7 +26,8 @@ from ...models.document_chunk import DocumentChunk
 from ...observability.conversation_compaction import conversation_compaction_metrics
 from ...repositories.document_chunk import DocumentChunkRepository
 from ...repositories.document_image import DocumentImageRepository
-from ...services.rag_retrieval import RAGRetriever, RetrievalScope
+from ...services.rag_reranker import RAGReranker
+from ...services.rag_retrieval import RAGRetriever, RetrievalCandidate, RetrievalScope
 from ..context_overflow import is_context_overflow_error, prepare_aggressive_context_retry
 from ..image_context import build_multimodal_content, has_image_parts, image_url_part
 from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
@@ -46,32 +45,9 @@ from ..utils import coerce_response_text
 from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
-_RERANKER_INIT_LOCK = threading.Lock()
 
 if TYPE_CHECKING:
     from ...usage.recorder import ModelUsageRecorder
-
-
-def _load_cross_encoder(model_name: str) -> CrossEncoder:
-    """Load a cross-encoder, preferring the local cache over the network.
-
-    sentence-transformers revalidates the cached config against huggingface.co
-    on every construction unless ``local_files_only`` is set. A slow or
-    unreachable hub then times out on that HEAD request (ReadTimeoutError) and
-    blocks cold start even though the model is fully cached. Load offline first;
-    only reach the network when the model is genuinely missing. Pre-fetch with
-    ``scripts/download_reranker.py`` to avoid the one-time download at runtime.
-    """
-    try:
-        return CrossEncoder(model_name, local_files_only=True)
-    except OSError:
-        logger.info(
-            "Reranker '%s' not in local cache; downloading from HuggingFace "
-            "(one-time). Pre-fetch with scripts/download_reranker.py to avoid "
-            "this at runtime.",
-            model_name,
-        )
-        return CrossEncoder(model_name)
 
 
 class RAGAgent(BaseAgent):
@@ -84,6 +60,7 @@ class RAGAgent(BaseAgent):
         runtime_model_resolver: IRuntimeModelResolver | None = None,
         recorder: "ModelUsageRecorder | None" = None,
         retriever: RAGRetriever | None = None,
+        reranker: RAGReranker | None = None,
     ):
         # Initialise BaseAgent (sets model_name, gemini_client, langchain_model,
         # mcp_manager, tools, skills tracking, etc.)
@@ -104,7 +81,14 @@ class RAGAgent(BaseAgent):
         self.top_k = settings.rag_top_k
         self.score_threshold = settings.rag_score_threshold
         self.enable_reranking = settings.enable_reranking
-        self.reranker = None
+        self.reranker = reranker or RAGReranker(
+            model_name=settings.rag_reranker_model,
+            enabled=settings.enable_reranking,
+            candidate_pool=settings.rag_rerank_candidate_pool,
+            output_limit=settings.rag_evidence_candidate_limit,
+            timeout_seconds=settings.rag_reranker_timeout_seconds,
+            max_concurrency=settings.rag_reranker_max_concurrency,
+        )
         self.retriever = retriever or RAGRetriever(
             qdrant_client=qdrant_client,
             embedding_service=embedding_service,
@@ -124,10 +108,6 @@ class RAGAgent(BaseAgent):
         self.agentic_max_iterations = settings.agentic_max_iterations
         self.agentic_preview_chars = settings.agentic_preview_chars
 
-        # Initialize re-ranker if enabled
-        if self.enable_reranking:
-            self._init_reranker()
-
     # ------------------------------------------------------------------
     # Abstract member implementations
     # ------------------------------------------------------------------
@@ -143,19 +123,6 @@ class RAGAgent(BaseAgent):
     def _get_base_system_prompt(self) -> str:
         """Return the agentic RAG system prompt (the only prompt path)."""
         return AGENTIC_RAG_SYSTEM_PROMPT
-
-    def _init_reranker(self):
-        model_name = (
-            getattr(
-                self.settings,
-                "rag_reranker_model",
-                None,
-            )
-            or self.settings.reranker_model
-        )
-        with _RERANKER_INIT_LOCK:
-            self.reranker = _load_cross_encoder(model_name)
-        logger.debug(f"Re-ranker initialized: {model_name}")
 
     def _get_full_system_prompt(
         self,
@@ -261,12 +228,18 @@ class RAGAgent(BaseAgent):
                 rrf_k=60,
                 score_threshold=self.score_threshold,
             )
-        search_kwargs: dict[str, Any] = {"final_limit": top_k}
+        retrieval_limit = (
+            self.settings.rag_rerank_candidate_pool if self.enable_reranking else top_k
+        )
+        search_kwargs: dict[str, Any] = {"final_limit": retrieval_limit}
         if legacy_generation_ids is not None:
             # Construction-bypassing legacy tests use non-UUID conversation
             # identifiers; production scope always resolves real SQL generations.
             search_kwargs["active_generation_ids"] = legacy_generation_ids
         candidates = retriever.search(query, scope, **search_kwargs)
+        if self.enable_reranking:
+            candidates = await self.reranker.rank(query, candidates)
+            candidates = candidates[:top_k]
 
         results: list[dict[str, Any]] = []
         image_repo = DocumentImageRepository(SessionLocal) if candidates else None
@@ -284,43 +257,38 @@ class RAGAgent(BaseAgent):
             metadata = candidate.metadata or {}
             page_number = (
                 candidate.page_start
-                if candidate.page_start is not None
-                and candidate.page_start == candidate.page_end
+                if candidate.page_start is not None and candidate.page_start == candidate.page_end
                 else None
             )
-            results.append(
-                {
-                    "content": candidate.content,
-                    "source": candidate.filename,
-                    "score": (
-                        candidate.dense_score
-                        if candidate.dense_score is not None
-                        else candidate.fused_score
-                    ),
-                    "page_number": page_number,
-                    "page_start": candidate.page_start,
-                    "page_end": candidate.page_end,
-                    "document_id": str(candidate.document_id),
-                    "conversation_id": str(conversation_id),
-                    "chunk_id": str(candidate.chunk_id) if candidate.chunk_id else None,
-                    "chunk_index": candidate.chunk_index,
-                    "has_tables": bool(
-                        metadata.get("has_tables") or metadata.get("contains_table")
-                    ),
-                    "table_count": int(metadata.get("table_count") or 0),
-                    "image_ids": [str(image.id) for image in chunk_images],
-                    "image_paths": [image.image_path for image in chunk_images],
-                    "image_captions": [image.image_caption or "" for image in chunk_images],
-                    "dense_rank": candidate.dense_rank,
-                    "dense_score": candidate.dense_score,
-                    "lexical_rank": candidate.lexical_rank,
-                    "lexical_score": candidate.lexical_score,
-                    "fused_score": candidate.fused_score,
-                }
-            )
-
-        if self.enable_reranking and len(results) > 3:
-            results = await self._rerank_results(query, results)
+            result = {
+                "content": candidate.content,
+                "source": candidate.filename,
+                "score": (
+                    candidate.dense_score
+                    if candidate.dense_score is not None
+                    else candidate.fused_score
+                ),
+                "page_number": page_number,
+                "page_start": candidate.page_start,
+                "page_end": candidate.page_end,
+                "document_id": str(candidate.document_id),
+                "conversation_id": str(conversation_id),
+                "chunk_id": str(candidate.chunk_id) if candidate.chunk_id else None,
+                "chunk_index": candidate.chunk_index,
+                "has_tables": bool(metadata.get("has_tables") or metadata.get("contains_table")),
+                "table_count": int(metadata.get("table_count") or 0),
+                "image_ids": [str(image.id) for image in chunk_images],
+                "image_paths": [image.image_path for image in chunk_images],
+                "image_captions": [image.image_caption or "" for image in chunk_images],
+                "dense_rank": candidate.dense_rank,
+                "dense_score": candidate.dense_score,
+                "lexical_rank": candidate.lexical_rank,
+                "lexical_score": candidate.lexical_score,
+                "fused_score": candidate.fused_score,
+            }
+            if candidate.rerank_score is not None:
+                result["rerank_score"] = candidate.rerank_score
+            results.append(result)
 
         return results
 
@@ -330,23 +298,48 @@ class RAGAgent(BaseAgent):
         if not self.reranker or not results:
             return results
 
-        # Prepare pairs for re-ranking
-        pairs = [[query, doc["content"]] for doc in results]
+        def optional_uuid(value: Any) -> UUID | None:
+            try:
+                return UUID(str(value)) if value else None
+            except (TypeError, ValueError, AttributeError):
+                return None
 
-        # Get re-ranking scores
-        rerank_scores = self.reranker.predict(pairs)
+        candidates: list[RetrievalCandidate] = []
+        payloads_by_identity: dict[tuple[UUID | None, UUID | None], dict[str, Any]] = {}
+        for result in results:
+            chunk_id = optional_uuid(result.get("chunk_id"))
+            image_id = optional_uuid(result.get("image_id"))
+            document_id = optional_uuid(result.get("document_id")) or UUID(int=0)
+            candidate = RetrievalCandidate(
+                document_id=document_id,
+                chunk_id=chunk_id,
+                image_id=image_id,
+                modality="image" if image_id is not None else "text",
+                content=str(result.get("content") or ""),
+                filename=str(result.get("source") or result.get("filename") or "unknown"),
+                page_start=result.get("page_start"),
+                page_end=result.get("page_end"),
+                section_path=tuple(result.get("section_path") or ()),
+                dense_rank=result.get("dense_rank"),
+                dense_score=result.get("dense_score"),
+                lexical_rank=result.get("lexical_rank"),
+                lexical_score=result.get("lexical_score"),
+                fused_score=float(result.get("fused_score") or 0.0),
+                chunk_index=result.get("chunk_index"),
+                metadata=dict(result.get("metadata") or {}),
+            )
+            candidates.append(candidate)
+            payloads_by_identity.setdefault((chunk_id, image_id), result)
 
-        # Add rerank scores to results
-        for i, score in enumerate(rerank_scores):
-            results[i]["rerank_score"] = float(score)
-
-        # Sort by rerank score
-        results = sorted(results, key=lambda x: x.get("rerank_score", 0), reverse=True)
-
-        # Keep only top K after re-ranking
-        results = results[: self.settings.rerank_top_k]
-
-        return results
+        ranked = await self.reranker.rank(query, candidates)
+        adapted: list[dict[str, Any]] = []
+        for candidate in ranked:
+            original = payloads_by_identity[(candidate.chunk_id, candidate.image_id)]
+            payload = dict(original)
+            if candidate.rerank_score is not None:
+                payload["rerank_score"] = candidate.rerank_score
+            adapted.append(payload)
+        return adapted
 
     async def _fetch_images_for_chunks(
         self,
@@ -667,8 +660,7 @@ class RAGAgent(BaseAgent):
                 query = query.group_by(Document.id, Document.filename, Document.upload_time)
                 total = int(query.count())
                 rows = (
-                    query
-                    .order_by(Document.upload_time.desc(), Document.id.asc())
+                    query.order_by(Document.upload_time.desc(), Document.id.asc())
                     .offset((bounded_page - 1) * bounded_page_size)
                     .limit(bounded_page_size)
                     .all()
