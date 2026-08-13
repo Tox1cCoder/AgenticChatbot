@@ -149,7 +149,7 @@ class DocumentNormalizer:
                 metadata.update(
                     {"img_path": img_path, "caption": caption, "footnote": footnote}
                 )
-                matched_image = self._match_image(img_path, page, image_entries)
+                matched_image = self._match_image(img_path, parser_page_idx, image_entries)
                 if matched_image:
                     metadata.update(matched_image)
                 description = " ".join(str(item) for item in [*caption, *footnote] if item).strip()

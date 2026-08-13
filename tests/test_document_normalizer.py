@@ -98,6 +98,31 @@ def test_image_retains_parser_and_image_file_provenance():
     assert image.metadata["footnote"] == ["Source: Finance"]
 
 
+def test_image_metadata_falls_back_to_raw_parser_page_when_path_does_not_match():
+    blocks = DocumentNormalizer().normalize_mineru(
+        [
+            {
+                "type": "image",
+                "page_idx": 0,
+                "img_path": "",
+                "image_caption": ["Page image"],
+            }
+        ],
+        images_data=[
+            {
+                "path": "/tmp/page-image.png",
+                "page_number": 0,
+                "mime_type": "image/png",
+            }
+        ],
+    )
+
+    assert blocks[0].page_start == 1
+    assert blocks[0].metadata["parser_page_idx"] == 0
+    assert blocks[0].metadata["path"] == "/tmp/page-image.png"
+    assert blocks[0].metadata["mime_type"] == "image/png"
+
+
 def test_equation_retains_page_bbox_and_section_context():
     normalizer = DocumentNormalizer()
 
