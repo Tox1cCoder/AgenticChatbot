@@ -106,6 +106,9 @@ dev = [
     # The linter this file already configures under [tool.ruff].
     "ruff>=0.15.2",
 ]
+eval = [
+    "ragas>=0.3,<1.0",
+]
 # `app/ui/` ships inside the wheel but is imported only by demo.py, the
 # Streamlit frontend. Keeping streamlit out of the core dependency list stops
 # the server from pulling it in; install this extra (or demo_requirements.txt)

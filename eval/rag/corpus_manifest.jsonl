@@ -1,0 +1,4 @@
+{"id":"warranty","path":"eval/rag/fixtures/warranty.txt","media_type":"text/plain","sha256":"6d26cc8bbca220e79a5c817e43f88a359e79e7d453c27768383fa5dce451b7b9","document_id":"5949e93d-cde8-5403-9352-c641992ab2f5"}
+{"id":"financial-table","path":"eval/rag/fixtures/financial_table.csv","media_type":"text/csv","sha256":"c6f11254878be536d95deccba085ebc49d31ed5a502b2d71151539d30bb15576","document_id":"3e128e5b-ff5e-5ece-8e38-09b7f29c1538"}
+{"id":"revenue-chart","path":"eval/rag/fixtures/chart_description.txt","media_type":"text/plain","sha256":"7163a690bcddbe1c3ed8305df7dbdb68a39aec6d26977344806fc56c524303f1","document_id":"d2463926-da3a-5cef-8524-934e8003a686"}
+{"id":"revenue-chart-image","path":"eval/rag/fixtures/revenue_chart.svg","media_type":"image/svg+xml","sha256":"a25547984d8ccde3a1ec06701d3627492a0b29e2e25621c3320c50f0c1dcb06c","document_id":"f7e37f22-0d8e-5ed2-8d1e-ad370a505d53"}

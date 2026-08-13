@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" role="img" aria-label="Revenue rises from 120000 in Q1 to 135000 in Q2 while gross margin rises from 34 percent to 36 percent.">
+  <rect width="640" height="360" fill="white"/>
+  <text x="40" y="40" font-size="24">Quarterly revenue and margin</text>
+  <rect x="140" y="160" width="100" height="140" fill="#4f46e5"/><text x="155" y="325">Q1: 120k</text>
+  <rect x="360" y="120" width="100" height="180" fill="#4f46e5"/><text x="375" y="325">Q2: 135k</text>
+  <text x="140" y="90" font-size="18">Margin: 34%</text><text x="360" y="70" font-size="18">Margin: 36%</text>
+</svg>

@@ -1,0 +1,25 @@
+{
+  "version": "v1",
+  "metrics": {
+    "document_recall_at_5": {
+      "direction": "higher",
+      "max_regression": 0.02
+    },
+    "citation_validity": {
+      "direction": "higher",
+      "max_regression": 0.01
+    },
+    "abstention_recall": {
+      "direction": "higher",
+      "max_regression": 0.02
+    },
+    "latency_ms": {
+      "direction": "lower",
+      "max_regression": 0.1
+    },
+    "cost_usd": {
+      "direction": "lower",
+      "max_regression": 0.1
+    }
+  }
+}
