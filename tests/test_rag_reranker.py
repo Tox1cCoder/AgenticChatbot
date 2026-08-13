@@ -108,7 +108,7 @@ async def test_rank_caps_input_and_output_and_preserves_candidate_provenance():
 
 @pytest.mark.asyncio
 async def test_rank_keeps_model_scores_raw_and_marks_them_uncalibrated():
-    from app.services.rag_reranker import RAGReranker
+    from app.services.rag_reranker import RERANK_SCORE_SEMANTICS, RAGReranker
 
     rows = _candidates(2)
     reranker = RAGReranker(
@@ -119,7 +119,7 @@ async def test_rank_keeps_model_scores_raw_and_marks_them_uncalibrated():
     ranked = await reranker.rank("query", rows)
 
     assert [row.rerank_score for row in ranked] == [12.25, -3.5]
-    assert reranker.last_trace["score_semantics"] == "uncalibrated_model_score"
+    assert RERANK_SCORE_SEMANTICS == "uncalibrated_model_score"
 
 
 @pytest.mark.asyncio
@@ -127,6 +127,7 @@ async def test_rank_keeps_model_scores_raw_and_marks_them_uncalibrated():
     ("scores", "expected_reason"),
     [
         ([0.5], "score_count_mismatch"),
+        ([0.5, "not-a-score"], "invalid_score"),
         ([0.5, math.nan], "non_finite_score"),
         ([0.5, math.inf], "non_finite_score"),
     ],
@@ -146,8 +147,23 @@ async def test_malformed_scores_fail_open_without_mutating_fused_order(scores, e
 
     assert ranked == rows
     assert all(actual is original for actual, original in zip(ranked, rows[:2], strict=True))
-    assert reranker.last_fallback_reason == expected_reason
     assert metrics.events == [("reranker", expected_reason)]
+
+
+@pytest.mark.asyncio
+async def test_scalar_provider_output_fails_open_as_score_count_mismatch():
+    from app.services.rag_reranker import RAGReranker
+
+    rows = _candidates(2)
+    metrics = _Metrics()
+    reranker = RAGReranker(
+        model_loader=lambda _name: _Model(0.5),
+        output_limit=2,
+        metrics=metrics,
+    )
+
+    assert await reranker.rank("query", rows) == rows
+    assert metrics.events == [("reranker", "score_count_mismatch")]
 
 
 @pytest.mark.asyncio
@@ -166,7 +182,6 @@ async def test_provider_exception_fails_open_with_observable_reason():
 
     assert ranked == rows[:2]
     assert all(actual is original for actual, original in zip(ranked, rows[:2], strict=True))
-    assert reranker.last_fallback_reason == "provider_exception"
     assert metrics.events == [("reranker", "provider_exception")]
 
 
@@ -189,7 +204,6 @@ async def test_model_load_failure_fails_open_with_bounded_reason():
     ranked = await reranker.rank("query", rows)
 
     assert ranked == rows
-    assert reranker.last_fallback_reason == "model_load_failure"
     assert metrics.events == [("reranker", "model_load_failure")]
 
 
@@ -216,7 +230,6 @@ async def test_timeout_fails_open_and_reports_timeout():
 
     assert ranked == rows
     assert all(actual is original for actual, original in zip(ranked, rows, strict=True))
-    assert reranker.last_fallback_reason == "timeout"
     assert metrics.events == [("reranker", "timeout")]
 
 
@@ -267,7 +280,6 @@ async def test_missing_candidate_identity_fails_open_before_provider_call():
 
     assert ranked == rows
     assert model.calls == []
-    assert reranker.last_fallback_reason == "missing_candidate_id"
 
 
 @pytest.mark.asyncio
@@ -293,7 +305,6 @@ async def test_disabled_reranker_never_constructs_or_calls_provider():
 
     assert ranked == rows[:2]
     assert loader_calls == 0
-    assert reranker.last_fallback_reason is None
 
 
 @pytest.mark.asyncio
@@ -407,3 +418,67 @@ def test_container_reranker_provider_is_lazy_and_uses_canonical_settings():
 
     assert reranker.model_name == container.rag_reranker.kwargs["model_name"]
     assert reranker.model is None
+    assert reranker.metrics is container.rag_reranker.kwargs["metrics"]()
+
+
+def test_direct_rag_agent_construction_wires_production_metrics(monkeypatch):
+    from app.ai.agents import base_agent as base_agent_module
+    from app.ai.agents import rag_agent as rag_agent_module
+    from app.ai.agents.rag_agent import RAGAgent
+    from app.core.config import settings
+    from app.observability.rag import rag_metrics
+
+    monkeypatch.setattr(base_agent_module.BaseAgent, "__init__", lambda self, **_kwargs: None)
+    monkeypatch.setattr(rag_agent_module, "RAGRetriever", lambda **_kwargs: object())
+
+    agent = RAGAgent(
+        settings=settings,
+        qdrant_client=object(),
+        embedding_service=object(),
+    )
+
+    assert agent.reranker.metrics is rag_metrics
+
+
+def test_shared_reranker_can_be_reused_across_event_loops_after_contention():
+    from app.services.rag_reranker import RAGReranker
+
+    release = threading.Event()
+
+    class ContendedModel:
+        def predict(self, _pairs):
+            release.wait(timeout=1)
+            return [1.0]
+
+    reranker = RAGReranker(
+        model_loader=lambda _name: ContendedModel(),
+        max_concurrency=1,
+        timeout_seconds=1,
+        output_limit=1,
+    )
+
+    async def contend() -> None:
+        first = asyncio.create_task(reranker.rank("first", _candidates(1)))
+        await asyncio.sleep(0.02)
+        second = asyncio.create_task(reranker.rank("second", _candidates(1)))
+        await asyncio.sleep(0.02)
+        release.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(contend())
+    second_loop_result = asyncio.run(reranker.rank("third", _candidates(1)))
+
+    assert second_loop_result[0].rerank_score == 1.0
+
+
+def test_production_metrics_emit_bounded_reranker_failure_labels():
+    from app.observability.rag import RAGMetrics
+
+    metrics = RAGMetrics()
+    metrics.degraded("reranker", "timeout")
+    metrics.degraded("unexpected component", "secret provider exception text")
+
+    rendered = metrics.render().decode()
+    assert 'component="reranker",failure_code="timeout"' in rendered
+    assert 'component="other",failure_code="other"' in rendered
+    assert "secret provider exception text" not in rendered

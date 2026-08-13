@@ -24,6 +24,7 @@ from ...models.conversation import Conversation
 from ...models.document import Document
 from ...models.document_chunk import DocumentChunk
 from ...observability.conversation_compaction import conversation_compaction_metrics
+from ...observability.rag import rag_metrics
 from ...repositories.document_chunk import DocumentChunkRepository
 from ...repositories.document_image import DocumentImageRepository
 from ...services.rag_reranker import RAGReranker
@@ -81,6 +82,7 @@ class RAGAgent(BaseAgent):
         self.top_k = settings.rag_top_k
         self.score_threshold = settings.rag_score_threshold
         self.enable_reranking = settings.enable_reranking
+        self.evidence_candidate_limit = settings.rag_evidence_candidate_limit
         self.reranker = reranker or RAGReranker(
             model_name=settings.rag_reranker_model,
             enabled=settings.enable_reranking,
@@ -88,6 +90,7 @@ class RAGAgent(BaseAgent):
             output_limit=settings.rag_evidence_candidate_limit,
             timeout_seconds=settings.rag_reranker_timeout_seconds,
             max_concurrency=settings.rag_reranker_max_concurrency,
+            metrics=rag_metrics,
         )
         self.retriever = retriever or RAGRetriever(
             qdrant_client=qdrant_client,
@@ -237,9 +240,10 @@ class RAGAgent(BaseAgent):
             # identifiers; production scope always resolves real SQL generations.
             search_kwargs["active_generation_ids"] = legacy_generation_ids
         candidates = retriever.search(query, scope, **search_kwargs)
-        if self.enable_reranking:
+        if self.reranker is not None:
             candidates = await self.reranker.rank(query, candidates)
-            candidates = candidates[:top_k]
+        evidence_limit = int(getattr(self, "evidence_candidate_limit", top_k))
+        candidates = candidates[: min(top_k, evidence_limit)]
 
         results: list[dict[str, Any]] = []
         image_repo = DocumentImageRepository(SessionLocal) if candidates else None
@@ -305,8 +309,7 @@ class RAGAgent(BaseAgent):
                 return None
 
         candidates: list[RetrievalCandidate] = []
-        payloads_by_identity: dict[tuple[UUID | None, UUID | None], dict[str, Any]] = {}
-        for result in results:
+        for position, result in enumerate(results):
             chunk_id = optional_uuid(result.get("chunk_id"))
             image_id = optional_uuid(result.get("image_id"))
             document_id = optional_uuid(result.get("document_id")) or UUID(int=0)
@@ -326,15 +329,18 @@ class RAGAgent(BaseAgent):
                 lexical_score=result.get("lexical_score"),
                 fused_score=float(result.get("fused_score") or 0.0),
                 chunk_index=result.get("chunk_index"),
-                metadata=dict(result.get("metadata") or {}),
+                metadata={
+                    **dict(result.get("metadata") or {}),
+                    "_legacy_rerank_position": position,
+                },
             )
             candidates.append(candidate)
-            payloads_by_identity.setdefault((chunk_id, image_id), result)
 
         ranked = await self.reranker.rank(query, candidates)
         adapted: list[dict[str, Any]] = []
         for candidate in ranked:
-            original = payloads_by_identity[(candidate.chunk_id, candidate.image_id)]
+            position = int((candidate.metadata or {})["_legacy_rerank_position"])
+            original = results[position]
             payload = dict(original)
             if candidate.rerank_score is not None:
                 payload["rerank_score"] = candidate.rerank_score

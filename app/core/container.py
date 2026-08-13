@@ -27,6 +27,7 @@ from app.interfaces import (
 from app.interfaces.planning_runtime_interface import IPlanningRuntimeService
 from app.interfaces.task_plan_service_interface import ITaskPlanService
 from app.observability.model_usage import model_usage_metrics as model_usage_metrics_singleton
+from app.observability.rag import rag_metrics as rag_metrics_singleton
 from app.observability.rich_images import rich_image_metrics as rich_image_metrics_singleton
 from app.repositories.agent_model_config import AgentModelConfigRepository
 from app.repositories.chat_image import ChatImageRepository
@@ -333,6 +334,7 @@ class Container(containers.DeclarativeContainer):
         output_limit=settings.rag_evidence_candidate_limit,
         timeout_seconds=settings.rag_reranker_timeout_seconds,
         max_concurrency=settings.rag_reranker_max_concurrency,
+        metrics=providers.Object(rag_metrics_singleton),
     )
 
     document_parse_artifact_repository = providers.Factory(

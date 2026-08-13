@@ -15,6 +15,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+import pytest
+
 from app.ai.agents import rag_agent as rag_agent_module
 from app.ai.agents.rag_agent import RAGAgent
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
@@ -1046,6 +1048,122 @@ def test_legacy_rerank_dict_adapter_delegates_to_bounded_service():
             "rerank_score": 4.0,
         }
     ]
+
+
+def test_legacy_rerank_dict_adapter_preserves_duplicate_missing_id_positions():
+    """Fail-open output must not collapse duplicate or absent identities."""
+    from app.services.rag_reranker import RAGReranker
+
+    agent = object.__new__(RAGAgent)
+    agent.reranker = RAGReranker(
+        model_loader=lambda _name: pytest.fail("missing IDs must fail open"),
+        output_limit=2,
+    )
+    payloads = [
+        {"content": "first", "source": "a.pdf", "custom": "keep-first"},
+        {"content": "second", "source": "b.pdf", "custom": "keep-second"},
+    ]
+
+    ranked = asyncio.run(agent._rerank_results("query", payloads))
+
+    assert ranked == payloads
+    assert ranked[0] is not ranked[1]
+
+
+def test_legacy_rerank_dict_adapter_preserves_duplicate_valid_id_occurrences():
+    agent = object.__new__(RAGAgent)
+    shared_document_id = uuid4()
+    shared_chunk_id = uuid4()
+    payloads = [
+        {
+            "content": "first occurrence",
+            "source": "a.pdf",
+            "document_id": str(shared_document_id),
+            "chunk_id": str(shared_chunk_id),
+        },
+        {
+            "content": "second occurrence",
+            "source": "a.pdf",
+            "document_id": str(shared_document_id),
+            "chunk_id": str(shared_chunk_id),
+        },
+    ]
+    agent.reranker = MagicMock()
+    agent.reranker.rank = AsyncMock(
+        side_effect=lambda _query, rows: [
+            replace(rows[1], rerank_score=2.0),
+            replace(rows[0], rerank_score=1.0),
+        ]
+    )
+
+    ranked = asyncio.run(agent._rerank_results("query", payloads))
+
+    assert [row["content"] for row in ranked] == [
+        "second occurrence",
+        "first occurrence",
+    ]
+    assert [row["rerank_score"] for row in ranked] == [2.0, 1.0]
+
+
+def test_disabled_agent_path_caps_evidence_without_loading_provider():
+    from app.services.rag_reranker import RAGReranker
+    from app.services.rag_retrieval import RetrievalCandidate
+
+    rows = [
+        RetrievalCandidate(
+            document_id=uuid4(),
+            chunk_id=uuid4(),
+            image_id=None,
+            modality="text",
+            content=f"content-{index}",
+            filename="report.pdf",
+            page_start=None,
+            page_end=None,
+            section_path=(),
+            dense_rank=index + 1,
+            dense_score=1.0,
+            lexical_rank=None,
+            lexical_score=None,
+            fused_score=1.0 / (index + 1),
+        )
+        for index in range(15)
+    ]
+    provider_loads = 0
+
+    def loader(_name):
+        nonlocal provider_loads
+        provider_loads += 1
+        return MagicMock()
+
+    agent = object.__new__(RAGAgent)
+    agent.settings = SimpleNamespace(rag_rerank_candidate_pool=40)
+    agent.qdrant_client = MagicMock()
+    agent.embedding_service = MagicMock()
+    agent.collection_name = "documents"
+    agent.top_k = 15
+    agent.score_threshold = None
+    agent.enable_reranking = False
+    agent.evidence_candidate_limit = 10
+    agent.retriever = MagicMock()
+    agent.retriever.search.return_value = rows
+    agent.reranker = RAGReranker(
+        enabled=False,
+        output_limit=10,
+        model_loader=loader,
+    )
+
+    with patch("app.ai.agents.rag_agent.DocumentImageRepository") as image_repo_cls:
+        image_repo_cls.return_value.get_by_chunk_id_for_scope.return_value = []
+        results = asyncio.run(
+            agent._search(
+                "query",
+                conversation_id=str(uuid4()),
+                user_id="user-1",
+            )
+        )
+
+    assert len(results) == 10
+    assert provider_loads == 0
 
 
 # ---------------------------------------------------------------------------

@@ -107,12 +107,10 @@ class RAGReranker:
         self.timeout_seconds = max(0.001, float(timeout_seconds))
         self.max_concurrency = max(1, int(max_concurrency))
         self._model_loader = model_loader
-        self._metrics = metrics
+        self.metrics = metrics
         self._model: Any | None = None
         self._model_lock = threading.Lock()
-        self._semaphore = asyncio.Semaphore(self.max_concurrency)
-        self.last_fallback_reason: str | None = None
-        self.last_trace: dict[str, Any] = {}
+        self._semaphore = threading.BoundedSemaphore(self.max_concurrency)
 
     @property
     def model(self) -> Any | None:
@@ -126,15 +124,6 @@ class RAGReranker:
     ) -> list[RetrievalCandidate]:
         pool = list(candidates[: self.candidate_pool])
         fallback = pool[: self.output_limit]
-        self.last_fallback_reason = None
-        self.last_trace = {
-            "enabled": self.enabled,
-            "candidate_count": len(pool),
-            "output_limit": self.output_limit,
-            "score_semantics": RERANK_SCORE_SEMANTICS,
-            "degraded": False,
-            "failure_code": None,
-        }
         if not self.enabled or not pool:
             return fallback
         if any(candidate.chunk_id is None and candidate.image_id is None for candidate in pool):
@@ -144,7 +133,7 @@ class RAGReranker:
         acquired = False
         worker: asyncio.Task[Any] | None = None
         try:
-            await asyncio.wait_for(self._semaphore.acquire(), timeout=self.timeout_seconds)
+            await self._acquire_permit(started_at)
             acquired = True
             remaining = self.timeout_seconds - (time.monotonic() - started_at)
             if remaining <= 0:
@@ -178,6 +167,14 @@ class RAGReranker:
         pairs = [[query, candidate.content] for candidate in candidates]
         return model.predict(pairs)
 
+    async def _acquire_permit(self, started_at: float) -> None:
+        """Acquire the process-wide permit without binding state to an event loop."""
+        while not self._semaphore.acquire(blocking=False):
+            remaining = self.timeout_seconds - (time.monotonic() - started_at)
+            if remaining <= 0:
+                raise TimeoutError
+            await asyncio.sleep(min(0.005, remaining))
+
     def _get_model(self) -> Any:
         if self._model is not None:
             return self._model
@@ -199,16 +196,9 @@ class RAGReranker:
         fused_order: list[RetrievalCandidate],
         failure_code: str,
     ) -> list[RetrievalCandidate]:
-        self.last_fallback_reason = failure_code
-        self.last_trace.update(
-            {
-                "degraded": True,
-                "failure_code": failure_code,
-            }
-        )
-        if self._metrics is not None:
+        if self.metrics is not None:
             try:
-                self._metrics.degraded("reranker", failure_code)
+                self.metrics.degraded("reranker", failure_code)
             except Exception:
                 logger.exception("Failed to record reranker degraded metric")
         return fused_order
