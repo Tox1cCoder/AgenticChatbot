@@ -239,15 +239,16 @@ class RAGAgent(BaseAgent):
             top_k = self.top_k
         try:
             typed_conversation_id: Any = UUID(str(conversation_id))
+            legacy_generation_ids = None
         except ValueError:
             # Compatibility for isolated legacy tests; production IDs are UUIDs.
             typed_conversation_id = conversation_id
+            legacy_generation_ids = [UUID(int=0)]
         scope = RetrievalScope(
             user_id=user_id,
             conversation_id=typed_conversation_id,
         )
         retriever = getattr(self, "retriever", None)
-        resolve_generation_fingerprint = True
         if retriever is None:
             retriever = RAGRetriever(
                 qdrant_client=self.qdrant_client,
@@ -260,12 +261,11 @@ class RAGAgent(BaseAgent):
                 rrf_k=60,
                 score_threshold=self.score_threshold,
             )
-            resolve_generation_fingerprint = False
         search_kwargs: dict[str, Any] = {"final_limit": top_k}
-        if not resolve_generation_fingerprint:
-            # Construction-bypassing legacy callers have no server-resolved
-            # fingerprint; production agents receive the configured retriever.
-            search_kwargs["resolve_generation_fingerprint"] = False
+        if legacy_generation_ids is not None:
+            # Construction-bypassing legacy tests use non-UUID conversation
+            # identifiers; production scope always resolves real SQL generations.
+            search_kwargs["active_generation_ids"] = legacy_generation_ids
         candidates = retriever.search(query, scope, **search_kwargs)
 
         results: list[dict[str, Any]] = []

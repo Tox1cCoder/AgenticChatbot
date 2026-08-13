@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any, Literal
 from uuid import UUID
 
-from qdrant_client.models import FieldCondition, Filter, MatchValue
+from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
 
 
 @dataclass(frozen=True)
@@ -127,7 +128,7 @@ class RAGRetriever:
         lexical_candidate_limit: int | None = None,
         final_limit: int = 10,
         generation_fingerprint: str | None = None,
-        resolve_generation_fingerprint: bool = True,
+        active_generation_ids: Iterable[UUID] | None = None,
     ) -> list[RetrievalCandidate]:
         if not query or not scope.user_id or not scope.conversation_id:
             return []
@@ -137,11 +138,18 @@ class RAGRetriever:
             1, int(lexical_candidate_limit or self.lexical_candidate_limit)
         )
         output_limit = max(1, int(final_limit))
-        if generation_fingerprint is None and resolve_generation_fingerprint:
-            generation_ids = self.chunk_repository.get_active_generation_ids_for_scope(
+        if active_generation_ids is None:
+            active_generation_ids = self.chunk_repository.get_active_generation_ids_for_scope(
                 user_id=scope.user_id,
                 conversation_id=scope.conversation_id,
             )
+        generation_ids = tuple(
+            sorted(
+                (self._coerce_uuid(generation_id) for generation_id in active_generation_ids),
+                key=str,
+            )
+        )
+        if generation_fingerprint is None:
             generation_fingerprint = active_generation_fingerprint(generation_ids)
         self.last_trace = {
             "active_generation_fingerprint": generation_fingerprint,
@@ -151,8 +159,16 @@ class RAGRetriever:
             "rrf_k": self.rrf_k,
             "hybrid_enabled": self.hybrid_enabled,
         }
+        if not generation_ids:
+            return []
 
-        dense_points = self._dense_search(query, scope, dense_limit)
+        dense_points = self._dense_search(
+            query,
+            scope,
+            dense_limit,
+            active_generation_ids=generation_ids,
+            modality="text",
+        )
         dense_ids: list[str] = []
         dense_scores: dict[str, float] = {}
         for point in dense_points:
@@ -229,8 +245,20 @@ class RAGRetriever:
         return results
 
     def _dense_search(
-        self, query: str, scope: RetrievalScope, limit: int
+        self,
+        query: str,
+        scope: RetrievalScope,
+        limit: int,
+        *,
+        active_generation_ids: Iterable[UUID],
+        modality: Literal["text", "image"] = "text",
     ) -> list[Any]:
+        generation_values = sorted(
+            str(self._coerce_uuid(generation_id))
+            for generation_id in active_generation_ids
+        )
+        if not generation_values:
+            return []
         query_embedding = list(self.embedding_service.embed_query(query))
         search_filter = Filter(
             must=[
@@ -241,7 +269,11 @@ class RAGRetriever:
                     key="conversation_id",
                     match=MatchValue(value=str(scope.conversation_id)),
                 ),
-                FieldCondition(key="modality", match=MatchValue(value="text")),
+                FieldCondition(key="modality", match=MatchValue(value=modality)),
+                FieldCondition(
+                    key="index_generation",
+                    match=MatchAny(any=generation_values),
+                ),
                 FieldCondition(key="is_active", match=MatchValue(value=True)),
             ]
         )

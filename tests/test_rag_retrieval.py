@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
-from qdrant_client.models import FieldCondition
+from qdrant_client.models import FieldCondition, MatchAny
 from sqlalchemy import create_engine, select
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSONB
@@ -148,16 +148,119 @@ def test_dense_query_filters_server_scope_active_generation_and_modality():
     call = qdrant.query_points.call_args.kwargs
     assert call["limit"] == 7
     conditions = {
-        condition.key: condition.match.value
+        condition.key: condition.match
         for condition in call["query_filter"].must
         if isinstance(condition, FieldCondition)
     }
-    assert conditions == {
+    assert {key: match.value for key, match in conditions.items() if key != "index_generation"} == {
         "user_id": user_id,
         "conversation_id": str(conversation_id),
         "modality": "text",
         "is_active": True,
     }
+    assert isinstance(conditions["index_generation"], MatchAny)
+    assert conditions["index_generation"].any == [
+        "00000000-0000-0000-0000-000000000001",
+        "00000000-0000-0000-0000-000000000002",
+    ]
+
+
+def test_retired_points_cannot_starve_active_generation_from_dense_limit():
+    from app.services.rag_retrieval import RetrievalScope
+
+    active_generation_id = uuid4()
+    retired_generation_id = uuid4()
+    active_chunk_id = uuid4()
+    active_row = _chunk(active_chunk_id, content="authorized active evidence")
+    retired_points = [
+        _point(
+            uuid4(),
+            1.0 - index / 1000,
+            index_generation=str(retired_generation_id),
+            is_active=True,
+        )
+        for index in range(40)
+    ]
+    active_point = _point(
+        active_chunk_id,
+        0.1,
+        index_generation=str(active_generation_id),
+        is_active=True,
+    )
+    retriever, qdrant, _, repository = _retriever(
+        hybrid_enabled=False,
+        hydrated=[active_row],
+    )
+    repository.get_active_generation_ids_for_scope.return_value = [active_generation_id]
+    provider_points = retired_points + [active_point]
+
+    def filtered_query_points(**kwargs):
+        generation_match = next(
+            condition.match
+            for condition in kwargs["query_filter"].must
+            if condition.key == "index_generation"
+        )
+        allowed = set(generation_match.any)
+        filtered = [
+            point
+            for point in provider_points
+            if point.payload["index_generation"] in allowed
+        ]
+        return SimpleNamespace(points=filtered[: kwargs["limit"]])
+
+    qdrant.query_points.side_effect = filtered_query_points
+
+    results = retriever.search(
+        "active evidence",
+        RetrievalScope(user_id=str(uuid4()), conversation_id=uuid4()),
+        dense_candidate_limit=40,
+        final_limit=1,
+    )
+
+    assert [candidate.chunk_id for candidate in results] == [active_chunk_id]
+
+
+def test_no_active_generation_fails_closed_before_embedding_or_retrieval():
+    from app.services.rag_retrieval import RetrievalScope
+
+    retriever, qdrant, embedding, repository = _retriever()
+    repository.get_active_generation_ids_for_scope.return_value = []
+
+    results = retriever.search(
+        "query",
+        RetrievalScope(user_id=str(uuid4()), conversation_id=uuid4()),
+        final_limit=5,
+    )
+
+    assert results == []
+    assert embedding.queries == []
+    qdrant.query_points.assert_not_called()
+    repository.search_active_lexical_for_scope.assert_not_called()
+    repository.get_active_by_ids_for_scope.assert_not_called()
+
+
+def test_image_dense_filter_uses_the_same_active_generation_constraint():
+    from app.services.rag_retrieval import RetrievalScope
+
+    retriever, qdrant, _, repository = _retriever()
+    generation_ids = repository.get_active_generation_ids_for_scope.return_value
+
+    retriever._dense_search(
+        "chart",
+        RetrievalScope(user_id=str(uuid4()), conversation_id=uuid4()),
+        4,
+        active_generation_ids=generation_ids,
+        modality="image",
+    )
+
+    matches = {
+        condition.key: condition.match
+        for condition in qdrant.query_points.call_args.kwargs["query_filter"].must
+    }
+    assert matches["modality"].value == "image"
+    assert matches["index_generation"].any == sorted(
+        str(generation_id) for generation_id in generation_ids
+    )
 
 
 def test_missing_or_stale_sql_rows_are_never_returned():
@@ -285,6 +388,9 @@ def test_server_resolved_fingerprint_is_used_without_requerying_generations():
         RetrievalScope(user_id=str(uuid4()), conversation_id=uuid4()),
         final_limit=5,
         generation_fingerprint="server-owned-fingerprint",
+        active_generation_ids=[
+            UUID("00000000-0000-0000-0000-000000000001")
+        ],
     )
 
     assert retriever.last_trace["active_generation_fingerprint"] == (
