@@ -10,10 +10,12 @@ Tests pin:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 
 import pytest
 
+from app.services.document_parse_service import DocumentParseService
 from app.services.document_processing_service import DocumentProcessingService
 
 
@@ -65,3 +67,25 @@ def test_process_document_routes_supported_rich_formats_to_server_parsers():
     for ext in (".pdf", ".docx", ".pptx", ".html", ".md"):
         assert ext in DocumentProcessingService.MINERU_EXTENSIONS
         assert ext in src, f"Expected process_document to dispatch {ext} through MinerU routing"
+
+
+def test_plain_text_parse_normalizes_once_without_character_chunking(tmp_path):
+    text_path = tmp_path / "long.txt"
+    text = "First paragraph. " * 200
+    text_path.write_text(text, encoding="utf-8")
+    settings = type(
+        "Settings",
+        (),
+        {
+            "rag_chunk_target_tokens": 5,
+            "rag_chunk_overlap_tokens": 1,
+            "rag_chunk_max_tokens": 10,
+        },
+    )()
+    service = DocumentParseService(settings=settings)
+
+    result = asyncio.run(service.parse_document(str(text_path), "long.txt", "doc-1"))
+
+    assert len(result.blocks) == 1
+    assert result.blocks[0].kind == "paragraph"
+    assert result.blocks[0].text == text

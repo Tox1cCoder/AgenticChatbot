@@ -355,8 +355,8 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
                         document_id,
                     )
                 )
-            processing_service._attach_prepared_images_to_chunks(
-                parse_result.chunks_with_metadata,
+            parse_result.blocks = processing_service._attach_prepared_images_to_blocks(
+                parse_result.blocks,
                 prepared_images,
             )
         else:
@@ -364,9 +364,7 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
         index_timings["caption_s"] = time.monotonic() - caption_t0
 
         # Build BuiltChunks for indexing (sync)
-        built_chunks = processing_service._build_chunks_for_indexing(
-            parse_result.chunks_with_metadata
-        )
+        built_chunks = processing_service._build_chunks_for_indexing(parse_result.blocks)
 
         # Index document in Qdrant (sync)
         persisted_chunks = processing_service.document_index_service.index_document(

@@ -8,6 +8,7 @@ import shutil
 import time
 import unicodedata
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,8 +24,9 @@ from app.core.config import Settings
 from app.core.events import DocumentEvent, DocumentEventData, get_event_bus
 from app.repositories.document_image import DocumentImageRepository
 from app.schemas.document_image import DocumentImageCreate
-from app.services.document_chunk_builder import DocumentChunkBuilder, NormalizedBlock
-from app.services.document_parse_service import DocumentParseService
+from app.services.document_blocks import NormalizedBlock
+from app.services.document_chunk_builder import DocumentChunkBuilder
+from app.services.document_parse_service import DocumentParseService, ParseResult
 from app.services.gemini_retry import is_rate_limit_error, parse_retry_delay
 from app.services.plain_text_loader import load_utf8_text_document
 from app.usage import begin_usage_operation, bind_usage_context, current_usage_context
@@ -295,7 +297,7 @@ class DocumentProcessingService:
     ) -> dict[str, Any]:
         start_time = time.time()
 
-        chunks_with_metadata = []
+        parsed_blocks: list[NormalizedBlock] | list[dict[str, Any]] = []
         self._extracted_images = []
 
         # Dispatch on extension.
@@ -307,15 +309,17 @@ class DocumentProcessingService:
         #   with page/section metadata.
         ext = os.path.splitext(filename)[1].lower()
         if ext == ".txt":
-            documents = [load_utf8_text_document(file_path)]
-            chunks = self._create_chunks(documents)
-            chunks_with_metadata = [{"text": chunk} for chunk in chunks]
+            document = load_utf8_text_document(file_path)
+            parsed_blocks = self._get_parse_service().document_normalizer.normalize_text(
+                document.page_content,
+                source=filename,
+            )
 
         elif ext in self.EXCEL_EXTENSIONS:
-            chunks_with_metadata = self._process_excel_workbook(file_path, filename)
+            parsed_blocks = self._process_excel_workbook(file_path, filename)
 
         elif ext in self.MINERU_EXTENSIONS:
-            chunks_with_metadata = await self._process_with_mineru(file_path, document_id, filename)
+            parsed_blocks = await self._process_with_mineru(file_path, document_id, filename)
 
         else:
             raise ValueError(f"Unsupported file type: {filename}")
@@ -328,18 +332,25 @@ class DocumentProcessingService:
                 "direct Qdrant chunk persistence has been removed."
             )
 
+        blocks = self._coerce_normalized_blocks(parsed_blocks)
+        parse_result = ParseResult(
+            blocks=blocks,
+            images_data=list(self._extracted_images),
+            backend_used="processing/compatibility",
+        )
+
         prepared_images = []
         if hasattr(self, "_extracted_images") and self._extracted_images:
             prepared_images = await self._prepare_images_for_indexing(
                 self._extracted_images,
                 document_id,
             )
-            self._attach_prepared_images_to_chunks(
-                chunks_with_metadata,
+            parse_result.blocks = self._attach_prepared_images_to_blocks(
+                parse_result.blocks,
                 prepared_images,
             )
 
-        built_chunks = self._build_chunks_for_indexing(chunks_with_metadata)
+        built_chunks = self._build_chunks_for_indexing(parse_result.blocks)
         persisted_chunks = index_service.index_document(
             document=self._document_ref(document_id, conversation_id, user_id, filename),
             built_chunks=built_chunks,
@@ -398,14 +409,14 @@ class DocumentProcessingService:
 
     async def _process_with_mineru(
         self, file_path: str, document_id: str, original_filename: str | None = None
-    ) -> list[dict[str, Any]]:
+    ) -> list[NormalizedBlock]:
         """Delegate to DocumentParseService._process_with_mineru.
 
         Output directory is named ``mineru_output_{document_id}`` so that
         concurrent uploads never share temp paths.
         """
         parse_service = self._get_parse_service()
-        chunks_with_metadata, images_data = await parse_service._process_with_mineru(
+        blocks, images_data = await parse_service._process_with_mineru(
             file_path=file_path,
             document_id=document_id,
             original_filename=original_filename,
@@ -414,7 +425,7 @@ class DocumentProcessingService:
         self._mineru_output_path = parse_service._mineru_output_path
         # Store images for the index stage.
         self._extracted_images = images_data
-        return chunks_with_metadata
+        return blocks
 
     def _legacy_char_chunk_size(self) -> int:
         """Delegate to parse service."""
@@ -437,7 +448,7 @@ class DocumentProcessingService:
         self,
         file_path: str,
         original_filename: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[NormalizedBlock]:
         """Delegate Excel workbook parsing to DocumentParseService."""
         return self._get_parse_service()._process_excel_workbook(file_path, original_filename)
 
@@ -501,52 +512,20 @@ class DocumentProcessingService:
 
     # --- End of delegated parse methods ---
 
-    def _build_chunks_for_indexing(self, chunks_with_metadata: list[dict[str, Any]]):
-        blocks: list[NormalizedBlock] = []
-        for index, chunk_data in enumerate(chunks_with_metadata):
-            if isinstance(chunk_data, dict):
-                text = str(chunk_data.get("text", "") or "")
-                tables = chunk_data.get("tables") or []
-                if isinstance(tables, list):
-                    table_texts = []
-                    for table in tables:
-                        if not isinstance(table, dict):
-                            continue
-                        body = str(table.get("body") or table.get("table_body") or "").strip()
-                        if body and body not in text:
-                            table_texts.append(body)
-                    if table_texts:
-                        text = "\n".join([part for part in [text.rstrip(), *table_texts] if part])
-                page_start = chunk_data.get("page_start")
-                page_end = chunk_data.get("page_end")
-                metadata = {
-                    "source_chunk_index": index,
-                    "page_end": self._display_page_number(page_end),
-                    "has_images": bool(chunk_data.get("has_images", False)),
-                    "image_count": int(chunk_data.get("image_count") or 0),
-                    "has_tables": bool(chunk_data.get("has_tables", False)),
-                    "table_count": int(chunk_data.get("table_count") or 0),
-                }
-            else:
-                text = str(chunk_data)
-                page_start = None
-                metadata = {"source_chunk_index": index}
+    def _coerce_normalized_blocks(
+        self,
+        blocks: list[NormalizedBlock] | list[dict[str, Any]],
+    ) -> list[NormalizedBlock]:
+        if all(isinstance(block, NormalizedBlock) for block in blocks):
+            return list(blocks)
+        return self._get_parse_service().document_normalizer.normalize_legacy_chunks(blocks)
 
-            if not text.strip():
-                continue
-
-            blocks.append(
-                NormalizedBlock(
-                    block_id=f"parsed-chunk-{index}",
-                    kind="text",
-                    text=text,
-                    page=self._display_page_number(page_start),
-                    section_path=[],
-                    metadata=metadata,
-                )
-            )
-
-        if not blocks:
+    def _build_chunks_for_indexing(
+        self,
+        blocks: list[NormalizedBlock] | list[dict[str, Any]],
+    ):
+        normalized_blocks = self._coerce_normalized_blocks(blocks)
+        if not normalized_blocks:
             return []
 
         builder = getattr(self, "document_chunk_builder", None)
@@ -558,7 +537,7 @@ class DocumentProcessingService:
             )
             self.document_chunk_builder = builder
 
-        return builder.build(blocks)
+        return builder.build(normalized_blocks)
 
     async def _prepare_images_for_indexing(
         self,
@@ -640,6 +619,7 @@ class DocumentProcessingService:
         chunks_with_metadata: list[dict[str, Any]],
         prepared_images: list[dict[str, Any]],
     ) -> None:
+        """Version-1 compatibility helper for mutable chunk dictionaries."""
         if not prepared_images:
             return
 
@@ -676,6 +656,86 @@ class DocumentProcessingService:
             chunk_data["images"] = existing_images
             chunk_data["has_images"] = True
             chunk_data["image_count"] = len(existing_images)
+
+    def _attach_prepared_images_to_blocks(
+        self,
+        blocks: list[NormalizedBlock],
+        prepared_images: list[dict[str, Any]],
+    ) -> list[NormalizedBlock]:
+        """Return blocks with image captions attached without mutating block records."""
+        if not prepared_images:
+            return blocks
+
+        updated: list[NormalizedBlock] = []
+        for block_index, block in enumerate(blocks):
+            block_view = {
+                "page_start": block.page_start,
+                "page_end": block.page_end,
+            }
+            matching_images = [
+                image
+                for image in prepared_images
+                if self._image_matches_block(image, block, block_view, block_index)
+            ]
+            if not matching_images:
+                updated.append(block)
+                continue
+
+            metadata = dict(block.metadata)
+            existing_images = list(metadata.get("images") or [])
+            context_lines: list[str] = []
+            for image in matching_images:
+                if image not in existing_images:
+                    existing_images.append(image)
+                caption = str(image.get("caption") or "").strip()
+                if caption:
+                    context_lines.append(f"[Image: {caption}]")
+                elif block.kind != "image":
+                    name = Path(str(image.get("stored_path") or image.get("path"))).name
+                    context_lines.append(f"[Image: {name}]")
+
+            text = block.text.rstrip()
+            for line in context_lines:
+                if line not in text:
+                    text = f"{text}\n{line}" if text else line
+            metadata.update(
+                {
+                    "images": existing_images,
+                    "has_images": True,
+                    "image_count": len(existing_images),
+                }
+            )
+            updated.append(replace(block, text=text, metadata=metadata))
+        return updated
+
+    @staticmethod
+    def _image_matches_block(
+        image: dict[str, Any],
+        block: NormalizedBlock,
+        block_view: dict[str, Any],
+        block_index: int,
+    ) -> bool:
+        if block.kind == "image":
+            block_paths = {
+                str(block.metadata.get(key))
+                for key in ("path", "img_path", "relative_path")
+                if block.metadata.get(key)
+            }
+            image_paths = {
+                str(image.get(key))
+                for key in ("path", "img_path", "relative_path", "stored_path")
+                if image.get(key)
+            }
+            if block_paths & image_paths:
+                return True
+            if any(
+                left.replace("\\", "/").endswith(right.replace("\\", "/"))
+                or right.replace("\\", "/").endswith(left.replace("\\", "/"))
+                for left in block_paths
+                for right in image_paths
+            ):
+                return True
+        return DocumentProcessingService._image_matches_chunk(image, block_view, block_index)
 
     async def _store_prepared_images(
         self,

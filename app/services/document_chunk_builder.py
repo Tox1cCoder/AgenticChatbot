@@ -13,11 +13,12 @@ spans across merged blocks.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any, Protocol
 
 from app.ai.token_counter import TokenCounter
+from app.services.document_blocks import BuiltChunk, NormalizedBlock
 
 _MIN_ORPHAN_TOKENS = 20
 
@@ -42,30 +43,6 @@ class DocumentTokenStrategy:
         )
 
 
-@dataclass(frozen=True)
-class NormalizedBlock:
-    block_id: str
-    kind: str
-    text: str
-    page: int | None = None
-    section_path: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class BuiltChunk:
-    chunk_index: int
-    content: str
-    content_sha256: str
-    char_count: int
-    token_count: int
-    page_start: int | None
-    page_end: int | None
-    section_path: list[str]
-    block_provenance: list[dict[str, Any]]
-    metadata: dict[str, Any]
-
-
 def _is_table(block: NormalizedBlock) -> bool:
     if block.kind and block.kind.lower() == "table":
         return True
@@ -83,12 +60,8 @@ def _finalize_chunk(
         text = "\n\n".join(b.text for b in buffered_blocks)
     char_count = len(text)
     token_count = token_strategy.count(text)
-    page_starts = [b.page for b in buffered_blocks if b.page is not None]
-    page_ends = [
-        b.metadata.get("page_end", b.page)
-        for b in buffered_blocks
-        if b.metadata.get("page_end", b.page) is not None
-    ]
+    page_starts = [b.page_start for b in buffered_blocks if b.page_start is not None]
+    page_ends = [b.page_end for b in buffered_blocks if b.page_end is not None]
     page_start = min(page_starts) if page_starts else None
     page_end = max(page_ends) if page_ends else None
 
@@ -98,7 +71,18 @@ def _finalize_chunk(
         if b.section_path:
             section_path = list(b.section_path)
 
-    provenance = [{"block_id": b.block_id, "kind": b.kind, "page": b.page} for b in buffered_blocks]
+    provenance = [
+        {
+            "block_id": b.block_id,
+            "kind": b.kind,
+            "page": b.page_start,
+            "page_start": b.page_start,
+            "page_end": b.page_end,
+            "section_path": list(b.section_path),
+            "metadata": dict(b.metadata),
+        }
+        for b in buffered_blocks
+    ]
 
     metadata: dict[str, Any] = {}
     has_images = False
@@ -109,10 +93,12 @@ def _finalize_chunk(
 
     for block in buffered_blocks:
         block_metadata = block.metadata or {}
-        if block_metadata.get("has_images"):
+        if block.kind == "image" or block_metadata.get("has_images"):
             has_images = True
         if block_metadata.get("image_count") is not None:
             image_count += int(block_metadata.get("image_count") or 0)
+        elif block.kind == "image":
+            image_count += 1
         if block_metadata.get("has_tables") or _is_table(block):
             has_tables = True
         if block_metadata.get("table_count") is not None:
@@ -384,7 +370,8 @@ class DocumentChunkBuilder:
                         block_id=f"{block.block_id}::chunk-{chunk_index}",
                         kind=block.kind,
                         text=piece,
-                        page=block.page,
+                        page_start=block.page_start,
+                        page_end=block.page_end,
                         section_path=block.section_path,
                         metadata={**block.metadata, "is_table_split_piece": True},
                     )
@@ -412,7 +399,8 @@ class DocumentChunkBuilder:
                         block_id=f"{block.block_id}::chunk-{chunk_index}",
                         kind=block.kind,
                         text=piece,
-                        page=block.page,
+                        page_start=block.page_start,
+                        page_end=block.page_end,
                         section_path=block.section_path,
                         metadata=block.metadata,
                     )

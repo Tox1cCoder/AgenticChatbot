@@ -1,11 +1,10 @@
 """Document parse service.
 
-Responsible for the parse stage only: file → normalized chunks + image entries.
+Responsible for the parse stage only: file → normalized structural blocks + image entries.
 Does NOT perform image captioning, chunk building, or embedding.
 
 The result is a ``ParseResult`` dataclass containing:
-- ``chunks_with_metadata`` — list of chunk dicts with text, page metadata, and
-  image/table references (no captions attached yet).
+- ``blocks`` — immutable parser-neutral structural blocks.
 - ``images_data`` — raw image entries: ``{path, page_number, mime_type}``.
 - ``parse_elapsed_s`` — wall-clock seconds for the parse operation.
 - ``backend_used`` — e.g. ``"mineru/pipeline"``, ``"excel"``, ``"text"``.
@@ -23,7 +22,7 @@ import shutil
 import subprocess
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -34,18 +33,51 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from app.core.config import Settings
 from app.models.document_parse_artifact import DocumentParseArtifact
 from app.repositories.document_parse_artifact import DocumentParseArtifactRepository
+from app.services.document_blocks import NormalizedBlock, deserialize_block, serialize_block
 from app.services.document_chunk_builder import DocumentChunkBuilder
+from app.services.document_normalizer import DocumentNormalizer
 from app.services.plain_text_loader import load_utf8_text_document
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(init=False)
 class ParseResult:
-    chunks_with_metadata: list[dict[str, Any]]
+    blocks: list[NormalizedBlock]
     images_data: list[dict[str, Any]]
     parse_elapsed_s: float
     backend_used: str
+
+    def __init__(
+        self,
+        blocks: list[NormalizedBlock] | None = None,
+        images_data: list[dict[str, Any]] | None = None,
+        parse_elapsed_s: float = 0.0,
+        backend_used: str = "unknown",
+        *,
+        chunks_with_metadata: list[dict[str, Any]] | None = None,
+    ) -> None:
+        # Accept the v1 constructor shape until all callers have rolled forward.
+        if blocks is None and chunks_with_metadata is not None:
+            blocks = DocumentNormalizer().normalize_legacy_chunks(chunks_with_metadata)
+        self.blocks = list(blocks or [])
+        self.images_data = list(images_data or [])
+        self.parse_elapsed_s = float(parse_elapsed_s)
+        self.backend_used = str(backend_used)
+
+    @property
+    def chunks_with_metadata(self) -> list[dict[str, Any]]:
+        """Version-1 compatibility view; new code must consume ``blocks``."""
+        return [
+            {
+                "text": block.text,
+                "page_start": block.page_start,
+                "page_end": block.page_end,
+                "section_path": list(block.section_path),
+                **dict(block.metadata),
+            }
+            for block in self.blocks
+        ]
 
 
 class DocumentParseService:
@@ -63,6 +95,7 @@ class DocumentParseService:
         settings: Settings,
         chunk_builder: DocumentChunkBuilder | None = None,
         artifact_repo: DocumentParseArtifactRepository | None = None,
+        normalizer: DocumentNormalizer | None = None,
     ):
         self.settings = settings
         self.document_chunk_builder = chunk_builder or DocumentChunkBuilder(
@@ -71,6 +104,7 @@ class DocumentParseService:
             max_tokens=settings.rag_chunk_max_tokens,
         )
         self._artifact_repo = artifact_repo
+        self.document_normalizer = normalizer or DocumentNormalizer()
         self._mineru_output_path: str | None = None
 
     def persist_parse_result(
@@ -80,7 +114,7 @@ class DocumentParseService:
     ) -> DocumentParseArtifact:
         """Write ParseResult to disk as JSON and upsert a DocumentParseArtifact row.
 
-        Writes chunks_with_metadata + images_data to:
+        Writes versioned blocks + images_data to:
             {parse_artifacts_storage_path}/{document_id}/normalized_chunks.json
 
         MinerU images are copied into the same durable artifact directory before
@@ -111,8 +145,14 @@ class DocumentParseService:
             images_data=result.images_data,
         )
 
+        durable_blocks = self._rewrite_durable_image_paths(
+            result.blocks,
+            result.images_data,
+            durable_images,
+        )
         payload = {
-            "chunks_with_metadata": result.chunks_with_metadata,
+            "schema_version": 2,
+            "blocks": [serialize_block(block) for block in durable_blocks],
             "images_data": durable_images,
             "backend_used": result.backend_used,
             "parse_elapsed_s": result.parse_elapsed_s,
@@ -127,7 +167,9 @@ class DocumentParseService:
         artifact_metadata = {
             "backend_used": result.backend_used,
             "parse_elapsed_s": result.parse_elapsed_s,
-            "chunk_count": len(result.chunks_with_metadata),
+            "schema_version": 2,
+            "block_count": len(durable_blocks),
+            "chunk_count": len(durable_blocks),
             "image_count": len(durable_images),
             "image_paths": image_paths,
         }
@@ -146,6 +188,29 @@ class DocumentParseService:
             ],
         )
         return created[0]
+
+    @staticmethod
+    def _rewrite_durable_image_paths(
+        blocks: list[NormalizedBlock],
+        source_images: list[dict[str, Any]],
+        durable_images: list[dict[str, Any]],
+    ) -> list[NormalizedBlock]:
+        path_map = {
+            str(source.get("path")): durable.get("path")
+            for source, durable in zip(source_images, durable_images, strict=False)
+            if source.get("path") and durable.get("path")
+        }
+        if not path_map:
+            return blocks
+        rewritten: list[NormalizedBlock] = []
+        for block in blocks:
+            metadata = dict(block.metadata)
+            old_path = metadata.get("path")
+            if old_path is not None and str(old_path) in path_map:
+                metadata["path"] = path_map[str(old_path)]
+                block = replace(block, metadata=metadata)
+            rewritten.append(block)
+        return rewritten
 
     def _copy_images_into_artifact(
         self,
@@ -210,11 +275,20 @@ class DocumentParseService:
         return durable_images
 
     def load_parse_result(self, artifact: DocumentParseArtifact) -> ParseResult:
-        """Load a persisted ParseResult from disk. Raises FileNotFoundError if gone."""
+        """Load schema v2 blocks or normalize a schema v1 chunk artifact."""
         with open(artifact.storage_path, encoding="utf-8") as f:
             data = json.load(f)
+        schema_version = int(data.get("schema_version", 1))
+        if schema_version == 2:
+            blocks = [deserialize_block(item) for item in data.get("blocks", [])]
+        elif schema_version == 1:
+            blocks = self.document_normalizer.normalize_legacy_chunks(
+                data.get("chunks_with_metadata", [])
+            )
+        else:
+            raise ValueError(f"Unsupported parse artifact schema_version: {schema_version}")
         return ParseResult(
-            chunks_with_metadata=data["chunks_with_metadata"],
+            blocks=blocks,
             images_data=data.get("images_data", []),
             parse_elapsed_s=data.get("parse_elapsed_s", 0.0),
             backend_used=data.get("backend_used", "unknown"),
@@ -226,7 +300,7 @@ class DocumentParseService:
         filename: str,
         document_id: str,
     ) -> ParseResult:
-        """Parse a document file and return normalized chunks + image entries.
+        """Parse a document file and return normalized structural blocks.
 
         Does NOT perform image captioning or embedding.
 
@@ -239,19 +313,21 @@ class DocumentParseService:
         ext = os.path.splitext(filename)[1].lower()
 
         if ext == ".txt":
-            documents = [load_utf8_text_document(file_path)]
-            chunks = self._create_chunks(documents)
-            chunks_with_metadata = [{"text": chunk} for chunk in chunks]
+            document = load_utf8_text_document(file_path)
+            blocks = self.document_normalizer.normalize_text(
+                document.page_content,
+                source=filename,
+            )
             images_data: list[dict[str, Any]] = []
             backend_used = "text"
 
         elif ext in self.EXCEL_EXTENSIONS:
-            chunks_with_metadata = self._process_excel_workbook(file_path, filename)
+            blocks = self._process_excel_workbook(file_path, filename)
             images_data = []
             backend_used = "excel"
 
         elif ext in self.MINERU_EXTENSIONS:
-            chunks_with_metadata, images_data = await self._process_with_mineru(
+            blocks, images_data = await self._process_with_mineru(
                 file_path, document_id, filename
             )
             backend_raw = str(getattr(self.settings, "mineru_backend", "pipeline") or "pipeline")
@@ -262,7 +338,7 @@ class DocumentParseService:
 
         parse_elapsed_s = time.perf_counter() - start_time
         return ParseResult(
-            chunks_with_metadata=chunks_with_metadata,
+            blocks=blocks,
             images_data=images_data,
             parse_elapsed_s=parse_elapsed_s,
             backend_used=backend_used,
@@ -273,8 +349,8 @@ class DocumentParseService:
         file_path: str,
         document_id: str,
         original_filename: str | None = None,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Run MinerU on a document and return (chunks_with_metadata, images_data).
+    ) -> tuple[list[NormalizedBlock], list[dict[str, Any]]]:
+        """Run MinerU and return structural blocks plus extracted image records.
 
         The output directory is named ``mineru_output_{document_id}`` so that
         concurrent uploads never share temp paths.
@@ -442,7 +518,6 @@ class DocumentParseService:
                         images_by_path[img_path] = page_idx
 
             images_data: list[dict[str, Any]] = []
-            page_to_images: dict[int, list[dict[str, Any]]] = {}
 
             if images_dir.exists():
                 for img_file in images_dir.iterdir():
@@ -467,50 +542,26 @@ class DocumentParseService:
 
                         image_entry: dict[str, Any] = {
                             "path": str(img_file),
+                            "relative_path": relative_path,
                             "page_number": page_number,
                             "mime_type": mime_type,
                         }
                         images_data.append(image_entry)
 
-                        if page_number is not None:
-                            page_to_images.setdefault(page_number, []).append(image_entry)
-
             if content_blocks:
-                chunks_with_metadata = self._create_chunks_with_page_metadata(
+                blocks = self.document_normalizer.normalize_mineru(
                     content_blocks,
-                    page_to_images,
-                    max_chunk_size=self._legacy_char_chunk_size(),
+                    images_data=images_data,
                 )
             else:
                 with open(markdown_file, encoding="utf-8") as f:
                     markdown_content = f.read()
+                blocks = self.document_normalizer.normalize_markdown(
+                    markdown_content,
+                    source=original_filename or markdown_file.name,
+                )
 
-                documents = [
-                    type(
-                        "Document",
-                        (),
-                        {"page_content": markdown_content, "metadata": {}},
-                    )()
-                ]
-                chunks = self._create_chunks(documents)
-
-                unpaged_images = [img for img in images_data if img["page_number"] is None]
-
-                chunks_with_metadata = []
-                for chunk in chunks:
-                    chunks_with_metadata.append(
-                        {
-                            "text": chunk,
-                            "page_start": None,
-                            "page_end": None,
-                            "has_images": bool(unpaged_images),
-                            "image_count": len(unpaged_images),
-                            "has_tables": False,
-                            "table_count": 0,
-                        }
-                    )
-
-            return chunks_with_metadata, images_data
+            return blocks, images_data
 
         except subprocess.TimeoutExpired as exc:
             logger.error(
@@ -566,8 +617,8 @@ class DocumentParseService:
         self,
         file_path: str,
         original_filename: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Convert an Excel workbook into text chunks without MinerU."""
+    ) -> list[NormalizedBlock]:
+        """Convert an Excel workbook into heading and table blocks."""
         try:
             from openpyxl import load_workbook
         except ImportError as exc:
@@ -577,48 +628,28 @@ class DocumentParseService:
         value_workbook = load_workbook(file_path, data_only=True, read_only=True)
 
         try:
-            chunks_with_metadata: list[dict[str, Any]] = []
+            sheets: list[tuple[str, list[list[str]]]] = []
             value_sheets = {sheet.title: sheet for sheet in value_workbook.worksheets}
 
-            for sheet_index, formula_sheet in enumerate(formula_workbook.worksheets):
+            for formula_sheet in formula_workbook.worksheets:
                 value_sheet = value_sheets.get(formula_sheet.title)
                 rows = self._extract_excel_rows(formula_sheet, value_sheet)
                 if not rows:
                     continue
 
-                text = self._excel_rows_to_markdown(formula_sheet.title, rows)
-                chunks_with_metadata.append(
-                    {
-                        "text": text,
-                        "page_start": sheet_index,
-                        "page_end": sheet_index,
-                        "has_images": False,
-                        "image_count": 0,
-                        "has_tables": True,
-                        "table_count": 1,
-                        "sheet_name": formula_sheet.title,
-                        "source": original_filename,
-                    }
+                sheets.append((formula_sheet.title, rows))
+
+            if sheets:
+                return self.document_normalizer.normalize_excel(
+                    sheets,
+                    source=original_filename,
                 )
 
-            if chunks_with_metadata:
-                return chunks_with_metadata
-
-            return [
-                {
-                    "text": (
-                        f"Workbook {original_filename or Path(file_path).name} "
-                        "contains no non-empty sheets."
-                    ),
-                    "page_start": None,
-                    "page_end": None,
-                    "has_images": False,
-                    "image_count": 0,
-                    "has_tables": False,
-                    "table_count": 0,
-                    "source": original_filename,
-                }
-            ]
+            return self.document_normalizer.normalize_text(
+                f"Workbook {original_filename or Path(file_path).name} "
+                "contains no non-empty sheets.",
+                source=original_filename,
+            )
         finally:
             formula_workbook.close()
             value_workbook.close()

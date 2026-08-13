@@ -9,12 +9,17 @@ factory correctly and persists the expected model shape.
 from __future__ import annotations
 
 import inspect
+import json
 from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
 
 from app.models.document_parse_artifact import DocumentParseArtifact
 from app.repositories.document_parse_artifact import DocumentParseArtifactRepository
+from app.services.document_blocks import NormalizedBlock
+from app.services.document_parse_service import DocumentParseService, ParseResult
 
 
 class _FakeQuery:
@@ -193,3 +198,94 @@ def test_container_exposes_parse_artifact_and_chunk_repos():
 
     repo_ch = container.document_chunk_repository()
     assert isinstance(repo_ch, DocumentChunkRepository)
+
+
+def test_load_parse_result_reads_version_1_chunk_artifact(tmp_path):
+    artifact_path = tmp_path / "normalized_chunks.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "chunks_with_metadata": [
+                    {
+                        "text": "Legacy paragraph",
+                        "page_start": 3,
+                        "page_end": 4,
+                        "has_tables": True,
+                    }
+                ],
+                "images_data": [],
+                "backend_used": "mineru/pipeline",
+                "parse_elapsed_s": 0.2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact = type("Artifact", (), {"storage_path": str(artifact_path)})()
+    settings = MagicMock()
+    settings.rag_chunk_target_tokens = 400
+    settings.rag_chunk_overlap_tokens = 40
+    settings.rag_chunk_max_tokens = 800
+
+    result = DocumentParseService(settings=settings).load_parse_result(artifact)
+
+    assert len(result.blocks) == 1
+    assert result.blocks[0].text == "Legacy paragraph"
+    assert result.blocks[0].page_start == 3
+    assert result.blocks[0].page_end == 4
+    assert result.blocks[0].metadata["has_tables"] is True
+
+
+def test_persist_parse_result_writes_version_2_structural_blocks(tmp_path):
+    document_id = uuid4()
+    settings = MagicMock()
+    settings.parse_artifacts_storage_path = str(tmp_path)
+    settings.temp_storage_path = str(tmp_path / "temp")
+    settings.rag_chunk_target_tokens = 400
+    settings.rag_chunk_overlap_tokens = 40
+    settings.rag_chunk_max_tokens = 800
+    artifact_repo = MagicMock()
+
+    def replace_for_document(*, document_id, artifacts):
+        return [
+            SimpleNamespace(
+                id=uuid4(),
+                document_id=document_id,
+                storage_path=artifacts[0]["storage_path"],
+            )
+        ]
+
+    artifact_repo.replace_for_document.side_effect = replace_for_document
+    service = DocumentParseService(settings=settings, artifact_repo=artifact_repo)
+
+    artifact = service.persist_parse_result(
+        str(document_id),
+        ParseResult(
+            blocks=[
+                NormalizedBlock(
+                    "mineru:0",
+                    "equation",
+                    "E = mc^2",
+                    page_start=1,
+                    page_end=1,
+                    section_path=("Method",),
+                    metadata={"bbox": [1, 2, 3, 4], "text_format": "latex"},
+                )
+            ],
+            backend_used="mineru/pipeline",
+        ),
+    )
+
+    payload = json.loads(Path(artifact.storage_path).read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 2
+    assert "chunks_with_metadata" not in payload
+    assert payload["blocks"] == [
+        {
+            "block_id": "mineru:0",
+            "kind": "equation",
+            "text": "E = mc^2",
+            "page_start": 1,
+            "page_end": 1,
+            "section_path": ["Method"],
+            "metadata": {"bbox": [1, 2, 3, 4], "text_format": "latex"},
+        }
+    ]
