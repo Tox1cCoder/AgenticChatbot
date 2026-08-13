@@ -28,6 +28,11 @@ def test_ragas_adapter_maps_run_and_example_to_collection_metric(monkeypatch):
             observed["multimodal"] = (response, retrieved_contexts)
             return type("MetricResult", (), {"value": 1.0})()
 
+    class MultiModalRelevanceMetric:
+        def score(self, *, user_input, response, retrieved_contexts):
+            observed["multimodal_relevance"] = (user_input, response, retrieved_contexts)
+            return type("MetricResult", (), {"value": 1.0})()
+
     collections = types.ModuleType("ragas.metrics.collections")
     collections.ContextPrecision = ContextPrecisionMetric
     collections.ContextRecall = ContextPrecisionMetric
@@ -35,7 +40,7 @@ def test_ragas_adapter_maps_run_and_example_to_collection_metric(monkeypatch):
     collections.Faithfulness = MultiModalFaithfulnessMetric
     collections.AnswerRelevancy = AnswerRelevancyMetric
     collections.MultiModalFaithfulness = MultiModalFaithfulnessMetric
-    collections.MultiModalRelevance = MultiModalFaithfulnessMetric
+    collections.MultiModalRelevance = MultiModalRelevanceMetric
     ragas = types.ModuleType("ragas")
     metrics = types.ModuleType("ragas.metrics")
     monkeypatch.setitem(sys.modules, "ragas", ragas)
@@ -59,17 +64,23 @@ def test_ragas_adapter_maps_run_and_example_to_collection_metric(monkeypatch):
         "faithfulness": MultiModalFaithfulnessMetric(),
         "answer_relevancy": AnswerRelevancyMetric(),
         "multimodal_faithfulness": MultiModalFaithfulnessMetric(),
-        "multimodal_relevance": MultiModalFaithfulnessMetric(),
+        "multimodal_relevance": MultiModalRelevanceMetric(),
     }
     evaluators = ragas_evaluators(True, metric_factory=metrics_by_key.__getitem__)
     result = evaluators[0](Run(), Example())
     evaluators[4](Run(), Example())
     evaluators[5](Run(), Example())
+    evaluators[6](Run(), Example())
 
     assert result == {"key": "ragas_context_precision", "score": 0.75}
     assert observed["context"] == ("question", "reference", ["source evidence"])
     assert observed["answer"] == ("question", "answer")
     assert observed["multimodal"] == ("answer", ["source evidence"])
+    assert observed["multimodal_relevance"] == (
+        "question",
+        "answer",
+        ["source evidence"],
+    )
 
 
 def test_ragas_collection_classes_require_explicit_dependencies(monkeypatch):

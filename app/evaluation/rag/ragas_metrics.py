@@ -40,7 +40,7 @@ RAGAS_COLLECTION_METRICS = {
     ),
     "multimodal_relevance": (
         ("MultiModalRelevance", "MultimodalRelevance"),
-        ("response", "retrieved_contexts"),
+        ("user_input", "response", "retrieved_contexts"),
         True,
         False,
     ),
