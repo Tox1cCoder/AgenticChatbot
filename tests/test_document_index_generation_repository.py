@@ -1,19 +1,28 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+
+
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_for_sqlite(_type, _compiler, **_kwargs):
+    return "JSON"
 
 
 @pytest.fixture()
 def generation_db():
     from app.models.base import Base
+    from app.models.document_chunk import DocumentChunk
+    from app.models.document_image import DocumentImage
     from app.models.document_index_generation import DocumentIndexGeneration
 
     engine = create_engine(
@@ -21,7 +30,14 @@ def generation_db():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    Base.metadata.create_all(engine, tables=[DocumentIndexGeneration.__table__])
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            DocumentIndexGeneration.__table__,
+            DocumentChunk.__table__,
+            DocumentImage.__table__,
+        ],
+    )
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     try:
         yield factory
@@ -54,7 +70,90 @@ def test_activation_retires_previous_generation_atomically(generation_db):
     assert activated.id == replacement.id
     assert generations[replacement.id].status == "active"
     assert generations[old.id].status == "retired"
+    assert generations[old.id].retired_at is not None
     assert repository.get_active(document_id).id == replacement.id
+
+
+def test_recently_retired_old_generation_keeps_full_rollback_window(generation_db):
+    from app.repositories.document_index_generation import DocumentIndexGenerationRepository
+
+    repository = DocumentIndexGenerationRepository(generation_db)
+    document_id = uuid4()
+    old = _create(repository, document_id)
+    repository.activate(old.id)
+    with generation_db() as db:
+        stored = db.get(type(old), old.id)
+        stored.created_at = datetime.now(timezone.utc) - timedelta(days=30)
+        db.commit()
+    replacement = _create(repository, document_id)
+
+    repository.activate(replacement.id)
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=168)
+    assert repository.retired_before(document_id, cutoff) == []
+
+
+def test_activation_rebinds_images_to_replacement_chunk_before_retiring_old(
+    generation_db,
+):
+    from app.models.document_chunk import DocumentChunk
+    from app.models.document_image import DocumentImage
+    from app.repositories.document_index_generation import DocumentIndexGenerationRepository
+
+    repository = DocumentIndexGenerationRepository(generation_db)
+    document_id = uuid4()
+    old = _create(repository, document_id)
+    old_chunk_id, new_chunk_id, image_id = uuid4(), uuid4(), uuid4()
+    with generation_db() as db:
+        db.add(
+            DocumentChunk(
+                id=old_chunk_id,
+                document_id=document_id,
+                index_generation_id=old.id,
+                chunk_index=0,
+                content="old",
+                content_sha256="a" * 64,
+                char_count=3,
+                token_count=1,
+                section_path=[],
+                block_provenance=[],
+                chunk_metadata={},
+            )
+        )
+        db.add(
+            DocumentImage(
+                id=image_id,
+                document_id=document_id,
+                chunk_id=old_chunk_id,
+                image_path="figure.png",
+                mime_type="image/png",
+            )
+        )
+        db.commit()
+    repository.activate(old.id)
+    replacement = _create(repository, document_id)
+    with generation_db() as db:
+        db.add(
+            DocumentChunk(
+                id=new_chunk_id,
+                document_id=document_id,
+                index_generation_id=replacement.id,
+                chunk_index=0,
+                content="new",
+                content_sha256="b" * 64,
+                char_count=3,
+                token_count=1,
+                section_path=[],
+                block_provenance=[],
+                chunk_metadata={},
+            )
+        )
+        db.commit()
+
+    repository.activate(replacement.id)
+
+    with generation_db() as db:
+        assert db.get(DocumentImage, image_id).chunk_id == new_chunk_id
 
 
 def test_failure_code_is_bounded_without_retiring_active_generation(generation_db):
@@ -96,6 +195,9 @@ class _QdrantGenerationFake:
         for condition in qdrant_filter.must or []:
             if payload.get(condition.key) != condition.match.value:
                 return False
+        for condition in qdrant_filter.must_not or []:
+            if payload.get(condition.key) == condition.match.value:
+                return False
         return True
 
     def count(self, *, collection_name, count_filter, exact):
@@ -109,9 +211,12 @@ class _QdrantGenerationFake:
 
     def set_payload(self, *, collection_name, payload, points, wait=True):
         generation = next(
-            condition.match.value
-            for condition in points.filter.must
-            if condition.key == "index_generation"
+            (
+                condition.match.value
+                for condition in points.filter.must
+                if condition.key == "index_generation"
+            ),
+            None,
         )
         self.events.append(("set_active", (generation, payload["is_active"])))
         if not payload["is_active"] and self.fail_old_cleanup:
@@ -325,3 +430,78 @@ def test_sql_chunk_build_failure_marks_new_generation_failed():
 
     assert generations.get_active(document_id).id == old_generation_id
     assert generations.get_latest_failed(document_id) is not None
+
+
+def test_successful_activation_reconciles_all_document_payloads():
+    document_id, old_generation_id = uuid4(), uuid4()
+    service, _generations, _chunks, qdrant = _index_service(
+        document_id, old_generation_id
+    )
+
+    service.index_document(
+        document=SimpleNamespace(id=document_id, conversation_id=uuid4(), user_id=uuid4()),
+        built_chunks=[_built_chunk()],
+        parse_artifact_id=None,
+    )
+
+    set_events = [event for event in qdrant.events if event[0] == "set_active"]
+    assert ("set_active", (None, False)) in set_events
+    new_generation_id = next(iter(qdrant.points.values())).payload["index_generation"]
+    assert ("set_active", (new_generation_id, True)) in set_events
+
+
+def test_ambiguous_commit_confirmed_active_keeps_new_payload_visible():
+    document_id, old_generation_id = uuid4(), uuid4()
+    service, generations, _chunks, qdrant = _index_service(document_id, old_generation_id)
+
+    def commit_then_raise(generation_id):
+        target = generations.rows[generation_id]
+        for row in generations.rows.values():
+            if row.document_id == document_id and row.status == "active":
+                row.status = "retired"
+        target.status = "active"
+        raise RuntimeError("connection lost after commit")
+
+    generations.activate = commit_then_raise
+
+    persisted = service.index_document(
+        document=SimpleNamespace(id=document_id, conversation_id=uuid4(), user_id=uuid4()),
+        built_chunks=[_built_chunk()],
+        parse_artifact_id=None,
+    )
+
+    assert generations.get_active(document_id).id == persisted[0].index_generation_id
+    assert next(iter(qdrant.points.values())).payload["is_active"] is True
+    assert generations.get_latest_failed(document_id) is None
+
+
+def test_reconciliation_cleanup_failure_does_not_hide_active_generation():
+    document_id, old_generation_id = uuid4(), uuid4()
+    service, generations, _chunks, qdrant = _index_service(document_id, old_generation_id)
+    qdrant.fail_old_cleanup = True
+
+    persisted = service.index_document(
+        document=SimpleNamespace(id=document_id, conversation_id=uuid4(), user_id=uuid4()),
+        built_chunks=[_built_chunk()],
+        parse_artifact_id=None,
+    )
+
+    new_generation_id = persisted[0].index_generation_id
+    assert generations.get_active(document_id).id == new_generation_id
+    assert next(iter(qdrant.points.values())).payload["is_active"] is True
+
+
+def test_empty_replacement_is_rejected_before_generation_creation():
+    document_id, old_generation_id = uuid4(), uuid4()
+    service, generations, chunks, qdrant = _index_service(document_id, old_generation_id)
+
+    with pytest.raises(ValueError, match="at least one chunk"):
+        service.index_document(
+            document=SimpleNamespace(id=document_id, conversation_id=uuid4(), user_id=uuid4()),
+            built_chunks=[],
+            parse_artifact_id=None,
+        )
+
+    assert generations.get_active(document_id).id == old_generation_id
+    assert chunks.create_generation_chunks.call_count == 0
+    assert qdrant.events == []

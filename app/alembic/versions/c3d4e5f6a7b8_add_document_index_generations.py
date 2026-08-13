@@ -38,6 +38,7 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
         ),
         sa.Column("activated_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("retired_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(
             ["document_id"], ["documents.id"], ondelete="CASCADE"
         ),
@@ -166,4 +167,3 @@ def downgrade() -> None:
         table_name="document_index_generations",
     )
     op.drop_table("document_index_generations")
-

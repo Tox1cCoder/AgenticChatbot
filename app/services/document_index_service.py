@@ -138,7 +138,8 @@ class DocumentIndexService:
     ) -> list[DocumentChunk]:
         """Build and verify a replacement generation before atomically activating it."""
         document_id = self._coerce_uuid(document.id)
-        old_generation = self.generation_repository.get_active(document_id)
+        if not built_chunks:
+            raise ValueError("document indexing requires at least one chunk")
         generation = self.generation_repository.create(
             document_id=document_id,
             embedding_provider=self.embedding_provider,
@@ -148,6 +149,7 @@ class DocumentIndexService:
         )
         chunk_rows = [self._built_chunk_to_row(bc, parse_artifact_id) for bc in built_chunks]
         persisted: list[DocumentChunk] = []
+        activation_outcome_unknown = False
 
         try:
             persisted = self.chunk_repository.create_generation_chunks(
@@ -173,14 +175,35 @@ class DocumentIndexService:
                 self._set_generation_active(document_id, generation.id, True)
                 try:
                     self.generation_repository.activate(generation.id)
-                except Exception:
-                    try:
-                        self._set_generation_active(document_id, generation.id, False)
-                    except Exception:
-                        logger.exception(
-                            "Failed to restore generation %s Qdrant payloads", generation.id
+                except Exception as activation_error:
+                    confirmed = self._confirm_active_generation(
+                        document_id, generation.id
+                    )
+                    if confirmed is True:
+                        logger.warning(
+                            "Generation %s activation commit was confirmed after error: %s",
+                            generation.id,
+                            activation_error,
                         )
-                    raise
+                    elif confirmed is False:
+                        try:
+                            self._set_generation_active(
+                                document_id, generation.id, False
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Failed to restore generation %s Qdrant payloads",
+                                generation.id,
+                            )
+                        raise
+                    else:
+                        # The transaction outcome is unknown. Do not hide or
+                        # mark failed a generation that may be SQL-active.
+                        activation_outcome_unknown = True
+                        raise RuntimeError(
+                            "index generation activation outcome is unknown; "
+                            "run payload reconciliation"
+                        ) from activation_error
         except Exception as exc:
             for chunk in persisted:
                 try:
@@ -189,17 +212,18 @@ class DocumentIndexService:
                     logger.exception(
                         "Failed to mark chunk %s as failed", getattr(chunk, "id", None)
                     )
-            try:
-                self.generation_repository.mark_failed(
-                    generation.id, self._failure_code(exc)
-                )
-            except Exception:
-                logger.exception("Failed to mark generation %s failed", generation.id)
+            if not activation_outcome_unknown:
+                try:
+                    self.generation_repository.mark_failed(
+                        generation.id, self._failure_code(exc)
+                    )
+                except Exception:
+                    logger.exception("Failed to mark generation %s failed", generation.id)
             raise
 
-        if activate and old_generation is not None and old_generation.id != generation.id:
+        if activate:
             try:
-                self._set_generation_active(document_id, old_generation.id, False)
+                self.reconcile_active_payloads(document_id)
             except Exception:
                 # SQL is authoritative. Active-only hydration prevents retired
                 # rows from leaking while reconciliation repairs Qdrant flags.
@@ -209,6 +233,18 @@ class DocumentIndexService:
                 )
 
         return persisted
+
+    def _confirm_active_generation(
+        self, document_id: UUID, generation_id: UUID
+    ) -> bool | None:
+        try:
+            active = self.generation_repository.get_active(document_id)
+        except Exception:
+            logger.exception(
+                "Could not confirm activation state for generation %s", generation_id
+            )
+            return None
+        return active is not None and active.id == generation_id
 
     def delete_document_index(self, document_id: UUID) -> None:
         document_id = self._coerce_uuid(document_id)
@@ -431,6 +467,34 @@ class DocumentIndexService:
         """Make Qdrant activity flags match the authoritative SQL generation."""
         document_id = self._coerce_uuid(document_id)
         active = self.generation_repository.get_active(document_id)
+        if active is not None:
+            # Preserve availability: make the authoritative generation visible
+            # before attempting cleanup of stale payload flags.
+            self._set_generation_active(document_id, active.id, True)
+            retired_filter = FilterSelector(
+                filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="document_id",
+                            match=MatchValue(value=str(document_id)),
+                        )
+                    ],
+                    must_not=[
+                        FieldCondition(
+                            key="index_generation",
+                            match=MatchValue(value=str(active.id)),
+                        )
+                    ],
+                )
+            )
+            self.qdrant_client.set_payload(
+                collection_name=self.collection_name,
+                payload={"is_active": False},
+                points=retired_filter,
+                wait=True,
+            )
+            return active.id
+
         document_filter = FilterSelector(
             filter=Filter(
                 must=[
@@ -446,9 +510,6 @@ class DocumentIndexService:
             points=document_filter,
             wait=True,
         )
-        if active is not None:
-            self._set_generation_active(document_id, active.id, True)
-            return active.id
         return None
 
     def purge_retired_generations(

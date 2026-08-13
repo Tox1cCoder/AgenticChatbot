@@ -8,6 +8,8 @@ from uuid import UUID
 from sqlalchemy import select
 
 from app.models.document import Document
+from app.models.document_chunk import DocumentChunk
+from app.models.document_image import DocumentImage
 from app.models.document_index_generation import DocumentIndexGeneration
 
 
@@ -131,6 +133,18 @@ class DocumentIndexGenerationRepository:
                         .with_for_update()
                     ).scalar_one_or_none()
 
+                retired_at = datetime.now(timezone.utc)
+                old_active_ids = [
+                    row.id
+                    for row in db.query(DocumentIndexGeneration.id)
+                    .filter(
+                        DocumentIndexGeneration.document_id == target.document_id,
+                        DocumentIndexGeneration.status == "active",
+                        DocumentIndexGeneration.id != target.id,
+                    )
+                    .all()
+                ]
+                self._rebind_images(db, old_active_ids, target.id)
                 (
                     db.query(DocumentIndexGeneration)
                     .filter(
@@ -138,18 +152,48 @@ class DocumentIndexGenerationRepository:
                         DocumentIndexGeneration.status == "active",
                         DocumentIndexGeneration.id != target.id,
                     )
-                    .update({"status": "retired"}, synchronize_session=False)
+                    .update(
+                        {"status": "retired", "retired_at": retired_at},
+                        synchronize_session=False,
+                    )
                 )
                 db.flush()
                 target.status = "active"
                 target.failure_code = None
                 target.activated_at = datetime.now(timezone.utc)
+                target.retired_at = None
                 db.commit()
                 db.refresh(target)
                 return target
             except Exception:
                 db.rollback()
                 raise
+
+    @staticmethod
+    def _rebind_images(db, old_generation_ids: list[UUID], target_generation_id: UUID) -> None:
+        if not old_generation_ids:
+            return
+        old_chunks = (
+            db.query(DocumentChunk.id, DocumentChunk.chunk_index)
+            .filter(DocumentChunk.index_generation_id.in_(old_generation_ids))
+            .all()
+        )
+        target_by_index = {
+            row.chunk_index: row.id
+            for row in db.query(DocumentChunk.id, DocumentChunk.chunk_index)
+            .filter(DocumentChunk.index_generation_id == target_generation_id)
+            .all()
+        }
+        old_index_by_id = {row.id: row.chunk_index for row in old_chunks}
+        if not old_index_by_id:
+            return
+        images = (
+            db.query(DocumentImage)
+            .filter(DocumentImage.chunk_id.in_(old_index_by_id))
+            .all()
+        )
+        for image in images:
+            image.chunk_id = target_by_index.get(old_index_by_id[image.chunk_id])
 
     def retired_before(
         self, document_id: UUID, cutoff: datetime
@@ -159,8 +203,9 @@ class DocumentIndexGenerationRepository:
                 db.query(DocumentIndexGeneration)
                 .filter(
                     DocumentIndexGeneration.document_id == document_id,
-                    DocumentIndexGeneration.status.in_(("retired", "failed")),
-                    DocumentIndexGeneration.created_at < cutoff,
+                    DocumentIndexGeneration.status == "retired",
+                    DocumentIndexGeneration.retired_at.is_not(None),
+                    DocumentIndexGeneration.retired_at < cutoff,
                 )
                 .order_by(DocumentIndexGeneration.created_at.asc())
                 .all()

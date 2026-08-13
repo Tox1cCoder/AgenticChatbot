@@ -39,6 +39,7 @@ class DocumentIndexGeneration(Base):
     failure_code = Column(String(64), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     activated_at = Column(DateTime(timezone=True), nullable=True)
+    retired_at = Column(DateTime(timezone=True), nullable=True)
 
     document = relationship("Document", back_populates="index_generations")
     chunks = relationship(
