@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
@@ -87,6 +87,7 @@ class DocumentIndexGenerationRepository:
                 raise ValueError(f"generation {generation_id} is not building")
             generation.status = "ready"
             generation.failure_code = None
+            generation.failed_at = None
             db.commit()
             db.refresh(generation)
             return generation
@@ -101,6 +102,7 @@ class DocumentIndexGenerationRepository:
                 raise ValueError("an active generation cannot be marked failed")
             generation.status = "failed"
             generation.failure_code = bounded_code
+            generation.failed_at = datetime.now(timezone.utc)
             db.commit()
             db.refresh(generation)
             return generation
@@ -162,6 +164,7 @@ class DocumentIndexGenerationRepository:
                 target.failure_code = None
                 target.activated_at = datetime.now(timezone.utc)
                 target.retired_at = None
+                target.failed_at = None
                 db.commit()
                 db.refresh(target)
                 return target
@@ -195,7 +198,7 @@ class DocumentIndexGenerationRepository:
         for image in images:
             image.chunk_id = target_by_index.get(old_index_by_id[image.chunk_id])
 
-    def retired_before(
+    def purgeable_before(
         self, document_id: UUID, cutoff: datetime
     ) -> list[DocumentIndexGeneration]:
         with self.session_factory() as db:
@@ -203,13 +206,28 @@ class DocumentIndexGenerationRepository:
                 db.query(DocumentIndexGeneration)
                 .filter(
                     DocumentIndexGeneration.document_id == document_id,
-                    DocumentIndexGeneration.status == "retired",
-                    DocumentIndexGeneration.retired_at.is_not(None),
-                    DocumentIndexGeneration.retired_at < cutoff,
+                    or_(
+                        and_(
+                            DocumentIndexGeneration.status == "retired",
+                            DocumentIndexGeneration.retired_at.is_not(None),
+                            DocumentIndexGeneration.retired_at < cutoff,
+                        ),
+                        and_(
+                            DocumentIndexGeneration.status == "failed",
+                            DocumentIndexGeneration.failed_at.is_not(None),
+                            DocumentIndexGeneration.failed_at < cutoff,
+                        ),
+                    ),
                 )
                 .order_by(DocumentIndexGeneration.created_at.asc())
                 .all()
             )
+
+    def retired_before(
+        self, document_id: UUID, cutoff: datetime
+    ) -> list[DocumentIndexGeneration]:
+        """Backward-compatible alias for all safe-to-purge inactive generations."""
+        return self.purgeable_before(document_id, cutoff)
 
     def delete(self, generation_id: UUID) -> bool:
         with self.session_factory() as db:

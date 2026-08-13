@@ -79,6 +79,7 @@ def test_document_index_generation_schema_enforces_one_active_generation():
         "created_at",
         "activated_at",
         "retired_at",
+        "failed_at",
         "failure_code",
     }.issubset(generation_columns.keys())
     active_index = next(

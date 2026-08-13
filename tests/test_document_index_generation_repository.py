@@ -103,7 +103,9 @@ def test_activation_rebinds_images_to_replacement_chunk_before_retiring_old(
     repository = DocumentIndexGenerationRepository(generation_db)
     document_id = uuid4()
     old = _create(repository, document_id)
-    old_chunk_id, new_chunk_id, image_id = uuid4(), uuid4(), uuid4()
+    old_chunk_id, old_chunk_2_id = uuid4(), uuid4()
+    new_chunk_id, new_chunk_2_id = uuid4(), uuid4()
+    image_id, image_2_id, image_3_id = uuid4(), uuid4(), uuid4()
     with generation_db() as db:
         db.add(
             DocumentChunk(
@@ -129,6 +131,39 @@ def test_activation_rebinds_images_to_replacement_chunk_before_retiring_old(
                 mime_type="image/png",
             )
         )
+        db.add(
+            DocumentChunk(
+                id=old_chunk_2_id,
+                document_id=document_id,
+                index_generation_id=old.id,
+                chunk_index=1,
+                content="old two",
+                content_sha256="c" * 64,
+                char_count=7,
+                token_count=2,
+                section_path=[],
+                block_provenance=[],
+                chunk_metadata={},
+            )
+        )
+        db.add_all(
+            [
+                DocumentImage(
+                    id=image_2_id,
+                    document_id=document_id,
+                    chunk_id=old_chunk_id,
+                    image_path="figure-2.png",
+                    mime_type="image/png",
+                ),
+                DocumentImage(
+                    id=image_3_id,
+                    document_id=document_id,
+                    chunk_id=old_chunk_2_id,
+                    image_path="figure-3.png",
+                    mime_type="image/png",
+                ),
+            ]
+        )
         db.commit()
     repository.activate(old.id)
     replacement = _create(repository, document_id)
@@ -148,12 +183,35 @@ def test_activation_rebinds_images_to_replacement_chunk_before_retiring_old(
                 chunk_metadata={},
             )
         )
+        db.add(
+            DocumentChunk(
+                id=new_chunk_2_id,
+                document_id=document_id,
+                index_generation_id=replacement.id,
+                chunk_index=1,
+                content="new two",
+                content_sha256="d" * 64,
+                char_count=7,
+                token_count=2,
+                section_path=[],
+                block_provenance=[],
+                chunk_metadata={},
+            )
+        )
         db.commit()
 
     repository.activate(replacement.id)
 
     with generation_db() as db:
         assert db.get(DocumentImage, image_id).chunk_id == new_chunk_id
+        assert db.get(DocumentImage, image_2_id).chunk_id == new_chunk_id
+        assert db.get(DocumentImage, image_3_id).chunk_id == new_chunk_2_id
+
+    repository.delete(old.id)
+    with generation_db() as db:
+        assert db.get(DocumentImage, image_id).chunk_id == new_chunk_id
+        assert db.get(DocumentImage, image_2_id).chunk_id == new_chunk_id
+        assert db.get(DocumentImage, image_3_id).chunk_id == new_chunk_2_id
 
 
 def test_failure_code_is_bounded_without_retiring_active_generation(generation_db):
@@ -172,6 +230,29 @@ def test_failure_code_is_bounded_without_retiring_active_generation(generation_d
     assert latest_failed.id == failed.id
     assert latest_failed.status == "failed"
     assert len(latest_failed.failure_code) <= 64
+    assert latest_failed.failed_at is not None
+
+
+def test_failed_generation_becomes_purgeable_by_failure_age_only(generation_db):
+    from app.repositories.document_index_generation import DocumentIndexGenerationRepository
+
+    repository = DocumentIndexGenerationRepository(generation_db)
+    document_id = uuid4()
+    active = _create(repository, document_id)
+    repository.activate(active.id)
+    failed = _create(repository, document_id)
+    repository.mark_failed(failed.id, "INDEX_BUILD_RUNTIMEERROR")
+    with generation_db() as db:
+        stored = db.get(type(failed), failed.id)
+        stored.failed_at = datetime.now(timezone.utc) - timedelta(days=8)
+        db.commit()
+
+    purgeable = repository.purgeable_before(
+        document_id, datetime.now(timezone.utc) - timedelta(days=7)
+    )
+
+    assert [row.id for row in purgeable] == [failed.id]
+    assert all(row.id != active.id for row in purgeable)
 
 
 class _QdrantGenerationFake:
@@ -491,6 +572,55 @@ def test_reconciliation_cleanup_failure_does_not_hide_active_generation():
     assert next(iter(qdrant.points.values())).payload["is_active"] is True
 
 
+def test_document_wide_reconciliation_deactivates_unobserved_concurrent_generation():
+    document_id, old_generation_id = uuid4(), uuid4()
+    service, _generations, _chunks, qdrant = _index_service(
+        document_id, old_generation_id
+    )
+    rogue_generation_id, rogue_point_id = uuid4(), uuid4()
+    qdrant.points[str(rogue_point_id)] = SimpleNamespace(
+        id=str(rogue_point_id),
+        payload={
+            "document_id": str(document_id),
+            "index_generation": str(rogue_generation_id),
+            "is_active": True,
+        },
+        vector=[0.0] * 8,
+    )
+
+    persisted = service.index_document(
+        document=SimpleNamespace(id=document_id, conversation_id=uuid4(), user_id=uuid4()),
+        built_chunks=[_built_chunk()],
+        parse_artifact_id=None,
+    )
+
+    authoritative = str(persisted[0].index_generation_id)
+    assert qdrant.points[str(rogue_point_id)].payload["is_active"] is False
+    assert all(
+        point.payload["is_active"]
+        == (point.payload["index_generation"] == authoritative)
+        for point in qdrant.points.values()
+    )
+
+
+def test_unknown_sql_activation_outcome_does_not_demote_generation_or_chunks():
+    document_id, old_generation_id = uuid4(), uuid4()
+    service, generations, chunks, qdrant = _index_service(document_id, old_generation_id)
+    generations.activate = MagicMock(side_effect=RuntimeError("commit response lost"))
+    generations.get_active = MagicMock(side_effect=RuntimeError("database unavailable"))
+
+    with pytest.raises(RuntimeError, match="outcome is unknown"):
+        service.index_document(
+            document=SimpleNamespace(id=document_id, conversation_id=uuid4(), user_id=uuid4()),
+            built_chunks=[_built_chunk()],
+            parse_artifact_id=None,
+        )
+
+    assert generations.get_latest_failed(document_id) is None
+    assert chunks.mark_index_failed.call_count == 0
+    assert next(iter(qdrant.points.values())).payload["is_active"] is True
+
+
 def test_empty_replacement_is_rejected_before_generation_creation():
     document_id, old_generation_id = uuid4(), uuid4()
     service, generations, chunks, qdrant = _index_service(document_id, old_generation_id)
@@ -505,3 +635,40 @@ def test_empty_replacement_is_rejected_before_generation_creation():
     assert generations.get_active(document_id).id == old_generation_id
     assert chunks.create_generation_chunks.call_count == 0
     assert qdrant.events == []
+
+
+def test_purge_removes_failed_generation_artifacts_without_touching_active():
+    from app.services.document_index_service import DocumentIndexService
+
+    document_id, active_id, failed_id = uuid4(), uuid4(), uuid4()
+    generation_repository = MagicMock()
+    generation_repository.purgeable_before.return_value = [
+        SimpleNamespace(id=failed_id, document_id=document_id, status="failed")
+    ]
+    chunk_repository = MagicMock()
+    qdrant = MagicMock()
+    service = DocumentIndexService(
+        chunk_repository=chunk_repository,
+        generation_repository=generation_repository,
+        qdrant_client=qdrant,
+        embedding_service=SimpleNamespace(
+            provider="gemini", model_name="gemini", dimension=8
+        ),
+        collection_name="documents",
+        embedding_dimension=8,
+    )
+
+    purged = service.purge_retired_generations(
+        document_id, datetime.now(timezone.utc) - timedelta(days=7)
+    )
+
+    assert purged == [failed_id]
+    selector = qdrant.delete.call_args.kwargs["points_selector"].filter
+    matches = {condition.key: condition.match.value for condition in selector.must}
+    assert matches == {
+        "document_id": str(document_id),
+        "index_generation": str(failed_id),
+    }
+    assert str(active_id) not in str(qdrant.delete.call_args)
+    chunk_repository.delete_generation.assert_called_once_with(failed_id)
+    generation_repository.delete.assert_called_once_with(failed_id)

@@ -39,6 +39,7 @@ def upgrade() -> None:
         ),
         sa.Column("activated_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("retired_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("failed_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(
             ["document_id"], ["documents.id"], ondelete="CASCADE"
         ),

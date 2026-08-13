@@ -205,14 +205,15 @@ class DocumentIndexService:
                             "run payload reconciliation"
                         ) from activation_error
         except Exception as exc:
-            for chunk in persisted:
-                try:
-                    self.chunk_repository.mark_index_failed(chunk.id, str(exc))
-                except Exception:
-                    logger.exception(
-                        "Failed to mark chunk %s as failed", getattr(chunk, "id", None)
-                    )
             if not activation_outcome_unknown:
+                for chunk in persisted:
+                    try:
+                        self.chunk_repository.mark_index_failed(chunk.id, str(exc))
+                    except Exception:
+                        logger.exception(
+                            "Failed to mark chunk %s as failed",
+                            getattr(chunk, "id", None),
+                        )
                 try:
                     self.generation_repository.mark_failed(
                         generation.id, self._failure_code(exc)
@@ -518,7 +519,9 @@ class DocumentIndexService:
         """Delete retired SQL/Qdrant generations after a caller-chosen rollback window."""
         document_id = self._coerce_uuid(document_id)
         purged: list[UUID] = []
-        for generation in self.generation_repository.retired_before(document_id, older_than):
+        for generation in self.generation_repository.purgeable_before(
+            document_id, older_than
+        ):
             self.qdrant_client.delete(
                 collection_name=self.collection_name,
                 points_selector=FilterSelector(
