@@ -72,6 +72,7 @@ from app.services.rag_embedding_service import (
     GeminiRAGEmbeddingService,
     SentenceTransformerRAGEmbeddingService,
 )
+from app.services.semantic_breakpoints import EmbeddingSemanticBoundaryDetector
 from app.services.task_plan_service import TaskPlanService
 from app.services.tool_result_blob_service import ToolResultBlobService
 from app.services.user_service import UserService
@@ -85,6 +86,28 @@ from app.utils.validation.task_plan_validation import TaskPlanValidationUtils
 from app.utils.validation.user_validation import UserValidationUtils
 from app.workers.celery_app import celery_app
 from app.workers.conversation_compaction import publish_conversation_compaction
+
+
+def _build_document_chunk_builder(
+    *,
+    target_tokens,
+    overlap_tokens,
+    max_tokens,
+    semantic_chunking_enabled=False,
+    semantic_detector_factory=None,
+):
+    """Build chunking lazily so disabled semantics never initialize embeddings."""
+    detector = None
+    if semantic_chunking_enabled:
+        if semantic_detector_factory is None:
+            raise RuntimeError("semantic chunking requires a boundary detector factory")
+        detector = semantic_detector_factory()
+    return DocumentChunkBuilder(
+        target_tokens=target_tokens,
+        overlap_tokens=overlap_tokens,
+        max_tokens=max_tokens,
+        semantic_boundary_detector=detector,
+    )
 
 
 class Container(containers.DeclarativeContainer):
@@ -533,11 +556,19 @@ class Container(containers.DeclarativeContainer):
         qdrant_upsert_batch_size=settings.qdrant_upsert_batch_size,
     )
 
+    semantic_boundary_detector = providers.Factory(
+        EmbeddingSemanticBoundaryDetector,
+        embedding_service=rag_embedding_service,
+        breakpoint_percentile=settings.rag_semantic_breakpoint_percentile,
+    )
+
     document_chunk_builder = providers.Factory(
-        DocumentChunkBuilder,
+        _build_document_chunk_builder,
         target_tokens=settings.rag_chunk_target_tokens,
         overlap_tokens=settings.rag_chunk_overlap_tokens,
         max_tokens=settings.rag_chunk_max_tokens,
+        semantic_chunking_enabled=settings.rag_semantic_chunking_enabled,
+        semantic_detector_factory=semantic_boundary_detector.provider,
     )
 
     document_parse_service = providers.Factory(

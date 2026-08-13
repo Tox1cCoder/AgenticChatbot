@@ -13,6 +13,21 @@ from hashlib import sha256
 from app.ai.token_counter import TokenCount
 
 
+class _WhitespaceCounter:
+    def count_text(self, *, provider, model, text):
+        del provider, model
+        return TokenCount(tokens=len(text.split()), strategy="test")
+
+
+class _SeparatorAwareCounter:
+    def count_text(self, *, provider, model, text):
+        del provider, model
+        return TokenCount(
+            tokens=len(text.split()) + text.count("\n\n"),
+            strategy="test",
+        )
+
+
 def _block(
     *,
     block_id: str,
@@ -43,6 +58,26 @@ def _build(blocks, *, target=200, overlap=20, max_tokens=400):
         max_tokens=max_tokens,
     )
     return builder.build(blocks)
+
+
+def _build_with_counter(
+    blocks,
+    *,
+    target,
+    overlap,
+    max_tokens,
+    counter=None,
+    semantic_boundary_detector=None,
+):
+    from app.services.document_chunk_builder import DocumentChunkBuilder
+
+    return DocumentChunkBuilder(
+        target_tokens=target,
+        overlap_tokens=overlap,
+        max_tokens=max_tokens,
+        token_counter=counter or _WhitespaceCounter(),
+        semantic_boundary_detector=semantic_boundary_detector,
+    ).build(blocks)
 
 
 def test_chunk_builder_is_pure_library():
@@ -252,3 +287,227 @@ def test_built_chunk_exposes_required_attributes():
         "metadata",
     }
     assert set(BuiltChunk.__dataclass_fields__) >= expected_chunk_fields
+
+
+def test_regular_adjacent_chunks_overlap_only_inside_same_section():
+    blocks = [
+        _block(
+            block_id=f"p-{index}",
+            kind="paragraph",
+            text=f"sentence{index} alpha{index} beta{index} gamma{index} delta{index}.",
+            section_path=["A"],
+        )
+        for index in range(4)
+    ]
+
+    chunks = _build_with_counter(
+        blocks,
+        target=9,
+        overlap=3,
+        max_tokens=14,
+    )
+
+    assert len(chunks) >= 2
+    first_words = chunks[0].content.split()
+    second_words = chunks[1].content.split()
+    shared_tail = 0
+    for size in range(1, min(len(first_words), len(second_words)) + 1):
+        if first_words[-size:] == second_words[:size]:
+            shared_tail = size
+    assert 0 < shared_tail <= 3
+
+
+def test_overlap_does_not_cross_heading_or_table_boundary():
+    blocks = [
+        _block(
+            block_id="a-1",
+            kind="paragraph",
+            text="a1 a2 a3 a4 a5 a6",
+            section_path=["A"],
+        ),
+        _block(
+            block_id="heading-b",
+            kind="heading",
+            text="Heading B",
+            section_path=["B"],
+        ),
+        _block(
+            block_id="b-1",
+            kind="paragraph",
+            text="b1 b2 b3 b4 b5 b6",
+            section_path=["B"],
+        ),
+        _block(
+            block_id="table-b",
+            kind="table",
+            text="| h |\n|---|\n| row |",
+            section_path=["B"],
+            metadata={"is_table": True},
+        ),
+        _block(
+            block_id="b-2",
+            kind="paragraph",
+            text="tail1 tail2 tail3 tail4 tail5 tail6",
+            section_path=["B"],
+        ),
+    ]
+
+    chunks = _build_with_counter(
+        blocks,
+        target=7,
+        overlap=3,
+        max_tokens=12,
+    )
+
+    heading_chunk = next(chunk for chunk in chunks if "Heading B" in chunk.content)
+    table_index = next(i for i, chunk in enumerate(chunks) if "| row |" in chunk.content)
+    assert "a4 a5 a6" not in heading_chunk.content
+    assert table_index > 0
+    assert "b4 b5 b6" not in chunks[table_index].content
+    assert table_index + 1 < len(chunks)
+    assert "| row |" not in chunks[table_index + 1].content
+    assert all(chunk.token_count <= 12 for chunk in chunks)
+
+
+def test_heading_only_chunk_is_not_used_as_overlap_for_its_section_body():
+    chunks = _build_with_counter(
+        [
+            _block(
+                block_id="heading",
+                kind="heading",
+                text="one two three four five",
+                section_path=["Section"],
+            ),
+            _block(
+                block_id="body",
+                kind="paragraph",
+                text="body six seven eight nine ten",
+                section_path=["Section"],
+            ),
+        ],
+        target=5,
+        overlap=3,
+        max_tokens=10,
+    )
+
+    assert len(chunks) == 3
+    assert chunks[1].content == "body six seven eight nine"
+
+
+def test_final_rendered_count_includes_block_separators():
+    blocks = [
+        _block(block_id="p-1", kind="paragraph", text="one two three four five"),
+        _block(block_id="p-2", kind="paragraph", text="six seven eight nine ten"),
+    ]
+
+    chunks = _build_with_counter(
+        blocks,
+        target=10,
+        overlap=0,
+        max_tokens=10,
+        counter=_SeparatorAwareCounter(),
+    )
+
+    assert len(chunks) == 2
+    assert all(chunk.token_count <= 10 for chunk in chunks)
+
+
+def test_large_table_repeats_caption_and_header_without_repeating_rows():
+    caption = "[Table: Revenue]"
+    header = "| Region | Revenue |"
+    separator = "|---|---|"
+    rows = [f"| region-{index} | value-{index} |" for index in range(12)]
+    block = _block(
+        block_id="table",
+        kind="table",
+        text="\n".join([caption, header, separator, *rows]),
+        section_path=["Results"],
+        metadata={
+            "is_table": True,
+            "caption": ["Revenue"],
+            "header": ["Region", "Revenue"],
+            "body": [[f"region-{i}", f"value-{i}"] for i in range(12)],
+        },
+    )
+
+    chunks = _build_with_counter(
+        [block],
+        target=12,
+        overlap=4,
+        max_tokens=16,
+    )
+
+    assert len(chunks) > 1
+    assert all(caption in chunk.content and header in chunk.content for chunk in chunks)
+    for row in rows:
+        assert sum(row in chunk.content for chunk in chunks) == 1
+    assert all(chunk.token_count <= 16 for chunk in chunks)
+
+
+def test_neighbor_indices_are_assigned_after_final_build():
+    blocks = [
+        _block(
+            block_id=f"p-{index}",
+            kind="paragraph",
+            text=" ".join(f"word{index}-{part}" for part in range(21)),
+            section_path=["A"],
+        )
+        for index in range(3)
+    ]
+
+    chunks = _build_with_counter(blocks, target=21, overlap=1, max_tokens=25)
+
+    assert [chunk.metadata["previous_chunk_index"] for chunk in chunks] == [None, 0, 1]
+    assert [chunk.metadata["next_chunk_index"] for chunk in chunks] == [1, 2, None]
+
+
+def test_semantic_boundary_flushes_without_overlap_inside_same_section():
+    class Detector:
+        def break_before(self, blocks):
+            del blocks
+            return frozenset({"p-2"})
+
+    blocks = [
+        _block(
+            block_id="p-1",
+            kind="paragraph",
+            text="first one two three",
+            section_path=["A"],
+        ),
+        _block(
+            block_id="p-2",
+            kind="paragraph",
+            text="second four five six",
+            section_path=["A"],
+        ),
+    ]
+
+    chunks = _build_with_counter(
+        blocks,
+        target=20,
+        overlap=3,
+        max_tokens=24,
+        semantic_boundary_detector=Detector(),
+    )
+
+    assert [chunk.content for chunk in chunks] == [
+        "first one two three",
+        "second four five six",
+    ]
+
+
+def test_legacy_prechunked_blocks_keep_one_to_one_boundaries():
+    blocks = [
+        _block(
+            block_id=f"legacy-{index}",
+            kind="paragraph",
+            text=f"legacy chunk {index} stays unchanged",
+            metadata={"legacy_prechunked": True, "source_chunk_index": index},
+        )
+        for index in range(2)
+    ]
+
+    chunks = _build_with_counter(blocks, target=3, overlap=2, max_tokens=4)
+
+    assert [chunk.content for chunk in chunks] == [block.text for block in blocks]
+    assert [p["block_id"] for p in chunks[0].block_provenance] == ["legacy-0"]

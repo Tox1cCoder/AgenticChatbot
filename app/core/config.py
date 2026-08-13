@@ -463,6 +463,19 @@ class Settings(BaseSettings):
         default=800,
         description="Hard ceiling on per-chunk token count.",
     )
+    rag_semantic_chunking_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable experimental embedding-based semantic chunk boundaries. "
+            "Keep disabled until the shadow evaluation beats structural chunking."
+        ),
+    )
+    rag_semantic_breakpoint_percentile: float = Field(
+        default=90.0,
+        ge=0.0,
+        le=100.0,
+        description="Adjacent-block embedding distance percentile used as a boundary.",
+    )
     # Gemini Embeddings API accepts up to 100 contents per embed_content call
     # (documented limit for gemini-embedding-2). Default 32 is conservative.
     rag_embedding_batch_size: int = Field(

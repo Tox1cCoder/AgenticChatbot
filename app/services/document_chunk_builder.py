@@ -1,18 +1,9 @@
-"""Structure-aware chunk builder.
-
-Pure library: takes a stream of ``NormalizedBlock`` records (the post-parse
-representation from MinerU or a plain-text loader) and emits
-``BuiltChunk`` records that the index service can persist.
-
-The builder keeps tables atomic when they fit, splits large tables on
-row-group boundaries, carries heading context through ``section_path``,
-merges tiny orphan paragraphs into their neighbors, and preserves page
-spans across merged blocks.
-"""
+"""Build bounded, structure-aware chunks from normalized document blocks."""
 
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any, Protocol
@@ -21,10 +12,18 @@ from app.ai.token_counter import TokenCounter
 from app.services.document_blocks import BuiltChunk, NormalizedBlock
 
 _MIN_ORPHAN_TOKENS = 20
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?。！？])(?:\s+|(?=\S))")
 
 
 class _TextCounter(Protocol):
     def count_text(self, *, provider: str, model: str, text: str): ...
+
+
+class _BoundaryDetector(Protocol):
+    def break_before(
+        self,
+        blocks: Sequence[NormalizedBlock],
+    ) -> frozenset[str]: ...
 
 
 @dataclass(frozen=True)
@@ -43,64 +42,76 @@ class DocumentTokenStrategy:
         )
 
 
+@dataclass(frozen=True)
+class _ChunkDraft:
+    content: str
+    blocks: tuple[NormalizedBlock, ...]
+    section_path: tuple[str, ...]
+    allow_overlap_from_previous: bool = False
+    is_table: bool = False
+    legacy_prechunked: bool = False
+
+    @property
+    def ends_with_heading(self) -> bool:
+        return bool(self.blocks and self.blocks[-1].kind == "heading")
+
+
 def _is_table(block: NormalizedBlock) -> bool:
-    if block.kind and block.kind.lower() == "table":
-        return True
-    return bool(block.metadata and block.metadata.get("is_table"))
+    return block.kind == "table" or bool(block.metadata.get("is_table"))
+
+
+def _render_blocks(blocks: Sequence[NormalizedBlock]) -> str:
+    return "\n\n".join(block.text for block in blocks)
+
+
+def _unique_blocks(blocks: Sequence[NormalizedBlock]) -> list[NormalizedBlock]:
+    seen: set[str] = set()
+    unique: list[NormalizedBlock] = []
+    for block in blocks:
+        if block.block_id not in seen:
+            seen.add(block.block_id)
+            unique.append(block)
+    return unique
 
 
 def _finalize_chunk(
     *,
     chunk_index: int,
-    buffered_blocks: list[NormalizedBlock],
+    buffered_blocks: Sequence[NormalizedBlock],
     token_strategy: DocumentTokenStrategy,
-    text: str | None = None,
+    text: str,
 ) -> BuiltChunk:
-    if text is None:
-        text = "\n\n".join(b.text for b in buffered_blocks)
-    char_count = len(text)
-    token_count = token_strategy.count(text)
-    page_starts = [b.page_start for b in buffered_blocks if b.page_start is not None]
-    page_ends = [b.page_end for b in buffered_blocks if b.page_end is not None]
-    page_start = min(page_starts) if page_starts else None
-    page_end = max(page_ends) if page_ends else None
-
-    # Section path is taken from the most recent block's section_path.
+    blocks = _unique_blocks(buffered_blocks)
+    page_starts = [block.page_start for block in blocks if block.page_start is not None]
+    page_ends = [block.page_end for block in blocks if block.page_end is not None]
     section_path: list[str] = []
-    for b in buffered_blocks:
-        if b.section_path:
-            section_path = list(b.section_path)
+    for block in blocks:
+        if block.section_path:
+            section_path = list(block.section_path)
 
     provenance = [
         {
-            "block_id": b.block_id,
-            "kind": b.kind,
-            "page": b.page_start,
-            "page_start": b.page_start,
-            "page_end": b.page_end,
-            "section_path": list(b.section_path),
-            "metadata": dict(b.metadata),
+            "block_id": block.block_id,
+            "kind": block.kind,
+            "page": block.page_start,
+            "page_start": block.page_start,
+            "page_end": block.page_end,
+            "section_path": list(block.section_path),
+            "metadata": dict(block.metadata),
         }
-        for b in buffered_blocks
+        for block in blocks
     ]
 
     metadata: dict[str, Any] = {}
-    has_images = False
     image_count = 0
-    has_tables = False
     table_count = 0
     source_chunk_indices: list[Any] = []
-
-    for block in buffered_blocks:
-        block_metadata = block.metadata or {}
-        if block.kind == "image" or block_metadata.get("has_images"):
-            has_images = True
+    for block in blocks:
+        block_metadata = block.metadata
         if block_metadata.get("image_count") is not None:
             image_count += int(block_metadata.get("image_count") or 0)
         elif block.kind == "image":
             image_count += 1
-        if block_metadata.get("has_tables") or _is_table(block):
-            has_tables = True
         if block_metadata.get("table_count") is not None:
             table_count += int(block_metadata.get("table_count") or 0)
         elif _is_table(block):
@@ -108,13 +119,14 @@ def _finalize_chunk(
         if block_metadata.get("source_chunk_index") is not None:
             source_chunk_indices.append(block_metadata["source_chunk_index"])
 
-    if has_images:
-        metadata["has_images"] = True
-        metadata["image_count"] = image_count
-    if has_tables:
-        metadata["has_tables"] = True
-        metadata["table_count"] = table_count or 1
-        metadata["contains_table"] = True
+    if image_count or any(block.metadata.get("has_images") for block in blocks):
+        metadata.update(has_images=True, image_count=image_count)
+    if table_count or any(block.metadata.get("has_tables") for block in blocks):
+        metadata.update(
+            has_tables=True,
+            table_count=table_count or 1,
+            contains_table=True,
+        )
     if source_chunk_indices:
         metadata["source_chunk_indices"] = source_chunk_indices
 
@@ -122,179 +134,201 @@ def _finalize_chunk(
         chunk_index=chunk_index,
         content=text,
         content_sha256=sha256(text.encode("utf-8")).hexdigest(),
-        char_count=char_count,
-        token_count=token_count,
-        page_start=page_start,
-        page_end=page_end,
+        char_count=len(text),
+        token_count=token_strategy.count(text),
+        page_start=min(page_starts) if page_starts else None,
+        page_end=max(page_ends) if page_ends else None,
         section_path=section_path,
         block_provenance=provenance,
         metadata=metadata,
     )
 
 
-def _split_large_table(
-    block: NormalizedBlock,
-    *,
-    target_tokens: int,
-    token_strategy: DocumentTokenStrategy,
-) -> list[str]:
-    """Split a big table on row-group boundaries, keeping the header row."""
-    lines = [line for line in block.text.splitlines() if line.strip()]
-    if not lines:
-        return [block.text]
-
-    # The first two lines are header + separator for a markdown-style table.
-    header_lines = lines[:2] if len(lines) >= 2 and "---" in lines[1] else lines[:1]
-    row_lines = lines[len(header_lines) :]
-
-    header_tokens = token_strategy.count("\n".join(header_lines))
-    out: list[str] = []
-    current_rows: list[str] = []
-    current_tokens = header_tokens
-
-    for row in row_lines:
-        row_tokens = token_strategy.count(row)
-        if current_rows and current_tokens + row_tokens > target_tokens:
-            out.append("\n".join(header_lines + current_rows))
-            current_rows = []
-            current_tokens = header_tokens
-        current_rows.append(row)
-        current_tokens += row_tokens
-
-    if current_rows:
-        out.append("\n".join(header_lines + current_rows))
-
-    return out
-
-
-def _split_by_words(
-    text: str,
-    *,
-    target_tokens: int,
-    overlap_tokens: int,
-    token_strategy: DocumentTokenStrategy,
-) -> list[str]:
-    words = text.split()
-    if not words:
-        return [text]
-
-    # Estimate how many words roughly fit in target_tokens.
-    sample_text = " ".join(words[: min(len(words), 256)])
-    sample_tokens = max(1, token_strategy.count(sample_text))
-    words_per_token = len(words[: min(len(words), 256)]) / sample_tokens
-    target_word_count = max(1, int(target_tokens * words_per_token))
-    overlap_word_count = max(0, int(overlap_tokens * words_per_token))
-
-    chunks: list[str] = []
-    idx = 0
-    while idx < len(words):
-        end = min(len(words), idx + target_word_count)
-        chunks.append(" ".join(words[idx:end]))
-        if end >= len(words):
-            break
-        idx = max(idx + 1, end - overlap_word_count)
-    return chunks
-
-
 def _split_sentence_units(text: str) -> list[str]:
     units: list[str] = []
     for paragraph in re.split(r"\n{2,}", text):
-        normalized = " ".join(paragraph.split())
-        if not normalized:
+        paragraph = paragraph.strip()
+        if not paragraph:
             continue
-        units.extend(
-            sentence.strip()
-            for sentence in re.split(r"(?<=[.!?])\s+", normalized)
-            if sentence.strip()
-        )
+        units.extend(unit.strip() for unit in _SENTENCE_BOUNDARY.split(paragraph) if unit.strip())
     return units or [text]
 
 
-def _tail_units_for_overlap(
-    units: list[str],
-    overlap_tokens: int,
+def _largest_prefix(
+    units: Sequence[str],
+    *,
+    separator: str,
+    budget: int,
+    token_strategy: DocumentTokenStrategy,
+) -> int:
+    low, high = 1, len(units)
+    best = 0
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = separator.join(units[:middle])
+        if token_strategy.count(candidate) <= budget:
+            best = middle
+            low = middle + 1
+        else:
+            high = middle - 1
+    return best
+
+
+def _split_atomic_unit(
+    text: str,
+    *,
+    budget: int,
+    max_tokens: int,
     token_strategy: DocumentTokenStrategy,
 ) -> list[str]:
-    if overlap_tokens <= 0:
-        return []
-
-    tail: list[str] = []
-    for unit in reversed(units):
-        candidate = [unit, *tail]
-        if token_strategy.count(" ".join(candidate)) > overlap_tokens and tail:
-            break
-        tail = candidate
-    return tail
+    words = text.split()
+    units = words if len(words) > 1 else list(text)
+    separator = " " if len(words) > 1 else ""
+    pieces: list[str] = []
+    remaining = units
+    while remaining:
+        count = _largest_prefix(
+            remaining,
+            separator=separator,
+            budget=budget,
+            token_strategy=token_strategy,
+        )
+        if count == 0:
+            if token_strategy.count(remaining[0]) > max_tokens:
+                raise ValueError("a single text unit exceeds the chunk hard limit")
+            count = 1
+        pieces.append(separator.join(remaining[:count]))
+        remaining = remaining[count:]
+    return pieces
 
 
 def _split_long_text(
     text: str,
     *,
     target_tokens: int,
-    overlap_tokens: int,
     max_tokens: int,
     token_strategy: DocumentTokenStrategy,
 ) -> list[str]:
-    """Split long text on sentence boundaries when possible."""
-    sentence_units = _split_sentence_units(text)
-    if len(sentence_units) == 1 and token_strategy.count(sentence_units[0]) > max_tokens:
-        return _split_by_words(
-            sentence_units[0],
-            target_tokens=target_tokens,
-            overlap_tokens=overlap_tokens,
-            token_strategy=token_strategy,
-        )
-
-    chunks: list[str] = []
-    current_units: list[str] = []
-
-    def emit_current() -> None:
-        nonlocal current_units
-        if not current_units:
-            return
-        emitted = current_units
-        chunks.append(" ".join(emitted))
-        current_units = _tail_units_for_overlap(
-            emitted,
-            overlap_tokens,
-            token_strategy,
-        )
-
-    for unit in sentence_units:
-        unit_tokens = token_strategy.count(unit)
-        if unit_tokens > max_tokens:
-            emit_current()
-            chunks.extend(
-                _split_by_words(
+    """Split at Latin/CJK sentence boundaries with word/character fallback."""
+    pieces: list[str] = []
+    current: list[str] = []
+    for unit in _split_sentence_units(text):
+        if token_strategy.count(unit) > target_tokens:
+            if current:
+                pieces.append(" ".join(current))
+                current = []
+            pieces.extend(
+                _split_atomic_unit(
                     unit,
-                    target_tokens=target_tokens,
-                    overlap_tokens=overlap_tokens,
+                    budget=target_tokens,
+                    max_tokens=max_tokens,
                     token_strategy=token_strategy,
                 )
             )
-            current_units = []
             continue
+        candidate = " ".join([*current, unit])
+        if current and token_strategy.count(candidate) > target_tokens:
+            pieces.append(" ".join(current))
+            current = [unit]
+        else:
+            current.append(unit)
+    if current:
+        pieces.append(" ".join(current))
+    return pieces
 
-        candidate_units = [*current_units, unit]
-        candidate_text = " ".join(candidate_units)
-        if current_units and token_strategy.count(candidate_text) > target_tokens:
-            emit_current()
-            candidate_units = [*current_units, unit]
-            candidate_text = " ".join(candidate_units)
-            if current_units and token_strategy.count(candidate_text) > max_tokens:
-                current_units = []
-                candidate_units = [unit]
 
-        current_units = candidate_units
+def _table_parts(block: NormalizedBlock) -> tuple[list[str], list[str], list[str]]:
+    lines = [line.strip() for line in block.text.splitlines() if line.strip()]
+    if not lines:
+        return [], [], []
 
-    if current_units:
-        chunks.append(" ".join(current_units))
+    prefix: list[str] = []
+    cursor = 0
+    while cursor < len(lines) and lines[cursor].startswith("[Table:"):
+        prefix.append(lines[cursor])
+        cursor += 1
+    if cursor < len(lines) and lines[cursor].startswith("|"):
+        prefix.append(lines[cursor])
+        cursor += 1
+        if cursor < len(lines) and re.match(r"^\|?[\s:|-]+\|?$", lines[cursor]):
+            prefix.append(lines[cursor])
+            cursor += 1
 
-    return chunks
+    suffix: list[str] = []
+    while len(lines) > cursor and lines[-1].startswith("[Table footnote:"):
+        suffix.insert(0, lines.pop())
+    return prefix, lines[cursor:], suffix
+
+
+def _split_large_table(
+    block: NormalizedBlock,
+    *,
+    target_tokens: int,
+    max_tokens: int,
+    token_strategy: DocumentTokenStrategy,
+) -> list[str]:
+    """Split a table into row groups while repeating its caption and header."""
+    prefix, rows, suffix = _table_parts(block)
+    if not rows:
+        return [block.text]
+    pieces: list[str] = []
+    current_rows: list[str] = []
+
+    def render(group: Sequence[str], trailing: Sequence[str] = ()) -> str:
+        return "\n".join([*prefix, *group, *trailing])
+
+    for row in rows:
+        candidate = render([*current_rows, row])
+        if current_rows and token_strategy.count(candidate) > target_tokens:
+            pieces.append(render(current_rows))
+            current_rows = []
+            candidate = render([row])
+        if token_strategy.count(candidate) > max_tokens:
+            raise ValueError(
+                f"table row in block {block.block_id!r} exceeds the chunk hard limit"
+            )
+        current_rows.append(row)
+    if current_rows:
+        final = render(current_rows, suffix)
+        if token_strategy.count(final) <= max_tokens:
+            pieces.append(final)
+        else:
+            pieces.append(render(current_rows))
+            suffix_piece = render([], suffix)
+            if token_strategy.count(suffix_piece) > max_tokens:
+                raise ValueError(
+                    f"table footnote in block {block.block_id!r} exceeds the chunk hard limit"
+                )
+            pieces.append(suffix_piece)
+    return pieces
+
+
+def _tail_with_budget(
+    text: str,
+    *,
+    budget: int,
+    token_strategy: DocumentTokenStrategy,
+) -> str:
+    if budget <= 0 or not text:
+        return ""
+    words = text.split()
+    units = words if len(words) > 1 else list(text)
+    separator = " " if len(words) > 1 else ""
+    low, high = 1, len(units)
+    best = ""
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = separator.join(units[-middle:])
+        if token_strategy.count(candidate) <= budget:
+            best = candidate
+            low = middle + 1
+        else:
+            high = middle - 1
+    return best
 
 
 class DocumentChunkBuilder:
-    """Build chunks out of a sequence of normalized blocks."""
+    """Build bounded chunks from parser-neutral structural blocks."""
 
     def __init__(
         self,
@@ -305,145 +339,234 @@ class DocumentChunkBuilder:
         token_counter: _TextCounter | None = None,
         token_provider: str = "openai",
         token_model: str = "gpt-4o",
+        semantic_boundary_detector: _BoundaryDetector
+        | Callable[[Sequence[NormalizedBlock]], frozenset[str]]
+        | None = None,
     ):
         if target_tokens <= 0 or max_tokens < target_tokens:
             raise ValueError(
                 "target_tokens must be positive and max_tokens must be >= target_tokens"
             )
+        if overlap_tokens < 0 or overlap_tokens > max_tokens:
+            raise ValueError("overlap_tokens must be between zero and max_tokens")
         self.target_tokens = target_tokens
         self.overlap_tokens = overlap_tokens
         self.max_tokens = max_tokens
+        self.semantic_boundary_detector = semantic_boundary_detector
         self.token_strategy = DocumentTokenStrategy(
             counter=token_counter or TokenCounter(),
             provider=token_provider,
             model=token_model,
         )
 
+    def _semantic_boundaries(
+        self,
+        blocks: Sequence[NormalizedBlock],
+    ) -> frozenset[str]:
+        detector = self.semantic_boundary_detector
+        if detector is None:
+            return frozenset()
+        method = getattr(detector, "break_before", None)
+        if method is not None:
+            return frozenset(method(blocks))
+        return frozenset(detector(blocks))
+
     def build(self, blocks: list[NormalizedBlock]) -> list[BuiltChunk]:
-        chunks: list[BuiltChunk] = []
+        semantic_boundaries = self._semantic_boundaries(blocks)
+        drafts: list[_ChunkDraft] = []
         buffered: list[NormalizedBlock] = []
         buffered_tokens = 0
-        chunk_index = 0
+        buffered_allows_overlap = False
 
-        def emit_buffered():
-            nonlocal buffered, buffered_tokens, chunk_index
+        def previous_allows_overlap(block: NormalizedBlock) -> bool:
+            if (
+                not drafts
+                or drafts[-1].is_table
+                or drafts[-1].legacy_prechunked
+                or drafts[-1].ends_with_heading
+            ):
+                return False
+            return (
+                drafts[-1].section_path == tuple(block.section_path)
+                and block.kind != "heading"
+                and block.block_id not in semantic_boundaries
+            )
+
+        def emit_buffered() -> None:
+            nonlocal buffered, buffered_tokens, buffered_allows_overlap
             if not buffered:
                 return
-            # Merge tiny orphan trailing blocks into the previous chunk if possible.
-            chunks.append(
-                _finalize_chunk(
-                    chunk_index=chunk_index,
-                    buffered_blocks=list(buffered),
-                    token_strategy=self.token_strategy,
+            drafts.append(
+                _ChunkDraft(
+                    content=_render_blocks(buffered),
+                    blocks=tuple(buffered),
+                    section_path=tuple(buffered[-1].section_path),
+                    allow_overlap_from_previous=buffered_allows_overlap,
                 )
             )
-            chunk_index += 1
             buffered = []
             buffered_tokens = 0
+            buffered_allows_overlap = False
+
+        def append_text_piece(
+            block: NormalizedBlock,
+            text: str,
+            *,
+            split_piece_index: int,
+            allow_overlap: bool,
+        ) -> None:
+            piece = NormalizedBlock(
+                block_id=block.block_id,
+                kind=block.kind,
+                text=text,
+                page_start=block.page_start,
+                page_end=block.page_end,
+                section_path=block.section_path,
+                metadata={**block.metadata, "split_piece_index": split_piece_index},
+            )
+            drafts.append(
+                _ChunkDraft(
+                    content=text,
+                    blocks=(piece,),
+                    section_path=tuple(block.section_path),
+                    allow_overlap_from_previous=allow_overlap,
+                )
+            )
 
         for block in blocks:
             block_tokens = self.token_strategy.count(block.text)
 
-            # Schema-v1 artifacts already contain character chunks. Preserve
-            # their indexing boundaries during the rollout instead of merging
-            # or splitting them a second time.
             if block.metadata.get("legacy_prechunked"):
                 emit_buffered()
-                chunks.append(
-                    _finalize_chunk(
-                        chunk_index=chunk_index,
-                        buffered_blocks=[block],
+                drafts.append(
+                    _ChunkDraft(
+                        content=block.text,
+                        blocks=(block,),
+                        section_path=tuple(block.section_path),
+                        legacy_prechunked=True,
+                    )
+                )
+                continue
+
+            is_boundary = (
+                block.block_id in semantic_boundaries
+                or block.kind == "heading"
+                or bool(buffered and buffered[-1].section_path != block.section_path)
+            )
+            if is_boundary:
+                emit_buffered()
+
+            if _is_table(block):
+                emit_buffered()
+                pieces = (
+                    [block.text]
+                    if block_tokens <= self.max_tokens
+                    else _split_large_table(
+                        block,
+                        target_tokens=self.target_tokens,
+                        max_tokens=self.max_tokens,
                         token_strategy=self.token_strategy,
                     )
                 )
-                chunk_index += 1
-                continue
-
-            # --- Atomic tables ----------------------------------------
-            if _is_table(block):
-                # Flush any pending text blocks first so the table stays on its own.
-                emit_buffered()
-
-                if block_tokens <= self.max_tokens:
-                    chunks.append(
-                        _finalize_chunk(
-                            chunk_index=chunk_index,
-                            buffered_blocks=[block],
-                            token_strategy=self.token_strategy,
-                        )
-                    )
-                    chunk_index += 1
-                    continue
-
-                # Oversized table: split on row groups but keep rows intact.
-                for piece in _split_large_table(
-                    block,
-                    target_tokens=self.target_tokens,
-                    token_strategy=self.token_strategy,
-                ):
-                    synthetic = NormalizedBlock(
-                        block_id=f"{block.block_id}::chunk-{chunk_index}",
+                for piece_index, piece_text in enumerate(pieces):
+                    piece_block = NormalizedBlock(
+                        block_id=block.block_id,
                         kind=block.kind,
-                        text=piece,
+                        text=piece_text,
                         page_start=block.page_start,
                         page_end=block.page_end,
                         section_path=block.section_path,
-                        metadata={**block.metadata, "is_table_split_piece": True},
+                        metadata={**block.metadata, "table_split_piece_index": piece_index},
                     )
-                    chunks.append(
-                        _finalize_chunk(
-                            chunk_index=chunk_index,
-                            buffered_blocks=[synthetic],
-                            token_strategy=self.token_strategy,
+                    drafts.append(
+                        _ChunkDraft(
+                            content=piece_text,
+                            blocks=(piece_block,),
+                            section_path=tuple(block.section_path),
+                            is_table=True,
                         )
                     )
-                    chunk_index += 1
                 continue
 
-            # --- Long paragraphs that blow past max_tokens on their own ------
-            if block_tokens > self.max_tokens:
+            if block_tokens > self.target_tokens:
                 emit_buffered()
-                for piece in _split_long_text(
+                pieces = _split_long_text(
                     block.text,
                     target_tokens=self.target_tokens,
-                    overlap_tokens=self.overlap_tokens,
                     max_tokens=self.max_tokens,
                     token_strategy=self.token_strategy,
-                ):
-                    synthetic = NormalizedBlock(
-                        block_id=f"{block.block_id}::chunk-{chunk_index}",
-                        kind=block.kind,
-                        text=piece,
-                        page_start=block.page_start,
-                        page_end=block.page_end,
-                        section_path=block.section_path,
-                        metadata=block.metadata,
+                )
+                for piece_index, piece_text in enumerate(pieces):
+                    append_text_piece(
+                        block,
+                        piece_text,
+                        split_piece_index=piece_index,
+                        allow_overlap=(
+                            previous_allows_overlap(block)
+                            if piece_index == 0
+                            else block.kind != "heading"
+                        ),
                     )
-                    chunks.append(
-                        _finalize_chunk(
-                            chunk_index=chunk_index,
-                            buffered_blocks=[synthetic],
-                            token_strategy=self.token_strategy,
-                        )
-                    )
-                    chunk_index += 1
                 continue
 
-            # --- Regular text blocks: buffer until we hit target -------------
-            if buffered and buffered_tokens + block_tokens > self.target_tokens:
-                # Respect max_tokens as a hard ceiling unless the current
-                # block is small enough to slip in as an orphan merge.
-                if (
-                    block_tokens <= _MIN_ORPHAN_TOKENS
-                    and buffered_tokens + block_tokens <= self.max_tokens
-                ):
-                    buffered.append(block)
-                    buffered_tokens += block_tokens
-                    continue
-                emit_buffered()
+            if buffered:
+                candidate = _render_blocks([*buffered, block])
+                candidate_tokens = self.token_strategy.count(candidate)
+                if candidate_tokens > self.target_tokens:
+                    if block_tokens <= _MIN_ORPHAN_TOKENS and candidate_tokens <= self.max_tokens:
+                        buffered.append(block)
+                        buffered_tokens = candidate_tokens
+                        continue
+                    emit_buffered()
 
+            if not buffered:
+                buffered_allows_overlap = previous_allows_overlap(block) and not is_boundary
+                buffered_tokens = block_tokens
             buffered.append(block)
-            buffered_tokens += block_tokens
 
         emit_buffered()
+
+        chunks: list[BuiltChunk] = []
+        previous_draft: _ChunkDraft | None = None
+        for chunk_index, draft in enumerate(drafts):
+            content = draft.content
+            provenance_blocks: list[NormalizedBlock] = list(draft.blocks)
+            if (
+                previous_draft is not None
+                and draft.allow_overlap_from_previous
+                and not draft.is_table
+                and not previous_draft.is_table
+                and self.overlap_tokens > 0
+            ):
+                for budget in range(self.overlap_tokens, 0, -1):
+                    overlap = _tail_with_budget(
+                        previous_draft.content,
+                        budget=budget,
+                        token_strategy=self.token_strategy,
+                    )
+                    if not overlap:
+                        continue
+                    candidate = f"{overlap}\n\n{content}"
+                    if self.token_strategy.count(candidate) <= self.max_tokens:
+                        content = candidate
+                        provenance_blocks = [*previous_draft.blocks, *provenance_blocks]
+                        break
+
+            chunk = _finalize_chunk(
+                chunk_index=chunk_index,
+                buffered_blocks=provenance_blocks,
+                token_strategy=self.token_strategy,
+                text=content,
+            )
+            if not draft.legacy_prechunked and chunk.token_count > self.max_tokens:
+                raise AssertionError(
+                    f"chunk {chunk_index} exceeds hard limit: "
+                    f"{chunk.token_count} > {self.max_tokens}"
+                )
+            chunks.append(chunk)
+            previous_draft = draft
+
+        for index, chunk in enumerate(chunks):
+            chunk.metadata["previous_chunk_index"] = index - 1 if index else None
+            chunk.metadata["next_chunk_index"] = index + 1 if index + 1 < len(chunks) else None
         return chunks
