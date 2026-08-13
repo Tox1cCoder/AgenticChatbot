@@ -52,7 +52,7 @@ class RagLoopMixin:
         last_human_idx = self._find_last_human_message_index(messages)
         original_query = messages[last_human_idx].content if last_human_idx is not None else content
 
-        tool_context = []
+        rag_tool_messages = []
         if last_human_idx is not None:
             for msg in messages[last_human_idx + 1 :]:
                 if isinstance(msg, ToolMessage):
@@ -61,14 +61,16 @@ class RagLoopMixin:
                     # into the delegated agent's tool context.
                     if getattr(msg, "name", None) == "hand_off":
                         continue
-                    tool_context.append(msg.content)
+                    rag_tool_messages.append(msg)
+                elif isinstance(msg, AIMessage) and msg.tool_calls:
+                    rag_tool_messages.append(msg)
 
         rag_context = state.get("context", {}) or {}
         metadata = {
             "persona": state.get("persona"),
             "history": conversation_history,
             "original_query": original_query,
-            "tool_context": tool_context,
+            "rag_tool_messages": rag_tool_messages,
             "agentic_images": rag_context.get(
                 "agentic_images", []
             ),  # Pass images for multimodal LLM
@@ -136,6 +138,22 @@ class RagLoopMixin:
         tool_artifacts: list[dict[str, Any]] = []
         all_images: list[dict[str, str]] = []
         max_agentic_images = getattr(settings, "agentic_rag_max_images", 6)
+        response = state.get("response")
+        response_metadata = getattr(response, "metadata", {}) or {}
+        request_budget = response_metadata.get("request_budget") or {}
+        raw_evidence_allowance = request_budget.get("evidence_token_allowance")
+        evidence_allowance = max(
+            0,
+            int(raw_evidence_allowance if raw_evidence_allowance is not None else 0),
+        )
+        evidence_provider = str(response_metadata.get("provider") or "gemini")
+        evidence_model = str(response_metadata.get("model") or "gemini-2.5-flash")
+        last_human_idx = self._find_last_human_message_index(messages)
+        question = (
+            str(messages[last_human_idx].content)
+            if last_human_idx is not None
+            else ""
+        )
 
         # Track agentic iteration count
         agentic_iteration = context.get("agentic_rag_iteration", 0) + 1
@@ -272,6 +290,10 @@ class RagLoopMixin:
                 context=context,
                 max_agentic_images=max_agentic_images,
                 user_id=state.get("user_id"),
+                question=question,
+                evidence_max_tokens=evidence_allowance,
+                evidence_provider=evidence_provider,
+                evidence_model=evidence_model,
             )
 
             parsed_error: dict[str, Any] | None = None
@@ -281,13 +303,16 @@ class RagLoopMixin:
                     if isinstance(candidate, dict) and candidate.get("status") == "error":
                         parsed_error = candidate
             error = result if parsed_error or result.startswith("Error") else None
-            public_text, blob_info = apply_tool_output_offload(
-                output_text=result,
-                tool_call_id=tool_id,
-                tool_name=tool_name,
-                conversation_id=conversation_id,
-                user_id=user_id,
-            )
+            if evidence.get("records") is not None:
+                public_text, blob_info = result, None
+            else:
+                public_text, blob_info = apply_tool_output_offload(
+                    output_text=result,
+                    tool_call_id=tool_id,
+                    tool_name=tool_name,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                )
             artifact = build_tool_artifact(
                 tool_call_id=tool_id,
                 tool_name=tool_name,

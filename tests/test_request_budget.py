@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.ai.agents.base_agent import BaseAgent
 from app.ai.request_budget import (
@@ -92,6 +92,45 @@ async def test_complete_input_accounting_and_below_soft_proceeds() -> None:
     assert result.input_tokens == 60
     assert result.usage_ratio == 0.60
     assert result.action == "proceed"
+    assert result.evidence_token_allowance == 25
+
+
+@pytest.mark.asyncio
+async def test_current_question_and_evidence_group_are_fixed_input() -> None:
+    service = RequestBudgetService(WeightedCounter())
+    current = (
+        HumanMessage(content="question", additional_kwargs={"tokens": 20}),
+        AIMessage(
+            content="",
+            tool_calls=[{"id": "e1", "name": "search_documents", "args": {}}],
+            additional_kwargs={"tokens": 20},
+        ),
+        ToolMessage(
+            content="bounded evidence",
+            tool_call_id="e1",
+            additional_kwargs={"tokens": 20},
+        ),
+    )
+
+    result = await service.preflight(
+        RequestEnvelope(
+            provider="gemini",
+            model="gemini-2.5-flash",
+            system_messages=(_message("system", 10),),
+            history_messages=(
+                _message("user", 30, "old"),
+                _message("assistant", 30, "old answer"),
+            ),
+            current_messages=current,
+        ),
+        _config(),
+    )
+
+    assert result.action == "reduced"
+    assert result.envelope.history_messages == ()
+    assert result.envelope.current_messages == current
+    assert result.input_tokens == 70
+    assert result.evidence_token_allowance == 15
 
 
 @pytest.mark.asyncio
@@ -107,6 +146,25 @@ async def test_near_boundary_uses_authoritative_provider_count() -> None:
 
     assert result.action == "durable_requested"
     assert result.input_tokens == 75
+    assert result.count_strategy == "gemini:native_count"
+
+
+@pytest.mark.asyncio
+async def test_evidence_allowance_requests_authoritative_count_below_soft_boundary() -> None:
+    service = RequestBudgetService(NativeAwareCounter())
+    envelope = RequestEnvelope(
+        provider="gemini",
+        model="gemini-2.5-flash",
+        system_messages=(_message("system", 5),),
+        history_messages=(),
+        current_messages=(_message("user", 5),),
+        authoritative_allowance=True,
+    )
+
+    result = await service.preflight(envelope, _config())
+
+    assert result.input_tokens == 75
+    assert result.evidence_token_allowance == 10
     assert result.count_strategy == "gemini:native_count"
 
 

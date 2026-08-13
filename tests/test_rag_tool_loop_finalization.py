@@ -17,7 +17,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.ai.agents.rag_agent import RAGAgent
 from app.ai.graph import MultiAgentWorkflow
@@ -308,6 +308,200 @@ def test_rag_document_tool_results_are_recorded_as_response_artifacts(monkeypatc
     recovered = workflow._recover_terminal_response(state)
     assert recovered is not None
     assert recovered.tool_artifacts == artifacts
+
+
+def test_rag_search_passes_authoritative_allowance_and_persists_pack(monkeypatch):
+    workflow = _make_workflow()
+    workflow.rag_agent = object()
+    workflow.agents = {}
+    captured = {}
+
+    async def fake_execute_search_documents_action(**kwargs):
+        captured.update(kwargs)
+        pack = {
+            "records": [{"evidence_id": "E1", "content": "bounded"}],
+            "evidence_ids": ["E1"],
+            "token_count": 7,
+            "omitted_count": 0,
+            "truncated_count": 0,
+            "count_strategy": "test",
+        }
+        return (
+            "BEGIN UNTRUSTED EVIDENCE E1\nbounded\nEND UNTRUSTED EVIDENCE E1",
+            "search_chunks",
+            pack,
+        )
+
+    monkeypatch.setattr(
+        "app.ai.workflow.rag_loop.execute_search_documents_action",
+        fake_execute_search_documents_action,
+    )
+    monkeypatch.setattr(
+        "app.ai.workflow.rag_loop.apply_tool_output_offload",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("bounded evidence serialization must remain the ToolMessage")
+        ),
+    )
+    state = {
+        "conversation_id": "conv-1",
+        "user_id": "owner",
+        "context": {},
+        "messages": [
+            HumanMessage(content="What is revenue?"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "search-1",
+                        "name": "search_documents",
+                        "args": {"action": "search_chunks", "query": "revenue"},
+                    }
+                ],
+            ),
+        ],
+        "response": AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content=""),
+            metadata={
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "request_budget": {"evidence_token_allowance": 321},
+            },
+        ),
+    }
+
+    asyncio.run(workflow._rag_tools_node(state))
+
+    assert captured["question"] == "What is revenue?"
+    assert captured["evidence_max_tokens"] == 321
+    assert captured["evidence_provider"] == "gemini"
+    assert captured["evidence_model"] == "gemini-2.5-flash"
+    tool_message = state["messages"][-1]
+    assert isinstance(tool_message, ToolMessage)
+    assert tool_message.content.startswith("BEGIN UNTRUSTED EVIDENCE E1")
+    artifact = state["context"]["tool_artifacts"][0]
+    assert artifact["rag_evidence"]["records"][0]["evidence_id"] == "E1"
+
+
+def test_rag_zero_allowance_does_not_fall_back_to_independent_budget(monkeypatch):
+    workflow = _make_workflow()
+    workflow.rag_agent = object()
+    workflow.agents = {}
+    captured = {}
+
+    async def fake_execute_search_documents_action(**kwargs):
+        captured.update(kwargs)
+        return "", "search_chunks", {
+            "records": [],
+            "evidence_ids": [],
+            "token_count": 0,
+            "omitted_count": 1,
+            "truncated_count": 0,
+        }
+
+    monkeypatch.setattr(
+        "app.ai.workflow.rag_loop.execute_search_documents_action",
+        fake_execute_search_documents_action,
+    )
+    state = {
+        "conversation_id": "conv-1",
+        "user_id": "owner",
+        "context": {},
+        "messages": [
+            HumanMessage(content="question"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "search-1",
+                        "name": "search_documents",
+                        "args": {"action": "search_chunks", "query": "question"},
+                    }
+                ],
+            ),
+        ],
+        "response": AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content=""),
+            metadata={"request_budget": {"evidence_token_allowance": 0}},
+        ),
+    }
+
+    asyncio.run(workflow._rag_tools_node(state))
+
+    assert captured["evidence_max_tokens"] == 0
+    assert state["messages"][-1].content == ""
+
+
+@pytest.mark.asyncio
+async def test_rag_agent_preserves_current_assistant_tool_group_without_synthetic_human_text():
+    agent = object.__new__(RAGAgent)
+    agent.settings = type("S", (), {"agentic_preview_chars": 500})()
+    agent.agentic_max_iterations = 5
+    agent.tools = [SimpleNamespace(name="search_documents")]
+    agent.mcp_manager = None
+    agent._tools_generation_seen = -1
+    captured = {}
+
+    async def fake_invoke(**kwargs):
+        captured.update(kwargs)
+        return AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content="answer"),
+            metadata={},
+        )
+
+    from app.core.runtime_modeling import ResolvedRuntimeModelConfig
+
+    runtime_config = ResolvedRuntimeModelConfig(
+        agent_key="rag",
+        provider="gemini",
+        model="gemini-2.5-flash",
+        temperature=0.7,
+        api_key=None,
+        key_source="settings",
+        source="agent_default",
+        capabilities={"supports_vision": False},
+        fallback_config=None,
+        warnings=[],
+        provider_fallback=None,
+        is_custom_model=False,
+    )
+    agent._invoke_agentic_rag_model = fake_invoke
+    agent._resolve_runtime_model_config = lambda *a, **kw: runtime_config
+    agent._create_fallback_runtime_config = lambda *a, **kw: None
+    agent._build_skills_suffix = lambda **kw: ""
+    agent._get_tools_for_binding = lambda **kw: []
+
+    tool_call = AIMessage(
+        content="",
+        tool_calls=[{"id": "search-1", "name": "search_documents", "args": {}}],
+    )
+    evidence = ToolMessage(
+        content="BEGIN UNTRUSTED EVIDENCE E1\nbounded\nEND UNTRUSTED EVIDENCE E1",
+        tool_call_id="search-1",
+        name="search_documents",
+    )
+    msg = AgentMessage(
+        role=MessageRole.USER,
+        content="What is revenue?",
+        metadata={
+            "original_query": "What is revenue?",
+            "rag_tool_messages": [tool_call, evidence],
+        },
+    )
+
+    response = await agent._process_message_agentic(msg, "conv-1")
+
+    assert response.message.content == "answer"
+    emitted = captured["messages"]
+    assert isinstance(emitted[-3], HumanMessage)
+    assert isinstance(emitted[-2], AIMessage)
+    assert isinstance(emitted[-1], ToolMessage)
+    assert all("Previous Tool Results" not in str(item.content) for item in emitted)
 
 
 def test_rag_action_named_tool_call_is_canonicalized_to_search_documents(monkeypatch):

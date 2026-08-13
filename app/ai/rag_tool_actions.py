@@ -6,6 +6,10 @@ import re
 from typing import Any
 from uuid import UUID
 
+from app.ai.token_counter import TokenCounter
+from app.services.rag_evidence import EvidenceAssembler
+from app.services.rag_retrieval import RetrievalScope
+
 from ..core.rich_response import (
     ALLOWED_IMAGE_MIME_TYPES,
     RichDisplayPolicy,
@@ -243,6 +247,12 @@ async def execute_search_documents_action(
     context: dict[str, Any],
     max_agentic_images: int,
     user_id: str | None = None,
+    question: str = "",
+    subquestions: tuple[str, ...] = (),
+    evidence_max_tokens: int = 2_000,
+    evidence_provider: str = "gemini",
+    evidence_model: str = "gemini-2.5-flash",
+    evidence_token_counter: Any | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
     """
     Execute one search_documents action.
@@ -367,6 +377,7 @@ async def execute_search_documents_action(
                     query,
                     conversation_id=conversation_id,
                     user_id=user_id,
+                    include_evidence_metadata=True,
                 )
                 if search_results:
                     attached_count = 0
@@ -384,74 +395,36 @@ async def execute_search_documents_action(
                     except Exception:
                         attached_count = 0
 
-                    chunks: list[dict[str, Any]] = []
-                    result = "SEARCH RESULTS:\n\n"
-                    for i, doc in enumerate(search_results[:10], 1):
-                        source = doc.get("source", "unknown")
-                        score = doc.get("score", 0)
-                        doc_id = doc.get("document_id") or "unknown"
-
-                        page_number = doc.get("page_number")
-                        page_start = doc.get("page_start")
-                        page_end = doc.get("page_end")
-
-                        image_ids = doc.get("image_ids") or []
-                        image_captions = [cap for cap in (doc.get("image_captions") or []) if cap]
-
-                        has_tables = bool(doc.get("has_tables", False))
-                        table_count = doc.get("table_count", 0) or 0
-
-                        meta_parts = [f"Document ID: {doc_id}"]
-                        if page_number:
-                            meta_parts.append(f"Page: {page_number}")
-                        elif page_start or page_end:
-                            start_label = page_start if page_start is not None else "?"
-                            end_label = page_end if page_end is not None else "?"
-                            meta_parts.append(f"Pages: {start_label}-{end_label}")
-
-                        if image_ids:
-                            meta_parts.append(f"Images: {len(image_ids)}")
-                            if image_captions:
-                                preview = ", ".join(image_captions[:3])
-                                more = "…" if len(image_captions) > 3 else ""
-                                meta_parts.append(f"Image captions: {preview}{more}")
-
-                        if has_tables or table_count:
-                            meta_parts.append(f"Tables: {int(table_count)}")
-
-                        content_full = doc.get("content") or ""
-                        content = content_full[:500]
-                        result += (
-                            f"[{i}] {source} (score: {score:.2%})\n"
-                            f"  {' | '.join(meta_parts)}\n"
-                            f"{content}\n\n"
-                        )
-
-                        chunks.append(
-                            {
-                                "rank": i,
-                                "source": source,
-                                "score": float(score) if isinstance(score, (int, float)) else None,
-                                "document_id": doc_id,
-                                "chunk_id": doc.get("chunk_id"),
-                                "page_number": page_number,
-                                "page_start": page_start,
-                                "page_end": page_end,
-                                "image_ids": list(image_ids),
-                                "image_captions": list(image_captions),
-                                "has_tables": has_tables,
-                                "table_count": int(table_count) if table_count else 0,
-                                "content": content_full,
-                            }
-                        )
-
-                    evidence["chunks"] = chunks
+                    repository = getattr(
+                        getattr(rag_agent, "retriever", None),
+                        "chunk_repository",
+                        None,
+                    )
+                    assembler = EvidenceAssembler(
+                        token_counter=evidence_token_counter or TokenCounter(),
+                        provider=evidence_provider,
+                        model=evidence_model,
+                        repository=repository,
+                    )
+                    try:
+                        typed_conversation_id: Any = UUID(str(conversation_id))
+                    except (TypeError, ValueError, AttributeError):
+                        typed_conversation_id = conversation_id
+                    scope = RetrievalScope(
+                        user_id=str(user_id),
+                        conversation_id=typed_conversation_id,
+                    )
+                    pack = assembler.assemble(
+                        question or str(query),
+                        search_results[:10],
+                        subquestions=subquestions,
+                        max_tokens=evidence_max_tokens,
+                        scope=scope,
+                    )
+                    result = pack.to_tool_text()
+                    evidence.update(pack.to_dict())
                     if attached_count:
                         evidence["images_attached"] = attached_count
-                        result += (
-                            f"(Attached {attached_count} image(s) from matching chunks "
-                            "for multimodal analysis.)\n"
-                        )
                 else:
                     result = "No search results found"
             else:

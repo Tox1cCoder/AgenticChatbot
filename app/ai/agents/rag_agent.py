@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -200,6 +200,7 @@ class RAGAgent(BaseAgent):
         top_k: int = None,
         conversation_id: str | None = None,
         user_id: str | None = None,
+        include_evidence_metadata: bool = False,
     ) -> list[dict[str, Any]]:
         if not user_id or not conversation_id:
             logger.warning("RAG search rejected because authenticated server scope is incomplete")
@@ -292,6 +293,9 @@ class RAGAgent(BaseAgent):
             }
             if candidate.rerank_score is not None:
                 result["rerank_score"] = candidate.rerank_score
+            if include_evidence_metadata:
+                result["section_path"] = list(candidate.section_path)
+                result["metadata"] = dict(metadata)
             results.append(result)
 
         return results
@@ -916,8 +920,16 @@ class RAGAgent(BaseAgent):
         non_system_messages = [
             message for message in messages if not isinstance(message, SystemMessage)
         ]
-        current_messages = non_system_messages[-1:] if non_system_messages else []
-        history_messages = non_system_messages[:-1] if non_system_messages else []
+        current_start = next(
+            (
+                index
+                for index in range(len(non_system_messages) - 1, -1, -1)
+                if isinstance(non_system_messages[index], HumanMessage)
+            ),
+            max(0, len(non_system_messages) - 1),
+        )
+        current_messages = non_system_messages[current_start:]
+        history_messages = non_system_messages[:current_start]
         system_prompt = "\n\n".join(
             coerce_response_text(getattr(message, "content", ""))
             for message in messages
@@ -966,6 +978,7 @@ class RAGAgent(BaseAgent):
                     tools=[] if disable_tools else tools,
                     conversation_id=conversation_id,
                     user_id=user_id,
+                    authoritative_allowance=True,
                 )
                 request_messages = (
                     list(budget_result.envelope.messages) if budget_result is not None else messages
@@ -1085,7 +1098,7 @@ class RAGAgent(BaseAgent):
         query = message.content or ""
         persona = message.metadata.get("persona")
         original_query = message.metadata.get("original_query", query)
-        tool_context = message.metadata.get("tool_context", [])
+        rag_tool_messages = message.metadata.get("rag_tool_messages", [])
         conversation_history = message.metadata.get("history", [])
         agentic_images = message.metadata.get("agentic_images", [])
         user_attachments = message.attachments or []
@@ -1148,10 +1161,6 @@ class RAGAgent(BaseAgent):
 
         # Build context for current query
         context_parts = [f"User Question: {original_query}"]
-        if tool_context:
-            context_parts.append("\nPrevious Tool Results:")
-            for i, result in enumerate(tool_context, 1):
-                context_parts.append(f"\nTool Call {i} Output:\n{result}")
         context_parts.append(f"\n\nConversation ID: {conversation_id}")
         if not rag_force_final_response:
             context_parts.append(
@@ -1183,6 +1192,9 @@ class RAGAgent(BaseAgent):
             messages.append(HumanMessage(content=human_content))
         else:
             messages.append(HumanMessage(content="\n".join(context_parts)))
+        messages.extend(
+            item for item in rag_tool_messages if isinstance(item, (AIMessage, ToolMessage))
+        )
 
         runtime_config = self._resolve_runtime_model_config(request_user_id, model_request)
         if has_prompt_images and not runtime_config.capabilities.get("supports_vision", False):

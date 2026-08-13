@@ -336,6 +336,76 @@ class DocumentChunkRepository:
             conversation_id=conversation_id,
         )
 
+    def get_context_expansion_for_scope(
+        self,
+        chunk_id: UUID,
+        *,
+        document_id: UUID,
+        user_id: Any | None = None,
+        conversation_id: Any | None = None,
+        max_neighbors: int = 2,
+    ) -> list[DocumentChunk]:
+        """Return bounded parent/adjacent rows from the seed's active generation."""
+        if not user_id or not conversation_id or not chunk_id or not document_id:
+            return []
+        bounded_limit = min(8, max(0, int(max_neighbors)))
+        if bounded_limit == 0:
+            return []
+
+        with self.session_factory() as db:
+            seed_query = (
+                db.query(DocumentChunk)
+                .join(Document, DocumentChunk.document_id == Document.id)
+                .join(Conversation, Document.conversation_id == Conversation.id)
+                .join(
+                    DocumentIndexGeneration,
+                    DocumentChunk.index_generation_id == DocumentIndexGeneration.id,
+                )
+                .filter(DocumentChunk.id == chunk_id)
+                .filter(DocumentChunk.document_id == document_id)
+                .filter(Document.conversation_id == conversation_id)
+                .filter(Conversation.owner_id == user_id)
+                .filter(DocumentIndexGeneration.status == "active")
+            )
+            seed = seed_query.first()
+            if seed is None:
+                return []
+
+            metadata = dict(seed.chunk_metadata or {})
+            parent_id = None
+            try:
+                raw_parent_id = metadata.get("parent_chunk_id")
+                if raw_parent_id:
+                    parent_id = UUID(str(raw_parent_id))
+            except (TypeError, ValueError, AttributeError):
+                parent_id = None
+
+            query = (
+                db.query(DocumentChunk)
+                .options(joinedload(DocumentChunk.document))
+                .filter(DocumentChunk.document_id == seed.document_id)
+                .filter(DocumentChunk.index_generation_id == seed.index_generation_id)
+                .filter(DocumentChunk.id != seed.id)
+            )
+            adjacent_min = int(seed.chunk_index) - bounded_limit
+            adjacent_max = int(seed.chunk_index) + bounded_limit
+            adjacency = DocumentChunk.chunk_index.between(adjacent_min, adjacent_max)
+            query = query.filter(
+                adjacency
+                if parent_id is None
+                else (adjacency | (DocumentChunk.id == parent_id))
+            )
+            rows = query.all()
+            return sorted(
+                rows,
+                key=lambda row: (
+                    0 if parent_id is not None and row.id == parent_id else 1,
+                    abs(int(row.chunk_index) - int(seed.chunk_index)),
+                    int(row.chunk_index),
+                    str(row.id),
+                ),
+            )[:bounded_limit]
+
     def get_active_generation_ids_for_scope(
         self,
         *,

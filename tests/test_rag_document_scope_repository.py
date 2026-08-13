@@ -527,3 +527,107 @@ def test_scoped_cursor_is_true_only_for_another_authorized_chunk(rag_scope_db):
         other_conversation_id,
         1,
     )
+
+
+def test_evidence_expansion_stays_in_active_seed_generation_and_scope(rag_scope_db):
+    owner_id, other_id = uuid4(), uuid4()
+    conversation_id, other_conversation_id = uuid4(), uuid4()
+    document_id, foreign_document_id = uuid4(), uuid4()
+    active_generation_id, retired_generation_id = uuid4(), uuid4()
+    now = datetime.now(timezone.utc)
+    active_chunks = [_chunk(document_id, index) for index in range(4)]
+    for chunk in active_chunks:
+        chunk.index_generation_id = active_generation_id
+    active_chunks[1].chunk_metadata = {"parent_chunk_id": str(active_chunks[3].id)}
+    retired_neighbor = _chunk(document_id, 2)
+    retired_neighbor.index_generation_id = retired_generation_id
+    foreign_neighbor = _chunk(foreign_document_id, 2)
+    foreign_neighbor.index_generation_id = foreign_document_id
+
+    with rag_scope_db.factory.begin() as session:
+        session.add_all([_user(owner_id), _user(other_id)])
+        session.add_all(
+            [
+                Conversation(id=conversation_id, owner_id=owner_id, title="owner"),
+                Conversation(
+                    id=other_conversation_id,
+                    owner_id=other_id,
+                    title="other",
+                ),
+            ]
+        )
+        session.add_all(
+            [
+                _document(
+                    document_id=document_id,
+                    conversation_id=conversation_id,
+                    filename="owned.pdf",
+                    filename_key="owned.pdf",
+                    upload_time=now,
+                ),
+                _document(
+                    document_id=foreign_document_id,
+                    conversation_id=other_conversation_id,
+                    filename="foreign.pdf",
+                    filename_key="foreign.pdf",
+                    upload_time=now,
+                ),
+            ]
+        )
+        session.add_all(
+            [
+                DocumentIndexGeneration(
+                    id=active_generation_id,
+                    document_id=document_id,
+                    status="active",
+                    embedding_provider="test",
+                    embedding_model="test",
+                    embedding_dimension=8,
+                    chunking_version="test",
+                ),
+                DocumentIndexGeneration(
+                    id=retired_generation_id,
+                    document_id=document_id,
+                    status="retired",
+                    embedding_provider="test",
+                    embedding_model="test",
+                    embedding_dimension=8,
+                    chunking_version="test",
+                ),
+                _active_generation(foreign_document_id),
+            ]
+        )
+        session.add_all([*active_chunks, retired_neighbor, foreign_neighbor])
+
+    repository = DocumentChunkRepository(rag_scope_db.factory)
+    rows = repository.get_context_expansion_for_scope(
+        active_chunks[1].id,
+        document_id=document_id,
+        user_id=owner_id,
+        conversation_id=conversation_id,
+        max_neighbors=2,
+    )
+
+    assert [row.id for row in rows] == [active_chunks[3].id, active_chunks[0].id]
+    assert retired_neighbor.id not in {row.id for row in rows}
+    assert foreign_neighbor.id not in {row.id for row in rows}
+    assert (
+        repository.get_context_expansion_for_scope(
+            active_chunks[1].id,
+            document_id=document_id,
+            user_id=other_id,
+            conversation_id=conversation_id,
+            max_neighbors=2,
+        )
+        == []
+    )
+    assert (
+        repository.get_context_expansion_for_scope(
+            active_chunks[1].id,
+            document_id=document_id,
+            user_id=owner_id,
+            conversation_id=other_conversation_id,
+            max_neighbors=2,
+        )
+        == []
+    )

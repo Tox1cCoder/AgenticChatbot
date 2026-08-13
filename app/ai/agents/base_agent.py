@@ -865,6 +865,7 @@ class BaseAgent(ABC):
         emergency_compact: Any | None = None,
         conversation_id: str | None = None,
         user_id: str | None = None,
+        authoritative_allowance: bool = False,
     ) -> BudgetResult | None:
         """Enforce the resolved provider's complete input budget before I/O."""
         context_window = runtime_config.context_window
@@ -908,6 +909,7 @@ class BaseAgent(ABC):
                 current_messages=tuple(current_messages),
                 tools=tuple(tools or ()),
                 attachments=tuple(attachments or ()),
+                authoritative_allowance=authoritative_allowance,
             ),
             config,
             durable_request=durable_request,
@@ -1006,6 +1008,7 @@ class BaseAgent(ABC):
             "available_input_tokens": result.available_input_tokens,
             "usage_ratio": result.usage_ratio,
             "count_strategy": result.count_strategy,
+            "evidence_token_allowance": result.evidence_token_allowance,
             "durable_requested": result.durable_requested,
             "emergency_compacted": result.emergency_compacted,
             "removed_groups": result.removed_groups,

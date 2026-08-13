@@ -36,6 +36,7 @@ class RequestEnvelope:
     current_messages: tuple[Any, ...]
     tools: tuple[Any, ...] = ()
     attachments: tuple[Any, ...] = ()
+    authoritative_allowance: bool = False
 
     @property
     def messages(self) -> tuple[Any, ...]:
@@ -79,6 +80,7 @@ class BudgetResult:
     available_input_tokens: int
     usage_ratio: float
     count_strategy: str
+    evidence_token_allowance: int
     durable_requested: bool = False
     emergency_compacted: bool = False
     removed_groups: int = 0
@@ -102,7 +104,7 @@ class RequestBudgetService:
     ) -> BudgetResult:
         count = self._count(envelope)
         ratio = count.input_tokens / config.available_input_tokens
-        if ratio >= config.soft_ratio * 0.9:
+        if envelope.authoritative_allowance or ratio >= config.soft_ratio * 0.9:
             count = await self._count_authoritative(envelope)
             ratio = count.input_tokens / config.available_input_tokens
         if ratio < config.soft_ratio:
@@ -265,6 +267,11 @@ class RequestBudgetService:
             available_input_tokens=config.available_input_tokens,
             usage_ratio=int(count.input_tokens) / config.available_input_tokens,
             count_strategy=str(getattr(count, "strategy", "unknown")),
+            evidence_token_allowance=max(
+                0,
+                int(config.available_input_tokens * config.hard_ratio)
+                - int(count.input_tokens),
+            ),
             **kwargs,
         )
 
