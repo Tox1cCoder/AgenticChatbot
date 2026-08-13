@@ -58,6 +58,32 @@ def test_citation_metrics_reject_unknown_evidence_ids():
     assert scores["claim_citation_coverage"] == 1.0
 
 
+def test_citation_precision_and_recall_require_gold_support_not_only_valid_ids():
+    output = RAGEvaluationOutput(
+        answer="Supported [E1], irrelevant [E2].",
+        abstained=False,
+        candidates=(),
+        evidence=(
+            EvidenceTrace("E1", "doc-a", "chunk-a", 1, 1),
+            EvidenceTrace("E2", "doc-b", "chunk-b", 1, 1),
+        ),
+        claims=(ClaimTrace("Supported", ("E1",)), ClaimTrace("Irrelevant", ("E2",))),
+        citations_valid=True,
+        tool_trajectory=(),
+        stage_ms={},
+        input_tokens=0,
+        output_tokens=0,
+        cost_usd=None,
+    )
+    reference = RAGEvaluationReference(relevant_document_ids={"doc-a", "doc-c"})
+
+    scores = citation_metrics(output, reference)
+
+    assert scores["citation_validity"] == 1.0
+    assert scores["citation_precision"] == 0.5
+    assert scores["citation_recall"] == 0.5
+
+
 def test_operational_and_abstention_metrics_are_reported_without_network_calls():
     output = RAGEvaluationOutput(
         answer="I do not have enough evidence.",

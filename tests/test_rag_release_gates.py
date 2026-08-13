@@ -24,3 +24,15 @@ def test_release_gate_comparison_marks_a_regression_as_failed():
     )
 
     assert result[0].passed is False
+
+
+@pytest.mark.parametrize(
+    ("rule", "message"),
+    [
+        ({"direction": "sideways", "max_regression": 0.1}, "direction"),
+        ({"direction": "higher", "max_regression": -0.1}, "max_regression"),
+    ],
+)
+def test_release_gate_rules_are_validated(rule, message):
+    with pytest.raises(ValueError, match=message):
+        compare_release_gates({"metric": 1.0}, {"metric": 1.0}, {"metric": rule})

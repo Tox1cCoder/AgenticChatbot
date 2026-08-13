@@ -15,8 +15,13 @@ from app.evaluation.rag.corpus import (
     load_golden_dataset,
     prepare_evaluation_scope_from_environment,
     validate_golden_dataset,
+    validate_reference_rows,
 )
-from app.evaluation.rag.metrics import deterministic_evaluators, deterministic_summary_evaluators
+from app.evaluation.rag.metrics import (
+    deterministic_evaluators,
+    deterministic_summary_evaluators,
+    output_from_mapping,
+)
 from app.evaluation.rag.ragas_metrics import ragas_evaluators
 from app.evaluation.rag.release_gates import compare_release_gates, load_release_gates
 from app.evaluation.rag.target import build_http_target, scoped_target
@@ -60,6 +65,61 @@ def offline_summary(
     }
 
 
+def _examples_to_rows(examples: Sequence[Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": str(getattr(example, "id", "<remote>")),
+            "inputs": dict(getattr(example, "inputs", {}) or {}),
+            "reference": dict(getattr(example, "outputs", {}) or {}),
+        }
+        for example in examples
+    ]
+
+
+def _local_target(inputs: dict[str, Any]) -> dict[str, Any]:
+    """Deterministic no-network target used only to exercise offline evaluation plumbing."""
+    del inputs
+    return {"answer": "", "abstained": True}
+
+
+def run_offline(args: argparse.Namespace, *, target: Any = _local_target) -> dict[str, Any]:
+    """Execute every local example through deterministic evaluators without upload."""
+    summary = offline_summary(args.dataset, args.dataset_tag)
+    rows = load_golden_dataset(ROOT / "eval" / "rag" / "golden_v1.jsonl")
+    evaluators = deterministic_evaluators() + ragas_evaluators(args.with_ragas)
+    run_scores: list[dict[str, float]] = []
+    runs: list[Any] = []
+    for row in rows:
+        result = target(dict(row["inputs"]))
+        output_from_mapping(result)
+
+        class Run:
+            outputs = result
+
+        runs.append(Run())
+
+        class Example:
+            inputs = row["inputs"]
+            outputs = row["reference"]
+
+        for evaluator in evaluators:
+            evaluation = evaluator(runs[-1], Example())
+            if "results" in evaluation:
+                run_scores.append(
+                    {item["key"]: float(item["score"]) for item in evaluation["results"]}
+                )
+            else:
+                run_scores.append({evaluation["key"]: float(evaluation["score"])})
+    summary_evaluator = deterministic_summary_evaluators()[0]
+    summary_result = summary_evaluator(
+        runs,
+        [type("Example", (), {"outputs": row["reference"]})() for row in rows],
+    )
+    summary["metrics"] = {item["key"]: float(item["score"]) for item in summary_result["results"]}
+    summary["evaluations_executed"] = len(run_scores)
+    return summary
+
+
 def run_online(
     args: argparse.Namespace,
     *,
@@ -72,11 +132,16 @@ def run_online(
 
         client_factory = Client
     client = client_factory()
-    target = scoped_target(target_factory(), prepare_scope())
     evaluators = deterministic_evaluators() + ragas_evaluators(args.with_ragas)
+    examples = list(client.list_examples(dataset_name=args.dataset, as_of=args.dataset_tag))
+    validate_reference_rows(
+        _examples_to_rows(examples),
+        load_corpus_manifest(ROOT / "eval" / "rag" / "corpus_manifest.jsonl"),
+    )
+    target = scoped_target(target_factory(), prepare_scope())
     results = client.evaluate(
         target,
-        data=client.list_examples(dataset_name=args.dataset, as_of=args.dataset_tag),
+        data=examples,
         evaluators=evaluators,
         summary_evaluators=deterministic_summary_evaluators(),
         experiment_prefix=args.experiment_prefix,
@@ -93,6 +158,10 @@ def experiment_metrics(client: Any, experiment_name: str) -> dict[str, float]:
         for column in frame.columns
         if column.startswith("feedback.")
     }
+    project = client.read_project(project_name=experiment_name, include_stats=True)
+    for metric, statistics in (getattr(project, "feedback_stats", {}) or {}).items():
+        if isinstance(statistics, dict) and statistics.get("avg") is not None:
+            metrics[metric] = float(statistics["avg"])
     if not metrics:
         raise ValueError(f"baseline experiment has no deterministic feedback: {experiment_name}")
     return metrics
@@ -101,30 +170,37 @@ def experiment_metrics(client: Any, experiment_name: str) -> dict[str, float]:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     if args.offline:
-        print(json.dumps(offline_summary(args.dataset, args.dataset_tag), sort_keys=True))
-        return 0
+        try:
+            print(json.dumps(run_offline(args), sort_keys=True))
+            return 0
+        except Exception as error:
+            print(f"offline evaluation failed: {error}", file=sys.stderr)
+            return 1
     if not os.getenv("LANGSMITH_API_KEY"):
         print(
             "LangSmith is not configured; run with --offline for local validation.", file=sys.stderr
         )
-        return 0
+        return 1
     try:
         client, results = run_online(args)
     except Exception as error:
-        # External quota/network failures must not invalidate offline evidence.
         message = str(error)
-        if "429" in message or "quota" in message.lower():
-            print(f"LangSmith recording unavailable (quota): {message}", file=sys.stderr)
-            return 0
-        raise
+        print(f"online evaluation was not recorded: {message}", file=sys.stderr)
+        return 1
     if args.compare_baseline:
-        gates = load_release_gates(ROOT / "eval" / "rag" / "release_gates.json")
-        candidate_name = getattr(results, "experiment_name", None)
-        if not candidate_name:
-            raise ValueError("LangSmith did not return the candidate experiment name")
-        candidate_metrics = experiment_metrics(client=client, experiment_name=candidate_name)
-        baseline_metrics = experiment_metrics(client=client, experiment_name=args.compare_baseline)
-        verdicts = compare_release_gates(baseline_metrics, candidate_metrics, gates)
+        try:
+            gates = load_release_gates(ROOT / "eval" / "rag" / "release_gates.json")
+            candidate_name = getattr(results, "experiment_name", None)
+            if not candidate_name:
+                raise ValueError("LangSmith did not return the candidate experiment name")
+            candidate_metrics = experiment_metrics(client=client, experiment_name=candidate_name)
+            baseline_metrics = experiment_metrics(
+                client=client, experiment_name=args.compare_baseline
+            )
+            verdicts = compare_release_gates(baseline_metrics, candidate_metrics, gates)
+        except Exception as error:
+            print(f"release-gate comparison failed: {error}", file=sys.stderr)
+            return 1
         print(json.dumps([verdict.__dict__ for verdict in verdicts], sort_keys=True))
         if not all(verdict.passed for verdict in verdicts):
             return 2

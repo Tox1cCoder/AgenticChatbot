@@ -81,16 +81,27 @@ def citation_metrics(
         and all(evidence_id in known_ids for evidence_id in claim.evidence_ids)
         for claim in output.claims
     )
-    evidence_document_ids = {evidence.document_id for evidence in output.evidence}
+    evidence_by_id = {evidence.evidence_id: evidence for evidence in output.evidence}
+    supporting_ids = set(reference.relevant_document_ids) if reference else None
+    supporting_citations = sum(
+        evidence_id in evidence_by_id
+        and (supporting_ids is None or evidence_by_id[evidence_id].document_id in supporting_ids)
+        for evidence_id in cited_ids
+    )
+    cited_supporting_documents = {
+        evidence_by_id[evidence_id].document_id
+        for evidence_id in cited_ids
+        if evidence_id in evidence_by_id
+        and supporting_ids is not None
+        and evidence_by_id[evidence_id].document_id in supporting_ids
+    }
     if reference and reference.relevant_document_ids:
-        citation_recall = len(evidence_document_ids & reference.relevant_document_ids) / len(
-            reference.relevant_document_ids
-        )
+        citation_recall = len(cited_supporting_documents) / len(reference.relevant_document_ids)
     else:
         citation_recall = 1.0 if not output.evidence or known_ids else 0.0
     return {
         "citation_validity": valid_citations / len(cited_ids) if cited_ids else 1.0,
-        "citation_precision": valid_citations / len(cited_ids) if cited_ids else 1.0,
+        "citation_precision": supporting_citations / len(cited_ids) if cited_ids else 1.0,
         "citation_recall": citation_recall,
         "claim_citation_coverage": cited_claims / len(output.claims) if output.claims else 1.0,
         "claim_citation_validity": valid_claims / len(output.claims) if output.claims else 1.0,

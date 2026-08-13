@@ -63,6 +63,13 @@ def validate_golden_dataset(
     missing = required_categories - categories
     if missing:
         raise ValueError(f"golden dataset is missing categories: {', '.join(sorted(missing))}")
+    supported_languages = {"en", "th", "vi"}
+    languages = {str(row.get("metadata", {}).get("language", "")) for row in materialized}
+    missing_languages = supported_languages - languages
+    if missing_languages:
+        raise ValueError(
+            f"golden dataset is missing supported languages: {', '.join(sorted(missing_languages))}"
+        )
     manifest_document_ids = (
         {str(entry["document_id"]) for entry in manifest} if manifest is not None else None
     )
@@ -84,6 +91,23 @@ def validate_golden_dataset(
                     f"golden row {row.get('id')} references unknown documents: "
                     f"{', '.join(sorted(unresolved))}"
                 )
+
+
+def validate_reference_rows(
+    rows: Iterable[Mapping[str, Any]], manifest: Iterable[Mapping[str, Any]]
+) -> None:
+    """Fail closed when any externally supplied gold reference cannot resolve."""
+    manifest_document_ids = {str(entry["document_id"]) for entry in manifest}
+    for row in rows:
+        reference = row.get("reference", row.get("outputs", {}))
+        labeled_ids = set(reference.get("relevant_document_ids", ()))
+        labeled_ids.update(span["document_id"] for span in reference.get("relevant_spans", ()))
+        unresolved = labeled_ids - manifest_document_ids
+        if unresolved:
+            raise ValueError(
+                f"remote example {row.get('id', '<unknown>')} references unknown documents: "
+                f"{', '.join(sorted(unresolved))}"
+            )
 
 
 def load_corpus_manifest(path: str | Path) -> list[dict[str, Any]]:
