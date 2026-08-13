@@ -6,8 +6,8 @@ The active RAG embedding path is the Gemini Embeddings API
 Tests pin:
   * Document inputs are formatted ``title: ... | text: ...`` and the model
     is called with ``output_dimensionality`` equal to the configured dim.
-  * ``embed_content`` receives a *list* of formatted strings (one per text in
-    the batch), not a single string.
+  * ``embed_content`` receives a *list* of ``Content`` objects (one per text
+    in the batch), not a single string.
   * Two texts in the same batch → one ``embed_content`` call with two
     ``contents`` items.
   * With ``embedding_batch_size=N``, K texts are split into ceil(K/N) calls.
@@ -32,6 +32,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from google.genai import types
 
 
 def _make_response(*vectors: list[float]):
@@ -42,7 +43,7 @@ def _make_response(*vectors: list[float]):
 def _build_service(
     monkeypatch,
     *,
-    dimension: int = 3072,
+    dimension: int = 2,
     query_task: str = "search result",
     embedding_batch_size: int = 32,
     embedding_max_concurrency: int = 4,
@@ -70,7 +71,7 @@ def _build_service(
 
 
 def test_embed_documents_uses_doc_format_and_output_dimensionality(monkeypatch):
-    service, client = _build_service(monkeypatch)
+    service, client = _build_service(monkeypatch, dimension=3072)
     # Single text → one embed_content call with a one-element contents list.
     client.models.embed_content.side_effect = [
         _make_response([0.1] * 3072),
@@ -82,14 +83,43 @@ def test_embed_documents_uses_doc_format_and_output_dimensionality(monkeypatch):
     call = client.models.embed_content.call_args
     kwargs = call.kwargs
     assert kwargs["model"] == "gemini-embedding-2"
-    # contents is now a LIST of formatted strings, not a bare string.
-    assert kwargs["contents"] == ["title: file.pdf | text: body"]
+    # Each text is its own Gemini Content, not a bare string.
+    assert kwargs["contents"] == [
+        types.Content(role="user", parts=[types.Part(text="title: file.pdf | text: body")])
+    ]
     config = kwargs["config"]
     assert getattr(config, "output_dimensionality", None) == 3072
+    assert getattr(config, "task_type", None) == "RETRIEVAL_DOCUMENT"
+    assert getattr(config, "title", None) == "file.pdf"
+
+
+def test_each_batched_text_is_a_separate_content(monkeypatch):
+    """A broken batch payload must not collapse two documents into one input."""
+    service, client = _build_service(monkeypatch, dimension=2)
+    client.models.embed_content.return_value = _make_response([1.0, 0.0], [0.0, 1.0])
+
+    assert service.embed_documents(["alpha", "beta"]) == [[1.0, 0.0], [0.0, 1.0]]
+
+    contents = client.models.embed_content.call_args.kwargs["contents"]
+    assert len(contents) == 2
+    assert all(isinstance(item, types.Content) for item in contents)
+    assert [item.parts[0].text for item in contents] == [
+        "title: none | text: alpha",
+        "title: none | text: beta",
+    ]
+
+
+def test_wrong_vector_dimension_fails_closed(monkeypatch):
+    """A provider vector with the wrong length must never reach the index."""
+    service, client = _build_service(monkeypatch, dimension=3)
+    client.models.embed_content.return_value = _make_response([1.0, 2.0])
+
+    with pytest.raises(RuntimeError, match="dimension mismatch"):
+        service.embed_documents(["alpha"])
 
 
 def test_embed_documents_returns_list_of_list_of_floats(monkeypatch):
-    service, client = _build_service(monkeypatch)
+    service, client = _build_service(monkeypatch, dimension=3)
     # Two texts in the same batch → one call, two embeddings in the response.
     client.models.embed_content.side_effect = [
         _make_response([0.1, 0.2, 0.3], [0.4, 0.5, 0.6]),
@@ -110,7 +140,7 @@ def test_embed_documents_titles_must_match_texts_length(monkeypatch):
 
 
 def test_embed_query_prefixes_with_task_and_returns_single_vector(monkeypatch):
-    service, client = _build_service(monkeypatch)
+    service, client = _build_service(monkeypatch, dimension=3072)
     client.models.embed_content.side_effect = [_make_response([0.7] * 3072)]
 
     vector = service.embed_query("what changed?")
@@ -119,17 +149,39 @@ def test_embed_query_prefixes_with_task_and_returns_single_vector(monkeypatch):
     assert len(vector) == 3072
     assert all(isinstance(v, float) for v in vector)
     call = client.models.embed_content.call_args
-    assert call.kwargs["contents"] == "task: search result | query: what changed?"
+    assert call.kwargs["contents"] == types.Content(
+        role="user", parts=[types.Part(text="task: search result | query: what changed?")]
+    )
+    assert getattr(call.kwargs["config"], "task_type", None) == "RETRIEVAL_QUERY"
 
 
 def test_embed_query_uses_configured_query_task(monkeypatch):
-    service, client = _build_service(monkeypatch, query_task="question answering")
+    service, client = _build_service(
+        monkeypatch, dimension=3072, query_task="question answering"
+    )
     client.models.embed_content.side_effect = [_make_response([0.0] * 3072)]
 
     service.embed_query("explain")
 
     call = client.models.embed_content.call_args
-    assert call.kwargs["contents"] == "task: question answering | query: explain"
+    assert call.kwargs["contents"] == types.Content(
+        role="user", parts=[types.Part(text="task: question answering | query: explain")]
+    )
+
+
+def test_embed_query_retry_rate_limit_before_returning_vector(monkeypatch):
+    """A transient query rate limit is retried within the configured bound."""
+    from google.genai import errors as genai_errors
+
+    service, client = _build_service(monkeypatch, dimension=2)
+    monkeypatch.setattr("app.services.rag_embedding_service.time.sleep", lambda _seconds: None)
+    rate_limit_err = genai_errors.ClientError(
+        429, {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED"}}
+    )
+    client.models.embed_content.side_effect = [rate_limit_err, _make_response([0.7, 0.8])]
+
+    assert service.embed_query("what changed?") == [0.7, 0.8]
+    assert client.models.embed_content.call_count == 2
 
 
 def test_response_count_mismatch_raises_runtime_error(monkeypatch):
@@ -144,7 +196,7 @@ def test_response_count_mismatch_raises_runtime_error(monkeypatch):
 def test_embed_image_accepts_bytes_and_mime_type(monkeypatch):
     """The image path is gated by a config flag at the caller — the service
     method must still accept (bytes, mime_type) when invoked."""
-    service, client = _build_service(monkeypatch)
+    service, client = _build_service(monkeypatch, dimension=3072)
     client.models.embed_content.side_effect = [_make_response([0.0] * 3072)]
 
     vector = service.embed_image(b"\x89PNG...", mime_type="image/png")
@@ -159,8 +211,34 @@ def test_embed_image_accepts_bytes_and_mime_type(monkeypatch):
     assert getattr(config, "output_dimensionality", None) == 3072
 
 
+def test_embed_image_retries_rate_limit_before_returning_vector(monkeypatch):
+    """Image embeddings receive the same bounded retry treatment as text."""
+    from google.genai import errors as genai_errors
+
+    service, client = _build_service(monkeypatch, dimension=2)
+    monkeypatch.setattr("app.services.rag_embedding_service.time.sleep", lambda _seconds: None)
+    client.models.embed_content.side_effect = [
+        genai_errors.ClientError(429, {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED"}}),
+        _make_response([0.1, 0.2]),
+    ]
+
+    assert service.embed_image(b"image", mime_type="image/png") == [0.1, 0.2]
+    assert client.models.embed_content.call_count == 2
+
+
+def test_invalid_response_shape_is_not_retried(monkeypatch):
+    """A malformed provider response fails closed instead of spending retries."""
+    service, client = _build_service(monkeypatch, dimension=2)
+    client.models.embed_content.return_value = _make_response([0.1])
+
+    with pytest.raises(RuntimeError, match="dimension mismatch"):
+        service.embed_query("broken")
+
+    assert client.models.embed_content.call_count == 1
+
+
 def test_service_exposes_provider_model_dimension(monkeypatch):
-    service, _ = _build_service(monkeypatch)
+    service, _ = _build_service(monkeypatch, dimension=3072)
     assert service.provider == "gemini"
     assert service.model_name == "gemini-embedding-2"
     assert service.dimension == 3072
@@ -194,7 +272,7 @@ def test_embed_documents_splits_into_batches_of_batch_size(monkeypatch):
 def test_embed_documents_preserves_input_order_across_batches(monkeypatch):
     """T005-b: 4 texts with batch_size=2, concurrency=2 — order is preserved."""
     service, client = _build_service(
-        monkeypatch, embedding_batch_size=2, embedding_max_concurrency=2
+        monkeypatch, dimension=1, embedding_batch_size=2, embedding_max_concurrency=2
     )
 
     # Each batch returns distinctly recognisable vectors so we can tell
@@ -285,7 +363,7 @@ def test_embed_documents_concurrency_cap_respected(monkeypatch):
     from app.services import rag_embedding_service as mod
 
     service, client = _build_service(
-        monkeypatch, embedding_batch_size=1, embedding_max_concurrency=2
+        monkeypatch, dimension=1, embedding_batch_size=1, embedding_max_concurrency=2
     )
 
     # 6 texts → 6 single-item batches.

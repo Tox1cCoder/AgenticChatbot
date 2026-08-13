@@ -75,6 +75,22 @@ def pytest_configure(config):
     )
 
 
+def pytest_collection_modifyitems(config, items):
+    """Keep paid/networked provider contracts out of ordinary test runs."""
+    if "live_provider" in config.option.markexpr:
+        return
+    selected = []
+    deselected = []
+    for item in items:
+        if item.get_closest_marker("live_provider"):
+            deselected.append(item)
+        else:
+            selected.append(item)
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = selected
+
+
 def pytest_asyncio_loop_factories(config, item):
     """Choose the event loop implementation per test, Windows only.
 

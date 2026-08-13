@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import random
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -189,55 +190,75 @@ class GeminiRAGEmbeddingService:
         ``embedding`` usage event under a single operation.
         """
         contents = [
-            self._format_document(text, title)
+            self._text_content(self._format_document(text, title))
             for text, title in zip(batch_texts, batch_titles, strict=True)
         ]
+        # Gemini's config supports one title per request. Preserve it for a
+        # singleton document; batched documents retain their individual title
+        # in their Content text so no title is incorrectly applied to a peer.
+        config_title = batch_titles[0] if len(batch_titles) == 1 else None
         with self._usage_scope(usage_context) as operation:
-            return self._embed_batch_with_retries(contents, operation)
+            return self._embed_with_retries(
+                contents=contents,
+                expected_count=len(batch_texts),
+                task_type="RETRIEVAL_DOCUMENT",
+                title=config_title,
+                operation=operation,
+            )
 
-    def _embed_batch_with_retries(
-        self, contents: list[str], operation: UsageOperation | None
+    def _embed_with_retries(
+        self,
+        *,
+        contents: Any,
+        expected_count: int,
+        task_type: str,
+        title: str | None,
+        operation: UsageOperation | None,
     ) -> list[list[float]]:
         for attempt in range(1, self._MAX_RETRY_ATTEMPTS + 1):
             try:
-                response = self._run_embed_content(contents=contents, operation=operation)
-                embeddings = list(getattr(response, "embeddings", []) or [])
-                if len(embeddings) != len(contents):
-                    raise RuntimeError(
-                        f"Embedding count mismatch: sent {len(contents)} contents, "
-                        f"got {len(embeddings)} embeddings back"
-                    )
-                vectors: list[list[float]] = []
-                for emb in embeddings:
-                    values = getattr(emb, "values", None)
-                    if values is None:
-                        raise RuntimeError("Embedding response missing values")
-                    vectors.append([float(v) for v in values])
+                response = self._run_embed_content(
+                    contents=contents,
+                    task_type=task_type,
+                    title=title,
+                    operation=operation,
+                )
+                vectors = self._response_vectors(response)
+                self._validate_vectors(
+                    vectors, expected_count=expected_count, dimension=self.dimension
+                )
                 return vectors
             except genai_errors.ClientError as exc:
                 if not is_rate_limit_error(exc) or attempt == self._MAX_RETRY_ATTEMPTS:
                     raise
                 delay_hint = parse_retry_delay(exc)
-                if delay_hint is not None:
-                    delay = max(delay_hint, self._MIN_RETRY_DELAY)
-                else:
-                    delay = self._BASE_RETRY_DELAY * (2 ** (attempt - 1))
+                exponential_delay = self._BASE_RETRY_DELAY * (2 ** (attempt - 1))
+                delay = max(
+                    delay_hint or 0.0,
+                    self._MIN_RETRY_DELAY,
+                    exponential_delay + random.uniform(0.0, exponential_delay),
+                )
                 logger.warning(
-                    "Gemini rate limit on embedding batch "
+                    "Gemini rate limit on embedding request "
                     f"(attempt {attempt}/{self._MAX_RETRY_ATTEMPTS}). "
                     f"Waiting {delay:.2f}s before retry."
                 )
                 time.sleep(delay)
         # Unreachable — the loop raises on the final attempt.
-        raise RuntimeError("_embed_batch exhausted retries without raising")  # pragma: no cover
+        raise RuntimeError(
+            "Embedding request exhausted retries without raising"
+        )  # pragma: no cover
 
     def embed_query(self, query: str, *, usage_context: UsageContext | None = None) -> list[float]:
         with self._usage_scope(usage_context) as operation:
-            response = self._run_embed_content(
-                contents=f"task: {self.query_task} | query: {query}",
+            vectors = self._embed_with_retries(
+                contents=self._text_content(f"task: {self.query_task} | query: {query}"),
+                expected_count=1,
+                task_type="RETRIEVAL_QUERY",
+                title=None,
                 operation=operation,
             )
-        return self._single_embedding(response)
+        return vectors[0]
 
     def embed_image(
         self, image_bytes: bytes, *, mime_type: str, usage_context: UsageContext | None = None
@@ -251,8 +272,14 @@ class GeminiRAGEmbeddingService:
             # specific Part API surface.
             part = {"inline_data": {"mime_type": mime_type, "data": image_bytes}}
         with self._usage_scope(usage_context) as operation:
-            response = self._run_embed_content(contents=part, operation=operation)
-        return self._single_embedding(response)
+            vectors = self._embed_with_retries(
+                contents=types.Content(role="user", parts=[part]),
+                expected_count=1,
+                task_type="RETRIEVAL_DOCUMENT",
+                title=None,
+                operation=operation,
+            )
+        return vectors[0]
 
     # ------------------------------------------------------------------
     # Usage recording (Task 10)
@@ -274,14 +301,25 @@ class GeminiRAGEmbeddingService:
         with bind_usage_context(base.child(operation="embedding")), begin_usage_operation() as op:
             yield op
 
-    def _run_embed_content(self, *, contents: Any, operation: UsageOperation | None) -> Any:
+    def _run_embed_content(
+        self,
+        *,
+        contents: Any,
+        task_type: str,
+        title: str | None,
+        operation: UsageOperation | None,
+    ) -> Any:
         """Invoke ``embed_content`` once, recording the attempt when enabled."""
 
         def _call() -> Any:
             return self.client.models.embed_content(
                 model=self.model_name,
                 contents=contents,
-                config=types.EmbedContentConfig(output_dimensionality=self.dimension),
+                config=types.EmbedContentConfig(
+                    output_dimensionality=self.dimension,
+                    task_type=task_type,
+                    title=title,
+                ),
             )
 
         if self.recorder is None or operation is None:
@@ -300,7 +338,12 @@ class GeminiRAGEmbeddingService:
 
         counter = TokenCounter()
         items = contents if isinstance(contents, list) else [contents]
-        texts = [item for item in items if isinstance(item, str)]
+        texts = [
+            part.text
+            for item in items
+            for part in getattr(item, "parts", []) or []
+            if getattr(part, "text", None)
+        ]
         if not texts:
             return NormalizedUsage(source="unavailable")
         total = sum(
@@ -318,11 +361,30 @@ class GeminiRAGEmbeddingService:
         return f"title: {clean_title} | text: {text}"
 
     @staticmethod
-    def _single_embedding(response: Any) -> list[float]:
+    def _text_content(text: str) -> types.Content:
+        return types.Content(role="user", parts=[types.Part(text=text)])
+
+    @staticmethod
+    def _response_vectors(response: Any) -> list[list[float]]:
         embeddings = list(getattr(response, "embeddings", []) or [])
-        if len(embeddings) != 1:
-            raise RuntimeError(f"Expected one embedding, got {len(embeddings)}")
-        values = getattr(embeddings[0], "values", None)
-        if values is None:
-            raise RuntimeError("Embedding response missing values")
-        return [float(value) for value in values]
+        vectors: list[list[float]] = []
+        for embedding in embeddings:
+            values = getattr(embedding, "values", None)
+            if values is None:
+                raise RuntimeError("Embedding response missing values")
+            vectors.append([float(value) for value in values])
+        return vectors
+
+    @staticmethod
+    def _validate_vectors(
+        vectors: list[list[float]], *, expected_count: int, dimension: int
+    ) -> None:
+        if len(vectors) != expected_count:
+            raise RuntimeError(
+                f"Embedding count mismatch: expected {expected_count}, got {len(vectors)}"
+            )
+        bad_indices = [index for index, vector in enumerate(vectors) if len(vector) != dimension]
+        if bad_indices:
+            raise RuntimeError(
+                f"Embedding dimension mismatch at indices {bad_indices}: expected {dimension}"
+            )
