@@ -467,7 +467,19 @@ class DocumentIndexService:
     def reconcile_active_payloads(self, document_id: UUID) -> UUID | None:
         """Make Qdrant activity flags match the authoritative SQL generation."""
         document_id = self._coerce_uuid(document_id)
-        active = self.generation_repository.get_active(document_id)
+        for _attempt in range(8):
+            active = self.generation_repository.get_active(document_id)
+            self._apply_payload_reconciliation(document_id, active)
+            confirmed = self.generation_repository.get_active(document_id)
+            active_id = getattr(active, "id", None)
+            confirmed_id = getattr(confirmed, "id", None)
+            if active_id == confirmed_id:
+                return confirmed_id
+        raise RuntimeError(
+            f"Qdrant payload reconciliation did not converge for document {document_id}"
+        )
+
+    def _apply_payload_reconciliation(self, document_id: UUID, active: Any) -> None:
         if active is not None:
             # Preserve availability: make the authoritative generation visible
             # before attempting cleanup of stale payload flags.
@@ -494,7 +506,7 @@ class DocumentIndexService:
                 points=retired_filter,
                 wait=True,
             )
-            return active.id
+            return
 
         document_filter = FilterSelector(
             filter=Filter(
@@ -511,7 +523,6 @@ class DocumentIndexService:
             points=document_filter,
             wait=True,
         )
-        return None
 
     def purge_retired_generations(
         self, document_id: UUID, older_than: datetime

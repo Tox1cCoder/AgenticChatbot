@@ -261,6 +261,7 @@ class _QdrantGenerationFake:
         self.events: list[tuple[str, object]] = []
         self.fail_upsert: Exception | None = None
         self.fail_old_cleanup = False
+        self.on_inactive_payload = None
 
     def upsert(self, *, collection_name, points):
         self.events.append(("upsert", collection_name))
@@ -300,6 +301,9 @@ class _QdrantGenerationFake:
             None,
         )
         self.events.append(("set_active", (generation, payload["is_active"])))
+        if not payload["is_active"] and self.on_inactive_payload is not None:
+            callback, self.on_inactive_payload = self.on_inactive_payload, None
+            callback()
         if not payload["is_active"] and self.fail_old_cleanup:
             raise RuntimeError("old cleanup unavailable")
         for point in self.points.values():
@@ -619,6 +623,46 @@ def test_unknown_sql_activation_outcome_does_not_demote_generation_or_chunks():
     assert generations.get_latest_failed(document_id) is None
     assert chunks.mark_index_failed.call_count == 0
     assert next(iter(qdrant.points.values())).payload["is_active"] is True
+
+
+def test_reconciliation_retries_when_active_generation_changes_mid_cleanup():
+    document_id, generation_a_id = uuid4(), uuid4()
+    service, generations, _chunks, qdrant = _index_service(
+        document_id, generation_a_id
+    )
+    generation_b_id = uuid4()
+    generations.rows[generation_b_id] = SimpleNamespace(
+        id=generation_b_id,
+        document_id=document_id,
+        status="ready",
+        created_at=datetime.now(timezone.utc),
+    )
+    for generation_id in (generation_a_id, generation_b_id):
+        point_id = uuid4()
+        qdrant.points[str(point_id)] = SimpleNamespace(
+            id=str(point_id),
+            payload={
+                "document_id": str(document_id),
+                "index_generation": str(generation_id),
+                "is_active": generation_id == generation_a_id,
+            },
+            vector=[0.0] * 8,
+        )
+
+    def activate_b_mid_reconcile():
+        generations.rows[generation_a_id].status = "retired"
+        generations.rows[generation_b_id].status = "active"
+
+    qdrant.on_inactive_payload = activate_b_mid_reconcile
+
+    reconciled = service.reconcile_active_payloads(document_id)
+
+    assert reconciled == generation_b_id
+    assert all(
+        point.payload["is_active"]
+        == (point.payload["index_generation"] == str(generation_b_id))
+        for point in qdrant.points.values()
+    )
 
 
 def test_empty_replacement_is_rejected_before_generation_creation():
