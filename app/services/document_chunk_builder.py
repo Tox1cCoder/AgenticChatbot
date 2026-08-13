@@ -327,6 +327,27 @@ def _tail_with_budget(
     return best
 
 
+def _overlap_source_blocks(
+    blocks: Sequence[NormalizedBlock],
+    overlap: str,
+) -> list[NormalizedBlock]:
+    """Return the smallest source-block suffix that contributed overlap text."""
+    words = overlap.split()
+    remaining_units = len(words) if len(words) > 1 else len(overlap)
+    sources: list[NormalizedBlock] = []
+    for block in reversed(blocks):
+        block_words = block.text.split()
+        block_units = len(block_words) if len(block_words) > 1 else len(block.text)
+        if block_units <= 0:
+            continue
+        sources.append(block)
+        remaining_units -= block_units
+        if remaining_units <= 0:
+            break
+    sources.reverse()
+    return sources
+
+
 class DocumentChunkBuilder:
     """Build bounded chunks from parser-neutral structural blocks."""
 
@@ -549,7 +570,10 @@ class DocumentChunkBuilder:
                     candidate = f"{overlap}\n\n{content}"
                     if self.token_strategy.count(candidate) <= self.max_tokens:
                         content = candidate
-                        provenance_blocks = [*previous_draft.blocks, *provenance_blocks]
+                        provenance_blocks = [
+                            *_overlap_source_blocks(previous_draft.blocks, overlap),
+                            *provenance_blocks,
+                        ]
                         break
 
             chunk = _finalize_chunk(

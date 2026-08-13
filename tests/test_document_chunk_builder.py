@@ -317,6 +317,46 @@ def test_regular_adjacent_chunks_overlap_only_inside_same_section():
     assert 0 < shared_tail <= 3
 
 
+def test_overlap_provenance_includes_only_blocks_that_supply_the_tail():
+    chunks = _build_with_counter(
+        [
+            _block(
+                block_id="page-1",
+                kind="paragraph",
+                text="old1 old2 old3 old4",
+                page=1,
+                section_path=["A"],
+            ),
+            _block(
+                block_id="page-2",
+                kind="paragraph",
+                text="near1 near2 near3 near4",
+                page=2,
+                section_path=["A"],
+            ),
+            _block(
+                block_id="page-3",
+                kind="paragraph",
+                text=" ".join(f"current{index}" for index in range(9)),
+                page=3,
+                section_path=["A"],
+            ),
+        ],
+        target=8,
+        overlap=2,
+        max_tokens=12,
+    )
+
+    overlapped = chunks[1]
+    assert overlapped.content.startswith("near3 near4\n\ncurrent0")
+    assert [item["block_id"] for item in overlapped.block_provenance] == [
+        "page-2",
+        "page-3",
+    ]
+    assert overlapped.page_start == 2
+    assert overlapped.page_end == 3
+
+
 def test_overlap_does_not_cross_heading_or_table_boundary():
     blocks = [
         _block(
