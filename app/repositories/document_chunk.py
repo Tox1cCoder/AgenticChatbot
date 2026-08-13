@@ -167,6 +167,9 @@ class DocumentChunkRepository:
         Auth filtering happens in the SQL ``WHERE`` clause via a join on
         ``Document``. Returns an empty list when filters don't match.
         """
+        if not user_id or not conversation_id:
+            return []
+
         with self.session_factory() as db:
             query = (
                 db.query(DocumentChunk)
@@ -174,17 +177,10 @@ class DocumentChunkRepository:
                 .join(Document, DocumentChunk.document_id == Document.id)
                 .filter(DocumentChunk.document_id == document_id)
             )
-            if conversation_id is not None:
-                query = query.filter(Document.conversation_id == conversation_id)
-            if user_id is not None:
-                # Documents are scoped via ``Conversation.owner_id``; the model
-                # exposes this through the relationship, so we restrict by
-                # joining to the conversation owner.
-                from app.models.conversation import Conversation
-
-                query = query.join(
-                    Conversation, Document.conversation_id == Conversation.id
-                ).filter(Conversation.owner_id == user_id)
+            query = query.filter(Document.conversation_id == conversation_id)
+            query = query.join(
+                Conversation, Document.conversation_id == Conversation.id
+            ).filter(Conversation.owner_id == user_id)
             return query.order_by(DocumentChunk.chunk_index.asc()).all()
 
     def get_window_for_scope(
@@ -196,7 +192,7 @@ class DocumentChunkRepository:
         max_chunks: int,
     ) -> list[DocumentChunk]:
         """Return one bounded, ownership-filtered window of document chunks."""
-        if user_id is None and conversation_id is None:
+        if not user_id or not conversation_id:
             return []
 
         bounded_start = max(0, int(start_chunk))
@@ -209,12 +205,10 @@ class DocumentChunkRepository:
                 .join(Document, DocumentChunk.document_id == Document.id)
                 .filter(DocumentChunk.document_id == document_id)
             )
-            if conversation_id is not None:
-                query = query.filter(Document.conversation_id == conversation_id)
-            if user_id is not None:
-                query = query.join(
-                    Conversation, Document.conversation_id == Conversation.id
-                ).filter(Conversation.owner_id == user_id)
+            query = query.filter(Document.conversation_id == conversation_id)
+            query = query.join(
+                Conversation, Document.conversation_id == Conversation.id
+            ).filter(Conversation.owner_id == user_id)
             return (
                 query.order_by(DocumentChunk.chunk_index.asc())
                 .offset(bounded_start)
@@ -230,7 +224,7 @@ class DocumentChunkRepository:
         after_offset: int,
     ) -> bool:
         """Check for a later chunk without hydrating content outside the window."""
-        if user_id is None and conversation_id is None:
+        if not user_id or not conversation_id:
             return False
 
         with self.session_factory() as db:
@@ -239,12 +233,10 @@ class DocumentChunkRepository:
                 .join(Document, DocumentChunk.document_id == Document.id)
                 .filter(DocumentChunk.document_id == document_id)
             )
-            if conversation_id is not None:
-                query = query.filter(Document.conversation_id == conversation_id)
-            if user_id is not None:
-                query = query.join(
-                    Conversation, Document.conversation_id == Conversation.id
-                ).filter(Conversation.owner_id == user_id)
+            query = query.filter(Document.conversation_id == conversation_id)
+            query = query.join(
+                Conversation, Document.conversation_id == Conversation.id
+            ).filter(Conversation.owner_id == user_id)
             return (
                 query.order_by(DocumentChunk.chunk_index.asc())
                 .offset(max(0, int(after_offset)))
@@ -273,7 +265,7 @@ class DocumentChunkRepository:
     ) -> list[DocumentChunk]:
         """Return chunks by id only when parent documents match server scope."""
         ids = list(chunk_ids)
-        if not ids:
+        if not ids or not user_id or not conversation_id:
             return []
 
         with self.session_factory() as db:
@@ -283,12 +275,10 @@ class DocumentChunkRepository:
                 .join(Document, DocumentChunk.document_id == Document.id)
                 .filter(DocumentChunk.id.in_(ids))
             )
-            if conversation_id is not None:
-                query = query.filter(Document.conversation_id == conversation_id)
-            if user_id is not None:
-                query = query.join(
-                    Conversation, Document.conversation_id == Conversation.id
-                ).filter(Conversation.owner_id == user_id)
+            query = query.filter(Document.conversation_id == conversation_id)
+            query = query.join(
+                Conversation, Document.conversation_id == Conversation.id
+            ).filter(Conversation.owner_id == user_id)
             return query.all()
 
     def get_by_qdrant_point_ids(self, point_ids: Iterable[str]) -> list[DocumentChunk]:

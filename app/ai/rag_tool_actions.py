@@ -271,6 +271,19 @@ async def execute_search_documents_action(
         tool_args.get("max_chunks"), default=8, minimum=1, maximum=20
     )
 
+    if action in _RAG_ACTION_TOOL_NAMES and (not user_id or not conversation_id):
+        return (
+            compact_rag_tool_error(
+                error_type=ToolErrorKind.VALIDATION.value,
+                message=(
+                    "search_documents requires authenticated user and conversation context."
+                ),
+                hint="Retry within the authenticated conversation that owns the documents.",
+            ),
+            action,
+            evidence,
+        )
+
     try:
         if action == DocumentAction.SCAN_ALL.value:
             if conversation_id:
@@ -358,7 +371,11 @@ async def execute_search_documents_action(
                 if search_results:
                     attached_count = 0
                     try:
-                        images_for_chunks = await rag_agent._fetch_images_for_chunks(search_results)
+                        images_for_chunks = await rag_agent._fetch_images_for_chunks(
+                            search_results,
+                            user_id=user_id,
+                            conversation_id=conversation_id,
+                        )
                         attached_count = merge_agentic_images(
                             context=context,
                             new_images=images_for_chunks,

@@ -544,3 +544,46 @@ async def test_list_documents_empty_page_still_returns_pagination():
         "total": 7,
         "next_page": None,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["search_chunks", "view_images"])
+@pytest.mark.parametrize(
+    ("conversation_id", "user_id"),
+    [(None, None), ("conv-1", None), (None, "user-1")],
+)
+async def test_retrieval_actions_reject_missing_server_scope_without_querying(
+    action, conversation_id, user_id
+):
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.ai.rag_tool_actions import execute_search_documents_action
+
+    rag_agent = SimpleNamespace(
+        _search=AsyncMock(),
+        get_document_images=AsyncMock(),
+    )
+    tool_args = {"action": action}
+    if action == "search_chunks":
+        tool_args["query"] = "revenue"
+    else:
+        tool_args["document_id"] = "doc-1"
+
+    result, normalized_action, evidence = await execute_search_documents_action(
+        rag_agent=rag_agent,
+        conversation_id=conversation_id,
+        user_id=user_id,
+        tool_args=tool_args,
+        context={},
+        max_agentic_images=3,
+    )
+
+    payload = json.loads(result)
+    assert normalized_action == action
+    assert evidence == {}
+    assert payload["error_type"] == "validation"
+    assert "authenticated user and conversation context" in payload["message"]
+    rag_agent._search.assert_not_awaited()
+    rag_agent.get_document_images.assert_not_awaited()

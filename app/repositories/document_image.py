@@ -5,6 +5,7 @@ from uuid import UUID
 
 from sqlalchemy import asc
 
+from app.models.conversation import Conversation
 from app.models.document import Document
 from app.models.document_image import DocumentImage
 from app.schemas.document_image import DocumentImageCreate, DocumentImageUpdate
@@ -67,15 +68,16 @@ class DocumentImageRepository:
         ``Document``. Returns an empty list when ``document_id`` or
         ``conversation_id`` is not a valid UUID, or when filters don't match.
         """
+        if not user_id or not conversation_id:
+            return []
+
         doc_uuid = _coerce_uuid(document_id)
         if doc_uuid is None:
             return []
 
-        conv_uuid: UUID | None = None
-        if conversation_id is not None:
-            conv_uuid = _coerce_uuid(conversation_id)
-            if conv_uuid is None:
-                return []
+        conv_uuid = _coerce_uuid(conversation_id)
+        if conv_uuid is None:
+            return []
 
         with self.session_factory() as db:
             query = (
@@ -83,15 +85,56 @@ class DocumentImageRepository:
                 .join(Document, DocumentImage.document_id == Document.id)
                 .filter(DocumentImage.document_id == doc_uuid)
             )
-            if conv_uuid is not None:
-                query = query.filter(Document.conversation_id == conv_uuid)
-            if user_id is not None:
-                from app.models.conversation import Conversation
-
-                query = query.join(
-                    Conversation, Document.conversation_id == Conversation.id
-                ).filter(Conversation.owner_id == user_id)
+            query = query.filter(Document.conversation_id == conv_uuid)
+            query = query.join(
+                Conversation, Document.conversation_id == Conversation.id
+            ).filter(Conversation.owner_id == user_id)
             return query.order_by(asc(DocumentImage.page_number)).all()
+
+    def get_by_id_for_scope(
+        self,
+        image_id: Any,
+        *,
+        user_id: str | None,
+        conversation_id: str | None,
+    ) -> DocumentImage | None:
+        image_uuid = _coerce_uuid(image_id)
+        conv_uuid = _coerce_uuid(conversation_id)
+        if image_uuid is None or conv_uuid is None or not user_id:
+            return None
+        with self.session_factory() as db:
+            return (
+                db.query(DocumentImage)
+                .join(Document, DocumentImage.document_id == Document.id)
+                .join(Conversation, Document.conversation_id == Conversation.id)
+                .filter(DocumentImage.id == image_uuid)
+                .filter(Document.conversation_id == conv_uuid)
+                .filter(Conversation.owner_id == user_id)
+                .first()
+            )
+
+    def get_by_chunk_id_for_scope(
+        self,
+        chunk_id: Any,
+        *,
+        user_id: str | None,
+        conversation_id: str | None,
+    ) -> list[DocumentImage]:
+        chunk_uuid = _coerce_uuid(chunk_id)
+        conv_uuid = _coerce_uuid(conversation_id)
+        if chunk_uuid is None or conv_uuid is None or not user_id:
+            return []
+        with self.session_factory() as db:
+            return (
+                db.query(DocumentImage)
+                .join(Document, DocumentImage.document_id == Document.id)
+                .join(Conversation, Document.conversation_id == Conversation.id)
+                .filter(DocumentImage.chunk_id == chunk_uuid)
+                .filter(Document.conversation_id == conv_uuid)
+                .filter(Conversation.owner_id == user_id)
+                .order_by(asc(DocumentImage.page_number))
+                .all()
+            )
 
     def get_by_chunk_id(self, chunk_id: UUID) -> list[DocumentImage]:
         with self.session_factory() as db:

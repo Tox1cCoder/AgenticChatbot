@@ -13,6 +13,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
+import pytest
+
 from app.ai.agents.rag_agent import RAGAgent
 from app.ai.schemas import SearchDocumentsInput
 
@@ -93,17 +95,30 @@ def test_rag_search_filter_includes_user_id_and_conversation_id():
     assert "user_id" in keys, f"user_id missing from filter: {keys}"
 
 
-def test_rag_search_still_scopes_conversation_when_user_id_absent():
-    """When caller omits user_id, conversation_id scoping must remain intact."""
+@pytest.mark.parametrize(
+    ("conversation_id", "user_id"),
+    [(None, None), ("conv-1", None), (None, "user-1")],
+)
+def test_rag_search_fails_closed_when_either_server_scope_value_is_absent(
+    conversation_id, user_id
+):
     qdrant = _fake_qdrant()
-    agent = _build_minimal_rag_agent(qdrant, _fake_embedding())
+    embedding = _fake_embedding()
+    agent = _build_minimal_rag_agent(qdrant, embedding)
 
-    asyncio.run(agent._search(query="x", conversation_id="conv-1", user_id=None))
+    with patch("app.ai.agents.rag_agent.DocumentChunkRepository") as repo_cls:
+        results = asyncio.run(
+            agent._search(
+                query="x",
+                conversation_id=conversation_id,
+                user_id=user_id,
+            )
+        )
 
-    call = qdrant.query_points.call_args
-    filter_arg = call.kwargs.get("query_filter")
-    keys = _filter_keys(filter_arg)
-    assert "conversation_id" in keys
+    assert results == []
+    embedding.embed_query.assert_not_called()
+    qdrant.query_points.assert_not_called()
+    repo_cls.assert_not_called()
 
 
 def test_rag_search_isolates_two_users_sharing_conversation_id():
@@ -188,7 +203,7 @@ def test_rag_search_isolates_two_users_sharing_conversation_id():
         chunk_map[cid] for cid in chunk_ids
     ]
     image_repo = MagicMock()
-    image_repo.get_by_chunk_id.return_value = []
+    image_repo.get_by_chunk_id_for_scope.return_value = []
 
     with (
         patch("app.ai.agents.rag_agent.DocumentChunkRepository") as chunk_repo_cls,
@@ -324,7 +339,7 @@ def test_rag_search_hydrates_sql_chunk_content_and_images_from_lookup_payload():
     chunk_repo = MagicMock()
     chunk_repo.get_by_ids_for_scope.return_value = [sql_chunk]
     image_repo = MagicMock()
-    image_repo.get_by_chunk_id.return_value = [sql_image]
+    image_repo.get_by_chunk_id_for_scope.return_value = [sql_image]
 
     with (
         patch("app.ai.agents.rag_agent.DocumentChunkRepository", create=True) as chunk_repo_cls,
@@ -380,7 +395,7 @@ def test_rag_search_reads_table_metadata_from_sql_chunk():
     chunk_repo = MagicMock()
     chunk_repo.get_by_ids_for_scope.return_value = [sql_chunk]
     image_repo = MagicMock()
-    image_repo.get_by_chunk_id.return_value = []
+    image_repo.get_by_chunk_id_for_scope.return_value = []
 
     with (
         patch("app.ai.agents.rag_agent.DocumentChunkRepository", create=True) as chunk_repo_cls,

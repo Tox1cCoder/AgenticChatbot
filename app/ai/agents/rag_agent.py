@@ -218,6 +218,10 @@ class RAGAgent(BaseAgent):
         conversation_id: str | None = None,
         user_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        if not user_id or not conversation_id:
+            logger.warning("RAG search rejected because authenticated server scope is incomplete")
+            return []
+
         # Use configured top_k if not specified
         if top_k is None:
             top_k = self.top_k
@@ -256,14 +260,11 @@ class RAGAgent(BaseAgent):
         if chunk_ids:
             try:
                 chunk_repo = DocumentChunkRepository(SessionLocal)
-                if user_id is not None or conversation_id is not None:
-                    chunks = chunk_repo.get_by_ids_for_scope(
-                        chunk_ids,
-                        user_id=user_id,
-                        conversation_id=conversation_id,
-                    )
-                else:
-                    chunks = chunk_repo.get_by_ids(chunk_ids)
+                chunks = chunk_repo.get_by_ids_for_scope(
+                    chunk_ids,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                )
                 hydrated_chunks = {str(chunk.id): chunk for chunk in chunks}
             except Exception:
                 logger.exception("Failed to hydrate SQL chunks for RAG search")
@@ -287,7 +288,11 @@ class RAGAgent(BaseAgent):
                 chunk_images = []
                 if image_repo is not None:
                     try:
-                        chunk_images = image_repo.get_by_chunk_id(chunk.id)
+                        chunk_images = image_repo.get_by_chunk_id_for_scope(
+                            chunk.id,
+                            user_id=user_id,
+                            conversation_id=conversation_id,
+                        )
                     except Exception:
                         logger.exception("Failed to hydrate images for chunk %s", chunk.id)
 
@@ -368,8 +373,15 @@ class RAGAgent(BaseAgent):
         return results
 
     async def _fetch_images_for_chunks(
-        self, retrieved_docs: list[dict[str, Any]]
+        self,
+        retrieved_docs: list[dict[str, Any]],
+        *,
+        user_id: str | None,
+        conversation_id: str | None,
     ) -> list[dict[str, Any]]:
+        if not user_id or not conversation_id:
+            return []
+
         images = []
         seen_image_ids = set()
 
@@ -393,7 +405,11 @@ class RAGAgent(BaseAgent):
             except Exception:
                 continue
 
-            image = image_repo.get_by_id(image_uuid)
+            image = image_repo.get_by_id_for_scope(
+                image_uuid,
+                user_id=user_id,
+                conversation_id=conversation_id,
+            )
             if not image:
                 continue
 
@@ -585,6 +601,9 @@ class RAGAgent(BaseAgent):
         max_chunks: int = 8,
     ) -> dict[str, Any] | None:
         """Read one server-bounded chunk window with ownership enforced in SQL."""
+        if not user_id or not conversation_id:
+            return None
+
         try:
             bounded_start = max(0, int(start_chunk))
             bounded_limit = min(20, max(1, int(max_chunks)))
@@ -641,9 +660,17 @@ class RAGAgent(BaseAgent):
         page: int = 1,
         page_size: int = 10,
     ) -> dict[str, Any]:
+        bounded_page = max(1, int(page))
+        bounded_page_size = min(25, max(1, int(page_size)))
+        if not user_id or not conversation_id:
+            return {
+                "documents": [],
+                "total": 0,
+                "page": bounded_page,
+                "page_size": bounded_page_size,
+            }
+
         try:
-            bounded_page = max(1, int(page))
-            bounded_page_size = min(25, max(1, int(page_size)))
             conversation_uuid = UUID(conversation_id)
             with SessionLocal() as db:
                 query = (
@@ -705,6 +732,9 @@ class RAGAgent(BaseAgent):
         user_id: str | None = None,
     ) -> str | None:
         """Resolve an exact filename under server-owned SQL scope."""
+        if not user_id or not conversation_id:
+            return None
+
         try:
             with SessionLocal() as db:
                 query = (
@@ -850,16 +880,16 @@ class RAGAgent(BaseAgent):
         user_id: str | None = None,
         conversation_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        if not user_id or not conversation_id:
+            return []
+
         images = []
         image_repo = DocumentImageRepository(SessionLocal)
-        if user_id is not None or conversation_id is not None:
-            db_images = image_repo.get_by_document_for_scope(
-                document_id,
-                user_id=user_id,
-                conversation_id=conversation_id,
-            )
-        else:
-            db_images = image_repo.get_by_document_id(UUID(document_id))
+        db_images = image_repo.get_by_document_for_scope(
+            document_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
 
         for image in db_images:
             image_path = Path(image.image_path)
