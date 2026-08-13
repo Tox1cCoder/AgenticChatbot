@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-13
 
-**Status:** Approved for implementation planning
+**Status:** Revised cleanup phase pending review
 
 ## Objective
 
@@ -29,6 +29,9 @@ This program covers:
 - LangSmith evaluation datasets and experiments, with selected RAGAS metrics.
 - Stage-level latency/cost telemetry, safe caches, and 1,000-document load
   qualification.
+- Evidence-based removal of superseded RAG paths, compatibility wrappers,
+  duplicate helpers, stale settings, noisy logs, misleading comments/docstrings,
+  obsolete tests, and unused dependencies after their replacements are proven.
 
 The design does not replace Qdrant with another vector database, replace
 PostgreSQL as the canonical authorized content store, or introduce TruLens.
@@ -52,6 +55,9 @@ production measurements justify them.
 - Document content, captions, OCR, filenames, and parser output are untrusted
   reference data and never become executable instructions.
 - Tenant scope is part of every cache key and every retrieval operation.
+- Cleanup may remove a path only after a repository-wide usage inventory and
+  replacement test prove it is unused. Operational error/audit logs and public
+  API contracts are retained unless an explicit replacement exists.
 
 ## Target Architecture
 
@@ -294,6 +300,60 @@ retrieval quality under distractors, tenant-filter performance, p95/p99 query
 latency, queue saturation, and failure recovery. Qdrant HNSW, quantization,
 sharding, and on-disk settings are changed only in response to these results.
 
+## Phase 7: Consolidation and Dead-Code Cleanup
+
+Cleanup runs after the replacement paths have passed their quality and rollout
+gates, so it removes proven redundancy instead of deleting fallback behavior
+while the new pipeline is still being validated. Each earlier implementation
+task removes local superseded code when safe; this final phase performs the
+cross-cutting audit that cannot be completed until every new path is active.
+
+The phase begins with an inventory across the RAG pipeline and its directly
+adjacent ingestion, workflow, configuration, tests, scripts, and documentation.
+The inventory records every candidate, its callers, replacement, compatibility
+reason, removal risk, and validating test. Dynamic framework registration,
+Celery task names, dependency-injection providers, Pydantic settings, migrations,
+and persisted tool/action names are treated as externally referenced until
+runtime/configuration searches prove otherwise.
+
+The cleanup includes:
+
+- removing the duplicated parse/chunk helper surface from
+  `DocumentProcessingService` after all callers use `DocumentParseService` and
+  the new normalizer;
+- deleting legacy character splitters and old rich-document chunk assembly once
+  the single normalized-block path owns every supported file type;
+- removing traditional/retired RAG branches, transitional adapters, stale
+  feature flags, legacy setting aliases, unused multimodal stubs, and obsolete
+  reindex behavior after their supported replacements ship;
+- consolidating repeated retrieval, scope, image-hydration, and document
+  reference logic behind the typed interfaces introduced by earlier phases;
+- removing tests whose only purpose was to preserve a retired implementation,
+  while retaining or rewriting behavioral regression coverage first;
+- removing unused imports, dependencies, scripts, environment variables, and
+  README troubleshooting instructions;
+- replacing phase/task archaeology comments and inaccurate docstrings with
+  concise descriptions of current contracts, invariants, and failure behavior;
+- converting interpolated logging to structured lazy arguments, deduplicating
+  repeated stage messages, bounding exception detail, and preventing document
+  content, credentials, embeddings, or base64 media from entering logs;
+- retaining warning/error/audit logs for provider failures, index activation,
+  authorization mismatches, fallback operation, citation rejection, and
+  degraded retrieval, with one owning layer per event to prevent duplicates.
+
+Removal is verified through focused tests, the full RAG suite, import/static
+checks, settings/documentation contract tests, and the unchanged offline quality
+dataset. A compatibility shim is removed only when no supported client, queued
+Celery task, stored state, deployment environment, or public API depends on it.
+Database migrations remain immutable; cleanup adds new migrations when required
+and never edits an already deployed migration solely for tidiness.
+
+The result is one documented production path per responsibility: parsing,
+normalization, chunking, embedding, indexing, retrieval, reranking, evidence
+assembly, answer validation, and evaluation. Source files keep module/class/
+public-method docstrings that describe why and contract; redundant narration,
+historical phase labels, and comments that merely restate code are removed.
+
 ## Error Handling and Rollback
 
 - Parse failures retain diagnostic artifacts and never publish partial chunks.
@@ -327,6 +387,9 @@ Required test layers are:
   fallback, untrusted evidence, regeneration, and abstention;
 - offline LangSmith/RAGAS experiments for every retrieval/chunking/model change;
 - load tests for 1,000 documents, concurrent users, and failure injection.
+- cleanup contract tests and repository scans that prove retired names, settings,
+  imports, and duplicated helpers are absent while required operational logs and
+  public interfaces remain.
 
 The existing focused RAG suite remains a regression gate. New quality gates are
 reported separately so deterministic unit success cannot be mistaken for RAG
@@ -347,6 +410,8 @@ quality success.
    points only when they pass gates.
 8. Enable exact caches and any reduced embedding dimension proven by evaluation.
 9. Complete 1,000-document load qualification before broad production rollout.
+10. Remove superseded paths and finish the RAG-adjacent cleanup audit only after
+    the replacement rollout and rollback window have completed.
 
 ## Completion Criteria
 
@@ -366,3 +431,9 @@ The remediation program is complete when:
 - stage-level cost and p95/p99 latency are visible in evaluation and operations;
 - the 1,000-document qualification run meets the release SLOs selected from the
   baseline rather than an unmeasured target.
+- repository-wide usage evidence shows no supported caller depends on removed
+  RAG compatibility paths, and each responsibility has one production owner;
+- RAG settings, environment examples, tests, scripts, README claims, logs,
+  comments, and docstrings describe only the current supported architecture;
+- the final cleanup diff passes focused and full RAG tests, static/import checks,
+  documentation contracts, and the offline quality gates without regression.
