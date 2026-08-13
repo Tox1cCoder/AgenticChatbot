@@ -12,6 +12,10 @@ def create_search_documents_tool():
         document_id: str | None = None,
         query: str | None = None,
         pattern: str | None = None,
+        page: int = 1,
+        page_size: int = 10,
+        start_chunk: int = 0,
+        max_chunks: int = 8,
         reason: str | None = None,
     ) -> str:
         """Explore documents with scan, read, search, grep, list, or image actions."""

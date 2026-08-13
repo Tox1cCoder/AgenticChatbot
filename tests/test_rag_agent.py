@@ -118,6 +118,34 @@ def test_search_tool_schema_does_not_carry_server_context():
     assert not leaked, f"Server context must not be model-facing: {leaked}"
 
 
+def test_read_document_schema_has_bounded_chunk_window():
+    from app.ai.schemas import SearchDocumentsInput
+
+    schema = SearchDocumentsInput.model_json_schema()["properties"]
+
+    assert schema["start_chunk"]["minimum"] == 0
+    assert schema["max_chunks"]["maximum"] == 20
+
+
+def test_search_documents_schema_has_bounded_pages():
+    from app.ai.schemas import SearchDocumentsInput
+
+    schema = SearchDocumentsInput.model_json_schema()["properties"]
+
+    assert schema["page"]["minimum"] == 1
+    assert schema["page_size"]["minimum"] == 1
+    assert schema["page_size"]["maximum"] == 25
+
+
+def test_rag_system_prompt_is_search_first_and_reserves_scan_all_for_enumeration():
+    from app.ai.prompts import AGENTIC_RAG_SYSTEM_PROMPT
+
+    prompt = AGENTIC_RAG_SYSTEM_PROMPT.casefold()
+
+    assert "begin with search_chunks for ordinary questions" in prompt
+    assert "reserve scan_all for explicit corpus enumeration" in prompt
+
+
 # ---------------------------------------------------------------------------
 # Phase 12: SQL hydration with server-context auth filters.
 # ---------------------------------------------------------------------------
@@ -214,13 +242,23 @@ def test_list_conversation_documents_filters_by_user_when_provided():
     fake_query.filter.return_value = fake_query
     fake_query.group_by.return_value = fake_query
     fake_query.order_by.return_value = fake_query
+    fake_query.offset.return_value = fake_query
+    fake_query.limit.return_value = fake_query
+    fake_query.count.return_value = 0
     fake_query.all.return_value = []
     fake_db.__enter__ = MagicMock(return_value=fake_db)
     fake_db.__exit__ = MagicMock(return_value=False)
     fake_db.query.return_value = fake_query
 
     with patch("app.ai.agents.rag_agent.SessionLocal", return_value=fake_db):
-        asyncio.run(agent.list_conversation_documents(str(uuid4()), user_id=str(uuid4())))
+        result = asyncio.run(
+            agent.list_conversation_documents(
+                str(uuid4()),
+                user_id=str(uuid4()),
+                page=2,
+                page_size=5,
+            )
+        )
 
     # The filter must be applied at the SQL layer — that means at least one
     # ``filter(...)`` call applies a user-id condition. We don't introspect the
@@ -233,6 +271,9 @@ def test_list_conversation_documents_filters_by_user_when_provided():
     assert fake_query.join.called, (
         "user_id auth filter must reach Conversation.owner_id via a SQL join"
     )
+    fake_query.offset.assert_called_once_with(5)
+    fake_query.limit.assert_called_once_with(5)
+    assert result == {"documents": [], "total": 0, "page": 2, "page_size": 5}
 
 
 def test_rag_tool_actions_threads_server_context_into_helpers():
@@ -277,9 +318,23 @@ def test_get_document_images_signature_accepts_scope():
 def test_scan_all_documents_threads_user_scope_into_helpers():
     agent = _build_minimal_agent()
 
-    async def fake_list(conv_id, *, user_id=None):
-        fake_list.calls.append({"conv_id": conv_id, "user_id": user_id})
-        return [{"document_id": "doc-1", "filename": "a.pdf", "chunk_count": 1}]
+    async def fake_list(conv_id, *, user_id=None, page=1, page_size=10):
+        fake_list.calls.append(
+            {
+                "conv_id": conv_id,
+                "user_id": user_id,
+                "page": page,
+                "page_size": page_size,
+            }
+        )
+        return {
+            "documents": [
+                {"document_id": "doc-1", "filename": "a.pdf", "chunk_count": 1}
+            ],
+            "total": 1,
+            "page": page,
+            "page_size": page_size,
+        }
 
     fake_list.calls = []
 
@@ -300,7 +355,14 @@ def test_scan_all_documents_threads_user_scope_into_helpers():
 
     asyncio.run(agent.scan_all_documents("conv-1", user_id="user-1"))
 
-    assert fake_list.calls == [{"conv_id": "conv-1", "user_id": "user-1"}], (
+    assert fake_list.calls == [
+        {
+            "conv_id": "conv-1",
+            "user_id": "user-1",
+            "page": 1,
+            "page_size": 10,
+        }
+    ], (
         f"list_conversation_documents not called with user_id: {fake_list.calls}"
     )
     assert fake_preview.calls == [
@@ -308,30 +370,240 @@ def test_scan_all_documents_threads_user_scope_into_helpers():
     ], f"get_document_preview not called with full scope: {fake_preview.calls}"
 
 
-def test_get_document_preview_threads_scope_to_full_content():
+def test_scan_all_never_reads_more_than_requested_page():
     agent = _build_minimal_agent()
+    agent.list_conversation_documents = AsyncMock(
+        return_value={
+            "documents": [
+                {"document_id": f"doc-{index}", "filename": f"{index}.pdf", "chunk_count": 1}
+                for index in range(5)
+            ],
+            "total": 12,
+            "page": 2,
+            "page_size": 5,
+        }
+    )
+    agent.get_document_preview = AsyncMock(return_value="preview")
 
-    async def fake_full(doc_id, *, user_id=None, conversation_id=None):
-        fake_full.calls.append(
-            {
-                "doc_id": doc_id,
-                "user_id": user_id,
-                "conversation_id": conversation_id,
-            }
+    asyncio.run(
+        agent.scan_all_documents(
+            "conversation",
+            user_id="user",
+            page=2,
+            page_size=5,
         )
-        return "the whole document content"
-
-    fake_full.calls = []
-    agent.get_document_full_content = fake_full
-
-    result = asyncio.run(
-        agent.get_document_preview("doc-1", user_id="user-1", conversation_id="conv-1")
     )
 
-    assert result == "the whole document content"
-    assert fake_full.calls == [
-        {"doc_id": "doc-1", "user_id": "user-1", "conversation_id": "conv-1"}
+    assert agent.get_document_preview.await_count <= 5
+
+
+def test_scan_all_empty_page_still_reports_page_and_total():
+    agent = _build_minimal_agent()
+    agent.list_conversation_documents = AsyncMock(
+        return_value={
+            "documents": [],
+            "total": 12,
+            "page": 4,
+            "page_size": 5,
+        }
+    )
+    agent.get_document_preview = AsyncMock()
+
+    result = asyncio.run(
+        agent.scan_all_documents(
+            "conversation",
+            user_id="user",
+            page=4,
+            page_size=5,
+        )
+    )
+
+    assert "Page 4" in result
+    assert "0 of 12 documents" in result
+    agent.get_document_preview.assert_not_awaited()
+
+
+def test_get_document_preview_uses_a_bounded_scoped_chunk_window():
+    agent = _build_minimal_agent()
+    document_id = uuid4()
+    chunk_repo = MagicMock()
+    chunk_repo.get_window_for_scope.return_value = [
+        SimpleNamespace(
+            content="the first chunk",
+            chunk_index=0,
+            page_start=1,
+            page_end=1,
+            section_path=[],
+        ),
+        SimpleNamespace(
+            content="the second chunk",
+            chunk_index=1,
+            page_start=1,
+            page_end=2,
+            section_path=["Section"],
+        ),
     ]
+
+    with patch("app.ai.agents.rag_agent.DocumentChunkRepository") as repo_cls:
+        repo_cls.return_value = chunk_repo
+        result = asyncio.run(
+            agent.get_document_preview(
+                str(document_id),
+                user_id="user-1",
+                conversation_id="conv-1",
+                max_chunks=2,
+            )
+        )
+
+    assert result == "the first chunk\n\nthe second chunk"
+    chunk_repo.get_window_for_scope.assert_called_once_with(
+        document_id,
+        "user-1",
+        "conv-1",
+        0,
+        2,
+    )
+
+
+def test_document_chunk_repository_window_enforces_scope_and_bounds_in_sql():
+    from app.repositories.document_chunk import DocumentChunkRepository
+
+    fake_db = MagicMock()
+    fake_query = MagicMock()
+    fake_query.options.return_value = fake_query
+    fake_query.join.return_value = fake_query
+    fake_query.filter.return_value = fake_query
+    fake_query.order_by.return_value = fake_query
+    fake_query.offset.return_value = fake_query
+    fake_query.limit.return_value = fake_query
+    fake_query.all.return_value = []
+    fake_db.__enter__ = MagicMock(return_value=fake_db)
+    fake_db.__exit__ = MagicMock(return_value=False)
+    fake_db.query.return_value = fake_query
+    repository = DocumentChunkRepository(lambda: fake_db)
+
+    repository.get_window_for_scope(uuid4(), "user-1", "conv-1", 7, 4)
+
+    assert fake_query.join.call_count >= 2
+    assert fake_query.filter.call_count >= 3
+    fake_query.offset.assert_called_once_with(7)
+    fake_query.limit.assert_called_once_with(4)
+
+
+def test_document_chunk_repository_window_fails_closed_without_server_scope():
+    from app.repositories.document_chunk import DocumentChunkRepository
+
+    session_factory = MagicMock()
+    repository = DocumentChunkRepository(session_factory)
+
+    result = repository.get_window_for_scope(uuid4(), None, None, 0, 8)
+
+    assert result == []
+    session_factory.assert_not_called()
+
+
+def test_chunk_window_has_no_next_cursor_when_page_ends_at_eof():
+    agent = _build_minimal_agent()
+    document_id = uuid4()
+    chunk_repo = MagicMock()
+    chunk_repo.get_window_for_scope.return_value = [
+        SimpleNamespace(
+            content=f"chunk {index}",
+            chunk_index=index,
+            page_start=1,
+            page_end=1,
+            section_path=[],
+        )
+        for index in range(2)
+    ]
+    chunk_repo.has_chunk_after_for_scope.return_value = False
+
+    with patch("app.ai.agents.rag_agent.DocumentChunkRepository") as repo_cls:
+        repo_cls.return_value = chunk_repo
+        result = asyncio.run(
+            agent.get_document_chunk_window(
+                str(document_id),
+                user_id="user-1",
+                conversation_id="conv-1",
+                start_chunk=0,
+                max_chunks=2,
+            )
+        )
+
+    assert result is not None
+    assert result["next_start_chunk"] is None
+    chunk_repo.has_chunk_after_for_scope.assert_called_once_with(
+        document_id,
+        "user-1",
+        "conv-1",
+        2,
+    )
+
+
+def test_resolve_document_filename_enforces_scope_in_sql():
+    agent = _build_minimal_agent()
+    document_id = uuid4()
+    fake_db = MagicMock()
+    fake_query = MagicMock()
+    fake_query.join.return_value = fake_query
+    fake_query.filter.return_value = fake_query
+    fake_query.limit.return_value = fake_query
+    fake_query.all.return_value = [SimpleNamespace(id=document_id)]
+    fake_db.__enter__ = MagicMock(return_value=fake_db)
+    fake_db.__exit__ = MagicMock(return_value=False)
+    fake_db.query.return_value = fake_query
+
+    with patch("app.ai.agents.rag_agent.SessionLocal", return_value=fake_db):
+        result = asyncio.run(
+            agent.resolve_document_filename(
+                "report.pdf",
+                conversation_id=str(uuid4()),
+                user_id="user-1",
+            )
+        )
+
+    assert result == str(document_id)
+    assert fake_query.join.called
+    assert fake_query.filter.call_count >= 3
+    fake_query.limit.assert_called_once_with(2)
+
+
+def test_grep_document_searches_only_the_requested_chunk_window():
+    agent = _build_minimal_agent()
+    agent.get_document_chunk_window = AsyncMock(
+        return_value={
+            "chunks": [
+                {"chunk_index": 5, "content": "alpha needle"},
+                {"chunk_index": 6, "content": "beta"},
+            ],
+            "next_start_chunk": 7,
+        }
+    )
+    agent.get_document_full_content = AsyncMock(
+        side_effect=AssertionError("grep must not hydrate full documents")
+    )
+
+    result = asyncio.run(
+        agent.grep_document(
+            "doc-1",
+            "needle",
+            user_id="user-1",
+            conversation_id="conv-1",
+            start_chunk=5,
+            max_chunks=2,
+        )
+    )
+
+    assert "needle" in result
+    assert "next_start_chunk=7" in result
+    agent.get_document_chunk_window.assert_awaited_once_with(
+        "doc-1",
+        user_id="user-1",
+        conversation_id="conv-1",
+        start_chunk=5,
+        max_chunks=2,
+    )
+    agent.get_document_full_content.assert_not_awaited()
 
 
 def test_get_document_images_uses_scoped_repository_when_scope_present(tmp_path):
@@ -386,14 +658,19 @@ def test_search_documents_action_scan_all_passes_server_scope():
         actions_module.execute_search_documents_action(
             rag_agent=rag_agent,
             conversation_id="conv-1",
-            tool_args={"action": "scan_all"},
+            tool_args={"action": "scan_all", "page": 2, "page_size": 5},
             context={},
             max_agentic_images=6,
             user_id="user-1",
         )
     )
 
-    rag_agent.scan_all_documents.assert_awaited_once_with("conv-1", user_id="user-1")
+    rag_agent.scan_all_documents.assert_awaited_once_with(
+        "conv-1",
+        user_id="user-1",
+        page=2,
+        page_size=5,
+    )
 
 
 def test_search_documents_action_read_document_resolves_filename_reference():
@@ -403,22 +680,21 @@ def test_search_documents_action_read_document_resolves_filename_reference():
 
     document_id = str(uuid4())
     rag_agent = MagicMock()
+    rag_agent.resolve_document_filename = AsyncMock(return_value=document_id)
     rag_agent.list_conversation_documents = AsyncMock(
-        return_value=[
-            {
-                "document_id": document_id,
-                "filename": "02_Huntington_Medication_Tip_Sheet.pdf",
-                "chunk_count": 1,
-            }
-        ]
+        side_effect=AssertionError("filename resolution must not depend on a listing page")
     )
-
-    async def fake_full_content(doc_ref, *, user_id=None, conversation_id=None):
-        if doc_ref == document_id:
-            return "resolved document text"
-        return None
-
-    rag_agent.get_document_full_content = AsyncMock(side_effect=fake_full_content)
+    rag_agent.get_document_chunk_window = AsyncMock(
+        return_value={
+            "chunks": [
+                {"chunk_index": 3, "content": "resolved document text"},
+            ],
+            "next_start_chunk": 4,
+        }
+    )
+    rag_agent.get_document_full_content = AsyncMock(
+        side_effect=AssertionError("default tool execution must not read full documents")
+    )
 
     result, _, evidence = asyncio.run(
         actions_module.execute_search_documents_action(
@@ -427,6 +703,8 @@ def test_search_documents_action_read_document_resolves_filename_reference():
             tool_args={
                 "action": "read_document",
                 "document_id": "[02_Huntington_Medication_Tip_Sheet.pdf]",
+                "start_chunk": 3,
+                "max_chunks": 1,
             },
             context={},
             max_agentic_images=6,
@@ -434,17 +712,49 @@ def test_search_documents_action_read_document_resolves_filename_reference():
         )
     )
 
-    assert result == f"DOCUMENT CONTENT ({document_id}):\n\nresolved document text"
+    assert "resolved document text" in result
     assert evidence["document"]["document_id"] == document_id
-    rag_agent.list_conversation_documents.assert_awaited_once_with(
-        "conv-1",
+    assert evidence["document"]["next_start_chunk"] == 4
+    rag_agent.resolve_document_filename.assert_awaited_once_with(
+        "02_huntington_medication_tip_sheet.pdf",
+        conversation_id="conv-1",
         user_id="user-1",
     )
-    rag_agent.get_document_full_content.assert_awaited_once_with(
+    rag_agent.list_conversation_documents.assert_not_awaited()
+    rag_agent.get_document_chunk_window.assert_awaited_once_with(
         document_id,
         user_id="user-1",
         conversation_id="conv-1",
+        start_chunk=3,
+        max_chunks=1,
     )
+    rag_agent.get_document_full_content.assert_not_awaited()
+
+
+def test_read_document_action_rejects_missing_server_scope():
+    import json
+
+    import app.ai.rag_tool_actions as actions_module
+
+    rag_agent = MagicMock()
+    rag_agent.get_document_chunk_window = AsyncMock()
+
+    result, _, evidence = asyncio.run(
+        actions_module.execute_search_documents_action(
+            rag_agent=rag_agent,
+            conversation_id=None,
+            tool_args={"action": "read_document", "document_id": str(uuid4())},
+            context={},
+            max_agentic_images=6,
+            user_id=None,
+        )
+    )
+
+    payload = json.loads(result)
+    assert payload["error_type"] == "validation"
+    assert "conversation context" in payload["message"]
+    assert evidence == {}
+    rag_agent.get_document_chunk_window.assert_not_awaited()
 
 
 def test_search_documents_action_view_images_passes_server_scope():

@@ -398,11 +398,11 @@ class WriteTodosInput(BaseModel):
 class DocumentAction(str, Enum):
     """Action types for the search_documents tool."""
 
-    SCAN_ALL = "scan_all"  # Preview all documents in conversation
-    READ_DOCUMENT = "read_document"  # Full content of specific document
+    SCAN_ALL = "scan_all"  # Preview one page of conversation documents
+    READ_DOCUMENT = "read_document"  # Read a bounded chunk window
     SEARCH_CHUNKS = "search_chunks"  # Vector search (existing functionality)
-    GREP_DOCUMENT = "grep_document"  # Regex search in a document
-    LIST_DOCUMENTS = "list_documents"  # List all documents in conversation
+    GREP_DOCUMENT = "grep_document"  # Regex search in a bounded chunk window
+    LIST_DOCUMENTS = "list_documents"  # List one page of conversation documents
     VIEW_IMAGES = "view_images"  # Get images from a document
 
 
@@ -415,4 +415,22 @@ class SearchDocumentsInput(BaseModel):
     )
     query: str | None = Field(None, description="For SEARCH_CHUNKS: semantic search query")
     pattern: str | None = Field(None, description="For GREP_DOCUMENT: regex pattern to search")
+    page: int = Field(default=1, ge=1, description="Page number for SCAN_ALL or LIST_DOCUMENTS")
+    page_size: int = Field(
+        default=10,
+        ge=1,
+        le=25,
+        description="Documents per page for SCAN_ALL or LIST_DOCUMENTS",
+    )
+    start_chunk: int = Field(
+        default=0,
+        ge=0,
+        description="First chunk index for READ_DOCUMENT or GREP_DOCUMENT",
+    )
+    max_chunks: int = Field(
+        default=8,
+        ge=1,
+        le=20,
+        description="Maximum chunks for READ_DOCUMENT or GREP_DOCUMENT",
+    )
     reason: str | None = Field(None, description="Reasoning for the action (displayed to user)")

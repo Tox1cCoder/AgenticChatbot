@@ -89,19 +89,20 @@ def _normalize_document_reference(value: Any) -> str:
     return " ".join(text.casefold().split())
 
 
-def _filename_stem_reference(value: Any) -> str:
-    text = str(value or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
-    if "." in text:
-        text = text.rsplit(".", 1)[0]
-    return _normalize_document_reference(text)
-
-
 def _tool_document_reference(tool_args: dict[str, Any]) -> Any:
     for key in ("document_id", "filename", "name", "document"):
         value = tool_args.get(key)
         if value:
             return value
     return None
+
+
+def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return min(maximum, max(minimum, parsed))
 
 
 async def _resolve_document_reference(
@@ -117,33 +118,14 @@ async def _resolve_document_reference(
     if not conversation_id:
         return None
 
-    documents = await rag_agent.list_conversation_documents(conversation_id, user_id=user_id)
-    if not documents:
-        return None
-
     requested = _normalize_document_reference(document_ref)
-    requested_stem = _filename_stem_reference(document_ref)
-    matches: list[str] = []
-
-    for index, document in enumerate(documents, 1):
-        doc_id = document.get("document_id")
-        if not doc_id:
-            continue
-
-        filename = document.get("filename") or ""
-        candidates = {
-            str(index),
-            _normalize_document_reference(doc_id),
-            _normalize_document_reference(filename),
-            _filename_stem_reference(filename),
-        }
-        if requested in candidates or requested_stem in candidates:
-            matches.append(str(doc_id))
-
-    unique_matches = list(dict.fromkeys(matches))
-    if len(unique_matches) == 1:
-        return unique_matches[0]
-    return None
+    if not requested or requested.isdigit():
+        return None
+    return await rag_agent.resolve_document_filename(
+        requested,
+        conversation_id=conversation_id,
+        user_id=user_id,
+    )
 
 
 def _build_document_image_candidate(image: dict[str, Any]) -> dict[str, Any] | None:
@@ -280,11 +262,24 @@ async def execute_search_documents_action(
 
     result = ""
     evidence: dict[str, Any] = {}
+    page = _bounded_int(tool_args.get("page"), default=1, minimum=1, maximum=1_000_000)
+    page_size = _bounded_int(tool_args.get("page_size"), default=10, minimum=1, maximum=25)
+    start_chunk = _bounded_int(
+        tool_args.get("start_chunk"), default=0, minimum=0, maximum=1_000_000
+    )
+    max_chunks = _bounded_int(
+        tool_args.get("max_chunks"), default=8, minimum=1, maximum=20
+    )
 
     try:
         if action == DocumentAction.SCAN_ALL.value:
             if conversation_id:
-                result = await rag_agent.scan_all_documents(conversation_id, user_id=user_id)
+                result = await rag_agent.scan_all_documents(
+                    conversation_id,
+                    user_id=user_id,
+                    page=page,
+                    page_size=page_size,
+                )
             else:
                 result = compact_rag_tool_error(
                     error_type=ToolErrorKind.VALIDATION.value,
@@ -293,6 +288,14 @@ async def execute_search_documents_action(
                 )
 
         elif action == DocumentAction.READ_DOCUMENT.value:
+            if not conversation_id:
+                result = compact_rag_tool_error(
+                    error_type=ToolErrorKind.VALIDATION.value,
+                    message="read_document has no conversation context.",
+                    hint="Retry within the active conversation that owns the document.",
+                )
+                return result, action, evidence
+
             document_ref = _tool_document_reference(tool_args)
             if document_ref:
                 document_id = await _resolve_document_reference(
@@ -309,16 +312,25 @@ async def execute_search_documents_action(
                     )
                     return result, action, evidence
 
-                content = await rag_agent.get_document_full_content(
+                window = await rag_agent.get_document_chunk_window(
                     document_id,
                     user_id=user_id,
                     conversation_id=conversation_id,
+                    start_chunk=start_chunk,
+                    max_chunks=max_chunks,
                 )
-                if content:
-                    result = f"DOCUMENT CONTENT ({document_id}):\n\n{content}"
+                if window:
+                    chunks = window.get("chunks", [])
+                    chunk_text = "\n\n".join(
+                        f"[Chunk {chunk['chunk_index']}]\n{chunk['content']}" for chunk in chunks
+                    )
+                    next_start = window.get("next_start_chunk")
+                    result = f"DOCUMENT CHUNKS ({document_id}):\n\n{chunk_text}"
+                    if next_start is not None:
+                        result += f"\n\n[next_start_chunk={next_start}]"
                     evidence["document"] = {
+                        **window,
                         "document_id": document_id,
-                        "content": content,
                     }
                     if str(document_ref) != document_id:
                         evidence["document"]["requested_reference"] = str(document_ref)
@@ -441,6 +453,8 @@ async def execute_search_documents_action(
                     pattern,
                     user_id=user_id,
                     conversation_id=conversation_id,
+                    start_chunk=start_chunk,
+                    max_chunks=max_chunks,
                 )
             else:
                 result = compact_rag_tool_error(
@@ -451,11 +465,30 @@ async def execute_search_documents_action(
 
         elif action == DocumentAction.LIST_DOCUMENTS.value:
             if conversation_id:
-                documents = await rag_agent.list_conversation_documents(
-                    conversation_id, user_id=user_id
+                listing_page = await rag_agent.list_conversation_documents(
+                    conversation_id,
+                    user_id=user_id,
+                    page=page,
+                    page_size=page_size,
                 )
+                documents = listing_page["documents"]
+                next_page = (
+                    listing_page["page"] + 1
+                    if listing_page["page"] * listing_page["page_size"]
+                    < listing_page["total"]
+                    else None
+                )
+                evidence["pagination"] = {
+                    "page": listing_page["page"],
+                    "page_size": listing_page["page_size"],
+                    "total": listing_page["total"],
+                    "next_page": next_page,
+                }
                 if documents:
-                    result = "AVAILABLE DOCUMENTS:\n\n"
+                    result = (
+                        f"AVAILABLE DOCUMENTS: Page {listing_page['page']} with "
+                        f"{len(documents)} of {listing_page['total']} documents\n\n"
+                    )
                     listing: list[dict[str, Any]] = []
                     for i, doc in enumerate(documents, 1):
                         result += (
@@ -473,7 +506,10 @@ async def execute_search_documents_action(
                         )
                     evidence["documents"] = listing
                 else:
-                    result = "No documents found in this conversation"
+                    result = (
+                        f"AVAILABLE DOCUMENTS: Page {listing_page['page']} with 0 of "
+                        f"{listing_page['total']} documents\n\nNo documents found on this page"
+                    )
             else:
                 result = compact_rag_tool_error(
                     error_type=ToolErrorKind.VALIDATION.value,

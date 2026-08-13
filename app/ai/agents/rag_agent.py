@@ -22,6 +22,7 @@ from ...core.config import Settings, settings
 from ...core.runtime_modeling import ResolvedRuntimeModelConfig
 from ...database.session import SessionLocal
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
+from ...models.conversation import Conversation
 from ...models.document import Document
 from ...models.document_chunk import DocumentChunk
 from ...observability.conversation_compaction import conversation_compaction_metrics
@@ -544,6 +545,7 @@ class RAGAgent(BaseAgent):
         user_id: str | None = None,
         conversation_id: str | None = None,
         max_chars: int | None = None,
+        max_chunks: int = 8,
     ) -> str | None:
         """
         Get a preview of a document (first N characters).
@@ -552,30 +554,96 @@ class RAGAgent(BaseAgent):
         if max_chars is None:
             max_chars = self.agentic_preview_chars
 
-        content = await self.get_document_full_content(
+        window = await self.get_document_chunk_window(
             document_id,
             user_id=user_id,
             conversation_id=conversation_id,
+            start_chunk=0,
+            max_chunks=max_chunks,
         )
+        if not window:
+            return None
+
+        content = "\n\n".join(chunk["content"] for chunk in window["chunks"])
         if not content:
             return None
 
         if len(content) > max_chars:
             preview = content[:max_chars]
-            preview += (
-                f"\n\n[PREVIEW - Total: {len(content):,} chars. Use READ_DOCUMENT for full content]"
-            )
+            preview += "\n\n[PREVIEW - bounded chunk window; use READ_DOCUMENT to continue]"
             return preview
 
         return content
+
+    async def get_document_chunk_window(
+        self,
+        document_id: str,
+        *,
+        user_id: str | None = None,
+        conversation_id: str | None = None,
+        start_chunk: int = 0,
+        max_chunks: int = 8,
+    ) -> dict[str, Any] | None:
+        """Read one server-bounded chunk window with ownership enforced in SQL."""
+        try:
+            bounded_start = max(0, int(start_chunk))
+            bounded_limit = min(20, max(1, int(max_chunks)))
+            chunk_repo = DocumentChunkRepository(SessionLocal)
+            chunks = chunk_repo.get_window_for_scope(
+                UUID(document_id),
+                user_id,
+                conversation_id,
+                bounded_start,
+                bounded_limit,
+            )
+            if not chunks:
+                return None
+
+            selected = [
+                {
+                    "chunk_index": int(chunk.chunk_index),
+                    "content": chunk.content,
+                    "page_start": chunk.page_start,
+                    "page_end": chunk.page_end,
+                    "section_path": list(chunk.section_path or []),
+                }
+                for chunk in chunks
+            ]
+            candidate_next = bounded_start + len(selected)
+            has_more = len(selected) == bounded_limit and chunk_repo.has_chunk_after_for_scope(
+                UUID(document_id),
+                user_id,
+                conversation_id,
+                candidate_next,
+            )
+            next_start_chunk = candidate_next if has_more else None
+            return {
+                "document_id": str(document_id),
+                "start_chunk": bounded_start,
+                "max_chunks": bounded_limit,
+                "chunks": selected,
+                "next_start_chunk": next_start_chunk,
+            }
+        except Exception as e:
+            logger.error(
+                "Error fetching chunk window for document %s: %s",
+                document_id,
+                e,
+                exc_info=True,
+            )
+            return None
 
     async def list_conversation_documents(
         self,
         conversation_id: str,
         *,
         user_id: str | None = None,
-    ) -> list[dict[str, Any]]:
+        page: int = 1,
+        page_size: int = 10,
+    ) -> dict[str, Any]:
         try:
+            bounded_page = max(1, int(page))
+            bounded_page_size = min(25, max(1, int(page_size)))
             conversation_uuid = UUID(conversation_id)
             with SessionLocal() as db:
                 query = (
@@ -593,27 +661,72 @@ class RAGAgent(BaseAgent):
                     query = query.join(
                         Conversation, Document.conversation_id == Conversation.id
                     ).filter(Conversation.owner_id == user_id)
+                query = query.group_by(Document.id, Document.filename, Document.upload_time)
+                total = int(query.count())
                 rows = (
-                    query.group_by(Document.id, Document.filename, Document.upload_time)
-                    .order_by(Document.upload_time.desc())
+                    query
+                    .order_by(Document.upload_time.desc(), Document.id.asc())
+                    .offset((bounded_page - 1) * bounded_page_size)
+                    .limit(bounded_page_size)
                     .all()
                 )
 
-            return [
-                {
-                    "document_id": str(row.id),
-                    "filename": row.filename,
-                    "chunk_count": int(row.chunk_count or 0),
-                }
-                for row in rows
-            ]
+            return {
+                "documents": [
+                    {
+                        "document_id": str(row.id),
+                        "filename": row.filename,
+                        "chunk_count": int(row.chunk_count or 0),
+                    }
+                    for row in rows
+                ],
+                "total": total,
+                "page": bounded_page,
+                "page_size": bounded_page_size,
+            }
 
         except Exception as e:
             logger.error(
                 f"Error listing documents for conversation {conversation_id}: {e}",
                 exc_info=True,
             )
-            return []
+            return {
+                "documents": [],
+                "total": 0,
+                "page": max(1, int(page)),
+                "page_size": min(25, max(1, int(page_size))),
+            }
+
+    async def resolve_document_filename(
+        self,
+        filename: str,
+        *,
+        conversation_id: str,
+        user_id: str | None = None,
+    ) -> str | None:
+        """Resolve an exact filename under server-owned SQL scope."""
+        try:
+            with SessionLocal() as db:
+                query = (
+                    db.query(Document.id)
+                    .join(Conversation, Document.conversation_id == Conversation.id)
+                    .filter(Document.conversation_id == UUID(conversation_id))
+                    .filter(func.lower(Document.filename) == filename.casefold())
+                )
+                if user_id is not None:
+                    query = query.filter(Conversation.owner_id == user_id)
+                rows = query.limit(2).all()
+            if len(rows) != 1:
+                return None
+            return str(rows[0].id)
+        except Exception as e:
+            logger.error(
+                "Error resolving document filename %s: %s",
+                filename,
+                e,
+                exc_info=True,
+            )
+            return None
 
     async def grep_document(
         self,
@@ -622,19 +735,26 @@ class RAGAgent(BaseAgent):
         *,
         user_id: str | None = None,
         conversation_id: str | None = None,
+        start_chunk: int = 0,
+        max_chunks: int = 8,
     ) -> str | None:
         """
-        Search for regex pattern in a document's content.
+        Search for a regex pattern in one bounded document chunk window.
         Used for agentic GREP_DOCUMENT action.
         """
-        content = await self.get_document_full_content(
-            document_id, user_id=user_id, conversation_id=conversation_id
+        window = await self.get_document_chunk_window(
+            document_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            start_chunk=start_chunk,
+            max_chunks=max_chunks,
         )
-        if not content:
+        if not window:
             return f"Error: Document {document_id} not found"
 
         try:
             regex = re.compile(pattern, re.MULTILINE | re.IGNORECASE)
+            content = "\n\n".join(chunk["content"] for chunk in window["chunks"])
             matches = regex.findall(content)
 
             if matches:
@@ -643,9 +763,14 @@ class RAGAgent(BaseAgent):
                     result += f"{i}. {match}\n"
                 if len(matches) > 50:
                     result += f"\n... and {len(matches) - 50} more matches"
+                if window["next_start_chunk"] is not None:
+                    result += f"\n[next_start_chunk={window['next_start_chunk']}]"
                 return result
             else:
-                return f"No matches found for pattern '{pattern}'"
+                result = f"No matches found for pattern '{pattern}'"
+                if window["next_start_chunk"] is not None:
+                    result += f"\n[next_start_chunk={window['next_start_chunk']}]"
+                return result
 
         except re.error as e:
             return f"Error: Invalid regex pattern - {e}"
@@ -655,25 +780,39 @@ class RAGAgent(BaseAgent):
         conversation_id: str,
         *,
         user_id: str | None = None,
+        page: int = 1,
+        page_size: int = 10,
     ) -> str:
         """
-        Scan all documents in a conversation and return previews.
+        Scan one page of documents in a conversation and return bounded previews.
         Used for agentic SCAN_ALL action.
         """
-        documents = await self.list_conversation_documents(conversation_id, user_id=user_id)
+        listing = await self.list_conversation_documents(
+            conversation_id,
+            user_id=user_id,
+            page=page,
+            page_size=page_size,
+        )
+        documents = listing["documents"]
 
         if not documents:
-            return f"No documents found in conversation {conversation_id}"
+            return (
+                f"DOCUMENT SCAN: Page {listing['page']} with 0 of "
+                f"{listing['total']} documents\nNo documents found on this page"
+            )
 
         output = []
-        output.append(f"DOCUMENT SCAN: {len(documents)} documents found")
+        output.append(
+            f"DOCUMENT SCAN: Page {listing['page']} with {len(documents)} of "
+            f"{listing['total']} documents"
+        )
 
         for i, doc in enumerate(documents, 1):
             doc_id = doc["document_id"]
             filename = doc["filename"]
             chunk_count = doc["chunk_count"]
 
-            output.append(f"[{i}/{len(documents)}] {filename}")
+            output.append(f"[{i}/{len(documents)} on page] {filename}")
             output.append(f"Document ID: {doc_id}")
             output.append(f"Chunks: {chunk_count}")
 
@@ -697,8 +836,10 @@ class RAGAgent(BaseAgent):
 
         output.append("  NEXT STEPS:")
         output.append("  1. Categorize documents as RELEVANT / MAYBE / SKIP")
-        output.append("  2. Use READ_DOCUMENT for deep dive into RELEVANT docs")
+        output.append("  2. Use bounded READ_DOCUMENT windows for RELEVANT docs")
         output.append("  3. Watch for cross-references to other documents")
+        if listing["page"] * listing["page_size"] < listing["total"]:
+            output.append(f"  4. Continue enumeration with page={listing['page'] + 1}")
 
         return "\n".join(output)
 

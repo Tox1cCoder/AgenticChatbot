@@ -187,6 +187,71 @@ class DocumentChunkRepository:
                 ).filter(Conversation.owner_id == user_id)
             return query.order_by(DocumentChunk.chunk_index.asc()).all()
 
+    def get_window_for_scope(
+        self,
+        document_id: UUID,
+        user_id: Any | None,
+        conversation_id: Any | None,
+        start_chunk: int,
+        max_chunks: int,
+    ) -> list[DocumentChunk]:
+        """Return one bounded, ownership-filtered window of document chunks."""
+        if user_id is None and conversation_id is None:
+            return []
+
+        bounded_start = max(0, int(start_chunk))
+        bounded_limit = min(20, max(1, int(max_chunks)))
+
+        with self.session_factory() as db:
+            query = (
+                db.query(DocumentChunk)
+                .options(joinedload(DocumentChunk.document))
+                .join(Document, DocumentChunk.document_id == Document.id)
+                .filter(DocumentChunk.document_id == document_id)
+            )
+            if conversation_id is not None:
+                query = query.filter(Document.conversation_id == conversation_id)
+            if user_id is not None:
+                query = query.join(
+                    Conversation, Document.conversation_id == Conversation.id
+                ).filter(Conversation.owner_id == user_id)
+            return (
+                query.order_by(DocumentChunk.chunk_index.asc())
+                .offset(bounded_start)
+                .limit(bounded_limit)
+                .all()
+            )
+
+    def has_chunk_after_for_scope(
+        self,
+        document_id: UUID,
+        user_id: Any | None,
+        conversation_id: Any | None,
+        after_offset: int,
+    ) -> bool:
+        """Check for a later chunk without hydrating content outside the window."""
+        if user_id is None and conversation_id is None:
+            return False
+
+        with self.session_factory() as db:
+            query = (
+                db.query(DocumentChunk.id)
+                .join(Document, DocumentChunk.document_id == Document.id)
+                .filter(DocumentChunk.document_id == document_id)
+            )
+            if conversation_id is not None:
+                query = query.filter(Document.conversation_id == conversation_id)
+            if user_id is not None:
+                query = query.join(
+                    Conversation, Document.conversation_id == Conversation.id
+                ).filter(Conversation.owner_id == user_id)
+            return (
+                query.order_by(DocumentChunk.chunk_index.asc())
+                .offset(max(0, int(after_offset)))
+                .first()
+                is not None
+            )
+
     def get_by_ids(self, chunk_ids: Iterable[UUID]) -> list[DocumentChunk]:
         ids = list(chunk_ids)
         if not ids:

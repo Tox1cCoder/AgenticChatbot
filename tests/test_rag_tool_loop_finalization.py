@@ -463,3 +463,84 @@ async def test_execute_search_documents_action_returns_compact_error_for_unknown
         "message": "search_documents rejected the requested action.",
         "hint": "Use one of the supported document exploration actions from the tool schema.",
     }
+
+
+@pytest.mark.asyncio
+async def test_list_documents_returns_one_server_bounded_page_with_total_count():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.ai.rag_tool_actions import execute_search_documents_action
+
+    documents_page = {
+        "documents": [
+            {"document_id": "doc-1", "filename": "one.pdf", "chunk_count": 2},
+        ],
+        "total": 76,
+        "page": 3,
+        "page_size": 25,
+    }
+    rag_agent = SimpleNamespace(
+        list_conversation_documents=AsyncMock(return_value=documents_page)
+    )
+
+    result, action, evidence = await execute_search_documents_action(
+        rag_agent=rag_agent,
+        conversation_id="conv-1",
+        user_id="user-1",
+        tool_args={"action": "list_documents", "page": 3, "page_size": 999},
+        context={},
+        max_agentic_images=3,
+    )
+
+    assert action == "list_documents"
+    assert "Page 3" in result
+    assert evidence["pagination"] == {
+        "page": 3,
+        "page_size": 25,
+        "total": 76,
+        "next_page": 4,
+    }
+    rag_agent.list_conversation_documents.assert_awaited_once_with(
+        "conv-1",
+        user_id="user-1",
+        page=3,
+        page_size=25,
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_documents_empty_page_still_returns_pagination():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.ai.rag_tool_actions import execute_search_documents_action
+
+    rag_agent = SimpleNamespace(
+        list_conversation_documents=AsyncMock(
+            return_value={
+                "documents": [],
+                "total": 7,
+                "page": 2,
+                "page_size": 5,
+            }
+        )
+    )
+
+    result, _, evidence = await execute_search_documents_action(
+        rag_agent=rag_agent,
+        conversation_id="conv-1",
+        user_id="user-1",
+        tool_args={"action": "list_documents", "page": 2, "page_size": 5},
+        context={},
+        max_agentic_images=3,
+    )
+
+    assert "Page 2" in result
+    assert "0 of 7 documents" in result
+    assert evidence["pagination"] == {
+        "page": 2,
+        "page_size": 5,
+        "total": 7,
+        "next_page": None,
+    }
