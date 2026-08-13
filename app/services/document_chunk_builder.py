@@ -56,6 +56,12 @@ class _ChunkDraft:
         return any(block.kind == "heading" for block in self.blocks)
 
 
+@dataclass(frozen=True)
+class _TablePiece:
+    text: str
+    degraded: bool = False
+
+
 def _is_table(block: NormalizedBlock) -> bool:
     return block.kind == "table" or bool(block.metadata.get("is_table"))
 
@@ -135,6 +141,8 @@ def _finalize_chunk(
         )
     if source_chunk_indices:
         metadata["source_chunk_indices"] = source_chunk_indices
+    if any(block.metadata.get("table_split_degraded") for block in blocks):
+        metadata["table_split_degraded"] = True
 
     return BuiltChunk(
         chunk_index=chunk_index,
@@ -272,53 +280,119 @@ def _split_large_table(
     target_tokens: int,
     max_tokens: int,
     token_strategy: DocumentTokenStrategy,
-) -> list[str]:
+) -> list[_TablePiece]:
     """Split a table into row groups while repeating its caption and header."""
     prefix, rows, suffix = _table_parts(block)
     if not rows:
-        return [block.text]
-    pieces: list[str] = []
+        return [_TablePiece(block.text)]
+    pieces: list[_TablePiece] = []
     current_rows: list[str] = []
 
     def render(group: Sequence[str], trailing: Sequence[str] = ()) -> str:
         return "\n".join([*prefix, *group, *trailing])
 
-    def split_oversized_row(row: str) -> list[str]:
+    def bounded_plain(text: str) -> list[str]:
+        if token_strategy.count(text) <= max_tokens:
+            return [text]
+        return _split_atomic_unit(
+            text,
+            budget=max_tokens,
+            max_tokens=max_tokens,
+            token_strategy=token_strategy,
+        )
+
+    def split_oversized_row(row: str) -> list[_TablePiece]:
         markdown_row = row.startswith("|") and row.endswith("|")
         payload = row.strip("|").strip() if markdown_row else row
-        words = payload.split()
-        units = words if len(words) > 1 else list(payload)
+        cells = [cell.strip() for cell in payload.split("|")] if markdown_row else [payload]
+        leading_cells = cells[:-1]
+        splittable_text = cells[-1]
+        words = splittable_text.split()
+        units = words if len(words) > 1 else list(splittable_text)
         separator = " " if len(words) > 1 else ""
 
-        def format_piece(piece_units: Sequence[str]) -> str:
+        def format_markdown(piece_units: Sequence[str]) -> str:
             piece = separator.join(piece_units)
-            return f"| {piece} |" if markdown_row else piece
+            cells_for_piece = [*leading_cells, piece]
+            return f"| {' | '.join(cells_for_piece)} |" if markdown_row else piece
 
-        row_pieces: list[str] = []
+        def format_plain(piece_units: Sequence[str]) -> str:
+            piece = separator.join(piece_units)
+            return " ".join([*leading_cells, piece]).strip()
+
+        formatters = (format_markdown, format_plain) if markdown_row else (format_plain,)
+        selected_context = prefix
+        selected_formatter = None
+        degraded = False
+        for formatter_index, formatter in enumerate(formatters):
+            if units and token_strategy.count(
+                "\n".join([*prefix, formatter(units[:1])])
+            ) <= max_tokens:
+                selected_formatter = formatter
+                degraded = formatter_index > 0
+                break
+
+        context_pieces: list[_TablePiece] = []
+        if selected_formatter is None:
+            # The repeated context and even the most compact row form cannot
+            # coexist under the cap. Preserve all context once in bounded
+            # fragments, then emit explicitly degraded row fragments.
+            context_text = "\n".join(prefix)
+            context_pieces = [
+                _TablePiece(text, degraded=True)
+                for text in bounded_plain(context_text)
+                if text
+            ]
+            selected_context = []
+            for formatter in formatters:
+                if units and token_strategy.count(formatter(units[:1])) <= max_tokens:
+                    selected_formatter = formatter
+                    break
+            degraded = True
+        if selected_formatter is None:
+            # An extreme counter may make the row identity/wrappers too large.
+            # Split raw row text so ingestion remains bounded and lossless;
+            # metadata marks the schema degradation explicitly.
+            return [
+                *context_pieces,
+                *(_TablePiece(text, degraded=True) for text in bounded_plain(payload)),
+            ]
+
+        row_pieces: list[_TablePiece] = []
         remaining = units
         while remaining:
             low, high = 1, len(remaining)
             best = 0
             while low <= high:
                 middle = (low + high) // 2
-                if token_strategy.count(render([format_piece(remaining[:middle])])) <= max_tokens:
+                candidate = "\n".join(
+                    [*selected_context, selected_formatter(remaining[:middle])]
+                )
+                if token_strategy.count(candidate) <= max_tokens:
                     best = middle
                     low = middle + 1
                 else:
                     high = middle - 1
             if best == 0:
-                raise ValueError(
-                    f"table context in block {block.block_id!r} leaves no room "
-                    "for one row unit under the chunk hard limit"
+                return [
+                    *context_pieces,
+                    *(_TablePiece(text, degraded=True) for text in bounded_plain(payload)),
+                ]
+            row_pieces.append(
+                _TablePiece(
+                    "\n".join(
+                        [*selected_context, selected_formatter(remaining[:best])]
+                    ),
+                    degraded=degraded,
                 )
-            row_pieces.append(render([format_piece(remaining[:best])]))
+            )
             remaining = remaining[best:]
-        return row_pieces
+        return [*context_pieces, *row_pieces]
 
     for row in rows:
         candidate = render([*current_rows, row])
         if current_rows and token_strategy.count(candidate) > target_tokens:
-            pieces.append(render(current_rows))
+            pieces.append(_TablePiece(render(current_rows)))
             current_rows = []
             candidate = render([row])
         if token_strategy.count(candidate) > max_tokens:
@@ -326,17 +400,25 @@ def _split_large_table(
             continue
         current_rows.append(row)
     if current_rows:
-        final = render(current_rows, suffix)
-        if token_strategy.count(final) <= max_tokens:
-            pieces.append(final)
+        pieces.append(_TablePiece(render(current_rows)))
+
+    if suffix:
+        suffix_piece = render([], suffix)
+        if token_strategy.count(suffix_piece) <= max_tokens:
+            pieces.append(_TablePiece(suffix_piece))
         else:
-            pieces.append(render(current_rows))
-            suffix_piece = render([], suffix)
-            if token_strategy.count(suffix_piece) > max_tokens:
-                raise ValueError(
-                    f"table footnote in block {block.block_id!r} exceeds the chunk hard limit"
-                )
-            pieces.append(suffix_piece)
+            context_text = "\n".join(prefix)
+            pieces.extend(
+                _TablePiece(text, degraded=True)
+                for text in bounded_plain(context_text)
+                if text
+            )
+            suffix_text = "\n".join(suffix)
+            pieces.extend(
+                _TablePiece(text, degraded=True)
+                for text in bounded_plain(suffix_text)
+                if text
+            )
     return pieces
 
 
@@ -517,7 +599,7 @@ class DocumentChunkBuilder:
             if _is_table(block):
                 emit_buffered()
                 pieces = (
-                    [block.text]
+                    [_TablePiece(block.text)]
                     if block_tokens <= self.max_tokens
                     else _split_large_table(
                         block,
@@ -526,19 +608,23 @@ class DocumentChunkBuilder:
                         token_strategy=self.token_strategy,
                     )
                 )
-                for piece_index, piece_text in enumerate(pieces):
+                for piece_index, piece in enumerate(pieces):
                     piece_block = NormalizedBlock(
                         block_id=block.block_id,
                         kind=block.kind,
-                        text=piece_text,
+                        text=piece.text,
                         page_start=block.page_start,
                         page_end=block.page_end,
                         section_path=block.section_path,
-                        metadata={**block.metadata, "table_split_piece_index": piece_index},
+                        metadata={
+                            **block.metadata,
+                            "table_split_piece_index": piece_index,
+                            "table_split_degraded": piece.degraded,
+                        },
                     )
                     drafts.append(
                         _ChunkDraft(
-                            content=piece_text,
+                            content=piece.text,
                             blocks=(piece_block,),
                             section_path=tuple(block.section_path),
                             is_table=True,

@@ -610,6 +610,110 @@ def test_oversized_table_row_is_split_under_hard_limit_with_repeated_context():
     assert all(chunk.page_start == 4 and chunk.page_end == 4 for chunk in chunks)
 
 
+def test_table_row_uses_bounded_degraded_fragments_when_wrappers_do_not_fit():
+    chunks = _build_with_counter(
+        [
+            _block(
+                block_id="tight-table",
+                kind="table",
+                text="| header |\n|---|\n| one two three four five six seven |",
+                metadata={"is_table": True},
+            )
+        ],
+        target=3,
+        overlap=0,
+        max_tokens=6,
+    )
+
+    assert len(chunks) > 1
+    assert all(chunk.token_count <= 6 for chunk in chunks)
+    for term in ["one", "two", "three", "four", "five", "six", "seven"]:
+        assert sum(term in chunk.content.split() for chunk in chunks) == 1
+    assert all(chunk.metadata.get("table_split_degraded") for chunk in chunks)
+
+
+def test_table_context_larger_than_cap_uses_explicit_bounded_degradation():
+    chunks = _build_with_counter(
+        [
+            _block(
+                block_id="huge-header-table",
+                kind="table",
+                text=(
+                    "| enormous repeated header context that exceeds limit |\n"
+                    "|---|\n"
+                    "| row-value |"
+                ),
+                metadata={"is_table": True},
+            )
+        ],
+        target=3,
+        overlap=0,
+        max_tokens=4,
+    )
+
+    assert chunks
+    assert all(chunk.token_count <= 4 for chunk in chunks)
+    assert all(chunk.metadata.get("table_split_degraded") for chunk in chunks)
+    combined = " ".join(chunk.content for chunk in chunks)
+    assert "enormous" in combined
+    assert "row-value" in combined
+
+
+def test_table_footnote_survives_once_after_an_oversized_final_row():
+    chunks = _build_with_counter(
+        [
+            _block(
+                block_id="footnoted-table",
+                kind="table",
+                text="\n".join(
+                    [
+                        "[Table: Revenue]",
+                        "| Region | Revenue |",
+                        "|---|---|",
+                        "| APAC | " + " ".join(f"value-{index}" for index in range(20)) + " |",
+                        "[Table footnote: audited source]",
+                    ]
+                ),
+                metadata={"is_table": True},
+            )
+        ],
+        target=12,
+        overlap=0,
+        max_tokens=16,
+    )
+
+    assert sum("[Table footnote: audited source]" in chunk.content for chunk in chunks) == 1
+    assert all(chunk.token_count <= 16 for chunk in chunks)
+
+
+def test_oversized_table_continuations_repeat_row_key_and_column_shape():
+    values = [f"value-{index}" for index in range(20)]
+    chunks = _build_with_counter(
+        [
+            _block(
+                block_id="keyed-table",
+                kind="table",
+                text="\n".join(
+                    [
+                        "| Region | Revenue |",
+                        "|---|---|",
+                        f"| APAC | {' '.join(values)} |",
+                    ]
+                ),
+                metadata={"is_table": True},
+            )
+        ],
+        target=10,
+        overlap=0,
+        max_tokens=12,
+    )
+
+    data_chunks = [chunk for chunk in chunks if any(value in chunk.content for value in values)]
+    assert len(data_chunks) > 1
+    assert all("| APAC |" in chunk.content for chunk in data_chunks)
+    assert all(chunk.token_count <= 12 for chunk in chunks)
+
+
 def test_neighbor_indices_are_assigned_after_final_build():
     blocks = [
         _block(
