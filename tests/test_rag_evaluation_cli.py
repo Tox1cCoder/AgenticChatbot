@@ -42,6 +42,7 @@ def test_offline_runner_executes_the_target_and_evaluators():
     assert len(calls) == 110
     assert summary["mode"] == "offline"
     assert "abstention_precision" in summary["metrics"]
+    assert "document_recall_at_1" in summary["metrics"]
 
 
 def test_online_runner_validates_remote_example_references_before_evaluation():
@@ -82,6 +83,7 @@ def test_experiment_metrics_include_summary_evaluator_scores():
 
     class Project:
         feedback_stats = {"abstention_precision": {"avg": 0.7}}
+        session_feedback_stats = {"abstention_recall": {"avg": 0.6}}
 
     class Client:
         def get_test_results(self, **_):
@@ -93,4 +95,5 @@ def test_experiment_metrics_include_summary_evaluator_scores():
     assert script.experiment_metrics(Client(), "experiment") == {
         "document_recall_at_5": 0.8,
         "abstention_precision": 0.7,
+        "abstention_recall": 0.6,
     }

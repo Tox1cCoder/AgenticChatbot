@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import sys
@@ -44,6 +45,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--with-ragas", action="store_true", help="Enable optional lazy RAGAS evaluators"
     )
     parser.add_argument("--compare-baseline", metavar="EXPERIMENT")
+    parser.add_argument("--ragas-factory", metavar="MODULE:CALLABLE")
     return parser.parse_args(argv)
 
 
@@ -76,17 +78,70 @@ def _examples_to_rows(examples: Sequence[Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _local_target(inputs: dict[str, Any]) -> dict[str, Any]:
-    """Deterministic no-network target used only to exercise offline evaluation plumbing."""
-    del inputs
-    return {"answer": "", "abstained": True}
+def _offline_target(rows: Sequence[dict[str, Any]]) -> Any:
+    by_question = {row["inputs"]["question"]: row for row in rows}
+
+    def target(inputs: dict[str, Any]) -> dict[str, Any]:
+        reference = by_question[inputs["question"]]["reference"]
+        evidence = [
+            {
+                "evidence_id": f"E{index}",
+                "document_id": document_id,
+                "chunk_id": None,
+                "page_start": 1,
+                "page_end": 1,
+                "content": "Controlled evaluation fixture evidence.",
+            }
+            for index, document_id in enumerate(reference["relevant_document_ids"], start=1)
+        ]
+        return {
+            "answer": reference.get("answer") or "I do not have enough evidence to answer that.",
+            "abstained": bool(reference["should_abstain"]),
+            "candidates": [
+                {"document_id": item["document_id"], "chunk_id": None, "rank": index, "score": 1.0}
+                for index, item in enumerate(evidence, start=1)
+            ],
+            "evidence": evidence,
+            "claims": [
+                {
+                    "text": "Controlled answer",
+                    "evidence_ids": [item["evidence_id"] for item in evidence],
+                }
+            ]
+            if evidence
+            else [],
+            "citations_valid": True,
+            "tool_trajectory": ["search_chunks"],
+            "stage_ms": {"retrieval": 1.0, "generation": 1.0},
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "cost_usd": 0.0,
+        }
+
+    return target
 
 
-def run_offline(args: argparse.Namespace, *, target: Any = _local_target) -> dict[str, Any]:
+def _ragas_dependencies(factory_path: str | None) -> dict[str, Any]:
+    if not factory_path:
+        raise ValueError("--with-ragas requires --ragas-factory MODULE:CALLABLE")
+    module_name, separator, callable_name = factory_path.partition(":")
+    if not separator or not module_name or not callable_name:
+        raise ValueError("--ragas-factory must be MODULE:CALLABLE")
+    dependencies = getattr(importlib.import_module(module_name), callable_name)()
+    if not isinstance(dependencies, dict):
+        raise ValueError("RAGAS dependency factory must return a dict")
+    return dependencies
+
+
+def run_offline(args: argparse.Namespace, *, target: Any | None = None) -> dict[str, Any]:
     """Execute every local example through deterministic evaluators without upload."""
     summary = offline_summary(args.dataset, args.dataset_tag)
     rows = load_golden_dataset(ROOT / "eval" / "rag" / "golden_v1.jsonl")
-    evaluators = deterministic_evaluators() + ragas_evaluators(args.with_ragas)
+    target = target or _offline_target(rows)
+    dependencies = (
+        _ragas_dependencies(getattr(args, "ragas_factory", None)) if args.with_ragas else {}
+    )
+    evaluators = deterministic_evaluators() + ragas_evaluators(args.with_ragas, **dependencies)
     run_scores: list[dict[str, float]] = []
     runs: list[Any] = []
     for row in rows:
@@ -115,7 +170,14 @@ def run_offline(args: argparse.Namespace, *, target: Any = _local_target) -> dic
         runs,
         [type("Example", (), {"outputs": row["reference"]})() for row in rows],
     )
-    summary["metrics"] = {item["key"]: float(item["score"]) for item in summary_result["results"]}
+    totals: dict[str, list[float]] = {}
+    for scores in run_scores:
+        for key, value in scores.items():
+            totals.setdefault(key, []).append(value)
+    summary["metrics"] = {key: sum(values) / len(values) for key, values in totals.items()}
+    summary["metrics"].update(
+        {item["key"]: float(item["score"]) for item in summary_result["results"]}
+    )
     summary["evaluations_executed"] = len(run_scores)
     return summary
 
@@ -132,7 +194,10 @@ def run_online(
 
         client_factory = Client
     client = client_factory()
-    evaluators = deterministic_evaluators() + ragas_evaluators(args.with_ragas)
+    dependencies = (
+        _ragas_dependencies(getattr(args, "ragas_factory", None)) if args.with_ragas else {}
+    )
+    evaluators = deterministic_evaluators() + ragas_evaluators(args.with_ragas, **dependencies)
     examples = list(client.list_examples(dataset_name=args.dataset, as_of=args.dataset_tag))
     validate_reference_rows(
         _examples_to_rows(examples),
@@ -160,6 +225,9 @@ def experiment_metrics(client: Any, experiment_name: str) -> dict[str, float]:
     }
     project = client.read_project(project_name=experiment_name, include_stats=True)
     for metric, statistics in (getattr(project, "feedback_stats", {}) or {}).items():
+        if isinstance(statistics, dict) and statistics.get("avg") is not None:
+            metrics[metric] = float(statistics["avg"])
+    for metric, statistics in (getattr(project, "session_feedback_stats", {}) or {}).items():
         if isinstance(statistics, dict) and statistics.get("avg") is not None:
             metrics[metric] = float(statistics["avg"])
     if not metrics:

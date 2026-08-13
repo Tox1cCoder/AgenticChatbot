@@ -49,6 +49,7 @@ class EvidenceTrace:
     chunk_id: str | None
     page_start: int | None
     page_end: int | None
+    content: str | None = None
 
 
 @dataclass(frozen=True)

@@ -25,7 +25,9 @@ def _sample(run: Any, example: Any) -> dict[str, Any]:
     outputs = _mapping(run, "outputs")
     inputs = _mapping(example, "inputs")
     reference = _mapping(example, "outputs")
-    contexts = [item.get("document_id", "") for item in outputs.get("evidence", ())]
+    contexts = [
+        item.get("content", "") for item in outputs.get("evidence", ()) if item.get("content")
+    ]
     return {
         "user_input": inputs.get("question", ""),
         "response": outputs.get("answer", ""),
@@ -69,7 +71,8 @@ def ragas_evaluators(
             def evaluate(
                 run: Any, example: Any, *, _metric: Any = metric, _key: str = key
             ) -> dict[str, Any]:
-                score = _metric.single_turn_score(_sample(run, example))
+                result = _metric.score(**_sample(run, example))
+                score = getattr(result, "value", result)
                 return {"key": f"ragas_{_key}", "score": float(score)}
 
             evaluators.append(evaluate)

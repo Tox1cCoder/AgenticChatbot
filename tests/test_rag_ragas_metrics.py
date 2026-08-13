@@ -12,9 +12,9 @@ def test_ragas_adapter_maps_run_and_example_to_collection_metric(monkeypatch):
     observed: dict[str, object] = {}
 
     class FakeMetric:
-        def single_turn_score(self, sample):
-            observed["sample"] = sample
-            return 0.75
+        def score(self, **kwargs):
+            observed["sample"] = kwargs
+            return type("MetricResult", (), {"value": 0.75})()
 
     collections = types.ModuleType("ragas.metrics.collections")
     collections.ContextPrecision = FakeMetric
@@ -25,7 +25,10 @@ def test_ragas_adapter_maps_run_and_example_to_collection_metric(monkeypatch):
     monkeypatch.setitem(sys.modules, "ragas.metrics.collections", collections)
 
     class Run:
-        outputs = {"answer": "answer", "evidence": [{"document_id": "doc-a"}]}
+        outputs = {
+            "answer": "answer",
+            "evidence": [{"document_id": "doc-a", "content": "source evidence"}],
+        }
 
     class Example:
         inputs = {"question": "question"}
@@ -35,3 +38,4 @@ def test_ragas_adapter_maps_run_and_example_to_collection_metric(monkeypatch):
 
     assert result == {"key": "ragas_context_precision", "score": 0.75}
     assert observed["sample"]["user_input"] == "question"
+    assert observed["sample"]["retrieved_contexts"] == ["source evidence"]
