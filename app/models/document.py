@@ -40,6 +40,11 @@ class Document(Base):
         back_populates="document",
         cascade="all, delete-orphan",
     )
+    index_generations = relationship(
+        "DocumentIndexGeneration",
+        back_populates="document",
+        cascade="all, delete-orphan",
+    )
     parse_artifacts = relationship(
         "DocumentParseArtifact",
         back_populates="document",

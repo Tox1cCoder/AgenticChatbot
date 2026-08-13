@@ -44,6 +44,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     target.add_argument("--all", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--continue-on-error", action="store_true")
+    parser.add_argument(
+        "--activate",
+        action="store_true",
+        help="Activate each verified replacement (default: leave it ready for inspection)",
+    )
+    parser.add_argument(
+        "--keep-retired-hours",
+        type=int,
+        default=168,
+        help="Purge retired generations older than this after successful activation",
+    )
     return parser.parse_args(argv)
 
 
@@ -129,8 +140,6 @@ def _run(args: argparse.Namespace) -> int:
         logger.info("No documents to re-embed. Nothing to do.")
         return 0
 
-    _mark_needs_reindex(db, targets)
-
     chunks_scanned = 0
     chunks_reembedded = 0
     chunks_failed = 0
@@ -138,11 +147,19 @@ def _run(args: argparse.Namespace) -> int:
 
     for doc_id in targets:
         try:
-            chunks = index_service.reindex_document(doc_id)
+            previous = index_service.generation_repository.get_active(doc_id)
+            chunks = index_service.reindex_document(doc_id, activate=args.activate)
+            new_generation_id = chunks[0].index_generation_id if chunks else None
             chunks_scanned += len(chunks)
             chunks_reembedded += len(chunks)
             qdrant_points_written += len(chunks)
-            logger.info("Re-embedded %s (%d chunks)", doc_id, len(chunks))
+            print(
+                f"document_id={doc_id} old_generation_id="
+                f"{getattr(previous, 'id', None)} new_generation_id={new_generation_id} "
+                f"activated={args.activate}"
+            )
+            if args.activate and args.keep_retired_hours >= 0:
+                index_service.purge_retired_after_hours(doc_id, args.keep_retired_hours)
         except Exception as exc:
             chunks_failed += 1
             logger.error("Failed to re-embed %s: %s", doc_id, exc, exc_info=True)

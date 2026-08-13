@@ -22,6 +22,7 @@ import logging
 import time as _time
 import uuid
 from collections.abc import Iterable
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
@@ -37,6 +38,7 @@ from qdrant_client.models import (
 
 from app.models.document_chunk import DocumentChunk
 from app.repositories.document_chunk import DocumentChunkRepository
+from app.repositories.document_index_generation import DocumentIndexGenerationRepository
 from app.services.document_chunk_builder import BuiltChunk
 from app.usage.types import UsageContext
 
@@ -48,15 +50,18 @@ class DocumentIndexService:
         self,
         *,
         chunk_repository: DocumentChunkRepository,
+        generation_repository: DocumentIndexGenerationRepository,
         qdrant_client: Any,
         embedding_service: Any,
         collection_name: str,
         embedding_model_name: str | None = None,
         embedding_dimension: int | None = None,
         embedding_provider: str | None = None,
+        chunking_version: str = "structure-v2",
         qdrant_upsert_batch_size: int = 1000,
     ):
         self.chunk_repository = chunk_repository
+        self.generation_repository = generation_repository
         self.qdrant_client = qdrant_client
         self.embedding_service = embedding_service
         self.collection_name = collection_name
@@ -74,6 +79,7 @@ class DocumentIndexService:
         self.embedding_provider = embedding_provider or getattr(
             embedding_service, "provider", "unknown"
         )
+        self.chunking_version = chunking_version
         self.qdrant_upsert_batch_size = max(1, int(qdrant_upsert_batch_size))
 
     # ------------------------------------------------------------------
@@ -128,23 +134,53 @@ class DocumentIndexService:
         parse_artifact_id: UUID | None,
         timing_sink: dict | None = None,
         usage_context: UsageContext | None = None,
+        activate: bool = True,
     ) -> list[DocumentChunk]:
-        """Replace chunks for ``document`` with ``built_chunks`` and index them."""
+        """Build and verify a replacement generation before atomically activating it."""
         document_id = self._coerce_uuid(document.id)
-
+        old_generation = self.generation_repository.get_active(document_id)
+        generation = self.generation_repository.create(
+            document_id=document_id,
+            embedding_provider=self.embedding_provider,
+            embedding_model=self.embedding_model_name,
+            embedding_dimension=self.embedding_dimension,
+            chunking_version=self.chunking_version,
+        )
         chunk_rows = [self._built_chunk_to_row(bc, parse_artifact_id) for bc in built_chunks]
-        persisted = self.chunk_repository.replace_document_chunks(document_id, chunk_rows)
-
-        # Delete any existing Qdrant points for this document (idempotent reindex).
-        self._delete_points_for_document(document_id)
+        persisted: list[DocumentChunk] = []
 
         try:
+            persisted = self.chunk_repository.create_generation_chunks(
+                document_id, generation.id, chunk_rows
+            )
             self._embed_and_upsert(
                 document=document,
                 persisted_chunks=persisted,
+                index_generation_id=generation.id,
                 timing_sink=timing_sink,
                 usage_context=usage_context,
             )
+            self.chunk_repository.mark_indexed_bulk(
+                [chunk.id for chunk in persisted],
+                point_ids=[str(self._point_id_for_chunk(chunk.id)) for chunk in persisted],
+                embedding_model=self.embedding_model_name,
+                embedding_dimension=self.embedding_dimension,
+                collection_name=self.collection_name,
+            )
+            self._verify_generation(document_id, generation.id, persisted)
+            self.generation_repository.mark_ready(generation.id)
+            if activate:
+                self._set_generation_active(document_id, generation.id, True)
+                try:
+                    self.generation_repository.activate(generation.id)
+                except Exception:
+                    try:
+                        self._set_generation_active(document_id, generation.id, False)
+                    except Exception:
+                        logger.exception(
+                            "Failed to restore generation %s Qdrant payloads", generation.id
+                        )
+                    raise
         except Exception as exc:
             for chunk in persisted:
                 try:
@@ -153,15 +189,24 @@ class DocumentIndexService:
                     logger.exception(
                         "Failed to mark chunk %s as failed", getattr(chunk, "id", None)
                     )
+            try:
+                self.generation_repository.mark_failed(
+                    generation.id, self._failure_code(exc)
+                )
+            except Exception:
+                logger.exception("Failed to mark generation %s failed", generation.id)
             raise
 
-        self.chunk_repository.mark_indexed_bulk(
-            [chunk.id for chunk in persisted],
-            point_ids=[str(self._point_id_for_chunk(chunk.id)) for chunk in persisted],
-            embedding_model=self.embedding_model_name,
-            embedding_dimension=self.embedding_dimension,
-            collection_name=self.collection_name,
-        )
+        if activate and old_generation is not None and old_generation.id != generation.id:
+            try:
+                self._set_generation_active(document_id, old_generation.id, False)
+            except Exception:
+                # SQL is authoritative. Active-only hydration prevents retired
+                # rows from leaking while reconciliation repairs Qdrant flags.
+                logger.exception(
+                    "Retired generation payload cleanup deferred for document_id=%s",
+                    document_id,
+                )
 
         return persisted
 
@@ -170,31 +215,35 @@ class DocumentIndexService:
         self._delete_points_for_document(document_id)
         self.chunk_repository.delete_by_document(document_id)
 
-    def reindex_document(self, document_id: UUID) -> list[DocumentChunk]:
+    def reindex_document(
+        self, document_id: UUID, *, activate: bool = True
+    ) -> list[DocumentChunk]:
         document_id = self._coerce_uuid(document_id)
         chunks = self.chunk_repository.get_by_document_ordered(document_id)
         if not chunks:
             return []
-
-        self._delete_points_for_document(document_id)
-
-        # Reindex only sees stored chunk content. Conversation/user payload
-        # fields are reconstructed from the chunk's joined Document row when
-        # available; otherwise they're omitted (the original index pass set
-        # them, and a stale collection should be recreated rather than
-        # patched in place).
-        self._embed_and_upsert(
-            document=None,
-            persisted_chunks=chunks,
+        document = chunks[0].document
+        built = [
+            BuiltChunk(
+                chunk_index=chunk.chunk_index,
+                content=chunk.content,
+                content_sha256=chunk.content_sha256,
+                char_count=chunk.char_count,
+                token_count=chunk.token_count,
+                page_start=chunk.page_start,
+                page_end=chunk.page_end,
+                section_path=tuple(chunk.section_path or ()),
+                block_provenance=tuple(chunk.block_provenance or ()),
+                metadata=dict(chunk.chunk_metadata or {}),
+            )
+            for chunk in chunks
+        ]
+        return self.index_document(
+            document=document,
+            built_chunks=built,
+            parse_artifact_id=chunks[0].parse_artifact_id,
+            activate=activate,
         )
-        self.chunk_repository.mark_indexed_bulk(
-            [chunk.id for chunk in chunks],
-            point_ids=[str(self._point_id_for_chunk(chunk.id)) for chunk in chunks],
-            embedding_model=self.embedding_model_name,
-            embedding_dimension=self.embedding_dimension,
-            collection_name=self.collection_name,
-        )
-        return chunks
 
     # ------------------------------------------------------------------
     # Internals
@@ -225,6 +274,7 @@ class DocumentIndexService:
         *,
         document: Any,
         persisted_chunks: Iterable[DocumentChunk],
+        index_generation_id: UUID,
         timing_sink: dict | None = None,
         usage_context: UsageContext | None = None,
     ) -> None:
@@ -254,7 +304,7 @@ class DocumentIndexService:
                 PointStruct(
                     id=self._point_id_for_chunk(chunk.id),
                     vector=list(vector),
-                    payload=self._payload_for_chunk(document, chunk),
+                    payload=self._payload_for_chunk(document, chunk, index_generation_id),
                 )
             )
 
@@ -289,7 +339,9 @@ class DocumentIndexService:
                     return str(value)
         return None
 
-    def _payload_for_chunk(self, document: Any, chunk: DocumentChunk) -> dict[str, Any]:
+    def _payload_for_chunk(
+        self, document: Any, chunk: DocumentChunk, index_generation_id: UUID
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "document_id": str(chunk.document_id),
             "chunk_id": str(chunk.id),
@@ -301,6 +353,8 @@ class DocumentIndexService:
             "embedding_model": self.embedding_model_name,
             "embedding_provider": self.embedding_provider,
             "modality": "text",
+            "index_generation": str(index_generation_id),
+            "is_active": False,
         }
         if document is not None:
             if getattr(document, "conversation_id", None) is not None:
@@ -308,6 +362,135 @@ class DocumentIndexService:
             if getattr(document, "user_id", None) is not None:
                 payload["user_id"] = str(document.user_id)
         return payload
+
+    def _verify_generation(
+        self,
+        document_id: UUID,
+        generation_id: UUID,
+        chunks: list[DocumentChunk],
+    ) -> None:
+        generation_filter = self._generation_filter(document_id, generation_id)
+        counted = self.qdrant_client.count(
+            collection_name=self.collection_name,
+            count_filter=generation_filter,
+            exact=True,
+        )
+        actual_count = int(getattr(counted, "count", -1))
+        if actual_count != len(chunks):
+            raise ValueError(
+                f"generation point count mismatch: expected {len(chunks)}, got {actual_count}"
+            )
+
+        point_ids = [str(self._point_id_for_chunk(chunk.id)) for chunk in chunks]
+        points = self.qdrant_client.retrieve(
+            collection_name=self.collection_name,
+            ids=point_ids,
+            with_payload=True,
+            with_vectors=True,
+        )
+        if len(points) != len(chunks):
+            raise ValueError(
+                f"generation point retrieval mismatch: expected {len(chunks)}, got {len(points)}"
+            )
+        expected_document = str(document_id)
+        expected_generation = str(generation_id)
+        for point in points:
+            payload = dict(getattr(point, "payload", None) or {})
+            if payload.get("document_id") != expected_document:
+                raise ValueError("generation point document scope mismatch")
+            if payload.get("index_generation") != expected_generation:
+                raise ValueError("generation point ownership mismatch")
+            vector = getattr(point, "vector", None)
+            if not isinstance(vector, list) or len(vector) != self.embedding_dimension:
+                raise ValueError("generation point vector dimension mismatch")
+
+    def _set_generation_active(
+        self, document_id: UUID, generation_id: UUID, is_active: bool
+    ) -> None:
+        self.qdrant_client.set_payload(
+            collection_name=self.collection_name,
+            payload={"is_active": is_active},
+            points=FilterSelector(
+                filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="document_id",
+                            match=MatchValue(value=str(document_id)),
+                        ),
+                        FieldCondition(
+                            key="index_generation",
+                            match=MatchValue(value=str(generation_id)),
+                        )
+                    ]
+                )
+            ),
+            wait=True,
+        )
+
+    def reconcile_active_payloads(self, document_id: UUID) -> UUID | None:
+        """Make Qdrant activity flags match the authoritative SQL generation."""
+        document_id = self._coerce_uuid(document_id)
+        active = self.generation_repository.get_active(document_id)
+        document_filter = FilterSelector(
+            filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="document_id", match=MatchValue(value=str(document_id))
+                    )
+                ]
+            )
+        )
+        self.qdrant_client.set_payload(
+            collection_name=self.collection_name,
+            payload={"is_active": False},
+            points=document_filter,
+            wait=True,
+        )
+        if active is not None:
+            self._set_generation_active(document_id, active.id, True)
+            return active.id
+        return None
+
+    def purge_retired_generations(
+        self, document_id: UUID, older_than: datetime
+    ) -> list[UUID]:
+        """Delete retired SQL/Qdrant generations after a caller-chosen rollback window."""
+        document_id = self._coerce_uuid(document_id)
+        purged: list[UUID] = []
+        for generation in self.generation_repository.retired_before(document_id, older_than):
+            self.qdrant_client.delete(
+                collection_name=self.collection_name,
+                points_selector=FilterSelector(
+                    filter=self._generation_filter(document_id, generation.id)
+                ),
+                wait=True,
+            )
+            self.chunk_repository.delete_generation(generation.id)
+            self.generation_repository.delete(generation.id)
+            purged.append(generation.id)
+        return purged
+
+    def purge_retired_after_hours(self, document_id: UUID, hours: int) -> list[UUID]:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max(0, int(hours)))
+        return self.purge_retired_generations(document_id, cutoff)
+
+    @staticmethod
+    def _failure_code(exc: Exception) -> str:
+        name = type(exc).__name__.upper()
+        return f"INDEX_BUILD_{name}"[:64]
+
+    @staticmethod
+    def _generation_filter(document_id: UUID, generation_id: UUID) -> Filter:
+        return Filter(
+            must=[
+                FieldCondition(
+                    key="document_id", match=MatchValue(value=str(document_id))
+                ),
+                FieldCondition(
+                    key="index_generation", match=MatchValue(value=str(generation_id))
+                ),
+            ]
+        )
 
     def _delete_points_for_document(self, document_id: UUID) -> None:
         try:

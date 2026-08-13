@@ -36,6 +36,7 @@ from app.repositories.custom_agent import CustomAgentRepository
 from app.repositories.document import DocumentRepository
 from app.repositories.document_chunk import DocumentChunkRepository
 from app.repositories.document_image import DocumentImageRepository
+from app.repositories.document_index_generation import DocumentIndexGenerationRepository
 from app.repositories.document_parse_artifact import DocumentParseArtifactRepository
 from app.repositories.feedback import FeedbackRepository
 from app.repositories.hitl_interrupt import HITLInterruptRepository
@@ -304,6 +305,11 @@ class Container(containers.DeclarativeContainer):
         session_factory=db.provided.session,
     )
 
+    document_index_generation_repository = providers.Factory(
+        DocumentIndexGenerationRepository,
+        session_factory=db.provided.session,
+    )
+
     document_parse_artifact_repository = providers.Factory(
         DocumentParseArtifactRepository,
         session_factory=db.provided.session,
@@ -547,6 +553,7 @@ class Container(containers.DeclarativeContainer):
     document_index_service = providers.Factory(
         DocumentIndexService,
         chunk_repository=document_chunk_repository,
+        generation_repository=document_index_generation_repository,
         qdrant_client=qdrant_client,
         embedding_service=rag_embedding_service,
         collection_name=settings.qdrant_collection_name,

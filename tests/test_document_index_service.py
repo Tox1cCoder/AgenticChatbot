@@ -123,6 +123,58 @@ class _EmbeddingStub:
         return [0.0] * self.dim
 
 
+class _GenerationRepoStub:
+    def __init__(self):
+        self.rows = {}
+
+    def get_active(self, document_id):
+        return next(
+            (
+                row
+                for row in self.rows.values()
+                if row.document_id == document_id and row.status == "active"
+            ),
+            None,
+        )
+
+    def create(self, *, document_id, **kwargs):
+        row = SimpleNamespace(id=uuid4(), document_id=document_id, status="building", **kwargs)
+        self.rows[row.id] = row
+        return row
+
+    def mark_ready(self, generation_id):
+        self.rows[generation_id].status = "ready"
+        return self.rows[generation_id]
+
+    def activate(self, generation_id):
+        target = self.rows[generation_id]
+        for row in self.rows.values():
+            if row.document_id == target.document_id and row.status == "active":
+                row.status = "retired"
+        target.status = "active"
+        return target
+
+    def mark_failed(self, generation_id, failure_code):
+        self.rows[generation_id].status = "failed"
+        return self.rows[generation_id]
+
+
+def _generation_aware_qdrant(qdrant):
+    captured = []
+
+    def capture_upsert(*args, **kwargs):
+        captured.extend(kwargs.get("points") or args[1])
+
+    if qdrant.upsert.side_effect is None:
+        qdrant.upsert.side_effect = capture_upsert
+    qdrant.count.side_effect = lambda **_kwargs: SimpleNamespace(count=len(captured))
+    qdrant.retrieve.side_effect = lambda **_kwargs: [
+        SimpleNamespace(id=point.id, payload=point.payload, vector=point.vector)
+        for point in captured
+    ]
+    return qdrant
+
+
 def _build_service(
     *,
     chunk_repo=None,
@@ -135,9 +187,18 @@ def _build_service(
 ):
     from app.services.document_index_service import DocumentIndexService
 
+    repository = chunk_repo or MagicMock()
+    repository.create_generation_chunks.side_effect = (
+        lambda _document_id, generation_id, _rows: [
+            setattr(chunk, "index_generation_id", generation_id) or chunk
+            for chunk in repository.replace_document_chunks.return_value
+        ]
+    )
+    qdrant = _generation_aware_qdrant(qdrant_client or MagicMock())
     return DocumentIndexService(
-        chunk_repository=chunk_repo or MagicMock(),
-        qdrant_client=qdrant_client or MagicMock(),
+        chunk_repository=repository,
+        generation_repository=_GenerationRepoStub(),
+        qdrant_client=qdrant,
         embedding_service=embedding_service or _EmbeddingStub(dim=embedding_dimension),
         collection_name=collection_name,
         embedding_model_name=embedding_model_name,
@@ -152,8 +213,8 @@ def test_constructor_does_not_expose_retired_index_batch_size():
     assert "index_batch_size" not in inspect.signature(DocumentIndexService).parameters
 
 
-def test_index_document_replaces_sql_chunks_first():
-    """Chunks are the canonical store: replacing them is a prerequisite to indexing."""
+def test_index_document_creates_generation_chunks_first():
+    """Inactive generation chunks are persisted before indexing."""
     document = _make_document()
     persisted = [
         _persisted_chunk(document.id, 0),
@@ -173,9 +234,8 @@ def test_index_document_replaces_sql_chunks_first():
         parse_artifact_id=None,
     )
 
-    # Replace runs before qdrant upsert.
-    assert repo.replace_document_chunks.called
-    replace_call = repo.replace_document_chunks.call_args
+    assert repo.create_generation_chunks.called
+    replace_call = repo.create_generation_chunks.call_args
     assert (
         replace_call.kwargs.get("document_id") == document.id or replace_call.args[0] == document.id
     )

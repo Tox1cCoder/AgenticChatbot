@@ -49,7 +49,7 @@ def test_document_chunk_has_all_required_columns():
     assert not missing, f"DocumentChunk missing required columns: {sorted(missing)}"
 
 
-def test_document_chunk_table_has_unique_document_index_pair():
+def test_document_chunk_table_has_unique_generation_index_tuple():
     from app.models import DocumentChunk
 
     uniques: list[tuple[str, ...]] = []
@@ -57,8 +57,9 @@ def test_document_chunk_table_has_unique_document_index_pair():
         if constraint.__class__.__name__ == "UniqueConstraint":
             uniques.append(tuple(col.name for col in constraint.columns))
 
-    assert ("document_id", "chunk_index") in uniques, (
-        f"Expected UNIQUE(document_id, chunk_index). Found: {uniques}"
+    assert ("document_id", "index_generation_id", "chunk_index") in uniques, (
+        "Expected UNIQUE(document_id, index_generation_id, chunk_index). "
+        f"Found: {uniques}"
     )
 
 

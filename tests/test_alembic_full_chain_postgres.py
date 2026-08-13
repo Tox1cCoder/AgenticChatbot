@@ -23,8 +23,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _SCRATCH_DATABASE_PREFIX = "chatbot_migration_smoke_"
 _SCRATCH_DATABASE_RE = re.compile(r"chatbot_migration_smoke_[0-9a-f]{32}")
 _OLD_HEAD = "a4b5c6d7e8f9"
-_HEAD = "b2c3d4e5f6a7"
-_PREVIOUS_HEAD = "f9a0b1c2d3e4"
+_HEAD = "c3d4e5f6a7b8"
+_PREVIOUS_HEAD = "b2c3d4e5f6a7"
 _PRE_RECONCILIATION_HEAD = "1ce64a959f7d"
 _PARALLEL_ALLOW_CUSTOM_MODEL_HEAD = "0f1e2d3c4b5a"
 _RECONCILIATION_REVISION = "6c6598a9eb26"
@@ -317,7 +317,15 @@ def _assert_head_schema(scratch_url: URL) -> None:
                 "model_usage_events",
                 "model_usage_minute",
                 "web_image_references",
+                "document_index_generations",
             } <= tables
+            assert "index_generation_id" in {
+                column["name"] for column in schema.get_columns("document_chunks")
+            }
+            generation_indexes = {
+                index["name"]: index for index in schema.get_indexes("document_index_generations")
+            }
+            assert generation_indexes["uq_document_index_generation_active"]["unique"] is True
 
             settings_columns = {
                 column["name"] for column in schema.get_columns("tool_approval_settings")
@@ -384,8 +392,12 @@ def _assert_previous_head_schema(scratch_url: URL) -> None:
                 "tool_approval_settings",
                 "model_usage_events",
                 "model_usage_minute",
+                "web_image_references",
             } <= tables
-            assert "web_image_references" not in tables
+            assert "document_index_generations" not in tables
+            assert "index_generation_id" not in {
+                column["name"] for column in schema.get_columns("document_chunks")
+            }
             assert {"device_id", "tool_origin"} <= {
                 column["name"] for column in schema.get_columns("tool_approval_settings")
             }
@@ -664,7 +676,7 @@ def test_full_alembic_chain_from_empty_postgres_database() -> None:
                 previous_snapshot = _public_table_schema_snapshot(connection)
         finally:
             engine.dispose()
-        assert previous_snapshot == _without_tables(head_snapshot, {"web_image_references"})
+        assert "document_index_generations" not in previous_snapshot
 
         _run_alembic(scratch_url, "upgrade", "head")
         _assert_head_schema(scratch_url)

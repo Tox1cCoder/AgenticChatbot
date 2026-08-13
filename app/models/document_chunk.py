@@ -31,8 +31,9 @@ class DocumentChunk(Base):
     __table_args__ = (
         UniqueConstraint(
             "document_id",
+            "index_generation_id",
             "chunk_index",
-            name="uq_document_chunk_document_index",
+            name="uq_document_chunk_generation_index",
         ),
         Index("idx_document_chunks_document_id", "document_id"),
         Index("idx_document_chunks_parse_artifact_id", "parse_artifact_id"),
@@ -44,6 +45,11 @@ class DocumentChunk(Base):
     document_id = Column(
         UUID(as_uuid=True),
         ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    index_generation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("document_index_generations.id", ondelete="CASCADE"),
         nullable=False,
     )
     parse_artifact_id = Column(
@@ -83,6 +89,7 @@ class DocumentChunk(Base):
     )
 
     document = relationship("Document", back_populates="chunks")
+    index_generation = relationship("DocumentIndexGeneration", back_populates="chunks")
     parse_artifact = relationship("DocumentParseArtifact", back_populates="chunks")
     images = relationship("DocumentImage", back_populates="chunk")
 

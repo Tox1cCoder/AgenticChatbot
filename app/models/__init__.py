@@ -8,6 +8,7 @@ from app.models.custom_agent import ConversationCustomAgent, CustomAgent
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.document_image import DocumentImage
+from app.models.document_index_generation import DocumentIndexGeneration
 from app.models.document_parse_artifact import DocumentParseArtifact
 from app.models.enums import (
     DocumentStatus,
@@ -47,6 +48,7 @@ __all__ = [
     "Document",
     "DocumentChunk",
     "DocumentImage",
+    "DocumentIndexGeneration",
     "ModelProvider",
     "ToolApproval",
     "ToolApprovalSetting",

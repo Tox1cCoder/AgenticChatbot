@@ -16,6 +16,7 @@ from sqlalchemy.orm import joinedload
 from app.models.conversation import Conversation
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
+from app.models.document_index_generation import DocumentIndexGeneration
 
 
 class DocumentChunkRepository:
@@ -25,12 +26,13 @@ class DocumentChunkRepository:
     # ------------------------------------------------------------------
     # Write operations
     # ------------------------------------------------------------------
-    def replace_document_chunks(
+    def create_generation_chunks(
         self,
         document_id: UUID,
+        index_generation_id: UUID,
         chunk_rows: list[dict[str, Any]],
     ) -> list[DocumentChunk]:
-        """Replace all chunks for a document in a single transaction.
+        """Create an inactive generation's chunks without touching active rows.
 
         ``chunk_rows`` is a list of kwargs dicts; each one is used to construct
         a ``DocumentChunk`` row. Callers are responsible for populating
@@ -38,13 +40,13 @@ class DocumentChunkRepository:
         any deterministic ``id`` / ``qdrant_point_id`` they want.
         """
         with self.session_factory() as db:
-            db.query(DocumentChunk).filter(DocumentChunk.document_id == document_id).delete(
-                synchronize_session=False
-            )
-
             created: list[DocumentChunk] = []
             for row in chunk_rows:
-                chunk = DocumentChunk(document_id=document_id, **row)
+                chunk = DocumentChunk(
+                    document_id=document_id,
+                    index_generation_id=index_generation_id,
+                    **row,
+                )
                 db.add(chunk)
                 created.append(chunk)
 
@@ -52,6 +54,26 @@ class DocumentChunkRepository:
             for chunk in created:
                 db.refresh(chunk)
             return created
+
+    def delete_generation(self, index_generation_id: UUID) -> int:
+        with self.session_factory() as db:
+            deleted = (
+                db.query(DocumentChunk)
+                .filter(DocumentChunk.index_generation_id == index_generation_id)
+                .delete(synchronize_session=False)
+            )
+            db.commit()
+            return deleted
+
+    def get_by_generation_ordered(self, index_generation_id: UUID) -> list[DocumentChunk]:
+        with self.session_factory() as db:
+            return (
+                db.query(DocumentChunk)
+                .options(joinedload(DocumentChunk.document))
+                .filter(DocumentChunk.index_generation_id == index_generation_id)
+                .order_by(DocumentChunk.chunk_index.asc())
+                .all()
+            )
 
     def delete_by_document(self, document_id: UUID) -> int:
         with self.session_factory() as db:
@@ -144,15 +166,21 @@ class DocumentChunkRepository:
     # ------------------------------------------------------------------
     # Read operations
     # ------------------------------------------------------------------
+    @staticmethod
+    def _active(query):
+        return query.join(
+            DocumentIndexGeneration,
+            DocumentChunk.index_generation_id == DocumentIndexGeneration.id,
+        ).filter(DocumentIndexGeneration.status == "active")
+
     def get_by_document_ordered(self, document_id: UUID) -> list[DocumentChunk]:
         with self.session_factory() as db:
-            return (
+            query = (
                 db.query(DocumentChunk)
                 .options(joinedload(DocumentChunk.document))
                 .filter(DocumentChunk.document_id == document_id)
-                .order_by(DocumentChunk.chunk_index.asc())
-                .all()
             )
+            return self._active(query).order_by(DocumentChunk.chunk_index.asc()).all()
 
     def get_by_document_for_scope(
         self,
@@ -181,7 +209,7 @@ class DocumentChunkRepository:
             query = query.join(
                 Conversation, Document.conversation_id == Conversation.id
             ).filter(Conversation.owner_id == user_id)
-            return query.order_by(DocumentChunk.chunk_index.asc()).all()
+            return self._active(query).order_by(DocumentChunk.chunk_index.asc()).all()
 
     def get_window_for_scope(
         self,
@@ -210,7 +238,8 @@ class DocumentChunkRepository:
                 Conversation, Document.conversation_id == Conversation.id
             ).filter(Conversation.owner_id == user_id)
             return (
-                query.order_by(DocumentChunk.chunk_index.asc())
+                self._active(query)
+                .order_by(DocumentChunk.chunk_index.asc())
                 .offset(bounded_start)
                 .limit(bounded_limit)
                 .all()
@@ -238,7 +267,8 @@ class DocumentChunkRepository:
                 Conversation, Document.conversation_id == Conversation.id
             ).filter(Conversation.owner_id == user_id)
             return (
-                query.order_by(DocumentChunk.chunk_index.asc())
+                self._active(query)
+                .order_by(DocumentChunk.chunk_index.asc())
                 .offset(max(0, int(after_offset)))
                 .first()
                 is not None
@@ -249,12 +279,12 @@ class DocumentChunkRepository:
         if not ids:
             return []
         with self.session_factory() as db:
-            return (
+            query = (
                 db.query(DocumentChunk)
                 .options(joinedload(DocumentChunk.document))
                 .filter(DocumentChunk.id.in_(ids))
-                .all()
             )
+            return self._active(query).all()
 
     def get_by_ids_for_scope(
         self,
@@ -279,16 +309,16 @@ class DocumentChunkRepository:
             query = query.join(
                 Conversation, Document.conversation_id == Conversation.id
             ).filter(Conversation.owner_id == user_id)
-            return query.all()
+            return self._active(query).all()
 
     def get_by_qdrant_point_ids(self, point_ids: Iterable[str]) -> list[DocumentChunk]:
         ids = [p for p in point_ids if p]
         if not ids:
             return []
         with self.session_factory() as db:
-            return (
+            query = (
                 db.query(DocumentChunk)
                 .options(joinedload(DocumentChunk.document))
                 .filter(DocumentChunk.qdrant_point_id.in_(ids))
-                .all()
             )
+            return self._active(query).all()

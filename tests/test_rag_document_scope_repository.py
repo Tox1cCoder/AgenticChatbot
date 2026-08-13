@@ -22,6 +22,7 @@ from app.models.conversation import Conversation
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.document_image import DocumentImage
+from app.models.document_index_generation import DocumentIndexGeneration
 from app.models.document_parse_artifact import DocumentParseArtifact
 from app.models.user import User
 from app.repositories.document_chunk import DocumentChunkRepository
@@ -46,6 +47,7 @@ def rag_scope_db(monkeypatch):
             User.__table__,
             Conversation.__table__,
             Document.__table__,
+            DocumentIndexGeneration.__table__,
             DocumentParseArtifact.__table__,
             DocumentChunk.__table__,
             DocumentImage.__table__,
@@ -92,6 +94,7 @@ def _chunk(document_id: UUID, chunk_index: int) -> DocumentChunk:
     return DocumentChunk(
         id=uuid4(),
         document_id=document_id,
+        index_generation_id=document_id,
         chunk_index=chunk_index,
         content=content,
         content_sha256=f"{chunk_index:064x}",
@@ -101,6 +104,72 @@ def _chunk(document_id: UUID, chunk_index: int) -> DocumentChunk:
         block_provenance=[],
         chunk_metadata={},
     )
+
+
+def _active_generation(document_id: UUID) -> DocumentIndexGeneration:
+    return DocumentIndexGeneration(
+        id=document_id,
+        document_id=document_id,
+        status="active",
+        embedding_provider="test",
+        embedding_model="test",
+        embedding_dimension=8,
+        chunking_version="test",
+    )
+
+
+def test_chunk_hydration_rejects_retired_generations(rag_scope_db):
+    owner_id, conversation_id, document_id = uuid4(), uuid4(), uuid4()
+    active_generation_id, retired_generation_id = uuid4(), uuid4()
+    active_chunk = _chunk(document_id, 0)
+    active_chunk.index_generation_id = active_generation_id
+    active_chunk.qdrant_point_id = str(active_chunk.id)
+    retired_chunk = _chunk(document_id, 0)
+    retired_chunk.index_generation_id = retired_generation_id
+    retired_chunk.qdrant_point_id = str(retired_chunk.id)
+
+    with rag_scope_db.factory.begin() as session:
+        session.add(_user(owner_id))
+        session.add(Conversation(id=conversation_id, owner_id=owner_id, title="owner"))
+        session.add(
+            _document(
+                document_id=document_id,
+                conversation_id=conversation_id,
+                filename="versioned.pdf",
+                filename_key="versioned.pdf",
+                upload_time=datetime.now(timezone.utc),
+            )
+        )
+        session.add_all(
+            [
+                DocumentIndexGeneration(
+                    id=active_generation_id,
+                    document_id=document_id,
+                    status="active",
+                    embedding_provider="test",
+                    embedding_model="test",
+                    embedding_dimension=8,
+                    chunking_version="test",
+                ),
+                DocumentIndexGeneration(
+                    id=retired_generation_id,
+                    document_id=document_id,
+                    status="retired",
+                    embedding_provider="test",
+                    embedding_model="test",
+                    embedding_dimension=8,
+                    chunking_version="test",
+                ),
+            ]
+        )
+        session.add_all([active_chunk, retired_chunk])
+
+    repository = DocumentChunkRepository(rag_scope_db.factory)
+    assert [row.id for row in repository.get_by_document_ordered(document_id)] == [
+        active_chunk.id
+    ]
+    assert repository.get_by_ids([retired_chunk.id]) == []
+    assert repository.get_by_qdrant_point_ids([str(retired_chunk.id)]) == []
 
 
 def _minimal_agent() -> RAGAgent:
@@ -128,6 +197,7 @@ def test_chunk_windows_exclude_wrong_owner_and_wrong_conversation(rag_scope_db):
                 upload_time=datetime.now(timezone.utc),
             )
         )
+        session.add(_active_generation(document_id))
         session.add(_chunk(document_id, 0))
 
     repository = DocumentChunkRepository(rag_scope_db.factory)
@@ -179,6 +249,9 @@ def test_search_and_image_repository_paths_exclude_mixed_tenant_rows(rag_scope_d
                     upload_time=now,
                 ),
             ]
+        )
+        session.add_all(
+            [_active_generation(owned_document_id), _active_generation(foreign_document_id)]
         )
         session.add_all([owned_chunk, foreign_chunk])
         session.add_all(
@@ -440,6 +513,7 @@ def test_scoped_cursor_is_true_only_for_another_authorized_chunk(rag_scope_db):
                 upload_time=datetime.now(timezone.utc),
             )
         )
+        session.add(_active_generation(document_id))
         session.add_all([_chunk(document_id, 0), _chunk(document_id, 1)])
 
     repository = DocumentChunkRepository(rag_scope_db.factory)

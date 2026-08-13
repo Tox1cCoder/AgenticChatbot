@@ -22,6 +22,11 @@ def test_cli_accepts_selectors_dry_run_and_continue_on_error():
     assert (
         reindex_embeddings._parse_args(["--all", "--continue-on-error"]).continue_on_error is True
     )
+    generation_args = reindex_embeddings._parse_args(
+        ["--document-id", "abc", "--activate", "--keep-retired-hours", "72"]
+    )
+    assert generation_args.activate is True
+    assert generation_args.keep_retired_hours == 72
     with pytest.raises(SystemExit):
         reindex_embeddings._parse_args(["--document-id", "d", "--conversation-id", "c"])
 
