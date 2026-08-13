@@ -344,6 +344,21 @@ class DocumentChunkBuilder:
         for block in blocks:
             block_tokens = self.token_strategy.count(block.text)
 
+            # Schema-v1 artifacts already contain character chunks. Preserve
+            # their indexing boundaries during the rollout instead of merging
+            # or splitting them a second time.
+            if block.metadata.get("legacy_prechunked"):
+                emit_buffered()
+                chunks.append(
+                    _finalize_chunk(
+                        chunk_index=chunk_index,
+                        buffered_blocks=[block],
+                        token_strategy=self.token_strategy,
+                    )
+                )
+                chunk_index += 1
+                continue
+
             # --- Atomic tables ----------------------------------------
             if _is_table(block):
                 # Flush any pending text blocks first so the table stays on its own.

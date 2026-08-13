@@ -23,6 +23,20 @@ def test_mineru_heading_carries_section_path_to_later_blocks():
     assert blocks[1].metadata["bbox"] == [1, 2, 3, 4]
 
 
+def test_mineru_first_page_builds_one_based_chunk_and_retains_raw_index():
+    from app.services.document_chunk_builder import DocumentChunkBuilder
+
+    blocks = DocumentNormalizer().normalize_mineru(
+        [{"type": "text", "text": "First page", "page_idx": 0}]
+    )
+    chunks = DocumentChunkBuilder().build(blocks)
+
+    assert blocks[0].page_start == 1
+    assert blocks[0].metadata["parser_page_idx"] == 0
+    assert chunks[0].page_start == 1
+    assert chunks[0].page_end == 1
+
+
 def test_table_retains_caption_header_body_and_footnote():
     normalizer = DocumentNormalizer()
 
@@ -42,8 +56,9 @@ def test_table_retains_caption_header_body_and_footnote():
 
     table = blocks[0]
     assert table.kind == "table"
-    assert table.page_start == 2
-    assert table.page_end == 2
+    assert table.page_start == 3
+    assert table.page_end == 3
+    assert table.metadata["parser_page_idx"] == 2
     assert table.metadata.keys() >= {"caption", "header", "body", "footnote", "bbox"}
     assert "Cloud" in table.text
     assert "USD millions" in table.text
@@ -121,6 +136,17 @@ def test_excel_sheet_becomes_heading_followed_by_table():
     assert blocks[1].metadata["header"] == ["Region", "Revenue"]
     assert blocks[1].metadata["body"] == [["APAC", "120"]]
     assert "| APAC | 120 |" in blocks[1].text
+
+
+def test_excel_first_sheet_builds_one_based_chunks_and_retains_raw_index():
+    from app.services.document_chunk_builder import DocumentChunkBuilder
+
+    blocks = DocumentNormalizer().normalize_excel([("Q1", [["Revenue"], ["120"]])])
+    chunks = DocumentChunkBuilder().build(blocks)
+
+    assert all(block.page_start == 1 for block in blocks)
+    assert all(block.metadata["sheet_index"] == 0 for block in blocks)
+    assert all(chunk.page_start == 1 for chunk in chunks)
 
 
 def test_markdown_fallback_emits_heading_and_paragraph_blocks():

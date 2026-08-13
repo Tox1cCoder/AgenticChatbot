@@ -83,11 +83,14 @@ class DocumentNormalizer:
 
         for source_index, entry in enumerate(entries):
             source_type = str(entry.get("type", "text") or "text").lower()
-            page = self._optional_int(entry.get("page_idx"))
+            parser_page_idx = self._optional_int(entry.get("page_idx"))
+            page = parser_page_idx + 1 if parser_page_idx is not None else None
             metadata: dict[str, Any] = {
                 "source_type": source_type,
                 "source_index": source_index,
             }
+            if parser_page_idx is not None:
+                metadata["parser_page_idx"] = parser_page_idx
             if "bbox" in entry:
                 metadata["bbox"] = entry.get("bbox")
 
@@ -208,6 +211,7 @@ class DocumentNormalizer:
             if not rows:
                 continue
             heading = f"Sheet: {sheet_name}"
+            display_page = sheet_index + 1
             common = {"source_type": "excel", "sheet_name": sheet_name, "sheet_index": sheet_index}
             if source:
                 common["source"] = source
@@ -216,8 +220,8 @@ class DocumentNormalizer:
                     f"excel:{sheet_index}:heading",
                     "heading",
                     heading,
-                    page_start=sheet_index,
-                    page_end=sheet_index,
+                    page_start=display_page,
+                    page_end=display_page,
                     section_path=(heading,),
                     metadata={**common, "heading_level": 1},
                 )
@@ -231,8 +235,8 @@ class DocumentNormalizer:
                     f"excel:{sheet_index}:table:0",
                     "table",
                     table_text,
-                    page_start=sheet_index,
-                    page_end=sheet_index,
+                    page_start=display_page,
+                    page_end=display_page,
                     section_path=(heading,),
                     metadata={
                         **common,
@@ -272,14 +276,23 @@ class DocumentNormalizer:
                 if key not in {"text", "page_start", "page_end", "section_path"}
             }
             metadata.setdefault("source_chunk_index", index)
+            metadata["legacy_prechunked"] = True
+            parser_page_start = data.get("page_start")
+            parser_page_end = data.get("page_end")
+            if parser_page_start is not None:
+                metadata["parser_page_start"] = parser_page_start
+            if parser_page_end is not None:
+                metadata["parser_page_end"] = parser_page_end
             kind = "table" if data.get("has_tables") else "paragraph"
             blocks.append(
                 NormalizedBlock(
                     f"legacy:{index}",
                     kind,
                     text,
-                    page_start=data.get("page_start"),
-                    page_end=data.get("page_end"),
+                    page_start=(
+                        int(parser_page_start) + 1 if parser_page_start is not None else None
+                    ),
+                    page_end=(int(parser_page_end) + 1 if parser_page_end is not None else None),
                     section_path=tuple(data.get("section_path") or ()),
                     metadata=metadata,
                 )

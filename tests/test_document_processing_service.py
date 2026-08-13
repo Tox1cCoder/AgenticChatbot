@@ -19,6 +19,7 @@ from uuid import uuid4
 from PIL import Image
 
 from app.schemas.document_image import DocumentImageCreate
+from app.services.document_blocks import NormalizedBlock
 from app.services.document_parse_service import DocumentParseService
 from app.services.document_processing_service import DocumentProcessingService
 
@@ -232,6 +233,51 @@ def test_build_chunks_for_indexing_preserves_table_metadata(tmp_path):
     assert len(built_chunks) == 1
     assert built_chunks[0].metadata["has_tables"] is True
     assert built_chunks[0].metadata["table_count"] == 2
+
+
+def test_prepared_images_attach_only_to_their_structural_owner(tmp_path):
+    service = _build_service(tmp_path)
+    blocks = [
+        NormalizedBlock("p", "paragraph", "Page summary", page_start=0, page_end=0),
+        NormalizedBlock(
+            "i1",
+            "image",
+            "[Image]",
+            page_start=0,
+            page_end=0,
+            metadata={"img_path": "images/a.png"},
+        ),
+        NormalizedBlock(
+            "i2",
+            "image",
+            "[Image]",
+            page_start=0,
+            page_end=0,
+            metadata={"img_path": "images/b.png"},
+        ),
+    ]
+    prepared = [
+        {
+            "path": str(tmp_path / "a.png"),
+            "relative_path": "images/a.png",
+            "page_number": 0,
+            "caption": "Alpha chart",
+        },
+        {
+            "path": str(tmp_path / "b.png"),
+            "relative_path": "images/b.png",
+            "page_number": 0,
+            "caption": "Beta chart",
+        },
+    ]
+
+    updated = service._attach_prepared_images_to_blocks(blocks, prepared)
+
+    assert updated[0].text == "Page summary"
+    assert "Alpha chart" in updated[1].text
+    assert "Beta chart" not in updated[1].text
+    assert "Beta chart" in updated[2].text
+    assert "Alpha chart" not in updated[2].text
 
 
 def test_mineru_content_list_table_body_is_indexed_as_searchable_text(tmp_path):

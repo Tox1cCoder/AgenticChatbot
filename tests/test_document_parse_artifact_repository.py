@@ -19,7 +19,9 @@ from uuid import uuid4
 from app.models.document_parse_artifact import DocumentParseArtifact
 from app.repositories.document_parse_artifact import DocumentParseArtifactRepository
 from app.services.document_blocks import NormalizedBlock
+from app.services.document_chunk_builder import DocumentChunkBuilder
 from app.services.document_parse_service import DocumentParseService, ParseResult
+from app.services.document_processing_service import DocumentProcessingService
 
 
 class _FakeQuery:
@@ -230,9 +232,44 @@ def test_load_parse_result_reads_version_1_chunk_artifact(tmp_path):
 
     assert len(result.blocks) == 1
     assert result.blocks[0].text == "Legacy paragraph"
-    assert result.blocks[0].page_start == 3
-    assert result.blocks[0].page_end == 4
+    assert result.blocks[0].page_start == 4
+    assert result.blocks[0].page_end == 5
+    assert result.blocks[0].metadata["parser_page_start"] == 3
+    assert result.blocks[0].metadata["parser_page_end"] == 4
     assert result.blocks[0].metadata["has_tables"] is True
+
+
+def test_version_1_artifact_chunks_keep_one_to_one_index_boundaries(tmp_path):
+    artifact_path = tmp_path / "normalized_chunks.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "chunks_with_metadata": [
+                    {"text": "Legacy alpha", "page_start": 0, "page_end": 0},
+                    {"text": "Legacy beta", "page_start": 1, "page_end": 1},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact = SimpleNamespace(storage_path=str(artifact_path))
+    settings = MagicMock()
+    settings.rag_chunk_target_tokens = 400
+    settings.rag_chunk_overlap_tokens = 40
+    settings.rag_chunk_max_tokens = 800
+    parse_result = DocumentParseService(settings=settings).load_parse_result(artifact)
+    processing_service = object.__new__(DocumentProcessingService)
+    processing_service.settings = settings
+    processing_service.document_chunk_builder = DocumentChunkBuilder(
+        target_tokens=400,
+        overlap_tokens=40,
+        max_tokens=800,
+    )
+
+    built = processing_service._build_chunks_for_indexing(parse_result.blocks)
+
+    assert [chunk.content for chunk in built] == ["Legacy alpha", "Legacy beta"]
+    assert [(chunk.page_start, chunk.page_end) for chunk in built] == [(1, 1), (2, 2)]
 
 
 def test_persist_parse_result_writes_version_2_structural_blocks(tmp_path):

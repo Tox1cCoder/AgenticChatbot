@@ -666,6 +666,11 @@ class DocumentProcessingService:
         if not prepared_images:
             return blocks
 
+        explicitly_owned_images = {
+            image_index
+            for image_index, image in enumerate(prepared_images)
+            if any(self._block_explicitly_owns_image(block, image) for block in blocks)
+        }
         updated: list[NormalizedBlock] = []
         for block_index, block in enumerate(blocks):
             block_view = {
@@ -674,8 +679,16 @@ class DocumentProcessingService:
             }
             matching_images = [
                 image
-                for image in prepared_images
-                if self._image_matches_block(image, block, block_view, block_index)
+                for image_index, image in enumerate(prepared_images)
+                if self._block_explicitly_owns_image(block, image)
+                or (
+                    image_index not in explicitly_owned_images
+                    and self._image_matches_normalized_block_page(
+                        image,
+                        block_view,
+                        block_index,
+                    )
+                )
             ]
             if not matching_images:
                 updated.append(block)
@@ -709,33 +722,52 @@ class DocumentProcessingService:
         return updated
 
     @staticmethod
-    def _image_matches_block(
-        image: dict[str, Any],
+    def _block_explicitly_owns_image(
         block: NormalizedBlock,
+        image: dict[str, Any],
+    ) -> bool:
+        block_paths = {
+            str(block.metadata.get(key))
+            for key in ("path", "img_path", "relative_path")
+            if block.metadata.get(key)
+        }
+        for linked_image in block.metadata.get("images") or []:
+            if not isinstance(linked_image, dict):
+                continue
+            block_paths.update(
+                str(linked_image[key])
+                for key in ("path", "img_path", "relative_path", "stored_path")
+                if linked_image.get(key)
+            )
+        image_paths = {
+            str(image.get(key))
+            for key in ("path", "img_path", "relative_path", "stored_path")
+            if image.get(key)
+        }
+        if block_paths & image_paths:
+            return True
+        return any(
+            left.replace("\\", "/").endswith(right.replace("\\", "/"))
+            or right.replace("\\", "/").endswith(left.replace("\\", "/"))
+            for left in block_paths
+            for right in image_paths
+        )
+
+    @staticmethod
+    def _image_matches_normalized_block_page(
+        image: dict[str, Any],
         block_view: dict[str, Any],
         block_index: int,
     ) -> bool:
-        if block.kind == "image":
-            block_paths = {
-                str(block.metadata.get(key))
-                for key in ("path", "img_path", "relative_path")
-                if block.metadata.get(key)
-            }
-            image_paths = {
-                str(image.get(key))
-                for key in ("path", "img_path", "relative_path", "stored_path")
-                if image.get(key)
-            }
-            if block_paths & image_paths:
-                return True
-            if any(
-                left.replace("\\", "/").endswith(right.replace("\\", "/"))
-                or right.replace("\\", "/").endswith(left.replace("\\", "/"))
-                for left in block_paths
-                for right in image_paths
-            ):
-                return True
-        return DocumentProcessingService._image_matches_chunk(image, block_view, block_index)
+        canonical_image = dict(image)
+        parser_page = image.get("page_number")
+        if parser_page is not None:
+            canonical_image["page_number"] = int(parser_page) + 1
+        return DocumentProcessingService._image_matches_chunk(
+            canonical_image,
+            block_view,
+            block_index,
+        )
 
     async def _store_prepared_images(
         self,
