@@ -263,6 +263,15 @@ class _QdrantGenerationFake:
         self.fail_old_cleanup = False
         self.on_inactive_payload = None
 
+    def get_collections(self):
+        return SimpleNamespace(collections=[])
+
+    def create_collection(self, **_kwargs):
+        self.events.append(("create_collection", None))
+
+    def create_payload_index(self, *, field_name, **_kwargs):
+        self.events.append(("create_payload_index", field_name))
+
     def upsert(self, *, collection_name, points):
         self.events.append(("upsert", collection_name))
         if self.fail_upsert is not None:

@@ -481,6 +481,128 @@ def test_ensure_collection_creates_if_absent():
     assert getattr(vectors, "size", None) == 8
 
 
+def test_collection_bootstrap_creates_filter_indexes_before_first_upsert():
+    document = _make_document()
+    persisted = [_persisted_chunk(document.id, 0)]
+    repo = MagicMock()
+    repo.replace_document_chunks.return_value = persisted
+    qdrant = MagicMock()
+    qdrant.get_collections.return_value = SimpleNamespace(collections=[])
+    service = _build_service(chunk_repo=repo, qdrant_client=qdrant)
+
+    service.index_document(
+        document=document,
+        built_chunks=[_make_built_chunk(0)],
+        parse_artifact_id=None,
+    )
+
+    fields = [
+        call.kwargs["field_name"]
+        for call in qdrant.create_payload_index.call_args_list
+    ]
+    assert fields == [
+        "user_id",
+        "conversation_id",
+        "document_id",
+        "modality",
+        "index_generation",
+        "is_active",
+    ]
+    first_upsert = next(
+        index
+        for index, call in enumerate(qdrant.mock_calls)
+        if call[0] == "upsert"
+    )
+    last_index = max(
+        index
+        for index, call in enumerate(qdrant.mock_calls)
+        if call[0] == "create_payload_index"
+    )
+    assert last_index < first_upsert
+
+
+def test_collection_bootstrap_is_idempotent_per_service_instance():
+    qdrant = MagicMock()
+    qdrant.get_collections.return_value = SimpleNamespace(
+        collections=[SimpleNamespace(name="documents_gemini_embedding_2_3072")]
+    )
+    qdrant.get_collection.return_value = SimpleNamespace(
+        config=SimpleNamespace(params=SimpleNamespace(vectors=SimpleNamespace(size=8)))
+    )
+    service = _build_service(qdrant_client=qdrant)
+
+    service.ensure_collection()
+    service.ensure_collection()
+
+    assert qdrant.create_payload_index.call_count == 6
+
+
+def test_tenant_payload_index_falls_back_only_for_explicit_unsupported_version():
+    from httpx import Headers
+    from qdrant_client.http.exceptions import UnexpectedResponse
+    from qdrant_client.models import KeywordIndexParams, PayloadSchemaType
+
+    qdrant = MagicMock()
+    qdrant.get_collections.return_value = SimpleNamespace(collections=[])
+    unsupported = UnexpectedResponse(
+        status_code=400,
+        reason_phrase="Bad Request",
+        content=b'Unknown field "is_tenant" for KeywordIndexParams',
+        headers=Headers(),
+    )
+    qdrant.create_payload_index.side_effect = [unsupported, None, None, None, None, None, None]
+    service = _build_service(qdrant_client=qdrant)
+
+    service.ensure_collection()
+
+    user_calls = [
+        call for call in qdrant.create_payload_index.call_args_list
+        if call.kwargs["field_name"] == "user_id"
+    ]
+    assert len(user_calls) == 2
+    assert isinstance(user_calls[0].kwargs["field_schema"], KeywordIndexParams)
+    assert user_calls[0].kwargs["field_schema"].is_tenant is True
+    assert user_calls[1].kwargs["field_schema"] == PayloadSchemaType.KEYWORD
+
+
+def test_payload_index_does_not_hide_unrelated_qdrant_errors():
+    qdrant = MagicMock()
+    qdrant.get_collections.return_value = SimpleNamespace(collections=[])
+    qdrant.create_payload_index.side_effect = RuntimeError("network down")
+    service = _build_service(qdrant_client=qdrant)
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="network down"):
+        service.ensure_collection()
+
+
+def test_indexing_aborts_before_embedding_and_upsert_when_bootstrap_is_unavailable():
+    document = _make_document()
+    repository = MagicMock()
+    qdrant = MagicMock()
+    qdrant.get_collections.side_effect = RuntimeError("unavailable")
+    embedding = _EmbeddingStub(dim=8)
+    service = _build_service(
+        chunk_repo=repository,
+        qdrant_client=qdrant,
+        embedding_service=embedding,
+    )
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="payload indexes"):
+        service.index_document(
+            document=document,
+            built_chunks=[_make_built_chunk(0)],
+            parse_artifact_id=None,
+        )
+
+    assert embedding.doc_calls == []
+    qdrant.upsert.assert_not_called()
+    repository.create_generation_chunks.assert_not_called()
+
+
 def test_ensure_collection_validates_dimension_match():
     import pytest
 

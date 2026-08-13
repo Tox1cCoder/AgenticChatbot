@@ -26,12 +26,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
+from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
     FilterSelector,
+    KeywordIndexParams,
+    KeywordIndexType,
     MatchValue,
+    PayloadSchemaType,
     PointStruct,
     VectorParams,
 )
@@ -81,6 +85,7 @@ class DocumentIndexService:
         )
         self.chunking_version = chunking_version
         self.qdrant_upsert_batch_size = max(1, int(qdrant_upsert_batch_size))
+        self._payload_indexes_ready = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -113,18 +118,21 @@ class DocumentIndexService:
                     distance=Distance.COSINE,
                 ),
             )
+            self._ensure_payload_indexes()
             return
 
         info = self.qdrant_client.get_collection(self.collection_name)
         try:
             actual_size = int(info.config.params.vectors.size)
         except AttributeError:
+            self._ensure_payload_indexes()
             return
         if actual_size != self.embedding_dimension:
             raise ValueError(
                 f"Collection '{self.collection_name}' has vector size "
                 f"{actual_size}, expected {self.embedding_dimension}"
             )
+        self._ensure_payload_indexes()
 
     def index_document(
         self,
@@ -137,9 +145,14 @@ class DocumentIndexService:
         activate: bool = True,
     ) -> list[DocumentChunk]:
         """Build and verify a replacement generation before atomically activating it."""
-        document_id = self._coerce_uuid(document.id)
         if not built_chunks:
             raise ValueError("document indexing requires at least one chunk")
+        self.ensure_collection()
+        if not self._payload_indexes_ready:
+            raise RuntimeError(
+                "Qdrant payload indexes are unavailable; refusing document upsert"
+            )
+        document_id = self._coerce_uuid(document.id)
         generation = self.generation_repository.create(
             document_id=document_id,
             embedding_provider=self.embedding_provider,
@@ -234,6 +247,55 @@ class DocumentIndexService:
                 )
 
         return persisted
+
+    def _ensure_payload_indexes(self) -> None:
+        if self._payload_indexes_ready:
+            return
+        tenant_schema = KeywordIndexParams(type=KeywordIndexType.KEYWORD, is_tenant=True)
+        try:
+            self.qdrant_client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="user_id",
+                field_schema=tenant_schema,
+                wait=True,
+            )
+        except UnexpectedResponse as exc:
+            if not self._tenant_index_is_unsupported(exc):
+                raise
+            self.qdrant_client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="user_id",
+                field_schema=PayloadSchemaType.KEYWORD,
+                wait=True,
+            )
+        for field_name in (
+            "conversation_id",
+            "document_id",
+            "modality",
+            "index_generation",
+        ):
+            self.qdrant_client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name=field_name,
+                field_schema=PayloadSchemaType.KEYWORD,
+                wait=True,
+            )
+        self.qdrant_client.create_payload_index(
+            collection_name=self.collection_name,
+            field_name="is_active",
+            field_schema=PayloadSchemaType.BOOL,
+            wait=True,
+        )
+        self._payload_indexes_ready = True
+
+    @staticmethod
+    def _tenant_index_is_unsupported(exc: UnexpectedResponse) -> bool:
+        content = getattr(exc, "content", b"")
+        message = content.decode("utf-8", errors="replace").casefold()
+        return getattr(exc, "status_code", None) in {400, 422} and (
+            "is_tenant" in message
+            and any(token in message for token in ("unknown", "unsupported", "extra"))
+        )
 
     def _confirm_active_generation(
         self, document_id: UUID, generation_id: UUID

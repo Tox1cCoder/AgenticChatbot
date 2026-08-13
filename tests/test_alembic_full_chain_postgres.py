@@ -23,7 +23,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _SCRATCH_DATABASE_PREFIX = "chatbot_migration_smoke_"
 _SCRATCH_DATABASE_RE = re.compile(r"chatbot_migration_smoke_[0-9a-f]{32}")
 _OLD_HEAD = "a4b5c6d7e8f9"
-_HEAD = "c3d4e5f6a7b8"
+_HEAD = "d4e5f6a7b8c9"
 _PREVIOUS_HEAD = "b2c3d4e5f6a7"
 _PRE_RECONCILIATION_HEAD = "1ce64a959f7d"
 _PARALLEL_ALLOW_CUSTOM_MODEL_HEAD = "0f1e2d3c4b5a"
@@ -326,6 +326,10 @@ def _assert_head_schema(scratch_url: URL) -> None:
                 index["name"]: index for index in schema.get_indexes("document_index_generations")
             }
             assert generation_indexes["uq_document_index_generation_active"]["unique"] is True
+            chunk_indexes = {
+                index["name"] for index in schema.get_indexes("document_chunks")
+            }
+            assert "idx_document_chunks_content_simple_fts" in chunk_indexes
 
             settings_columns = {
                 column["name"] for column in schema.get_columns("tool_approval_settings")

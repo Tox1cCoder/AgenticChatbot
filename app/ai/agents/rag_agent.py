@@ -28,6 +28,7 @@ from ...models.document_chunk import DocumentChunk
 from ...observability.conversation_compaction import conversation_compaction_metrics
 from ...repositories.document_chunk import DocumentChunkRepository
 from ...repositories.document_image import DocumentImageRepository
+from ...services.rag_retrieval import RAGRetriever, RetrievalScope
 from ..context_overflow import is_context_overflow_error, prepare_aggressive_context_retry
 from ..image_context import build_multimodal_content, has_image_parts, image_url_part
 from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
@@ -82,6 +83,7 @@ class RAGAgent(BaseAgent):
         collection_name: str = "documents_gemini_embedding_2_3072",
         runtime_model_resolver: IRuntimeModelResolver | None = None,
         recorder: "ModelUsageRecorder | None" = None,
+        retriever: RAGRetriever | None = None,
     ):
         # Initialise BaseAgent (sets model_name, gemini_client, langchain_model,
         # mcp_manager, tools, skills tracking, etc.)
@@ -103,6 +105,17 @@ class RAGAgent(BaseAgent):
         self.score_threshold = settings.rag_score_threshold
         self.enable_reranking = settings.enable_reranking
         self.reranker = None
+        self.retriever = retriever or RAGRetriever(
+            qdrant_client=qdrant_client,
+            embedding_service=embedding_service,
+            chunk_repository=DocumentChunkRepository(SessionLocal),
+            collection_name=collection_name,
+            hybrid_enabled=settings.rag_hybrid_retrieval_enabled,
+            dense_candidate_limit=settings.rag_dense_candidate_limit,
+            lexical_candidate_limit=settings.rag_lexical_candidate_limit,
+            rrf_k=settings.rag_rrf_k,
+            score_threshold=settings.rag_score_threshold,
+        )
 
         # Thinking support
         self._last_thinking_summary = None
@@ -222,124 +235,87 @@ class RAGAgent(BaseAgent):
             logger.warning("RAG search rejected because authenticated server scope is incomplete")
             return []
 
-        # Use configured top_k if not specified
         if top_k is None:
             top_k = self.top_k
-
-        query_embedding = list(self.embedding_service.embed_query(query))
-
-        must_conditions: list[FieldCondition] = []
-        if conversation_id:
-            must_conditions.append(
-                FieldCondition(key="conversation_id", match=MatchValue(value=conversation_id))
+        try:
+            typed_conversation_id: Any = UUID(str(conversation_id))
+        except ValueError:
+            # Compatibility for isolated legacy tests; production IDs are UUIDs.
+            typed_conversation_id = conversation_id
+        scope = RetrievalScope(
+            user_id=user_id,
+            conversation_id=typed_conversation_id,
+        )
+        retriever = getattr(self, "retriever", None)
+        resolve_generation_fingerprint = True
+        if retriever is None:
+            retriever = RAGRetriever(
+                qdrant_client=self.qdrant_client,
+                embedding_service=self.embedding_service,
+                chunk_repository=DocumentChunkRepository(SessionLocal),
+                collection_name=self.collection_name,
+                hybrid_enabled=False,
+                dense_candidate_limit=max(self.top_k, top_k),
+                lexical_candidate_limit=40,
+                rrf_k=60,
+                score_threshold=self.score_threshold,
             )
-        if user_id:
-            must_conditions.append(FieldCondition(key="user_id", match=MatchValue(value=user_id)))
+            resolve_generation_fingerprint = False
+        search_kwargs: dict[str, Any] = {"final_limit": top_k}
+        if not resolve_generation_fingerprint:
+            # Construction-bypassing legacy callers have no server-resolved
+            # fingerprint; production agents receive the configured retriever.
+            search_kwargs["resolve_generation_fingerprint"] = False
+        candidates = retriever.search(query, scope, **search_kwargs)
 
-        search_filter = Filter(must=must_conditions) if must_conditions else None
-
-        search_results = self.qdrant_client.query_points(
-            collection_name=self.collection_name,
-            query=query_embedding,
-            limit=top_k,
-            score_threshold=self.score_threshold,
-            query_filter=search_filter,
-        ).points
-
-        hydrated_chunks: dict[str, Any] = {}
-        chunk_ids: list[UUID] = []
-        for result in search_results:
-            raw_chunk_id = result.payload.get("chunk_id") if result.payload else None
-            if not raw_chunk_id:
-                continue
-            try:
-                chunk_ids.append(UUID(str(raw_chunk_id)))
-            except Exception:
-                logger.warning("Skipping invalid chunk_id in Qdrant payload: %s", raw_chunk_id)
-
-        if chunk_ids:
-            try:
-                chunk_repo = DocumentChunkRepository(SessionLocal)
-                chunks = chunk_repo.get_by_ids_for_scope(
-                    chunk_ids,
-                    user_id=user_id,
-                    conversation_id=conversation_id,
-                )
-                hydrated_chunks = {str(chunk.id): chunk for chunk in chunks}
-            except Exception:
-                logger.exception("Failed to hydrate SQL chunks for RAG search")
-
-        image_repo = DocumentImageRepository(SessionLocal) if hydrated_chunks else None
-
-        results = []
-        for result in search_results:
-            payload = result.payload or {}
-            raw_chunk_id = payload.get("chunk_id")
-            if not raw_chunk_id:
-                logger.warning(
-                    "Skipping Qdrant result without chunk_id for document_id=%s",
-                    payload.get("document_id"),
-                )
-                continue
-
-            chunk = hydrated_chunks.get(str(raw_chunk_id)) if raw_chunk_id else None
-
-            if chunk is not None:
-                chunk_images = []
-                if image_repo is not None:
-                    try:
-                        chunk_images = image_repo.get_by_chunk_id_for_scope(
-                            chunk.id,
-                            user_id=user_id,
-                            conversation_id=conversation_id,
-                        )
-                    except Exception:
-                        logger.exception("Failed to hydrate images for chunk %s", chunk.id)
-
-                document = getattr(chunk, "document", None)
-                source = getattr(document, "filename", None) or payload.get("source", "unknown")
-                page_start = getattr(chunk, "page_start", None)
-                page_end = getattr(chunk, "page_end", None)
-                page_number = (
-                    page_start if page_start is not None and page_start == page_end else None
-                )
-                image_ids = [str(image.id) for image in chunk_images]
-                image_paths = [image.image_path for image in chunk_images]
-                image_captions = [image.image_caption or "" for image in chunk_images]
-                content = chunk.content
-                document_id = str(chunk.document_id)
-                chunk_index = chunk.chunk_index
-                chunk_metadata = getattr(chunk, "chunk_metadata", None) or {}
-            else:
-                logger.error(
-                    "Qdrant returned chunk_id=%s but no SQL document_chunks row exists",
-                    raw_chunk_id,
-                )
-                continue
-
+        results: list[dict[str, Any]] = []
+        image_repo = DocumentImageRepository(SessionLocal) if candidates else None
+        for candidate in candidates:
+            chunk_images = []
+            if image_repo is not None and candidate.chunk_id is not None:
+                try:
+                    chunk_images = image_repo.get_by_chunk_id_for_scope(
+                        candidate.chunk_id,
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                    )
+                except Exception:
+                    logger.exception("Failed to hydrate images for chunk %s", candidate.chunk_id)
+            metadata = candidate.metadata or {}
+            page_number = (
+                candidate.page_start
+                if candidate.page_start is not None
+                and candidate.page_start == candidate.page_end
+                else None
+            )
             results.append(
                 {
-                    "content": content,
-                    "source": source,
-                    "score": result.score,
+                    "content": candidate.content,
+                    "source": candidate.filename,
+                    "score": (
+                        candidate.dense_score
+                        if candidate.dense_score is not None
+                        else candidate.fused_score
+                    ),
                     "page_number": page_number,
-                    "page_start": page_start,
-                    "page_end": page_end,
-                    "document_id": document_id,
-                    "conversation_id": payload.get("conversation_id") or None,
-                    "chunk_id": str(raw_chunk_id) if raw_chunk_id else None,
-                    "chunk_index": chunk_index,
+                    "page_start": candidate.page_start,
+                    "page_end": candidate.page_end,
+                    "document_id": str(candidate.document_id),
+                    "conversation_id": str(conversation_id),
+                    "chunk_id": str(candidate.chunk_id) if candidate.chunk_id else None,
+                    "chunk_index": candidate.chunk_index,
                     "has_tables": bool(
-                        chunk_metadata.get("has_tables")
-                        or chunk_metadata.get("contains_table")
-                        or payload.get("has_tables", False)
+                        metadata.get("has_tables") or metadata.get("contains_table")
                     ),
-                    "table_count": int(
-                        chunk_metadata.get("table_count") or payload.get("table_count", 0) or 0
-                    ),
-                    "image_ids": image_ids,
-                    "image_paths": image_paths,
-                    "image_captions": image_captions,
+                    "table_count": int(metadata.get("table_count") or 0),
+                    "image_ids": [str(image.id) for image in chunk_images],
+                    "image_paths": [image.image_path for image in chunk_images],
+                    "image_captions": [image.image_caption or "" for image in chunk_images],
+                    "dense_rank": candidate.dense_rank,
+                    "dense_score": candidate.dense_score,
+                    "lexical_rank": candidate.lexical_rank,
+                    "lexical_score": candidate.lexical_score,
+                    "fused_score": candidate.fused_score,
                 }
             )
 

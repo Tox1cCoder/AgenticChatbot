@@ -41,6 +41,7 @@ def _build_minimal_rag_agent(qdrant_stub, embedding_stub) -> RAGAgent:
     agent.agentic_max_iterations = 5
     agent.agentic_preview_chars = 500
     agent._last_thinking_summary = None
+    agent.retriever = None
     return agent
 
 
@@ -93,6 +94,78 @@ def test_rag_search_filter_includes_user_id_and_conversation_id():
     keys = _filter_keys(filter_arg)
     assert "conversation_id" in keys, f"conversation_id missing from filter: {keys}"
     assert "user_id" in keys, f"user_id missing from filter: {keys}"
+
+
+def test_rag_search_delegates_to_typed_retriever_and_adapts_public_dict_contract():
+    from app.services.rag_retrieval import RetrievalCandidate, RetrievalScope
+
+    qdrant = _fake_qdrant()
+    agent = _build_minimal_rag_agent(qdrant, _fake_embedding())
+    conversation_id = uuid4()
+    document_id = uuid4()
+    chunk_id = uuid4()
+    agent.retriever = MagicMock()
+    agent.retriever.search.return_value = [
+        RetrievalCandidate(
+            document_id=document_id,
+            chunk_id=chunk_id,
+            image_id=None,
+            modality="text",
+            content="SQL-authorized content",
+            filename="report.pdf",
+            page_start=2,
+            page_end=2,
+            section_path=("Results",),
+            dense_rank=1,
+            dense_score=0.73,
+            lexical_rank=2,
+            lexical_score=0.12,
+            fused_score=0.03,
+            chunk_index=4,
+            metadata={"has_tables": True, "table_count": 1},
+        )
+    ]
+
+    with patch("app.ai.agents.rag_agent.DocumentImageRepository") as image_repo_cls:
+        image_repo_cls.return_value.get_by_chunk_id_for_scope.return_value = []
+        results = asyncio.run(
+            agent._search(
+                "revenue",
+                top_k=3,
+                conversation_id=str(conversation_id),
+                user_id="server-user",
+            )
+        )
+
+    agent.retriever.search.assert_called_once_with(
+        "revenue",
+        RetrievalScope(user_id="server-user", conversation_id=conversation_id),
+        final_limit=3,
+    )
+    assert results == [
+        {
+            "content": "SQL-authorized content",
+            "source": "report.pdf",
+            "score": 0.73,
+            "page_number": 2,
+            "page_start": 2,
+            "page_end": 2,
+            "document_id": str(document_id),
+            "conversation_id": str(conversation_id),
+            "chunk_id": str(chunk_id),
+            "chunk_index": 4,
+            "has_tables": True,
+            "table_count": 1,
+            "image_ids": [],
+            "image_paths": [],
+            "image_captions": [],
+            "dense_rank": 1,
+            "dense_score": 0.73,
+            "lexical_rank": 2,
+            "lexical_score": 0.12,
+            "fused_score": 0.03,
+        }
+    ]
 
 
 @pytest.mark.parametrize(
@@ -199,7 +272,7 @@ def test_rag_search_isolates_two_users_sharing_conversation_id():
         ),
     }
     chunk_repo = MagicMock()
-    chunk_repo.get_by_ids_for_scope.side_effect = lambda chunk_ids, **_scope: [
+    chunk_repo.get_active_by_ids_for_scope.side_effect = lambda chunk_ids, **_scope: [
         chunk_map[cid] for cid in chunk_ids
     ]
     image_repo = MagicMock()
@@ -280,7 +353,7 @@ def test_rag_search_rehydrates_chunks_with_server_scope():
             document=SimpleNamespace(filename="foreign.pdf"),
         )
     ]
-    chunk_repo.get_by_ids_for_scope.return_value = []
+    chunk_repo.get_active_by_ids_for_scope.return_value = []
 
     with patch("app.ai.agents.rag_agent.DocumentChunkRepository") as chunk_repo_cls:
         chunk_repo_cls.return_value = chunk_repo
@@ -292,8 +365,8 @@ def test_rag_search_rehydrates_chunks_with_server_scope():
             )
         )
 
-    chunk_repo.get_by_ids_for_scope.assert_called_once()
-    call_kwargs = chunk_repo.get_by_ids_for_scope.call_args.kwargs
+    chunk_repo.get_active_by_ids_for_scope.assert_called_once()
+    call_kwargs = chunk_repo.get_active_by_ids_for_scope.call_args.kwargs
     assert call_kwargs.get("conversation_id") == "victim-conv"
     assert call_kwargs.get("user_id") == "victim-user"
     chunk_repo.get_by_ids.assert_not_called()
@@ -337,7 +410,7 @@ def test_rag_search_hydrates_sql_chunk_content_and_images_from_lookup_payload():
     )
 
     chunk_repo = MagicMock()
-    chunk_repo.get_by_ids_for_scope.return_value = [sql_chunk]
+    chunk_repo.get_active_by_ids_for_scope.return_value = [sql_chunk]
     image_repo = MagicMock()
     image_repo.get_by_chunk_id_for_scope.return_value = [sql_image]
 
@@ -393,7 +466,7 @@ def test_rag_search_reads_table_metadata_from_sql_chunk():
     )
 
     chunk_repo = MagicMock()
-    chunk_repo.get_by_ids_for_scope.return_value = [sql_chunk]
+    chunk_repo.get_active_by_ids_for_scope.return_value = [sql_chunk]
     image_repo = MagicMock()
     image_repo.get_by_chunk_id_for_scope.return_value = []
 

@@ -966,6 +966,25 @@ class Settings(BaseSettings):
         default=0.2,
         description="Minimum similarity score for retrieval",
     )
+    rag_hybrid_retrieval_enabled: bool = Field(
+        default=False,
+        description="Enable rank-fused dense and PostgreSQL lexical retrieval.",
+    )
+    rag_dense_candidate_limit: int = Field(
+        default=40,
+        ge=1,
+        description="Dense candidates considered before authorization and fusion.",
+    )
+    rag_lexical_candidate_limit: int = Field(
+        default=40,
+        ge=1,
+        description="Lexical candidates considered before authorization and fusion.",
+    )
+    rag_rrf_k: int = Field(
+        default=60,
+        ge=1,
+        description="Reciprocal-rank-fusion smoothing constant.",
+    )
     # Re-ranking Configuration
     enable_reranking: bool = Field(
         default=True,

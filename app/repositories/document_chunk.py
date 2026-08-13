@@ -11,12 +11,23 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import and_, func, literal, literal_column
 from sqlalchemy.orm import joinedload
 
 from app.models.conversation import Conversation
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.document_index_generation import DocumentIndexGeneration
+
+
+def postgres_lexical_expressions(query_text: str):
+    """Build the indexed PostgreSQL simple-language match and raw rank."""
+    language = literal_column("'simple'")
+    vector = func.to_tsvector(language, DocumentChunk.content)
+    tsquery = func.plainto_tsquery(language, query_text)
+    return vector.op("@@")(tsquery), func.ts_rank_cd(vector, tsquery).label(
+        "lexical_score"
+    )
 
 
 class DocumentChunkRepository:
@@ -310,6 +321,95 @@ class DocumentChunkRepository:
                 Conversation, Document.conversation_id == Conversation.id
             ).filter(Conversation.owner_id == user_id)
             return self._active(query).all()
+
+    def get_active_by_ids_for_scope(
+        self,
+        chunk_ids: Iterable[UUID],
+        *,
+        user_id: Any | None = None,
+        conversation_id: Any | None = None,
+    ) -> list[DocumentChunk]:
+        """Authorize candidate IDs against active SQL generations and scope."""
+        return self.get_by_ids_for_scope(
+            chunk_ids,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+
+    def get_active_generation_ids_for_scope(
+        self,
+        *,
+        user_id: Any | None = None,
+        conversation_id: Any | None = None,
+    ) -> list[UUID]:
+        if not user_id or not conversation_id:
+            return []
+        with self.session_factory() as db:
+            rows = (
+                db.query(DocumentIndexGeneration.id)
+                .join(Document, DocumentIndexGeneration.document_id == Document.id)
+                .join(Conversation, Document.conversation_id == Conversation.id)
+                .filter(Document.conversation_id == conversation_id)
+                .filter(Conversation.owner_id == user_id)
+                .filter(DocumentIndexGeneration.status == "active")
+                .order_by(DocumentIndexGeneration.id.asc())
+                .all()
+            )
+            return [row.id for row in rows]
+
+    def search_active_lexical_for_scope(
+        self,
+        query_text: str,
+        *,
+        user_id: Any | None = None,
+        conversation_id: Any | None = None,
+        limit: int = 40,
+    ) -> list[tuple[DocumentChunk, float]]:
+        """Return deterministic lexical candidates from active authorized rows."""
+        query_text = str(query_text or "").strip()
+        if not query_text or not user_id or not conversation_id:
+            return []
+        bounded_limit = max(1, int(limit))
+        with self.session_factory() as db:
+            base = (
+                db.query(DocumentChunk)
+                .options(joinedload(DocumentChunk.document))
+                .join(Document, DocumentChunk.document_id == Document.id)
+                .join(Conversation, Document.conversation_id == Conversation.id)
+                .join(
+                    DocumentIndexGeneration,
+                    DocumentChunk.index_generation_id == DocumentIndexGeneration.id,
+                )
+                .filter(Document.conversation_id == conversation_id)
+                .filter(Conversation.owner_id == user_id)
+                .filter(DocumentIndexGeneration.status == "active")
+            )
+            if db.get_bind().dialect.name == "postgresql":
+                match, score = postgres_lexical_expressions(query_text)
+                rows = (
+                    base.add_columns(score)
+                    .filter(match)
+                    .order_by(score.desc(), DocumentChunk.id.asc())
+                    .limit(bounded_limit)
+                    .all()
+                )
+            else:
+                terms = [term.casefold() for term in query_text.split() if term]
+                if not terms:
+                    return []
+                score = literal(1.0).label("lexical_score")
+                rows = (
+                    base.add_columns(score)
+                    .filter(
+                        and_(
+                            *(func.lower(DocumentChunk.content).contains(term) for term in terms)
+                        )
+                    )
+                    .order_by(DocumentChunk.id.asc())
+                    .limit(bounded_limit)
+                    .all()
+                )
+            return [(chunk, float(raw_score)) for chunk, raw_score in rows]
 
     def get_by_qdrant_point_ids(self, point_ids: Iterable[str]) -> list[DocumentChunk]:
         ids = [p for p in point_ids if p]

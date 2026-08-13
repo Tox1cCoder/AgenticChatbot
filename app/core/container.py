@@ -73,6 +73,7 @@ from app.services.rag_embedding_service import (
     GeminiRAGEmbeddingService,
     SentenceTransformerRAGEmbeddingService,
 )
+from app.services.rag_retrieval import RAGRetriever
 from app.services.semantic_breakpoints import EmbeddingSemanticBoundaryDetector
 from app.services.task_plan_service import TaskPlanService
 from app.services.tool_result_blob_service import ToolResultBlobService
@@ -310,6 +311,19 @@ class Container(containers.DeclarativeContainer):
         session_factory=db.provided.session,
     )
 
+    rag_retriever = providers.Factory(
+        RAGRetriever,
+        qdrant_client=qdrant_client,
+        embedding_service=rag_embedding_service,
+        chunk_repository=document_chunk_repository,
+        collection_name=settings.qdrant_collection_name,
+        hybrid_enabled=settings.rag_hybrid_retrieval_enabled,
+        dense_candidate_limit=settings.rag_dense_candidate_limit,
+        lexical_candidate_limit=settings.rag_lexical_candidate_limit,
+        rrf_k=settings.rag_rrf_k,
+        score_threshold=settings.rag_score_threshold,
+    )
+
     document_parse_artifact_repository = providers.Factory(
         DocumentParseArtifactRepository,
         session_factory=db.provided.session,
@@ -471,6 +485,9 @@ class Container(containers.DeclarativeContainer):
             model_usage_recorder=container.model_usage_recorder(),
             chat_image_service=container.chat_image_service(),
         )
+        rag_agent = getattr(workflow_runtime, "rag_agent", None)
+        if rag_agent is not None:
+            rag_agent.retriever = container.rag_retriever()
 
         return AIService(
             workflow_runtime=workflow_runtime,
