@@ -45,6 +45,40 @@ def test_offline_runner_executes_the_target_and_evaluators():
     assert "document_recall_at_1" in summary["metrics"]
 
 
+def test_offline_target_receives_only_inputs_not_gold_reference_outputs():
+    script = _script()
+
+    def target(inputs):
+        assert set(inputs) == {"question", "user_id", "conversation_id"}
+        return {"answer": "", "abstained": True}
+
+    script.run_offline(script.parse_args(["--offline"]), target=target)
+
+
+def test_offline_cli_fails_without_an_explicit_local_target():
+    assert _script().main(["--offline"]) == 1
+
+
+def test_compare_baseline_rejects_pending_human_review(monkeypatch):
+    script = _script()
+    monkeypatch.setenv("LANGSMITH_API_KEY", "configured")
+
+    class Client:
+        def list_examples(self, **_):
+            return []
+
+        def evaluate(self, *_args, **_kwargs):
+            return type("Results", (), {"experiment_name": "candidate"})()
+
+    monkeypatch.setattr(
+        script,
+        "run_online",
+        lambda _args: (Client(), type("Results", (), {"experiment_name": "candidate"})()),
+    )
+
+    assert script.main(["--compare-baseline", "baseline"]) == 1
+
+
 def test_online_runner_validates_remote_example_references_before_evaluation():
     script = _script()
 

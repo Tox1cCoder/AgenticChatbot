@@ -5,19 +5,37 @@ from __future__ import annotations
 import sys
 import types
 
+import pytest
+
 from app.evaluation.rag.ragas_metrics import ragas_evaluators
 
 
 def test_ragas_adapter_maps_run_and_example_to_collection_metric(monkeypatch):
     observed: dict[str, object] = {}
 
-    class FakeMetric:
-        def score(self, **kwargs):
-            observed["sample"] = kwargs
+    class ContextPrecisionMetric:
+        def score(self, *, user_input, reference, retrieved_contexts):
+            observed["context"] = (user_input, reference, retrieved_contexts)
             return type("MetricResult", (), {"value": 0.75})()
 
+    class AnswerRelevancyMetric:
+        def score(self, *, user_input, response):
+            observed["answer"] = (user_input, response)
+            return type("MetricResult", (), {"value": 0.5})()
+
+    class MultiModalFaithfulnessMetric:
+        def score(self, *, response, retrieved_contexts):
+            observed["multimodal"] = (response, retrieved_contexts)
+            return type("MetricResult", (), {"value": 1.0})()
+
     collections = types.ModuleType("ragas.metrics.collections")
-    collections.ContextPrecision = FakeMetric
+    collections.ContextPrecision = ContextPrecisionMetric
+    collections.ContextRecall = ContextPrecisionMetric
+    collections.NoiseSensitivity = ContextPrecisionMetric
+    collections.Faithfulness = MultiModalFaithfulnessMetric
+    collections.AnswerRelevancy = AnswerRelevancyMetric
+    collections.MultiModalFaithfulness = MultiModalFaithfulnessMetric
+    collections.MultiModalRelevance = MultiModalFaithfulnessMetric
     ragas = types.ModuleType("ragas")
     metrics = types.ModuleType("ragas.metrics")
     monkeypatch.setitem(sys.modules, "ragas", ragas)
@@ -34,8 +52,43 @@ def test_ragas_adapter_maps_run_and_example_to_collection_metric(monkeypatch):
         inputs = {"question": "question"}
         outputs = {"answer": "reference", "relevant_document_ids": ["doc-a"]}
 
-    result = ragas_evaluators(True, metric_factory=lambda _: FakeMetric())[0](Run(), Example())
+    metrics_by_key = {
+        "context_precision": ContextPrecisionMetric(),
+        "context_recall": ContextPrecisionMetric(),
+        "noise_sensitivity": ContextPrecisionMetric(),
+        "faithfulness": MultiModalFaithfulnessMetric(),
+        "answer_relevancy": AnswerRelevancyMetric(),
+        "multimodal_faithfulness": MultiModalFaithfulnessMetric(),
+        "multimodal_relevance": MultiModalFaithfulnessMetric(),
+    }
+    evaluators = ragas_evaluators(True, metric_factory=metrics_by_key.__getitem__)
+    result = evaluators[0](Run(), Example())
+    evaluators[4](Run(), Example())
+    evaluators[5](Run(), Example())
 
     assert result == {"key": "ragas_context_precision", "score": 0.75}
-    assert observed["sample"]["user_input"] == "question"
-    assert observed["sample"]["retrieved_contexts"] == ["source evidence"]
+    assert observed["context"] == ("question", "reference", ["source evidence"])
+    assert observed["answer"] == ("question", "answer")
+    assert observed["multimodal"] == ("answer", ["source evidence"])
+
+
+def test_ragas_collection_classes_require_explicit_dependencies(monkeypatch):
+    class Metric:
+        def __init__(self, *, llm):
+            self.llm = llm
+
+    collections = types.ModuleType("ragas.metrics.collections")
+    for name in (
+        "ContextPrecision",
+        "ContextRecall",
+        "NoiseSensitivity",
+        "Faithfulness",
+        "AnswerRelevancy",
+        "MultiModalFaithfulness",
+        "MultiModalRelevance",
+    ):
+        setattr(collections, name, Metric)
+    monkeypatch.setitem(sys.modules, "ragas.metrics.collections", collections)
+
+    with pytest.raises(RuntimeError, match="requires an explicit llm dependency"):
+        ragas_evaluators(True)

@@ -7,13 +7,43 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 RAGAS_COLLECTION_METRICS = {
-    "context_precision": ("ContextPrecision",),
-    "context_recall": ("ContextRecall",),
-    "noise_sensitivity": ("NoiseSensitivity",),
-    "faithfulness": ("Faithfulness",),
-    "answer_relevancy": ("AnswerRelevancy", "ResponseRelevancy"),
-    "multimodal_faithfulness": ("MultiModalFaithfulness", "MultimodalFaithfulness"),
-    "multimodal_relevance": ("MultiModalRelevance", "MultimodalRelevance"),
+    "context_precision": (
+        ("ContextPrecision",),
+        ("user_input", "reference", "retrieved_contexts"),
+        True,
+        False,
+    ),
+    "context_recall": (
+        ("ContextRecall",),
+        ("user_input", "reference", "retrieved_contexts"),
+        True,
+        False,
+    ),
+    "noise_sensitivity": (
+        ("NoiseSensitivity",),
+        ("user_input", "reference", "response", "retrieved_contexts"),
+        True,
+        False,
+    ),
+    "faithfulness": (("Faithfulness",), ("response", "retrieved_contexts"), True, False),
+    "answer_relevancy": (
+        ("AnswerRelevancy", "ResponseRelevancy"),
+        ("user_input", "response"),
+        True,
+        True,
+    ),
+    "multimodal_faithfulness": (
+        ("MultiModalFaithfulness", "MultimodalFaithfulness"),
+        ("response", "retrieved_contexts"),
+        True,
+        False,
+    ),
+    "multimodal_relevance": (
+        ("MultiModalRelevance", "MultimodalRelevance"),
+        ("response", "retrieved_contexts"),
+        True,
+        False,
+    ),
 }
 
 
@@ -54,24 +84,34 @@ def ragas_evaluators(
     collections = importlib.import_module("ragas.metrics.collections")
     evaluators: list[Callable[[Any, Any], dict[str, Any]]] = []
     missing: list[str] = []
-    for key, names in RAGAS_COLLECTION_METRICS.items():
+    for key, (names, arguments, needs_llm, needs_embeddings) in RAGAS_COLLECTION_METRICS.items():
         metric_name = next((name for name in names if hasattr(collections, name)), None)
         metric = metric_factory(key) if metric_factory else getattr(collections, metric_name, None)
         if metric is None:
             missing.append("/".join(names))
         else:
             if isinstance(metric, type):
-                kwargs = {
-                    name: value
-                    for name, value in {"llm": llm, "embeddings": embeddings}.items()
-                    if value
-                }
+                if needs_llm and llm is None:
+                    raise RuntimeError(f"RAGAS {key} requires an explicit llm dependency")
+                if needs_embeddings and embeddings is None:
+                    raise RuntimeError(f"RAGAS {key} requires an explicit embeddings dependency")
+                kwargs = {}
+                if needs_llm:
+                    kwargs["llm"] = llm
+                if needs_embeddings:
+                    kwargs["embeddings"] = embeddings
                 metric = metric(**kwargs)
 
             def evaluate(
-                run: Any, example: Any, *, _metric: Any = metric, _key: str = key
+                run: Any,
+                example: Any,
+                *,
+                _metric: Any = metric,
+                _key: str = key,
+                _arguments: tuple[str, ...] = arguments,
             ) -> dict[str, Any]:
-                result = _metric.score(**_sample(run, example))
+                sample = _sample(run, example)
+                result = _metric.score(**{argument: sample[argument] for argument in _arguments})
                 score = getattr(result, "value", result)
                 return {"key": f"ragas_{_key}", "score": float(score)}
 

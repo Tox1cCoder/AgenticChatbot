@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -33,6 +34,22 @@ def build_http_target(
         payload = response.json()
         return dict(payload.get("output", payload))
 
+    return target
+
+
+def load_local_target(factory_path: str | None) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
+    """Load an explicit local RAG target; never synthesize answers from gold data."""
+    if not factory_path:
+        raise RuntimeError(
+            "offline evaluation requires --target MODULE:FUNCTION for a local RAG target; "
+            "the repository has no configured runtime service target"
+        )
+    module_name, separator, function_name = factory_path.partition(":")
+    if not separator or not module_name or not function_name:
+        raise ValueError("--target must be MODULE:FUNCTION")
+    target = getattr(importlib.import_module(module_name), function_name)
+    if not callable(target):
+        raise ValueError("--target must resolve to a callable RAG target")
     return target
 
 

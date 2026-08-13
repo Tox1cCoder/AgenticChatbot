@@ -107,7 +107,7 @@ dev = [
     "ruff>=0.15.2",
 ]
 eval = [
-    "ragas>=0.3,<1.0",
+    "ragas>=0.3.9,<1.0",
 ]
 # `app/ui/` ships inside the wheel but is imported only by demo.py, the
 # Streamlit frontend. Keeping streamlit out of the core dependency list stops

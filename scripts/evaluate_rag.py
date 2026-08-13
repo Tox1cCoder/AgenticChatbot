@@ -25,7 +25,7 @@ from app.evaluation.rag.metrics import (
 )
 from app.evaluation.rag.ragas_metrics import ragas_evaluators
 from app.evaluation.rag.release_gates import compare_release_gates, load_release_gates
-from app.evaluation.rag.target import build_http_target, scoped_target
+from app.evaluation.rag.target import build_http_target, load_local_target, scoped_target
 
 DEFAULT_DATASET = "rag-golden-v1"
 DEFAULT_DATASET_TAG = "v1"
@@ -46,6 +46,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--compare-baseline", metavar="EXPERIMENT")
     parser.add_argument("--ragas-factory", metavar="MODULE:CALLABLE")
+    parser.add_argument("--target", metavar="MODULE:FUNCTION")
     return parser.parse_args(argv)
 
 
@@ -78,49 +79,6 @@ def _examples_to_rows(examples: Sequence[Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _offline_target(rows: Sequence[dict[str, Any]]) -> Any:
-    by_question = {row["inputs"]["question"]: row for row in rows}
-
-    def target(inputs: dict[str, Any]) -> dict[str, Any]:
-        reference = by_question[inputs["question"]]["reference"]
-        evidence = [
-            {
-                "evidence_id": f"E{index}",
-                "document_id": document_id,
-                "chunk_id": None,
-                "page_start": 1,
-                "page_end": 1,
-                "content": "Controlled evaluation fixture evidence.",
-            }
-            for index, document_id in enumerate(reference["relevant_document_ids"], start=1)
-        ]
-        return {
-            "answer": reference.get("answer") or "I do not have enough evidence to answer that.",
-            "abstained": bool(reference["should_abstain"]),
-            "candidates": [
-                {"document_id": item["document_id"], "chunk_id": None, "rank": index, "score": 1.0}
-                for index, item in enumerate(evidence, start=1)
-            ],
-            "evidence": evidence,
-            "claims": [
-                {
-                    "text": "Controlled answer",
-                    "evidence_ids": [item["evidence_id"] for item in evidence],
-                }
-            ]
-            if evidence
-            else [],
-            "citations_valid": True,
-            "tool_trajectory": ["search_chunks"],
-            "stage_ms": {"retrieval": 1.0, "generation": 1.0},
-            "input_tokens": 1,
-            "output_tokens": 1,
-            "cost_usd": 0.0,
-        }
-
-    return target
-
-
 def _ragas_dependencies(factory_path: str | None) -> dict[str, Any]:
     if not factory_path:
         raise ValueError("--with-ragas requires --ragas-factory MODULE:CALLABLE")
@@ -137,7 +95,7 @@ def run_offline(args: argparse.Namespace, *, target: Any | None = None) -> dict[
     """Execute every local example through deterministic evaluators without upload."""
     summary = offline_summary(args.dataset, args.dataset_tag)
     rows = load_golden_dataset(ROOT / "eval" / "rag" / "golden_v1.jsonl")
-    target = target or _offline_target(rows)
+    target = target or load_local_target(getattr(args, "target", None))
     dependencies = (
         _ragas_dependencies(getattr(args, "ragas_factory", None)) if args.with_ragas else {}
     )
@@ -204,12 +162,20 @@ def run_online(
         load_corpus_manifest(ROOT / "eval" / "rag" / "corpus_manifest.jsonl"),
     )
     target = scoped_target(target_factory(), prepare_scope())
+    local_rows = load_golden_dataset(ROOT / "eval" / "rag" / "golden_v1.jsonl")
+    pending_review = any(
+        row["metadata"].get("label_review_status") == "pending_human_review" for row in local_rows
+    )
     results = client.evaluate(
         target,
         data=examples,
         evaluators=evaluators,
         summary_evaluators=deterministic_summary_evaluators(),
         experiment_prefix=args.experiment_prefix,
+        metadata={
+            "evaluation_label_review": "pending" if pending_review else "reviewed",
+            "binding": not pending_review,
+        },
         upload_results=not args.offline,
     )
     return client, results
@@ -256,6 +222,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"online evaluation was not recorded: {message}", file=sys.stderr)
         return 1
     if args.compare_baseline:
+        local_rows = load_golden_dataset(ROOT / "eval" / "rag" / "golden_v1.jsonl")
+        if any(
+            row["metadata"].get("label_review_status") == "pending_human_review"
+            for row in local_rows
+        ):
+            print(
+                "release-gate comparison blocked: dataset labels are pending human review",
+                file=sys.stderr,
+            )
+            return 1
         try:
             gates = load_release_gates(ROOT / "eval" / "rag" / "release_gates.json")
             candidate_name = getattr(results, "experiment_name", None)
