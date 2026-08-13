@@ -77,11 +77,16 @@ class EmbeddingSemanticBoundaryDetector:
                 "semantic embedding count does not match normalized block count"
             )
         distances = [1.0 - cosine(left, right) for left, right in pairwise(vectors)]
-        if not distances or max(distances) <= 0.0:
+        # Zero distance represents no semantic change and is ineligible both
+        # for percentile selection and for emitting a breakpoint. Including a
+        # large zero population can otherwise collapse the cutoff to zero and
+        # mark identical/unknown (zero-vector) pairs as boundaries.
+        eligible_distances = [distance for distance in distances if distance > 0.0]
+        if not eligible_distances:
             return frozenset()
-        cutoff = percentile(distances, self.breakpoint_percentile)
+        cutoff = percentile(eligible_distances, self.breakpoint_percentile)
         return frozenset(
             blocks[index + 1].block_id
             for index, distance in enumerate(distances)
-            if distance >= cutoff
+            if distance > 0.0 and distance >= cutoff
         )

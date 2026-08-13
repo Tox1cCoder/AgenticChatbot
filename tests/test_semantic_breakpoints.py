@@ -81,6 +81,39 @@ def test_embedding_detector_does_not_break_between_zero_vectors():
     assert detector.break_before([_block("a", "a"), _block("b", "b")]) == frozenset()
 
 
+def test_zero_percentile_does_not_promote_zero_distance_pairs_to_boundaries():
+    from app.services.semantic_breakpoints import EmbeddingSemanticBoundaryDetector
+
+    class Embeddings:
+        def embed_documents(self, texts):
+            assert len(texts) == 3
+            return [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]]
+
+    detector = EmbeddingSemanticBoundaryDetector(
+        embedding_service=Embeddings(),
+        breakpoint_percentile=0.0,
+    )
+
+    assert detector.break_before(
+        [_block("a", "a"), _block("b", "b"), _block("c", "c")]
+    ) == frozenset({"c"})
+
+
+def test_default_percentile_ignores_zero_distance_population():
+    from app.services.semantic_breakpoints import EmbeddingSemanticBoundaryDetector
+
+    class Embeddings:
+        def embed_documents(self, texts):
+            assert len(texts) == 12
+            return [[1.0, 0.0], [0.0, 1.0], *([[0.0, 0.0]] * 10)]
+
+    blocks = [_block(f"block-{index}", str(index)) for index in range(12)]
+
+    assert EmbeddingSemanticBoundaryDetector(
+        embedding_service=Embeddings()
+    ).break_before(blocks) == frozenset({"block-1"})
+
+
 def test_semantic_config_defaults_to_disabled():
     from app.core.config import Settings
 

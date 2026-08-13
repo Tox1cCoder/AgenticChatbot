@@ -52,8 +52,8 @@ class _ChunkDraft:
     legacy_prechunked: bool = False
 
     @property
-    def ends_with_heading(self) -> bool:
-        return bool(self.blocks and self.blocks[-1].kind == "heading")
+    def contains_heading(self) -> bool:
+        return any(block.kind == "heading" for block in self.blocks)
 
 
 def _is_table(block: NormalizedBlock) -> bool:
@@ -65,12 +65,18 @@ def _render_blocks(blocks: Sequence[NormalizedBlock]) -> str:
 
 
 def _unique_blocks(blocks: Sequence[NormalizedBlock]) -> list[NormalizedBlock]:
-    seen: set[str] = set()
+    positions: dict[str, int] = {}
     unique: list[NormalizedBlock] = []
     for block in blocks:
-        if block.block_id not in seen:
-            seen.add(block.block_id)
+        position = positions.get(block.block_id)
+        if position is None:
+            positions[block.block_id] = len(unique)
             unique.append(block)
+        else:
+            # Split pieces retain the stable source block ID. When overlap and
+            # the current piece share it, the current piece is the exact
+            # provenance record for this chunk.
+            unique[position] = block
     return unique
 
 
@@ -277,6 +283,38 @@ def _split_large_table(
     def render(group: Sequence[str], trailing: Sequence[str] = ()) -> str:
         return "\n".join([*prefix, *group, *trailing])
 
+    def split_oversized_row(row: str) -> list[str]:
+        markdown_row = row.startswith("|") and row.endswith("|")
+        payload = row.strip("|").strip() if markdown_row else row
+        words = payload.split()
+        units = words if len(words) > 1 else list(payload)
+        separator = " " if len(words) > 1 else ""
+
+        def format_piece(piece_units: Sequence[str]) -> str:
+            piece = separator.join(piece_units)
+            return f"| {piece} |" if markdown_row else piece
+
+        row_pieces: list[str] = []
+        remaining = units
+        while remaining:
+            low, high = 1, len(remaining)
+            best = 0
+            while low <= high:
+                middle = (low + high) // 2
+                if token_strategy.count(render([format_piece(remaining[:middle])])) <= max_tokens:
+                    best = middle
+                    low = middle + 1
+                else:
+                    high = middle - 1
+            if best == 0:
+                raise ValueError(
+                    f"table context in block {block.block_id!r} leaves no room "
+                    "for one row unit under the chunk hard limit"
+                )
+            row_pieces.append(render([format_piece(remaining[:best])]))
+            remaining = remaining[best:]
+        return row_pieces
+
     for row in rows:
         candidate = render([*current_rows, row])
         if current_rows and token_strategy.count(candidate) > target_tokens:
@@ -284,9 +322,8 @@ def _split_large_table(
             current_rows = []
             candidate = render([row])
         if token_strategy.count(candidate) > max_tokens:
-            raise ValueError(
-                f"table row in block {block.block_id!r} exceeds the chunk hard limit"
-            )
+            pieces.extend(split_oversized_row(row))
+            continue
         current_rows.append(row)
     if current_rows:
         final = render(current_rows, suffix)
@@ -332,12 +369,12 @@ def _overlap_source_blocks(
     overlap: str,
 ) -> list[NormalizedBlock]:
     """Return the smallest source-block suffix that contributed overlap text."""
-    words = overlap.split()
-    remaining_units = len(words) if len(words) > 1 else len(overlap)
+    rendered_words = _render_blocks(blocks).split()
+    word_mode = len(rendered_words) > 1
+    remaining_units = len(overlap.split()) if word_mode else len(overlap)
     sources: list[NormalizedBlock] = []
     for block in reversed(blocks):
-        block_words = block.text.split()
-        block_units = len(block_words) if len(block_words) > 1 else len(block.text)
+        block_units = len(block.text.split()) if word_mode else len(block.text)
         if block_units <= 0:
             continue
         sources.append(block)
@@ -404,7 +441,7 @@ class DocumentChunkBuilder:
                 not drafts
                 or drafts[-1].is_table
                 or drafts[-1].legacy_prechunked
-                or drafts[-1].ends_with_heading
+                or drafts[-1].contains_heading
             ):
                 return False
             return (

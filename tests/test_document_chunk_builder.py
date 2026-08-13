@@ -357,6 +357,67 @@ def test_overlap_provenance_includes_only_blocks_that_supply_the_tail():
     assert overlapped.page_end == 3
 
 
+def test_overlap_provenance_tracks_single_word_blocks_by_rendered_word_units():
+    chunks = _build_with_counter(
+        [
+            _block(
+                block_id="page-1",
+                kind="paragraph",
+                text="alpha beta",
+                page=1,
+                section_path=["A"],
+            ),
+            _block(
+                block_id="page-2",
+                kind="paragraph",
+                text="gamma",
+                page=2,
+                section_path=["A"],
+            ),
+            _block(
+                block_id="page-3",
+                kind="paragraph",
+                text="one two three four",
+                page=3,
+                section_path=["A"],
+            ),
+        ],
+        target=3,
+        overlap=2,
+        max_tokens=6,
+    )
+
+    assert chunks[1].content.startswith("beta gamma\n\none two three")
+    assert [item["block_id"] for item in chunks[1].block_provenance] == [
+        "page-1",
+        "page-2",
+        "page-3",
+    ]
+    assert chunks[1].page_start == 1
+
+
+def test_long_block_overlap_provenance_keeps_each_current_split_piece():
+    chunks = _build_with_counter(
+        [
+            _block(
+                block_id="long",
+                kind="paragraph",
+                text="one two three four five six seven",
+                page=1,
+                section_path=["A"],
+            )
+        ],
+        target=3,
+        overlap=1,
+        max_tokens=5,
+    )
+
+    assert [
+        chunk.block_provenance[-1]["metadata"]["split_piece_index"]
+        for chunk in chunks
+    ] == [0, 1, 2]
+
+
 def test_overlap_does_not_cross_heading_or_table_boundary():
     blocks = [
         _block(
@@ -434,6 +495,41 @@ def test_heading_only_chunk_is_not_used_as_overlap_for_its_section_body():
     assert chunks[1].content == "body six seven eight nine"
 
 
+def test_mixed_heading_and_body_chunk_never_seeds_overlap():
+    chunks = _build_with_counter(
+        [
+            _block(
+                block_id="heading",
+                kind="heading",
+                text="Heading",
+                page=1,
+                section_path=["Section"],
+            ),
+            _block(
+                block_id="body-1",
+                kind="paragraph",
+                text="first second third",
+                page=1,
+                section_path=["Section"],
+            ),
+            _block(
+                block_id="body-2",
+                kind="paragraph",
+                text=" ".join(f"current{index}" for index in range(6)),
+                page=2,
+                section_path=["Section"],
+            ),
+        ],
+        target=4,
+        overlap=3,
+        max_tokens=8,
+    )
+
+    assert chunks[0].content == "Heading\n\nfirst second third"
+    assert chunks[1].content == "current0 current1 current2 current3"
+    assert [item["block_id"] for item in chunks[1].block_provenance] == ["body-2"]
+
+
 def test_final_rendered_count_includes_block_separators():
     blocks = [
         _block(block_id="p-1", kind="paragraph", text="one two three four five"),
@@ -482,6 +578,36 @@ def test_large_table_repeats_caption_and_header_without_repeating_rows():
     for row in rows:
         assert sum(row in chunk.content for chunk in chunks) == 1
     assert all(chunk.token_count <= 16 for chunk in chunks)
+
+
+def test_oversized_table_row_is_split_under_hard_limit_with_repeated_context():
+    caption = "[Table: Revenue]"
+    header = "| Region | Revenue |"
+    row_terms = [f"value-{index}" for index in range(20)]
+    chunks = _build_with_counter(
+        [
+            _block(
+                block_id="table",
+                kind="table",
+                text="\n".join(
+                    [caption, header, "|---|---|", f"| APAC | {' '.join(row_terms)} |"]
+                ),
+                page=4,
+                section_path=["Results"],
+                metadata={"is_table": True},
+            )
+        ],
+        target=12,
+        overlap=4,
+        max_tokens=16,
+    )
+
+    assert len(chunks) > 1
+    assert all(caption in chunk.content and header in chunk.content for chunk in chunks)
+    assert all(chunk.token_count <= 16 for chunk in chunks)
+    for term in row_terms:
+        assert sum(term in chunk.content.split() for chunk in chunks) == 1
+    assert all(chunk.page_start == 4 and chunk.page_end == 4 for chunk in chunks)
 
 
 def test_neighbor_indices_are_assigned_after_final_build():
