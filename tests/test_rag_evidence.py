@@ -240,6 +240,134 @@ def test_tight_budget_interleaves_document_coverage_with_many_subquestions() -> 
     ]
 
 
+def test_three_record_budget_jointly_covers_subquestions_and_documents() -> None:
+    candidates = [
+        _candidate(1, document=1, metadata={"subquestions": ["q1"]}),
+        _candidate(2, document=2, metadata={"subquestions": ["q1"]}),
+        _candidate(3, document=3, metadata={"subquestions": ["q1"]}),
+        _candidate(4, document=2, metadata={"subquestions": ["q2"]}),
+        _candidate(5, document=3, metadata={"subquestions": ["q3"]}),
+    ]
+    three_record_budget = _assembler().assemble(
+        "question",
+        [candidates[0], candidates[3], candidates[4]],
+        max_tokens=500,
+    ).token_count
+
+    pack = _assembler().assemble(
+        "question",
+        candidates,
+        subquestions=("q1", "q2", "q3"),
+        max_tokens=three_record_budget,
+    )
+
+    assert [record.chunk_id for record in pack.records] == [
+        UUID(int=1),
+        UUID(int=4),
+        UUID(int=5),
+    ]
+    assert [record.document_id for record in pack.records] == [
+        UUID(int=1),
+        UUID(int=2),
+        UUID(int=3),
+    ]
+
+
+def test_gemini_evidence_fit_loop_never_calls_sync_provider_rpc() -> None:
+    from app.ai.agents.base_agent import BaseAgent
+    from app.services.rag_evidence import EvidenceAssembler
+
+    sync_calls: list[str] = []
+
+    class FakeGeminiModel:
+        def get_num_tokens(self, text: str) -> int:
+            sync_calls.append(text)
+            return len(text.split())
+
+    counter = BaseAgent._token_counter_for_model("gemini", FakeGeminiModel())
+    assembler = EvidenceAssembler(
+        token_counter=counter,
+        provider="gemini",
+        model="gemini-2.5-flash",
+    )
+
+    assembler.assemble(
+        "question",
+        [
+            _candidate(index, document=index, content="candidate words " * 40)
+            for index in range(1, 11)
+        ],
+        max_tokens=200,
+    )
+
+    assert sync_calls == []
+
+
+@pytest.mark.asyncio
+async def test_assembly_fit_checks_are_local_and_final_count_is_one_native_call() -> None:
+    """Bound provider round trips to one per assembly, on the final text only.
+
+    Every incremental fit test goes through the conservative local strategy, so
+    the pack still cannot overshoot; the single reconciliation call makes the
+    charged ``token_count`` the provider's exact count of the emitted text.
+    """
+    from app.ai.token_counter import TokenCounter
+    from app.services.rag_evidence import EvidenceAssembler
+
+    native_texts: list[str] = []
+
+    async def native_text(*, model: str, text: str) -> int:
+        del model
+        native_texts.append(text)
+        return 11
+
+    assembler = EvidenceAssembler(
+        token_counter=TokenCounter(native_text_counters={"gemini": native_text}),
+        provider="gemini",
+        model="gemini-2.5-flash",
+    )
+    candidates = [
+        _candidate(index, document=index, content="candidate words " * 20)
+        for index in range(1, 11)
+    ]
+
+    local_pack = assembler.assemble("question", candidates, max_tokens=4_000)
+    assert native_texts == []
+    assert local_pack.count_strategy == "gemini:utf8_byte_upper_bound"
+
+    exact_pack = await assembler.assemble_exact("question", candidates, max_tokens=4_000)
+
+    assert native_texts == [exact_pack.to_tool_text()]
+    assert exact_pack.records == local_pack.records
+    assert exact_pack.token_count == 11
+    assert exact_pack.count_strategy == "gemini:native_text"
+
+
+@pytest.mark.asyncio
+async def test_empty_pack_needs_no_provider_reconciliation_call() -> None:
+    from app.ai.token_counter import TokenCounter
+    from app.services.rag_evidence import EvidenceAssembler
+
+    native_texts: list[str] = []
+
+    async def native_text(*, model: str, text: str) -> int:
+        del model
+        native_texts.append(text)
+        return 11
+
+    assembler = EvidenceAssembler(
+        token_counter=TokenCounter(native_text_counters={"gemini": native_text}),
+        provider="gemini",
+        model="gemini-2.5-flash",
+    )
+
+    pack = await assembler.assemble_exact("question", [_candidate(1)], max_tokens=0)
+
+    assert pack.records == ()
+    assert pack.token_count == 0
+    assert native_texts == []
+
+
 def test_structural_records_are_omitted_whole_and_text_truncation_is_reported() -> None:
     atomic_table = _candidate(
         1,

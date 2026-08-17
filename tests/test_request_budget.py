@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app.ai.agents.base_agent import BaseAgent
 from app.ai.request_budget import (
@@ -202,6 +202,114 @@ async def test_evidence_allowance_reserves_actual_assistant_and_all_tool_wrapper
 
     assert reserved.input_tokens == 45
     assert reserved.evidence_token_allowance == 40
+
+
+@pytest.mark.asyncio
+async def test_gemini_native_count_uses_provider_request_structure_without_blocking() -> None:
+    sdk_calls: list[dict] = []
+    prepared_calls: list[dict] = []
+    sync_calls: list[str] = []
+
+    class AsyncModels:
+        async def count_tokens(self, **kwargs):
+            sdk_calls.append(kwargs)
+            await asyncio.sleep(0)
+            return SimpleNamespace(total_tokens=37)
+
+    class FakeGeminiModel:
+        async_client = SimpleNamespace(models=AsyncModels())
+
+        def get_num_tokens(self, text: str) -> int:
+            sync_calls.append(text)
+            return 999
+
+        def _prepare_request(self, messages, *, tools=None, **_kwargs):
+            prepared_calls.append({"messages": messages, "tools": tools})
+            return {
+                "model": "models/gemini-2.5-flash",
+                "contents": ("provider-user-content", "provider-function-response"),
+                "config": SimpleNamespace(
+                    system_instruction="provider-system-instruction",
+                    tools=("provider-function-declarations",),
+                ),
+            }
+
+    messages = [
+        SystemMessage(content="system"),
+        HumanMessage(
+            content=[
+                {"type": "text", "text": "inspect"},
+                {"type": "image_url", "image_url": "data:image/png;base64,AAAA"},
+            ]
+        ),
+        AIMessage(
+            content="",
+            tool_calls=[{"id": "call-1", "name": "inspect", "args": {}}],
+        ),
+        ToolMessage(content="done", tool_call_id="call-1", name="inspect"),
+    ]
+    tools = [{"name": "inspect", "description": "Inspect an image"}]
+    counter = BaseAgent._token_counter_for_model("gemini", FakeGeminiModel())
+    heartbeat_seen = asyncio.Event()
+
+    async def heartbeat() -> None:
+        heartbeat_seen.set()
+
+    asyncio.create_task(heartbeat())
+
+    result = await counter.count_request(
+        provider="gemini",
+        model="gemini-2.5-flash",
+        messages=messages,
+        tools=tools,
+        authoritative=True,
+    )
+
+    assert heartbeat_seen.is_set(), "native counting must yield instead of blocking the event loop"
+    assert sync_calls == []
+    assert result.input_tokens == 37
+    assert prepared_calls == [{"messages": messages, "tools": tools}]
+    assert sdk_calls == [
+        {
+            "model": "models/gemini-2.5-flash",
+            "contents": ("provider-user-content", "provider-function-response"),
+            "config": {
+                "system_instruction": "provider-system-instruction",
+                "tools": ("provider-function-declarations",),
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_hard_budget_reduction_bounds_native_reconciliation_calls() -> None:
+    class CountingNativeCounter(WeightedCounter):
+        def __init__(self) -> None:
+            self.native_calls = 0
+
+        async def count_request(self, **kwargs):
+            self.native_calls += 1
+            await asyncio.sleep(0)
+            return self.estimate_request(**kwargs)
+
+    counter = CountingNativeCounter()
+    history = [
+        message
+        for turn in range(10)
+        for message in (
+            _message("user", 12, f"question {turn}"),
+            _message("assistant", 12, f"answer {turn}"),
+        )
+    ]
+    envelope = _envelope(system=10, history=history, current=10)
+
+    result = await RequestBudgetService(counter).preflight(
+        envelope,
+        _config(max_input_tokens=200, reserved_output_tokens=0, safety_margin_tokens=0),
+    )
+
+    assert result.input_tokens <= result.hard_input_tokens
+    assert counter.native_calls <= 2
 
 
 @pytest.mark.asyncio

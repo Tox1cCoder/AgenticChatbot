@@ -153,6 +153,46 @@ class EvidenceAssembler:
             count_strategy=strategy,
         )
 
+    async def assemble_exact(
+        self,
+        question: str,
+        candidates: Sequence[RetrievalCandidate | Mapping[str, Any] | Any],
+        *,
+        max_tokens: int,
+        subquestions: Sequence[str] = (),
+        scope: RetrievalScope | None = None,
+    ) -> EvidencePack:
+        """Assemble locally, then reconcile the final text with one provider call.
+
+        Selection and every incremental fit test use the conservative local
+        strategy, so assembly issues no provider round trips and the pack cannot
+        overshoot the allowance. Exactly one native call then replaces the
+        conservative bound with the provider's exact count of the emitted text,
+        which is what the caller charges against the cumulative allowance.
+        """
+        pack = self.assemble(
+            question,
+            candidates,
+            max_tokens=max_tokens,
+            subquestions=subquestions,
+            scope=scope,
+        )
+        count_exact = getattr(self.token_counter, "count_text_exact", None)
+        if not pack.records or not callable(count_exact):
+            # Counters are injected duck-typed (restart fallbacks, per-provider
+            # adapters). One without an exact entry point keeps its local count.
+            return pack
+        exact = await count_exact(
+            provider=self.provider,
+            model=self.model,
+            text=pack.to_tool_text(),
+        )
+        return replace(
+            pack,
+            token_count=int(exact.tokens),
+            count_strategy=str(exact.strategy),
+        )
+
     def _pack_candidates(
         self,
         selected: list[EvidenceRecord],
@@ -269,57 +309,37 @@ class EvidenceAssembler:
             if (normalized := str(subquestion).strip().casefold())
         )
         covered_subquestions: set[str] = set()
+        covered_documents: set[UUID] = set()
 
-        # Seed relevance with one subquestion, then cover documents before adding
-        # more same-document subquestion matches. This prevents a tight pack from
-        # spending every slot on one source while retaining deterministic order.
-        for normalized in normalized_subquestions:
-            match = next(
-                (
-                    candidate
-                    for candidate in remaining
-                    if _candidate_matches_subquestion(candidate, normalized)
-                ),
-                None,
-            )
-            if match is not None:
-                ordered.append(match)
-                remaining.remove(match)
-                covered_subquestions.update(
-                    subquestion
-                    for subquestion in normalized_subquestions
-                    if _candidate_matches_subquestion(match, subquestion)
-                )
-                break
-
-        covered_documents = {candidate.document_id for candidate in ordered}
-        for candidate in tuple(remaining):
-            if candidate.document_id not in covered_documents:
-                ordered.append(candidate)
-                remaining.remove(candidate)
-                covered_documents.add(candidate.document_id)
-                covered_subquestions.update(
+        # Greedily maximize joint marginal coverage. A candidate that adds both
+        # a missing subquestion and a missing document wins over one that adds
+        # only either axis. Equal one-axis gains prefer document coverage, then
+        # the original retrieval order, giving deterministic ties without letting
+        # an early run of unseen documents consume every tight-budget slot.
+        while remaining:
+            best_index = 0
+            best_key = (-1, -1, -1)
+            for index, candidate in enumerate(remaining):
+                matched = {
                     subquestion
                     for subquestion in normalized_subquestions
                     if _candidate_matches_subquestion(candidate, subquestion)
-                )
+                }
+                new_subquestions = len(matched - covered_subquestions)
+                new_document = int(candidate.document_id not in covered_documents)
+                key = (new_subquestions + new_document, new_document, -index)
+                if key > best_key:
+                    best_index = index
+                    best_key = key
 
-        for normalized in normalized_subquestions:
-            if normalized in covered_subquestions:
-                continue
-            match = next(
-                (
-                    candidate
-                    for candidate in remaining
-                    if _candidate_matches_subquestion(candidate, normalized)
-                ),
-                None,
+            selected = remaining.pop(best_index)
+            ordered.append(selected)
+            covered_documents.add(selected.document_id)
+            covered_subquestions.update(
+                subquestion
+                for subquestion in normalized_subquestions
+                if _candidate_matches_subquestion(selected, subquestion)
             )
-            if match is not None:
-                ordered.append(match)
-                remaining.remove(match)
-                covered_subquestions.add(normalized)
-        ordered.extend(remaining)
         return ordered
 
     @staticmethod

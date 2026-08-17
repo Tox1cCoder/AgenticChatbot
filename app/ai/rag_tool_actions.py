@@ -500,7 +500,7 @@ async def execute_search_documents_action(
                         user_id=str(user_id),
                         conversation_id=typed_conversation_id,
                     )
-                    pack = assembler.assemble(
+                    pack = await assembler.assemble_exact(
                         question or str(query),
                         search_results[:10],
                         subquestions=subquestions,

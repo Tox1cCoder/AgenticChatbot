@@ -1320,19 +1320,38 @@ def test_invoke_agentic_rag_model_binds_tools_when_enabled():
     )
 
 
-def test_reachable_rag_invocation_shares_provider_native_counter_with_evidence():
+def test_reachable_rag_invocation_uses_native_request_and_bounded_evidence_counts():
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
     from app.ai.checkpoint import _build_checkpoint_serializer
     from app.core.runtime_modeling import ResolvedRuntimeModelConfig
 
     agent = _build_agentic_invocation_agent()
-    native_calls: list[str] = []
+    native_calls: list[dict] = []
+    sync_calls: list[str] = []
+
+    class AsyncModels:
+        async def count_tokens(self, **kwargs):
+            native_calls.append(kwargs)
+            await asyncio.sleep(0)
+            return SimpleNamespace(total_tokens=20)
 
     class NativeCountingModel:
+        async_client = SimpleNamespace(models=AsyncModels())
+
         def get_num_tokens(self, text: str) -> int:
-            native_calls.append(text)
-            return max(1, len(text.split()))
+            sync_calls.append(text)
+            return 999
+
+        def _prepare_request(self, messages, *, tools=None, **_kwargs):
+            return {
+                "model": "models/gemini-2.5-flash",
+                "contents": tuple(messages),
+                "config": SimpleNamespace(
+                    system_instruction="sys",
+                    tools=tuple(tools or ()),
+                ),
+            }
 
     llm = NativeCountingModel()
     fake_response = AIMessage(
@@ -1387,14 +1406,32 @@ def test_reachable_rag_invocation_shares_provider_native_counter_with_evidence()
         provider="gemini",
         model="gemini-2.5-flash",
     )
+    request_call_count = len(native_calls)
     evidence_count = counter.count_text(
         provider="gemini",
         model="gemini-2.5-flash",
         text="bounded evidence",
     )
-    assert evidence_count.source == "provider"
+    # Fit checks stay local so a pack of N candidates costs zero round trips.
+    assert evidence_count.source == "local"
+    assert evidence_count.strategy == "gemini:utf8_byte_upper_bound"
+    assert len(native_calls) == request_call_count
+
+    exact_count = asyncio.run(
+        counter.count_text_exact(
+            provider="gemini",
+            model="gemini-2.5-flash",
+            text="bounded evidence",
+        )
+    )
+    # ...and the single reconciliation of the emitted text is exact.
+    assert exact_count.source == "provider"
+    assert exact_count.tokens == 20
+    assert len(native_calls) == request_call_count + 1
+    assert native_calls[-1]["contents"] == "bounded evidence"
     assert len(agent._ephemeral_evidence_counters) == 0
     assert native_calls
+    assert sync_calls == []
 
     restarted_agent = object.__new__(RAGAgent)
     fallback = restarted_agent._take_evidence_token_counter(

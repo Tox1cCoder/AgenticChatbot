@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import math
 import secrets
 import time
@@ -15,9 +16,11 @@ from typing import Any, Literal
 import tiktoken
 from langchain_core.messages import ToolMessage
 
+logger = logging.getLogger(__name__)
+
 TokenSource = Literal["local", "provider", "reported"]
 NativeCounter = Callable[..., int | Awaitable[int]]
-NativeTextCounter = Callable[..., int]
+NativeTextCounter = Callable[..., int | Awaitable[int]]
 
 _IMAGE_FALLBACK_TOKENS = 1_200
 _MESSAGE_ENVELOPE_TOKENS = 4
@@ -196,34 +199,56 @@ class TokenCounter:
         )
 
     def count_text(self, *, provider: str, model: str, text: str) -> TokenCount:
+        """Count one string with the deterministic, local, provider-aware strategy.
+
+        Deliberately never issues a provider call. Evidence packing calls this
+        once per incremental fit test, so a round trip here would multiply
+        network calls by the candidate count. The per-provider strategies are
+        conservative upper bounds, so a pack that fits locally also fits the
+        provider's own count; :meth:`count_text_exact` reconciles the one final
+        rendered text.
+        """
         provider_key = self._normalize_provider(provider)
         raw_text = str(text or "")
         strategy, encoder = self._text_strategy(provider_key, str(model or ""))
         if not raw_text:
             return TokenCount(tokens=0, strategy=strategy)
+        if encoder is not None:
+            tokens = len(encoder.encode(raw_text))
+        elif provider_key == "anthropic":
+            tokens = math.ceil(len(raw_text.encode("utf-8")) / 3)
+        else:
+            # One token per UTF-8 byte. Gemini shares this bound rather than the
+            # old bytes/3 heuristic: bytes/3 is an estimate, not an upper bound,
+            # and packing decisions need a bound they cannot exceed.
+            tokens = len(raw_text.encode("utf-8"))
+        return TokenCount(tokens=max(1, tokens), strategy=strategy)
+
+    async def count_text_exact(self, *, provider: str, model: str, text: str) -> TokenCount:
+        """Count one string with the provider tokenizer, once.
+
+        Reserved for a single reconciliation of an already-assembled text.
+        Falls back to :meth:`count_text` when the provider exposes no native
+        text counter or the call fails, so callers never depend on the RPC.
+        """
+        provider_key = self._normalize_provider(provider)
+        raw_text = str(text or "")
         native_counter = self._native_text_counters.get(provider_key)
-        if native_counter is not None:
+        if raw_text and native_counter is not None:
             try:
-                tokens = self._non_negative(
-                    native_counter(model=str(model or ""), text=raw_text),
-                    "native text token count",
-                )
+                result = native_counter(model=str(model or ""), text=raw_text)
+                if inspect.isawaitable(result):
+                    result = await result
                 return TokenCount(
-                    tokens=tokens,
+                    tokens=self._non_negative(result, "native text token count"),
                     strategy=f"{provider_key}:native_text",
                     source="provider",
                 )
             except Exception:
-                # Provider tokenization is optional. The provider-specific local
-                # strategy below is deliberately conservative and explicit.
-                strategy = f"{strategy}:conservative_fallback"
-        if encoder is not None:
-            tokens = len(encoder.encode(raw_text))
-        elif provider_key in {"gemini", "anthropic"}:
-            tokens = math.ceil(len(raw_text.encode("utf-8")) / 3)
-        else:
-            tokens = len(raw_text.encode("utf-8"))
-        return TokenCount(tokens=max(1, tokens), strategy=strategy)
+                # Provider tokenization is optional; the local bound below is
+                # deterministic and conservative.
+                logger.debug("Native text token count unavailable", exc_info=True)
+        return self.count_text(provider=provider, model=model, text=raw_text)
 
     def count_messages(
         self,
@@ -330,19 +355,6 @@ class TokenCounter:
         reserved_output_tokens: int = 0,
         safety_margin_tokens: int = 0,
     ) -> RequestTokenCount:
-        if self._native_text_counters:
-            # Request estimation must remain one bounded local operation. Native
-            # text callbacks are reserved for exact rendered evidence and the
-            # single full-request native call in ``count_request``.
-            return TokenCounter().estimate_request(
-                provider=provider,
-                model=model,
-                messages=messages,
-                tools=tools,
-                attachments=attachments,
-                reserved_output_tokens=reserved_output_tokens,
-                safety_margin_tokens=safety_margin_tokens,
-            )
         reserved = self._non_negative(reserved_output_tokens, "reserved_output_tokens")
         safety = self._non_negative(safety_margin_tokens, "safety_margin_tokens")
         message_count = self.count_messages(
@@ -762,8 +774,10 @@ class TokenCounter:
                     f"openai:tiktoken:{encoding_name}:fallback",
                     tiktoken.get_encoding(encoding_name),
                 )
-        if provider in {"gemini", "anthropic"}:
+        if provider == "anthropic":
             return f"{provider}:utf8_bytes_div_3", None
+        if provider == "gemini":
+            return "gemini:utf8_byte_upper_bound", None
         return f"{provider}:utf8_byte_upper_bound", None
 
 

@@ -945,24 +945,98 @@ class BaseAgent(ABC):
 
     @staticmethod
     def _token_counter_for_model(provider: str, llm: Any) -> TokenCounter:
-        """Use a provider tokenizer when the live model exposes one, else local fallback."""
+        """Use Gemini's async structured request counter when this SDK supports it.
+
+        ``ChatGoogleGenerativeAI.get_num_tokens`` is a synchronous provider RPC
+        over one synthetic text part. It neither represents the request sent by
+        the chat model nor belongs on the event-loop thread, so it is deliberately
+        not used here. The guarded adapters below accept only the installed
+        wrapper shape that can prepare the real provider contents/config and
+        expose the SDK's async ``count_tokens`` method. Any shape drift or runtime
+        failure falls back to the local conservative counter without claiming
+        provider authority.
+
+        Two counters are registered for different jobs: the request counter is
+        the one authoritative full-request count per model call, and the text
+        counter is the one exact reconciliation of an assembled evidence pack.
+        Neither is reachable from the per-candidate fit loop.
+        """
         provider_key = str(provider or "").strip().casefold()
-        get_num_tokens = getattr(llm, "get_num_tokens", None)
-        if provider_key != "gemini" or not callable(get_num_tokens):
+        if provider_key != "gemini":
             return TokenCounter()
 
-        def native_text(*, model: str, text: str) -> int:
-            del model
-            return int(get_num_tokens(text))
+        prepare_request = getattr(llm, "_prepare_request", None)
+        try:
+            async_client = getattr(llm, "async_client", None)
+        except Exception:
+            async_client = None
+        count_tokens = getattr(getattr(async_client, "models", None), "count_tokens", None)
+        if not callable(prepare_request) or not callable(count_tokens):
+            return TokenCounter()
 
-        def native_request(*, model: str, messages, tools, attachments) -> int:
-            del model
-            rendered = TokenCounter.canonical_request_text(
-                messages=messages,
-                tools=tools,
-                attachments=attachments,
+        def native_timeout() -> float:
+            return max(
+                0.1,
+                float(getattr(settings, "conversation_summary_timeout_seconds", 10.0)),
             )
-            return int(get_num_tokens(rendered))
+
+        async def native_text(*, model: str, text: str) -> int:
+            # Mirrors the SDK's own single-text count shape; the SDK converts a
+            # bare string into one user Content part.
+            response = await asyncio.wait_for(
+                count_tokens(
+                    model=str(getattr(llm, "model", None) or model),
+                    contents=str(text),
+                ),
+                timeout=native_timeout(),
+            )
+            total_tokens = getattr(response, "total_tokens", None)
+            if total_tokens is None:
+                raise ValueError("gemini_native_count_missing_total")
+            return int(total_tokens)
+
+        async def native_request(*, model: str, messages, tools, attachments) -> int:
+            del model
+            if attachments:
+                # This layer cannot prove how detached attachments are projected
+                # into provider parts. Refuse an inexact native claim; the caller
+                # will use the explicit conservative local estimate instead.
+                raise ValueError("gemini_native_count_detached_attachments_unsupported")
+
+            request = prepare_request(
+                list(messages),
+                tools=list(tools) if tools else None,
+            )
+            if not isinstance(request, dict):
+                raise ValueError("gemini_native_count_request_shape_unsupported")
+            request_model = request.get("model")
+            contents = request.get("contents")
+            request_config = request.get("config")
+            if not request_model or contents is None:
+                raise ValueError("gemini_native_count_request_shape_unsupported")
+
+            count_config: dict[str, Any] = {}
+            for field in ("system_instruction", "tools"):
+                value = (
+                    request_config.get(field)
+                    if isinstance(request_config, dict)
+                    else getattr(request_config, field, None)
+                )
+                if value is not None:
+                    count_config[field] = value
+
+            response = await asyncio.wait_for(
+                count_tokens(
+                    model=request_model,
+                    contents=contents,
+                    config=count_config or None,
+                ),
+                timeout=native_timeout(),
+            )
+            total_tokens = getattr(response, "total_tokens", None)
+            if total_tokens is None:
+                raise ValueError("gemini_native_count_missing_total")
+            return int(total_tokens)
 
         return TokenCounter(
             native_counters={provider_key: native_request},

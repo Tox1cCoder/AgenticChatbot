@@ -56,37 +56,72 @@ def test_openai_unknown_model_uses_explicit_family_fallback():
     assert result.strategy == "openai:tiktoken:o200k_base:fallback"
 
 
-def test_gemini_thai_estimate_is_conservative_not_four_character_heuristic():
+def test_gemini_local_fallback_uses_utf8_byte_upper_bound():
     counter = TokenCounter()
     text = "การสรุปบทสนทนาต้องนับโทเค็นภาษาไทยอย่างระมัดระวัง"
 
     result = counter.count_text(provider="gemini", model="gemini-2.5-flash", text=text)
 
-    assert result.tokens >= math.ceil(len(text.encode("utf-8")) / 3)
+    assert result.tokens == len(text.encode("utf-8"))
     old_ascii_heuristic = math.floor(len(text) / 4)
     assert result.tokens > old_ascii_heuristic
-    assert result.strategy == "gemini:utf8_bytes_div_3"
+    assert result.strategy == "gemini:utf8_byte_upper_bound"
 
 
-def test_configured_provider_native_text_counter_governs_pack_text() -> None:
+@pytest.mark.asyncio
+async def test_native_text_counter_is_reserved_for_the_exact_final_count() -> None:
+    """``count_text`` is the local fit-check path; ``count_text_exact`` is the RPC.
+
+    Evidence packing calls ``count_text`` once per incremental fit test, so a
+    provider round trip there multiplies network calls by the candidate count.
+    """
     calls: list[tuple[str, str]] = []
 
-    def native_text(*, model: str, text: str) -> int:
+    async def native_text(*, model: str, text: str) -> int:
         calls.append((model, text))
         return 7
 
     counter = TokenCounter(native_text_counters={"gemini": native_text})
 
-    result = counter.count_text(
+    local = counter.count_text(
         provider="gemini",
         model="gemini-2.5-flash",
         text="encoded evidence",
     )
 
-    assert result.tokens == 7
-    assert result.strategy == "gemini:native_text"
-    assert result.source == "provider"
+    assert local.source == "local"
+    assert local.strategy == "gemini:utf8_byte_upper_bound"
+    assert calls == []
+
+    exact = await counter.count_text_exact(
+        provider="gemini",
+        model="gemini-2.5-flash",
+        text="encoded evidence",
+    )
+
+    assert exact.tokens == 7
+    assert exact.strategy == "gemini:native_text"
+    assert exact.source == "provider"
     assert calls == [("gemini-2.5-flash", "encoded evidence")]
+
+
+@pytest.mark.asyncio
+async def test_exact_text_count_falls_back_locally_when_the_provider_call_fails() -> None:
+    async def native_text(*, model: str, text: str) -> int:
+        del model, text
+        raise TimeoutError("provider unavailable")
+
+    counter = TokenCounter(native_text_counters={"gemini": native_text})
+
+    exact = await counter.count_text_exact(
+        provider="gemini",
+        model="gemini-2.5-flash",
+        text="encoded evidence",
+    )
+
+    assert exact.source == "local"
+    assert exact.strategy == "gemini:utf8_byte_upper_bound"
+    assert exact.tokens == len(b"encoded evidence")
 
 
 def test_anthropic_uses_conservative_local_estimate():

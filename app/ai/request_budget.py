@@ -126,7 +126,11 @@ class RequestBudgetService:
 
         hard_limit = int(config.available_input_tokens * config.hard_ratio)
         fixed_envelope = envelope.with_history(())
-        fixed_count = await self._count_authoritative(fixed_envelope)
+        # Candidate exploration is deliberately local. A provider count can be
+        # an RPC, so invoking it once per history group amplifies latency and
+        # quota consumption. The local strategies are conservative; reconcile
+        # the one final candidate below with at most one additional native call.
+        fixed_count = self._count(fixed_envelope)
         if fixed_count.input_tokens > hard_limit:
             return self._result(
                 "error",
@@ -138,6 +142,7 @@ class RequestBudgetService:
             )
 
         candidate = envelope
+        compacted_candidate = False
         if emergency_compact is not None and envelope.history_messages:
             try:
                 compacted_history = await asyncio.wait_for(
@@ -145,30 +150,29 @@ class RequestBudgetService:
                     timeout=config.emergency_timeout_seconds,
                 )
                 candidate = envelope.with_history(compacted_history)
-                compacted_count = await self._count_authoritative(candidate)
+                compacted_count = self._count(candidate)
                 if compacted_count.input_tokens <= hard_limit:
-                    return self._result(
-                        "emergency_compacted",
-                        candidate,
-                        compacted_count,
-                        config,
-                        durable_requested=durable_requested,
-                        emergency_compacted=True,
-                    )
+                    compacted_candidate = True
             except Exception:
                 candidate = envelope
 
-        reduced, reduced_count, removed = await self._reduce_to_limit(
-            candidate,
-            hard_limit=hard_limit,
-        )
+        if compacted_candidate:
+            reduced = candidate
+            removed = 0
+        else:
+            reduced, removed = self._reduce_to_limit(candidate, hard_limit=hard_limit)
+
+        # One authoritative reconciliation of the single surviving candidate.
+        reduced_count = await self._count_authoritative(reduced)
         if reduced_count.input_tokens <= hard_limit:
+            action: BudgetAction = "emergency_compacted" if compacted_candidate else "reduced"
             return self._result(
-                "reduced",
+                action,
                 reduced,
                 reduced_count,
                 config,
                 durable_requested=durable_requested,
+                emergency_compacted=compacted_candidate,
                 removed_groups=removed,
             )
         return self._result(
@@ -208,17 +212,23 @@ class RequestBudgetService:
             evidence_token_allowance=max(0, result.hard_input_tokens - input_tokens),
         )
 
-    async def _reduce_to_limit(
+    def _reduce_to_limit(
         self,
         envelope: RequestEnvelope,
         *,
         hard_limit: int,
-    ) -> tuple[RequestEnvelope, Any, int]:
+    ) -> tuple[RequestEnvelope, int]:
+        """Drop complete history groups until the local estimate fits.
+
+        Every step counts locally. A provider count is an RPC, so counting once
+        per candidate group would amplify latency and quota by the history
+        length; the caller reconciles only the surviving candidate.
+        """
         groups = _atomic_history_groups(envelope.history_messages)
         remaining_groups: list[_HistoryGroup | None] = list(groups)
         remaining = list(envelope.history_messages)
         removed = 0
-        count = await self._count_authoritative(envelope)
+        count = self._count(envelope)
         for index, group in enumerate(groups):
             if count.input_tokens <= hard_limit:
                 break
@@ -233,8 +243,8 @@ class RequestBudgetService:
             ]
             removed += 1
             candidate = envelope.with_history(remaining)
-            count = await self._count_authoritative(candidate)
-        return envelope.with_history(remaining), count, removed
+            count = self._count(candidate)
+        return envelope.with_history(remaining), removed
 
     def _count(self, envelope: RequestEnvelope):
         return self.token_counter.estimate_request(
