@@ -7,6 +7,15 @@ from typing import Any
 from prometheus_client import CollectorRegistry, Counter, generate_latest
 
 _COMPONENTS = {"reranker"}
+_GROUNDING_MODES = {"shadow", "enforced"}
+_GROUNDING_OUTCOMES = {"accepted", "regenerated", "abstained"}
+_GROUNDING_REASON_CODES = {
+    "none",
+    "unknown_evidence_id",
+    "citation_coverage_below_minimum",
+    "answer_without_evidence",
+    "insufficient_evidence",
+}
 _FAILURE_CODES = {
     "timeout",
     "model_load_failure",
@@ -29,6 +38,20 @@ class RAGMetrics:
             ("component", "failure_code"),
             registry=self.registry,
         )
+
+        self.grounded_answers = Counter(
+            "rag_grounded_answers_total",
+            "Grounded-answer gate decisions, including shadow decisions when enforcement is off.",
+            ("mode", "outcome", "reason_code"),
+            registry=self.registry,
+        )
+
+    def grounded_answer(self, *, mode: str, outcome: str, reason_code: str) -> None:
+        self.grounded_answers.labels(
+            mode=_bounded(mode, _GROUNDING_MODES),
+            outcome=_bounded(outcome, _GROUNDING_OUTCOMES),
+            reason_code=_bounded(reason_code, _GROUNDING_REASON_CODES),
+        ).inc()
 
     def degraded(self, component: str, failure_code: str) -> None:
         self.degraded_operations.labels(

@@ -74,6 +74,7 @@ from app.services.rag_embedding_service import (
     GeminiRAGEmbeddingService,
     SentenceTransformerRAGEmbeddingService,
 )
+from app.services.rag_grounding import GroundedAnswerGate
 from app.services.rag_reranker import RAGReranker
 from app.services.rag_retrieval import RAGRetriever
 from app.services.semantic_breakpoints import EmbeddingSemanticBoundaryDetector
@@ -337,6 +338,12 @@ class Container(containers.DeclarativeContainer):
         metrics=providers.Object(rag_metrics_singleton),
     )
 
+    grounded_answer_gate = providers.Singleton(
+        GroundedAnswerGate,
+        providers.Object(settings.min_citation_coverage),
+        metrics=providers.Object(rag_metrics_singleton),
+    )
+
     document_parse_artifact_repository = providers.Factory(
         DocumentParseArtifactRepository,
         session_factory=db.provided.session,
@@ -500,6 +507,7 @@ class Container(containers.DeclarativeContainer):
         if rag_agent is not None:
             rag_agent.retriever = container.rag_retriever()
             rag_agent.reranker = container.rag_reranker()
+            rag_agent.grounded_answer_gate = container.grounded_answer_gate()
 
         return AIService(
             workflow_runtime=workflow_runtime,

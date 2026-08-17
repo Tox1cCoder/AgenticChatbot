@@ -1103,6 +1103,189 @@ async def test_list_documents_empty_page_still_returns_pagination():
     }
 
 
+def _grounded_state(*, evidence_id: str = "E1", filename: str = "report.pdf"):
+    """One RAG turn whose single search call produced one server-owned record."""
+    from uuid import UUID
+
+    artifact = {
+        "tool_call_id": "search-1",
+        "tool": "search_documents",
+        "args": {"action": "search_chunks", "query": "revenue"},
+        "output": f"BEGIN UNTRUSTED EVIDENCE {evidence_id}",
+        "error": None,
+        "status": "success",
+        "rag_evidence": {
+            "records": [
+                {
+                    "evidence_id": evidence_id,
+                    "document_id": str(UUID(int=1)),
+                    "chunk_id": str(UUID(int=11)),
+                    "image_id": None,
+                    "filename": filename,
+                    "page_start": 3,
+                    "page_end": 3,
+                    "section_path": ["Results"],
+                    "modality": "text",
+                    "content": "Revenue rose to 10 million in FY24.",
+                }
+            ],
+            "evidence_ids": [evidence_id],
+            "token_count": 19,
+            "omitted_count": 0,
+            "truncated_count": 0,
+            "count_strategy": "test:fixture",
+        },
+    }
+    return {
+        "conversation_id": "conv-1",
+        "user_id": "owner",
+        "context": {"tool_artifacts": [artifact], "agentic_rag_iteration": 1},
+        "messages": [
+            HumanMessage(content="What was revenue?"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "search-1",
+                        "name": "search_documents",
+                        "args": {"action": "search_chunks", "query": "revenue"},
+                    }
+                ],
+            ),
+            ToolMessage(
+                content=f"BEGIN UNTRUSTED EVIDENCE {evidence_id}",
+                tool_call_id="search-1",
+                name="search_documents",
+            ),
+        ],
+    }
+
+
+def _grounded_workflow(*, final_text: str, regenerated_answer=None):
+    """A workflow whose RAG agent returns ``final_text`` as its final response."""
+    calls: dict[str, object] = {"regenerations": []}
+
+    async def process_message(_message, _conversation_id, **_kwargs):
+        return AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content=final_text),
+            metadata={"agentic_mode": True},
+        )
+
+    async def regenerate_grounded_answer(*, reason_codes, **kwargs):
+        calls["regenerations"].append((tuple(reason_codes), kwargs.get("question")))
+        return regenerated_answer
+
+    workflow = _make_workflow()
+    workflow.rag_agent = SimpleNamespace(
+        process_message=process_message,
+        regenerate_grounded_answer=regenerate_grounded_answer,
+    )
+
+    async def history(*_args, **_kwargs):
+        return []
+
+    workflow._get_conversation_history = history
+    workflow._get_state_attachments = lambda _state: []
+    return workflow, calls
+
+
+def test_disabled_grounded_gate_keeps_the_answer_but_records_shadow_metrics(monkeypatch):
+    monkeypatch.setattr(settings, "enable_citation_verification", True, raising=False)
+    monkeypatch.setattr(settings, "rag_grounded_answer_gate_enabled", False, raising=False)
+    state = _grounded_state()
+    workflow, calls = _grounded_workflow(final_text="Revenue rose to 10 million.")
+
+    asyncio.run(workflow._rag_node(state))
+
+    response = state["response"]
+    assert response.message.content == "Revenue rose to 10 million."
+    shadow = response.metadata["grounded_answer"]
+    assert shadow["mode"] == "shadow"
+    assert shadow["valid"] is False
+    assert shadow["reason_codes"] == ["citation_coverage_below_minimum"]
+    assert shadow["evidence_id_count"] == 1
+    assert shadow["outcome"] == "abstained"
+    assert calls["regenerations"] == [], "the disabled path must never spend a regeneration"
+
+
+def test_enforced_grounded_gate_appends_server_rendered_sources(monkeypatch):
+    monkeypatch.setattr(settings, "enable_citation_verification", True, raising=False)
+    monkeypatch.setattr(settings, "rag_grounded_answer_gate_enabled", True, raising=False)
+    state = _grounded_state()
+    workflow, calls = _grounded_workflow(
+        final_text="Revenue rose to 10 million [E1] [Source: forged.pdf, Page 99].",
+    )
+
+    asyncio.run(workflow._rag_node(state))
+
+    content = state["response"].message.content
+    assert "Revenue rose to 10 million [E1]." in content
+    assert "forged.pdf" not in content
+    assert '[E1] "report.pdf" page 3' in content
+    assert calls["regenerations"] == []
+    assert state["response"].metadata["grounded_answer"]["outcome"] == "accepted"
+
+
+def test_enforced_grounded_gate_regenerates_once_then_abstains(monkeypatch):
+    from app.services.rag_grounding import GroundedAnswer, GroundedClaim
+
+    monkeypatch.setattr(settings, "enable_citation_verification", True, raising=False)
+    monkeypatch.setattr(settings, "rag_grounded_answer_gate_enabled", True, raising=False)
+    state = _grounded_state()
+    workflow, calls = _grounded_workflow(
+        final_text="Revenue rose to 10 million [E9].",
+        regenerated_answer=GroundedAnswer(
+            claims=[GroundedClaim(text="Revenue rose to 10 million.", evidence_ids=("E8",))]
+        ),
+    )
+
+    asyncio.run(workflow._rag_node(state))
+
+    metadata = state["response"].metadata
+    assert calls["regenerations"] == [(("unknown_evidence_id",), "What was revenue?")]
+    assert metadata["grounded_answer"]["outcome"] == "abstained"
+    assert metadata["grounded_answer"]["regenerated"] is True
+    assert "E9" not in state["response"].message.content
+    assert "report.pdf" not in state["response"].message.content
+    assert "evidence_tokenization" not in metadata
+    assert "_evidence_token_counter" not in metadata
+    assert all(
+        isinstance(value, (bool, int, float, str, list))
+        for value in metadata["grounded_answer"].values()
+    ), "gate metadata must stay msgpack-safe for checkpointed state"
+
+
+def test_grounded_gate_ignores_evidence_from_other_tool_calls(monkeypatch):
+    """Only the current turn's pack authorizes a citation."""
+    monkeypatch.setattr(settings, "enable_citation_verification", True, raising=False)
+    monkeypatch.setattr(settings, "rag_grounded_answer_gate_enabled", False, raising=False)
+    state = _grounded_state()
+    stale = dict(state["context"]["tool_artifacts"][0])
+    stale["tool_call_id"] = "search-from-an-earlier-turn"
+    state["context"]["tool_artifacts"] = [stale]
+    workflow, _calls = _grounded_workflow(final_text="Revenue rose to 10 million [E1].")
+
+    asyncio.run(workflow._rag_node(state))
+
+    shadow = state["response"].metadata["grounded_answer"]
+    assert shadow["evidence_id_count"] == 0
+    assert shadow["reason_codes"] == ["unknown_evidence_id", "answer_without_evidence"]
+
+
+def test_citation_verification_disabled_skips_the_gate_entirely(monkeypatch):
+    monkeypatch.setattr(settings, "enable_citation_verification", False, raising=False)
+    monkeypatch.setattr(settings, "rag_grounded_answer_gate_enabled", False, raising=False)
+    state = _grounded_state()
+    workflow, _calls = _grounded_workflow(final_text="Revenue rose to 10 million.")
+
+    asyncio.run(workflow._rag_node(state))
+
+    assert state["response"].message.content == "Revenue rose to 10 million."
+    assert "grounded_answer" not in state["response"].metadata
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["search_chunks", "view_images"])
 @pytest.mark.parametrize(

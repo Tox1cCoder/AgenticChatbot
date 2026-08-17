@@ -16,7 +16,7 @@ from app.ai.rag_tool_actions import (
     execute_search_documents_action,
     fit_rag_tool_message_content,
 )
-from app.ai.schemas import AgentMessage, GraphState, MessageRole
+from app.ai.schemas import AgentMessage, AgentResponse, GraphState, MessageRole
 from app.ai.token_counter import TokenCounter
 from app.ai.tool_context import (
     rich_response_capable_from_context,
@@ -31,6 +31,14 @@ from app.ai.tool_execution import (
 )
 from app.ai.utils import apply_hitl_decisions, make_json_safe, normalize_tool_call
 from app.core.config import settings
+from app.observability.rag import rag_metrics
+from app.services.rag_evidence import EvidencePack
+from app.services.rag_grounding import (
+    GroundedAnswerGate,
+    evidence_pack_from_payloads,
+    parse_grounded_answer,
+    render_grounded_answer,
+)
 
 logger = logging.getLogger("app.ai.graph")
 _apply_decisions = apply_hitl_decisions
@@ -73,6 +81,112 @@ class RagLoopMixin:
         discard = getattr(agent, "_discard_evidence_token_counter", None)
         if callable(discard):
             discard(descriptor)
+
+    def _grounded_answer_gate(self) -> GroundedAnswerGate:
+        gate = getattr(self.rag_agent, "grounded_answer_gate", None)
+        if isinstance(gate, GroundedAnswerGate):
+            return gate
+        return GroundedAnswerGate(
+            getattr(settings, "min_citation_coverage", 0.5),
+            metrics=rag_metrics,
+        )
+
+    def _current_turn_evidence(self, state: GraphState, messages: list[Any]) -> EvidencePack:
+        """Merge only the evidence packs this turn's own tool calls produced.
+
+        Ids are reissued per pack, so an id from an earlier turn is not a
+        citation this turn can authorize.
+        """
+        last_human_idx = self._find_last_human_message_index(messages)
+        start = 0 if last_human_idx is None else last_human_idx + 1
+        turn_tool_call_ids = {
+            str(tool_call.get("id") or "")
+            for message in messages[start:]
+            if isinstance(message, AIMessage) and message.tool_calls
+            for tool_call in message.tool_calls
+            if isinstance(tool_call, dict)
+        }
+        context = state.get("context") or {}
+        payloads = [
+            artifact["rag_evidence"]
+            for artifact in (context.get("tool_artifacts") or [])
+            if isinstance(artifact, dict)
+            and isinstance(artifact.get("rag_evidence"), dict)
+            and str(artifact.get("tool_call_id") or "") in turn_tool_call_ids
+        ]
+        return evidence_pack_from_payloads(payloads)
+
+    def _grounded_regenerator(
+        self,
+        state: GraphState,
+        question: str,
+        evidence: EvidencePack,
+    ) -> Any | None:
+        regenerate = getattr(self.rag_agent, "regenerate_grounded_answer", None)
+        if not callable(regenerate):
+            return None
+
+        async def _regenerate(*, reason_codes: Any):
+            return await regenerate(
+                question=question,
+                evidence=evidence,
+                reason_codes=reason_codes,
+                conversation_id=state.get("conversation_id"),
+                user_id=state.get("user_id"),
+                model_request=state.get("model_request"),
+            )
+
+        return _regenerate
+
+    async def _apply_grounded_answer_gate(
+        self,
+        state: GraphState,
+        response: AgentResponse,
+        *,
+        question: str,
+    ) -> AgentResponse:
+        """Validate one final RAG answer against the current turn's evidence.
+
+        Enforcement is opt-in. With ``rag_grounded_answer_gate_enabled`` off the
+        model's answer is returned unchanged and only the shadow validation
+        record is attached. The live evidence token counter is already consumed
+        or discarded before this runs, and the regeneration is a tool-free pass
+        that registers no descriptor, so this exit stays leak-free.
+        """
+        if not getattr(settings, "enable_citation_verification", False):
+            return response
+        text = str(response.message.content or "")
+        if not text.strip():
+            return response
+
+        messages = state.get("messages", []) or []
+        evidence = self._current_turn_evidence(state, messages)
+        enforced = bool(getattr(settings, "rag_grounded_answer_gate_enabled", False))
+        finalization = await self._grounded_answer_gate().finalize_answer(
+            question=question,
+            evidence=evidence,
+            answer=parse_grounded_answer(text),
+            regenerate=(
+                self._grounded_regenerator(state, question, evidence) if enforced else None
+            ),
+            mode="enforced" if enforced else "shadow",
+        )
+        metadata = response.metadata if isinstance(response.metadata, dict) else {}
+        metadata["grounded_answer"] = finalization.to_metadata()
+        response.metadata = metadata
+        if not enforced:
+            return response
+
+        # A regenerated answer has no original prose to preserve, and an
+        # abstention replaces it outright; otherwise keep the model's formatting
+        # and let the server append the citation block.
+        keep_prose = not finalization.answer.abstained and not finalization.regenerated
+        response.message.content = render_grounded_answer(
+            finalization.answer,
+            evidence,
+            text=text if keep_prose else None,
+        )
+        return response
 
     async def _rag_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
@@ -147,6 +261,11 @@ class RagLoopMixin:
             self._discard_evidence_token_counter(
                 self.rag_agent,
                 response.metadata or {},
+            )
+            response = await self._apply_grounded_answer_gate(
+                state,
+                response,
+                question=str(original_query or ""),
             )
         self._merge_tool_artifacts(state, response)
         state["response"] = response

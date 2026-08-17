@@ -1332,6 +1332,14 @@ class Settings(BaseSettings):
         default=0.5,
         description="Minimum fraction of retrieved docs that should be referenced in RAG response",
     )
+    rag_grounded_answer_gate_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enforce the grounded-answer gate on RAG final responses: constrained citation "
+            "prompting, one regeneration, and explicit abstention. Disabled keeps the current "
+            "final response and only records validation shadow metrics."
+        ),
+    )
 
     # LangGraph Checkpoint Configuration
     enable_langgraph_checkpoints: bool = Field(
