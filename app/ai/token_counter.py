@@ -5,6 +5,9 @@ from __future__ import annotations
 import inspect
 import json
 import math
+import secrets
+import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Literal
@@ -117,6 +120,52 @@ class ReportedTokenUsage:
     output_text_tokens: int | None = None
     output_image_tokens: int | None = None
     source: Literal["reported"] = "reported"
+
+
+class EphemeralTokenCounterStore:
+    """Bounded one-shot transport for counters that must never enter graph state.
+
+    Checkpointed state carries only the opaque reference plus provider/model
+    identity. A missing/expired reference is expected after process restart and
+    callers must fall back to a deterministic local :class:`TokenCounter`.
+    """
+
+    def __init__(self, *, max_entries: int = 32, ttl_seconds: float = 300.0):
+        self._max_entries = max(1, int(max_entries))
+        self._ttl_seconds = max(0.0, float(ttl_seconds))
+        self._entries: OrderedDict[str, tuple[float, TokenCounter]] = OrderedDict()
+
+    def put(self, counter: TokenCounter) -> str:
+        self.prune()
+        reference = secrets.token_urlsafe(18)
+        self._entries[reference] = (time.monotonic() + self._ttl_seconds, counter)
+        while len(self._entries) > self._max_entries:
+            self._entries.popitem(last=False)
+        return reference
+
+    def take(self, reference: str | None) -> TokenCounter | None:
+        self.prune()
+        if not reference:
+            return None
+        entry = self._entries.pop(str(reference), None)
+        return entry[1] if entry is not None else None
+
+    def discard(self, reference: str | None) -> None:
+        if reference:
+            self._entries.pop(str(reference), None)
+
+    def prune(self) -> None:
+        now = time.monotonic()
+        expired = [key for key, (deadline, _) in self._entries.items() if deadline <= now]
+        for key in expired:
+            self._entries.pop(key, None)
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+    def __len__(self) -> int:
+        self.prune()
+        return len(self._entries)
 
 
 class TokenCounter:

@@ -1094,7 +1094,11 @@ class RAGAgent(BaseAgent):
         if request_budget_metadata is not None:
             metadata["request_budget"] = request_budget_metadata
         if tool_calls and evidence_token_counter is not None:
-            metadata["_evidence_token_counter"] = evidence_token_counter
+            metadata["evidence_tokenization"] = self._register_evidence_token_counter(
+                evidence_token_counter,
+                provider=runtime_config.provider,
+                model=runtime_config.model,
+            )
         self._apply_runtime_metadata(metadata, runtime_config)
         self._merge_context_window_usage(metadata, metadata["token_breakdown"])
 

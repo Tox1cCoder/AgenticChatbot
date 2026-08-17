@@ -58,7 +58,7 @@ from ..skills_tool import (
     get_available_skill_summaries,
 )
 from ..time_context import build_runtime_time_context_block
-from ..token_counter import TokenCounter
+from ..token_counter import EphemeralTokenCounterStore, TokenCounter
 from ..token_instrumentation import (
     compute_token_breakdown,
     estimate_output_tokens,
@@ -968,6 +968,52 @@ class BaseAgent(ABC):
             native_counters={provider_key: native_request},
             native_text_counters={provider_key: native_text},
         )
+
+    def _register_evidence_token_counter(
+        self,
+        counter: TokenCounter,
+        *,
+        provider: str,
+        model: str,
+    ) -> dict[str, str]:
+        """Keep a live counter out of checkpointed response metadata."""
+        store = getattr(self, "_ephemeral_evidence_counters", None)
+        if not isinstance(store, EphemeralTokenCounterStore):
+            store = EphemeralTokenCounterStore()
+            self._ephemeral_evidence_counters = store
+        return {
+            "reference": store.put(counter),
+            "provider": str(provider or ""),
+            "model": str(model or ""),
+            "fallback": "deterministic_local_conservative",
+        }
+
+    def _take_evidence_token_counter(
+        self,
+        descriptor: dict[str, Any] | None,
+        *,
+        provider: str,
+        model: str,
+    ) -> TokenCounter:
+        """Consume a live counter once, or reconstruct the safe restart fallback."""
+        reference = descriptor.get("reference") if isinstance(descriptor, dict) else None
+        identity_matches = bool(
+            isinstance(descriptor, dict)
+            and str(descriptor.get("provider") or "") == str(provider or "")
+            and str(descriptor.get("model") or "") == str(model or "")
+        )
+        store = getattr(self, "_ephemeral_evidence_counters", None)
+        counter = store.take(reference) if isinstance(store, EphemeralTokenCounterStore) else None
+        if identity_matches and counter is not None:
+            return counter
+        return TokenCounter()
+
+    def _discard_evidence_token_counter(self, descriptor: dict[str, Any] | None) -> None:
+        """Release an unused live counter after final/error/approval paths."""
+        store = getattr(self, "_ephemeral_evidence_counters", None)
+        if isinstance(store, EphemeralTokenCounterStore):
+            reference = descriptor.get("reference") if isinstance(descriptor, dict) else None
+            store.discard(reference)
 
     def _build_compaction_callbacks(self, conversation_id: str, user_id: str):
         coordinator = self._get_request_compaction_coordinator()

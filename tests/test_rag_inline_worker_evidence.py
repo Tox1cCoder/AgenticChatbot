@@ -136,7 +136,12 @@ async def test_inline_worker_charges_non_pack_content_before_later_search(monkey
                 "provider": "test",
                 "model": "test",
                 "request_budget": {"evidence_token_allowance": 50},
-                "_evidence_token_counter": WordCounter(),
+                "evidence_tokenization": {
+                    "reference": "word-counter",
+                    "provider": "test",
+                    "model": "test",
+                    "fallback": "deterministic_local_conservative",
+                },
             },
         ),
         AgentResponse(
@@ -155,6 +160,7 @@ async def test_inline_worker_charges_non_pack_content_before_later_search(monkey
         agent_config_key="rag",
         tool_state_key="rag",
         agent_type=AgentType.RAG,
+        _take_evidence_token_counter=lambda descriptor, **_kwargs: WordCounter(),
     )
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
     workflow.rag_agent = agent
@@ -187,3 +193,59 @@ async def test_inline_worker_charges_non_pack_content_before_later_search(monkey
 
     assert response.message.content == "done"
     assert allowances == [47]
+
+
+@pytest.mark.asyncio
+async def test_inline_worker_strips_private_counter_before_approval_return():
+    consumed: list[dict] = []
+    response = AgentResponse(
+        agent_type=AgentType.RAG,
+        agent_id="rag_agent",
+        message=AgentMessage(
+            role=MessageRole.ASSISTANT,
+            content="",
+            tool_calls=[
+                {
+                    "id": "search-approval",
+                    "name": "search_documents",
+                    "args": {"action": "search_chunks", "query": "revenue"},
+                }
+            ],
+        ),
+        metadata={
+            "request_budget": {"evidence_token_allowance": 50},
+            "evidence_tokenization": {
+                "reference": "approval-counter",
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "fallback": "deterministic_local_conservative",
+            },
+        },
+    )
+
+    async def process_message(_message, _conversation_id):
+        return response
+
+    agent = SimpleNamespace(
+        process_message=process_message,
+        agent_config_key="rag",
+        tool_state_key="rag",
+        agent_type=AgentType.RAG,
+        _take_evidence_token_counter=lambda descriptor, **_kwargs: (
+            consumed.append(descriptor) or object()
+        ),
+    )
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    workflow.rag_agent = agent
+    workflow.agents = {"rag_agent": agent}
+    workflow._needs_approval = AsyncMock(return_value=True)
+
+    approved = await workflow._run_agent_in_isolated_context(
+        agent_name="rag_agent",
+        task_prompt="question",
+        parent_state={"conversation_id": "conv", "user_id": "owner", "context": {}},
+    )
+
+    assert approved.metadata["requires_approval"] is True
+    assert "evidence_tokenization" not in approved.metadata
+    assert consumed[0]["reference"] == "approval-counter"

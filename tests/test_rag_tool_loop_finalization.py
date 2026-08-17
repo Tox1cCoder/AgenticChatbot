@@ -486,8 +486,6 @@ def test_rag_search_calls_share_one_cumulative_evidence_allowance(monkeypatch):
 
 def test_mixed_rag_actions_charge_non_pack_content_before_later_search(monkeypatch):
     workflow = _make_workflow()
-    workflow.rag_agent = object()
-    workflow.agents = {}
     search_allowances: list[int] = []
 
     async def fake_execute_search_documents_action(**kwargs):
@@ -506,6 +504,11 @@ def test_mixed_rag_actions_charge_non_pack_content_before_later_search(monkeypat
     class FourWordCounter:
         def count_text(self, **kwargs):
             return SimpleNamespace(tokens=len(kwargs["text"].split()), strategy="words")
+
+    workflow.rag_agent = SimpleNamespace(
+        _take_evidence_token_counter=lambda descriptor, **_kwargs: FourWordCounter()
+    )
+    workflow.agents = {}
 
     monkeypatch.setattr(
         "app.ai.workflow.rag_loop.execute_search_documents_action",
@@ -531,7 +534,12 @@ def test_mixed_rag_actions_charge_non_pack_content_before_later_search(monkeypat
             message=AgentMessage(role=MessageRole.ASSISTANT, content=""),
             metadata={
                 "request_budget": {"evidence_token_allowance": 100},
-                "_evidence_token_counter": FourWordCounter(),
+                "evidence_tokenization": {
+                    "reference": "test-counter",
+                    "provider": "gemini",
+                    "model": "gemini-2.5-flash",
+                    "fallback": "deterministic_local_conservative",
+                },
             },
         ),
     }

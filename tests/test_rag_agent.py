@@ -1323,6 +1323,7 @@ def test_invoke_agentic_rag_model_binds_tools_when_enabled():
 def test_reachable_rag_invocation_shares_provider_native_counter_with_evidence():
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+    from app.ai.checkpoint import _build_checkpoint_serializer
     from app.core.runtime_modeling import ResolvedRuntimeModelConfig
 
     agent = _build_agentic_invocation_agent()
@@ -1359,6 +1360,8 @@ def test_reachable_rag_invocation_shares_provider_native_counter_with_evidence()
         is_custom_model=False,
         context_window={"max_input_tokens": 100_000},
     )
+    search_tool = MagicMock()
+    search_tool.name = "search_documents"
 
     with patch(
         "app.ai.agents.rag_agent.ModelFactory.bind_tools_to_model",
@@ -1368,7 +1371,7 @@ def test_reachable_rag_invocation_shares_provider_native_counter_with_evidence()
             agent._invoke_agentic_rag_model(
                 conversation_id=None,
                 messages=[SystemMessage(content="sys"), HumanMessage(content="question")],
-                tools=[MagicMock(name="search_documents")],
+                tools=[search_tool],
                 disable_tools=False,
                 user_id=None,
                 runtime_config=runtime_config,
@@ -1376,14 +1379,36 @@ def test_reachable_rag_invocation_shares_provider_native_counter_with_evidence()
         )
 
     assert response.metadata["request_budget"]["count_strategy"] == "gemini:native_count"
-    counter = response.metadata["_evidence_token_counter"]
+    descriptor = response.metadata["evidence_tokenization"]
+    _build_checkpoint_serializer().dumps_typed(("state", {"response": response}))
+    assert all(not callable(value) for value in descriptor.values())
+    counter = agent._take_evidence_token_counter(
+        descriptor,
+        provider="gemini",
+        model="gemini-2.5-flash",
+    )
     evidence_count = counter.count_text(
         provider="gemini",
         model="gemini-2.5-flash",
         text="bounded evidence",
     )
     assert evidence_count.source == "provider"
+    assert len(agent._ephemeral_evidence_counters) == 0
     assert native_calls
+
+    restarted_agent = object.__new__(RAGAgent)
+    fallback = restarted_agent._take_evidence_token_counter(
+        descriptor,
+        provider="gemini",
+        model="gemini-2.5-flash",
+    )
+    fallback_count = fallback.count_text(
+        provider="gemini",
+        model="gemini-2.5-flash",
+        text="bounded evidence",
+    )
+    assert fallback_count.source == "local"
+    assert "native" not in fallback_count.strategy
 
 
 def test_invoke_agentic_rag_model_populates_runtime_metadata():

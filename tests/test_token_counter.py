@@ -7,7 +7,28 @@ import pytest
 import tiktoken
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from app.ai.token_counter import ReportedTokenUsage, TokenCounter
+from app.ai.token_counter import EphemeralTokenCounterStore, ReportedTokenUsage, TokenCounter
+
+
+def test_ephemeral_counter_store_is_one_shot_bounded_and_expiring(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("app.ai.token_counter.time.monotonic", lambda: clock[0])
+    store = EphemeralTokenCounterStore(max_entries=2, ttl_seconds=5)
+    first = TokenCounter()
+    second = TokenCounter()
+    third = TokenCounter()
+
+    first_ref = store.put(first)
+    second_ref = store.put(second)
+    third_ref = store.put(third)
+
+    assert store.take(first_ref) is None
+    assert store.take(second_ref) is second
+    assert store.take(second_ref) is None
+    assert len(store) == 1
+    clock[0] = 106.0
+    assert store.take(third_ref) is None
+    assert len(store) == 0
 
 
 def test_openai_uses_model_tokenizer_for_text():

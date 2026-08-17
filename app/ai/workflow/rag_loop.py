@@ -35,6 +35,33 @@ _apply_decisions = apply_hitl_decisions
 class RagLoopMixin:
     """Relocated rag_loop methods for :class:`MultiAgentWorkflow`."""
 
+    @staticmethod
+    def _consume_evidence_token_counter(
+        agent: Any,
+        metadata: dict[str, Any],
+        *,
+        provider: str,
+        model: str,
+    ) -> TokenCounter:
+        # Never allow a legacy live object to propagate farther through state.
+        metadata.pop("_evidence_token_counter", None)
+        descriptor = metadata.pop("evidence_tokenization", None)
+        resolver = getattr(agent, "_take_evidence_token_counter", None)
+        if callable(resolver):
+            try:
+                return resolver(descriptor, provider=provider, model=model)
+            except Exception:
+                logger.exception("Failed to resolve ephemeral evidence counter")
+        return TokenCounter()
+
+    @staticmethod
+    def _discard_evidence_token_counter(agent: Any, metadata: dict[str, Any]) -> None:
+        metadata.pop("_evidence_token_counter", None)
+        descriptor = metadata.pop("evidence_tokenization", None)
+        discard = getattr(agent, "_discard_evidence_token_counter", None)
+        if callable(discard):
+            discard(descriptor)
+
     async def _rag_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
         if not messages:
@@ -104,6 +131,11 @@ class RagLoopMixin:
             handoff_target_descriptions=multi_agent_kwargs.get("handoff_target_descriptions"),
         )
         response = self._finalize_forced_final_response(state, response)
+        if not response.message.tool_calls:
+            self._discard_evidence_token_counter(
+                self.rag_agent,
+                response.metadata or {},
+            )
         self._merge_tool_artifacts(state, response)
         state["response"] = response
 
@@ -150,10 +182,12 @@ class RagLoopMixin:
         remaining_evidence_allowance = evidence_allowance
         evidence_provider = str(response_metadata.get("provider") or "gemini")
         evidence_model = str(response_metadata.get("model") or "gemini-2.5-flash")
-        evidence_token_counter = response_metadata.pop(
-            "_evidence_token_counter",
-            None,
-        ) or TokenCounter()
+        evidence_token_counter = self._consume_evidence_token_counter(
+            self.rag_agent,
+            response_metadata,
+            provider=evidence_provider,
+            model=evidence_model,
+        )
         last_human_idx = self._find_last_human_message_index(messages)
         question = (
             str(messages[last_human_idx].content)

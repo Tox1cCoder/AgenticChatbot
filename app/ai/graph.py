@@ -78,7 +78,6 @@ from .schemas import (
     TodoStatus,
     WorkflowExecutionRequest,
 )
-from .token_counter import TokenCounter
 from .tool_context import rich_response_capable_from_context, tool_execution_context
 from .tool_execution import (
     apply_tool_output_offload,
@@ -1899,12 +1898,14 @@ class MultiAgentWorkflow(
                 response = await agent.process_message(agent_msg, conversation_id)
 
                 if response.error:
+                    self._discard_evidence_token_counter(agent, response.metadata or {})
                     if accumulated_artifacts:
                         response.tool_artifacts = accumulated_artifacts
                     return response
 
                 tool_calls = response.message.tool_calls or []
                 if not tool_calls:
+                    self._discard_evidence_token_counter(agent, response.metadata or {})
                     if accumulated_artifacts:
                         existing_artifacts = list(response.tool_artifacts or [])
                         for artifact in accumulated_artifacts:
@@ -1916,6 +1917,23 @@ class MultiAgentWorkflow(
                 normalized_calls = [
                     canonicalize_rag_tool_call(normalize_tool_call(tc)) for tc in tool_calls
                 ]
+                response_metadata = response.metadata or {}
+                request_budget = response_metadata.get("request_budget") or {}
+                raw_allowance = request_budget.get("evidence_token_allowance")
+                remaining_evidence_allowance = max(
+                    0,
+                    int(raw_allowance if raw_allowance is not None else 0),
+                )
+                evidence_provider = str(response_metadata.get("provider") or "gemini")
+                evidence_model = str(
+                    response_metadata.get("model") or "gemini-2.5-flash"
+                )
+                evidence_token_counter = self._consume_evidence_token_counter(
+                    agent,
+                    response_metadata,
+                    provider=evidence_provider,
+                    model=evidence_model,
+                )
                 if await self._needs_approval(parent_state, normalized_calls, agent=agent):
                     if response.metadata is None:
                         response.metadata = {}
@@ -1938,21 +1956,6 @@ class MultiAgentWorkflow(
                         ],
                     )
                 )
-                response_metadata = response.metadata or {}
-                request_budget = response_metadata.get("request_budget") or {}
-                raw_allowance = request_budget.get("evidence_token_allowance")
-                remaining_evidence_allowance = max(
-                    0,
-                    int(raw_allowance if raw_allowance is not None else 0),
-                )
-                evidence_provider = str(response_metadata.get("provider") or "gemini")
-                evidence_model = str(
-                    response_metadata.get("model") or "gemini-2.5-flash"
-                )
-                evidence_token_counter = response_metadata.pop(
-                    "_evidence_token_counter",
-                    None,
-                ) or TokenCounter()
                 rag_iteration_start = len(accumulated_artifacts)
                 for tool_call_data in normalized_calls:
                     tool_name = tool_call_data.get("name")
