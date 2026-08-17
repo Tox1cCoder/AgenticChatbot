@@ -311,6 +311,29 @@ def test_hybrid_search_fuses_then_reauthorizes_winners_and_preserves_raw_scores(
     )
 
 
+def test_retrieval_candidate_carries_production_block_provenance() -> None:
+    from app.services.rag_retrieval import RetrievalScope
+
+    chunk_id = uuid4()
+    row = _chunk(chunk_id, content="equation")
+    row.block_provenance = [{"kind": "equation", "block_index": 3}]
+    retriever, _, _, _ = _retriever(
+        hybrid_enabled=False,
+        points=[_point(chunk_id, 0.9)],
+        hydrated=[row],
+    )
+
+    results = retriever.search(
+        "equation",
+        RetrievalScope(user_id=str(uuid4()), conversation_id=uuid4()),
+        final_limit=1,
+    )
+
+    assert results[0].metadata["block_provenance"] == [
+        {"kind": "equation", "block_index": 3}
+    ]
+
+
 def test_dense_only_rollback_path_remains_typed_and_authorized():
     from app.services.rag_retrieval import RetrievalCandidate, RetrievalScope
 

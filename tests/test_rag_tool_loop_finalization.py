@@ -484,6 +484,63 @@ def test_rag_search_calls_share_one_cumulative_evidence_allowance(monkeypatch):
     assert allowances == [100, 40]
 
 
+def test_mixed_rag_actions_charge_non_pack_content_before_later_search(monkeypatch):
+    workflow = _make_workflow()
+    workflow.rag_agent = object()
+    workflow.agents = {}
+    search_allowances: list[int] = []
+
+    async def fake_execute_search_documents_action(**kwargs):
+        action = kwargs["tool_args"]["action"]
+        if action == "list_documents":
+            return "one two three four", action, {"documents": []}
+        search_allowances.append(kwargs["evidence_max_tokens"])
+        return "pack", action, {
+            "records": [{"evidence_id": "E1"}],
+            "evidence_ids": ["E1"],
+            "token_count": 1,
+            "omitted_count": 0,
+            "truncated_count": 0,
+        }
+
+    class FourWordCounter:
+        def count_text(self, **kwargs):
+            return SimpleNamespace(tokens=len(kwargs["text"].split()), strategy="words")
+
+    monkeypatch.setattr(
+        "app.ai.workflow.rag_loop.execute_search_documents_action",
+        fake_execute_search_documents_action,
+    )
+    state = {
+        "conversation_id": "conv-1",
+        "user_id": "owner",
+        "context": {},
+        "messages": [
+            HumanMessage(content="question"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "l1", "name": "search_documents", "args": {"action": "list_documents"}},
+                    {"id": "s1", "name": "search_documents", "args": {"action": "search_chunks"}},
+                ],
+            ),
+        ],
+        "response": AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content=""),
+            metadata={
+                "request_budget": {"evidence_token_allowance": 100},
+                "_evidence_token_counter": FourWordCounter(),
+            },
+        ),
+    }
+
+    asyncio.run(workflow._rag_tools_node(state))
+
+    assert search_allowances == [96]
+
+
 @pytest.mark.asyncio
 async def test_rag_agent_preserves_current_assistant_tool_group_without_synthetic_human_text():
     agent = object.__new__(RAGAgent)

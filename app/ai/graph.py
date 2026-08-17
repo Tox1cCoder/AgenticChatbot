@@ -78,6 +78,7 @@ from .schemas import (
     TodoStatus,
     WorkflowExecutionRequest,
 )
+from .token_counter import TokenCounter
 from .tool_context import rich_response_capable_from_context, tool_execution_context
 from .tool_execution import (
     apply_tool_output_offload,
@@ -1948,6 +1949,10 @@ class MultiAgentWorkflow(
                 evidence_model = str(
                     response_metadata.get("model") or "gemini-2.5-flash"
                 )
+                evidence_token_counter = response_metadata.pop(
+                    "_evidence_token_counter",
+                    None,
+                ) or TokenCounter()
                 rag_iteration_start = len(accumulated_artifacts)
                 for tool_call_data in normalized_calls:
                     tool_name = tool_call_data.get("name")
@@ -1966,11 +1971,7 @@ class MultiAgentWorkflow(
                             evidence_max_tokens=remaining_evidence_allowance,
                             evidence_provider=evidence_provider,
                             evidence_model=evidence_model,
-                        )
-                        remaining_evidence_allowance = max(
-                            0,
-                            remaining_evidence_allowance
-                            - int(evidence.get("token_count") or 0),
+                            evidence_token_counter=evidence_token_counter,
                         )
                         parsed_error: dict[str, Any] | None = None
                         if isinstance(result, str):
@@ -1992,6 +1993,19 @@ class MultiAgentWorkflow(
                                 conversation_id=conversation_id,
                                 user_id=user_id,
                             )
+                        consumed_tokens = (
+                            int(evidence.get("token_count") or 0)
+                            if evidence.get("records") is not None
+                            else evidence_token_counter.count_text(
+                                provider=evidence_provider,
+                                model=evidence_model,
+                                text=public_text or "",
+                            ).tokens
+                        )
+                        remaining_evidence_allowance = max(
+                            0,
+                            remaining_evidence_allowance - consumed_tokens,
+                        )
                         artifact = build_tool_artifact(
                             tool_call_id=tool_id,
                             tool_name=tool_name,
@@ -2053,6 +2067,15 @@ class MultiAgentWorkflow(
                             )
                         )
                         legacy_tool_context.append(output_content)
+                        remaining_evidence_allowance = max(
+                            0,
+                            remaining_evidence_allowance
+                            - evidence_token_counter.count_text(
+                                provider=evidence_provider,
+                                model=evidence_model,
+                                text=output_content,
+                            ).tokens,
+                        )
 
                 rag_error_artifacts = [
                     artifact

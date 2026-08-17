@@ -14,6 +14,7 @@ from langchain_core.messages import ToolMessage
 
 TokenSource = Literal["local", "provider", "reported"]
 NativeCounter = Callable[..., int | Awaitable[int]]
+NativeTextCounter = Callable[..., int]
 
 _IMAGE_FALLBACK_TOKENS = 1_200
 _MESSAGE_ENVELOPE_TOKENS = 4
@@ -121,10 +122,18 @@ class ReportedTokenUsage:
 class TokenCounter:
     """Count request components with provider/model-specific strategies."""
 
-    def __init__(self, native_counters: Mapping[str, NativeCounter] | None = None):
+    def __init__(
+        self,
+        native_counters: Mapping[str, NativeCounter] | None = None,
+        native_text_counters: Mapping[str, NativeTextCounter] | None = None,
+    ):
         self._native_counters = {
             self._normalize_provider(provider): callback
             for provider, callback in (native_counters or {}).items()
+        }
+        self._native_text_counters = {
+            self._normalize_provider(provider): callback
+            for provider, callback in (native_text_counters or {}).items()
         }
 
     @staticmethod
@@ -143,6 +152,22 @@ class TokenCounter:
         strategy, encoder = self._text_strategy(provider_key, str(model or ""))
         if not raw_text:
             return TokenCount(tokens=0, strategy=strategy)
+        native_counter = self._native_text_counters.get(provider_key)
+        if native_counter is not None:
+            try:
+                tokens = self._non_negative(
+                    native_counter(model=str(model or ""), text=raw_text),
+                    "native text token count",
+                )
+                return TokenCount(
+                    tokens=tokens,
+                    strategy=f"{provider_key}:native_text",
+                    source="provider",
+                )
+            except Exception:
+                # Provider tokenization is optional. The provider-specific local
+                # strategy below is deliberately conservative and explicit.
+                strategy = f"{strategy}:conservative_fallback"
         if encoder is not None:
             tokens = len(encoder.encode(raw_text))
         elif provider_key in {"gemini", "anthropic"}:
@@ -256,6 +281,19 @@ class TokenCounter:
         reserved_output_tokens: int = 0,
         safety_margin_tokens: int = 0,
     ) -> RequestTokenCount:
+        if self._native_text_counters:
+            # Request estimation must remain one bounded local operation. Native
+            # text callbacks are reserved for exact rendered evidence and the
+            # single full-request native call in ``count_request``.
+            return TokenCounter().estimate_request(
+                provider=provider,
+                model=model,
+                messages=messages,
+                tools=tools,
+                attachments=attachments,
+                reserved_output_tokens=reserved_output_tokens,
+                safety_margin_tokens=safety_margin_tokens,
+            )
         reserved = self._non_negative(reserved_output_tokens, "reserved_output_tokens")
         safety = self._non_negative(safety_margin_tokens, "safety_margin_tokens")
         message_count = self.count_messages(
@@ -331,6 +369,38 @@ class TokenCounter:
             ),
             strategy=f"{provider_key}:native_count",
             source="provider",
+        )
+
+    @classmethod
+    def canonical_request_text(
+        cls,
+        *,
+        messages: Sequence[Any],
+        tools: Sequence[Any],
+        attachments: Sequence[Any],
+    ) -> str:
+        """Stable full protocol payload used by provider-native tokenizers."""
+        message_payloads = []
+        for message in messages:
+            payload = {
+                "role": cls._message_role(message),
+                "content": cls._message_value(message, "content"),
+            }
+            tool_calls = cls._message_value(message, "tool_calls")
+            if tool_calls:
+                payload["tool_calls"] = tool_calls
+            if cls._message_role(message) == "tool" or isinstance(message, ToolMessage):
+                payload["name"] = cls._message_value(message, "name") or ""
+                payload["tool_call_id"] = (
+                    cls._message_value(message, "tool_call_id") or ""
+                )
+            message_payloads.append(payload)
+        return cls.canonical_json(
+            {
+                "attachments": [cls._attachment_payload(item) for item in attachments],
+                "messages": message_payloads,
+                "tools": [cls._tool_payload(tool) for tool in tools],
+            }
         )
 
     def extract_reported_usage(

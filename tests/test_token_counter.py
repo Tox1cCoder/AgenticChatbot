@@ -47,6 +47,27 @@ def test_gemini_thai_estimate_is_conservative_not_four_character_heuristic():
     assert result.strategy == "gemini:utf8_bytes_div_3"
 
 
+def test_configured_provider_native_text_counter_governs_pack_text() -> None:
+    calls: list[tuple[str, str]] = []
+
+    def native_text(*, model: str, text: str) -> int:
+        calls.append((model, text))
+        return 7
+
+    counter = TokenCounter(native_text_counters={"gemini": native_text})
+
+    result = counter.count_text(
+        provider="gemini",
+        model="gemini-2.5-flash",
+        text="encoded evidence",
+    )
+
+    assert result.tokens == 7
+    assert result.strategy == "gemini:native_text"
+    assert result.source == "provider"
+    assert calls == [("gemini-2.5-flash", "encoded evidence")]
+
+
 def test_anthropic_uses_conservative_local_estimate():
     counter = TokenCounter()
 

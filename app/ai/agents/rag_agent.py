@@ -917,6 +917,7 @@ class RAGAgent(BaseAgent):
         current_runtime = runtime_config
         context_overflow_retried = False
         budget_result = None
+        evidence_token_counter: TokenCounter | None = None
         system_messages = [message for message in messages if isinstance(message, SystemMessage)]
         non_system_messages = [
             message for message in messages if not isinstance(message, SystemMessage)
@@ -971,6 +972,10 @@ class RAGAgent(BaseAgent):
                         tools,
                         tool_choice=getattr(settings, "tool_choice_mode", "auto"),
                     )
+                evidence_token_counter = self._token_counter_for_model(
+                    current_runtime.provider,
+                    llm,
+                )
                 budget_result = await self._preflight_model_request(
                     current_runtime,
                     system_messages=system_messages,
@@ -980,6 +985,7 @@ class RAGAgent(BaseAgent):
                     conversation_id=conversation_id,
                     user_id=user_id,
                     authoritative_allowance=True,
+                    token_counter=evidence_token_counter,
                 )
                 request_messages = (
                     list(budget_result.envelope.messages) if budget_result is not None else messages
@@ -1056,7 +1062,7 @@ class RAGAgent(BaseAgent):
                     for tool_call in tool_calls
                 )
                 budget_result = await RequestBudgetService(
-                    TokenCounter()
+                    evidence_token_counter or TokenCounter()
                 ).reserve_tool_result_envelopes(
                     budget_result,
                     assistant_message=response,
@@ -1087,6 +1093,8 @@ class RAGAgent(BaseAgent):
         request_budget_metadata = self._request_budget_metadata(budget_result)
         if request_budget_metadata is not None:
             metadata["request_budget"] = request_budget_metadata
+        if tool_calls and evidence_token_counter is not None:
+            metadata["_evidence_token_counter"] = evidence_token_counter
         self._apply_runtime_metadata(metadata, runtime_config)
         self._merge_context_window_usage(metadata, metadata["token_breakdown"])
 

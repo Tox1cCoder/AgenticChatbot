@@ -110,3 +110,80 @@ async def test_reachable_inline_rag_worker_feeds_real_role_group_to_rag_agent(mo
     assert invocations[1][-1].tool_call_id == "search-1"
     assert "BEGIN UNTRUSTED EVIDENCE E1" in str(invocations[1][-1].content)
     assert response.tool_artifacts[0]["rag_evidence"]["evidence_ids"] == ["E1"]
+
+
+@pytest.mark.asyncio
+async def test_inline_worker_charges_non_pack_content_before_later_search(monkeypatch):
+    allowances: list[int] = []
+
+    class WordCounter:
+        def count_text(self, **kwargs):
+            return SimpleNamespace(tokens=len(kwargs["text"].split()), strategy="words")
+
+    responses = [
+        AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(
+                role=MessageRole.ASSISTANT,
+                content="",
+                tool_calls=[
+                    {"id": "l1", "name": "search_documents", "args": {"action": "list_documents"}},
+                    {"id": "s1", "name": "search_documents", "args": {"action": "search_chunks"}},
+                ],
+            ),
+            metadata={
+                "provider": "test",
+                "model": "test",
+                "request_budget": {"evidence_token_allowance": 50},
+                "_evidence_token_counter": WordCounter(),
+            },
+        ),
+        AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content="done"),
+            metadata={},
+        ),
+    ]
+
+    async def process_message(_message, _conversation_id):
+        return responses.pop(0)
+
+    agent = SimpleNamespace(
+        process_message=process_message,
+        agent_config_key="rag",
+        tool_state_key="rag",
+        agent_type=AgentType.RAG,
+    )
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    workflow.rag_agent = agent
+    workflow.agents = {"rag_agent": agent}
+
+    async def fake_action(**kwargs):
+        action = kwargs["tool_args"]["action"]
+        if action == "list_documents":
+            return "one two three", action, {"documents": []}
+        allowances.append(kwargs["evidence_max_tokens"])
+        return "pack", action, {
+            "records": [{"evidence_id": "E1"}],
+            "evidence_ids": ["E1"],
+            "token_count": 1,
+            "omitted_count": 0,
+            "truncated_count": 0,
+        }
+
+    monkeypatch.setattr("app.ai.graph.execute_search_documents_action", fake_action)
+    monkeypatch.setattr(
+        "app.ai.graph.apply_tool_output_offload",
+        lambda **kwargs: (kwargs["output_text"], None),
+    )
+
+    response = await workflow._run_agent_in_isolated_context(
+        agent_name="rag_agent",
+        task_prompt="question",
+        parent_state={"conversation_id": "conv", "user_id": "owner", "context": {}},
+    )
+
+    assert response.message.content == "done"
+    assert allowances == [47]

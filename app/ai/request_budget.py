@@ -103,11 +103,14 @@ class RequestBudgetService:
         emergency_compact: Callable[[tuple[Any, ...]], Sequence[Any] | Awaitable[Sequence[Any]]]
         | None = None,
     ) -> BudgetResult:
-        count = self._count(envelope)
-        ratio = count.input_tokens / config.available_input_tokens
-        if envelope.authoritative_allowance or ratio >= config.soft_ratio * 0.9:
+        if envelope.authoritative_allowance:
             count = await self._count_authoritative(envelope)
+        else:
+            count = self._count(envelope)
             ratio = count.input_tokens / config.available_input_tokens
+            if ratio >= config.soft_ratio * 0.9:
+                count = await self._count_authoritative(envelope)
+        ratio = count.input_tokens / config.available_input_tokens
         if ratio < config.soft_ratio:
             return self._result("proceed", envelope, count, config)
 

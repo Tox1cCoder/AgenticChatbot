@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
@@ -16,7 +14,6 @@ from app.ai.token_counter import TokenCounter
 from app.services.rag_retrieval import RetrievalCandidate, RetrievalScope
 
 _ATOMIC_KINDS = frozenset({"table", "image", "equation"})
-_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 
 
 @dataclass(frozen=True)
@@ -237,7 +234,6 @@ class EvidenceAssembler:
             if record.image_id or record.chunk_id
         }
         seen_hashes = {_content_hash(record.content) for record in existing_records}
-        seen_tokens = [_normalized_tokens(record.content) for record in existing_records]
         omitted = 0
         for raw_candidate in candidates:
             candidate = _coerce_candidate(raw_candidate)
@@ -248,21 +244,16 @@ class EvidenceAssembler:
                 candidate.image_id if candidate.modality == "image" else candidate.chunk_id
             )
             id_key = (candidate.modality, str(canonical_id)) if canonical_id else None
-            tokens = _normalized_tokens(candidate.content)
             content_hash = _content_hash(candidate.content)
             if (
                 (id_key is not None and id_key in seen_ids)
                 or content_hash in seen_hashes
-                or any(
-                _content_overlaps(tokens, prior, self.overlap_threshold) for prior in seen_tokens
-                )
             ):
                 omitted += 1
                 continue
             if id_key is not None:
                 seen_ids.add(id_key)
             seen_hashes.add(content_hash)
-            seen_tokens.append(tokens)
             kept.append(candidate)
         return kept, omitted
 
@@ -414,28 +405,13 @@ def _content_hash(content: str) -> str:
     return hashlib.sha256(_normalize_content(content).encode("utf-8")).hexdigest()
 
 
-def _normalized_tokens(content: str) -> tuple[str, ...]:
-    return tuple(_TOKEN_RE.findall(_normalize_content(content)))
-
-
-def _content_overlaps(
-    left: tuple[str, ...], right: tuple[str, ...], threshold: float
-) -> bool:
-    if not left or not right:
-        return False
-    shorter = min(len(left), len(right))
-    minimum_overlap = max(3, math.ceil(shorter * threshold))
-    for size in range(shorter, minimum_overlap - 1, -1):
-        if left[-size:] == right[:size] or right[-size:] == left[:size]:
-            return True
-    return False
-
-
 def _atomic_kind(modality: str, metadata: Mapping[str, Any]) -> str | None:
     if modality == "image":
         return "image"
     if metadata.get("has_tables") or metadata.get("contains_table"):
         return "table"
+    if metadata.get("has_images") or metadata.get("contains_image"):
+        return "image"
 
     def _kind_from(mapping: Mapping[str, Any]) -> str | None:
         for key in ("kind", "block_type", "element_type", "content_type", "type"):
@@ -449,7 +425,17 @@ def _atomic_kind(modality: str, metadata: Mapping[str, Any]) -> str | None:
         return direct
     provenance = metadata.get("provenance")
     if isinstance(provenance, Mapping):
-        return _kind_from(provenance)
+        nested = _kind_from(provenance)
+        if nested:
+            return nested
+    block_provenance = metadata.get("block_provenance")
+    if isinstance(block_provenance, Sequence) and not isinstance(
+        block_provenance,
+        (str, bytes),
+    ):
+        for block in block_provenance:
+            if isinstance(block, Mapping) and (nested := _kind_from(block)):
+                return nested
     return None
 
 
@@ -490,6 +476,9 @@ def _coerce_candidate(raw: Any) -> RetrievalCandidate | None:
         return None
     document = getter("document")
     metadata = dict(getter("metadata") or getter("chunk_metadata") or {})
+    block_provenance = getter("block_provenance")
+    if block_provenance:
+        metadata["block_provenance"] = list(block_provenance)
     return RetrievalCandidate(
         document_id=document_id,
         chunk_id=_optional_uuid(getter("chunk_id") or getter("id")),

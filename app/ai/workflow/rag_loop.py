@@ -13,6 +13,7 @@ from langgraph.types import interrupt
 
 from app.ai.rag_tool_actions import canonicalize_rag_tool_call, execute_search_documents_action
 from app.ai.schemas import AgentMessage, GraphState, MessageRole
+from app.ai.token_counter import TokenCounter
 from app.ai.tool_context import (
     rich_response_capable_from_context,
     tool_execution_context,
@@ -149,6 +150,10 @@ class RagLoopMixin:
         remaining_evidence_allowance = evidence_allowance
         evidence_provider = str(response_metadata.get("provider") or "gemini")
         evidence_model = str(response_metadata.get("model") or "gemini-2.5-flash")
+        evidence_token_counter = response_metadata.pop(
+            "_evidence_token_counter",
+            None,
+        ) or TokenCounter()
         last_human_idx = self._find_last_human_message_index(messages)
         question = (
             str(messages[last_human_idx].content)
@@ -282,6 +287,15 @@ class RagLoopMixin:
                 else:
                     entry["content"] = f"Error: Tool {tool_name} not found"
                 tool_outputs.append(entry)
+                remaining_evidence_allowance = max(
+                    0,
+                    remaining_evidence_allowance
+                    - evidence_token_counter.count_text(
+                        provider=evidence_provider,
+                        model=evidence_model,
+                        text=str(entry["content"] or ""),
+                    ).tokens,
+                )
                 continue
 
             result, _, evidence = await execute_search_documents_action(
@@ -295,10 +309,7 @@ class RagLoopMixin:
                 evidence_max_tokens=remaining_evidence_allowance,
                 evidence_provider=evidence_provider,
                 evidence_model=evidence_model,
-            )
-            remaining_evidence_allowance = max(
-                0,
-                remaining_evidence_allowance - int(evidence.get("token_count") or 0),
+                evidence_token_counter=evidence_token_counter,
             )
 
             parsed_error: dict[str, Any] | None = None
@@ -318,6 +329,19 @@ class RagLoopMixin:
                     conversation_id=conversation_id,
                     user_id=user_id,
                 )
+            consumed_tokens = (
+                int(evidence.get("token_count") or 0)
+                if evidence.get("records") is not None
+                else evidence_token_counter.count_text(
+                    provider=evidence_provider,
+                    model=evidence_model,
+                    text=public_text or "",
+                ).tokens
+            )
+            remaining_evidence_allowance = max(
+                0,
+                remaining_evidence_allowance - consumed_tokens,
+            )
             artifact = build_tool_artifact(
                 tool_call_id=tool_id,
                 tool_name=tool_name,

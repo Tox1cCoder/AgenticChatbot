@@ -866,6 +866,7 @@ class BaseAgent(ABC):
         conversation_id: str | None = None,
         user_id: str | None = None,
         authoritative_allowance: bool = False,
+        token_counter: TokenCounter | None = None,
     ) -> BudgetResult | None:
         """Enforce the resolved provider's complete input budget before I/O."""
         context_window = runtime_config.context_window
@@ -900,7 +901,7 @@ class BaseAgent(ABC):
             durable_request = durable_request or default_durable
             emergency_compact = emergency_compact or default_emergency
 
-        result = await RequestBudgetService(TokenCounter()).preflight(
+        result = await RequestBudgetService(token_counter or TokenCounter()).preflight(
             RequestEnvelope(
                 provider=runtime_config.provider,
                 model=runtime_config.model,
@@ -941,6 +942,32 @@ class BaseAgent(ABC):
                 duration_seconds=0,
             )
         return result
+
+    @staticmethod
+    def _token_counter_for_model(provider: str, llm: Any) -> TokenCounter:
+        """Use a provider tokenizer when the live model exposes one, else local fallback."""
+        provider_key = str(provider or "").strip().casefold()
+        get_num_tokens = getattr(llm, "get_num_tokens", None)
+        if provider_key != "gemini" or not callable(get_num_tokens):
+            return TokenCounter()
+
+        def native_text(*, model: str, text: str) -> int:
+            del model
+            return int(get_num_tokens(text))
+
+        def native_request(*, model: str, messages, tools, attachments) -> int:
+            del model
+            rendered = TokenCounter.canonical_request_text(
+                messages=messages,
+                tools=tools,
+                attachments=attachments,
+            )
+            return int(get_num_tokens(rendered))
+
+        return TokenCounter(
+            native_counters={provider_key: native_request},
+            native_text_counters={provider_key: native_text},
+        )
 
     def _build_compaction_callbacks(self, conversation_id: str, user_id: str):
         coordinator = self._get_request_compaction_coordinator()

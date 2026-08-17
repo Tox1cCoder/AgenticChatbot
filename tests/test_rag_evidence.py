@@ -102,7 +102,7 @@ def test_evidence_serialization_marks_content_untrusted_and_counts_exact_renderi
     assert pack.records[0].trace_metadata["rerank_score"] == 0.91
 
 
-def test_deduplicates_canonical_ids_and_overlapping_normalized_content_deterministically() -> None:
+def test_deduplicates_canonical_ids_and_exact_normalized_content_deterministically() -> None:
     first = _candidate(1, content="Alpha beta gamma delta epsilon zeta eta theta")
     same_content = _candidate(
         2,
@@ -122,8 +122,12 @@ def test_deduplicates_canonical_ids_and_overlapping_normalized_content_determini
         max_tokens=500,
     )
 
-    assert [record.chunk_id for record in pack.records] == [UUID(int=1), UUID(int=4)]
-    assert pack.omitted_count == 2
+    assert [record.chunk_id for record in pack.records] == [
+        UUID(int=1),
+        UUID(int=3),
+        UUID(int=4),
+    ]
+    assert pack.omitted_count == 1
 
 
 def test_dedupe_keeps_order_sensitive_opposite_claims() -> None:
@@ -138,6 +142,23 @@ def test_dedupe_keeps_order_sensitive_opposite_claims() -> None:
     )
 
     pack = _assembler().assemble("question", [permitted, prohibited], max_tokens=500)
+
+    assert [record.chunk_id for record in pack.records] == [UUID(int=1), UUID(int=2)]
+    assert pack.omitted_count == 0
+
+
+def test_dedupe_keeps_negation_just_outside_shared_boundary() -> None:
+    negative = _candidate(
+        1,
+        content="not alpha beta gamma delta epsilon zeta eta theta",
+    )
+    positive = _candidate(
+        2,
+        document=2,
+        content="alpha beta gamma delta epsilon zeta eta theta tail",
+    )
+
+    pack = _assembler().assemble("question", [negative, positive], max_tokens=500)
 
     assert [record.chunk_id for record in pack.records] == [UUID(int=1), UUID(int=2)]
     assert pack.omitted_count == 0
@@ -248,8 +269,10 @@ def test_structural_records_are_omitted_whole_and_text_truncation_is_reported() 
     [
         {"has_tables": True},
         {"contains_table": True},
+        {"has_images": True},
         {"block_type": "image"},
         {"provenance": {"block_type": "equation"}},
+        {"block_provenance": [{"kind": "equation", "block_index": 4}]},
     ],
 )
 def test_production_atomic_metadata_is_omitted_whole(metadata: dict) -> None:
@@ -260,6 +283,27 @@ def test_production_atomic_metadata_is_omitted_whole(metadata: dict) -> None:
     )
 
     pack = _assembler().assemble("question", [atomic], max_tokens=24)
+
+    assert pack.records == ()
+    assert pack.omitted_count == 1
+    assert pack.truncated_count == 0
+
+
+def test_expansion_row_carries_production_block_provenance_atomically() -> None:
+    row = SimpleNamespace(
+        id=UUID(int=1),
+        document_id=UUID(int=1),
+        content="equation structure " * 100,
+        document=SimpleNamespace(filename="math.pdf"),
+        page_start=1,
+        page_end=1,
+        section_path=["Proof"],
+        chunk_metadata={},
+        block_provenance=[{"kind": "equation", "block_index": 7}],
+        chunk_index=1,
+    )
+
+    pack = _assembler().assemble("question", [row], max_tokens=24)
 
     assert pack.records == ()
     assert pack.omitted_count == 1

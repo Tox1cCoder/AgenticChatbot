@@ -1320,6 +1320,72 @@ def test_invoke_agentic_rag_model_binds_tools_when_enabled():
     )
 
 
+def test_reachable_rag_invocation_shares_provider_native_counter_with_evidence():
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+    from app.core.runtime_modeling import ResolvedRuntimeModelConfig
+
+    agent = _build_agentic_invocation_agent()
+    native_calls: list[str] = []
+
+    class NativeCountingModel:
+        def get_num_tokens(self, text: str) -> int:
+            native_calls.append(text)
+            return max(1, len(text.split()))
+
+    llm = NativeCountingModel()
+    fake_response = AIMessage(
+        content="",
+        tool_calls=[{"name": "search_documents", "args": {}, "id": "t1"}],
+    )
+
+    async def fake_invoke(_llm, _messages):
+        return fake_response
+
+    agent._ainvoke_with_retries = fake_invoke
+    agent._create_langchain_model_from_runtime = lambda *_args, **_kwargs: (llm, False)
+    runtime_config = ResolvedRuntimeModelConfig(
+        agent_key="rag",
+        provider="gemini",
+        model="gemini-2.5-flash",
+        temperature=0.7,
+        api_key=None,
+        key_source="settings",
+        source="agent_default",
+        capabilities={"supports_vision": False},
+        fallback_config=None,
+        warnings=[],
+        provider_fallback=None,
+        is_custom_model=False,
+        context_window={"max_input_tokens": 100_000},
+    )
+
+    with patch(
+        "app.ai.agents.rag_agent.ModelFactory.bind_tools_to_model",
+        return_value=llm,
+    ):
+        response = asyncio.run(
+            agent._invoke_agentic_rag_model(
+                conversation_id=None,
+                messages=[SystemMessage(content="sys"), HumanMessage(content="question")],
+                tools=[MagicMock(name="search_documents")],
+                disable_tools=False,
+                user_id=None,
+                runtime_config=runtime_config,
+            )
+        )
+
+    assert response.metadata["request_budget"]["count_strategy"] == "gemini:native_count"
+    counter = response.metadata["_evidence_token_counter"]
+    evidence_count = counter.count_text(
+        provider="gemini",
+        model="gemini-2.5-flash",
+        text="bounded evidence",
+    )
+    assert evidence_count.source == "provider"
+    assert native_calls
+
+
 def test_invoke_agentic_rag_model_populates_runtime_metadata():
     """Runtime metadata must include provider/model from the shared method."""
     from langchain_core.messages import HumanMessage, SystemMessage

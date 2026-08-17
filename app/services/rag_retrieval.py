@@ -237,7 +237,12 @@ class RAGRetriever:
                     lexical_score=lexical_scores.get(rank.candidate_id),
                     fused_score=rank.fused_score,
                     chunk_index=getattr(chunk, "chunk_index", None),
-                    metadata=dict(getattr(chunk, "chunk_metadata", None) or {}),
+                    metadata={
+                        **dict(getattr(chunk, "chunk_metadata", None) or {}),
+                        "block_provenance": list(
+                            getattr(chunk, "block_provenance", None) or []
+                        ),
+                    },
                 )
             )
             if len(results) >= output_limit:
