@@ -169,6 +169,42 @@ async def test_evidence_allowance_requests_authoritative_count_below_soft_bounda
 
 
 @pytest.mark.asyncio
+async def test_evidence_allowance_reserves_actual_assistant_and_all_tool_wrappers() -> None:
+    service = RequestBudgetService(WeightedCounter())
+    result = await service.preflight(
+        RequestEnvelope(
+            provider="gemini",
+            model="gemini-2.5-flash",
+            system_messages=(_message("system", 10),),
+            history_messages=(),
+            current_messages=(_message("user", 10),),
+            authoritative_allowance=True,
+        ),
+        _config(),
+    )
+    assistant = AIMessage(
+        content="searching",
+        tool_calls=[
+            {"id": "s1", "name": "search_documents", "args": {}},
+            {"id": "s2", "name": "search_documents", "args": {}},
+        ],
+        additional_kwargs={"tokens": 11},
+    )
+
+    reserved = await service.reserve_tool_result_envelopes(
+        result,
+        assistant_message=assistant,
+        tool_messages=(
+            ToolMessage(content="", tool_call_id="s1", additional_kwargs={"tokens": 7}),
+            ToolMessage(content="", tool_call_id="s2", additional_kwargs={"tokens": 7}),
+        ),
+    )
+
+    assert reserved.input_tokens == 45
+    assert reserved.evidence_token_allowance == 40
+
+
+@pytest.mark.asyncio
 async def test_soft_to_hard_requests_durable_compaction_and_proceeds() -> None:
     requested = []
     service = RequestBudgetService(WeightedCounter())

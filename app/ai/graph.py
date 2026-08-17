@@ -1850,7 +1850,8 @@ class MultiAgentWorkflow(
         if agent_name == "rag_agent":
             max_agentic_images = getattr(settings, "agentic_rag_max_images", 6)
             rag_context = dict(parent_state.get("context") or {})
-            tool_context: list[str] = []
+            rag_tool_messages: list[AIMessage | ToolMessage] = []
+            legacy_tool_context: list[str] = []
             accumulated_artifacts: list[dict[str, Any]] = []
             rag_tool_map: dict[str, Any] | None = None
             rag_worker_iterations = 0
@@ -1884,7 +1885,8 @@ class MultiAgentWorkflow(
                         "persona": persona,
                         "history": [],
                         "original_query": task_prompt,
-                        "tool_context": list(tool_context),
+                        "rag_tool_messages": list(rag_tool_messages),
+                        "tool_context": list(legacy_tool_context),
                         "agentic_images": list(rag_context.get("agentic_images") or []),
                         "model_request": model_request,
                         "user_id": user_id,
@@ -1922,6 +1924,30 @@ class MultiAgentWorkflow(
                         response.tool_artifacts = accumulated_artifacts
                     return response
 
+                rag_tool_messages.append(
+                    AIMessage(
+                        content=response.message.content or "",
+                        tool_calls=[
+                            {
+                                "id": tool_call.get("id"),
+                                "name": tool_call.get("name"),
+                                "args": tool_call.get("args", {}),
+                            }
+                            for tool_call in normalized_calls
+                        ],
+                    )
+                )
+                response_metadata = response.metadata or {}
+                request_budget = response_metadata.get("request_budget") or {}
+                raw_allowance = request_budget.get("evidence_token_allowance")
+                remaining_evidence_allowance = max(
+                    0,
+                    int(raw_allowance if raw_allowance is not None else 0),
+                )
+                evidence_provider = str(response_metadata.get("provider") or "gemini")
+                evidence_model = str(
+                    response_metadata.get("model") or "gemini-2.5-flash"
+                )
                 rag_iteration_start = len(accumulated_artifacts)
                 for tool_call_data in normalized_calls:
                     tool_name = tool_call_data.get("name")
@@ -1930,12 +1956,21 @@ class MultiAgentWorkflow(
 
                     if tool_name == "search_documents":
                         result, _, evidence = await execute_search_documents_action(
-                            rag_agent=self.rag_agent,
+                            rag_agent=agent,
                             conversation_id=conversation_id,
                             tool_args=tool_args,
                             context=rag_context,
                             max_agentic_images=max_agentic_images,
                             user_id=user_id,
+                            question=task_prompt,
+                            evidence_max_tokens=remaining_evidence_allowance,
+                            evidence_provider=evidence_provider,
+                            evidence_model=evidence_model,
+                        )
+                        remaining_evidence_allowance = max(
+                            0,
+                            remaining_evidence_allowance
+                            - int(evidence.get("token_count") or 0),
                         )
                         parsed_error: dict[str, Any] | None = None
                         if isinstance(result, str):
@@ -1947,13 +1982,16 @@ class MultiAgentWorkflow(
                                 ):
                                     parsed_error = candidate
                         error = result if parsed_error or result.startswith("Error") else None
-                        public_text, blob_info = apply_tool_output_offload(
-                            output_text=result,
-                            tool_call_id=tool_id,
-                            tool_name=tool_name,
-                            conversation_id=conversation_id,
-                            user_id=user_id,
-                        )
+                        if evidence.get("records") is not None:
+                            public_text, blob_info = result, None
+                        else:
+                            public_text, blob_info = apply_tool_output_offload(
+                                output_text=result,
+                                tool_call_id=tool_id,
+                                tool_name=tool_name,
+                                conversation_id=conversation_id,
+                                user_id=user_id,
+                            )
                         artifact = build_tool_artifact(
                             tool_call_id=tool_id,
                             tool_name=tool_name,
@@ -1969,7 +2007,14 @@ class MultiAgentWorkflow(
                         if evidence:
                             artifact["rag_evidence"] = make_json_safe(evidence)
                         accumulated_artifacts.append(artifact)
-                        tool_context.append(public_text or "")
+                        rag_tool_messages.append(
+                            ToolMessage(
+                                content=public_text or "",
+                                tool_call_id=tool_id,
+                                name=tool_name,
+                            )
+                        )
+                        legacy_tool_context.append(public_text or "")
                         continue
 
                     if rag_tool_map is None:
@@ -1999,7 +2044,15 @@ class MultiAgentWorkflow(
                         )
                     accumulated_artifacts.extend(artifacts)
                     for output in outputs:
-                        tool_context.append(output.get("content", ""))
+                        output_content = output.get("content", "")
+                        rag_tool_messages.append(
+                            ToolMessage(
+                                content=output_content,
+                                tool_call_id=output.get("tool_call_id") or tool_id,
+                                name=tool_name,
+                            )
+                        )
+                        legacy_tool_context.append(output_content)
 
                 rag_error_artifacts = [
                     artifact

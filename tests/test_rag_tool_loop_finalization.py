@@ -435,6 +435,55 @@ def test_rag_zero_allowance_does_not_fall_back_to_independent_budget(monkeypatch
     assert state["messages"][-1].content == ""
 
 
+def test_rag_search_calls_share_one_cumulative_evidence_allowance(monkeypatch):
+    workflow = _make_workflow()
+    workflow.rag_agent = object()
+    workflow.agents = {}
+    allowances: list[int] = []
+
+    async def fake_execute_search_documents_action(**kwargs):
+        allowance = kwargs["evidence_max_tokens"]
+        allowances.append(allowance)
+        used = min(60, allowance)
+        return "bounded", "search_chunks", {
+            "records": [{"evidence_id": f"E{len(allowances)}"}],
+            "evidence_ids": [f"E{len(allowances)}"],
+            "token_count": used,
+            "omitted_count": 0,
+            "truncated_count": 0,
+        }
+
+    monkeypatch.setattr(
+        "app.ai.workflow.rag_loop.execute_search_documents_action",
+        fake_execute_search_documents_action,
+    )
+    state = {
+        "conversation_id": "conv-1",
+        "user_id": "owner",
+        "context": {},
+        "messages": [
+            HumanMessage(content="question"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "s1", "name": "search_documents", "args": {}},
+                    {"id": "s2", "name": "search_documents", "args": {}},
+                ],
+            ),
+        ],
+        "response": AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content=""),
+            metadata={"request_budget": {"evidence_token_allowance": 100}},
+        ),
+    }
+
+    asyncio.run(workflow._rag_tools_node(state))
+
+    assert allowances == [100, 40]
+
+
 @pytest.mark.asyncio
 async def test_rag_agent_preserves_current_assistant_tool_group_without_synthetic_human_text():
     agent = object.__new__(RAGAgent)

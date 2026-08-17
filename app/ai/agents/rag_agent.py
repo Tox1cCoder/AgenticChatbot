@@ -39,8 +39,9 @@ from ..prompts import (
     TOOL_EXPLORATION_SUFFIX,
 )
 from ..rag_tools import create_search_documents_tool
-from ..request_budget import ContextBudgetExceededError
+from ..request_budget import ContextBudgetExceededError, RequestBudgetService
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+from ..token_counter import TokenCounter
 from ..token_instrumentation import compute_token_breakdown, extract_actual_usage
 from ..utils import coerce_response_text
 from .base_agent import BaseAgent
@@ -1045,6 +1046,22 @@ class RAGAgent(BaseAgent):
                 f"Agentic RAG returned {len(tool_calls)} tool calls: "
                 f"{[tc.get('name', tc['name']) for tc in tool_calls]}"
             )
+            if budget_result is not None:
+                wrappers = tuple(
+                    ToolMessage(
+                        content="",
+                        tool_call_id=str(tool_call.get("id") or ""),
+                        name=str(tool_call.get("name") or "search_documents"),
+                    )
+                    for tool_call in tool_calls
+                )
+                budget_result = await RequestBudgetService(
+                    TokenCounter()
+                ).reserve_tool_result_envelopes(
+                    budget_result,
+                    assistant_message=response,
+                    tool_messages=wrappers,
+                )
 
         response_message = AgentMessage(
             role=MessageRole.ASSISTANT,

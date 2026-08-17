@@ -80,6 +80,7 @@ class BudgetResult:
     available_input_tokens: int
     usage_ratio: float
     count_strategy: str
+    hard_input_tokens: int
     evidence_token_allowance: int
     durable_requested: bool = False
     emergency_compacted: bool = False
@@ -177,6 +178,33 @@ class RequestBudgetService:
             error_code="context_budget_unreducible",
         )
 
+    async def reserve_tool_result_envelopes(
+        self,
+        result: BudgetResult,
+        *,
+        assistant_message: Any,
+        tool_messages: Sequence[Any],
+    ) -> BudgetResult:
+        """Reserve the exact fixed assistant/tool wrapper group before evidence packing."""
+        envelope = replace(
+            result.envelope,
+            current_messages=(
+                *result.envelope.current_messages,
+                assistant_message,
+                *tuple(tool_messages),
+            ),
+        )
+        count = await self._count_authoritative(envelope)
+        input_tokens = int(count.input_tokens)
+        return replace(
+            result,
+            envelope=envelope,
+            input_tokens=input_tokens,
+            usage_ratio=input_tokens / result.available_input_tokens,
+            count_strategy=str(getattr(count, "strategy", "unknown")),
+            evidence_token_allowance=max(0, result.hard_input_tokens - input_tokens),
+        )
+
     async def _reduce_to_limit(
         self,
         envelope: RequestEnvelope,
@@ -267,6 +295,7 @@ class RequestBudgetService:
             available_input_tokens=config.available_input_tokens,
             usage_ratio=int(count.input_tokens) / config.available_input_tokens,
             count_strategy=str(getattr(count, "strategy", "unknown")),
+            hard_input_tokens=int(config.available_input_tokens * config.hard_ratio),
             evidence_token_allowance=max(
                 0,
                 int(config.available_input_tokens * config.hard_ratio)

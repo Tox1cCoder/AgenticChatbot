@@ -146,6 +146,7 @@ class RagLoopMixin:
             0,
             int(raw_evidence_allowance if raw_evidence_allowance is not None else 0),
         )
+        remaining_evidence_allowance = evidence_allowance
         evidence_provider = str(response_metadata.get("provider") or "gemini")
         evidence_model = str(response_metadata.get("model") or "gemini-2.5-flash")
         last_human_idx = self._find_last_human_message_index(messages)
@@ -291,9 +292,13 @@ class RagLoopMixin:
                 max_agentic_images=max_agentic_images,
                 user_id=state.get("user_id"),
                 question=question,
-                evidence_max_tokens=evidence_allowance,
+                evidence_max_tokens=remaining_evidence_allowance,
                 evidence_provider=evidence_provider,
                 evidence_model=evidence_model,
+            )
+            remaining_evidence_allowance = max(
+                0,
+                remaining_evidence_allowance - int(evidence.get("token_count") or 0),
             )
 
             parsed_error: dict[str, Any] | None = None

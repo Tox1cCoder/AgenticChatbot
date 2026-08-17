@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -110,19 +112,17 @@ class EvidenceAssembler:
         selected: list[EvidenceRecord] = []
         omitted = duplicate_count
         truncated = 0
-
-        for candidate in ordered:
-            record = self._record(candidate, len(selected) + 1)
-            accepted, was_truncated = self._fit_record(selected, record, allowance)
-            if accepted is None:
-                omitted += 1
-                continue
-            selected.append(accepted)
-            truncated += int(was_truncated)
+        selected, newly_omitted, newly_truncated = self._pack_candidates(
+            selected,
+            ordered,
+            allowance,
+        )
+        omitted += newly_omitted
+        truncated += newly_truncated
 
         if self.repository is not None and scope is not None and self.max_neighbors:
             for seed in tuple(selected):
-                if self._count(_serialize_records(selected))[0] >= allowance:
+                if not self._minimum_complete_record_fits(selected, seed, allowance):
                     break
                 if seed.chunk_id is None:
                     continue
@@ -138,14 +138,13 @@ class EvidenceAssembler:
                     existing_records=selected,
                 )
                 omitted += expansion_duplicates
-                for candidate in expansion_candidates:
-                    record = self._record(candidate, len(selected) + 1)
-                    accepted, was_truncated = self._fit_record(selected, record, allowance)
-                    if accepted is None:
-                        omitted += 1
-                        continue
-                    selected.append(accepted)
-                    truncated += int(was_truncated)
+                selected, newly_omitted, newly_truncated = self._pack_candidates(
+                    selected,
+                    expansion_candidates,
+                    allowance,
+                )
+                omitted += newly_omitted
+                truncated += newly_truncated
 
         rendered = _serialize_records(selected)
         token_count, strategy = self._count(rendered)
@@ -157,6 +156,46 @@ class EvidenceAssembler:
             count_strategy=strategy,
         )
 
+    def _pack_candidates(
+        self,
+        selected: list[EvidenceRecord],
+        candidates: Sequence[RetrievalCandidate],
+        allowance: int,
+    ) -> tuple[list[EvidenceRecord], int, int]:
+        """Pack complete records for coverage before spending remainder on truncation."""
+        deferred: list[RetrievalCandidate] = []
+        omitted = 0
+        truncated = 0
+        for candidate in candidates:
+            record = self._record(candidate, len(selected) + 1)
+            if self._count(_serialize_records((*selected, record)))[0] <= allowance:
+                selected.append(record)
+            else:
+                deferred.append(candidate)
+
+        for candidate in deferred:
+            record = self._record(candidate, len(selected) + 1)
+            accepted, was_truncated = self._fit_record(selected, record, allowance)
+            if accepted is None:
+                omitted += 1
+                continue
+            selected.append(accepted)
+            truncated += int(was_truncated)
+        return selected, omitted, truncated
+
+    def _minimum_complete_record_fits(
+        self,
+        selected: Sequence[EvidenceRecord],
+        seed: EvidenceRecord,
+        allowance: int,
+    ) -> bool:
+        minimum = replace(
+            seed,
+            evidence_id=f"E{len(selected) + 1}",
+            content="x",
+        )
+        return self._count(_serialize_records((*selected, minimum)))[0] <= allowance
+
     def _fit_record(
         self,
         selected: Sequence[EvidenceRecord],
@@ -165,8 +204,8 @@ class EvidenceAssembler:
     ) -> tuple[EvidenceRecord | None, bool]:
         if self._count(_serialize_records((*selected, record)))[0] <= allowance:
             return record, False
-        kind = str(record.trace_metadata.get("kind") or "").casefold()
-        if record.modality == "image" or kind in _ATOMIC_KINDS:
+        kind = str(record.trace_metadata.get("atomic_kind") or "").casefold()
+        if kind in _ATOMIC_KINDS:
             return None, False
 
         words = record.content.split()
@@ -197,6 +236,7 @@ class EvidenceAssembler:
             for record in existing_records
             if record.image_id or record.chunk_id
         }
+        seen_hashes = {_content_hash(record.content) for record in existing_records}
         seen_tokens = [_normalized_tokens(record.content) for record in existing_records]
         omitted = 0
         for raw_candidate in candidates:
@@ -209,13 +249,19 @@ class EvidenceAssembler:
             )
             id_key = (candidate.modality, str(canonical_id)) if canonical_id else None
             tokens = _normalized_tokens(candidate.content)
-            if (id_key is not None and id_key in seen_ids) or any(
+            content_hash = _content_hash(candidate.content)
+            if (
+                (id_key is not None and id_key in seen_ids)
+                or content_hash in seen_hashes
+                or any(
                 _content_overlaps(tokens, prior, self.overlap_threshold) for prior in seen_tokens
+                )
             ):
                 omitted += 1
                 continue
             if id_key is not None:
                 seen_ids.add(id_key)
+            seen_hashes.add(content_hash)
             seen_tokens.append(tokens)
             kept.append(candidate)
         return kept, omitted
@@ -253,6 +299,7 @@ class EvidenceAssembler:
     @staticmethod
     def _record(candidate: RetrievalCandidate, ordinal: int) -> EvidenceRecord:
         metadata = dict(candidate.metadata or {})
+        atomic_kind = _atomic_kind(candidate.modality, metadata)
         trace = {
             "dense_rank": candidate.dense_rank,
             "dense_score": candidate.dense_score,
@@ -264,6 +311,7 @@ class EvidenceAssembler:
             "content_sha256": hashlib.sha256(
                 _normalize_content(candidate.content).encode("utf-8")
             ).hexdigest(),
+            "atomic_kind": atomic_kind,
             **{
                 key: metadata[key]
                 for key in ("kind", "expansion_kind", "parent_chunk_id")
@@ -296,16 +344,27 @@ class EvidenceAssembler:
 def _serialize_records(records: Sequence[EvidenceRecord]) -> str:
     parts: list[str] = []
     for record in records:
-        pages = f"{record.page_start}-{record.page_end}"
-        section = " > ".join(record.section_path) or "unknown"
+        metadata_json = json.dumps(
+            {
+                "modality": record.modality,
+                "pages": [record.page_start, record.page_end],
+                "section_path": list(record.section_path),
+                "source": record.filename,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        content_json = json.dumps(
+            record.content,
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
         parts.extend(
             [
                 f"BEGIN UNTRUSTED EVIDENCE {record.evidence_id}",
-                (
-                    f"source={record.filename} pages={pages} "
-                    f"section={section} modality={record.modality}"
-                ),
-                record.content,
+                f"metadata_json={metadata_json}",
+                f"content_json={content_json}",
                 f"END UNTRUSTED EVIDENCE {record.evidence_id}",
             ]
         )
@@ -316,16 +375,47 @@ def _normalize_content(content: str) -> str:
     return " ".join(str(content or "").casefold().split())
 
 
-def _normalized_tokens(content: str) -> frozenset[str]:
-    return frozenset(_TOKEN_RE.findall(_normalize_content(content)))
+def _content_hash(content: str) -> str:
+    return hashlib.sha256(_normalize_content(content).encode("utf-8")).hexdigest()
+
+
+def _normalized_tokens(content: str) -> tuple[str, ...]:
+    return tuple(_TOKEN_RE.findall(_normalize_content(content)))
 
 
 def _content_overlaps(
-    left: frozenset[str], right: frozenset[str], threshold: float
+    left: tuple[str, ...], right: tuple[str, ...], threshold: float
 ) -> bool:
     if not left or not right:
         return False
-    return len(left & right) / min(len(left), len(right)) >= threshold
+    shorter = min(len(left), len(right))
+    minimum_overlap = max(3, math.ceil(shorter * threshold))
+    for size in range(shorter, minimum_overlap - 1, -1):
+        if left[-size:] == right[:size] or right[-size:] == left[:size]:
+            return True
+    return False
+
+
+def _atomic_kind(modality: str, metadata: Mapping[str, Any]) -> str | None:
+    if modality == "image":
+        return "image"
+    if metadata.get("has_tables") or metadata.get("contains_table"):
+        return "table"
+
+    def _kind_from(mapping: Mapping[str, Any]) -> str | None:
+        for key in ("kind", "block_type", "element_type", "content_type", "type"):
+            value = str(mapping.get(key) or "").strip().casefold()
+            if value in _ATOMIC_KINDS:
+                return value
+        return None
+
+    direct = _kind_from(metadata)
+    if direct:
+        return direct
+    provenance = metadata.get("provenance")
+    if isinstance(provenance, Mapping):
+        return _kind_from(provenance)
+    return None
 
 
 def _candidate_subquestions(candidate: RetrievalCandidate) -> frozenset[str]:
