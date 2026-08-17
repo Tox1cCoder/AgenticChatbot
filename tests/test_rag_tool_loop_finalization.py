@@ -1274,6 +1274,37 @@ def test_grounded_gate_ignores_evidence_from_other_tool_calls(monkeypatch):
     assert shadow["reason_codes"] == ["unknown_evidence_id", "answer_without_evidence"]
 
 
+def test_grounded_gate_leaves_failed_rag_turns_reporting_their_own_error(monkeypatch):
+    """An error response is not an answer: replacing it would hide the failure."""
+    monkeypatch.setattr(settings, "enable_citation_verification", True, raising=False)
+    monkeypatch.setattr(settings, "rag_grounded_answer_gate_enabled", True, raising=False)
+    state = _grounded_state()
+    workflow, calls = _grounded_workflow(final_text="unused")
+
+    async def failing_process_message(_message, _conversation_id, **_kwargs):
+        return AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(
+                role=MessageRole.ASSISTANT,
+                content="Error during document exploration: provider timeout",
+            ),
+            metadata={"agentic_mode": True, "error": "provider timeout"},
+            error="provider timeout",
+        )
+
+    workflow.rag_agent.process_message = failing_process_message
+
+    asyncio.run(workflow._rag_node(state))
+
+    assert (
+        state["response"].message.content
+        == "Error during document exploration: provider timeout"
+    )
+    assert "grounded_answer" not in state["response"].metadata
+    assert calls["regenerations"] == []
+
+
 def test_citation_verification_disabled_skips_the_gate_entirely(monkeypatch):
     monkeypatch.setattr(settings, "enable_citation_verification", False, raising=False)
     monkeypatch.setattr(settings, "rag_grounded_answer_gate_enabled", False, raising=False)

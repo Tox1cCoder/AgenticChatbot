@@ -155,6 +155,10 @@ class RagLoopMixin:
         """
         if not getattr(settings, "enable_citation_verification", False):
             return response
+        if getattr(response, "error", None):
+            # A failed turn reports its own error. It is not an answer to ground,
+            # and replacing it would hide the failure from the user.
+            return response
         text = str(response.message.content or "")
         if not text.strip():
             return response
