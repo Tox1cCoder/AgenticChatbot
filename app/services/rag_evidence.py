@@ -272,20 +272,34 @@ class EvidenceAssembler:
     ) -> list[RetrievalCandidate]:
         remaining = list(candidates)
         ordered: list[RetrievalCandidate] = []
-        for subquestion in subquestions:
-            normalized = str(subquestion).strip().casefold()
+        normalized_subquestions = tuple(
+            normalized
+            for subquestion in subquestions
+            if (normalized := str(subquestion).strip().casefold())
+        )
+        covered_subquestions: set[str] = set()
+
+        # Seed relevance with one subquestion, then cover documents before adding
+        # more same-document subquestion matches. This prevents a tight pack from
+        # spending every slot on one source while retaining deterministic order.
+        for normalized in normalized_subquestions:
             match = next(
                 (
                     candidate
                     for candidate in remaining
-                    if normalized in _candidate_subquestions(candidate)
-                    or normalized in candidate.content.casefold()
+                    if _candidate_matches_subquestion(candidate, normalized)
                 ),
                 None,
             )
             if match is not None:
                 ordered.append(match)
                 remaining.remove(match)
+                covered_subquestions.update(
+                    subquestion
+                    for subquestion in normalized_subquestions
+                    if _candidate_matches_subquestion(match, subquestion)
+                )
+                break
 
         covered_documents = {candidate.document_id for candidate in ordered}
         for candidate in tuple(remaining):
@@ -293,6 +307,27 @@ class EvidenceAssembler:
                 ordered.append(candidate)
                 remaining.remove(candidate)
                 covered_documents.add(candidate.document_id)
+                covered_subquestions.update(
+                    subquestion
+                    for subquestion in normalized_subquestions
+                    if _candidate_matches_subquestion(candidate, subquestion)
+                )
+
+        for normalized in normalized_subquestions:
+            if normalized in covered_subquestions:
+                continue
+            match = next(
+                (
+                    candidate
+                    for candidate in remaining
+                    if _candidate_matches_subquestion(candidate, normalized)
+                ),
+                None,
+            )
+            if match is not None:
+                ordered.append(match)
+                remaining.remove(match)
+                covered_subquestions.add(normalized)
         ordered.extend(remaining)
         return ordered
 
@@ -421,6 +456,16 @@ def _atomic_kind(modality: str, metadata: Mapping[str, Any]) -> str | None:
 def _candidate_subquestions(candidate: RetrievalCandidate) -> frozenset[str]:
     raw = (candidate.metadata or {}).get("subquestions") or ()
     return frozenset(str(item).strip().casefold() for item in raw if str(item).strip())
+
+
+def _candidate_matches_subquestion(
+    candidate: RetrievalCandidate,
+    normalized_subquestion: str,
+) -> bool:
+    return (
+        normalized_subquestion in _candidate_subquestions(candidate)
+        or normalized_subquestion in candidate.content.casefold()
+    )
 
 
 def _optional_uuid(value: Any) -> UUID | None:

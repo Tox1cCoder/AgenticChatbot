@@ -249,7 +249,7 @@ async def execute_search_documents_action(
     user_id: str | None = None,
     question: str = "",
     subquestions: tuple[str, ...] = (),
-    evidence_max_tokens: int = 2_000,
+    evidence_max_tokens: int = 0,
     evidence_provider: str = "gemini",
     evidence_model: str = "gemini-2.5-flash",
     evidence_token_counter: Any | None = None,

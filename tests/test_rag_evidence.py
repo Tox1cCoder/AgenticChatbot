@@ -191,6 +191,34 @@ def test_tight_budget_prefers_complete_cross_document_coverage_before_truncation
     assert pack.omitted_count == 1
 
 
+def test_tight_budget_interleaves_document_coverage_with_many_subquestions() -> None:
+    candidates = [
+        _candidate(1, document=1, metadata={"subquestions": ["one"]}),
+        _candidate(2, document=1, metadata={"subquestions": ["two"]}),
+        _candidate(3, document=1, metadata={"subquestions": ["three"]}),
+        _candidate(4, document=2),
+        _candidate(5, document=3),
+    ]
+    three_record_budget = _assembler().assemble(
+        "question",
+        candidates[:3],
+        max_tokens=500,
+    ).token_count
+
+    pack = _assembler().assemble(
+        "question",
+        candidates,
+        subquestions=("one", "two", "three"),
+        max_tokens=three_record_budget,
+    )
+
+    assert [record.document_id for record in pack.records] == [
+        UUID(int=1),
+        UUID(int=2),
+        UUID(int=3),
+    ]
+
+
 def test_structural_records_are_omitted_whole_and_text_truncation_is_reported() -> None:
     atomic_table = _candidate(
         1,
@@ -395,3 +423,37 @@ async def test_search_action_emits_only_bounded_pack_and_returns_structured_arti
     assert evidence["records"][0]["filename"] == "report.pdf"
     assert evidence["token_count"] == len(result.split())
     assert evidence["token_count"] <= 30
+
+
+@pytest.mark.asyncio
+async def test_search_action_without_authoritative_allowance_fails_closed() -> None:
+    from app.ai.rag_tool_actions import execute_search_documents_action
+
+    row = {
+        "document_id": str(UUID(int=1)),
+        "chunk_id": str(UUID(int=2)),
+        "content": "this must not receive an implicit independent budget",
+        "source": "report.pdf",
+        "image_ids": [],
+    }
+    rag_agent = SimpleNamespace(
+        _search=AsyncMock(return_value=[row]),
+        _fetch_images_for_chunks=AsyncMock(return_value=[]),
+        retriever=SimpleNamespace(chunk_repository=None),
+    )
+
+    result, _, evidence = await execute_search_documents_action(
+        rag_agent=rag_agent,
+        conversation_id=str(UUID(int=9)),
+        user_id="owner",
+        tool_args={"action": "search_chunks", "query": "revenue"},
+        context={},
+        max_agentic_images=3,
+        evidence_provider="test",
+        evidence_model="test-model",
+        evidence_token_counter=WordCounter(),
+    )
+
+    assert result == ""
+    assert evidence["records"] == []
+    assert evidence["token_count"] == 0
