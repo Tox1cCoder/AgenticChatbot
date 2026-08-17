@@ -11,7 +11,11 @@ from typing import Any
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import interrupt
 
-from app.ai.rag_tool_actions import canonicalize_rag_tool_call, execute_search_documents_action
+from app.ai.rag_tool_actions import (
+    canonicalize_rag_tool_call,
+    execute_search_documents_action,
+    fit_rag_tool_message_content,
+)
 from app.ai.schemas import AgentMessage, GraphState, MessageRole
 from app.ai.token_counter import TokenCounter
 from app.ai.tool_context import (
@@ -30,6 +34,14 @@ from app.core.config import settings
 
 logger = logging.getLogger("app.ai.graph")
 _apply_decisions = apply_hitl_decisions
+
+# Control-plane results whose model-visible text is server-generated, bounded by
+# construction, and re-read after execution. ``_apply_hand_off_if_present``
+# parses ``hand_off`` output and rewrites it in place with refusal feedback, so
+# replacing it with a budget omission marker would both hide the delegation and
+# discard the refusal the model needs in order to stop retrying. They are still
+# charged against the cumulative allowance, just never replaced.
+_UNBOUNDABLE_TOOL_NAMES = frozenset({"hand_off"})
 
 
 class RagLoopMixin:
@@ -157,11 +169,16 @@ class RagLoopMixin:
         - LIST_DOCUMENTS: List available documents
         """
         messages = state.get("messages", [])
-        if not messages:
-            return state
-
-        last_message = messages[-1]
+        last_message = messages[-1] if messages else None
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
+            # ``_should_call_rag_tools`` should never route here without a
+            # tool-calling assistant message, but this node is also the only
+            # consumer of the one-shot counter reference. Release it rather than
+            # leaving it parked in the store until its TTL.
+            self._discard_evidence_token_counter(
+                self.rag_agent,
+                getattr(state.get("response"), "metadata", None) or {},
+            )
             return state
 
         conversation_id = state.get("conversation_id")
@@ -175,11 +192,14 @@ class RagLoopMixin:
         response_metadata = getattr(response, "metadata", {}) or {}
         request_budget = response_metadata.get("request_budget") or {}
         raw_evidence_allowance = request_budget.get("evidence_token_allowance")
-        evidence_allowance = max(
+        # Evidence packs fail closed on a missing allowance (zero tokens), but
+        # non-pack results must not: "absent" means the request budget never ran,
+        # so there is no authoritative remainder to enforce against.
+        evidence_allowance_authoritative = raw_evidence_allowance is not None
+        remaining_evidence_allowance = max(
             0,
-            int(raw_evidence_allowance if raw_evidence_allowance is not None else 0),
+            int(raw_evidence_allowance if evidence_allowance_authoritative else 0),
         )
-        remaining_evidence_allowance = evidence_allowance
         evidence_provider = str(response_metadata.get("provider") or "gemini")
         evidence_model = str(response_metadata.get("model") or "gemini-2.5-flash")
         evidence_token_counter = self._consume_evidence_token_counter(
@@ -188,6 +208,15 @@ class RagLoopMixin:
             provider=evidence_provider,
             model=evidence_model,
         )
+
+        def enforceable_allowance(name: Any) -> int | None:
+            """Remainder one result may be bounded to, or None when unbounded."""
+            if not evidence_allowance_authoritative:
+                return None
+            if str(name or "") in _UNBOUNDABLE_TOOL_NAMES:
+                return None
+            return remaining_evidence_allowance
+
         last_human_idx = self._find_last_human_message_index(messages)
         question = (
             str(messages[last_human_idx].content)
@@ -320,15 +349,24 @@ class RagLoopMixin:
                         entry["render"] = render
                 else:
                     entry["content"] = f"Error: Tool {tool_name} not found"
+                fitted_content, consumed_tokens, budget_omitted = (
+                    fit_rag_tool_message_content(
+                        content=entry["content"],
+                        allowance=enforceable_allowance(tool_name),
+                        token_counter=evidence_token_counter,
+                        provider=evidence_provider,
+                        model=evidence_model,
+                        tool_call_id=tool_id,
+                        tool_name=tool_name,
+                    )
+                )
+                entry["content"] = fitted_content
+                if budget_omitted:
+                    entry["model_output_omitted"] = True
                 tool_outputs.append(entry)
                 remaining_evidence_allowance = max(
                     0,
-                    remaining_evidence_allowance
-                    - evidence_token_counter.count_text(
-                        provider=evidence_provider,
-                        model=evidence_model,
-                        text=str(entry["content"] or ""),
-                    ).tokens,
+                    remaining_evidence_allowance - consumed_tokens,
                 )
                 continue
 
@@ -355,6 +393,8 @@ class RagLoopMixin:
             error = result if parsed_error or result.startswith("Error") else None
             if evidence.get("records") is not None:
                 public_text, blob_info = result, None
+                consumed_tokens = int(evidence.get("token_count") or 0)
+                budget_omitted = False
             else:
                 public_text, blob_info = apply_tool_output_offload(
                     output_text=result,
@@ -363,15 +403,17 @@ class RagLoopMixin:
                     conversation_id=conversation_id,
                     user_id=user_id,
                 )
-            consumed_tokens = (
-                int(evidence.get("token_count") or 0)
-                if evidence.get("records") is not None
-                else evidence_token_counter.count_text(
-                    provider=evidence_provider,
-                    model=evidence_model,
-                    text=public_text or "",
-                ).tokens
-            )
+                public_text, consumed_tokens, budget_omitted = (
+                    fit_rag_tool_message_content(
+                        content=public_text,
+                        allowance=enforceable_allowance(tool_name),
+                        token_counter=evidence_token_counter,
+                        provider=evidence_provider,
+                        model=evidence_model,
+                        tool_call_id=tool_id,
+                        tool_name=tool_name,
+                    )
+                )
             remaining_evidence_allowance = max(
                 0,
                 remaining_evidence_allowance - consumed_tokens,
@@ -383,6 +425,14 @@ class RagLoopMixin:
                 output_text=public_text,
                 error=error,
             )
+            if budget_omitted:
+                artifact.update(
+                    {
+                        "model_output_omitted": True,
+                        "model_output_omitted_reason": "context_budget",
+                        "original_output_chars": len(str(result or "")),
+                    }
+                )
             if parsed_error:
                 artifact["error_type"] = parsed_error.get("error_type")
                 artifact["retryable"] = bool(parsed_error.get("retryable"))
@@ -401,6 +451,9 @@ class RagLoopMixin:
 
         # Interpret delegation before persisting ToolMessages so rejection
         # feedback replaces the matching result rather than adding a duplicate.
+        # This rewrites entries of ``tool_outputs`` in place, so it must receive
+        # that exact list — not a copy — and the entries it can rewrite must not
+        # have been budget-replaced above (see ``_UNBOUNDABLE_TOOL_NAMES``).
         state = self._apply_hand_off_if_present(state, tool_outputs)
 
         # Add tool messages to state
@@ -451,6 +504,12 @@ class RagLoopMixin:
         if isinstance(last_message, AIMessage) and last_message.tool_calls:
             context = state.get("context", {}) or {}
             if context.get("rag_force_final_response"):
+                response = state.get("response")
+                response_metadata = getattr(response, "metadata", {}) or {}
+                self._discard_evidence_token_counter(
+                    self.rag_agent,
+                    response_metadata,
+                )
                 logger.warning(
                     "RAG final no-tools pass still emitted tool calls; ending "
                     "instead of executing more RAG tools."

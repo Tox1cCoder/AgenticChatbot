@@ -6,6 +6,8 @@ import re
 from typing import Any
 from uuid import UUID
 
+from langchain_core.messages import ToolMessage
+
 from app.ai.token_counter import TokenCounter
 from app.services.rag_evidence import EvidenceAssembler
 from app.services.rag_retrieval import RetrievalScope
@@ -22,6 +24,90 @@ from .tool_error_policy import ToolErrorKind, ToolErrorSummary
 logger = logging.getLogger(__name__)
 
 _RAG_ACTION_TOOL_NAMES = {action.value for action in DocumentAction}
+
+
+def fit_rag_tool_message_content(
+    *,
+    content: Any,
+    allowance: int | None,
+    token_counter: Any,
+    provider: str,
+    model: str,
+    tool_call_id: Any,
+    tool_name: Any,
+) -> tuple[str, int, bool]:
+    """Fit one result into its already-reserved empty ToolMessage wrapper.
+
+    Returns ``(model_visible_text, tokens_consumed, omitted)``.
+
+    ``allowance`` is the authoritative model-input remainder in tokens. Pass
+    ``None`` when no authoritative allowance was propagated at all: that is an
+    *unknown* budget, not a zero-token one, and bounding against zero would
+    blank every tool result and starve the loop of its own evidence. In that
+    case the result is charged but never replaced.
+
+    A result that does not fit is replaced whole with a compact, constant-size
+    JSON omission marker rather than truncated. Splitting JSON, tables, or image
+    descriptors yields misleading fragments, and a blank ``ToolMessage`` is
+    indistinguishable from an empty-but-successful result, so the model would
+    simply call the tool again and spend more budget than the marker costs. The
+    caller keeps the complete result in its artifact/blob; only model-visible
+    content is bounded here.
+    """
+
+    text = str(content or "")
+
+    def content_delta(candidate: str) -> int:
+        count_messages = getattr(token_counter, "count_messages", None)
+        if callable(count_messages):
+            empty = ToolMessage(
+                content="",
+                tool_call_id=str(tool_call_id or ""),
+                name=str(tool_name or "search_documents"),
+            )
+            actual = ToolMessage(
+                content=candidate,
+                tool_call_id=str(tool_call_id or ""),
+                name=str(tool_name or "search_documents"),
+            )
+            try:
+                empty_count = count_messages(
+                    provider=provider,
+                    model=model,
+                    messages=(empty,),
+                )
+                actual_count = count_messages(
+                    provider=provider,
+                    model=model,
+                    messages=(actual,),
+                )
+                return max(0, int(actual_count.tokens) - int(empty_count.tokens))
+            except Exception:
+                # Counters are duck-typed; one without a usable message-level
+                # entry point is handled by the plain-text count below.
+                logger.debug("Message-level token delta unavailable", exc_info=True)
+        counted = token_counter.count_text(
+            provider=provider,
+            model=model,
+            text=candidate,
+        )
+        return max(0, int(counted.tokens))
+
+    consumed = content_delta(text)
+    if allowance is None or consumed <= max(0, int(allowance)):
+        return text, consumed, False
+
+    omission = json.dumps(
+        {
+            "status": "omitted",
+            "reason": "context_budget",
+            "tool": str(tool_name or "search_documents"),
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return omission, content_delta(omission), True
 
 
 def compact_rag_tool_error(

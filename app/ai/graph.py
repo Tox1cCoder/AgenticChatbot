@@ -64,7 +64,11 @@ from .image_generation import (
     use_image_preview_emitter,
     use_media_delivery_service,
 )
-from .rag_tool_actions import canonicalize_rag_tool_call, execute_search_documents_action
+from .rag_tool_actions import (
+    canonicalize_rag_tool_call,
+    execute_search_documents_action,
+    fit_rag_tool_message_content,
+)
 from .research_budget import reset_research_budget
 from .schemas import (
     AgentMessage,
@@ -1920,9 +1924,14 @@ class MultiAgentWorkflow(
                 response_metadata = response.metadata or {}
                 request_budget = response_metadata.get("request_budget") or {}
                 raw_allowance = request_budget.get("evidence_token_allowance")
+                # Evidence packs fail closed on a missing allowance (zero
+                # tokens), but non-pack results must not: "absent" means the
+                # request budget never ran, so there is no authoritative
+                # remainder to enforce against.
+                allowance_authoritative = raw_allowance is not None
                 remaining_evidence_allowance = max(
                     0,
-                    int(raw_allowance if raw_allowance is not None else 0),
+                    int(raw_allowance if allowance_authoritative else 0),
                 )
                 evidence_provider = str(response_metadata.get("provider") or "gemini")
                 evidence_model = str(
@@ -1988,6 +1997,8 @@ class MultiAgentWorkflow(
                         error = result if parsed_error or result.startswith("Error") else None
                         if evidence.get("records") is not None:
                             public_text, blob_info = result, None
+                            consumed_tokens = int(evidence.get("token_count") or 0)
+                            budget_omitted = False
                         else:
                             public_text, blob_info = apply_tool_output_offload(
                                 output_text=result,
@@ -1996,15 +2007,21 @@ class MultiAgentWorkflow(
                                 conversation_id=conversation_id,
                                 user_id=user_id,
                             )
-                        consumed_tokens = (
-                            int(evidence.get("token_count") or 0)
-                            if evidence.get("records") is not None
-                            else evidence_token_counter.count_text(
-                                provider=evidence_provider,
-                                model=evidence_model,
-                                text=public_text or "",
-                            ).tokens
-                        )
+                            public_text, consumed_tokens, budget_omitted = (
+                                fit_rag_tool_message_content(
+                                    content=public_text,
+                                    allowance=(
+                                        remaining_evidence_allowance
+                                        if allowance_authoritative
+                                        else None
+                                    ),
+                                    token_counter=evidence_token_counter,
+                                    provider=evidence_provider,
+                                    model=evidence_model,
+                                    tool_call_id=tool_id,
+                                    tool_name=tool_name,
+                                )
+                            )
                         remaining_evidence_allowance = max(
                             0,
                             remaining_evidence_allowance - consumed_tokens,
@@ -2016,6 +2033,14 @@ class MultiAgentWorkflow(
                             output_text=public_text,
                             error=error,
                         )
+                        if budget_omitted:
+                            artifact.update(
+                                {
+                                    "model_output_omitted": True,
+                                    "model_output_omitted_reason": "context_budget",
+                                    "original_output_chars": len(str(result or "")),
+                                }
+                            )
                         if parsed_error:
                             artifact["error_type"] = parsed_error.get("error_type")
                             artifact["retryable"] = bool(parsed_error.get("retryable"))
@@ -2061,7 +2086,30 @@ class MultiAgentWorkflow(
                         )
                     accumulated_artifacts.extend(artifacts)
                     for output in outputs:
-                        output_content = output.get("content", "")
+                        output_content, consumed_tokens, budget_omitted = (
+                            fit_rag_tool_message_content(
+                                content=output.get("content", ""),
+                                allowance=(
+                                    remaining_evidence_allowance
+                                    if allowance_authoritative
+                                    else None
+                                ),
+                                token_counter=evidence_token_counter,
+                                provider=evidence_provider,
+                                model=evidence_model,
+                                tool_call_id=output.get("tool_call_id") or tool_id,
+                                tool_name=tool_name,
+                            )
+                        )
+                        if budget_omitted:
+                            for artifact in artifacts:
+                                if artifact.get("tool_call_id") == (
+                                    output.get("tool_call_id") or tool_id
+                                ):
+                                    artifact["model_output_omitted"] = True
+                                    artifact["model_output_omitted_reason"] = (
+                                        "context_budget"
+                                    )
                         rag_tool_messages.append(
                             ToolMessage(
                                 content=output_content,
@@ -2072,12 +2120,7 @@ class MultiAgentWorkflow(
                         legacy_tool_context.append(output_content)
                         remaining_evidence_allowance = max(
                             0,
-                            remaining_evidence_allowance
-                            - evidence_token_counter.count_text(
-                                provider=evidence_provider,
-                                model=evidence_model,
-                                text=output_content,
-                            ).tokens,
+                            remaining_evidence_allowance - consumed_tokens,
                         )
 
                 rag_error_artifacts = [

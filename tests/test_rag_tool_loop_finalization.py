@@ -83,6 +83,88 @@ async def test_rag_handoff_routes_to_search_agent_in_same_turn(monkeypatch):
     assert workflow._should_continue_rag(state) == "search_agent"
 
 
+@pytest.mark.asyncio
+async def test_refused_handoff_feedback_reaches_the_tool_message(monkeypatch):
+    """Delegation is interpreted on the dicts that become ToolMessages.
+
+    ``_apply_hand_off_if_present`` rewrites a refused ``hand_off`` output in
+    place. If evidence budgeting interposes a copy, the refusal is written to the
+    copy and the model still reads canonical handoff JSON — it believes the
+    delegation happened and re-issues it forever.
+    """
+    import app.ai.workflow.rag_loop as rag_loop
+
+    workflow = _make_workflow()
+    workflow.rag_agent = SimpleNamespace(
+        _take_evidence_token_counter=lambda descriptor, **_kwargs: SimpleNamespace(
+            count_text=lambda **kwargs: SimpleNamespace(
+                tokens=len(kwargs["text"]), strategy="characters"
+            )
+        )
+    )
+    workflow.agents = {
+        "rag_agent": SimpleNamespace(agent_config_key="rag"),
+        "search_agent": object(),
+    }
+
+    async def no_approval(*_args, **_kwargs):
+        return False
+
+    async def tool_map(*_args, **_kwargs):
+        return {"hand_off": SimpleNamespace(name="hand_off")}
+
+    async def execute_tools(**_kwargs):
+        return (
+            [
+                {
+                    "tool_call_id": "handoff-1",
+                    "name": "hand_off",
+                    "content": '{"hand_off":"unreachable_agent"}',
+                }
+            ],
+            [
+                {
+                    "tool_call_id": "handoff-1",
+                    "tool": "hand_off",
+                    "status": "success",
+                    "output": '{"hand_off":"unreachable_agent"}',
+                }
+            ],
+            [],
+        )
+
+    workflow._needs_approval = no_approval
+    workflow._update_tool_error_streak = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(rag_loop, "ensure_agent_tool_map", tool_map)
+    monkeypatch.setattr(rag_loop, "execute_tool_calls", execute_tools)
+
+    state = {
+        "selected_agent": "rag_agent",
+        "messages": [
+            AIMessage(
+                content="",
+                tool_calls=[{"id": "handoff-1", "name": "hand_off", "args": {}}],
+            )
+        ],
+        "context": {},
+        "custom_agents": {},
+        "response": AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content=""),
+            metadata={"request_budget": {"evidence_token_allowance": 4}},
+        ),
+    }
+
+    await workflow._rag_tools_node(state)
+
+    assert state["selected_agent"] == "rag_agent"
+    tool_message = state["messages"][-1]
+    assert isinstance(tool_message, ToolMessage)
+    assert tool_message.content.startswith("Hand-off refused:")
+    assert "unreachable_agent" in tool_message.content
+
+
 def test_rag_budget_routes_to_final_no_tool_pass(monkeypatch):
     monkeypatch.setattr(
         "app.ai.graph.settings.agentic_max_iterations",
@@ -140,6 +222,16 @@ def test_rag_budget_already_forced_routes_to_end_to_avoid_loop(monkeypatch):
 
 def test_forced_final_assistant_tool_calls_do_not_route_to_rag_tools():
     workflow = _make_workflow()
+    discarded: list[dict] = []
+    workflow.rag_agent = SimpleNamespace(
+        _discard_evidence_token_counter=lambda descriptor: discarded.append(descriptor)
+    )
+    descriptor = {
+        "reference": "forced-final-counter",
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "fallback": "deterministic_local_conservative",
+    }
     state = {
         "messages": [
             AIMessage(
@@ -148,11 +240,19 @@ def test_forced_final_assistant_tool_calls_do_not_route_to_rag_tools():
             )
         ],
         "context": {"rag_force_final_response": True},
+        "response": AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content=""),
+            metadata={"evidence_tokenization": descriptor},
+        ),
     }
 
     route = workflow._should_call_rag_tools(state)
 
     assert route == "end"
+    assert "evidence_tokenization" not in state["response"].metadata
+    assert discarded == [descriptor]
 
 
 def test_rag_budget_not_yet_reached_continues_normally(monkeypatch):
@@ -547,6 +647,155 @@ def test_mixed_rag_actions_charge_non_pack_content_before_later_search(monkeypat
     asyncio.run(workflow._rag_tools_node(state))
 
     assert search_allowances == [96]
+
+
+def test_oversized_last_non_pack_result_is_omitted_before_tool_message_append(monkeypatch):
+    import json
+
+    workflow = _make_workflow()
+
+    class CharacterCounter:
+        def count_text(self, **kwargs):
+            return SimpleNamespace(tokens=len(kwargs["text"]), strategy="characters")
+
+    workflow.rag_agent = SimpleNamespace(
+        _take_evidence_token_counter=lambda descriptor, **_kwargs: CharacterCounter()
+    )
+    workflow.agents = {}
+    oversized = json.dumps(
+        {"rows": [{"id": index, "value": "x" * 20} for index in range(20)]},
+        separators=(",", ":"),
+    )
+
+    async def fake_execute_search_documents_action(**kwargs):
+        action = kwargs["tool_args"]["action"]
+        if action == "search_chunks":
+            return "bounded pack", action, {
+                "records": [{"evidence_id": "E1"}],
+                "evidence_ids": ["E1"],
+                "token_count": 20,
+                "omitted_count": 0,
+                "truncated_count": 0,
+            }
+        return oversized, action, {"documents": []}
+
+    monkeypatch.setattr(
+        "app.ai.workflow.rag_loop.execute_search_documents_action",
+        fake_execute_search_documents_action,
+    )
+    monkeypatch.setattr(
+        "app.ai.workflow.rag_loop.apply_tool_output_offload",
+        lambda **kwargs: (kwargs["output_text"], None),
+    )
+    state = {
+        "conversation_id": "conv-1",
+        "user_id": "owner",
+        "context": {},
+        "messages": [
+            HumanMessage(content="question"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "search-first",
+                        "name": "search_documents",
+                        "args": {"action": "search_chunks", "query": "question"},
+                    },
+                    {
+                        "id": "list-last",
+                        "name": "search_documents",
+                        "args": {"action": "list_documents"},
+                    },
+                ],
+            ),
+        ],
+        "response": AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content=""),
+            metadata={
+                "request_budget": {"evidence_token_allowance": 100},
+                "evidence_tokenization": {
+                    "reference": "character-counter",
+                    "provider": "test",
+                    "model": "test",
+                    "fallback": "deterministic_local_conservative",
+                },
+            },
+        ),
+    }
+
+    asyncio.run(workflow._rag_tools_node(state))
+
+    last_result = state["messages"][-1].content
+    assert len(last_result) <= 80
+    assert last_result != oversized
+    # A blank ToolMessage is indistinguishable from an empty-but-successful
+    # result, so the bounded replacement is always the explicit marker.
+    assert json.loads(last_result)["reason"] == "context_budget"
+    artifacts = state["context"]["tool_artifacts"]
+    omitted = [a for a in artifacts if a.get("tool_call_id") == "list-last"]
+    assert omitted and omitted[0]["model_output_omitted_reason"] == "context_budget"
+
+
+def test_missing_authoritative_allowance_keeps_model_visible_tool_text(monkeypatch):
+    """No propagated allowance must not be read as a zero-token allowance.
+
+    ``evidence_token_allowance`` is absent whenever the request budget could not
+    run (unresolvable context window, non-preflighted provider). Treating that
+    as ``0`` would blank every tool result and starve the loop of its own
+    evidence, so non-pack content is charged but not bounded in that case.
+    """
+    workflow = _make_workflow()
+    workflow.rag_agent = SimpleNamespace(
+        _take_evidence_token_counter=lambda descriptor, **_kwargs: SimpleNamespace(
+            count_text=lambda **kwargs: SimpleNamespace(
+                tokens=len(kwargs["text"]), strategy="characters"
+            )
+        )
+    )
+    workflow.agents = {}
+
+    async def fake_execute_search_documents_action(**kwargs):
+        return "AVAILABLE DOCUMENTS: report.pdf", kwargs["tool_args"]["action"], {}
+
+    monkeypatch.setattr(
+        "app.ai.workflow.rag_loop.execute_search_documents_action",
+        fake_execute_search_documents_action,
+    )
+    monkeypatch.setattr(
+        "app.ai.workflow.rag_loop.apply_tool_output_offload",
+        lambda **kwargs: (kwargs["output_text"], None),
+    )
+    state = {
+        "conversation_id": "conv-1",
+        "user_id": "owner",
+        "context": {},
+        "messages": [
+            HumanMessage(content="question"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "list-only",
+                        "name": "search_documents",
+                        "args": {"action": "list_documents"},
+                    }
+                ],
+            ),
+        ],
+        "response": AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content=""),
+            metadata={},
+        ),
+    }
+
+    asyncio.run(workflow._rag_tools_node(state))
+
+    assert state["messages"][-1].content == "AVAILABLE DOCUMENTS: report.pdf"
+    assert "model_output_omitted" not in state["context"]["tool_artifacts"][0]
 
 
 @pytest.mark.asyncio
