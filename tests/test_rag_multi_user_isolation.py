@@ -819,3 +819,43 @@ def test_native_image_candidate_survives_truncation_when_text_page_is_full():
     assert any(r.get("image_id") == str(image_candidate.image_id) for r in results), (
         f"native image candidate was truncated away: {results}"
     )
+
+
+def test_image_reservation_never_evicts_all_text_when_limit_is_small():
+    """Round 2 finding A: ``reserved`` was not bounded away from ``limit``,
+    so whenever the evidence limit was <= max_images the reservation wiped
+    out text evidence entirely, regardless of score — a 0.05-scoring image
+    evicted a 0.9-scoring chunk. At least one text candidate must survive
+    whenever any exist."""
+    from app.services.rag_retrieval import RetrievalCandidate
+
+    def _make(modality: str, index: int, score: float) -> RetrievalCandidate:
+        return RetrievalCandidate(
+            document_id=uuid4(),
+            chunk_id=uuid4() if modality == "text" else None,
+            image_id=uuid4() if modality == "image" else None,
+            modality=modality,
+            content=f"{modality}-{index}",
+            filename="report.pdf",
+            page_start=index,
+            page_end=index,
+            section_path=(),
+            dense_rank=index,
+            dense_score=score,
+            lexical_rank=None,
+            lexical_score=None,
+            fused_score=score,
+        )
+
+    texts = [_make("text", i, 0.9 - i * 0.01) for i in range(10)]
+    images = [_make("image", i, 0.05) for i in range(6)]
+    candidates = texts + images
+
+    for limit in (6, 3, 1):
+        result = RAGAgent._cap_candidates_with_image_reservation(
+            candidates, limit, max_reserved_images=6
+        )
+        assert len(result) == limit
+        assert any(candidate.modality == "text" for candidate in result), (
+            f"limit={limit}: text evidence was wiped out entirely: {result}"
+        )

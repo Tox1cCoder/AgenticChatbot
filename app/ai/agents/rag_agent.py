@@ -360,14 +360,21 @@ class RAGAgent(BaseAgent):
         max_reserved_images: int,
     ) -> list[RetrievalCandidate]:
         """Truncate to ``limit`` without letting text results evict every
-        native image candidate.
+        native image candidate — and without letting image candidates evict
+        every text result either.
 
         A plain ``candidates[:limit]`` slice always kept text first because
         image candidates were appended after the text list, so a full page
         of text (the common case with reranking disabled) evicted every
-        image before it could ever reach a result dict (review finding 6).
+        image before it could ever reach a result dict (round 1 finding 6).
         Reserves up to ``max_reserved_images`` slots for image candidates,
-        preserving each group's original relative order.
+        preserving each group's original relative order, but the reservation
+        is capped at ``limit - 1`` whenever there is at least one text
+        candidate to keep — otherwise, whenever the evidence limit was <=
+        max_images, the reservation wiped out text evidence entirely
+        regardless of score (round 2 finding A). Selection within each group
+        is by existing rank/fusion order, not by directly comparing dense
+        and image scores, which are not calibrated against each other.
         """
         if limit <= 0:
             return []
@@ -376,7 +383,8 @@ class RAGAgent(BaseAgent):
 
         images = [candidate for candidate in candidates if candidate.modality == "image"]
         texts = [candidate for candidate in candidates if candidate.modality != "image"]
-        reserved = min(len(images), max(0, int(max_reserved_images)), limit)
+        text_floor = min(len(texts), 1)
+        reserved = min(len(images), max(0, int(max_reserved_images)), max(0, limit - text_floor))
         text_slots = limit - reserved
         kept_ids = {id(candidate) for candidate in texts[:text_slots]}
         kept_ids.update(id(candidate) for candidate in images[:reserved])
