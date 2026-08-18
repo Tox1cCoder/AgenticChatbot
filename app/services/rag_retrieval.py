@@ -107,6 +107,7 @@ class RAGRetriever:
         lexical_candidate_limit: int = 40,
         rrf_k: int = 60,
         score_threshold: float | None = None,
+        document_image_repository: Any | None = None,
     ) -> None:
         self.qdrant_client = qdrant_client
         self.embedding_service = embedding_service
@@ -117,6 +118,10 @@ class RAGRetriever:
         self.lexical_candidate_limit = max(1, int(lexical_candidate_limit))
         self.rrf_k = max(1, int(rrf_k))
         self.score_threshold = score_threshold
+        # Task 11: native multimodal image points. Optional — only
+        # ``search_images`` requires it, and that path is only ever called
+        # behind ``rag_multimodal_image_embeddings_enabled``.
+        self.document_image_repository = document_image_repository
         self.last_trace: dict[str, Any] = {}
 
     def search(
@@ -243,6 +248,92 @@ class RAGRetriever:
                             getattr(chunk, "block_provenance", None) or []
                         ),
                     },
+                )
+            )
+            if len(results) >= output_limit:
+                break
+        return results
+
+    def search_images(
+        self,
+        query: str,
+        scope: RetrievalScope,
+        *,
+        limit: int = 10,
+        active_generation_ids: Iterable[UUID] | None = None,
+    ) -> list[RetrievalCandidate]:
+        """Dense-search native ``modality="image"`` points and hydrate them.
+
+        Qdrant payloads carry only lookup metadata; each candidate's
+        ``DocumentImage`` row is re-authorized through its parent document via
+        ``document_image_repository.get_by_id_for_scope`` before it is ever
+        returned, exactly like text hydration re-checks scope in SQL rather
+        than trusting the Qdrant payload. Caption-first retrieval never calls
+        this method — it is additive and only meaningful when native image
+        embeddings were indexed (``rag_multimodal_image_embeddings_enabled``).
+        """
+        if not query or not scope.user_id or not scope.conversation_id:
+            return []
+        if self.document_image_repository is None:
+            return []
+
+        if active_generation_ids is None:
+            active_generation_ids = self.chunk_repository.get_active_generation_ids_for_scope(
+                user_id=scope.user_id,
+                conversation_id=scope.conversation_id,
+            )
+        generation_ids = tuple(
+            self._coerce_uuid(generation_id) for generation_id in active_generation_ids
+        )
+        if not generation_ids:
+            return []
+
+        output_limit = max(1, int(limit))
+        points = self._dense_search(
+            query,
+            scope,
+            output_limit,
+            active_generation_ids=generation_ids,
+            modality="image",
+        )
+
+        results: list[RetrievalCandidate] = []
+        for point in points:
+            payload = dict(getattr(point, "payload", None) or {})
+            image_id = self._valid_chunk_id(payload.get("image_id"))
+            if image_id is None:
+                continue
+            image = self.document_image_repository.get_by_id_for_scope(
+                image_id,
+                user_id=scope.user_id,
+                conversation_id=scope.conversation_id,
+            )
+            if image is None:
+                continue
+            document_id = self._valid_chunk_id(getattr(image, "document_id", None))
+            if document_id is None:
+                continue
+            page_number = getattr(image, "page_number", None)
+            score = float(getattr(point, "score", 0.0))
+            results.append(
+                RetrievalCandidate(
+                    document_id=document_id,
+                    chunk_id=self._valid_chunk_id(getattr(image, "chunk_id", None)),
+                    image_id=image_id,
+                    modality="image",
+                    content=str(getattr(image, "image_caption", None) or ""),
+                    filename=str(
+                        getattr(getattr(image, "document", None), "filename", None) or "unknown"
+                    ),
+                    page_start=page_number,
+                    page_end=page_number,
+                    section_path=tuple(getattr(image, "section_path", None) or ()),
+                    dense_rank=len(results) + 1,
+                    dense_score=score,
+                    lexical_rank=None,
+                    lexical_score=None,
+                    fused_score=score,
+                    metadata={"content_sha256": getattr(image, "content_sha256", None)},
                 )
             )
             if len(results) >= output_limit:

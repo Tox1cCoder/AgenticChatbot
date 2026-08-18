@@ -47,6 +47,7 @@ def _build_service(tmp_path: Path) -> DocumentProcessingService:
     service._event_bus = MagicMock()
     service.gemini_client = None
     service._mineru_output_path = None
+    service.recorder = None
     return service
 
 
@@ -119,7 +120,9 @@ def test_mineru_processing_uses_per_document_output_directory(tmp_path):
 
 
 def test_process_document_indexes_generated_image_caption_and_links_sql_chunk(tmp_path):
-    """Generated visual captions must be indexed and image rows must point at SQL chunks."""
+    """Generated visual captions must be indexed; the image row persists ahead
+    of the index call with a nullable chunk_id for DocumentIndexService to
+    resolve (Task 11: persist-before-vector-write ordering)."""
     service = _build_service(tmp_path)
 
     source_image = tmp_path / "chart.png"
@@ -146,11 +149,13 @@ def test_process_document_indexes_generated_image_caption_and_links_sql_chunk(tm
         return chunks_with_metadata
 
     sql_chunk_id = uuid4()
+    persisted_image_stub = SimpleNamespace(id=uuid4(), chunk_id=None)
     service._process_with_mineru = _fake_process_with_mineru
     service.gemini_client = object()
     service._generate_image_caption_with_retry = AsyncMock(
         return_value="A red bar chart showing revenue increasing each quarter."
     )
+    service.document_image_repository.create.return_value = persisted_image_stub
     service.document_index_service = MagicMock()
     service.document_index_service.index_document.return_value = [
         SimpleNamespace(id=sql_chunk_id, chunk_index=0, page_start=0, page_end=0)
@@ -179,10 +184,70 @@ def test_process_document_indexes_generated_image_caption_and_links_sql_chunk(tm
     assert create_call is not None, "Expected image metadata to be persisted"
     image_record = create_call.args[0]
     assert isinstance(image_record, DocumentImageCreate)
-    assert image_record.chunk_id == sql_chunk_id
+    assert image_record.chunk_id is None, (
+        "chunk_id must stay nullable at persist time; DocumentIndexService links it"
+    )
     assert image_record.image_caption == "A red bar chart showing revenue increasing each quarter."
+    assert image_record.content_sha256, "content hash must be computed for provenance"
+
+    index_call = service.document_index_service.index_document.call_args
+    assert list(index_call.kwargs["image_rows"]) == [persisted_image_stub]
+
     assert result["chunks_stored"] == 1
     assert result["images_stored"] == 1
+
+
+def test_process_document_persists_images_before_calling_index_document(tmp_path):
+    """Images must be persisted (nullable chunk_id) before the index service's
+    vector writes, never after."""
+    service = _build_service(tmp_path)
+
+    source_image = tmp_path / "chart.png"
+    Image.new("RGB", (4, 4), color="blue").save(source_image)
+    image_data = {
+        "path": str(source_image),
+        "page_number": 0,
+        "mime_type": "image/png",
+    }
+    chunks_with_metadata = [
+        {
+            "text": "Body text\n[Image]",
+            "page_start": 0,
+            "page_end": 0,
+            "has_images": True,
+            "image_count": 1,
+            "images": [image_data],
+        }
+    ]
+
+    async def _fake_process_with_mineru(*_args, **_kwargs):
+        service._extracted_images = [image_data]
+        return chunks_with_metadata
+
+    call_order: list[str] = []
+    service._process_with_mineru = _fake_process_with_mineru
+    service.document_image_repository.create.side_effect = lambda _data: (
+        call_order.append("create_image") or SimpleNamespace(id=uuid4(), chunk_id=None)
+    )
+    service.document_index_service = MagicMock()
+
+    def _record_index_document(**_kwargs):
+        call_order.append("index_document")
+        return []
+
+    service.document_index_service.index_document.side_effect = _record_index_document
+
+    asyncio.run(
+        service.process_document(
+            file_path=str(tmp_path / "report.pdf"),
+            filename="report.pdf",
+            document_id=str(uuid4()),
+            conversation_id=str(uuid4()),
+            user_id=str(uuid4()),
+        )
+    )
+
+    assert call_order == ["create_image", "index_document"]
 
 
 def test_process_document_passes_filename_to_index_document_reference(tmp_path):
@@ -457,3 +522,110 @@ def test_captioning_failure_degrades_to_metadata_caption(tmp_path):
     # "caption" key in the input dict that method returns it directly.
     assert results[0]["caption"] == "metadata caption from pdf"
     assert "stored_path" in results[0]
+
+
+# ---------------------------------------------------------------------------
+# Task 11: structured captions and image provenance (bbox/section_path)
+# ---------------------------------------------------------------------------
+
+
+def test_request_image_caption_renders_structured_sections_from_parsed_response(tmp_path):
+    """A validated structured caption is flattened into the searchable text."""
+    from app.schemas.document_image import ImageCaptionSections
+
+    service = _build_service(tmp_path)
+    service.gemini_client = MagicMock()
+    service.gemini_client.models.generate_content.return_value = SimpleNamespace(
+        parsed=ImageCaptionSections(
+            chart_title="Quarterly Revenue",
+            axes="X: Quarter, Y: Revenue (USD)",
+            values="Q1 $10M, Q2 $12M",
+            trends="Revenue increased each quarter",
+        ),
+        text="{}",
+    )
+
+    caption = service._request_image_caption(b"fake-jpeg-bytes", "chart.png")
+
+    assert caption == (
+        "Title: Quarterly Revenue\n"
+        "Axes: X: Quarter, Y: Revenue (USD)\n"
+        "Values: Q1 $10M, Q2 $12M\n"
+        "Trends: Revenue increased each quarter"
+    )
+    call_kwargs = service.gemini_client.models.generate_content.call_args.kwargs
+    assert call_kwargs["config"].response_mime_type == "application/json"
+
+
+def test_request_image_caption_falls_back_to_raw_text_for_non_json_response(tmp_path):
+    """Non-JSON model output is preserved as-is rather than discarded."""
+    service = _build_service(tmp_path)
+    service.gemini_client = MagicMock()
+    service.gemini_client.models.generate_content.return_value = SimpleNamespace(
+        parsed=None,
+        text="a plain-language description, not JSON",
+    )
+
+    caption = service._request_image_caption(b"fake-jpeg-bytes", "chart.png")
+
+    assert caption == "a plain-language description, not JSON"
+
+
+def test_request_image_caption_returns_none_when_response_has_no_text(tmp_path):
+    service = _build_service(tmp_path)
+    service.gemini_client = MagicMock()
+    service.gemini_client.models.generate_content.return_value = SimpleNamespace(
+        parsed=None, text=""
+    )
+
+    assert service._request_image_caption(b"fake-jpeg-bytes", "chart.png") is None
+
+
+def test_attach_prepared_images_to_blocks_stamps_bbox_and_section_path_from_owning_block(tmp_path):
+    service = _build_service(tmp_path)
+    owning_block = NormalizedBlock(
+        "i1",
+        "image",
+        "[Image]",
+        page_start=0,
+        page_end=0,
+        section_path=("Chapter 1", "Figures"),
+        metadata={"img_path": "images/a.png", "bbox": [1, 2, 3, 4]},
+    )
+    prepared = [
+        {
+            "path": "/tmp/a.png",
+            "relative_path": "images/a.png",
+            "page_number": 0,
+            "caption": "Alpha chart",
+        }
+    ]
+
+    service._attach_prepared_images_to_blocks([owning_block], prepared)
+
+    assert prepared[0]["bbox"] == [1, 2, 3, 4]
+    assert prepared[0]["section_path"] == ["Chapter 1", "Figures"]
+
+
+def test_persist_prepared_images_writes_bbox_section_path_and_content_hash(tmp_path):
+    service = _build_service(tmp_path)
+    prepared = [
+        {
+            "stored_path": "document_images/doc/chart.png",
+            "caption": "A chart",
+            "content_sha256": "deadbeef" * 8,
+            "page_number": 0,
+            "mime_type": "image/png",
+            "bbox": [0.1, 0.2, 0.3, 0.4],
+            "section_path": ["Results"],
+        }
+    ]
+
+    service._persist_prepared_images(prepared, str(uuid4()))
+
+    create_call = service.document_image_repository.create.call_args
+    image_record = create_call.args[0]
+    assert image_record.chunk_id is None
+    assert image_record.bbox == [0.1, 0.2, 0.3, 0.4]
+    assert image_record.section_path == ["Results"]
+    assert image_record.content_sha256 == "deadbeef" * 8

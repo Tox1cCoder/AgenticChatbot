@@ -21,8 +21,9 @@ from __future__ import annotations
 import logging
 import time as _time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -43,6 +44,7 @@ from qdrant_client.models import (
 from app.models.document_chunk import DocumentChunk
 from app.repositories.document_chunk import DocumentChunkRepository
 from app.repositories.document_index_generation import DocumentIndexGenerationRepository
+from app.schemas.document_image import DocumentImageUpdate
 from app.services.document_chunk_builder import BuiltChunk
 from app.usage.types import UsageContext
 
@@ -63,6 +65,8 @@ class DocumentIndexService:
         embedding_provider: str | None = None,
         chunking_version: str = "structure-v2",
         qdrant_upsert_batch_size: int = 1000,
+        document_image_repository: Any | None = None,
+        multimodal_image_embeddings_enabled: bool = False,
     ):
         self.chunk_repository = chunk_repository
         self.generation_repository = generation_repository
@@ -85,6 +89,10 @@ class DocumentIndexService:
         )
         self.chunking_version = chunking_version
         self.qdrant_upsert_batch_size = max(1, int(qdrant_upsert_batch_size))
+        # Task 11: native multimodal image points. Both stay optional/off by
+        # default so existing text-only callers are unaffected.
+        self.document_image_repository = document_image_repository
+        self.multimodal_image_embeddings_enabled = bool(multimodal_image_embeddings_enabled)
         self._payload_indexes_ready = False
 
     # ------------------------------------------------------------------
@@ -140,11 +148,20 @@ class DocumentIndexService:
         document: Any,
         built_chunks: list[BuiltChunk],
         parse_artifact_id: UUID | None,
+        image_rows: Sequence[Any] = (),
         timing_sink: dict | None = None,
         usage_context: UsageContext | None = None,
         activate: bool = True,
     ) -> list[DocumentChunk]:
-        """Build and verify a replacement generation before atomically activating it."""
+        """Build and verify a replacement generation before atomically activating it.
+
+        ``image_rows`` are already-persisted ``DocumentImage`` rows (nullable
+        ``chunk_id``) supplied by the caller. This method links each row's
+        ``chunk_id`` to the page-matching chunk from this generation and, when
+        ``multimodal_image_embeddings_enabled`` is true, embeds and upserts a
+        separate ``modality="image"`` Qdrant point per row. Both text and
+        image point counts are verified before the generation activates.
+        """
         if not built_chunks:
             raise ValueError("document indexing requires at least one chunk")
         self.ensure_collection()
@@ -162,6 +179,7 @@ class DocumentIndexService:
         )
         chunk_rows = [self._built_chunk_to_row(bc, parse_artifact_id) for bc in built_chunks]
         persisted: list[DocumentChunk] = []
+        image_points: list[PointStruct] = []
         activation_outcome_unknown = False
 
         try:
@@ -182,7 +200,15 @@ class DocumentIndexService:
                 embedding_dimension=self.embedding_dimension,
                 collection_name=self.collection_name,
             )
+            image_points = self._link_and_embed_images(
+                document=document,
+                persisted_chunks=persisted,
+                image_rows=image_rows,
+                index_generation_id=generation.id,
+                usage_context=usage_context,
+            )
             self._verify_generation(document_id, generation.id, persisted)
+            self._verify_image_points(document_id, generation.id, image_points)
             self.generation_repository.mark_ready(generation.id)
             if activate:
                 self._set_generation_active(document_id, generation.id, True)
@@ -468,7 +494,7 @@ class DocumentIndexService:
         generation_id: UUID,
         chunks: list[DocumentChunk],
     ) -> None:
-        generation_filter = self._generation_filter(document_id, generation_id)
+        generation_filter = self._generation_filter(document_id, generation_id, modality="text")
         counted = self.qdrant_client.count(
             collection_name=self.collection_name,
             count_filter=generation_filter,
@@ -502,6 +528,174 @@ class DocumentIndexService:
             vector = getattr(point, "vector", None)
             if not isinstance(vector, list) or len(vector) != self.embedding_dimension:
                 raise ValueError("generation point vector dimension mismatch")
+
+    # ------------------------------------------------------------------
+    # Task 11: image linking + native multimodal embeddings
+    # ------------------------------------------------------------------
+    def _link_and_embed_images(
+        self,
+        *,
+        document: Any,
+        persisted_chunks: list[DocumentChunk],
+        image_rows: Sequence[Any],
+        index_generation_id: UUID,
+        usage_context: UsageContext | None,
+    ) -> list[PointStruct]:
+        """Link each image row's chunk_id by page, then embed natively if enabled.
+
+        Linking (an SQL update) always runs when ``image_rows`` are supplied.
+        Native embedding + Qdrant upsert only runs when
+        ``multimodal_image_embeddings_enabled`` is true; caption-first
+        retrieval never depends on it.
+        """
+        image_rows = list(image_rows)
+        if not image_rows:
+            return []
+        if self.document_image_repository is None:
+            raise ValueError(
+                "document_image_repository is required to index image_rows"
+            )
+
+        for image in image_rows:
+            matched_chunk_id = self._chunk_id_for_image_page(
+                getattr(image, "page_number", None), persisted_chunks
+            )
+            if matched_chunk_id is not None and matched_chunk_id != getattr(
+                image, "chunk_id", None
+            ):
+                self.document_image_repository.update(
+                    image.id, DocumentImageUpdate(chunk_id=matched_chunk_id)
+                )
+
+        if not self.multimodal_image_embeddings_enabled:
+            return []
+
+        points: list[PointStruct] = []
+        for image in image_rows:
+            mime_type = str(getattr(image, "mime_type", "") or "application/octet-stream")
+            image_bytes = self._resolve_image_path(image).read_bytes()
+            vector = self.embedding_service.embed_image(
+                image_bytes,
+                mime_type=mime_type,
+                usage_context=usage_context,
+            )
+            points.append(
+                self._point_for_image(
+                    document,
+                    image,
+                    list(vector),
+                    index_generation_id=index_generation_id,
+                )
+            )
+
+        for batch in _batched(points, self.qdrant_upsert_batch_size):
+            self.qdrant_client.upsert(collection_name=self.collection_name, points=batch)
+        return points
+
+    def _verify_image_points(
+        self,
+        document_id: UUID,
+        generation_id: UUID,
+        image_points: list[PointStruct],
+    ) -> None:
+        if not image_points:
+            return
+        generation_filter = self._generation_filter(document_id, generation_id, modality="image")
+        counted = self.qdrant_client.count(
+            collection_name=self.collection_name,
+            count_filter=generation_filter,
+            exact=True,
+        )
+        actual_count = int(getattr(counted, "count", -1))
+        if actual_count != len(image_points):
+            raise ValueError(
+                "image generation point count mismatch: "
+                f"expected {len(image_points)}, got {actual_count}"
+            )
+
+        point_ids = [str(point.id) for point in image_points]
+        points = self.qdrant_client.retrieve(
+            collection_name=self.collection_name,
+            ids=point_ids,
+            with_payload=True,
+            with_vectors=True,
+        )
+        if len(points) != len(image_points):
+            raise ValueError(
+                "image generation point retrieval mismatch: "
+                f"expected {len(image_points)}, got {len(points)}"
+            )
+        expected_document = str(document_id)
+        expected_generation = str(generation_id)
+        for point in points:
+            payload = dict(getattr(point, "payload", None) or {})
+            if payload.get("document_id") != expected_document:
+                raise ValueError("image generation point document scope mismatch")
+            if payload.get("index_generation") != expected_generation:
+                raise ValueError("image generation point ownership mismatch")
+
+    def _point_for_image(
+        self,
+        document: Any,
+        image: Any,
+        vector: list[float] | None = None,
+        *,
+        index_generation_id: UUID | None = None,
+    ) -> PointStruct:
+        payload: dict[str, Any] = {
+            "document_id": str(getattr(image, "document_id", getattr(document, "id", ""))),
+            "image_id": str(image.id),
+            "page_number": getattr(image, "page_number", None),
+            "content_sha256": getattr(image, "content_sha256", None),
+            "section_path": list(getattr(image, "section_path", None) or []),
+            "embedding_model": self.embedding_model_name,
+            "embedding_provider": self.embedding_provider,
+            "modality": "image",
+            "index_generation": (
+                str(index_generation_id) if index_generation_id is not None else None
+            ),
+            "is_active": False,
+        }
+        if document is not None:
+            if getattr(document, "conversation_id", None) is not None:
+                payload["conversation_id"] = str(document.conversation_id)
+            if getattr(document, "user_id", None) is not None:
+                payload["user_id"] = str(document.user_id)
+        return PointStruct(
+            id=self._point_id_for_image(image.id),
+            vector=list(vector) if vector else [],
+            payload=payload,
+        )
+
+    @staticmethod
+    def _resolve_image_path(image: Any) -> Path:
+        path = Path(str(image.image_path))
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        return path
+
+    @staticmethod
+    def _chunk_id_for_image_page(
+        page_number: int | None, persisted_chunks: list[DocumentChunk]
+    ) -> UUID | None:
+        if not persisted_chunks:
+            return None
+        if page_number is None:
+            return persisted_chunks[0].id
+        for chunk in persisted_chunks:
+            page_start = getattr(chunk, "page_start", None)
+            page_end = getattr(chunk, "page_end", None)
+            if page_start is None and page_end is None:
+                continue
+            start = page_start if page_start is not None else page_end
+            end = page_end if page_end is not None else page_start
+            if start <= page_number <= end:
+                return chunk.id
+        return persisted_chunks[0].id
+
+    @staticmethod
+    def _point_id_for_image(image_id: UUID) -> str:
+        return str(image_id)
 
     def _set_generation_active(
         self, document_id: UUID, generation_id: UUID, is_active: bool
@@ -617,17 +811,16 @@ class DocumentIndexService:
         return f"INDEX_BUILD_{name}"[:64]
 
     @staticmethod
-    def _generation_filter(document_id: UUID, generation_id: UUID) -> Filter:
-        return Filter(
-            must=[
-                FieldCondition(
-                    key="document_id", match=MatchValue(value=str(document_id))
-                ),
-                FieldCondition(
-                    key="index_generation", match=MatchValue(value=str(generation_id))
-                ),
-            ]
-        )
+    def _generation_filter(
+        document_id: UUID, generation_id: UUID, *, modality: str | None = None
+    ) -> Filter:
+        must = [
+            FieldCondition(key="document_id", match=MatchValue(value=str(document_id))),
+            FieldCondition(key="index_generation", match=MatchValue(value=str(generation_id))),
+        ]
+        if modality is not None:
+            must.append(FieldCondition(key="modality", match=MatchValue(value=modality)))
+        return Filter(must=must)
 
     def _delete_points_for_document(self, document_id: UUID) -> None:
         try:

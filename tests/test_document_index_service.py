@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import inspect
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
@@ -110,6 +111,7 @@ class _EmbeddingStub:
         self.dimension = dim
         self.doc_calls: list[tuple[list[str], list[str | None]]] = []
         self.query_calls: list[str] = []
+        self.image_calls: list[tuple[bytes, str]] = []
 
     def embed_documents(self, texts, *, titles=None, usage_context=None):
         texts_list = list(texts)
@@ -120,6 +122,10 @@ class _EmbeddingStub:
 
     def embed_query(self, query: str, *, usage_context=None):
         self.query_calls.append(query)
+        return [0.0] * self.dim
+
+    def embed_image(self, image_bytes, *, mime_type, usage_context=None):
+        self.image_calls.append((image_bytes, mime_type))
         return [0.0] * self.dim
 
 
@@ -159,19 +165,48 @@ class _GenerationRepoStub:
         return self.rows[generation_id]
 
 
+def _condition_matches(payload: dict, condition) -> bool:
+    match = getattr(condition, "match", None)
+    value = getattr(match, "value", None)
+    if value is None:
+        # Only MatchValue conditions are used by the verify-path filters this
+        # fake supports; anything else is treated conservatively as no match.
+        return False
+    return payload.get(condition.key) == value
+
+
 def _generation_aware_qdrant(qdrant):
     captured = []
 
     def capture_upsert(*args, **kwargs):
         captured.extend(kwargs.get("points") or args[1])
 
+    def _filtered(count_filter):
+        if count_filter is None:
+            return list(captured)
+        conditions = getattr(count_filter, "must", None) or []
+        return [
+            point
+            for point in captured
+            if all(_condition_matches(point.payload, condition) for condition in conditions)
+        ]
+
+    def _retrieve(**kwargs):
+        wanted = {str(value) for value in (kwargs.get("ids") or [])}
+        return [
+            SimpleNamespace(id=point.id, payload=point.payload, vector=point.vector)
+            for point in captured
+            if str(point.id) in wanted
+        ]
+
     if qdrant.upsert.side_effect is None:
         qdrant.upsert.side_effect = capture_upsert
-    qdrant.count.side_effect = lambda **_kwargs: SimpleNamespace(count=len(captured))
-    qdrant.retrieve.side_effect = lambda **_kwargs: [
-        SimpleNamespace(id=point.id, payload=point.payload, vector=point.vector)
-        for point in captured
-    ]
+    if qdrant.count.side_effect is None:
+        qdrant.count.side_effect = lambda **kwargs: SimpleNamespace(
+            count=len(_filtered(kwargs.get("count_filter")))
+        )
+    if qdrant.retrieve.side_effect is None:
+        qdrant.retrieve.side_effect = _retrieve
     return qdrant
 
 
@@ -184,6 +219,8 @@ def _build_service(
     embedding_model_name: str = "gemini-embedding-2",
     embedding_dimension: int = 8,
     embedding_provider: str = "gemini",
+    document_image_repository=None,
+    multimodal_image_embeddings_enabled: bool = False,
 ):
     from app.services.document_index_service import DocumentIndexService
 
@@ -204,7 +241,37 @@ def _build_service(
         embedding_model_name=embedding_model_name,
         embedding_dimension=embedding_dimension,
         embedding_provider=embedding_provider,
+        document_image_repository=document_image_repository,
+        multimodal_image_embeddings_enabled=multimodal_image_embeddings_enabled,
     )
+
+
+def document():
+    return _make_document()
+
+
+def document_image(document_id: UUID | None = None, **overrides):
+    defaults = dict(
+        id=uuid4(),
+        document_id=document_id or uuid4(),
+        chunk_id=None,
+        page_number=1,
+        mime_type="image/png",
+        image_path="images/chart.png",
+        content_sha256="a" * 64,
+        section_path=["Q1 Results"],
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+class _ImageRepoStub:
+    def __init__(self):
+        self.updates: list[tuple[UUID, Any]] = []
+
+    def update(self, image_id, update_data):
+        self.updates.append((image_id, update_data))
+        return SimpleNamespace(id=image_id, chunk_id=update_data.chunk_id)
 
 
 def test_constructor_does_not_expose_retired_index_batch_size():
@@ -666,3 +733,191 @@ def test_index_document_calls_bulk_mark_indexed(monkeypatch=None):
         f"Bulk mark must receive all persisted chunk IDs; "
         f"expected {expected_ids}, got {set(chunk_ids_passed)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 11: image points, chunk-linking, and native multimodal embeddings
+# ---------------------------------------------------------------------------
+
+
+def test_image_point_links_image_without_chunk_id():
+    index_service = _build_service()
+    point = index_service._point_for_image(document(), document_image())
+
+    assert point.payload["modality"] == "image"
+    assert point.payload["image_id"]
+    assert "chunk_id" not in point.payload
+
+
+def test_index_document_links_image_rows_to_matching_chunk_by_page():
+    document_row = _make_document()
+    persisted = [_persisted_chunk(document_row.id, 0)]  # page_start = page_end = 1
+    repo = MagicMock()
+    repo.replace_document_chunks.return_value = persisted
+    image_repo = _ImageRepoStub()
+    image = document_image(document_row.id, page_number=1)
+
+    service = _build_service(chunk_repo=repo, document_image_repository=image_repo)
+    service.index_document(
+        document=document_row,
+        built_chunks=[_make_built_chunk(0)],
+        parse_artifact_id=None,
+        image_rows=[image],
+    )
+
+    assert image_repo.updates, "image chunk_id must be linked to the matching persisted chunk"
+    linked_image_id, update_data = image_repo.updates[0]
+    assert linked_image_id == image.id
+    assert update_data.chunk_id == persisted[0].id
+
+
+def test_index_document_requires_image_repository_when_image_rows_given():
+    import pytest
+
+    document_row = _make_document()
+    persisted = [_persisted_chunk(document_row.id, 0)]
+    repo = MagicMock()
+    repo.replace_document_chunks.return_value = persisted
+    image = document_image(document_row.id)
+
+    service = _build_service(chunk_repo=repo)  # no document_image_repository
+
+    with pytest.raises(ValueError, match="document_image_repository"):
+        service.index_document(
+            document=document_row,
+            built_chunks=[_make_built_chunk(0)],
+            parse_artifact_id=None,
+            image_rows=[image],
+        )
+
+
+def test_index_document_skips_native_image_embedding_when_flag_disabled():
+    document_row = _make_document()
+    persisted = [_persisted_chunk(document_row.id, 0)]
+    repo = MagicMock()
+    repo.replace_document_chunks.return_value = persisted
+    image_repo = _ImageRepoStub()
+    embedding = _EmbeddingStub(dim=4)
+    image = document_image(document_row.id, page_number=1)
+
+    service = _build_service(
+        chunk_repo=repo,
+        embedding_service=embedding,
+        embedding_dimension=4,
+        document_image_repository=image_repo,
+        multimodal_image_embeddings_enabled=False,
+    )
+    service.index_document(
+        document=document_row,
+        built_chunks=[_make_built_chunk(0)],
+        parse_artifact_id=None,
+        image_rows=[image],
+    )
+
+    assert embedding.image_calls == [], "flag off must never call embed_image"
+    assert image_repo.updates, "linking must still happen when the flag is off"
+
+
+def test_index_document_embeds_and_upserts_image_points_when_flag_enabled(tmp_path):
+    document_row = _make_document()
+    persisted = [_persisted_chunk(document_row.id, 0)]
+    repo = MagicMock()
+    repo.replace_document_chunks.return_value = persisted
+    qdrant = MagicMock()
+    image_repo = _ImageRepoStub()
+    embedding = _EmbeddingStub(dim=4)
+
+    image_file = tmp_path / "chart.png"
+    image_file.write_bytes(b"fake-image-bytes")
+    image = document_image(document_row.id, page_number=1, image_path=str(image_file))
+
+    service = _build_service(
+        chunk_repo=repo,
+        qdrant_client=qdrant,
+        embedding_service=embedding,
+        embedding_dimension=4,
+        document_image_repository=image_repo,
+        multimodal_image_embeddings_enabled=True,
+    )
+    service.index_document(
+        document=document_row,
+        built_chunks=[_make_built_chunk(0)],
+        parse_artifact_id=None,
+        image_rows=[image],
+    )
+
+    assert embedding.image_calls, "embed_image must be called once per canonical image"
+    assert embedding.image_calls[0][1] == "image/png"
+
+    image_points = [
+        point
+        for call in qdrant.upsert.call_args_list
+        for point in (call.kwargs.get("points") or call.args[1])
+        if point.payload.get("modality") == "image"
+    ]
+    assert len(image_points) == 1
+    assert image_points[0].payload["image_id"] == str(image.id)
+    assert image_points[0].payload["document_id"] == str(document_row.id)
+
+
+def test_index_document_raises_before_activation_when_image_points_go_missing(tmp_path):
+    """Both text and image point counts must verify before a generation activates."""
+    import pytest
+
+    document_row = _make_document()
+    persisted = [_persisted_chunk(document_row.id, 0)]
+    repo = MagicMock()
+    repo.replace_document_chunks.return_value = persisted
+    image_repo = _ImageRepoStub()
+    embedding = _EmbeddingStub(dim=4)
+
+    image_file = tmp_path / "chart.png"
+    image_file.write_bytes(b"fake-image-bytes")
+    image = document_image(document_row.id, page_number=1, image_path=str(image_file))
+
+    captured = []
+
+    def _drop_image_points_on_upsert(*args, **kwargs):
+        points = kwargs.get("points") or args[1]
+        # Simulate an upstream failure that silently drops image points while
+        # text points still land — activation must still be blocked.
+        captured.extend(point for point in points if point.payload.get("modality") != "image")
+
+    qdrant = MagicMock()
+    qdrant.upsert.side_effect = _drop_image_points_on_upsert
+    qdrant.count.side_effect = lambda **kwargs: SimpleNamespace(
+        count=len(
+            [
+                point
+                for point in captured
+                if all(
+                    _condition_matches(point.payload, condition)
+                    for condition in (getattr(kwargs.get("count_filter"), "must", None) or [])
+                )
+            ]
+        )
+    )
+    qdrant.retrieve.side_effect = lambda **kwargs: [
+        SimpleNamespace(id=point.id, payload=point.payload, vector=point.vector)
+        for point in captured
+        if str(point.id) in {str(value) for value in (kwargs.get("ids") or [])}
+    ]
+
+    service = _build_service(
+        chunk_repo=repo,
+        qdrant_client=qdrant,
+        embedding_service=embedding,
+        embedding_dimension=4,
+        document_image_repository=image_repo,
+        multimodal_image_embeddings_enabled=True,
+    )
+
+    with pytest.raises(ValueError, match="image generation point"):
+        service.index_document(
+            document=document_row,
+            built_chunks=[_make_built_chunk(0)],
+            parse_artifact_id=None,
+            image_rows=[image],
+        )
+
+    assert repo.mark_index_failed.called

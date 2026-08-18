@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import hashlib
 import io
 import logging
 import os
@@ -19,11 +20,12 @@ from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
 from PIL import Image
+from pydantic import ValidationError
 
 from app.core.config import Settings
 from app.core.events import DocumentEvent, DocumentEventData, get_event_bus
 from app.repositories.document_image import DocumentImageRepository
-from app.schemas.document_image import DocumentImageCreate
+from app.schemas.document_image import DocumentImageCreate, ImageCaptionSections
 from app.services.document_blocks import NormalizedBlock
 from app.services.document_chunk_builder import DocumentChunkBuilder
 from app.services.document_parse_service import DocumentParseService, ParseResult
@@ -33,6 +35,18 @@ from app.usage import begin_usage_operation, bind_usage_context, current_usage_c
 from app.usage.types import UsageOperation
 
 logger = logging.getLogger(__name__)
+
+# Untrusted document content flows into this prompt only as image bytes, and
+# the response is validated against ImageCaptionSections — the model's output
+# is data, never treated as instructions.
+_IMAGE_CAPTION_STRUCTURED_PROMPT = (
+    "Describe this image for search retrieval. Extract: any visible text "
+    "rendered in the image (OCR), a chart or figure title if present, axis "
+    "labels, legend entries, key values, described trends or patterns, "
+    "relationships between depicted elements, and one sentence tying the "
+    "image to its likely surrounding document section. Leave a field empty "
+    "if it does not apply."
+)
 
 
 class DocumentProcessingService:
@@ -324,7 +338,6 @@ class DocumentProcessingService:
         else:
             raise ValueError(f"Unsupported file type: {filename}")
 
-        images_stored = 0
         index_service = getattr(self, "document_index_service", None)
         if index_service is None:
             raise RuntimeError(
@@ -340,6 +353,7 @@ class DocumentProcessingService:
         )
 
         prepared_images = []
+        persisted_images: list[Any] = []
         if hasattr(self, "_extracted_images") and self._extracted_images:
             prepared_images = await self._prepare_images_for_indexing(
                 self._extracted_images,
@@ -349,20 +363,22 @@ class DocumentProcessingService:
                 parse_result.blocks,
                 prepared_images,
             )
+            # Persist DocumentImage rows (nullable chunk_id) before the index
+            # service's vector writes so a native image Qdrant point is never
+            # created without a matching canonical SQL row to authorize it
+            # through. DocumentIndexService links chunk_id by page once the
+            # generation's chunks exist.
+            persisted_images = self._persist_prepared_images(prepared_images, document_id)
 
         built_chunks = self._build_chunks_for_indexing(parse_result.blocks)
         persisted_chunks = index_service.index_document(
             document=self._document_ref(document_id, conversation_id, user_id, filename),
             built_chunks=built_chunks,
             parse_artifact_id=None,
+            image_rows=persisted_images,
         )
 
-        if prepared_images:
-            images_stored = await self._store_prepared_images(
-                prepared_images,
-                document_id,
-                persisted_chunks,
-            )
+        images_stored = len(persisted_images)
 
         store_result = {
             "chunks_stored": len(persisted_chunks),
@@ -576,15 +592,12 @@ class DocumentProcessingService:
         sem = asyncio.Semaphore(self.settings.image_caption_max_concurrency)
 
         async def _caption_one(img_data, dest_path, metadata_caption):
+            content_sha256 = await asyncio.to_thread(self._sha256_of_file, dest_path)
             caption = metadata_caption  # fallback
             if self.gemini_client:
                 async with sem:
                     try:
-                        with Image.open(dest_path) as img:
-                            rgb_img = img.convert("RGB")
-                            buffer = io.BytesIO()
-                            rgb_img.save(buffer, format="JPEG")
-                        image_bytes = buffer.getvalue()
+                        image_bytes = await asyncio.to_thread(self._encode_jpeg_bytes, dest_path)
                         generated = await self._generate_image_caption_with_retry(
                             image_bytes=image_bytes,
                             image_name=dest_path.name,
@@ -607,6 +620,7 @@ class DocumentProcessingService:
                 **img_data,
                 "stored_path": str(relative_image_path),
                 "caption": caption,
+                "content_sha256": content_sha256,
                 "page_number": img_data.get("page_number"),
                 "mime_type": img_data["mime_type"],
             }
@@ -698,6 +712,15 @@ class DocumentProcessingService:
             existing_images = list(metadata.get("images") or [])
             context_lines: list[str] = []
             for image in matching_images:
+                if block.kind == "image":
+                    # Structural provenance (Task 11): only the owning image
+                    # block's own bbox/section_path apply here, never a
+                    # neighboring text block's. Mutates the shared dict so it
+                    # also reaches ``prepared_images`` for SQL persistence.
+                    if image.get("bbox") is None:
+                        image["bbox"] = block.metadata.get("bbox")
+                    if not image.get("section_path"):
+                        image["section_path"] = list(block.section_path)
                 if image not in existing_images:
                     existing_images.append(image)
                 caption = str(image.get("caption") or "").strip()
@@ -769,25 +792,66 @@ class DocumentProcessingService:
             block_index,
         )
 
+    def _persist_prepared_images(
+        self,
+        prepared_images: list[dict[str, Any]],
+        document_id: str,
+    ) -> list[Any]:
+        """Persist ``DocumentImage`` rows with a nullable ``chunk_id``.
+
+        Called before ``DocumentIndexService.index_document`` so a native
+        image Qdrant point is never created without a matching canonical SQL
+        row; ``index_document`` links ``chunk_id`` once its generation's
+        chunks exist.
+        """
+        persisted: list[Any] = []
+        for img_data in prepared_images:
+            persisted.append(
+                self.document_image_repository.create(
+                    self._image_create_payload(img_data, document_id, chunk_id=None)
+                )
+            )
+        return persisted
+
+    @staticmethod
+    def _image_create_payload(
+        img_data: dict[str, Any],
+        document_id: str,
+        *,
+        chunk_id: UUID | None,
+    ) -> DocumentImageCreate:
+        page_number = img_data.get("page_number")
+        return DocumentImageCreate(
+            document_id=uuid.UUID(document_id),
+            chunk_id=chunk_id,
+            image_path=img_data["stored_path"],
+            image_caption=img_data.get("caption"),
+            page_number=page_number + 1 if page_number is not None else None,
+            mime_type=img_data["mime_type"],
+            bbox=img_data.get("bbox"),
+            section_path=list(img_data.get("section_path") or []),
+            content_sha256=img_data.get("content_sha256"),
+        )
+
     async def _store_prepared_images(
         self,
         prepared_images: list[dict[str, Any]],
         document_id: str,
         persisted_chunks: list[Any],
     ) -> int:
+        """Legacy post-index persistence path used by the Celery indexing
+        worker (``app/workers/document_processor.py``), which resolves
+        ``chunk_id`` itself from already-persisted chunks rather than relying
+        on ``DocumentIndexService``'s ``image_rows`` linking. Kept unchanged
+        in calling contract; only the persisted payload gained the Task 11
+        provenance fields.
+        """
         stored_count = 0
         for img_data in prepared_images:
             chunk_id = self._chunk_id_for_image(img_data, persisted_chunks)
-            page_number = img_data.get("page_number")
-            image_record_data = DocumentImageCreate(
-                document_id=uuid.UUID(document_id),
-                chunk_id=chunk_id,
-                image_path=img_data["stored_path"],
-                image_caption=img_data.get("caption"),
-                page_number=page_number + 1 if page_number is not None else None,
-                mime_type=img_data["mime_type"],
+            self.document_image_repository.create(
+                self._image_create_payload(img_data, document_id, chunk_id=chunk_id)
             )
-            self.document_image_repository.create(image_record_data)
             stored_count += 1
         return stored_count
 
@@ -938,8 +1002,15 @@ class DocumentProcessingService:
         *,
         operation: UsageOperation | None = None,
     ) -> str | None:
+        """Request a validated structured caption and return its rendered text.
+
+        The structured object covers visible OCR text, chart title, axes,
+        legend, values, trends, relationships, and surrounding section
+        context so the flattened text is retrievable via lexical/dense
+        search. Never logs the caption or OCR content — only ``image_name``.
+        """
         prompt_parts = [
-            types.Part.from_text(text="Describe this image concisely in one sentence."),
+            types.Part.from_text(text=_IMAGE_CAPTION_STRUCTURED_PROMPT),
             types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
         ]
 
@@ -949,6 +1020,10 @@ class DocumentProcessingService:
             return self.gemini_client.models.generate_content(
                 model=model_name,
                 contents=prompt_parts,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=ImageCaptionSections,
+                ),
             )
 
         if self.recorder is None or operation is None:
@@ -961,11 +1036,44 @@ class DocumentProcessingService:
                 operation=operation,
             )
 
-        if hasattr(response, "text") and response.text:
-            return response.text.strip()
+        return self._render_caption_response(response, image_name)
 
-        logger.warning(f"No caption text in Gemini response for {image_name}")
-        return None
+    @staticmethod
+    def _render_caption_response(response: Any, image_name: str) -> str | None:
+        """Render the validated structured object, or fall back to raw text.
+
+        The request enforces ``response_schema=ImageCaptionSections`` so a
+        parsed structured object is the expected shape. A response that
+        somehow isn't structured JSON is treated as a plain-text caption
+        as-is (not discarded, and not mislabeled as OCR-specific content).
+        """
+        parsed = getattr(response, "parsed", None)
+        if isinstance(parsed, ImageCaptionSections):
+            rendered = parsed.render().strip()
+            return rendered or None
+
+        text = getattr(response, "text", None)
+        if not text:
+            logger.warning(f"No caption text in Gemini response for {image_name}")
+            return None
+        try:
+            sections = ImageCaptionSections.model_validate_json(text)
+        except (ValidationError, ValueError):
+            return text.strip() or None
+        rendered = sections.render().strip()
+        return rendered or None
+
+    @staticmethod
+    def _sha256_of_file(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    @staticmethod
+    def _encode_jpeg_bytes(path: Path) -> bytes:
+        with Image.open(path) as img:
+            rgb_img = img.convert("RGB")
+            buffer = io.BytesIO()
+            rgb_img.save(buffer, format="JPEG")
+            return buffer.getvalue()
 
     async def cleanup_temp_files(self, older_than_hours: int = 24) -> dict[str, Any]:
         try:

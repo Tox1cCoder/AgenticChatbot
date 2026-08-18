@@ -325,6 +325,7 @@ class Container(containers.DeclarativeContainer):
         lexical_candidate_limit=settings.rag_lexical_candidate_limit,
         rrf_k=settings.rag_rrf_k,
         score_threshold=settings.rag_score_threshold,
+        document_image_repository=document_image_repository,
     )
 
     rag_reranker = providers.Singleton(
@@ -598,6 +599,8 @@ class Container(containers.DeclarativeContainer):
         embedding_dimension=settings.rag_embedding_dimension,
         embedding_provider=settings.rag_embedding_provider,
         qdrant_upsert_batch_size=settings.qdrant_upsert_batch_size,
+        document_image_repository=document_image_repository,
+        multimodal_image_embeddings_enabled=settings.rag_multimodal_image_embeddings_enabled,
     )
 
     semantic_boundary_detector = providers.Factory(
