@@ -42,6 +42,10 @@ def _build_minimal_rag_agent(qdrant_stub, embedding_stub) -> RAGAgent:
     agent.agentic_preview_chars = 500
     agent._last_thinking_summary = None
     agent.retriever = None
+    # The real constructor always builds an image_selector, regardless of
+    # rag_multimodal_image_embeddings_enabled — only the native search call
+    # itself is flag-gated (Task 11).
+    agent.image_selector = SimpleNamespace(max_images=6)
     return agent
 
 
@@ -744,3 +748,74 @@ def test_native_image_search_authorizes_document_image_through_parent_document()
         assert other_image_id not in [result.image_id for result in results]
     finally:
         engine.dispose()
+
+
+def test_native_image_candidate_survives_truncation_when_text_page_is_full():
+    """Review finding 6: a full page of text candidates must not evict every
+    native image candidate. With reranking disabled (the failure mode from
+    the finding), a plain ``candidates[:limit]`` slice always kept text
+    first because images were appended after it."""
+    from app.services.rag_retrieval import RetrievalCandidate
+
+    qdrant = _fake_qdrant()
+    agent = _build_minimal_rag_agent(qdrant, _fake_embedding())
+    agent.settings.rag_multimodal_image_embeddings_enabled = True
+    agent.top_k = 3
+    agent.evidence_candidate_limit = 3
+    agent.image_selector = SimpleNamespace(max_images=4)
+    agent.reranker = None  # reranking disabled — the failure mode from the finding
+
+    text_candidates = [
+        RetrievalCandidate(
+            document_id=uuid4(),
+            chunk_id=uuid4(),
+            image_id=None,
+            modality="text",
+            content=f"text evidence {i}",
+            filename="report.pdf",
+            page_start=i,
+            page_end=i,
+            section_path=(),
+            dense_rank=i,
+            dense_score=1.0 - i * 0.01,
+            lexical_rank=None,
+            lexical_score=None,
+            fused_score=1.0 - i * 0.01,
+        )
+        for i in range(3)
+    ]
+    image_candidate = RetrievalCandidate(
+        document_id=uuid4(),
+        chunk_id=None,
+        image_id=uuid4(),
+        modality="image",
+        content="a revenue chart",
+        filename="report.pdf",
+        page_start=2,
+        page_end=2,
+        section_path=(),
+        dense_rank=1,
+        dense_score=0.95,
+        lexical_rank=None,
+        lexical_score=None,
+        fused_score=0.95,
+    )
+
+    agent.retriever = MagicMock()
+    agent.retriever.search.return_value = text_candidates
+    agent.retriever.search_images.return_value = [image_candidate]
+
+    with patch("app.ai.agents.rag_agent.DocumentImageRepository") as image_repo_cls:
+        image_repo_cls.return_value.get_by_chunk_id_for_scope.return_value = []
+        results = asyncio.run(
+            agent._search(
+                query="revenue chart",
+                conversation_id="conv-1",
+                user_id="user-1",
+                top_k=3,
+            )
+        )
+
+    assert any(r.get("image_id") == str(image_candidate.image_id) for r in results), (
+        f"native image candidate was truncated away: {results}"
+    )

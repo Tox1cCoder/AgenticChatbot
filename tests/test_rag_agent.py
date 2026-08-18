@@ -989,6 +989,7 @@ def test_rag_search_reranks_authorized_typed_pool_before_dict_adapter():
     agent.retriever.search.return_value = rows
     agent.reranker = MagicMock()
     agent.reranker.rank = AsyncMock(return_value=ranked)
+    agent.image_selector = SimpleNamespace(max_images=6)
 
     with patch("app.ai.agents.rag_agent.DocumentImageRepository") as image_repo_cls:
         image_repo_cls.return_value.get_by_chunk_id_for_scope.return_value = []
@@ -1151,6 +1152,7 @@ def test_disabled_agent_path_caps_evidence_without_loading_provider():
         output_limit=10,
         model_loader=loader,
     )
+    agent.image_selector = SimpleNamespace(max_images=6)
 
     with patch("app.ai.agents.rag_agent.DocumentImageRepository") as image_repo_cls:
         image_repo_cls.return_value.get_by_chunk_id_for_scope.return_value = []

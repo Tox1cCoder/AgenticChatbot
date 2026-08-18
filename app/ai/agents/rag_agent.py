@@ -289,7 +289,11 @@ class RAGAgent(BaseAgent):
         if self.reranker is not None:
             candidates = await self.reranker.rank(query, candidates)
         evidence_limit = int(getattr(self, "evidence_candidate_limit", top_k))
-        candidates = candidates[: min(top_k, evidence_limit)]
+        candidates = self._cap_candidates_with_image_reservation(
+            candidates,
+            min(top_k, evidence_limit),
+            max_reserved_images=self.image_selector.max_images,
+        )
 
         results: list[dict[str, Any]] = []
         image_repo = DocumentImageRepository(SessionLocal) if candidates else None
@@ -347,6 +351,36 @@ class RAGAgent(BaseAgent):
             results.append(result)
 
         return results
+
+    @staticmethod
+    def _cap_candidates_with_image_reservation(
+        candidates: list[RetrievalCandidate],
+        limit: int,
+        *,
+        max_reserved_images: int,
+    ) -> list[RetrievalCandidate]:
+        """Truncate to ``limit`` without letting text results evict every
+        native image candidate.
+
+        A plain ``candidates[:limit]`` slice always kept text first because
+        image candidates were appended after the text list, so a full page
+        of text (the common case with reranking disabled) evicted every
+        image before it could ever reach a result dict (review finding 6).
+        Reserves up to ``max_reserved_images`` slots for image candidates,
+        preserving each group's original relative order.
+        """
+        if limit <= 0:
+            return []
+        if len(candidates) <= limit:
+            return list(candidates)
+
+        images = [candidate for candidate in candidates if candidate.modality == "image"]
+        texts = [candidate for candidate in candidates if candidate.modality != "image"]
+        reserved = min(len(images), max(0, int(max_reserved_images)), limit)
+        text_slots = limit - reserved
+        kept_ids = {id(candidate) for candidate in texts[:text_slots]}
+        kept_ids.update(id(candidate) for candidate in images[:reserved])
+        return [candidate for candidate in candidates if id(candidate) in kept_ids]
 
     @staticmethod
     def _native_image_candidate_result(
