@@ -503,3 +503,244 @@ def test_get_document_full_content_reads_sql_chunks_not_qdrant_payloads():
 
     assert content == "First SQL chunk.\n\nSecond SQL chunk."
     qdrant.scroll.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Task 11: native multimodal image search — off by default, authorized when on
+# ---------------------------------------------------------------------------
+
+
+def test_native_image_search_is_off_by_default():
+    """``rag_multimodal_image_embeddings_enabled`` is default-off: even with a
+    retriever that supports it, ``_search`` must never call ``search_images``
+    unless the flag is explicitly ``True``."""
+    qdrant = _fake_qdrant()
+    agent = _build_minimal_rag_agent(qdrant, _fake_embedding())
+    # agent.settings is a bare MagicMock (no explicit flag set) — this pins
+    # that an unconfigured mock attribute must not be treated as enabled.
+    agent.retriever = MagicMock()
+    agent.retriever.search.return_value = []
+
+    asyncio.run(agent._search(query="q", conversation_id="conv-1", user_id="user-1"))
+
+    agent.retriever.search_images.assert_not_called()
+
+
+def test_native_image_search_scopes_by_user_and_conversation_when_enabled():
+    qdrant = _fake_qdrant()
+    agent = _build_minimal_rag_agent(qdrant, _fake_embedding())
+    agent.settings.rag_multimodal_image_embeddings_enabled = True
+    agent.image_selector = SimpleNamespace(max_images=4)
+    agent.retriever = MagicMock()
+    agent.retriever.search.return_value = []
+    agent.retriever.search_images.return_value = []
+
+    conversation_id = uuid4()
+    asyncio.run(
+        agent._search(
+            query="compare charts",
+            conversation_id=str(conversation_id),
+            user_id="user-1",
+        )
+    )
+
+    agent.retriever.search_images.assert_called_once()
+    call = agent.retriever.search_images.call_args
+    scope = call.args[1] if len(call.args) > 1 else call.kwargs["scope"]
+    assert scope.user_id == "user-1"
+    assert scope.conversation_id == conversation_id
+    assert call.kwargs["limit"] == 4
+
+
+def test_native_image_search_failure_falls_back_to_text_only_candidates():
+    """A broken native-image path must never break caption-first retrieval."""
+    from app.services.rag_retrieval import RetrievalCandidate
+
+    qdrant = _fake_qdrant()
+    agent = _build_minimal_rag_agent(qdrant, _fake_embedding())
+    agent.settings.rag_multimodal_image_embeddings_enabled = True
+    agent.image_selector = SimpleNamespace(max_images=4)
+    text_document_id = uuid4()
+    text_chunk_id = uuid4()
+    agent.retriever = MagicMock()
+    agent.retriever.search.return_value = [
+        RetrievalCandidate(
+            document_id=text_document_id,
+            chunk_id=text_chunk_id,
+            image_id=None,
+            modality="text",
+            content="caption-first text evidence",
+            filename="report.pdf",
+            page_start=1,
+            page_end=1,
+            section_path=(),
+            dense_rank=1,
+            dense_score=0.5,
+            lexical_rank=None,
+            lexical_score=None,
+            fused_score=0.5,
+        )
+    ]
+    agent.retriever.search_images.side_effect = RuntimeError("qdrant image collection down")
+
+    with patch("app.ai.agents.rag_agent.DocumentImageRepository") as image_repo_cls:
+        image_repo_cls.return_value.get_by_chunk_id_for_scope.return_value = []
+        results = asyncio.run(
+            agent._search(query="compare charts", conversation_id="conv-1", user_id="user-1")
+        )
+
+    assert len(results) == 1
+    assert results[0]["content"] == "caption-first text evidence"
+
+
+def _sqlite_image_repository():
+    from sqlalchemy import create_engine
+    from sqlalchemy.dialects.postgresql import JSONB
+    from sqlalchemy.ext.compiler import compiles
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from app.models.base import Base
+    from app.models.conversation import Conversation
+    from app.models.document import Document
+    from app.models.document_image import DocumentImage
+    from app.models.user import User
+    from app.repositories.document_image import DocumentImageRepository
+
+    @compiles(JSONB, "sqlite")
+    def _compile_jsonb_for_sqlite(_type, _compiler, **_kwargs):
+        return "JSON"
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            User.__table__,
+            Conversation.__table__,
+            Document.__table__,
+            DocumentImage.__table__,
+        ],
+    )
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    return engine, factory, DocumentImageRepository(factory)
+
+
+def test_native_image_search_authorizes_document_image_through_parent_document():
+    """RAGRetriever.search_images must re-check scope in SQL, not trust the
+    Qdrant payload — a foreign tenant's image id must never hydrate."""
+    from datetime import datetime, timezone
+
+    from app.models.conversation import Conversation
+    from app.models.document import Document
+    from app.models.document_image import DocumentImage
+    from app.models.user import User
+    from app.services.rag_retrieval import RAGRetriever, RetrievalScope
+
+    engine, factory, image_repo = _sqlite_image_repository()
+    try:
+        owner_id, other_owner_id = uuid4(), uuid4()
+        conversation_id, other_conversation_id = uuid4(), uuid4()
+        document_id, other_document_id = uuid4(), uuid4()
+        image_id, other_image_id = uuid4(), uuid4()
+
+        with factory.begin() as session:
+            session.add_all(
+                [
+                    User(
+                        id=owner_id,
+                        username="owner",
+                        email="owner@example.test",
+                        password_hash="test",
+                    ),
+                    User(
+                        id=other_owner_id,
+                        username="other",
+                        email="other@example.test",
+                        password_hash="test",
+                    ),
+                    Conversation(id=conversation_id, owner_id=owner_id, title="mine"),
+                    Conversation(
+                        id=other_conversation_id, owner_id=other_owner_id, title="theirs"
+                    ),
+                ]
+            )
+            session.add_all(
+                [
+                    Document(
+                        id=document_id,
+                        conversation_id=conversation_id,
+                        filename="mine.pdf",
+                        filename_key="mine.pdf",
+                        file_type="application/pdf",
+                        status=2,
+                        upload_time=datetime.now(timezone.utc),
+                    ),
+                    Document(
+                        id=other_document_id,
+                        conversation_id=other_conversation_id,
+                        filename="theirs.pdf",
+                        filename_key="theirs.pdf",
+                        file_type="application/pdf",
+                        status=2,
+                        upload_time=datetime.now(timezone.utc),
+                    ),
+                ]
+            )
+            session.add_all(
+                [
+                    DocumentImage(
+                        id=image_id,
+                        document_id=document_id,
+                        image_path="a.png",
+                        mime_type="image/png",
+                        page_number=1,
+                    ),
+                    DocumentImage(
+                        id=other_image_id,
+                        document_id=other_document_id,
+                        image_path="b.png",
+                        mime_type="image/png",
+                        page_number=1,
+                    ),
+                ]
+            )
+
+        chunk_repo = MagicMock()
+        chunk_repo.get_active_generation_ids_for_scope.return_value = [uuid4()]
+
+        qdrant = MagicMock()
+        response = MagicMock()
+        # Qdrant is not the authorization authority: it returns points for
+        # both tenants' images regardless of which scope is searching.
+        response.points = [
+            SimpleNamespace(score=0.9, payload={"image_id": str(image_id)}),
+            SimpleNamespace(score=0.8, payload={"image_id": str(other_image_id)}),
+        ]
+        qdrant.query_points.return_value = response
+
+        retriever = RAGRetriever(
+            qdrant_client=qdrant,
+            embedding_service=_fake_embedding(),
+            chunk_repository=chunk_repo,
+            collection_name="documents",
+            document_image_repository=image_repo,
+        )
+
+        # DocumentImageRepository (like DocumentChunkRepository) compares
+        # Conversation.owner_id directly against user_id without coercion, so
+        # SQLite round-tripping needs a real UUID here — the same convention
+        # test_rag_retrieval.py's SQLite scope tests already use.
+        results = retriever.search_images(
+            "chart",
+            RetrievalScope(user_id=owner_id, conversation_id=conversation_id),
+        )
+
+        assert [result.image_id for result in results] == [image_id]
+        assert results[0].document_id == document_id
+        assert other_image_id not in [result.image_id for result in results]
+    finally:
+        engine.dispose()

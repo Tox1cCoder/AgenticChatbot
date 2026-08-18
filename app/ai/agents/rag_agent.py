@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import logging
 import re
@@ -35,6 +36,7 @@ from ...services.rag_grounding import (
     GroundedAnswerGate,
     parse_grounded_answer,
 )
+from ...services.rag_image_selector import ImageCandidate, RAGImageSelector
 from ...services.rag_reranker import RAGReranker
 from ...services.rag_retrieval import RAGRetriever, RetrievalCandidate, RetrievalScope
 from ..context_overflow import is_context_overflow_error, prepare_aggressive_context_retry
@@ -72,6 +74,7 @@ class RAGAgent(BaseAgent):
         retriever: RAGRetriever | None = None,
         reranker: RAGReranker | None = None,
         grounded_answer_gate: GroundedAnswerGate | None = None,
+        image_selector: RAGImageSelector | None = None,
     ):
         # Initialise BaseAgent (sets model_name, gemini_client, langchain_model,
         # mcp_manager, tools, skills tracking, etc.)
@@ -112,6 +115,7 @@ class RAGAgent(BaseAgent):
             lexical_candidate_limit=settings.rag_lexical_candidate_limit,
             rrf_k=settings.rag_rrf_k,
             score_threshold=settings.rag_score_threshold,
+            document_image_repository=DocumentImageRepository(SessionLocal),
         )
 
         # Grounded-answer enforcement. The gate itself is deterministic; only
@@ -119,6 +123,16 @@ class RAGAgent(BaseAgent):
         self.grounded_answer_gate = grounded_answer_gate or GroundedAnswerGate(
             settings.min_citation_coverage,
             metrics=rag_metrics,
+        )
+
+        # Task 11: bounded, post-retrieval image selection. Caption-first
+        # retrieval never depends on this; it only bounds how many/which
+        # already-linked images get read from disk and attached to a turn.
+        self.image_selector = image_selector or RAGImageSelector(
+            max_images=settings.agentic_rag_max_images,
+            max_bytes=settings.rag_vision_max_bytes,
+            max_pixels=settings.rag_vision_max_pixels,
+            max_vision_tokens=settings.rag_vision_max_tokens,
         )
 
         # Thinking support
@@ -258,6 +272,20 @@ class RAGAgent(BaseAgent):
             # identifiers; production scope always resolves real SQL generations.
             search_kwargs["active_generation_ids"] = legacy_generation_ids
         candidates = retriever.search(query, scope, **search_kwargs)
+        if getattr(self.settings, "rag_multimodal_image_embeddings_enabled", False) is True:
+            # Additive and off by default: caption-first text candidates are
+            # never replaced, only supplemented with natively-indexed image
+            # points once RAGRetriever has authorized them through their
+            # parent document.
+            try:
+                image_candidates = retriever.search_images(
+                    query, scope, limit=self.image_selector.max_images
+                )
+            except Exception:
+                logger.exception("Native image search failed; continuing with text candidates")
+                image_candidates = []
+            if image_candidates:
+                candidates = list(candidates) + list(image_candidates)
         if self.reranker is not None:
             candidates = await self.reranker.rank(query, candidates)
         evidence_limit = int(getattr(self, "evidence_candidate_limit", top_k))
@@ -266,6 +294,9 @@ class RAGAgent(BaseAgent):
         results: list[dict[str, Any]] = []
         image_repo = DocumentImageRepository(SessionLocal) if candidates else None
         for candidate in candidates:
+            if candidate.modality == "image":
+                results.append(self._native_image_candidate_result(candidate, conversation_id))
+                continue
             chunk_images = []
             if image_repo is not None and candidate.chunk_id is not None:
                 try:
@@ -316,6 +347,39 @@ class RAGAgent(BaseAgent):
             results.append(result)
 
         return results
+
+    @staticmethod
+    def _native_image_candidate_result(
+        candidate: RetrievalCandidate, conversation_id: str | None
+    ) -> dict[str, Any]:
+        """Adapt a natively-hydrated ``modality="image"`` candidate to the
+        same public dict contract ``_search`` returns for text chunks."""
+        score = (
+            candidate.dense_score if candidate.dense_score is not None else candidate.fused_score
+        )
+        return {
+            "content": candidate.content,
+            "source": candidate.filename,
+            "score": score,
+            "page_number": candidate.page_start,
+            "page_start": candidate.page_start,
+            "page_end": candidate.page_end,
+            "document_id": str(candidate.document_id),
+            "conversation_id": str(conversation_id),
+            "chunk_id": str(candidate.chunk_id) if candidate.chunk_id else None,
+            "image_id": str(candidate.image_id) if candidate.image_id else None,
+            "chunk_index": candidate.chunk_index,
+            "has_tables": False,
+            "table_count": 0,
+            "image_ids": [str(candidate.image_id)] if candidate.image_id else [],
+            "image_paths": [],
+            "image_captions": [candidate.content] if candidate.content else [],
+            "dense_rank": candidate.dense_rank,
+            "dense_score": candidate.dense_score,
+            "lexical_rank": candidate.lexical_rank,
+            "lexical_score": candidate.lexical_score,
+            "fused_score": candidate.fused_score,
+        }
 
     async def _rerank_results(
         self, query: str, results: list[dict[str, Any]]
@@ -374,28 +438,33 @@ class RAGAgent(BaseAgent):
         *,
         user_id: str | None,
         conversation_id: str | None,
+        query: str = "",
     ) -> list[dict[str, Any]]:
+        """Select and load images only after retrieval (Task 11).
+
+        Chunk-linked image ids are authorized through their parent document
+        exactly as before, but the candidate set is now bounded by
+        ``RAGImageSelector`` (count/bytes/pixels/vision-token budgets) before
+        any bytes are read from disk. Selection does blocking file IO and
+        Pillow work, so it runs off the event loop via ``asyncio.to_thread``.
+        """
         if not user_id or not conversation_id:
             return []
 
-        images = []
-        seen_image_ids = set()
-
+        ordered_image_ids: list[str] = []
+        seen_image_ids: set[str] = set()
         for doc in retrieved_docs:
-            image_ids = doc.get("image_ids", [])
-            if not image_ids:
-                continue
-
-            for image_id in image_ids:
+            for image_id in doc.get("image_ids") or []:
                 if image_id and image_id not in seen_image_ids:
                     seen_image_ids.add(image_id)
+                    ordered_image_ids.append(image_id)
 
-        if not seen_image_ids:
-            return images
+        if not ordered_image_ids:
+            return []
 
         image_repo = DocumentImageRepository(SessionLocal)
-
-        for image_id in seen_image_ids:
+        candidates: list[ImageCandidate] = []
+        for image_id in ordered_image_ids:
             try:
                 image_uuid = UUID(str(image_id))
             except Exception:
@@ -409,30 +478,31 @@ class RAGAgent(BaseAgent):
             if not image:
                 continue
 
-            image_path = Path(image.image_path)
-            if not image_path.is_absolute():
-                image_path = Path.cwd() / image_path
-
-            if not image_path.exists():
-                continue
-
-            with open(image_path, "rb") as f:
-                image_bytes = f.read()
-
-            base64_data = base64.b64encode(image_bytes).decode("utf-8")
-
-            images.append(
-                {
-                    "id": str(image.id),
-                    "data": base64_data,
-                    "mime_type": image.mime_type,
-                    "caption": image.image_caption,
-                    "page_number": image.page_number,
-                    "source_path": str(image_path),
-                }
+            candidates.append(
+                ImageCandidate(
+                    image_id=image.id,
+                    image_path=image.image_path,
+                    mime_type=image.mime_type,
+                    page_number=image.page_number,
+                    caption=image.image_caption,
+                )
             )
 
-        return images
+        if not candidates:
+            return []
+
+        selected = await asyncio.to_thread(self.image_selector.select, query, candidates)
+
+        return [
+            {
+                "id": str(item.image_id),
+                "data": base64.b64encode(item.data).decode("utf-8"),
+                "mime_type": item.mime_type,
+                "caption": item.caption,
+                "page_number": item.page_number,
+            }
+            for item in selected
+        ]
 
     async def initialize(self):
         return True
