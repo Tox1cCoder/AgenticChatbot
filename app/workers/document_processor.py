@@ -347,6 +347,7 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
 
         # Caption images + attach to chunks (async)
         caption_t0 = time.monotonic()
+        persisted_images: list[Any] = []
         if parse_result.images_data:
             with bind_usage_context(usage_context):
                 prepared_images = _run_async(
@@ -359,8 +360,16 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
                 parse_result.blocks,
                 prepared_images,
             )
-        else:
-            prepared_images = []
+            # Persist DocumentImage rows (nullable chunk_id) before
+            # index_document's vector writes — mirrors
+            # DocumentProcessingService.process_document (Task 11) so a
+            # native image Qdrant point can never exist without a matching
+            # canonical SQL row, and so DocumentIndexService can link
+            # chunk_id and embed natively for this, the only path that
+            # actually ingests documents in production.
+            persisted_images = processing_service._persist_prepared_images(
+                prepared_images, document_id
+            )
         index_timings["caption_s"] = time.monotonic() - caption_t0
 
         # Build BuiltChunks for indexing (sync)
@@ -371,20 +380,12 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
             document=doc_ref,
             built_chunks=built_chunks,
             parse_artifact_id=artifact.id,
+            image_rows=persisted_images,
             timing_sink=index_timings,
             usage_context=usage_context,
         )
 
-        # Store image records (async)
-        images_stored = 0
-        if prepared_images:
-            images_stored = _run_async(
-                processing_service._store_prepared_images(
-                    prepared_images,
-                    document_id,
-                    persisted_chunks,
-                )
-            )
+        images_stored = len(persisted_images)
 
         # Mark document READY
         _mark_document(document_repo, document_id, DocumentStatus.READY)

@@ -398,6 +398,104 @@ def test_index_task_accepts_artifact_id_from_parse(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Test 2c — Task 11 review finding 1 (Critical): the production worker must
+# persist images before index_document's vector writes and pass image_rows=
+# ---------------------------------------------------------------------------
+
+
+def test_index_task_persists_images_before_calling_index_document(tmp_path, monkeypatch):
+    """DocumentProcessingService.process_document has zero non-test callers —
+    index_document_task is the only path that actually ingests documents in
+    production, so it must persist DocumentImage rows (nullable chunk_id)
+    before index_document's vector writes and pass image_rows= through,
+    mirroring the ordering already pinned for process_document."""
+    document_id = str(uuid4())
+    artifact_id = uuid4()
+
+    artifact_dir = tmp_path / document_id
+    artifact_dir.mkdir()
+    artifact_file = artifact_dir / "normalized_chunks.json"
+    payload = {
+        "chunks_with_metadata": [{"text": "a"}],
+        "images_data": [{"path": "/tmp/chart.png", "page_number": 0, "mime_type": "image/png"}],
+        "parse_elapsed_s": 0.1,
+        "backend_used": "text",
+    }
+    artifact_file.write_text(json.dumps(payload), encoding="utf-8")
+
+    fake_artifact = _fake_artifact(
+        document_id, artifact_id=artifact_id, storage_path=str(artifact_file)
+    )
+    fake_doc = _fake_document(document_id)
+
+    _make_mock_session_local(monkeypatch)
+    _make_mock_doc_repo(monkeypatch, fake_doc)
+    _make_mock_event_bus(monkeypatch)
+
+    mock_artifact_repo = MagicMock()
+    mock_artifact_repo.get_by_id.return_value = fake_artifact
+
+    mock_container = MagicMock()
+    mock_container.document_parse_artifact_repository.return_value = mock_artifact_repo
+    mock_container.document_chunk_builder.return_value = MagicMock()
+
+    call_order: list[str] = []
+    persisted_image_stub = SimpleNamespace(id=uuid4(), chunk_id=None)
+
+    mock_proc_service = MagicMock()
+    mock_proc_service._build_chunks_for_indexing.return_value = [MagicMock()]
+    mock_proc_service._prepare_images_for_indexing = AsyncMock(
+        return_value=[
+            {"stored_path": "images/chart.png", "page_number": 0, "mime_type": "image/png"}
+        ]
+    )
+    mock_proc_service._attach_prepared_images_to_blocks.side_effect = (
+        lambda blocks, _images: blocks
+    )
+
+    def _record_persist(_prepared_images, _document_id):
+        call_order.append("persist_images")
+        return [persisted_image_stub]
+
+    mock_proc_service._persist_prepared_images.side_effect = _record_persist
+
+    def _record_index_document(**kwargs):
+        call_order.append("index_document")
+        assert list(kwargs["image_rows"]) == [persisted_image_stub], (
+            "index_document must receive the persisted image rows"
+        )
+        return [MagicMock()]
+
+    mock_proc_service.document_index_service.index_document.side_effect = _record_index_document
+    mock_container.document_processing_service.return_value = mock_proc_service
+
+    monkeypatch.setattr("app.workers.document_processor.get_container", lambda: mock_container)
+
+    with patch("app.services.document_parse_service.DocumentParseService") as MockParseService:
+        instance = MockParseService.return_value
+        instance.load_parse_result.return_value = ParseResult(
+            chunks_with_metadata=[{"text": "a"}],
+            images_data=[{"path": "/tmp/chart.png", "page_number": 0, "mime_type": "image/png"}],
+            parse_elapsed_s=0.1,
+            backend_used="text",
+        )
+
+        result = celery_app.tasks["app.workers.document_processor.index_document_task"].apply(
+            args=[str(artifact_id)]
+        )
+
+    assert not result.failed(), f"Task failed: {result.result}"
+    retval = result.get()
+    assert retval.get("success") is True
+    assert retval.get("images_stored") == 1
+
+    assert call_order == ["persist_images", "index_document"], (
+        "images must be persisted before index_document is called"
+    )
+    mock_proc_service._store_prepared_images.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Test 3 — Index retry never calls parse_document
 # ---------------------------------------------------------------------------
 
