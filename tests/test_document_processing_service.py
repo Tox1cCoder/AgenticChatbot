@@ -14,7 +14,7 @@ import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from PIL import Image
 
@@ -629,3 +629,65 @@ def test_persist_prepared_images_writes_bbox_section_path_and_content_hash(tmp_p
     assert image_record.bbox == [0.1, 0.2, 0.3, 0.4]
     assert image_record.section_path == ["Results"]
     assert image_record.content_sha256 == "deadbeef" * 8
+
+
+class _FakeImageRepo:
+    """Stateful stand-in tracking rows across repeated persist calls, so a
+    retry-accumulation regression is actually observable (a plain MagicMock
+    would happily "create" without ever reflecting prior state)."""
+
+    def __init__(self):
+        self.rows: dict[UUID, SimpleNamespace] = {}
+
+    def delete_unlinked_by_document_id(self, document_id: UUID) -> int:
+        orphans = [
+            row_id
+            for row_id, row in self.rows.items()
+            if row.document_id == document_id and row.chunk_id is None
+        ]
+        for row_id in orphans:
+            del self.rows[row_id]
+        return len(orphans)
+
+    def create(self, image_data):
+        row = SimpleNamespace(
+            id=uuid4(),
+            document_id=image_data.document_id,
+            chunk_id=image_data.chunk_id,
+            image_path=image_data.image_path,
+        )
+        self.rows[row.id] = row
+        return row
+
+
+def test_persist_prepared_images_clears_orphans_from_failed_attempts(tmp_path):
+    """Round 2 finding B: two failed attempts followed by a success must
+    leave exactly one row set. Persistence now happens before
+    index_document links chunk_id, so a Celery retry that re-enters this
+    whole path with no delete or dedup would otherwise leave every failed
+    attempt's rows behind — chunk_id stays NULL forever, but VIEW_IMAGES
+    lists by document, so a user would see N duplicate copies."""
+    service = _build_service(tmp_path)
+    service.document_image_repository = _FakeImageRepo()
+    document_id = str(uuid4())
+    prepared = [
+        {
+            "stored_path": "document_images/doc/chart.png",
+            "caption": "A chart",
+            "content_sha256": "a" * 64,
+            "page_number": 0,
+            "mime_type": "image/png",
+        }
+    ]
+
+    service._persist_prepared_images(prepared, document_id)  # attempt 1: "fails" after this
+    service._persist_prepared_images(prepared, document_id)  # attempt 2: "fails" after this
+    final = service._persist_prepared_images(prepared, document_id)  # attempt 3: succeeds
+
+    remaining = [
+        row
+        for row in service.document_image_repository.rows.values()
+        if row.document_id == UUID(document_id)
+    ]
+    assert len(remaining) == 1, f"expected exactly one row set, got {len(remaining)}"
+    assert final and final[0].id == remaining[0].id

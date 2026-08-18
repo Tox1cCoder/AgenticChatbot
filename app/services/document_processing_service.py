@@ -803,7 +803,16 @@ class DocumentProcessingService:
         image Qdrant point is never created without a matching canonical SQL
         row; ``index_document`` links ``chunk_id`` once its generation's
         chunks exist.
+
+        First deletes this document's own orphaned (``chunk_id IS NULL``)
+        rows from an earlier attempt that persisted but never reached
+        linking (Celery retries re-enter this whole path with no delete or
+        dedup otherwise, so a document that failed twice then succeeded
+        would end up with three row sets for the same images). A row that
+        was already linked belongs to a generation that reached
+        ``mark_ready`` and is left alone.
         """
+        self.document_image_repository.delete_unlinked_by_document_id(uuid.UUID(document_id))
         persisted: list[Any] = []
         for img_data in prepared_images:
             persisted.append(
@@ -833,28 +842,6 @@ class DocumentProcessingService:
             content_sha256=img_data.get("content_sha256"),
         )
 
-    async def _store_prepared_images(
-        self,
-        prepared_images: list[dict[str, Any]],
-        document_id: str,
-        persisted_chunks: list[Any],
-    ) -> int:
-        """Legacy post-index persistence path used by the Celery indexing
-        worker (``app/workers/document_processor.py``), which resolves
-        ``chunk_id`` itself from already-persisted chunks rather than relying
-        on ``DocumentIndexService``'s ``image_rows`` linking. Kept unchanged
-        in calling contract; only the persisted payload gained the Task 11
-        provenance fields.
-        """
-        stored_count = 0
-        for img_data in prepared_images:
-            chunk_id = self._chunk_id_for_image(img_data, persisted_chunks)
-            self.document_image_repository.create(
-                self._image_create_payload(img_data, document_id, chunk_id=chunk_id)
-            )
-            stored_count += 1
-        return stored_count
-
     @staticmethod
     def _caption_from_image_metadata(img_data: dict[str, Any]) -> str | None:
         raw_caption = img_data.get("caption") or img_data.get("image_caption")
@@ -882,28 +869,6 @@ class DocumentProcessingService:
         start = page_start if page_start is not None else page_end
         end = page_end if page_end is not None else page_start
         return start <= page_number <= end
-
-    @staticmethod
-    def _chunk_id_for_image(image: dict[str, Any], persisted_chunks: list[Any]) -> UUID | None:
-        if not persisted_chunks:
-            return None
-
-        page_number = image.get("page_number")
-        if page_number is None:
-            return persisted_chunks[0].id
-
-        page_candidates = {page_number, page_number + 1}
-        for chunk in persisted_chunks:
-            page_start = getattr(chunk, "page_start", None)
-            page_end = getattr(chunk, "page_end", None)
-            if page_start is None and page_end is None:
-                continue
-            start = page_start if page_start is not None else page_end
-            end = page_end if page_end is not None else page_start
-            if any(start <= candidate <= end for candidate in page_candidates):
-                return chunk.id
-
-        return persisted_chunks[0].id
 
     @staticmethod
     def _display_page_number(value: Any) -> int | None:

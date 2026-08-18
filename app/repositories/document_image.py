@@ -182,6 +182,36 @@ class DocumentImageRepository:
             db.commit()
             return count
 
+    def delete_unlinked_by_document_id(self, document_id: UUID) -> int:
+        """Delete this document's orphaned (``chunk_id IS NULL``) image rows.
+
+        Persistence now happens before ``DocumentIndexService.index_document``
+        links each row's ``chunk_id`` (Task 11). If an attempt fails after
+        persisting but before that link, a retry re-persists from scratch and
+        would otherwise leave the earlier attempt's rows behind — indefinitely
+        unlinked, but still listed by ``get_by_document_for_scope`` (e.g. the
+        ``VIEW_IMAGES`` action), so a user would see N duplicate copies after
+        N failed attempts. A row that has already been linked (``chunk_id``
+        set) belongs to a generation that reached ``mark_ready`` and is never
+        touched here.
+        """
+        with self.session_factory() as db:
+            images = (
+                db.query(DocumentImage)
+                .filter(
+                    DocumentImage.document_id == document_id,
+                    DocumentImage.chunk_id.is_(None),
+                )
+                .all()
+            )
+            count = len(images)
+
+            for image in images:
+                db.delete(image)
+
+            db.commit()
+            return count
+
     def get_image_paths_by_document_id(self, document_id: UUID) -> list[str]:
         with self.session_factory() as db:
             images = (

@@ -367,7 +367,6 @@ def test_index_task_accepts_artifact_id_from_parse(tmp_path, monkeypatch):
         MagicMock(),
         MagicMock(),
     ]
-    mock_proc_service._store_prepared_images = AsyncMock(return_value=0)
     mock_container.document_processing_service.return_value = mock_proc_service
 
     monkeypatch.setattr("app.workers.document_processor.get_container", lambda: mock_container)
@@ -492,7 +491,6 @@ def test_index_task_persists_images_before_calling_index_document(tmp_path, monk
     assert call_order == ["persist_images", "index_document"], (
         "images must be persisted before index_document is called"
     )
-    mock_proc_service._store_prepared_images.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -535,7 +533,6 @@ def test_index_retry_does_not_call_parse_document(tmp_path, monkeypatch):
     mock_proc_service = MagicMock()
     mock_proc_service._build_chunks_for_indexing.return_value = [MagicMock()]
     mock_proc_service.document_index_service.index_document.return_value = [MagicMock()]
-    mock_proc_service._store_prepared_images = AsyncMock(return_value=0)
     mock_container.document_processing_service.return_value = mock_proc_service
 
     monkeypatch.setattr("app.workers.document_processor.get_container", lambda: mock_container)
@@ -743,7 +740,6 @@ def test_small_documents_complete_independently_of_large(tmp_path, monkeypatch):
         mock_proc_service = MagicMock()
         mock_proc_service._build_chunks_for_indexing.return_value = [MagicMock()]
         mock_proc_service.document_index_service.index_document.return_value = [MagicMock()]
-        mock_proc_service._store_prepared_images = AsyncMock(return_value=0)
         mock_container.document_processing_service.return_value = mock_proc_service
 
         # Write a real temp file for parse step
