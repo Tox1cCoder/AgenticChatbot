@@ -156,11 +156,14 @@ class DocumentIndexService:
         """Build and verify a replacement generation before atomically activating it.
 
         ``image_rows`` are already-persisted ``DocumentImage`` rows (nullable
-        ``chunk_id``) supplied by the caller. This method links each row's
-        ``chunk_id`` to the page-matching chunk from this generation and, when
-        ``multimodal_image_embeddings_enabled`` is true, embeds and upserts a
-        separate ``modality="image"`` Qdrant point per row. Both text and
-        image point counts are verified before the generation activates.
+        ``chunk_id``) supplied by the caller. When
+        ``multimodal_image_embeddings_enabled`` is true, each row is embedded
+        and upserted as a separate ``modality="image"`` Qdrant point *before*
+        verification; both text and image point counts are verified before
+        ``mark_ready``. Only once the generation is verified does this method
+        link each row's ``chunk_id`` to the page-matching chunk — never
+        earlier, so a build that fails partway never repoints another
+        generation's images.
         """
         if not built_chunks:
             raise ValueError("document indexing requires at least one chunk")
@@ -200,9 +203,8 @@ class DocumentIndexService:
                 embedding_dimension=self.embedding_dimension,
                 collection_name=self.collection_name,
             )
-            image_points = self._link_and_embed_images(
+            image_points = self._embed_and_upsert_images(
                 document=document,
-                persisted_chunks=persisted,
                 image_rows=image_rows,
                 index_generation_id=generation.id,
                 usage_context=usage_context,
@@ -210,6 +212,9 @@ class DocumentIndexService:
             self._verify_generation(document_id, generation.id, persisted)
             self._verify_image_points(document_id, generation.id, image_points)
             self.generation_repository.mark_ready(generation.id)
+            # Link only after verification succeeds (finding 3): a failure
+            # above must never repoint another generation's images.
+            self._link_image_chunks(persisted_chunks=persisted, image_rows=image_rows)
             if activate:
                 self._set_generation_active(document_id, generation.id, True)
                 try:
@@ -532,21 +537,25 @@ class DocumentIndexService:
     # ------------------------------------------------------------------
     # Task 11: image linking + native multimodal embeddings
     # ------------------------------------------------------------------
-    def _link_and_embed_images(
+    def _embed_and_upsert_images(
         self,
         *,
         document: Any,
-        persisted_chunks: list[DocumentChunk],
         image_rows: Sequence[Any],
         index_generation_id: UUID,
         usage_context: UsageContext | None,
     ) -> list[PointStruct]:
-        """Link each image row's chunk_id by page, then embed natively if enabled.
+        """Embed and upsert native ``modality="image"`` points, if enabled.
 
-        Linking (an SQL update) always runs when ``image_rows`` are supplied.
-        Native embedding + Qdrant upsert only runs when
-        ``multimodal_image_embeddings_enabled`` is true; caption-first
-        retrieval never depends on it.
+        Only runs when ``multimodal_image_embeddings_enabled`` is true;
+        caption-first retrieval never depends on it. chunk_id linking is a
+        separate step (``_link_image_chunks``) run only after this
+        generation is verified, so a build that fails here never touches
+        another generation's image rows (review finding 3).
+
+        An unreadable image file is skipped (logged by id only, never its
+        path or bytes) rather than aborting the whole generation, matching
+        how ``RAGImageSelector`` tolerates the same condition (finding 7).
         """
         image_rows = list(image_rows)
         if not image_rows:
@@ -555,25 +564,15 @@ class DocumentIndexService:
             raise ValueError(
                 "document_image_repository is required to index image_rows"
             )
-
-        for image in image_rows:
-            matched_chunk_id = self._chunk_id_for_image_page(
-                getattr(image, "page_number", None), persisted_chunks
-            )
-            if matched_chunk_id is not None and matched_chunk_id != getattr(
-                image, "chunk_id", None
-            ):
-                self.document_image_repository.update(
-                    image.id, DocumentImageUpdate(chunk_id=matched_chunk_id)
-                )
-
         if not self.multimodal_image_embeddings_enabled:
             return []
 
         points: list[PointStruct] = []
         for image in image_rows:
+            image_bytes = self._read_image_bytes(image)
+            if image_bytes is None:
+                continue
             mime_type = str(getattr(image, "mime_type", "") or "application/octet-stream")
-            image_bytes = self._resolve_image_path(image).read_bytes()
             vector = self.embedding_service.embed_image(
                 image_bytes,
                 mime_type=mime_type,
@@ -591,6 +590,48 @@ class DocumentIndexService:
         for batch in _batched(points, self.qdrant_upsert_batch_size):
             self.qdrant_client.upsert(collection_name=self.collection_name, points=batch)
         return points
+
+    def _link_image_chunks(
+        self,
+        *,
+        persisted_chunks: list[DocumentChunk],
+        image_rows: Sequence[Any],
+    ) -> None:
+        """Link each image row's chunk_id by page against this generation.
+
+        Called only after the generation has been verified and marked
+        ready. Linking earlier (before we know the build will succeed) let a
+        later failure leave an older, still-active generation's images
+        pointing at a chunk that belongs to the new, doomed generation —
+        purging that failed generation then nulled the link via
+        ``ondelete="SET NULL"`` (review finding 3).
+        """
+        image_rows = list(image_rows)
+        if not image_rows:
+            return
+        if self.document_image_repository is None:
+            raise ValueError(
+                "document_image_repository is required to index image_rows"
+            )
+        for image in image_rows:
+            matched_chunk_id = self._chunk_id_for_image_page(
+                getattr(image, "page_number", None), persisted_chunks
+            )
+            if matched_chunk_id is not None and matched_chunk_id != getattr(
+                image, "chunk_id", None
+            ):
+                self.document_image_repository.update(
+                    image.id, DocumentImageUpdate(chunk_id=matched_chunk_id)
+                )
+
+    def _read_image_bytes(self, image: Any) -> bytes | None:
+        try:
+            return self._resolve_image_path(image).read_bytes()
+        except OSError:
+            logger.warning(
+                "Skipping unreadable image file: image_id=%s", getattr(image, "id", None)
+            )
+            return None
 
     def _verify_image_points(
         self,
@@ -662,7 +703,7 @@ class DocumentIndexService:
             if getattr(document, "user_id", None) is not None:
                 payload["user_id"] = str(document.user_id)
         return PointStruct(
-            id=self._point_id_for_image(image.id),
+            id=self._point_id_for_image(image.id, index_generation_id),
             vector=list(vector) if vector else [],
             payload=payload,
         )
@@ -694,8 +735,19 @@ class DocumentIndexService:
         return persisted_chunks[0].id
 
     @staticmethod
-    def _point_id_for_image(image_id: UUID) -> str:
-        return str(image_id)
+    def _point_id_for_image(image_id: UUID, index_generation_id: UUID | None) -> str:
+        """Derive a point id scoped to (image, generation).
+
+        ``DocumentImage`` rows survive reindexing — unlike chunks, which get
+        fresh rows (and therefore fresh point ids) every generation — so
+        reusing ``str(image_id)`` directly would let a new generation's
+        upsert overwrite the still-active generation's point in place. A
+        later failure + purge of the new generation would then delete the
+        point the active generation depends on (review finding 2).
+        """
+        namespace = image_id if isinstance(image_id, UUID) else UUID(str(image_id))
+        generation_key = str(index_generation_id) if index_generation_id is not None else "none"
+        return str(uuid.uuid5(namespace, generation_key))
 
     def _set_generation_active(
         self, document_id: UUID, generation_id: UUID, is_active: bool

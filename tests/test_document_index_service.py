@@ -921,3 +921,92 @@ def test_index_document_raises_before_activation_when_image_points_go_missing(tm
         )
 
     assert repo.mark_index_failed.called
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 findings
+# ---------------------------------------------------------------------------
+
+
+def test_point_id_for_image_is_scoped_per_generation():
+    """Finding 2: the same image must get a different Qdrant point id per
+    generation, so reindexing upserts a new point rather than overwriting
+    (and later, on purge, deleting) the previously-active generation's
+    image point."""
+    service = _build_service()
+    image = document_image()
+    generation_a = uuid4()
+    generation_b = uuid4()
+
+    point_a = service._point_for_image(document(), image, index_generation_id=generation_a)
+    point_b = service._point_for_image(document(), image, index_generation_id=generation_b)
+
+    assert point_a.id != point_b.id
+
+
+def test_index_document_does_not_link_images_when_verification_fails():
+    """Finding 3: images must not be relinked to a generation that never
+    passes verification — that would repoint (and later orphan, via purge)
+    an older, still-active generation's image links."""
+    document_row = _make_document()
+    persisted = [_persisted_chunk(document_row.id, 0)]
+    repo = MagicMock()
+    repo.replace_document_chunks.return_value = persisted
+    image_repo = _ImageRepoStub()
+    image = document_image(document_row.id, page_number=1)
+
+    qdrant = MagicMock()
+    # Force the text-point verification check to fail regardless of what
+    # was actually upserted — isolates the linking-order guarantee from
+    # unrelated upsert/count bookkeeping.
+    qdrant.count.side_effect = lambda **_kwargs: SimpleNamespace(count=0)
+
+    service = _build_service(
+        chunk_repo=repo,
+        qdrant_client=qdrant,
+        document_image_repository=image_repo,
+    )
+
+    import pytest
+
+    with pytest.raises(ValueError, match="generation point count mismatch"):
+        service.index_document(
+            document=document_row,
+            built_chunks=[_make_built_chunk(0)],
+            parse_artifact_id=None,
+            image_rows=[image],
+        )
+
+    assert image_repo.updates == [], "images must not be linked when verification fails"
+
+
+def test_index_document_skips_unreadable_image_without_failing_generation(tmp_path):
+    """Finding 7: an unreadable image file must not abort the whole
+    generation — RAGImageSelector already tolerates the same condition."""
+    document_row = _make_document()
+    persisted = [_persisted_chunk(document_row.id, 0)]
+    repo = MagicMock()
+    repo.replace_document_chunks.return_value = persisted
+    image_repo = _ImageRepoStub()
+    embedding = _EmbeddingStub(dim=4)
+    missing_path = tmp_path / "does-not-exist.png"
+    image = document_image(document_row.id, page_number=1, image_path=str(missing_path))
+
+    service = _build_service(
+        chunk_repo=repo,
+        embedding_service=embedding,
+        embedding_dimension=4,
+        document_image_repository=image_repo,
+        multimodal_image_embeddings_enabled=True,
+    )
+
+    persisted_chunks = service.index_document(
+        document=document_row,
+        built_chunks=[_make_built_chunk(0)],
+        parse_artifact_id=None,
+        image_rows=[image],
+    )
+
+    assert persisted_chunks, "the generation must still succeed"
+    assert embedding.image_calls == [], "the unreadable image must be skipped, not embedded"
+    assert image_repo.updates, "chunk linking still happens for the unembedded image"
