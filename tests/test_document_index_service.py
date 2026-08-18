@@ -23,6 +23,7 @@ from typing import Any
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
+import pytest
 from sqlalchemy.orm.exc import DetachedInstanceError
 
 
@@ -221,6 +222,8 @@ def _build_service(
     embedding_provider: str = "gemini",
     document_image_repository=None,
     multimodal_image_embeddings_enabled: bool = False,
+    cache=None,
+    metrics=None,
 ):
     from app.services.document_index_service import DocumentIndexService
 
@@ -243,6 +246,8 @@ def _build_service(
         embedding_provider=embedding_provider,
         document_image_repository=document_image_repository,
         multimodal_image_embeddings_enabled=multimodal_image_embeddings_enabled,
+        cache=cache,
+        metrics=metrics,
     )
 
 
@@ -1030,3 +1035,234 @@ def test_index_document_skips_unreadable_image_without_failing_generation(tmp_pa
     assert persisted_chunks, "the generation must still succeed"
     assert embedding.image_calls == [], "the unreadable image must be skipped, not embedded"
     assert image_repo.updates, "chunk linking still happens for the unembedded image"
+
+
+# ---------------------------------------------------------------------------
+# Round-1 fix (finding 1): the cache-enabled document-embedding path had zero
+# test coverage. Fake is local to this module and duck-types ``RAGExactCache``.
+# ---------------------------------------------------------------------------
+
+
+class _FakeDocumentEmbeddingCache:
+    """Deterministic in-memory stand-in for ``RAGExactCache``."""
+
+    enabled = True
+
+    def __init__(self, *, seeded: dict[str, list[float]] | None = None):
+        self._seeded = dict(seeded or {})
+        self.get_keys: list[str] = []
+        self.set_calls: list[tuple[str, list[float]]] = []
+
+    def get_document_embedding(self, key, *, dimension):
+        self.get_keys.append(key)
+        vector = self._seeded.get(key)
+        if vector is not None and len(vector) == dimension:
+            return list(vector)
+        return None
+
+    def set_document_embedding(self, key, vector):
+        self.set_calls.append((key, list(vector)))
+
+    def get_query_embedding(self, key, *, dimension):
+        del key, dimension
+        return None
+
+    def set_query_embedding(self, key, vector, *, ttl_seconds):
+        del key, vector, ttl_seconds
+
+    def get_retrieval(self, key):
+        del key
+        return None
+
+    def set_retrieval(self, key, payload, *, ttl_seconds):
+        del key, payload, ttl_seconds
+
+
+class _FakeIndexServiceMetrics:
+    def __init__(self) -> None:
+        self.stage_calls: list[tuple[str, float, dict]] = []
+        self.stage_failure_calls: list[tuple[str, str]] = []
+        self.cache_result_calls: list[tuple[str, str]] = []
+
+    def stage(self, stage, *, elapsed_seconds, labels=None):
+        self.stage_calls.append((stage, elapsed_seconds, dict(labels or {})))
+
+    def stage_failure(self, stage, failure_code):
+        self.stage_failure_calls.append((stage, failure_code))
+
+    def cache_result(self, cache, result):
+        self.cache_result_calls.append((cache, result))
+
+
+def test_embed_documents_cached_only_embeds_missing_chunks_and_preserves_alignment():
+    """One chunk hits the cache, the other must be embedded fresh, and the
+    returned vectors must line up with ``persisted`` in the same order --
+    not shifted because one slot was served from the cache.
+    """
+    from app.services.rag_cache import document_embedding_key
+
+    document = _make_document()
+    persisted = [
+        _persisted_chunk(document.id, 0),  # content_sha256 == "sha-0"
+        _persisted_chunk(document.id, 1),  # content_sha256 == "sha-1"
+    ]
+    repo = MagicMock()
+    repo.replace_document_chunks.return_value = persisted
+    stub = _EmbeddingStub(dim=8)
+
+    cached_vector = [9.0] * 8
+    seeded_key = document_embedding_key(
+        tenant=str(document.user_id),
+        provider="gemini",
+        model="gemini-embedding-2",
+        dimension=8,
+        format_version="doc-fmt-v1",
+        content_sha256="sha-0",
+    )
+    fake_cache = _FakeDocumentEmbeddingCache(seeded={seeded_key: cached_vector})
+
+    service = _build_service(
+        chunk_repo=repo, embedding_service=stub, embedding_dimension=8, cache=fake_cache
+    )
+    service.index_document(
+        document=document,
+        built_chunks=[_make_built_chunk(0, "hello"), _make_built_chunk(1, "world")],
+        parse_artifact_id=None,
+    )
+
+    # Only chunk 1's content (the miss) is sent to the provider.
+    assert len(stub.doc_calls) == 1
+    embedded_texts, _ = stub.doc_calls[0]
+    assert embedded_texts == ["content-1"]
+
+    # The freshly embedded vector must have been written back to the cache
+    # under chunk 1's own key, not chunk 0's.
+    assert len(fake_cache.set_calls) == 1
+    set_key, set_vector = fake_cache.set_calls[0]
+    assert set_key != seeded_key
+    assert set_vector == [0.0] * 8
+
+    # Vector-to-chunk alignment: chunk 0 must carry the cached vector, not
+    # the freshly embedded one, in Qdrant's payload/vector pairing.
+    upserted_by_id = {
+        str(point.id): point
+        for call in service.qdrant_client.upsert.call_args_list
+        for point in call.kwargs.get("points", [])
+    }
+    point_for_chunk_0 = upserted_by_id[str(persisted[0].id)]
+    point_for_chunk_1 = upserted_by_id[str(persisted[1].id)]
+    assert point_for_chunk_0.vector == cached_vector
+    assert point_for_chunk_1.vector == [0.0] * 8
+
+
+def test_embed_documents_cached_skips_cache_entirely_when_tenant_missing():
+    """Round-1 fix (finding 8): fail closed instead of collapsing every
+    tenant onto one key when ``document.user_id`` is absent.
+    """
+    document = _make_document()
+    document.user_id = None  # duck-typed document without a resolvable tenant
+    persisted = [_persisted_chunk(document.id, 0)]
+    repo = MagicMock()
+    repo.replace_document_chunks.return_value = persisted
+    stub = _EmbeddingStub(dim=8)
+    fake_cache = _FakeDocumentEmbeddingCache()
+
+    service = _build_service(
+        chunk_repo=repo, embedding_service=stub, embedding_dimension=8, cache=fake_cache
+    )
+    service.index_document(
+        document=document,
+        built_chunks=[_make_built_chunk(0, "hello")],
+        parse_artifact_id=None,
+    )
+
+    assert fake_cache.get_keys == []
+    assert fake_cache.set_calls == []
+    assert stub.doc_calls[0][0] == ["content-0"]
+
+
+def test_embed_documents_cached_skips_cache_for_chunk_missing_content_sha256():
+    """A chunk without a content hash bypasses the cache for that chunk
+    only -- it must never collide with every other hash-less chunk."""
+    document = _make_document()
+    persisted = [_persisted_chunk(document.id, 0)]
+    persisted[0].content_sha256 = ""
+    repo = MagicMock()
+    repo.replace_document_chunks.return_value = persisted
+    stub = _EmbeddingStub(dim=8)
+    fake_cache = _FakeDocumentEmbeddingCache()
+
+    service = _build_service(
+        chunk_repo=repo, embedding_service=stub, embedding_dimension=8, cache=fake_cache
+    )
+    service.index_document(
+        document=document,
+        built_chunks=[_make_built_chunk(0, "hello")],
+        parse_artifact_id=None,
+    )
+
+    assert fake_cache.get_keys == []
+    assert fake_cache.set_calls == []
+    assert stub.doc_calls[0][0] == ["content-0"]
+
+
+def test_embedding_failure_records_duration_and_failure_metric():
+    """Round-1 fix (finding 4): a raising embedding provider must not be
+    invisible to the duration histogram, and failure must be countable.
+    """
+    document = _make_document()
+    persisted = [_persisted_chunk(document.id, 0)]
+    repo = MagicMock()
+    repo.replace_document_chunks.return_value = persisted
+    stub = _EmbeddingStub(dim=8)
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("provider is down")
+
+    stub.embed_documents = _raise
+    fake_metrics = _FakeIndexServiceMetrics()
+
+    service = _build_service(
+        chunk_repo=repo, embedding_service=stub, embedding_dimension=8, metrics=fake_metrics
+    )
+
+    with pytest.raises(RuntimeError):
+        service.index_document(
+            document=document,
+            built_chunks=[_make_built_chunk(0, "hello")],
+            parse_artifact_id=None,
+        )
+
+    stage_names = [call[0] for call in fake_metrics.stage_calls]
+    assert "embedding" in stage_names
+    assert ("embedding", "provider_exception") in fake_metrics.stage_failure_calls
+
+
+def test_embedding_stage_records_provider_and_model_labels():
+    document = _make_document()
+    persisted = [_persisted_chunk(document.id, 0)]
+    repo = MagicMock()
+    repo.replace_document_chunks.return_value = persisted
+    stub = _EmbeddingStub(dim=8)
+    fake_metrics = _FakeIndexServiceMetrics()
+
+    service = _build_service(
+        chunk_repo=repo,
+        embedding_service=stub,
+        embedding_dimension=8,
+        embedding_provider="gemini",
+        embedding_model_name="gemini-embedding-2",
+        metrics=fake_metrics,
+    )
+    service.index_document(
+        document=document,
+        built_chunks=[_make_built_chunk(0, "hello")],
+        parse_artifact_id=None,
+    )
+
+    embedding_calls = [call for call in fake_metrics.stage_calls if call[0] == "embedding"]
+    assert len(embedding_calls) == 1
+    _, _, labels = embedding_calls[0]
+    assert labels["provider"] == "gemini"
+    assert labels["model"] == "gemini-embedding-2"
+    assert labels["cache_result"] == "miss"

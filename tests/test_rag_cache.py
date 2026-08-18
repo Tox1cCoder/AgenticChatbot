@@ -107,10 +107,38 @@ def test_query_embedding_key_changes_with_normalized_query_only():
     assert a == same_as_a
 
 
-def test_normalize_query_collapses_whitespace_and_case_only():
-    assert normalize_query("  Revenue   Growth  ") == "revenue growth"
+def test_normalize_query_collapses_whitespace_only():
+    """Round-1 fix (finding 7): the key must not distinguish less than the
+    value. The value embedded/searched is the raw (non-casefolded) query, so
+    the key may only collapse whitespace -- casefolding it would let two
+    queries that embed to different vectors ("US GDP" vs "us gdp") share one
+    cache entry.
+    """
+    assert normalize_query("  Revenue   Growth  ") == "Revenue Growth"
     # Distinct wording is never collapsed -- exact match only.
     assert normalize_query("revenue growth") != normalize_query("growth in revenue")
+
+
+def test_normalize_query_does_not_collapse_case():
+    """Case must survive normalization: it is never casefolded elsewhere
+    before embedding or search, so folding it only in the cache key would
+    let two queries that produce different vectors share one entry.
+    """
+    assert normalize_query("US GDP") != normalize_query("us gdp")
+
+
+def test_query_embedding_key_distinguishes_case():
+    base = dict(tenant="u1", provider="gemini", model="m", dimension=8, task_prefix="search")
+    upper = query_embedding_key(normalized_query=normalize_query("US GDP"), **base)
+    lower = query_embedding_key(normalized_query=normalize_query("us gdp"), **base)
+    assert upper != lower
+
+
+def test_retrieval_key_distinguishes_case():
+    base = dict(tenant="u1", conversation="c1", generation="g1", retrieval_config_sha256="cfg")
+    upper = retrieval_key(normalized_query=normalize_query("US GDP"), **base)
+    lower = retrieval_key(normalized_query=normalize_query("us gdp"), **base)
+    assert upper != lower
 
 
 def test_retrieval_config_sha256_changes_when_cache_settings_change():

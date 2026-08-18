@@ -439,7 +439,6 @@ class DocumentIndexService:
             usage_context=usage_context,
         )
         embed_s = _time.monotonic() - embed_t0
-        self._record_stage("embedding", embed_s, modality="text")
 
         # Build points for all chunks.
         points: list[PointStruct] = []
@@ -483,44 +482,107 @@ class DocumentIndexService:
         the default no-op cache every lookup misses, so every chunk is
         embedded exactly as before Task 12.
         """
-        tenant = str(getattr(document, "user_id", "") or "")
+        keys, vectors, missing_indices = self._document_embedding_lookup(document, persisted)
+
+        if missing_indices:
+            fresh = self._embed_missing_documents(
+                texts=texts,
+                titles=titles,
+                missing_indices=missing_indices,
+                usage_context=usage_context,
+            )
+        else:
+            fresh = []
+            self._record_stage(
+                "embedding",
+                0.0,
+                provider=self.embedding_provider,
+                model=self.embedding_model_name,
+                modality="text",
+                cache_result="hit",
+            )
+
+        for index, vector in zip(missing_indices, fresh, strict=True):
+            resolved = list(vector)
+            vectors[index] = resolved
+            if keys[index] is not None:
+                self.cache.set_document_embedding(keys[index], resolved)
+
+        return [vector for vector in vectors if vector is not None]
+
+    def _document_embedding_lookup(
+        self, document: Any, persisted: list[DocumentChunk]
+    ) -> tuple[list[str | None], list[list[float] | None], list[int]]:
+        """Build one cache key per chunk and look each one up exactly once.
+
+        Round-1 fix (finding 8): fail closed on any identity-collapsing
+        component. A missing ``document.user_id`` bypasses the cache for the
+        whole call (skip-the-cache is cheaper than collapsing every tenant
+        onto one key); a missing per-chunk ``content_sha256`` bypasses the
+        cache for that chunk only, rather than colliding every hash-less
+        chunk onto one entry.
+        """
+        tenant = str(getattr(document, "user_id", "") or "").strip()
+        if not tenant:
+            return [None] * len(persisted), [None] * len(persisted), list(range(len(persisted)))
+
         format_version = str(
-            getattr(self.embedding_service, "document_format_version", "doc-fmt-v1")
+            getattr(self.embedding_service, "document_format_version", "doc-fmt-v1") or "doc-fmt-v1"
         )
-        keys = [
-            document_embedding_key(
+        keys: list[str | None] = []
+        vectors: list[list[float] | None] = []
+        missing_indices: list[int] = []
+        for index, chunk in enumerate(persisted):
+            content_sha256 = str(getattr(chunk, "content_sha256", "") or "").strip()
+            if not content_sha256:
+                keys.append(None)
+                vectors.append(None)
+                missing_indices.append(index)
+                continue
+            key = document_embedding_key(
                 tenant=tenant,
                 provider=self.embedding_provider,
                 model=self.embedding_model_name,
                 dimension=self.embedding_dimension,
                 format_version=format_version,
-                content_sha256=str(getattr(chunk, "content_sha256", "") or ""),
+                content_sha256=content_sha256,
             )
-            for chunk in persisted
-        ]
-
-        vectors: list[list[float] | None] = [None] * len(persisted)
-        missing_indices: list[int] = []
-        for index, key in enumerate(keys):
+            keys.append(key)
             cached = self.cache.get_document_embedding(key, dimension=self.embedding_dimension)
             self._record_cache_result("document_embedding", hit=cached is not None)
-            if cached is not None:
-                vectors[index] = cached
-            else:
+            vectors.append(cached)
+            if cached is None:
                 missing_indices.append(index)
+        return keys, vectors, missing_indices
 
-        if missing_indices:
+    def _embed_missing_documents(
+        self,
+        *,
+        texts: list[str],
+        titles: list[str | None],
+        missing_indices: list[int],
+        usage_context: UsageContext | None,
+    ) -> list[list[float]]:
+        """Call the embedding provider, recording duration on every outcome."""
+        embed_started = _time.monotonic()
+        labels = {
+            "provider": self.embedding_provider,
+            "model": self.embedding_model_name,
+            "modality": "text",
+            "cache_result": "miss",
+        }
+        try:
             fresh = self.embedding_service.embed_documents(
                 [texts[index] for index in missing_indices],
                 titles=[titles[index] for index in missing_indices],
                 usage_context=usage_context,
             )
-            for index, vector in zip(missing_indices, fresh, strict=True):
-                resolved = list(vector)
-                vectors[index] = resolved
-                self.cache.set_document_embedding(keys[index], resolved)
-
-        return [vector for vector in vectors if vector is not None]
+        except Exception:
+            self._record_stage("embedding", _time.monotonic() - embed_started, **labels)
+            self._record_stage_failure("embedding", "provider_exception")
+            raise
+        self._record_stage("embedding", _time.monotonic() - embed_started, **labels)
+        return fresh
 
     def _record_stage(self, stage: str, elapsed_seconds: float, **labels: Any) -> None:
         recorder = getattr(self.metrics, "stage", None)
@@ -530,6 +592,15 @@ class DocumentIndexService:
             recorder(stage, elapsed_seconds=elapsed_seconds, labels=labels)
         except Exception:
             logger.exception("Failed to record RAG stage metric for %s", stage)
+
+    def _record_stage_failure(self, stage: str, failure_code: str) -> None:
+        recorder = getattr(self.metrics, "stage_failure", None)
+        if not callable(recorder):
+            return
+        try:
+            recorder(stage, failure_code)
+        except Exception:
+            logger.exception("Failed to record RAG stage-failure metric for %s", stage)
 
     def _record_cache_result(self, cache_name: str, *, hit: bool) -> None:
         recorder = getattr(self.metrics, "cache_result", None)

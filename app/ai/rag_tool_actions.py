@@ -9,6 +9,7 @@ from uuid import UUID
 from langchain_core.messages import ToolMessage
 
 from app.ai.token_counter import TokenCounter
+from app.observability.rag import rag_metrics
 from app.services.rag_evidence import EvidenceAssembler
 from app.services.rag_retrieval import RetrievalScope
 
@@ -491,6 +492,7 @@ async def execute_search_documents_action(
                         provider=evidence_provider,
                         model=evidence_model,
                         repository=repository,
+                        metrics=rag_metrics,
                     )
                     try:
                         typed_conversation_id: Any = UUID(str(conversation_id))

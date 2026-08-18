@@ -26,7 +26,24 @@ _STAGES = {
     "generation",
     "validation",
 }
-_STAGE_PROVIDERS = {"gemini", "sentence_transformers", "n/a"}
+# Round-1 fix (finding 6): providers span both the RAG-embedding domain
+# (gemini, sentence_transformers) and the chat/generation domain (gemini,
+# openai, anthropic -- see app/services/provider_service.py's
+# SUPPORTED_PROVIDERS). Both domains share one closed set here because they
+# share one label dimension.
+_STAGE_PROVIDERS = {"gemini", "openai", "anthropic", "sentence_transformers", "n/a"}
+# Round-1 fix (finding 6): "model was dropped entirely." Bounded to the
+# handful of models this deployment's config can actually select for the
+# stages that record one (embedding, reranking) -- see
+# app/core/config.py's rag_embedding_model / rag_reranker_model defaults.
+# Chat/generation model ids are open-ended (provider-hosted catalogs), so the
+# generation stage intentionally leaves `model` at its "n/a" default rather
+# than enumerating an unbounded set.
+_STAGE_MODELS = {
+    "gemini-embedding-2",
+    "cross-encoder/ms-marco-minilm-l-6-v2",
+    "n/a",
+}
 _STAGE_MODALITIES = {"text", "image", "n/a"}
 _CACHE_NAMES = {"document_embedding", "query_embedding", "retrieval"}
 _CACHE_RESULTS = {"hit", "miss", "disabled"}
@@ -51,6 +68,9 @@ _FAILURE_CODES = {
     "invalid_score",
     "non_finite_score",
     "missing_candidate_id",
+    # Round-1 fix (finding 4): infra-level failures (Qdrant, PostgreSQL) that
+    # are not a specific reranker code above.
+    "dependency_exception",
 }
 
 
@@ -81,9 +101,20 @@ class RAGMetrics:
 
         self.stage_duration_seconds = Histogram(
             "rag_stage_duration_seconds",
-            "Wall-clock duration of one RAG pipeline stage. Labels are bounded, "
-            "content-free enums only -- never a document id, filename or text.",
-            ("stage", "provider", "modality", "cache_result"),
+            "Wall-clock duration of one RAG pipeline stage, recorded on both "
+            "success and failure so p95/p99 are not biased downward by "
+            "excluding slow failures. Labels are bounded, content-free enums "
+            "only -- never a document id, filename or text.",
+            ("stage", "provider", "model", "modality", "cache_result"),
+            registry=self.registry,
+        )
+
+        self.stage_failures = Counter(
+            "rag_stage_failures_total",
+            "Failed attempts per RAG pipeline stage. Denominator for failure "
+            "rate is this counter plus rag_stage_duration_seconds_count for "
+            "the same stage.",
+            ("stage", "failure_code"),
             registry=self.registry,
         )
 
@@ -108,21 +139,30 @@ class RAGMetrics:
         elapsed_seconds: float,
         labels: Mapping[str, Any] | None = None,
     ) -> None:
-        """Record one pipeline-stage duration.
+        """Record one pipeline-stage duration -- call on success AND failure.
 
         ``labels`` may be a caller's raw kwargs and can carry anything,
-        including document content by mistake. Only the four fixed keys
+        including document content by mistake. Only the five fixed keys
         below are ever read from it; every other key -- and every value read
         here -- is bounded to a closed enum before export, so nothing else
-        ever reaches the exported series.
+        ever reaches the exported series. Callers on a failure path should
+        still call this (so a slow failure is not invisible to p95/p99) and
+        also call :meth:`stage_failure` (so failure rate is computable).
         """
         source = labels or {}
         self.stage_duration_seconds.labels(
             stage=_bounded(stage, _STAGES),
             provider=_bounded(source.get("provider", "n/a"), _STAGE_PROVIDERS),
+            model=_bounded(source.get("model", "n/a"), _STAGE_MODELS),
             modality=_bounded(source.get("modality", "n/a"), _STAGE_MODALITIES),
             cache_result=_bounded(source.get("cache_result", "n/a"), _STAGE_CACHE_RESULTS),
         ).observe(max(0.0, float(elapsed_seconds)))
+
+    def stage_failure(self, stage: str, failure_code: str) -> None:
+        self.stage_failures.labels(
+            stage=_bounded(stage, _STAGES),
+            failure_code=_bounded(failure_code, _FAILURE_CODES),
+        ).inc()
 
     def cache_result(self, cache: str, result: str) -> None:
         self.cache_operations.labels(

@@ -2,6 +2,7 @@ import asyncio
 import base64
 import logging
 import re
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -1118,6 +1119,7 @@ class RAGAgent(BaseAgent):
                 request_messages = (
                     list(budget_result.envelope.messages) if budget_result is not None else messages
                 )
+                generation_started_at = time.monotonic()
                 try:
                     response = await _invoke_with_optional_config(llm_with_tools, request_messages)
                 except Exception as exc:
@@ -1145,6 +1147,14 @@ class RAGAgent(BaseAgent):
                         raise
                     conversation_compaction_metrics.record_provider_overflow_retry("success")
                     context_overflow_retried = True
+                try:
+                    rag_metrics.stage(
+                        "generation",
+                        elapsed_seconds=time.monotonic() - generation_started_at,
+                        labels={"provider": current_runtime.provider, "modality": "text"},
+                    )
+                except Exception:
+                    logger.exception("Failed to record RAG generation stage metric")
                 runtime_config = current_runtime
                 break
             except Exception as exc:

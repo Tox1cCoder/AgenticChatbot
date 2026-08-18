@@ -122,3 +122,77 @@ def test_evidence_tokens_records_a_count_without_content(metrics):
     metrics.evidence_tokens(512)
     rendered = metrics.render().decode("utf-8")
     assert "rag_evidence_pack_tokens" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Round-1 fix: the stage histogram must carry a real, bounded `model` label
+# (finding 6 -- "model was dropped entirely").
+# ---------------------------------------------------------------------------
+
+
+def test_stage_records_known_model_label(metrics):
+    metrics.stage(
+        "embedding",
+        elapsed_seconds=0.02,
+        labels={"provider": "gemini", "model": "gemini-embedding-2"},
+    )
+    rendered = metrics.render().decode("utf-8")
+    assert 'model="gemini-embedding-2"' in rendered
+
+
+def test_stage_unknown_model_bounds_to_other(metrics):
+    metrics.stage(
+        "embedding",
+        elapsed_seconds=0.02,
+        labels={"provider": "gemini", "model": "some-unlisted-finetune"},
+    )
+    rendered = metrics.render().decode("utf-8")
+    assert "some-unlisted-finetune" not in rendered
+    assert 'model="other"' in rendered
+
+
+def test_stage_without_model_label_defaults_to_not_applicable(metrics):
+    metrics.stage("validation", elapsed_seconds=0.01)
+    rendered = metrics.render().decode("utf-8")
+    assert 'model="n/a"' in rendered
+
+
+# ---------------------------------------------------------------------------
+# Round-1 fix: failed stage attempts must be countable and their duration
+# must still land in the histogram (finding 4 -- failures were invisible,
+# biasing p95/p99 downward for exactly the slow/failing calls).
+# ---------------------------------------------------------------------------
+
+
+def test_stage_failure_is_recorded_and_bounded(metrics):
+    metrics.stage_failure("reranking", "timeout")
+    rendered = metrics.render().decode("utf-8")
+    assert "rag_stage_failures_total" in rendered
+    assert 'stage="reranking"' in rendered
+    assert 'failure_code="timeout"' in rendered
+
+
+def test_stage_failure_unknown_code_bounds_to_other(metrics):
+    metrics.stage_failure("embedding", "some-never-seen-failure-mode")
+    rendered = metrics.render().decode("utf-8")
+    assert "some-never-seen-failure-mode" not in rendered
+    assert 'failure_code="other"' in rendered
+
+
+def test_stage_failure_unknown_stage_bounds_to_other(metrics):
+    metrics.stage_failure("not-a-real-stage", "timeout")
+    rendered = metrics.render().decode("utf-8")
+    assert "not-a-real-stage" not in rendered
+    assert 'stage="other"' in rendered
+
+
+# ---------------------------------------------------------------------------
+# Round-1 fix: provider now has real producers at the embedding and
+# dense-retrieval sites, expanded to cover chat providers too (finding 6).
+# ---------------------------------------------------------------------------
+
+
+def test_stage_accepts_chat_providers_for_the_generation_stage(metrics):
+    metrics.stage("generation", elapsed_seconds=1.2, labels={"provider": "anthropic"})
+    rendered = metrics.render().decode("utf-8")
+    assert 'provider="anthropic"' in rendered

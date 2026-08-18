@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
+import pytest
 from qdrant_client.models import FieldCondition, MatchAny
 from sqlalchemy import create_engine, select
 from sqlalchemy.dialects import postgresql
@@ -32,6 +33,15 @@ def _compile_jsonb_for_sqlite(_type, _compiler, **_kwargs):
 
 
 class _EmbeddingStub:
+    # Round-1 fix: a real embedding service always reports its own
+    # provider/model/dimension/query_task; a stub without them made every
+    # query-embedding cache key build with ``dimension=0``, which the
+    # fail-closed guard (finding 8) always treats as uncacheable.
+    provider = "gemini"
+    model_name = "test-model"
+    dimension = 2
+    query_task = "search result"
+
     def __init__(self) -> None:
         self.queries: list[str] = []
 
@@ -627,3 +637,297 @@ def test_container_exposes_configured_rag_retriever_provider():
     from app.core.container import Container
 
     assert "rag_retriever" in Container.providers
+
+
+# ---------------------------------------------------------------------------
+# Round-1 fix (finding 1): the cache-enabled paths had zero test coverage,
+# including the security-critical "a hit still re-authorizes" property. Each
+# fake below is local to this module and duck-types ``RAGExactCache``.
+# ---------------------------------------------------------------------------
+
+
+class _FakeExactCache:
+    """Deterministic in-memory stand-in for ``RAGExactCache``."""
+
+    enabled = True
+
+    def __init__(self, *, retrieval_payload=None, query_vector=None):
+        self._retrieval_payload = retrieval_payload
+        self._query_vector = query_vector
+        self.retrieval_get_keys: list[str] = []
+        self.retrieval_set_calls: list[tuple[str, dict]] = []
+        self.query_embedding_get_keys: list[str] = []
+        self.query_embedding_set_calls: list[tuple[str, list]] = []
+
+    def get_document_embedding(self, key, *, dimension):
+        del key, dimension
+        return None
+
+    def set_document_embedding(self, key, vector):
+        del key, vector
+
+    def get_query_embedding(self, key, *, dimension):
+        self.query_embedding_get_keys.append(key)
+        if self._query_vector is not None and len(self._query_vector) == dimension:
+            return list(self._query_vector)
+        return None
+
+    def set_query_embedding(self, key, vector, *, ttl_seconds):
+        del ttl_seconds
+        self.query_embedding_set_calls.append((key, list(vector)))
+
+    def get_retrieval(self, key):
+        self.retrieval_get_keys.append(key)
+        return self._retrieval_payload
+
+    def set_retrieval(self, key, payload, *, ttl_seconds):
+        del ttl_seconds
+        self.retrieval_set_calls.append((key, payload))
+
+
+def test_retrieval_cache_hit_still_reauthorizes_through_sql_and_skips_qdrant():
+    """The security-critical property: a cache hit must never bypass SQL
+    re-authorization, and it must skip the Qdrant dense search it replaces.
+    """
+    from app.services.rag_retrieval import RetrievalScope
+
+    chunk_id = uuid4()
+    document_id = uuid4()
+    hydrated_chunk = _chunk(chunk_id, document_id=document_id, content="cached body")
+    retriever, qdrant, embedding, repository = _retriever(
+        hybrid_enabled=False, hydrated=[hydrated_chunk]
+    )
+    payload = {
+        "fused": [
+            {
+                "candidate_id": str(chunk_id),
+                "dense_rank": 1,
+                "lexical_rank": None,
+                "fused_score": 0.5,
+            }
+        ],
+        "dense_scores": {str(chunk_id): 0.9},
+        "lexical_scores": {},
+    }
+    retriever.cache = _FakeExactCache(retrieval_payload=payload)
+    scope = RetrievalScope(user_id="user-1", conversation_id=uuid4())
+
+    results = retriever.search("revenue", scope, active_generation_ids=[uuid4()])
+
+    repository.get_active_by_ids_for_scope.assert_called_once()
+    assert repository.get_active_by_ids_for_scope.call_args.args[0] == [chunk_id]
+    qdrant.query_points.assert_not_called()
+    assert embedding.queries == []
+    assert [candidate.chunk_id for candidate in results] == [chunk_id]
+    assert results[0].dense_score == 0.9
+
+
+def test_retrieval_cache_miss_populates_cache_for_next_call():
+    from app.services.rag_retrieval import RetrievalScope
+
+    chunk_id = uuid4()
+    retriever, qdrant, embedding, repository = _retriever(
+        hybrid_enabled=False,
+        points=[_point(chunk_id, 0.77)],
+        hydrated=[_chunk(chunk_id, content="fresh body")],
+    )
+    fake_cache = _FakeExactCache()
+    retriever.cache = fake_cache
+    scope = RetrievalScope(user_id="user-1", conversation_id=uuid4())
+
+    results = retriever.search("revenue", scope, active_generation_ids=[uuid4()])
+
+    assert len(results) == 1
+    qdrant.query_points.assert_called_once()
+    assert len(fake_cache.retrieval_set_calls) == 1
+    stored_key, stored_payload = fake_cache.retrieval_set_calls[0]
+    assert stored_payload["fused"][0]["candidate_id"] == str(chunk_id)
+    # The same key must be used for the lookup that missed.
+    assert fake_cache.retrieval_get_keys == [stored_key]
+
+
+def test_retrieval_cache_key_differs_by_tenant_and_by_conversation():
+    """Round-1 fix (finding 1): pin the retriever's *own* key construction,
+    not only the standalone key-builder function.
+    """
+    from app.services.rag_retrieval import RetrievalScope
+
+    conversation_id = uuid4()
+    keys: list[str] = []
+    for user_id in ("tenant-a", "tenant-b"):
+        retriever, _, _, _ = _retriever(hybrid_enabled=False, hydrated=[])
+        fake_cache = _FakeExactCache()
+        retriever.cache = fake_cache
+        retriever.search(
+            "revenue",
+            RetrievalScope(user_id=user_id, conversation_id=conversation_id),
+            active_generation_ids=[uuid4()],
+        )
+        keys.append(fake_cache.retrieval_get_keys[0])
+
+    assert keys[0] != keys[1]
+
+
+def test_embed_query_cached_returns_cached_vector_without_calling_the_provider():
+    from app.services.rag_retrieval import RetrievalScope
+
+    chunk_id = uuid4()
+    cached_vector = [0.5, 0.25]
+    retriever, qdrant, embedding, repository = _retriever(
+        hybrid_enabled=False,
+        points=[_point(chunk_id, 0.77)],
+        hydrated=[_chunk(chunk_id, content="body")],
+    )
+    fake_cache = _FakeExactCache(query_vector=cached_vector)
+    retriever.cache = fake_cache
+    scope = RetrievalScope(user_id="user-1", conversation_id=uuid4())
+
+    retriever.search("revenue", scope, active_generation_ids=[uuid4()])
+
+    # The embedding provider must never be called on a cache hit ...
+    assert embedding.queries == []
+    # ... and the cached vector must be exactly what reaches Qdrant.
+    assert qdrant.query_points.call_args.kwargs["query"] == cached_vector
+
+
+def test_zero_dimension_embedding_service_bypasses_query_embedding_cache():
+    """Round-1 fix (finding 8): a dimension of 0 must skip the cache
+    entirely rather than write an entry that can never validate on read.
+    """
+    from app.services.rag_retrieval import RetrievalScope
+
+    class _ZeroDimEmbedding:
+        provider = "gemini"
+        model_name = "test-model"
+        dimension = 0
+        query_task = "search result"
+
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        def embed_query(self, query: str):
+            self.queries.append(query)
+            return [0.1, 0.2]
+
+    chunk_id = uuid4()
+    retriever, qdrant, _, repository = _retriever(
+        hybrid_enabled=False, points=[_point(chunk_id, 0.5)], hydrated=[_chunk(chunk_id)]
+    )
+    zero_dim_embedding = _ZeroDimEmbedding()
+    retriever.embedding_service = zero_dim_embedding
+    fake_cache = _FakeExactCache()
+    retriever.cache = fake_cache
+    scope = RetrievalScope(user_id="user-1", conversation_id=uuid4())
+
+    retriever.search("revenue", scope, active_generation_ids=[uuid4()])
+
+    assert fake_cache.query_embedding_get_keys == []
+    assert fake_cache.query_embedding_set_calls == []
+    assert zero_dim_embedding.queries == ["revenue"]
+
+
+class _FakeStageMetrics:
+    """Deterministic recorder matching the ``RAGMetrics`` stage/cache API."""
+
+    def __init__(self) -> None:
+        self.stage_calls: list[tuple[str, float, dict]] = []
+        self.stage_failure_calls: list[tuple[str, str]] = []
+        self.cache_result_calls: list[tuple[str, str]] = []
+
+    def stage(self, stage, *, elapsed_seconds, labels=None):
+        self.stage_calls.append((stage, elapsed_seconds, dict(labels or {})))
+
+    def stage_failure(self, stage, failure_code):
+        self.stage_failure_calls.append((stage, failure_code))
+
+    def cache_result(self, cache, result):
+        self.cache_result_calls.append((cache, result))
+
+
+def test_dense_retrieval_failure_still_records_duration_and_failure_metric():
+    """Round-1 fix (finding 4): a raising dense search must not be invisible
+    to the duration histogram (which would bias p95/p99 downward) and must
+    increment a countable failure metric. The exception still propagates --
+    retrieval failures are not silently swallowed.
+    """
+    from app.services.rag_retrieval import RetrievalScope
+
+    retriever, qdrant, _, _ = _retriever(hybrid_enabled=False, hydrated=[])
+    qdrant.query_points.side_effect = RuntimeError("qdrant is down")
+    fake_metrics = _FakeStageMetrics()
+    retriever.metrics = fake_metrics
+    scope = RetrievalScope(user_id="user-1", conversation_id=uuid4())
+
+    with pytest.raises(RuntimeError):
+        retriever.search("revenue", scope, active_generation_ids=[uuid4()])
+
+    stage_names = [call[0] for call in fake_metrics.stage_calls]
+    assert "dense_retrieval" in stage_names
+    assert ("dense_retrieval", "dependency_exception") in fake_metrics.stage_failure_calls
+
+
+def test_lexical_retrieval_failure_still_records_duration_and_failure_metric():
+    from app.services.rag_retrieval import RetrievalScope
+
+    retriever, _, _, repository = _retriever(hybrid_enabled=True, hydrated=[])
+    repository.search_active_lexical_for_scope.side_effect = RuntimeError("db is down")
+    fake_metrics = _FakeStageMetrics()
+    retriever.metrics = fake_metrics
+    scope = RetrievalScope(user_id="user-1", conversation_id=uuid4())
+
+    with pytest.raises(RuntimeError):
+        retriever.search("revenue", scope, active_generation_ids=[uuid4()])
+
+    stage_names = [call[0] for call in fake_metrics.stage_calls]
+    assert "lexical_retrieval" in stage_names
+    assert ("lexical_retrieval", "dependency_exception") in fake_metrics.stage_failure_calls
+
+
+def test_sql_hydration_failure_still_records_duration_and_failure_metric():
+    from app.services.rag_retrieval import RetrievalScope
+
+    chunk_id = uuid4()
+    retriever, _, _, repository = _retriever(
+        hybrid_enabled=False, points=[_point(chunk_id, 0.5)]
+    )
+    repository.get_active_by_ids_for_scope.side_effect = RuntimeError("db is down")
+    fake_metrics = _FakeStageMetrics()
+    retriever.metrics = fake_metrics
+    scope = RetrievalScope(user_id="user-1", conversation_id=uuid4())
+
+    with pytest.raises(RuntimeError):
+        retriever.search("revenue", scope, active_generation_ids=[uuid4()])
+
+    stage_names = [call[0] for call in fake_metrics.stage_calls]
+    assert "sql_hydration" in stage_names
+    assert ("sql_hydration", "dependency_exception") in fake_metrics.stage_failure_calls
+
+
+def test_dense_retrieval_stage_records_provider_model_and_cache_result():
+    """Round-1 fix (finding 6): provider/model/cache_result must have real
+    producers instead of every series reading provider="n/a", cache_result="n/a".
+    """
+    from app.services.rag_retrieval import RetrievalScope
+
+    chunk_id = uuid4()
+    retriever, qdrant, embedding, repository = _retriever(
+        hybrid_enabled=False, points=[_point(chunk_id, 0.5)], hydrated=[_chunk(chunk_id)]
+    )
+    fake_metrics = _FakeStageMetrics()
+    retriever.metrics = fake_metrics
+    retriever.cache = _FakeExactCache()
+    scope = RetrievalScope(user_id="user-1", conversation_id=uuid4())
+
+    retriever.search("revenue", scope, active_generation_ids=[uuid4()])
+
+    dense_calls = [call for call in fake_metrics.stage_calls if call[0] == "dense_retrieval"]
+    assert len(dense_calls) == 1
+    _, _, dense_labels = dense_calls[0]
+    assert dense_labels["provider"] == embedding.provider
+    assert dense_labels["model"] == embedding.model_name
+    assert dense_labels["cache_result"] == "miss"
+
+    hydration_calls = [call for call in fake_metrics.stage_calls if call[0] == "sql_hydration"]
+    assert len(hydration_calls) == 1
+    _, _, hydration_labels = hydration_calls[0]
+    assert hydration_labels["cache_result"] == "miss"

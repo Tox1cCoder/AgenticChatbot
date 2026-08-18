@@ -400,7 +400,11 @@ class EvidenceAssembler:
         if not callable(recorder):
             return
         try:
-            recorder("evidence_assembly", elapsed_seconds=elapsed_seconds)
+            recorder(
+                "evidence_assembly",
+                elapsed_seconds=elapsed_seconds,
+                labels={"provider": self.provider},
+            )
         except Exception:
             logger.exception("Failed to record evidence-assembly stage metric")
 

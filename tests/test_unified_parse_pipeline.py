@@ -89,3 +89,34 @@ def test_plain_text_parse_normalizes_once_without_character_chunking(tmp_path):
     assert len(result.blocks) == 1
     assert result.blocks[0].kind == "paragraph"
     assert result.blocks[0].text == text
+
+
+def test_parse_document_records_the_parse_stage_metric(tmp_path, monkeypatch):
+    """Round-1 fix (finding 3): the "parse" stage enum had no producer."""
+    from app.observability.rag import rag_metrics
+
+    text_path = tmp_path / "short.txt"
+    text_path.write_text("hello world", encoding="utf-8")
+    settings = type(
+        "Settings",
+        (),
+        {
+            "rag_chunk_target_tokens": 5,
+            "rag_chunk_overlap_tokens": 1,
+            "rag_chunk_max_tokens": 10,
+        },
+    )()
+    service = DocumentParseService(settings=settings)
+
+    recorded: list[tuple[str, float]] = []
+    original_stage = rag_metrics.stage
+
+    def _capture(stage, *, elapsed_seconds, labels=None):
+        recorded.append((stage, elapsed_seconds))
+        return original_stage(stage, elapsed_seconds=elapsed_seconds, labels=labels)
+
+    monkeypatch.setattr(rag_metrics, "stage", _capture)
+
+    asyncio.run(service.parse_document(str(text_path), "short.txt", "doc-2"))
+
+    assert any(stage == "parse" and elapsed >= 0.0 for stage, elapsed in recorded)

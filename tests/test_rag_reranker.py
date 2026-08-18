@@ -52,9 +52,17 @@ class _Model:
 class _Metrics:
     def __init__(self) -> None:
         self.events: list[tuple[str, str]] = []
+        self.stage_calls: list[tuple[str, float, dict]] = []
+        self.stage_failure_events: list[tuple[str, str]] = []
 
     def degraded(self, component: str, failure_code: str) -> None:
         self.events.append((component, failure_code))
+
+    def stage(self, stage, *, elapsed_seconds, labels=None) -> None:
+        self.stage_calls.append((stage, elapsed_seconds, dict(labels or {})))
+
+    def stage_failure(self, stage: str, failure_code: str) -> None:
+        self.stage_failure_events.append((stage, failure_code))
 
 
 @pytest.mark.asyncio
@@ -482,3 +490,95 @@ def test_production_metrics_emit_bounded_reranker_failure_labels():
     assert 'component="reranker",failure_code="timeout"' in rendered
     assert 'component="other",failure_code="other"' in rendered
     assert "secret provider exception text" not in rendered
+
+
+# ---------------------------------------------------------------------------
+# Round-1 fix (finding 4): the stage duration was recorded only on success,
+# inside the try block before every fail-open handler -- a timeout or
+# provider exception (exactly the slow/failing calls) never reached the
+# histogram, biasing p95/p99 downward. Failures must also be countable.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_successful_rank_records_stage_duration_with_model_label():
+    from app.services.rag_reranker import RAGReranker
+
+    metrics = _Metrics()
+    reranker = RAGReranker(
+        model_loader=lambda _name: _Model([0.1, 0.2]),
+        output_limit=2,
+        metrics=metrics,
+        model_name="cross-encoder/ms-marco-MiniLM-L-6-v2",
+    )
+
+    await reranker.rank("query", _candidates(2))
+
+    assert len(metrics.stage_calls) == 1
+    stage, elapsed, labels = metrics.stage_calls[0]
+    assert stage == "reranking"
+    assert elapsed >= 0.0
+    assert labels["model"] == "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    assert metrics.stage_failure_events == []
+
+
+@pytest.mark.asyncio
+async def test_timeout_records_stage_duration_and_failure_metric():
+    from app.services.rag_reranker import RAGReranker
+
+    rows = _candidates(3)
+    metrics = _Metrics()
+
+    class SlowModel:
+        def predict(self, _pairs):
+            time.sleep(0.05)
+            return [0.0, 1.0, 2.0]
+
+    reranker = RAGReranker(
+        model_loader=lambda _name: SlowModel(),
+        output_limit=3,
+        timeout_seconds=0.005,
+        metrics=metrics,
+    )
+
+    await reranker.rank("query", rows)
+
+    # The duration histogram must not be blind to the slow/failing call.
+    assert any(stage == "reranking" for stage, _, _ in metrics.stage_calls)
+    assert ("reranking", "timeout") in metrics.stage_failure_events
+
+
+@pytest.mark.asyncio
+async def test_provider_exception_records_stage_duration_and_failure_metric():
+    from app.services.rag_reranker import RAGReranker
+
+    rows = _candidates(3)
+    metrics = _Metrics()
+    reranker = RAGReranker(
+        model_loader=lambda _name: _Model(error=RuntimeError("provider unavailable")),
+        output_limit=2,
+        metrics=metrics,
+    )
+
+    await reranker.rank("query", rows)
+
+    assert any(stage == "reranking" for stage, _, _ in metrics.stage_calls)
+    assert ("reranking", "provider_exception") in metrics.stage_failure_events
+
+
+@pytest.mark.asyncio
+async def test_missing_candidate_id_records_stage_failure_even_before_timing_starts():
+    from app.services.rag_reranker import RAGReranker
+
+    rows = _candidates(1)
+    rows[0] = replace(rows[0], chunk_id=None, image_id=None)
+    metrics = _Metrics()
+    reranker = RAGReranker(
+        model_loader=lambda _name: _Model([0.1]),
+        output_limit=1,
+        metrics=metrics,
+    )
+
+    await reranker.rank("query", rows)
+
+    assert ("reranking", "missing_candidate_id") in metrics.stage_failure_events

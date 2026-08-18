@@ -32,6 +32,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from app.core.config import Settings
 from app.models.document_parse_artifact import DocumentParseArtifact
+from app.observability.rag import rag_metrics
 from app.repositories.document_parse_artifact import DocumentParseArtifactRepository
 from app.services.document_blocks import NormalizedBlock, deserialize_block, serialize_block
 from app.services.document_chunk_builder import DocumentChunkBuilder
@@ -337,6 +338,10 @@ class DocumentParseService:
             raise ValueError(f"Unsupported file type: {filename}")
 
         parse_elapsed_s = time.perf_counter() - start_time
+        try:
+            rag_metrics.stage("parse", elapsed_seconds=parse_elapsed_s)
+        except Exception:
+            logger.exception("Failed to record RAG parse stage metric")
         return ParseResult(
             blocks=blocks,
             images_data=images_data,

@@ -122,14 +122,16 @@ class RAGReranker:
         query: str,
         candidates: Sequence[RetrievalCandidate],
     ) -> list[RetrievalCandidate]:
+        started_at = time.monotonic()
         pool = list(candidates[: self.candidate_pool])
         fallback = pool[: self.output_limit]
         if not self.enabled or not pool:
             return fallback
         if any(candidate.chunk_id is None and candidate.image_id is None for candidate in pool):
-            return self._fail_open(fallback, "missing_candidate_id")
+            return self._fail_open(
+                fallback, "missing_candidate_id", elapsed_seconds=time.monotonic() - started_at
+            )
 
-        started_at = time.monotonic()
         acquired = False
         worker: asyncio.Task[Any] | None = None
         try:
@@ -148,14 +150,22 @@ class RAGReranker:
             self._record_stage(time.monotonic() - started_at)
             return ranked[: self.output_limit]
         except TimeoutError:
-            return self._fail_open(fallback, "timeout")
+            return self._fail_open(
+                fallback, "timeout", elapsed_seconds=time.monotonic() - started_at
+            )
         except _RerankerFailure as exc:
-            return self._fail_open(fallback, exc.failure_code)
+            return self._fail_open(
+                fallback, exc.failure_code, elapsed_seconds=time.monotonic() - started_at
+            )
         except _ModelLoadFailure:
-            return self._fail_open(fallback, "model_load_failure")
+            return self._fail_open(
+                fallback, "model_load_failure", elapsed_seconds=time.monotonic() - started_at
+            )
         except Exception:
             logger.exception("Reranker provider failed; using fused retrieval order")
-            return self._fail_open(fallback, "provider_exception")
+            return self._fail_open(
+                fallback, "provider_exception", elapsed_seconds=time.monotonic() - started_at
+            )
         finally:
             if acquired:
                 if worker is not None and not worker.done():
@@ -197,15 +207,36 @@ class RAGReranker:
         if not callable(recorder):
             return
         try:
-            recorder("reranking", elapsed_seconds=elapsed_seconds)
+            recorder(
+                "reranking",
+                elapsed_seconds=elapsed_seconds,
+                labels={"provider": "sentence_transformers", "model": self.model_name},
+            )
         except Exception:
             logger.exception("Failed to record reranker stage metric")
+
+    def _record_stage_failure(self, failure_code: str) -> None:
+        recorder = getattr(self.metrics, "stage_failure", None)
+        if not callable(recorder):
+            return
+        try:
+            recorder("reranking", failure_code)
+        except Exception:
+            logger.exception("Failed to record reranker stage-failure metric")
 
     def _fail_open(
         self,
         fused_order: list[RetrievalCandidate],
         failure_code: str,
+        *,
+        elapsed_seconds: float,
     ) -> list[RetrievalCandidate]:
+        # Round-1 fix (finding 4): the duration histogram must see failed
+        # attempts too -- otherwise a reranker that always times out would
+        # never contribute a sample near its timeout, biasing p95/p99
+        # downward exactly when it is slow.
+        self._record_stage(elapsed_seconds)
+        self._record_stage_failure(failure_code)
         if self.metrics is not None:
             try:
                 self.metrics.degraded("reranker", failure_code)

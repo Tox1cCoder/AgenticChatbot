@@ -629,3 +629,34 @@ async def test_search_action_without_authoritative_allowance_fails_closed() -> N
     assert result == ""
     assert evidence["records"] == []
     assert evidence["token_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Round-1 fix (finding 6): evidence_assembly's stage recording carried no
+# provider label, so per-provider attribution was impossible for this stage
+# too. ``self.provider`` is already known to the assembler at construction.
+# ---------------------------------------------------------------------------
+
+
+class _StageMetrics:
+    def __init__(self) -> None:
+        self.stage_calls: list[tuple[str, float, dict]] = []
+
+    def stage(self, stage, *, elapsed_seconds, labels=None):
+        self.stage_calls.append((stage, elapsed_seconds, dict(labels or {})))
+
+    def evidence_tokens(self, token_count):
+        pass
+
+
+def test_assemble_records_evidence_assembly_stage_with_provider_label():
+    metrics = _StageMetrics()
+    assembler = _assembler(metrics=metrics)
+
+    assembler.assemble("question", [_candidate(1)], max_tokens=1000)
+
+    assert len(metrics.stage_calls) == 1
+    stage, elapsed, labels = metrics.stage_calls[0]
+    assert stage == "evidence_assembly"
+    assert elapsed >= 0.0
+    assert labels["provider"] == "test"

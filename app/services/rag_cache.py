@@ -79,13 +79,16 @@ def retrieval_key(
 
 
 def normalize_query(query: str) -> str:
-    """Canonicalize whitespace and case only. No semantic normalization.
+    """Canonicalize whitespace only. No casefolding, no semantic normalization.
 
-    Two queries are the same cache entry only when they are the same text up
-    to whitespace and case -- there is no fuzzy or embedding-similarity match
-    anywhere in this module.
+    Round-1 fix (finding 7): the embedding call and the Qdrant search both
+    run on the raw (non-casefolded) query text, so casefolding only the cache
+    key let two queries that produce different vectors -- e.g. "US GDP" vs.
+    "us gdp" -- collide on one entry and silently share whichever vector or
+    retrieval result arrived first. The key must never distinguish less than
+    the value it is keying, so this collapses whitespace only.
     """
-    return " ".join(str(query or "").split()).casefold()
+    return " ".join(str(query or "").split())
 
 
 def retrieval_config_sha256(
@@ -219,9 +222,7 @@ class RedisRAGExactCache:
         return self._get_vector(key, dimension=dimension)
 
     def set_query_embedding(self, key: str, vector: Sequence[float], *, ttl_seconds: int) -> None:
-        self._set(
-            key, json.dumps([float(value) for value in vector]), ttl_seconds=ttl_seconds
-        )
+        self._set(key, json.dumps([float(value) for value in vector]), ttl_seconds=ttl_seconds)
 
     def get_retrieval(self, key: str) -> dict[str, Any] | None:
         try:

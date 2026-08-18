@@ -18,6 +18,7 @@ from app.core.events import DocumentEvent, DocumentEventData, get_event_bus
 from app.database.session import SessionLocal
 from app.models.conversation import Conversation
 from app.models.document import Document
+from app.observability.rag import rag_metrics
 from app.repositories.document import DocumentRepository
 from app.schemas.document import DocumentStatus, DocumentUpdate
 from app.usage import bind_usage_context
@@ -371,6 +372,12 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
                 prepared_images, document_id
             )
         index_timings["caption_s"] = time.monotonic() - caption_t0
+        try:
+            rag_metrics.stage(
+                "caption", elapsed_seconds=index_timings["caption_s"], labels={"modality": "image"}
+            )
+        except Exception:
+            logger.exception("Failed to record RAG caption stage metric")
 
         # Build BuiltChunks for indexing (sync)
         built_chunks = processing_service._build_chunks_for_indexing(parse_result.blocks)

@@ -191,7 +191,7 @@ class RAGRetriever:
         if not generation_ids:
             return []
 
-        fused, dense_scores, lexical_scores = self._fused_candidates(
+        fused, dense_scores, lexical_scores, retrieval_cache_result = self._fused_candidates(
             query,
             scope,
             dense_limit=dense_limit,
@@ -202,14 +202,29 @@ class RAGRetriever:
         if not fused:
             return []
 
-        hydration_t0 = time.monotonic()
         winner_ids = [UUID(row.candidate_id) for row in fused]
-        authorized = self.chunk_repository.get_active_by_ids_for_scope(
-            winner_ids,
-            user_id=scope.user_id,
-            conversation_id=scope.conversation_id,
+        hydration_t0 = time.monotonic()
+        try:
+            authorized = self.chunk_repository.get_active_by_ids_for_scope(
+                winner_ids,
+                user_id=scope.user_id,
+                conversation_id=scope.conversation_id,
+            )
+        except Exception:
+            self._record_stage(
+                "sql_hydration",
+                time.monotonic() - hydration_t0,
+                modality="text",
+                cache_result=retrieval_cache_result,
+            )
+            self._record_stage_failure("sql_hydration", "dependency_exception")
+            raise
+        self._record_stage(
+            "sql_hydration",
+            time.monotonic() - hydration_t0,
+            modality="text",
+            cache_result=retrieval_cache_result,
         )
-        self._record_stage("sql_hydration", time.monotonic() - hydration_t0, modality="text")
         chunks_by_id = {str(chunk.id): chunk for chunk in authorized}
 
         results: list[RetrievalCandidate] = []
@@ -256,14 +271,16 @@ class RAGRetriever:
         lexical_limit: int,
         generation_ids: tuple[UUID, ...],
         generation_fingerprint: str,
-    ) -> tuple[list[FusedRank], dict[str, float], dict[str, float]]:
+    ) -> tuple[list[FusedRank], dict[str, float], dict[str, float], str]:
         """Fuse dense + lexical ranks, using the exact retrieval cache when hit.
 
         A cache hit only replaces the Qdrant dense search, the SQL lexical
         search, and the RRF fusion arithmetic below -- it never replaces the
         SQL re-authorization step the caller performs afterward on the
         returned candidate ids, so a cached result cannot bypass tenant
-        authorization.
+        authorization. The fourth return value is the retrieval-cache
+        hit/miss/disabled label, threaded back to the caller so the
+        ``sql_hydration`` stage recording can carry it too.
         """
         cache_key = self._retrieval_cache_key(
             scope,
@@ -273,32 +290,28 @@ class RAGRetriever:
             lexical_limit=lexical_limit,
         )
         cached = self.cache.get_retrieval(cache_key)
-        self._record_cache_result("retrieval", hit=cached is not None)
+        cache_result = self._record_cache_result("retrieval", hit=cached is not None)
         if cached is not None:
-            return self._fused_from_cached_payload(cached)
+            fused, dense_scores, lexical_scores = self._fused_from_cached_payload(cached)
+            return fused, dense_scores, lexical_scores, cache_result
 
-        dense_t0 = time.monotonic()
-        dense_points = self._dense_search(
+        provider = str(getattr(self.embedding_service, "provider", "") or "")
+        model = str(getattr(self.embedding_service, "model_name", "") or "")
+        dense_ids, dense_scores = self._timed_dense_search(
             query,
             scope,
             dense_limit,
-            active_generation_ids=generation_ids,
-            modality="text",
+            generation_ids=generation_ids,
+            provider=provider,
+            model=model,
         )
-        self._record_stage("dense_retrieval", time.monotonic() - dense_t0, modality="text")
-        dense_ids, dense_scores = self._dense_ids_and_scores(dense_points)
 
         lexical_ids: list[str] = []
         lexical_scores: dict[str, float] = {}
         if self.hybrid_enabled:
-            lexical_t0 = time.monotonic()
-            lexical_rows = self.chunk_repository.search_active_lexical_for_scope(
-                query,
-                user_id=scope.user_id,
-                conversation_id=scope.conversation_id,
-                limit=lexical_limit,
+            lexical_rows = self._timed_lexical_search(
+                query, scope, lexical_limit=lexical_limit
             )
-            self._record_stage("lexical_retrieval", time.monotonic() - lexical_t0, modality="text")
             for chunk, raw_score in lexical_rows:
                 candidate_key = str(chunk.id)
                 if candidate_key in lexical_scores:
@@ -325,7 +338,73 @@ class RAGRetriever:
                 },
                 ttl_seconds=self.retrieval_cache_ttl_seconds,
             )
-        return fused, dense_scores, lexical_scores
+        return fused, dense_scores, lexical_scores, cache_result
+
+    def _timed_dense_search(
+        self,
+        query: str,
+        scope: RetrievalScope,
+        dense_limit: int,
+        *,
+        generation_ids: tuple[UUID, ...],
+        provider: str,
+        model: str,
+    ) -> tuple[list[str], dict[str, float]]:
+        """Run the dense Qdrant search, recording duration on every outcome."""
+        dense_t0 = time.monotonic()
+        try:
+            dense_points, query_cache_result = self._dense_search(
+                query,
+                scope,
+                dense_limit,
+                active_generation_ids=generation_ids,
+                modality="text",
+            )
+        except Exception:
+            self._record_stage(
+                "dense_retrieval",
+                time.monotonic() - dense_t0,
+                provider=provider,
+                model=model,
+                modality="text",
+            )
+            self._record_stage_failure("dense_retrieval", "dependency_exception")
+            raise
+        self._record_stage(
+            "dense_retrieval",
+            time.monotonic() - dense_t0,
+            provider=provider,
+            model=model,
+            modality="text",
+            cache_result=query_cache_result,
+        )
+        dense_ids, dense_scores = self._dense_ids_and_scores(dense_points)
+        return dense_ids, dense_scores
+
+    def _timed_lexical_search(
+        self,
+        query: str,
+        scope: RetrievalScope,
+        *,
+        lexical_limit: int,
+    ) -> list[Any]:
+        """Run the SQL lexical search, recording duration on every outcome."""
+        lexical_t0 = time.monotonic()
+        try:
+            lexical_rows = self.chunk_repository.search_active_lexical_for_scope(
+                query,
+                user_id=scope.user_id,
+                conversation_id=scope.conversation_id,
+                limit=lexical_limit,
+            )
+        except Exception:
+            self._record_stage(
+                "lexical_retrieval", time.monotonic() - lexical_t0, modality="text"
+            )
+            self._record_stage_failure("lexical_retrieval", "dependency_exception")
+            raise
+        self._record_stage("lexical_retrieval", time.monotonic() - lexical_t0, modality="text")
+        return lexical_rows
 
     @staticmethod
     def _fused_from_cached_payload(
@@ -388,8 +467,21 @@ class RAGRetriever:
             scores[candidate_key] = float(getattr(point, "score", 0.0))
         return ids, scores
 
-    def _embed_query_cached(self, query: str, scope: RetrievalScope) -> list[float]:
+    def _embed_query_cached(self, query: str, scope: RetrievalScope) -> tuple[list[float], str]:
+        """Embed the query, using the exact cache when possible.
+
+        Returns the vector and the cache-result label so the caller can
+        attribute the ``dense_retrieval`` stage's duration to a hit/miss.
+        """
         dimension = int(getattr(self.embedding_service, "dimension", 0) or 0)
+        if dimension <= 0:
+            # Round-1 fix (finding 8): fail closed. A key hashed with a
+            # placeholder dimension can never validate on read (every read
+            # would demand ``len(vector) == 0``), so skip the cache entirely
+            # rather than write an entry that can never be served back.
+            vector = list(self.embedding_service.embed_query(query))
+            return vector, "disabled"
+
         key = query_embedding_key(
             tenant=str(scope.user_id),
             provider=str(getattr(self.embedding_service, "provider", "") or ""),
@@ -399,14 +491,14 @@ class RAGRetriever:
             normalized_query=normalize_query(query),
         )
         cached = self.cache.get_query_embedding(key, dimension=dimension)
-        self._record_cache_result("query_embedding", hit=cached is not None)
+        cache_result = self._record_cache_result("query_embedding", hit=cached is not None)
         if cached is not None:
-            return cached
+            return cached, cache_result
         vector = list(self.embedding_service.embed_query(query))
         self.cache.set_query_embedding(
             key, vector, ttl_seconds=self.query_embedding_cache_ttl_seconds
         )
-        return vector
+        return vector, cache_result
 
     def _record_stage(self, stage: str, elapsed_seconds: float, **labels: Any) -> None:
         recorder = getattr(self.metrics, "stage", None)
@@ -417,16 +509,25 @@ class RAGRetriever:
         except Exception:
             logger.exception("Failed to record RAG stage metric for %s", stage)
 
-    def _record_cache_result(self, cache_name: str, *, hit: bool) -> None:
-        recorder = getattr(self.metrics, "cache_result", None)
+    def _record_stage_failure(self, stage: str, failure_code: str) -> None:
+        recorder = getattr(self.metrics, "stage_failure", None)
         if not callable(recorder):
             return
+        try:
+            recorder(stage, failure_code)
+        except Exception:
+            logger.exception("Failed to record RAG stage-failure metric for %s", stage)
+
+    def _record_cache_result(self, cache_name: str, *, hit: bool) -> str:
         cache_enabled = bool(getattr(self.cache, "enabled", False))
         result = "hit" if hit else ("miss" if cache_enabled else "disabled")
-        try:
-            recorder(cache_name, result)
-        except Exception:
-            logger.exception("Failed to record RAG cache metric for %s", cache_name)
+        recorder = getattr(self.metrics, "cache_result", None)
+        if callable(recorder):
+            try:
+                recorder(cache_name, result)
+            except Exception:
+                logger.exception("Failed to record RAG cache metric for %s", cache_name)
+        return result
 
     def search_images(
         self,
@@ -463,7 +564,7 @@ class RAGRetriever:
             return []
 
         output_limit = max(1, int(limit))
-        points = self._dense_search(
+        points, _query_cache_result = self._dense_search(
             query,
             scope,
             output_limit,
@@ -522,14 +623,15 @@ class RAGRetriever:
         *,
         active_generation_ids: Iterable[UUID],
         modality: Literal["text", "image"] = "text",
-    ) -> list[Any]:
+    ) -> tuple[list[Any], str]:
+        """Search Qdrant, returning the points and the query-embedding cache result."""
         generation_values = sorted(
             str(self._coerce_uuid(generation_id))
             for generation_id in active_generation_ids
         )
         if not generation_values:
-            return []
-        query_embedding = self._embed_query_cached(query, scope)
+            return [], "n/a"
+        query_embedding, query_cache_result = self._embed_query_cached(query, scope)
         search_filter = Filter(
             must=[
                 FieldCondition(
@@ -554,7 +656,7 @@ class RAGRetriever:
             score_threshold=self.score_threshold,
             query_filter=search_filter,
         )
-        return list(getattr(response, "points", None) or [])
+        return list(getattr(response, "points", None) or []), query_cache_result
 
     @staticmethod
     def _valid_chunk_id(value: Any) -> UUID | None:
