@@ -198,8 +198,9 @@ class RAGImageSelector:
 
         mime_type = candidate.mime_type
         pixel_count = width * height
-        if len(data) > self.max_bytes or pixel_count > self.max_pixels:
-            resized = self._resize_to_budget(data, width, height)
+        effective_max_pixels = self._effective_max_pixels()
+        if len(data) > self.max_bytes or pixel_count > effective_max_pixels:
+            resized = self._resize_to_budget(data, width, height, effective_max_pixels)
             if resized is None:
                 logger.warning(
                     "Selected image could not be resized under budget: id=%s",
@@ -227,8 +228,25 @@ class RAGImageSelector:
             return path
         return self.base_dir / path
 
+    def _effective_max_pixels(self) -> int:
+        """The tighter of the configured pixel budget and what the vision-
+        token budget implies for a single image.
+
+        Without this, an image between the token-derived ceiling and
+        ``max_pixels`` was rejected outright at the byte/pixel check instead
+        of ever reaching a resize: with the shipped defaults
+        (``max_vision_tokens=4096`` at ~700 px/token ≈ 2.87 MP vs.
+        ``max_pixels=40_000_000``), any image in that ~2.9-40 MP range was
+        silently dropped. Deriving the resize target from both budgets means
+        a single image is always resized to fit, never just discarded
+        because it happened to fall between two independent ceilings
+        (review finding 4).
+        """
+        token_derived = self.max_vision_tokens * _PIXELS_PER_ESTIMATED_TOKEN
+        return min(self.max_pixels, max(1, token_derived))
+
     def _resize_to_budget(
-        self, data: bytes, width: int, height: int
+        self, data: bytes, width: int, height: int, max_pixels: int
     ) -> tuple[bytes, int, int] | None:
         try:
             with Image.open(io.BytesIO(data)) as source:
@@ -236,8 +254,8 @@ class RAGImageSelector:
         except (UnidentifiedImageError, OSError, ValueError):
             return None
 
-        if width * height > self.max_pixels:
-            scale = math.sqrt(self.max_pixels / float(width * height))
+        if width * height > max_pixels:
+            scale = math.sqrt(max_pixels / float(width * height))
             width = max(1, int(width * scale))
             height = max(1, int(height * scale))
             image = image.resize((width, height), Image.LANCZOS)

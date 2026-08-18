@@ -189,3 +189,57 @@ def test_selector_skips_missing_file_without_raising(selector):
     selected = selector.select("chart", [missing, real])
 
     assert [item.image_id for item in selected] == [real.image_id]
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 findings
+# ---------------------------------------------------------------------------
+
+
+def test_selector_resizes_when_only_the_vision_token_budget_binds():
+    """Finding 4: with the shipped defaults (rag_vision_max_pixels=40M,
+    rag_vision_max_tokens=4096 -> a ~2.87 MP token-derived ceiling), a single
+    image between the two thresholds must be resized to fit, never silently
+    dropped."""
+    base = Path(tempfile.mkdtemp(prefix="rag_image_selector_token_budget_test_"))
+    mid_path = base / "mid.png"
+    _write_png(mid_path, size=(2000, 2000), seed=9)  # 4 MP: over the token
+    # ceiling (~2.87 MP) but comfortably under the 40 MP pixel budget.
+
+    selector = RAGImageSelector(
+        max_images=6,
+        max_bytes=8 * 1024 * 1024,
+        max_pixels=40_000_000,
+        max_vision_tokens=4096,
+    )
+    candidate = ImageCandidate(
+        image_id=uuid4(),
+        image_path=str(mid_path),
+        mime_type="image/png",
+        page_number=1,
+        caption="Large diagram",
+    )
+
+    selected = selector.select("diagram", [candidate])
+
+    assert len(selected) == 1, "an image between the two budgets must be resized, not dropped"
+    assert selected[0].estimated_vision_tokens <= selector.max_vision_tokens
+    assert selected[0].pixel_count <= selector.max_pixels
+
+
+def test_selector_stops_before_max_images_when_vision_token_budget_exhausted():
+    """Finding 5: the cumulative vision-token budget has no independent
+    coverage elsewhere — every other fixture sets it high enough (50_000 or
+    1_000_000) that this branch never binds."""
+    candidates = image_candidates()
+    tight = RAGImageSelector(
+        max_images=5,
+        max_bytes=100_000_000,
+        max_pixels=100_000_000,
+        max_vision_tokens=20,
+    )
+
+    selected = tight.select("compare these charts", candidates)
+
+    assert 0 < len(selected) < tight.max_images
+    assert sum(item.estimated_vision_tokens for item in selected) <= tight.max_vision_tokens
