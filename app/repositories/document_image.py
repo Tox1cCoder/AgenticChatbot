@@ -4,6 +4,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import asc
+from sqlalchemy.orm import joinedload
 
 from app.models.conversation import Conversation
 from app.models.document import Document
@@ -35,6 +36,9 @@ class DocumentImageRepository:
                 image_caption=image_data.image_caption,
                 page_number=image_data.page_number,
                 mime_type=image_data.mime_type,
+                bbox=image_data.bbox,
+                section_path=list(image_data.section_path or []),
+                content_sha256=image_data.content_sha256,
             )
             db.add(db_image)
             db.commit()
@@ -105,6 +109,9 @@ class DocumentImageRepository:
         with self.session_factory() as db:
             return (
                 db.query(DocumentImage)
+                # Eager-load so callers (e.g. RAGRetriever.search_images) can
+                # read image.document.filename after the session closes.
+                .options(joinedload(DocumentImage.document))
                 .join(Document, DocumentImage.document_id == Document.id)
                 .join(Conversation, Document.conversation_id == Conversation.id)
                 .filter(DocumentImage.id == image_uuid)
