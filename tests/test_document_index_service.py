@@ -944,6 +944,26 @@ def test_point_id_for_image_is_scoped_per_generation():
     assert point_a.id != point_b.id
 
 
+def test_point_id_for_image_is_deterministic_for_the_same_pair():
+    """Round 2 finding D: a random id (e.g. uuid4()) would also satisfy
+    'differs across generations' — pin the actual invariant that stops a
+    purge from deleting the wrong points: the id for a given
+    (image_id, index_generation_id) pair must be stable across
+    recomputation, not merely unique per call."""
+    from app.services.document_index_service import DocumentIndexService
+
+    image_id = uuid4()
+    generation_id = uuid4()
+
+    first = DocumentIndexService._point_id_for_image(image_id, generation_id)
+    second = DocumentIndexService._point_id_for_image(image_id, generation_id)
+
+    assert first == second
+    # And still distinct from a different generation, recomputed independently.
+    other_generation = uuid4()
+    assert first != DocumentIndexService._point_id_for_image(image_id, other_generation)
+
+
 def test_index_document_does_not_link_images_when_verification_fails():
     """Finding 3: images must not be relinked to a generation that never
     passes verification — that would repoint (and later orphan, via purge)
