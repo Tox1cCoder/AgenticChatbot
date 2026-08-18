@@ -1433,6 +1433,40 @@ class Settings(BaseSettings):
         default=1500,
         description="Characters to include in document preview during scan phase (~1 page)",
     )
+    agentic_rag_max_images: int = Field(
+        default=6,
+        ge=1,
+        description=(
+            "Maximum document images attached to one agentic RAG turn after "
+            "retrieval, applied by RAGImageSelector."
+        ),
+    )
+    rag_vision_max_bytes: int = Field(
+        default=8 * 1024 * 1024,
+        gt=0,
+        description=(
+            "Maximum combined encoded byte size for images selected for one "
+            "agentic RAG turn (Task 11 bounded multimodal retrieval)."
+        ),
+    )
+    rag_vision_max_pixels: int = Field(
+        default=40_000_000,
+        gt=0,
+        description=(
+            "Maximum combined decoded pixel count for images selected for one "
+            "agentic RAG turn. Oversized individual images are resized down "
+            "to fit rather than dropped."
+        ),
+    )
+    rag_vision_max_tokens: int = Field(
+        default=4096,
+        gt=0,
+        description=(
+            "Maximum combined estimated vision-token cost for images selected "
+            "for one agentic RAG turn. A conservative, provider-agnostic "
+            "budgeting heuristic, not an exact provider accounting."
+        ),
+    )
 
     # Auto-Continue Configuration
     auto_continue_enabled: bool = Field(
