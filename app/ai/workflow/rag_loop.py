@@ -35,7 +35,7 @@ from app.observability.rag import rag_metrics
 from app.services.rag_evidence import EvidencePack
 from app.services.rag_grounding import (
     GroundedAnswerGate,
-    evidence_pack_from_payloads,
+    merge_evidence_payloads,
     parse_grounded_answer,
     render_grounded_answer,
 )
@@ -91,11 +91,15 @@ class RagLoopMixin:
             metrics=rag_metrics,
         )
 
-    def _current_turn_evidence(self, state: GraphState, messages: list[Any]) -> EvidencePack:
+    def _current_turn_evidence(
+        self, state: GraphState, messages: list[Any]
+    ) -> tuple[EvidencePack, int]:
         """Merge only the evidence packs this turn's own tool calls produced.
 
         Ids are reissued per pack, so an id from an earlier turn is not a
-        citation this turn can authorize.
+        citation this turn can authorize. Returns the merged pack plus how
+        many ids collided across different server records this turn, so that
+        count can be surfaced instead of silently folded away (finding 5).
         """
         last_human_idx = self._find_last_human_message_index(messages)
         start = 0 if last_human_idx is None else last_human_idx + 1
@@ -114,7 +118,7 @@ class RagLoopMixin:
             and isinstance(artifact.get("rag_evidence"), dict)
             and str(artifact.get("tool_call_id") or "") in turn_tool_call_ids
         ]
-        return evidence_pack_from_payloads(payloads)
+        return merge_evidence_payloads(payloads)
 
     def _grounded_regenerator(
         self,
@@ -164,7 +168,7 @@ class RagLoopMixin:
             return response
 
         messages = state.get("messages", []) or []
-        evidence = self._current_turn_evidence(state, messages)
+        evidence, ambiguous_evidence_id_count = self._current_turn_evidence(state, messages)
         enforced = bool(getattr(settings, "rag_grounded_answer_gate_enabled", False))
         finalization = await self._grounded_answer_gate().finalize_answer(
             question=question,
@@ -174,6 +178,7 @@ class RagLoopMixin:
                 self._grounded_regenerator(state, question, evidence) if enforced else None
             ),
             mode="enforced" if enforced else "shadow",
+            ambiguous_evidence_id_count=ambiguous_evidence_id_count,
         )
         metadata = response.metadata if isinstance(response.metadata, dict) else {}
         metadata["grounded_answer"] = finalization.to_metadata()
@@ -181,14 +186,15 @@ class RagLoopMixin:
         if not enforced:
             return response
 
-        # A regenerated answer has no original prose to preserve, and an
-        # abstention replaces it outright; otherwise keep the model's formatting
-        # and let the server append the citation block.
+        # A regenerated answer renders from its own raw text so its markdown
+        # structure survives (finding 3); an abstention replaces the answer
+        # outright and ignores ``text`` entirely; otherwise keep the model's
+        # original formatting and let the server append the citation block.
         keep_prose = not finalization.answer.abstained and not finalization.regenerated
         response.message.content = render_grounded_answer(
             finalization.answer,
             evidence,
-            text=text if keep_prose else None,
+            text=text if keep_prose else finalization.answer.raw_text,
         )
         return response
 

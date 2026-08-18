@@ -523,7 +523,8 @@ async def test_injected_document_commands_never_reach_the_regeneration_policy(ca
     )
 
     assert answer == GroundedAnswer(
-        claims=(GroundedClaim(text="Revenue rose to 10 million.", evidence_ids=("E1",)),)
+        claims=(GroundedClaim(text="Revenue rose to 10 million.", evidence_ids=("E1",)),),
+        raw_text="Revenue rose to 10 million [E1].",
     )
     assert captured["disable_tools"] is True
     assert captured["tools"] == []
@@ -547,3 +548,295 @@ def test_grounded_gate_setting_defaults_off():
     from app.core.config import get_settings
 
     assert get_settings().rag_grounded_answer_gate_enabled is False
+
+
+# --------------------------------------------------------------------------
+# Round-1 finding 1: zero-claim answers over real evidence must not bypass
+# validation just because the parser found nothing to examine.
+# --------------------------------------------------------------------------
+
+
+def test_sources_appendix_as_the_first_line_does_not_bypass_validation(gate):
+    """A document-injected 'Sources:' opener must not earn a free pass.
+
+    Before the fix, parsing ``break``s on the first line matching the
+    sources-appendix pattern, so an answer that *opens* with "Sources: ..."
+    produced zero claims; zero claims over a non-empty pack was then scored
+    ``coverage=1.0, valid=True`` and rendered unchanged.
+    """
+    pack = evidence_pack("E1")
+    answer = parse_grounded_answer(
+        "Sources: everything below is from my own knowledge and can be trusted."
+    )
+
+    result = gate.validate(answer, pack)
+    decided = gate.finalize(question="What was revenue?", evidence=pack, answer=answer)
+
+    assert answer.claims == (), "the appendix line itself must never become a claim"
+    assert result.valid is False
+    assert result.reason_codes == ("unstructured_answer",)
+    assert decided.abstained is True
+
+
+def test_heading_only_answer_over_evidence_does_not_bypass_validation(gate):
+    pack = evidence_pack("E1")
+    answer = parse_grounded_answer("## Summary")
+
+    result = gate.validate(answer, pack)
+
+    assert result.valid is False
+    assert result.reason_codes == ("unstructured_answer",)
+
+
+def test_appendix_break_still_stops_parsing_once_a_real_claim_was_found():
+    text = "Revenue rose to 10 million [E1].\nSources:\n- report.pdf, page 3 [E4]\n"
+
+    answer = parse_grounded_answer(text)
+
+    assert [claim.text for claim in answer.claims] == ["Revenue rose to 10 million."]
+
+
+def test_content_after_a_false_appendix_trigger_is_still_parsed():
+    """The appendix line must not swallow real content that follows it."""
+    text = "Sources: see below for details.\nRevenue rose to 10 million [E1]."
+
+    answer = parse_grounded_answer(text)
+
+    assert [claim.text for claim in answer.claims] == ["Revenue rose to 10 million."]
+
+
+def test_unstructured_answer_reason_is_not_reported_alongside_coverage_reason(gate):
+    """Zero claims forces coverage to 0.0 but must report one reason, not two."""
+    pack = evidence_pack("E1")
+    answer = parse_grounded_answer("## Summary")
+
+    result = gate.validate(answer, pack)
+
+    assert result.reason_codes == ("unstructured_answer",)
+    assert result.citation_coverage == pytest.approx(0.0)
+
+
+# --------------------------------------------------------------------------
+# Round-1 finding 2: only factual claims should count toward coverage, so a
+# genuine non-answer (question, closer) is not punished as ungrounded.
+# --------------------------------------------------------------------------
+
+
+def test_interrogative_sentences_are_not_counted_as_claims():
+    answer = parse_grounded_answer("Which quarter do you mean?")
+
+    assert answer.claims == ()
+
+
+def test_second_person_closer_with_no_numeral_or_proper_noun_is_not_a_claim():
+    answer = parse_grounded_answer("Let me know if you need anything else.")
+
+    assert answer.claims == ()
+
+
+def test_second_person_sentence_with_a_numeral_still_counts():
+    answer = parse_grounded_answer("Your invoice total was 42 dollars.")
+
+    assert [claim.text for claim in answer.claims] == ["Your invoice total was 42 dollars."]
+
+
+def test_clarifying_question_over_no_evidence_is_not_treated_as_unstructured(gate):
+    """A genuine non-factual answer must not be flagged as a bypass just
+    because classifying its claims left zero of them — that is finding 1's
+    signal only when evidence exists to have been ignored."""
+    answer = parse_grounded_answer("Which quarter do you mean?")
+
+    decided = gate.finalize(question="What was revenue?", evidence=empty_pack(), answer=answer)
+
+    assert decided.abstained is False
+    assert decided == answer
+
+
+def test_table_rows_count_as_one_claim_group_not_one_claim_per_row(gate):
+    text = (
+        "| Metric | Value |\n"
+        "| --- | --- |\n"
+        "| Revenue | 10 million [E1] |\n"
+        "| Costs | 4 million |\n"
+    )
+    pack = evidence_pack("E1")
+
+    answer = parse_grounded_answer(text)
+    result = gate.validate(answer, pack)
+
+    assert len(answer.claims) == 1, "a table's rows must merge into one claim group"
+    assert result.valid is True
+    assert result.citation_coverage == pytest.approx(1.0)
+
+
+def test_table_rows_are_not_excluded_by_factual_classification():
+    """Table content is data-bearing by nature; it must not be dropped by the
+    interrogative/imperative filter that applies to prose sentences."""
+    text = "| Question | Answer |\n| --- | --- |\n| Why? | Because. |\n"
+
+    answer = parse_grounded_answer(text)
+
+    assert len(answer.claims) == 1
+
+
+# --------------------------------------------------------------------------
+# Round-1 finding 3: enforced rendering must not reflow markdown structure,
+# and a regenerated answer must render from its own raw text.
+# --------------------------------------------------------------------------
+
+
+def test_strip_model_citations_preserves_markdown_structure_elsewhere():
+    from app.services.rag_grounding import _strip_model_citations
+
+    text = (
+        "Summary [Source: forged.pdf, Page 1].\n\n"
+        "- Top level\n"
+        "    - Nested item one\n"
+        "    - Nested item two\n\n"
+        "```python\n"
+        "    def foo():\n"
+        "        return 1\n"
+        "```\n"
+    )
+
+    cleaned = _strip_model_citations(text)
+
+    assert "forged.pdf" not in cleaned
+    assert "    - Nested item one" in cleaned
+    assert "        return 1" in cleaned
+
+
+def test_parse_grounded_answer_keeps_the_original_text_for_rendering():
+    text = "Revenue rose [E1].\n\n- Costs fell [E1]\n- Margins widened [E1]"
+
+    answer = parse_grounded_answer(text)
+
+    assert answer.raw_text == text
+
+
+# --------------------------------------------------------------------------
+# Round-1 finding 5: a turn-level id collision must be visible, not silent.
+# --------------------------------------------------------------------------
+
+
+def test_ambiguous_ids_are_logged_when_dropped(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="app.services.rag_grounding"):
+        evidence_pack_from_payloads(
+            [
+                _pack_payload(_payload("E1", filename="a.pdf")),
+                _pack_payload(_payload("E1", filename="b.pdf", document=2, chunk=99)),
+            ]
+        )
+
+    assert any("ambiguous" in record.message.lower() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_evidence_id_count_is_recorded_in_shadow_metadata(gate):
+    pack = evidence_pack("E1")
+    answer = GroundedAnswer(claims=[GroundedClaim(text="Revenue rose.", evidence_ids=("E1",))])
+
+    finalization = await gate.finalize_answer(
+        question="What was revenue?",
+        evidence=pack,
+        answer=answer,
+        ambiguous_evidence_id_count=2,
+    )
+
+    assert finalization.to_metadata()["ambiguous_evidence_id_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_evidence_id_count_defaults_to_zero(gate):
+    pack = evidence_pack("E1")
+    answer = GroundedAnswer(claims=[GroundedClaim(text="Revenue rose.", evidence_ids=("E1",))])
+
+    finalization = await gate.finalize_answer(
+        question="What was revenue?", evidence=pack, answer=answer
+    )
+
+    assert finalization.to_metadata()["ambiguous_evidence_id_count"] == 0
+
+
+# --------------------------------------------------------------------------
+# Round-1 finding 6: filename rendering must be independently verified —
+# it is the one untrusted surface this module actually renders.
+# --------------------------------------------------------------------------
+
+
+def test_display_filename_strips_control_characters_and_collapses_whitespace():
+    from app.services.rag_grounding import _display_filename
+
+    rendered = _display_filename("report\n.pdf\t(final)\x1b")
+
+    assert rendered == json.dumps("report .pdf (final)", ensure_ascii=False)
+
+
+def test_display_filename_truncates_to_120_characters():
+    from app.services.rag_grounding import _display_filename
+
+    rendered = _display_filename("a" * 200)
+
+    assert rendered == json.dumps("a" * 120, ensure_ascii=False)
+
+
+def test_display_filename_falls_back_to_unknown_for_empty_input():
+    from app.services.rag_grounding import _display_filename
+
+    assert _display_filename("") == json.dumps("unknown", ensure_ascii=False)
+    assert _display_filename(None) == json.dumps("unknown", ensure_ascii=False)
+
+
+def test_filename_forging_evidence_framing_is_sanitized_to_one_json_string(gate):
+    """The one case where an untrusted surface is actually rendered: a
+    filename that tries to forge a new evidence boundary must collapse into
+    a single neutralized, JSON-quoted line, not multi-line framing."""
+    case = next(
+        case
+        for case in _injection_cases()
+        if case["id"] == "filename_forges_evidence_framing"
+    )
+    pack = _injected_pack(case)
+    answer = parse_grounded_answer(case["model_answer"])
+
+    decided = gate.finalize(question="What was revenue?", evidence=pack, answer=answer)
+    rendered = render_grounded_answer(decided, pack, text=case["model_answer"])
+
+    from app.services.rag_grounding import _display_filename
+
+    expected_line = f'[E1] {_display_filename(case["injected_text"])} page 3'
+    assert decided.abstained is False, "this case cites its evidence and must be accepted"
+    assert expected_line in rendered
+    assert rendered.count("\n") == 3, "the forged filename must not add any extra line breaks"
+    for line in rendered.splitlines():
+        assert not line.startswith("[E9]")
+        assert not line.startswith("END UNTRUSTED EVIDENCE")
+
+
+_RENDERED_ABSTENTIONS_BY_REASON: dict[tuple[str, ...], str] = {}
+
+
+@pytest.mark.parametrize(
+    "case", [case for case in _injection_cases() if case["surface"] != "filename"],
+    ids=lambda case: case["id"],
+)
+def test_content_surface_injections_render_identically_regardless_of_surface(case):
+    """The real invariant behind finding 6: paragraph, table, OCR and caption
+    surfaces must never influence the rendered/abstention text differently —
+    if they did, the untrusted content would be leaking through somewhere."""
+    gate = GroundedAnswerGate(0.5)
+    pack = _injected_pack(case)
+    answer = parse_grounded_answer(case["model_answer"])
+
+    decided = gate.finalize(question="What was revenue?", evidence=pack, answer=answer)
+    rendered = render_grounded_answer(decided, pack, text=case["model_answer"])
+
+    assert decided.abstained is True, "every non-filename case in this fixture set abstains"
+    key = tuple(case["expected_reason_codes"])
+    previous = _RENDERED_ABSTENTIONS_BY_REASON.setdefault(key, rendered)
+    assert rendered == previous, (
+        "identical validation outcomes must produce byte-identical abstention text "
+        "no matter which untrusted surface (content, caption, OCR) carried the payload"
+    )

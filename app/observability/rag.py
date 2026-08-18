@@ -8,13 +8,16 @@ from prometheus_client import CollectorRegistry, Counter, generate_latest
 
 _COMPONENTS = {"reranker"}
 _GROUNDING_MODES = {"shadow", "enforced"}
-_GROUNDING_OUTCOMES = {"accepted", "regenerated", "abstained"}
+# "would_abstain" is shadow-only: the answer is never actually replaced in
+# shadow mode, so it must read differently from a live "abstained" outcome.
+_GROUNDING_OUTCOMES = {"accepted", "regenerated", "abstained", "would_abstain"}
 _GROUNDING_REASON_CODES = {
     "none",
     "unknown_evidence_id",
     "citation_coverage_below_minimum",
     "answer_without_evidence",
     "insufficient_evidence",
+    "unstructured_answer",
 }
 _FAILURE_CODES = {
     "timeout",
@@ -41,7 +44,13 @@ class RAGMetrics:
 
         self.grounded_answers = Counter(
             "rag_grounded_answers_total",
-            "Grounded-answer gate decisions, including shadow decisions when enforcement is off.",
+            "Grounded-answer gate decisions. mode=shadow decisions never change the "
+            "final response — they measure whether today's answer *would* pass, which "
+            "is a floor, not an estimate, while the citation prompt stays enforcement-only: "
+            "the model is never asked to cite in shadow mode, so most shadow records read "
+            "citation_coverage_below_minimum by construction. outcome=would_abstain is the "
+            "shadow-mode equivalent of an enforced abstention; only outcome=abstained is a "
+            "live one.",
             ("mode", "outcome", "reason_code"),
             registry=self.registry,
         )

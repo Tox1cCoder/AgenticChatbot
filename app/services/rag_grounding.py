@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 _SERVER_EVIDENCE_ID = re.compile(r"E\d+")
 _EVIDENCE_MARKER = re.compile(r"\[\s*(E\d+(?:\s*,\s*E\d+)*)\s*\]", re.IGNORECASE)
 _MODEL_SOURCE_SPAN = re.compile(r"\[\s*sources?\s*:[^\]]*\]", re.IGNORECASE)
+# Same span, but including the immediately adjacent horizontal whitespace so a
+# targeted excision can close the gap it leaves without reflowing anything
+# else in the document (round-1 finding 3).
+_MODEL_SOURCE_SPAN_WITH_GAP = re.compile(
+    r"[ \t]*\[\s*sources?\s*:[^\]]*\][ \t]*", re.IGNORECASE
+)
 _SOURCES_APPENDIX = re.compile(
     r"^\s*(sources?|references?|citations?|documents?\s+consulted)\b\s*:",
     re.IGNORECASE,
@@ -41,15 +47,28 @@ _MARKDOWN_HEADING = re.compile(r"^\s*#{1,6}\s")
 _LIST_MARKER = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
 _SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
 _SPACE_BEFORE_PUNCTUATION = re.compile(r"[ \t]+([.,;:!?)])")
-_REPEATED_SPACES = re.compile(r"[ \t]{2,}")
 _ALPHANUMERIC = re.compile(r"[^\W_]", re.UNICODE)
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
+
+# Claim classification (round-1 finding 2): a sentence that is a question, or
+# that opens like conversational filler with no numeral or later proper noun
+# to ground it, asserts nothing and must not count toward citation coverage.
+_INTERROGATIVE_ENDING = re.compile(r"\?\s*$")
+_SECOND_PERSON_OR_IMPERATIVE_OPENER = re.compile(
+    r"^(you|your|please|thanks|thank you|sorry|i'm sorry|i am sorry|"
+    r"i don't have|i do not have|i can't|i cannot|i'm happy|i am happy|"
+    r"let me know|feel free|let's|here's|here is)\b",
+    re.IGNORECASE,
+)
+_HAS_NUMERAL = re.compile(r"\d")
+_LATER_PROPER_NOUN = re.compile(r"[A-Z][a-z]+")
 
 _MAX_RENDERED_FILENAME_CHARS = 120
 _MAX_ABSTENTION_QUESTION_CHARS = 120
 _MAX_LISTED_EVIDENCE_IDS = 8
 
 REASON_INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+REASON_UNSTRUCTURED_ANSWER = "unstructured_answer"
 
 GROUNDED_ANSWER_CITATION_INSTRUCTIONS = """
 
@@ -84,6 +103,13 @@ class GroundedAnswer(BaseModel):
     abstained: bool = False
     missing_information: str | None = None
     reason_code: str | None = None
+    # The exact text ``parse_grounded_answer`` was given, kept only when it had
+    # real alphanumeric content. Two independent jobs read it: rendering a
+    # regenerated answer from its own markdown instead of a claim-joined
+    # run-on paragraph (finding 3), and telling "no claims because the answer
+    # asserts nothing" apart from "no claims because the parser found nothing
+    # to examine" (finding 1 vs. finding 2 — see ``validate``/``finalize``).
+    raw_text: str | None = None
 
 
 class ValidationResult(BaseModel):
@@ -102,6 +128,11 @@ class GroundedFinalization(BaseModel):
     claim_count: int = 0
     cited_claim_count: int = 0
     evidence_id_count: int = 0
+    # Turn-scoped ids that named two different server records this turn and
+    # were therefore dropped from the citable set (round-1 finding 5). This
+    # makes the frequency of that pre-existing collision measurable instead
+    # of silent, ahead of the rollout task that must fix the id scheme.
+    ambiguous_evidence_id_count: int = 0
     outcome: str = Field(default="accepted")
 
     def to_metadata(self) -> dict[str, Any]:
@@ -115,6 +146,7 @@ class GroundedFinalization(BaseModel):
             "claim_count": int(self.claim_count),
             "cited_claim_count": int(self.cited_claim_count),
             "evidence_id_count": int(self.evidence_id_count),
+            "ambiguous_evidence_id_count": int(self.ambiguous_evidence_id_count),
             "regenerated": bool(self.regenerated),
             "abstained": bool(self.answer.abstained),
             "abstention_reason_code": str(self.answer.reason_code or ""),
@@ -139,12 +171,23 @@ class GroundedAnswerGate:
         known = evidence.evidence_ids
         unknown = any(eid not in known for claim in answer.claims for eid in claim.evidence_ids)
         covered = sum(bool(claim.evidence_ids) for claim in answer.claims)
-        coverage = covered / len(answer.claims) if answer.claims else 1.0
+        # Zero claims only means "nothing to ground" when there was also no
+        # evidence to have used — with evidence present, zero claims over
+        # non-empty raw text means the parser found prose it never examined
+        # (round-1 finding 1), not a legitimate non-answer (finding 2).
+        unstructured = (
+            not answer.claims and bool(evidence.records) and answer.raw_text is not None
+        )
+        coverage = (
+            0.0 if unstructured else (covered / len(answer.claims) if answer.claims else 1.0)
+        )
+        below_minimum = not unstructured and coverage < self.min_coverage
         reasons = tuple(
             code
             for code, failed in (
                 ("unknown_evidence_id", unknown),
-                ("citation_coverage_below_minimum", coverage < self.min_coverage),
+                (REASON_UNSTRUCTURED_ANSWER, unstructured),
+                ("citation_coverage_below_minimum", below_minimum),
                 ("answer_without_evidence", bool(answer.claims) and not known),
             )
             if failed
@@ -180,8 +223,14 @@ class GroundedAnswerGate:
         candidate = answer if answer is not None else GroundedAnswer()
         if candidate.abstained:
             return candidate
+        if not candidate.claims and not getattr(evidence, "records", ()) and candidate.raw_text:
+            # No evidence was retrieved this turn and the answer asserts
+            # nothing factual — e.g. a clarifying question. There is nothing
+            # to validate, so let it through instead of replacing it with a
+            # canned insufficient-evidence message (round-1 finding 2).
+            return candidate
         result = self.validate(candidate, evidence)
-        if result.valid and (candidate.claims or getattr(evidence, "records", ())):
+        if result.valid and candidate.claims:
             return candidate
         return self.abstain(
             question=question,
@@ -197,6 +246,7 @@ class GroundedAnswerGate:
         answer: GroundedAnswer,
         regenerate: Any | None = None,
         mode: str = "shadow",
+        ambiguous_evidence_id_count: int = 0,
     ) -> GroundedFinalization:
         """Validate, allow exactly one constrained regeneration, then abstain."""
         validation = self.validate(answer, evidence)
@@ -210,7 +260,14 @@ class GroundedAnswerGate:
 
         decided = self.finalize(question=question, evidence=evidence, answer=answer)
         accepted_outcome = "regenerated" if regenerated else "accepted"
-        outcome = "abstained" if decided.abstained else accepted_outcome
+        if decided.abstained:
+            # Shadow mode never actually replaces the answer (see
+            # ``_apply_grounded_answer_gate``), so calling this "abstained"
+            # invites reading a floor measurement as a live abstention. Only
+            # enforced mode has actually abstained (round-1 finding 4).
+            outcome = "would_abstain" if mode == "shadow" else "abstained"
+        else:
+            outcome = accepted_outcome
         finalization = GroundedFinalization(
             answer=decided,
             validation=validation,
@@ -219,6 +276,7 @@ class GroundedAnswerGate:
             claim_count=len(answer.claims),
             cited_claim_count=sum(bool(claim.evidence_ids) for claim in answer.claims),
             evidence_id_count=len(evidence.evidence_ids),
+            ambiguous_evidence_id_count=int(ambiguous_evidence_id_count),
             outcome=outcome,
         )
         self._record(finalization)
@@ -293,22 +351,49 @@ def parse_grounded_answer(text: str) -> GroundedAnswer:
     Citation markers and any model-written ``[Source: ...]`` span are removed
     from the claim text: the ids are kept as data to validate, and the rendered
     source names come from server records instead.
+
+    A contiguous block of markdown table rows counts as one claim group
+    (round-1 finding 2), and the sources appendix only cuts parsing short
+    once at least one real claim has already been found — otherwise a
+    document-injected "Sources:" opener could discard genuine content that
+    follows it (round-1 finding 1).
     """
+    raw = str(text or "")
     claims: list[GroundedClaim] = []
-    for line in str(text or "").splitlines():
+    table_block: list[str] = []
+
+    def _flush_table() -> None:
+        if not table_block:
+            return
+        combined = " ".join(table_block)
+        table_block.clear()
+        claim = _claim_from_sentence(combined)
+        if claim is not None:
+            claims.append(claim)
+
+    for line in raw.splitlines():
         stripped = line.strip()
         if not stripped:
+            _flush_table()
             continue
+        if _is_table_row(stripped):
+            table_block.append(stripped)
+            continue
+        _flush_table()
         if _SOURCES_APPENDIX.match(stripped):
-            break
+            if claims:
+                break
+            continue
         if _MARKDOWN_HEADING.match(stripped):
             continue
         stripped = _LIST_MARKER.sub("", stripped, count=1)
         for sentence in _SENTENCE_BREAK.split(stripped):
             claim = _claim_from_sentence(sentence)
-            if claim is not None:
+            if claim is not None and _is_factual_claim(claim.text):
                 claims.append(claim)
-    return GroundedAnswer(claims=tuple(claims))
+    _flush_table()
+    raw_text = raw if _ALPHANUMERIC.search(raw) else None
+    return GroundedAnswer(claims=tuple(claims), raw_text=raw_text)
 
 
 def render_grounded_answer(
@@ -338,6 +423,18 @@ def evidence_pack_from_payloads(payloads: Sequence[Mapping[str, Any]]) -> Eviden
     label two different records ``E1``. Such an id cannot be attributed to a
     single server record, so it is dropped rather than rendered against a guess.
     """
+    return merge_evidence_payloads(payloads)[0]
+
+
+def merge_evidence_payloads(
+    payloads: Sequence[Mapping[str, Any]],
+) -> tuple[EvidencePack, int]:
+    """Same merge as ``evidence_pack_from_payloads``, plus the drop count.
+
+    Callers that need to surface *how often* a turn collided on an id — the
+    ledgered rollout blocker this makes visible (round-1 finding 5) — use this
+    instead of the plain pack.
+    """
     by_id: dict[str, EvidenceRecord] = {}
     ambiguous: set[str] = set()
     token_count = 0
@@ -359,20 +456,48 @@ def evidence_pack_from_payloads(payloads: Sequence[Mapping[str, Any]]) -> Eviden
                 by_id[record.evidence_id] = record
             elif _record_identity(existing) != _record_identity(record):
                 ambiguous.add(record.evidence_id)
+    if ambiguous:
+        logger.warning(
+            "Dropped %d ambiguous evidence id(s) reused for different server "
+            "records in one turn: %s",
+            len(ambiguous),
+            sorted(ambiguous),
+        )
     ordered = sorted(by_id.items(), key=lambda item: _evidence_id_sort_key(item[0]))
     records = tuple(record for evidence_id, record in ordered if evidence_id not in ambiguous)
-    return EvidencePack(
+    pack = EvidencePack(
         records=records,
         token_count=token_count,
         omitted_count=omitted_count + len(ambiguous),
         truncated_count=truncated_count,
         count_strategy="grounding_merge",
     )
+    return pack, len(ambiguous)
 
 
 _DEFAULT_ABSTENTION = (
     "I do not have enough grounded document evidence to answer that from the retrieved passages."
 )
+
+
+def _is_table_row(stripped: str) -> bool:
+    """A markdown table row, including its header and separator rows."""
+    return stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2
+
+
+def _is_factual_claim(text: str) -> bool:
+    """Exclude interrogatives and unsupported second-person/imperative filler.
+
+    A sentence that opens like conversational filler ("Please...", "Let me
+    know...") but still carries a numeral or a later proper noun is kept: it
+    is asserting something specific, not just making conversation. Table rows
+    are never run through this — they are grouped and counted separately.
+    """
+    if _INTERROGATIVE_ENDING.search(text):
+        return False
+    opens_like_filler = _SECOND_PERSON_OR_IMPERATIVE_OPENER.match(text.strip())
+    is_grounded_by_content = _HAS_NUMERAL.search(text) or _LATER_PROPER_NOUN.search(text[1:])
+    return not (opens_like_filler and not is_grounded_by_content)
 
 
 def _claim_from_sentence(sentence: str) -> GroundedClaim | None:
@@ -403,9 +528,35 @@ def _render_claims(answer: GroundedAnswer, known: frozenset[str]) -> str:
 
 
 def _strip_model_citations(text: str) -> str:
-    cleaned = _MODEL_SOURCE_SPAN.sub("", str(text or ""))
-    cleaned = _REPEATED_SPACES.sub(" ", cleaned)
-    return _SPACE_BEFORE_PUNCTUATION.sub(r"\1", cleaned).strip()
+    """Remove a model-written ``[Source: ...]`` span without reflowing the rest.
+
+    Only the matched span and its immediate horizontal whitespace are
+    excised, closing the gap with at most one space. Markdown structure
+    elsewhere in the document — nested-list indentation, fenced code blocks —
+    is left exactly as the model wrote it (round-1 finding 3).
+    """
+    raw = str(text or "")
+
+    def _excise(match: re.Match[str]) -> str:
+        before, after = raw[: match.start()], raw[match.end() :]
+        left = before[-1] if before else ""
+        right = after[0] if after else ""
+        keep_gap = left not in ("", " ", "\t", "\n") and right not in (
+            "",
+            " ",
+            "\t",
+            "\n",
+            ".",
+            ",",
+            ";",
+            ":",
+            "!",
+            "?",
+            ")",
+        )
+        return " " if keep_gap else ""
+
+    return _MODEL_SOURCE_SPAN_WITH_GAP.sub(_excise, raw).strip()
 
 
 def _render_sources(cited: Sequence[str], evidence: EvidencePack) -> str:

@@ -1206,7 +1206,10 @@ def test_disabled_grounded_gate_keeps_the_answer_but_records_shadow_metrics(monk
     assert shadow["valid"] is False
     assert shadow["reason_codes"] == ["citation_coverage_below_minimum"]
     assert shadow["evidence_id_count"] == 1
-    assert shadow["outcome"] == "abstained"
+    # Shadow mode never replaces the answer, so this is a floor measurement,
+    # not a live abstention — it must read differently from "abstained"
+    # (round-1 finding 4).
+    assert shadow["outcome"] == "would_abstain"
     assert calls["regenerations"] == [], "the disabled path must never spend a regeneration"
 
 
@@ -1315,6 +1318,110 @@ def test_citation_verification_disabled_skips_the_gate_entirely(monkeypatch):
 
     assert state["response"].message.content == "Revenue rose to 10 million."
     assert "grounded_answer" not in state["response"].metadata
+
+
+def test_enforced_regeneration_preserves_the_regenerated_markdown_structure(monkeypatch):
+    """Round-1 finding 3: a regenerated answer must render from its own raw
+    text, not a space-joined run-on paragraph built from its claims."""
+    from app.services.rag_grounding import parse_grounded_answer
+
+    monkeypatch.setattr(settings, "enable_citation_verification", True, raising=False)
+    monkeypatch.setattr(settings, "rag_grounded_answer_gate_enabled", True, raising=False)
+    state = _grounded_state()
+    regenerated_text = "Revenue rose [E1].\n\n- Costs fell [E1]\n- Margins widened [E1]"
+    workflow, calls = _grounded_workflow(
+        final_text="Revenue rose to 10 million [E9].",
+        regenerated_answer=parse_grounded_answer(regenerated_text),
+    )
+
+    asyncio.run(workflow._rag_node(state))
+
+    content = state["response"].message.content
+    assert calls["regenerations"] == [(("unknown_evidence_id",), "What was revenue?")]
+    assert state["response"].metadata["grounded_answer"]["outcome"] == "regenerated"
+    assert "\n\n- Costs fell [E1]\n- Margins widened [E1]" in content, (
+        "regenerated markdown structure must survive rendering, not be "
+        "flattened into one space-joined paragraph"
+    )
+
+
+def test_grounded_gate_reports_ambiguous_evidence_id_count(monkeypatch):
+    """Round-1 finding 5: an id reused for two different records this turn
+    must be visible in the shadow metadata, not silently dropped."""
+    from uuid import UUID
+
+    monkeypatch.setattr(settings, "enable_citation_verification", True, raising=False)
+    monkeypatch.setattr(settings, "rag_grounded_answer_gate_enabled", False, raising=False)
+
+    def _artifact(tool_call_id: str, filename: str) -> dict:
+        return {
+            "tool_call_id": tool_call_id,
+            "tool": "search_documents",
+            "args": {"action": "search_chunks", "query": "revenue"},
+            "output": "BEGIN UNTRUSTED EVIDENCE E1",
+            "error": None,
+            "status": "success",
+            "rag_evidence": {
+                "records": [
+                    {
+                        "evidence_id": "E1",
+                        "document_id": str(UUID(int=1)),
+                        "chunk_id": str(UUID(int=11)),
+                        "image_id": None,
+                        "filename": filename,
+                        "page_start": 3,
+                        "page_end": 3,
+                        "section_path": ["Results"],
+                        "modality": "text",
+                        "content": "Revenue rose to 10 million in FY24.",
+                    }
+                ],
+                "evidence_ids": ["E1"],
+                "token_count": 19,
+                "omitted_count": 0,
+                "truncated_count": 0,
+                "count_strategy": "test:fixture",
+            },
+        }
+
+    state = {
+        "conversation_id": "conv-1",
+        "user_id": "owner",
+        "context": {
+            "tool_artifacts": [
+                _artifact("search-1", "report.pdf"),
+                _artifact("search-2", "different.pdf"),
+            ],
+            "agentic_rag_iteration": 1,
+        },
+        "messages": [
+            HumanMessage(content="What was revenue?"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "search-1", "name": "search_documents", "args": {}},
+                    {"id": "search-2", "name": "search_documents", "args": {}},
+                ],
+            ),
+            ToolMessage(
+                content="BEGIN UNTRUSTED EVIDENCE E1",
+                tool_call_id="search-1",
+                name="search_documents",
+            ),
+            ToolMessage(
+                content="BEGIN UNTRUSTED EVIDENCE E1",
+                tool_call_id="search-2",
+                name="search_documents",
+            ),
+        ],
+    }
+    workflow, _calls = _grounded_workflow(final_text="Revenue rose to 10 million [E1].")
+
+    asyncio.run(workflow._rag_node(state))
+
+    shadow = state["response"].metadata["grounded_answer"]
+    assert shadow["ambiguous_evidence_id_count"] == 1
+    assert shadow["evidence_id_count"] == 0, "the colliding id must not be citable either"
 
 
 @pytest.mark.asyncio
