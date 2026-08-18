@@ -1005,6 +1005,23 @@ class Settings(BaseSettings):
         ge=1,
         description="Reciprocal-rank-fusion smoothing constant.",
     )
+    rag_exact_cache_enabled: bool = Field(
+        default=False,
+        description="Enable exact-match Redis caches for RAG document/query embeddings "
+        "and retrieval results. Disabled by default; ignored (cache stays disabled) "
+        "when redis_url is blank.",
+    )
+    rag_query_embedding_cache_ttl_seconds: int = Field(
+        default=300,
+        ge=1,
+        description="TTL for cached query embeddings, keyed by exact normalized query.",
+    )
+    rag_retrieval_cache_ttl_seconds: int = Field(
+        default=60,
+        ge=1,
+        description="TTL for cached retrieval fusion results, keyed by the active "
+        "index generation fingerprint.",
+    )
     # Re-ranking Configuration
     enable_reranking: bool = Field(
         default=True,

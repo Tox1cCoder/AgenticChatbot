@@ -68,6 +68,10 @@ class SentenceTransformerRAGEmbeddingService:
     model_name: str
     dimension: int
     provider: str = field(default="sentence_transformers", init=False)
+    # Task 12: version tag for the document-embedding cache key. Bump this if
+    # the input formatting given to the model ever changes, so stale cache
+    # entries keyed on the old formatting are never reused.
+    document_format_version: str = field(default="doc-fmt-v1", init=False)
 
     def embed_documents(
         self,
@@ -114,6 +118,10 @@ class GeminiRAGEmbeddingService:
     recorder: Any = field(default=None, repr=False)
     provider: str = field(default="gemini", init=False)
     client: Any = field(default=None, init=False, repr=False)
+    # Task 12: version tag for the document-embedding cache key. Bump this if
+    # ``_format_document``'s template ever changes, so a cache entry keyed on
+    # the old formatting is never mistaken for a hit under the new one.
+    document_format_version: str = field(default="doc-fmt-v1", init=False)
 
     # Hard ceiling imposed by the Gemini Embeddings API for gemini-embedding-2.
     _API_MAX_BATCH: ClassVar[int] = 100

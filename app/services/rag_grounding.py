@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
@@ -249,16 +250,24 @@ class GroundedAnswerGate:
         ambiguous_evidence_id_count: int = 0,
     ) -> GroundedFinalization:
         """Validate, allow exactly one constrained regeneration, then abstain."""
+        validation_seconds = 0.0
+        started_at = time.monotonic()
         validation = self.validate(answer, evidence)
+        validation_seconds += time.monotonic() - started_at
         regenerated = False
         if not validation.valid and regenerate is not None:
             candidate = await self._regenerate_once(regenerate, validation.reason_codes)
             if candidate is not None:
                 regenerated = True
                 answer = candidate
+                revalidate_at = time.monotonic()
                 validation = self.validate(answer, evidence)
+                validation_seconds += time.monotonic() - revalidate_at
 
+        finalize_at = time.monotonic()
         decided = self.finalize(question=question, evidence=evidence, answer=answer)
+        validation_seconds += time.monotonic() - finalize_at
+        self._record_stage(validation_seconds)
         accepted_outcome = "regenerated" if regenerated else "accepted"
         if decided.abstained:
             # Shadow mode never actually replaces the answer (see
@@ -293,6 +302,15 @@ class GroundedAnswerGate:
             logger.exception("Constrained grounded-answer regeneration failed")
             return None
         return candidate if isinstance(candidate, GroundedAnswer) else None
+
+    def _record_stage(self, elapsed_seconds: float) -> None:
+        recorder = getattr(self.metrics, "stage", None)
+        if not callable(recorder):
+            return
+        try:
+            recorder("validation", elapsed_seconds=elapsed_seconds)
+        except Exception:
+            logger.exception("Failed to record grounded-answer validation stage metric")
 
     def _record(self, finalization: GroundedFinalization) -> None:
         recorder = getattr(self.metrics, "grounded_answer", None)

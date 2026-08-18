@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
@@ -12,6 +14,8 @@ from uuid import UUID
 
 from app.ai.token_counter import TokenCounter
 from app.services.rag_retrieval import RetrievalCandidate, RetrievalScope
+
+logger = logging.getLogger(__name__)
 
 _ATOMIC_KINDS = frozenset({"table", "image", "equation"})
 
@@ -85,6 +89,7 @@ class EvidenceAssembler:
         repository: Any | None = None,
         overlap_threshold: float = 0.85,
         max_neighbors: int = 2,
+        metrics: Any | None = None,
     ) -> None:
         self.token_counter = token_counter or TokenCounter()
         self.provider = provider
@@ -92,6 +97,7 @@ class EvidenceAssembler:
         self.repository = repository
         self.overlap_threshold = min(1.0, max(0.0, float(overlap_threshold)))
         self.max_neighbors = max(0, int(max_neighbors))
+        self.metrics = metrics
 
     def assemble(
         self,
@@ -103,6 +109,7 @@ class EvidenceAssembler:
         scope: RetrievalScope | None = None,
     ) -> EvidencePack:
         del question
+        started_at = time.monotonic()
         allowance = max(0, int(max_tokens))
         canonical, duplicate_count = self._deduplicate(candidates)
         ordered = self._coverage_order(canonical, subquestions)
@@ -145,6 +152,8 @@ class EvidenceAssembler:
 
         rendered = _serialize_records(selected)
         token_count, strategy = self._count(rendered)
+        self._record_stage(time.monotonic() - started_at)
+        self._record_evidence_tokens(token_count)
         return EvidencePack(
             records=tuple(selected),
             token_count=token_count,
@@ -385,6 +394,24 @@ class EvidenceAssembler:
             text=text,
         )
         return int(result.tokens), str(result.strategy)
+
+    def _record_stage(self, elapsed_seconds: float) -> None:
+        recorder = getattr(self.metrics, "stage", None)
+        if not callable(recorder):
+            return
+        try:
+            recorder("evidence_assembly", elapsed_seconds=elapsed_seconds)
+        except Exception:
+            logger.exception("Failed to record evidence-assembly stage metric")
+
+    def _record_evidence_tokens(self, token_count: int) -> None:
+        recorder = getattr(self.metrics, "evidence_tokens", None)
+        if not callable(recorder):
+            return
+        try:
+            recorder(token_count)
+        except Exception:
+            logger.exception("Failed to record evidence-pack token metric")
 
 
 def _serialize_records(records: Sequence[EvidenceRecord]) -> str:

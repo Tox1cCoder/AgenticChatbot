@@ -46,6 +46,7 @@ from app.repositories.document_chunk import DocumentChunkRepository
 from app.repositories.document_index_generation import DocumentIndexGenerationRepository
 from app.schemas.document_image import DocumentImageUpdate
 from app.services.document_chunk_builder import BuiltChunk
+from app.services.rag_cache import NullRAGExactCache, RAGExactCache, document_embedding_key
 from app.usage.types import UsageContext
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,8 @@ class DocumentIndexService:
         qdrant_upsert_batch_size: int = 1000,
         document_image_repository: Any | None = None,
         multimodal_image_embeddings_enabled: bool = False,
+        cache: RAGExactCache | None = None,
+        metrics: Any | None = None,
     ):
         self.chunk_repository = chunk_repository
         self.generation_repository = generation_repository
@@ -94,6 +97,11 @@ class DocumentIndexService:
         self.document_image_repository = document_image_repository
         self.multimodal_image_embeddings_enabled = bool(multimodal_image_embeddings_enabled)
         self._payload_indexes_ready = False
+        # Task 12: exact content-addressed embedding cache, tenant-scoped by
+        # document.user_id. Defaults to a no-op so a caller that never wires a
+        # cache is byte-for-byte identical to the pre-Task-12 code path.
+        self.cache = cache if cache is not None else NullRAGExactCache()
+        self.metrics = metrics
 
     # ------------------------------------------------------------------
     # Public API
@@ -414,18 +422,24 @@ class DocumentIndexService:
 
         title = self._title_for_document(document, persisted)
 
-        # Single embed_documents call for all chunks — batching is internal
-        # to the embedding service (rag_embedding_batch_size). usage_context is
-        # passed explicitly because the embedding batches run in a
-        # ThreadPoolExecutor that does not inherit the bound request context.
+        # Single embed_documents call for all *uncached* chunks — batching is
+        # internal to the embedding service (rag_embedding_batch_size).
+        # usage_context is passed explicitly because the embedding batches run
+        # in a ThreadPoolExecutor that does not inherit the bound request
+        # context.
         texts = [chunk.content for chunk in persisted]
         titles = [title] * len(texts)
 
         embed_t0 = _time.monotonic()
-        vectors = self.embedding_service.embed_documents(
-            texts, titles=titles, usage_context=usage_context
+        vectors = self._embed_documents_cached(
+            document=document,
+            persisted=persisted,
+            texts=texts,
+            titles=titles,
+            usage_context=usage_context,
         )
         embed_s = _time.monotonic() - embed_t0
+        self._record_stage("embedding", embed_s, modality="text")
 
         # Build points for all chunks.
         points: list[PointStruct] = []
@@ -451,6 +465,81 @@ class DocumentIndexService:
         if timing_sink is not None:
             timing_sink["embed_s"] = embed_s
             timing_sink["upsert_s"] = upsert_s
+
+    def _embed_documents_cached(
+        self,
+        *,
+        document: Any,
+        persisted: list[DocumentChunk],
+        texts: list[str],
+        titles: list[str | None],
+        usage_context: UsageContext | None,
+    ) -> list[list[float]]:
+        """Embed only the chunks whose content hash misses the exact cache.
+
+        Keyed by content SHA-256 under the current tenant/provider/model/
+        dimension/format-version -- never by chunk id, so two chunks with
+        identical text (even across documents) share one cache entry. With
+        the default no-op cache every lookup misses, so every chunk is
+        embedded exactly as before Task 12.
+        """
+        tenant = str(getattr(document, "user_id", "") or "")
+        format_version = str(
+            getattr(self.embedding_service, "document_format_version", "doc-fmt-v1")
+        )
+        keys = [
+            document_embedding_key(
+                tenant=tenant,
+                provider=self.embedding_provider,
+                model=self.embedding_model_name,
+                dimension=self.embedding_dimension,
+                format_version=format_version,
+                content_sha256=str(getattr(chunk, "content_sha256", "") or ""),
+            )
+            for chunk in persisted
+        ]
+
+        vectors: list[list[float] | None] = [None] * len(persisted)
+        missing_indices: list[int] = []
+        for index, key in enumerate(keys):
+            cached = self.cache.get_document_embedding(key, dimension=self.embedding_dimension)
+            self._record_cache_result("document_embedding", hit=cached is not None)
+            if cached is not None:
+                vectors[index] = cached
+            else:
+                missing_indices.append(index)
+
+        if missing_indices:
+            fresh = self.embedding_service.embed_documents(
+                [texts[index] for index in missing_indices],
+                titles=[titles[index] for index in missing_indices],
+                usage_context=usage_context,
+            )
+            for index, vector in zip(missing_indices, fresh, strict=True):
+                resolved = list(vector)
+                vectors[index] = resolved
+                self.cache.set_document_embedding(keys[index], resolved)
+
+        return [vector for vector in vectors if vector is not None]
+
+    def _record_stage(self, stage: str, elapsed_seconds: float, **labels: Any) -> None:
+        recorder = getattr(self.metrics, "stage", None)
+        if not callable(recorder):
+            return
+        try:
+            recorder(stage, elapsed_seconds=elapsed_seconds, labels=labels)
+        except Exception:
+            logger.exception("Failed to record RAG stage metric for %s", stage)
+
+    def _record_cache_result(self, cache_name: str, *, hit: bool) -> None:
+        recorder = getattr(self.metrics, "cache_result", None)
+        if not callable(recorder):
+            return
+        result = "hit" if hit else ("miss" if getattr(self.cache, "enabled", False) else "disabled")
+        try:
+            recorder(cache_name, result)
+        except Exception:
+            logger.exception("Failed to record RAG cache metric for %s", cache_name)
 
     @staticmethod
     def _title_for_document(document: Any, chunks: list[DocumentChunk]) -> str | None:

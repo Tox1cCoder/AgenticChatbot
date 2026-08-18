@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from hashlib import sha256
@@ -9,6 +11,17 @@ from typing import Any, Literal
 from uuid import UUID
 
 from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
+
+from app.services.rag_cache import (
+    NullRAGExactCache,
+    RAGExactCache,
+    normalize_query,
+    query_embedding_key,
+    retrieval_config_sha256,
+    retrieval_key,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -108,6 +121,10 @@ class RAGRetriever:
         rrf_k: int = 60,
         score_threshold: float | None = None,
         document_image_repository: Any | None = None,
+        cache: RAGExactCache | None = None,
+        query_embedding_cache_ttl_seconds: int = 300,
+        retrieval_cache_ttl_seconds: int = 60,
+        metrics: Any | None = None,
     ) -> None:
         self.qdrant_client = qdrant_client
         self.embedding_service = embedding_service
@@ -123,6 +140,13 @@ class RAGRetriever:
         # behind ``rag_multimodal_image_embeddings_enabled``.
         self.document_image_repository = document_image_repository
         self.last_trace: dict[str, Any] = {}
+        # Task 12: exact query-embedding and retrieval-result caches. Defaults
+        # to a no-op so a caller that never wires a cache is byte-for-byte
+        # identical to the pre-Task-12 code path.
+        self.cache = cache if cache is not None else NullRAGExactCache()
+        self.query_embedding_cache_ttl_seconds = max(1, int(query_embedding_cache_ttl_seconds))
+        self.retrieval_cache_ttl_seconds = max(1, int(retrieval_cache_ttl_seconds))
+        self.metrics = metrics
 
     def search(
         self,
@@ -167,56 +191,25 @@ class RAGRetriever:
         if not generation_ids:
             return []
 
-        dense_points = self._dense_search(
+        fused, dense_scores, lexical_scores = self._fused_candidates(
             query,
             scope,
-            dense_limit,
-            active_generation_ids=generation_ids,
-            modality="text",
-        )
-        dense_ids: list[str] = []
-        dense_scores: dict[str, float] = {}
-        for point in dense_points:
-            payload = dict(getattr(point, "payload", None) or {})
-            candidate_id = self._valid_chunk_id(payload.get("chunk_id"))
-            if candidate_id is None:
-                continue
-            candidate_key = str(candidate_id)
-            if candidate_key in dense_scores:
-                continue
-            dense_ids.append(candidate_key)
-            dense_scores[candidate_key] = float(getattr(point, "score", 0.0))
-
-        lexical_ids: list[str] = []
-        lexical_scores: dict[str, float] = {}
-        if self.hybrid_enabled:
-            lexical_rows = self.chunk_repository.search_active_lexical_for_scope(
-                query,
-                user_id=scope.user_id,
-                conversation_id=scope.conversation_id,
-                limit=lexical_limit,
-            )
-            for chunk, raw_score in lexical_rows:
-                candidate_key = str(chunk.id)
-                if candidate_key in lexical_scores:
-                    continue
-                lexical_ids.append(candidate_key)
-                lexical_scores[candidate_key] = float(raw_score)
-
-        fused = reciprocal_rank_fusion(
-            dense=dense_ids,
-            lexical=lexical_ids,
-            k=self.rrf_k,
+            dense_limit=dense_limit,
+            lexical_limit=lexical_limit,
+            generation_ids=generation_ids,
+            generation_fingerprint=generation_fingerprint,
         )
         if not fused:
             return []
 
+        hydration_t0 = time.monotonic()
         winner_ids = [UUID(row.candidate_id) for row in fused]
         authorized = self.chunk_repository.get_active_by_ids_for_scope(
             winner_ids,
             user_id=scope.user_id,
             conversation_id=scope.conversation_id,
         )
+        self._record_stage("sql_hydration", time.monotonic() - hydration_t0, modality="text")
         chunks_by_id = {str(chunk.id): chunk for chunk in authorized}
 
         results: list[RetrievalCandidate] = []
@@ -253,6 +246,187 @@ class RAGRetriever:
             if len(results) >= output_limit:
                 break
         return results
+
+    def _fused_candidates(
+        self,
+        query: str,
+        scope: RetrievalScope,
+        *,
+        dense_limit: int,
+        lexical_limit: int,
+        generation_ids: tuple[UUID, ...],
+        generation_fingerprint: str,
+    ) -> tuple[list[FusedRank], dict[str, float], dict[str, float]]:
+        """Fuse dense + lexical ranks, using the exact retrieval cache when hit.
+
+        A cache hit only replaces the Qdrant dense search, the SQL lexical
+        search, and the RRF fusion arithmetic below -- it never replaces the
+        SQL re-authorization step the caller performs afterward on the
+        returned candidate ids, so a cached result cannot bypass tenant
+        authorization.
+        """
+        cache_key = self._retrieval_cache_key(
+            scope,
+            generation_fingerprint,
+            query,
+            dense_limit=dense_limit,
+            lexical_limit=lexical_limit,
+        )
+        cached = self.cache.get_retrieval(cache_key)
+        self._record_cache_result("retrieval", hit=cached is not None)
+        if cached is not None:
+            return self._fused_from_cached_payload(cached)
+
+        dense_t0 = time.monotonic()
+        dense_points = self._dense_search(
+            query,
+            scope,
+            dense_limit,
+            active_generation_ids=generation_ids,
+            modality="text",
+        )
+        self._record_stage("dense_retrieval", time.monotonic() - dense_t0, modality="text")
+        dense_ids, dense_scores = self._dense_ids_and_scores(dense_points)
+
+        lexical_ids: list[str] = []
+        lexical_scores: dict[str, float] = {}
+        if self.hybrid_enabled:
+            lexical_t0 = time.monotonic()
+            lexical_rows = self.chunk_repository.search_active_lexical_for_scope(
+                query,
+                user_id=scope.user_id,
+                conversation_id=scope.conversation_id,
+                limit=lexical_limit,
+            )
+            self._record_stage("lexical_retrieval", time.monotonic() - lexical_t0, modality="text")
+            for chunk, raw_score in lexical_rows:
+                candidate_key = str(chunk.id)
+                if candidate_key in lexical_scores:
+                    continue
+                lexical_ids.append(candidate_key)
+                lexical_scores[candidate_key] = float(raw_score)
+
+        fused = reciprocal_rank_fusion(dense=dense_ids, lexical=lexical_ids, k=self.rrf_k)
+        if fused:
+            self.cache.set_retrieval(
+                cache_key,
+                {
+                    "fused": [
+                        {
+                            "candidate_id": row.candidate_id,
+                            "dense_rank": row.dense_rank,
+                            "lexical_rank": row.lexical_rank,
+                            "fused_score": row.fused_score,
+                        }
+                        for row in fused
+                    ],
+                    "dense_scores": dense_scores,
+                    "lexical_scores": lexical_scores,
+                },
+                ttl_seconds=self.retrieval_cache_ttl_seconds,
+            )
+        return fused, dense_scores, lexical_scores
+
+    @staticmethod
+    def _fused_from_cached_payload(
+        cached: dict[str, Any],
+    ) -> tuple[list[FusedRank], dict[str, float], dict[str, float]]:
+        fused = [
+            FusedRank(
+                candidate_id=str(row["candidate_id"]),
+                dense_rank=row.get("dense_rank"),
+                lexical_rank=row.get("lexical_rank"),
+                fused_score=float(row["fused_score"]),
+            )
+            for row in cached.get("fused") or ()
+        ]
+        dense_scores = {str(k): float(v) for k, v in (cached.get("dense_scores") or {}).items()}
+        lexical_scores = {
+            str(k): float(v) for k, v in (cached.get("lexical_scores") or {}).items()
+        }
+        return fused, dense_scores, lexical_scores
+
+    def _retrieval_cache_key(
+        self,
+        scope: RetrievalScope,
+        generation_fingerprint: str,
+        query: str,
+        *,
+        dense_limit: int,
+        lexical_limit: int,
+    ) -> str:
+        config_hash = retrieval_config_sha256(
+            dense_candidate_limit=dense_limit,
+            lexical_candidate_limit=lexical_limit,
+            rrf_k=self.rrf_k,
+            hybrid_enabled=self.hybrid_enabled,
+            score_threshold=self.score_threshold,
+            cache_enabled=bool(getattr(self.cache, "enabled", False)),
+            query_embedding_cache_ttl_seconds=self.query_embedding_cache_ttl_seconds,
+            retrieval_cache_ttl_seconds=self.retrieval_cache_ttl_seconds,
+        )
+        return retrieval_key(
+            tenant=str(scope.user_id),
+            conversation=str(scope.conversation_id),
+            generation=generation_fingerprint,
+            normalized_query=normalize_query(query),
+            retrieval_config_sha256=config_hash,
+        )
+
+    def _dense_ids_and_scores(self, points: list[Any]) -> tuple[list[str], dict[str, float]]:
+        ids: list[str] = []
+        scores: dict[str, float] = {}
+        for point in points:
+            payload = dict(getattr(point, "payload", None) or {})
+            candidate_id = self._valid_chunk_id(payload.get("chunk_id"))
+            if candidate_id is None:
+                continue
+            candidate_key = str(candidate_id)
+            if candidate_key in scores:
+                continue
+            ids.append(candidate_key)
+            scores[candidate_key] = float(getattr(point, "score", 0.0))
+        return ids, scores
+
+    def _embed_query_cached(self, query: str, scope: RetrievalScope) -> list[float]:
+        dimension = int(getattr(self.embedding_service, "dimension", 0) or 0)
+        key = query_embedding_key(
+            tenant=str(scope.user_id),
+            provider=str(getattr(self.embedding_service, "provider", "") or ""),
+            model=str(getattr(self.embedding_service, "model_name", "") or ""),
+            dimension=dimension,
+            task_prefix=str(getattr(self.embedding_service, "query_task", "") or ""),
+            normalized_query=normalize_query(query),
+        )
+        cached = self.cache.get_query_embedding(key, dimension=dimension)
+        self._record_cache_result("query_embedding", hit=cached is not None)
+        if cached is not None:
+            return cached
+        vector = list(self.embedding_service.embed_query(query))
+        self.cache.set_query_embedding(
+            key, vector, ttl_seconds=self.query_embedding_cache_ttl_seconds
+        )
+        return vector
+
+    def _record_stage(self, stage: str, elapsed_seconds: float, **labels: Any) -> None:
+        recorder = getattr(self.metrics, "stage", None)
+        if not callable(recorder):
+            return
+        try:
+            recorder(stage, elapsed_seconds=elapsed_seconds, labels=labels)
+        except Exception:
+            logger.exception("Failed to record RAG stage metric for %s", stage)
+
+    def _record_cache_result(self, cache_name: str, *, hit: bool) -> None:
+        recorder = getattr(self.metrics, "cache_result", None)
+        if not callable(recorder):
+            return
+        cache_enabled = bool(getattr(self.cache, "enabled", False))
+        result = "hit" if hit else ("miss" if cache_enabled else "disabled")
+        try:
+            recorder(cache_name, result)
+        except Exception:
+            logger.exception("Failed to record RAG cache metric for %s", cache_name)
 
     def search_images(
         self,
@@ -355,7 +529,7 @@ class RAGRetriever:
         )
         if not generation_values:
             return []
-        query_embedding = list(self.embedding_service.embed_query(query))
+        query_embedding = self._embed_query_cached(query, scope)
         search_filter = Filter(
             must=[
                 FieldCondition(

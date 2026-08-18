@@ -70,6 +70,7 @@ from app.services.message_service import MessageService
 from app.services.model_config_service import ModelConfigService
 from app.services.model_usage_service import ModelUsageService
 from app.services.provider_service import ProviderService
+from app.services.rag_cache import build_rag_exact_cache
 from app.services.rag_embedding_service import (
     GeminiRAGEmbeddingService,
     SentenceTransformerRAGEmbeddingService,
@@ -223,6 +224,14 @@ class Container(containers.DeclarativeContainer):
         recorder=model_usage_recorder,
     )
 
+    # Task 12: exact-match Redis caches for RAG document/query embeddings and
+    # retrieval results. Disabled (NullRAGExactCache) unless
+    # rag_exact_cache_enabled is true AND redis_url is configured.
+    rag_exact_cache = providers.Singleton(
+        build_rag_exact_cache,
+        settings=providers.Object(settings),
+    )
+
     # JWT Service
     jwt_service = providers.Factory(
         JwtService,
@@ -326,6 +335,10 @@ class Container(containers.DeclarativeContainer):
         rrf_k=settings.rag_rrf_k,
         score_threshold=settings.rag_score_threshold,
         document_image_repository=document_image_repository,
+        cache=rag_exact_cache,
+        query_embedding_cache_ttl_seconds=settings.rag_query_embedding_cache_ttl_seconds,
+        retrieval_cache_ttl_seconds=settings.rag_retrieval_cache_ttl_seconds,
+        metrics=providers.Object(rag_metrics_singleton),
     )
 
     rag_reranker = providers.Singleton(
@@ -601,6 +614,8 @@ class Container(containers.DeclarativeContainer):
         qdrant_upsert_batch_size=settings.qdrant_upsert_batch_size,
         document_image_repository=document_image_repository,
         multimodal_image_embeddings_enabled=settings.rag_multimodal_image_embeddings_enabled,
+        cache=rag_exact_cache,
+        metrics=providers.Object(rag_metrics_singleton),
     )
 
     semantic_boundary_detector = providers.Factory(

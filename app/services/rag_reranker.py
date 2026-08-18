@@ -145,6 +145,7 @@ class RAGReranker:
             except TypeError as exc:
                 raise _RerankerFailure("score_count_mismatch") from exc
             ranked = apply_rerank_scores(pool, score_values)
+            self._record_stage(time.monotonic() - started_at)
             return ranked[: self.output_limit]
         except TimeoutError:
             return self._fail_open(fallback, "timeout")
@@ -190,6 +191,15 @@ class RAGReranker:
         with contextlib.suppress(asyncio.CancelledError, Exception):
             worker.exception()
         self._semaphore.release()
+
+    def _record_stage(self, elapsed_seconds: float) -> None:
+        recorder = getattr(self.metrics, "stage", None)
+        if not callable(recorder):
+            return
+        try:
+            recorder("reranking", elapsed_seconds=elapsed_seconds)
+        except Exception:
+            logger.exception("Failed to record reranker stage metric")
 
     def _fail_open(
         self,
