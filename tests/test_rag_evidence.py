@@ -649,7 +649,11 @@ class _StageMetrics:
         pass
 
 
-def test_assemble_records_evidence_assembly_stage_with_provider_label():
+def test_assemble_records_evidence_assembly_stage_with_provider_and_model_labels():
+    """Round-2 fix (finding 1): ``self.model`` was omitted alongside the
+    already-present ``self.provider`` -- a one-word gap in a fix volunteered
+    in round 1.
+    """
     metrics = _StageMetrics()
     assembler = _assembler(metrics=metrics)
 
@@ -660,3 +664,4 @@ def test_assemble_records_evidence_assembly_stage_with_provider_label():
     assert stage == "evidence_assembly"
     assert elapsed >= 0.0
     assert labels["provider"] == "test"
+    assert labels["model"] == "test-model"

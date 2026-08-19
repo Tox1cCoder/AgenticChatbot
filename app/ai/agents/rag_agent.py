@@ -1022,6 +1022,38 @@ class RAGAgent(BaseAgent):
 
         return images
 
+    def _record_generation_stage(
+        self,
+        elapsed_seconds: float,
+        *,
+        runtime_config: ResolvedRuntimeModelConfig,
+        failed: bool,
+    ) -> None:
+        """Record the "generation" stage on every outcome, not only success.
+
+        A failed call still lands a duration sample (so p95/p99 are not
+        blind to exactly the slow/failing attempts) and a countable
+        ``stage_failure`` -- matching how dense/lexical/sql-hydration and
+        the reranker and embedding stages already behave.
+        """
+        try:
+            rag_metrics.stage(
+                "generation",
+                elapsed_seconds=elapsed_seconds,
+                labels={
+                    "provider": runtime_config.provider,
+                    "model": runtime_config.model,
+                    "modality": "text",
+                },
+            )
+        except Exception:
+            logger.exception("Failed to record RAG generation stage metric")
+        if failed:
+            try:
+                rag_metrics.stage_failure("generation", "provider_exception")
+            except Exception:
+                logger.exception("Failed to record RAG generation stage-failure metric")
+
     async def _invoke_agentic_rag_model(
         self,
         *,
@@ -1126,6 +1158,11 @@ class RAGAgent(BaseAgent):
                     if not settings.context_overflow_retry_enabled or not is_context_overflow_error(
                         exc
                     ):
+                        self._record_generation_stage(
+                            time.monotonic() - generation_started_at,
+                            runtime_config=current_runtime,
+                            failed=True,
+                        )
                         raise
                     compacted_messages = prepare_aggressive_context_retry(
                         request_messages,
@@ -1137,6 +1174,11 @@ class RAGAgent(BaseAgent):
                             compacted_messages,
                         )
                     except Exception as retry_exc:
+                        self._record_generation_stage(
+                            time.monotonic() - generation_started_at,
+                            runtime_config=current_runtime,
+                            failed=True,
+                        )
                         if is_context_overflow_error(retry_exc):
                             conversation_compaction_metrics.record_provider_overflow_retry(
                                 "failure"
@@ -1147,14 +1189,11 @@ class RAGAgent(BaseAgent):
                         raise
                     conversation_compaction_metrics.record_provider_overflow_retry("success")
                     context_overflow_retried = True
-                try:
-                    rag_metrics.stage(
-                        "generation",
-                        elapsed_seconds=time.monotonic() - generation_started_at,
-                        labels={"provider": current_runtime.provider, "modality": "text"},
-                    )
-                except Exception:
-                    logger.exception("Failed to record RAG generation stage metric")
+                self._record_generation_stage(
+                    time.monotonic() - generation_started_at,
+                    runtime_config=current_runtime,
+                    failed=False,
+                )
                 runtime_config = current_runtime
                 break
             except Exception as exc:

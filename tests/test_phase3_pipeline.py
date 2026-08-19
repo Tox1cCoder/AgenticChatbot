@@ -396,6 +396,76 @@ def test_index_task_accepts_artifact_id_from_parse(tmp_path, monkeypatch):
     )
 
 
+class _FakeCaptionMetrics:
+    """Deterministic recorder matching ``RAGMetrics.stage``'s signature."""
+
+    def __init__(self) -> None:
+        self.stage_calls: list[tuple[str, float, dict]] = []
+
+    def stage(self, stage, *, elapsed_seconds, labels=None):
+        self.stage_calls.append((stage, elapsed_seconds, dict(labels or {})))
+
+    def stage_failure(self, stage, failure_code):
+        pass
+
+
+def test_index_task_records_the_caption_stage_metric(tmp_path, monkeypatch):
+    """Round-2 fix (finding 3): the caption stage call sits inside a
+    blanket try/except Exception -- a wrong stage name, a wrong label, or a
+    raising call would all pass silently without a dedicated test.
+    """
+    document_id = str(uuid4())
+    artifact_id = uuid4()
+
+    fake_artifact = _fake_artifact(document_id, artifact_id=artifact_id)
+    fake_doc = _fake_document(document_id)
+
+    _make_mock_session_local(monkeypatch)
+    _make_mock_doc_repo(monkeypatch, fake_doc)
+    _make_mock_event_bus(monkeypatch)
+
+    mock_artifact_repo = MagicMock()
+    mock_artifact_repo.get_by_id.return_value = fake_artifact
+
+    mock_container = MagicMock()
+    mock_container.document_parse_artifact_repository.return_value = mock_artifact_repo
+    mock_container.document_chunk_builder.return_value = MagicMock()
+
+    mock_proc_service = MagicMock()
+    mock_proc_service._build_chunks_for_indexing.return_value = [MagicMock(), MagicMock()]
+    mock_proc_service.document_index_service.index_document.return_value = [
+        MagicMock(),
+        MagicMock(),
+    ]
+    mock_container.document_processing_service.return_value = mock_proc_service
+
+    monkeypatch.setattr("app.workers.document_processor.get_container", lambda: mock_container)
+
+    fake_metrics = _FakeCaptionMetrics()
+    monkeypatch.setattr("app.workers.document_processor.rag_metrics", fake_metrics)
+
+    with patch("app.services.document_parse_service.DocumentParseService") as MockParseService:
+        instance = MockParseService.return_value
+        instance.load_parse_result.return_value = ParseResult(
+            chunks_with_metadata=[{"text": "a"}, {"text": "b"}],
+            images_data=[],
+            parse_elapsed_s=0.1,
+            backend_used="text",
+        )
+
+        result = celery_app.tasks["app.workers.document_processor.index_document_task"].apply(
+            args=[str(artifact_id)]
+        )
+
+    assert not result.failed(), f"Task failed: {result.result}"
+
+    caption_calls = [call for call in fake_metrics.stage_calls if call[0] == "caption"]
+    assert len(caption_calls) == 1
+    _, elapsed, labels = caption_calls[0]
+    assert elapsed >= 0.0
+    assert labels["modality"] == "image"
+
+
 # ---------------------------------------------------------------------------
 # Test 2c — Task 11 review finding 1 (Critical): the production worker must
 # persist images before index_document's vector writes and pass image_rows=

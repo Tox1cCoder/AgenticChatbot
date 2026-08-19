@@ -403,7 +403,7 @@ class EvidenceAssembler:
             recorder(
                 "evidence_assembly",
                 elapsed_seconds=elapsed_seconds,
-                labels={"provider": self.provider},
+                labels={"provider": self.provider, "model": self.model},
             )
         except Exception:
             logger.exception("Failed to record evidence-assembly stage metric")

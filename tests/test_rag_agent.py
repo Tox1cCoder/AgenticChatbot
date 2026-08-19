@@ -1322,6 +1322,135 @@ def test_invoke_agentic_rag_model_binds_tools_when_enabled():
     )
 
 
+class _FakeGenerationMetrics:
+    """Deterministic recorder matching the ``RAGMetrics`` stage/failure API."""
+
+    def __init__(self) -> None:
+        self.stage_calls: list[tuple[str, float, dict]] = []
+        self.stage_failure_calls: list[tuple[str, str]] = []
+
+    def stage(self, stage, *, elapsed_seconds, labels=None):
+        self.stage_calls.append((stage, elapsed_seconds, dict(labels or {})))
+
+    def stage_failure(self, stage, failure_code):
+        self.stage_failure_calls.append((stage, failure_code))
+
+
+def test_invoke_agentic_rag_model_records_generation_stage_with_provider_and_model():
+    """Round-2 fix (finding 1): the generation stage still emitted
+    model="n/a" -- ``current_runtime.model`` was available but unused.
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    from app.core.runtime_modeling import ResolvedRuntimeModelConfig
+
+    agent = _build_agentic_invocation_agent()
+    fake_response = SimpleNamespace(content="final answer", tool_calls=None)
+
+    async def fake_invoke(llm, msgs):
+        return fake_response
+
+    def fake_create_model(rc, *, user_id=None, enable_reasoning_summary=False):
+        return (SimpleNamespace(__name__="fakellm"), False)
+
+    agent._ainvoke_with_retries = fake_invoke
+    agent._create_langchain_model_from_runtime = fake_create_model
+
+    runtime_config = ResolvedRuntimeModelConfig(
+        agent_key="rag",
+        provider="anthropic",
+        model="claude-example",
+        temperature=0.7,
+        api_key=None,
+        key_source="settings",
+        source="agent_default",
+        capabilities={"supports_vision": False},
+        fallback_config=None,
+        warnings=[],
+        provider_fallback=None,
+        is_custom_model=False,
+    )
+
+    fake_metrics = _FakeGenerationMetrics()
+    with patch.object(rag_agent_module, "rag_metrics", fake_metrics):
+        asyncio.run(
+            agent._invoke_agentic_rag_model(
+                conversation_id="conv-1",
+                messages=[SystemMessage(content="sys"), HumanMessage(content="hi")],
+                tools=[],
+                disable_tools=True,
+                user_id="user-1",
+                runtime_config=runtime_config,
+            )
+        )
+
+    generation_calls = [call for call in fake_metrics.stage_calls if call[0] == "generation"]
+    assert len(generation_calls) == 1
+    _, elapsed, labels = generation_calls[0]
+    assert elapsed >= 0.0
+    assert labels["provider"] == "anthropic"
+    assert labels["model"] == "claude-example"
+    assert fake_metrics.stage_failure_calls == []
+
+
+def test_invoke_agentic_rag_model_records_generation_stage_failure_on_raise():
+    """Round-2 fix (finding 2): generation recorded only on success,
+    reproducing the exact bias round-1 item 4 removed everywhere else --
+    a raising provider call must still land a duration sample and a
+    countable failure, before the exception propagates.
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    from app.core.runtime_modeling import ResolvedRuntimeModelConfig
+
+    agent = _build_agentic_invocation_agent()
+
+    async def fake_invoke_raises(llm, msgs):
+        raise RuntimeError("provider unavailable")
+
+    def fake_create_model(rc, *, user_id=None, enable_reasoning_summary=False):
+        return (SimpleNamespace(__name__="fakellm"), False)
+
+    agent._ainvoke_with_retries = fake_invoke_raises
+    agent._create_langchain_model_from_runtime = fake_create_model
+
+    runtime_config = ResolvedRuntimeModelConfig(
+        agent_key="rag",
+        provider="gemini",
+        model="gemini-2.5-flash",
+        temperature=0.7,
+        api_key=None,
+        key_source="settings",
+        source="agent_default",
+        capabilities={"supports_vision": False},
+        fallback_config=None,
+        warnings=[],
+        provider_fallback=None,
+        is_custom_model=False,
+    )
+
+    fake_metrics = _FakeGenerationMetrics()
+    with (
+        patch.object(rag_agent_module, "rag_metrics", fake_metrics),
+        pytest.raises(RuntimeError),
+    ):
+        asyncio.run(
+            agent._invoke_agentic_rag_model(
+                conversation_id="conv-1",
+                messages=[SystemMessage(content="sys"), HumanMessage(content="hi")],
+                tools=[],
+                disable_tools=True,
+                user_id="user-1",
+                runtime_config=runtime_config,
+            )
+        )
+
+    generation_calls = [call for call in fake_metrics.stage_calls if call[0] == "generation"]
+    assert len(generation_calls) == 1
+    assert generation_calls[0][1] >= 0.0
+    assert ("generation", "provider_exception") in fake_metrics.stage_failure_calls
+
+
 def test_reachable_rag_invocation_uses_native_request_and_bounded_evidence_counts():
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
