@@ -62,6 +62,11 @@ log.md
 *.tmp
 tasksync
 
+# RAG benchmark/experiment output (scripts/benchmark_rag.py,
+# scripts/experiment_embedding_dimensions.py). These are real-run artifacts,
+# never fixtures -- they must never be committed by an unqualified `git add`.
+/artifacts/
+
 # Storage (user uploaded content: chat images, document images, parse
 # artifacts). Ignore the whole tree — the previous `document_images/`-only rule
 # left chat_images/ and parse_artifacts/ exposed to a broad `git add`.
