@@ -435,12 +435,11 @@ class DocumentParseService:
             cmd.extend(extra_args)
 
             logger.info(
-                "Running MinerU (backend=%s, method=%s, api_url=%s) for document %s: %s",
+                "Running MinerU (backend=%s, method=%s, api_url=%s) for document %s",
                 backend,
                 method if supports_method_and_lang else "n/a",
                 "configured" if api_url else "auto-local",
                 document_id,
-                " ".join(cmd),
             )
 
             parse_started_at = time.perf_counter()
@@ -474,8 +473,9 @@ class DocumentParseService:
                 search_roots.append(base_output_dir)
             else:
                 logger.warning(
-                    "MinerU output directory missing for %s. Searching entire output tree.",
-                    filename_without_ext,
+                    "MinerU output directory missing for document %s. Searching entire "
+                    "output tree.",
+                    document_id,
                 )
 
             if output_dir not in search_roots:
@@ -491,21 +491,22 @@ class DocumentParseService:
                 try:
                     content_blocks = self._parse_content_list_json(content_list_path)
                     logger.info(
-                        "Loaded %d content blocks from content_list.json for %s",
+                        "Loaded %d content blocks from content_list.json for document %s",
                         len(content_blocks),
-                        original_filename or filename_without_ext,
+                        document_id,
                     )
-                except Exception as e:
+                except Exception:
                     logger.warning(
-                        "Failed to parse content_list.json for %s: %s. Falling back to markdown.",
-                        original_filename or filename_without_ext,
-                        str(e),
+                        "Failed to parse content_list.json for document %s; "
+                        "falling back to markdown.",
+                        document_id,
+                        exc_info=True,
                     )
                     content_blocks = None
             else:
                 logger.info(
-                    "content_list.json not found for %s, using markdown fallback",
-                    original_filename or filename_without_ext,
+                    "content_list.json not found for document %s, using markdown fallback",
+                    document_id,
                 )
 
             images_by_path: dict[str, int] = {}
@@ -568,9 +569,9 @@ class DocumentParseService:
 
         except subprocess.TimeoutExpired as exc:
             logger.error(
-                "MinerU timed out after %ss while processing %s",
+                "MinerU timed out after %ss while processing document %s",
                 self.settings.mineru_timeout,
-                file_path,
+                document_id,
             )
             raise RuntimeError(f"MinerU timed out after {self.settings.mineru_timeout}s") from exc
         except subprocess.CalledProcessError as exc:
@@ -578,14 +579,18 @@ class DocumentParseService:
                 "backend", getattr(self.settings, "mineru_backend", "pipeline")
             )
             logger.error(
-                "MinerU (backend=%s) failed (exit %s) while processing %s",
+                "MinerU (backend=%s) failed (exit %s) while processing document %s",
                 backend_for_log,
                 exc.returncode,
-                file_path,
+                document_id,
             )
             raise RuntimeError(f"MinerU failed (exit {exc.returncode})") from exc
         except Exception as exc:
-            logger.error("Unexpected MinerU error while processing %s: %s", file_path, exc)
+            logger.error(
+                "Unexpected MinerU error while processing document %s",
+                document_id,
+                exc_info=True,
+            )
             raise RuntimeError(f"Unexpected error in MinerU processing: {str(exc)}") from exc
 
     def _process_excel_workbook(
@@ -951,9 +956,8 @@ class DocumentParseService:
             if result:
                 if root != unique_roots[0]:
                     logger.warning(
-                        "MinerU markdown resolved via fallback root %s for %s",
-                        root,
-                        ordered_candidates[0],
+                        "MinerU markdown resolved via a fallback search root "
+                        "(primary output directory did not contain it)"
                     )
                 return result
 

@@ -126,9 +126,9 @@ class RAGAgent(BaseAgent):
             metrics=rag_metrics,
         )
 
-        # Task 11: bounded, post-retrieval image selection. Caption-first
-        # retrieval never depends on this; it only bounds how many/which
-        # already-linked images get read from disk and attached to a turn.
+        # Bounded, post-retrieval image selection. Caption-first retrieval
+        # never depends on this; it only bounds how many/which already-linked
+        # images get read from disk and attached to a turn.
         self.image_selector = image_selector or RAGImageSelector(
             max_images=settings.agentic_rag_max_images,
             max_bytes=settings.rag_vision_max_bytes,
@@ -367,15 +367,15 @@ class RAGAgent(BaseAgent):
         A plain ``candidates[:limit]`` slice always kept text first because
         image candidates were appended after the text list, so a full page
         of text (the common case with reranking disabled) evicted every
-        image before it could ever reach a result dict (round 1 finding 6).
-        Reserves up to ``max_reserved_images`` slots for image candidates,
-        preserving each group's original relative order, but the reservation
-        is capped at ``limit - 1`` whenever there is at least one text
-        candidate to keep — otherwise, whenever the evidence limit was <=
-        max_images, the reservation wiped out text evidence entirely
-        regardless of score (round 2 finding A). Selection within each group
-        is by existing rank/fusion order, not by directly comparing dense
-        and image scores, which are not calibrated against each other.
+        image before it could ever reach a result dict. Reserves up to
+        ``max_reserved_images`` slots for image candidates, preserving each
+        group's original relative order, but the reservation is capped at
+        ``limit - 1`` whenever there is at least one text candidate to keep —
+        otherwise, whenever the evidence limit was <= max_images, the
+        reservation wiped out text evidence entirely regardless of score.
+        Selection within each group is by existing rank/fusion order, not by
+        directly comparing dense and image scores, which are not calibrated
+        against each other.
         """
         if limit <= 0:
             return []
@@ -432,7 +432,7 @@ class RAGAgent(BaseAgent):
         conversation_id: str | None,
         query: str = "",
     ) -> list[dict[str, Any]]:
-        """Select and load images only after retrieval (Task 11).
+        """Select and load images only after retrieval.
 
         Chunk-linked image ids are authorized through their parent document
         exactly as before, but the candidate set is now bounded by
@@ -521,7 +521,7 @@ class RAGAgent(BaseAgent):
                 "embedding_dimension": self.embedding_dimension,
             }
         except Exception as e:
-            logger.error(f"Error getting RAG agent status: {e}")
+            logger.error("Error getting RAG agent status", exc_info=True)
             return {
                 "status": "error",
                 "error": str(e),
@@ -575,7 +575,9 @@ class RAGAgent(BaseAgent):
                 "operation_result": str(result),
             }
         except Exception as e:
-            logger.error(f"Error deleting vectors for document {document_id}: {e}", exc_info=True)
+            logger.error(
+                "Error deleting vectors for document %s", document_id, exc_info=True
+            )
             return {"success": False, "document_id": document_id, "error": str(e)}
 
     # === Agentic RAG Content Retrieval Methods ===
@@ -669,11 +671,10 @@ class RAGAgent(BaseAgent):
                 "chunks": selected,
                 "next_start_chunk": next_start_chunk,
             }
-        except Exception as e:
+        except Exception:
             logger.error(
-                "Error fetching chunk window for document %s: %s",
+                "Error fetching chunk window for document %s",
                 document_id,
-                e,
                 exc_info=True,
             )
             return None
@@ -737,9 +738,10 @@ class RAGAgent(BaseAgent):
                 "page_size": bounded_page_size,
             }
 
-        except Exception as e:
+        except Exception:
             logger.error(
-                f"Error listing documents for conversation {conversation_id}: {e}",
+                "Error listing documents for conversation %s",
+                conversation_id,
                 exc_info=True,
             )
             return {
@@ -774,11 +776,10 @@ class RAGAgent(BaseAgent):
             if len(rows) != 1:
                 return None
             return str(rows[0].id)
-        except Exception as e:
+        except Exception:
             logger.error(
-                "Error resolving document filename %s: %s",
-                filename,
-                e,
+                "Error resolving a document filename for conversation %s",
+                conversation_id,
                 exc_info=True,
             )
             return None
@@ -1143,8 +1144,9 @@ class RAGAgent(BaseAgent):
         if hasattr(response, "tool_calls") and response.tool_calls:
             tool_calls = response.tool_calls
             logger.debug(
-                f"Agentic RAG returned {len(tool_calls)} tool calls: "
-                f"{[tc.get('name', tc['name']) for tc in tool_calls]}"
+                "Agentic RAG returned %d tool calls: %s",
+                len(tool_calls),
+                [tc.get("name", tc["name"]) for tc in tool_calls],
             )
             if budget_result is not None:
                 wrappers = tuple(
@@ -1412,7 +1414,7 @@ class RAGAgent(BaseAgent):
                 response.metadata["rag_force_final_response"] = True
             return response
         except Exception as e:
-            logger.error(f"Error in agentic RAG processing: {e}", exc_info=True)
+            logger.error("Error in agentic RAG processing", exc_info=True)
             error_metadata = {
                 "conversation_id": conversation_id,
                 "agentic_mode": True,

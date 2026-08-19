@@ -231,8 +231,8 @@ class DocumentProcessingService:
                     metadata={"task_id": task.id},
                 ),
             )
-        except Exception as e:
-            logger.debug(f"Event emission failed for PROCESSING_STARTED: {e}")
+        except Exception:
+            logger.debug("Event emission failed for PROCESSING_STARTED", exc_info=True)
 
         return {
             "success": True,
@@ -402,9 +402,10 @@ class DocumentProcessingService:
     # process_document dispatches .xlsx and MinerU-format uploads through these
     # two wrappers so DocumentParseService stays the single owner of parse
     # logic, while process_document itself keeps its persist-before-vector-
-    # writes ordering as one coherent method (Task 15: DocumentProcessingService
-    # is otherwise a documented cleanup candidate, but this ordering is the
-    # plan-mandated reference implementation and must not be restructured).
+    # writes ordering as one coherent method. process_document has zero
+    # non-test callers but is not dead: it is the reference implementation
+    # of that ordering invariant (see docs/rag-cleanup-inventory.md) and
+    # must not be restructured to converge with the Celery worker here.
     # ---------------------------------------------------------------------------
 
     def _get_parse_service(self) -> "DocumentParseService":
@@ -491,7 +492,8 @@ class DocumentProcessingService:
         doc_storage_path = storage_path / document_id
         doc_storage_path.mkdir(parents=True, exist_ok=True)
 
-        # Phase 1: copy files, collect caption candidates
+        # Local file copies happen sequentially, up front: only the
+        # network-bound captioning below needs the concurrency semaphore.
         candidates = []  # (img_data, dest_path, metadata_caption)
         seen_source_paths: set[str] = set()
 
@@ -503,7 +505,7 @@ class DocumentProcessingService:
             seen_source_paths.add(source_key)
 
             if not source_path.exists():
-                logger.warning("Skipping missing extracted image %s", source_path)
+                logger.warning("Skipping extracted image missing from temp storage")
                 continue
 
             dest_path = doc_storage_path / source_path.name
@@ -512,7 +514,8 @@ class DocumentProcessingService:
             caption = self._caption_from_image_metadata(img_data)
             candidates.append((img_data, dest_path, caption))
 
-        # Phase 2: caption concurrently (bounded by semaphore)
+        # Caption concurrently, bounded so a large image batch cannot exceed
+        # the provider's rate limit.
         sem = asyncio.Semaphore(self.settings.image_caption_max_concurrency)
 
         async def _caption_one(img_data, dest_path, metadata_caption):
@@ -528,11 +531,9 @@ class DocumentProcessingService:
                         )
                         if generated:
                             caption = generated
-                    except Exception as e:
+                    except Exception:
                         logger.error(
-                            "Failed to generate caption for %s: %s",
-                            dest_path.name,
-                            e,
+                            "Failed to generate caption for an extracted image",
                             exc_info=True,
                         )
             try:
@@ -813,8 +814,11 @@ class DocumentProcessingService:
                         )
                         delay = base_delay * attempt
                     logger.warning(
-                        f"Gemini rate limit while captioning {image_name} "
-                        f"(attempt {attempt}/{max_attempts}). Waiting {delay:.2f}s before retry."
+                        "Gemini rate limit while captioning an image "
+                        "(attempt %d/%d); waiting %.2fs before retry.",
+                        attempt,
+                        max_attempts,
+                        delay,
                     )
                     await asyncio.sleep(delay)
                     continue
@@ -822,16 +826,14 @@ class DocumentProcessingService:
                 raise
             except Exception as e:
                 last_error = e
-                logger.error(
-                    f"Unexpected error while captioning {image_name}: {str(e)}",
-                    exc_info=True,
-                )
+                logger.error("Unexpected error while captioning an image", exc_info=True)
                 break
 
         if last_error:
             logger.error(
-                f"Exhausted caption retries for {image_name} after {max_attempts} "
-                f"attempts: {last_error}"
+                "Exhausted caption retries after %d attempts",
+                max_attempts,
+                exc_info=last_error,
             )
         return None
 
@@ -847,7 +849,8 @@ class DocumentProcessingService:
         The structured object covers visible OCR text, chart title, axes,
         legend, values, trends, relationships, and surrounding section
         context so the flattened text is retrievable via lexical/dense
-        search. Never logs the caption or OCR content — only ``image_name``.
+        search. Never logs the caption, OCR content, or ``image_name`` — the
+        caller-side retry/error logs describe events generically instead.
         """
         prompt_parts = [
             types.Part.from_text(text=_IMAGE_CAPTION_STRUCTURED_PROMPT),
@@ -876,10 +879,10 @@ class DocumentProcessingService:
                 operation=operation,
             )
 
-        return self._render_caption_response(response, image_name)
+        return self._render_caption_response(response)
 
     @staticmethod
-    def _render_caption_response(response: Any, image_name: str) -> str | None:
+    def _render_caption_response(response: Any) -> str | None:
         """Render the validated structured object, or fall back to raw text.
 
         The request enforces ``response_schema=ImageCaptionSections`` so a
@@ -894,7 +897,7 @@ class DocumentProcessingService:
 
         text = getattr(response, "text", None)
         if not text:
-            logger.warning(f"No caption text in Gemini response for {image_name}")
+            logger.warning("No caption text in Gemini response for an extracted image")
             return None
         try:
             sections = ImageCaptionSections.model_validate_json(text)
@@ -931,27 +934,24 @@ class DocumentProcessingService:
 
                 file_path = os.path.join(temp_dir, filename)
 
-                # Handle regular files
                 if os.path.isfile(file_path):
                     file_mtime = os.path.getmtime(file_path)
                     if file_mtime < cutoff_time:
                         try:
                             os.unlink(file_path)
                             removed_count += 1
-                        except Exception as e:
-                            logger.warning(f"Failed to remove temp file {filename}: {str(e)}")
+                        except Exception:
+                            logger.warning("Failed to remove a temp file", exc_info=True)
 
-                # Handle MinerU output folders
                 elif os.path.isdir(file_path) and filename.startswith("mineru_output_"):
                     dir_mtime = os.path.getmtime(file_path)
                     if dir_mtime < cutoff_time:
                         try:
                             shutil.rmtree(file_path)
                             removed_folders += 1
-                        except Exception as e:
-                            logger.warning(f"Failed to remove MinerU folder {filename}: {str(e)}")
+                        except Exception:
+                            logger.warning("Failed to remove a MinerU output folder", exc_info=True)
 
-            # Cleanup old document image folders
             images_dir = Path(self.settings.document_images_storage_path)
             if images_dir.exists():
                 for doc_folder in images_dir.iterdir():
@@ -971,7 +971,7 @@ class DocumentProcessingService:
             }
 
         except Exception as e:
-            logger.error(f"Failed to cleanup temp files: {str(e)}")
+            logger.error("Failed to cleanup temp files", exc_info=True)
             return {
                 "files_removed": 0,
                 "folders_removed": 0,
