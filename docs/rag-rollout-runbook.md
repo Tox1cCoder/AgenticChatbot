@@ -50,8 +50,9 @@ setting it `True` makes `RagLoop._apply_grounded_answer_gate`
 **never replaced** in this mode; the gate only parses the answer's citations
 against the turn's evidence and records the outcome
 (`response.metadata["grounded_answer"]`) plus a Prometheus sample
-(`grounding_outcome_total{mode="shadow", ...}`, see
-`app/observability/rag.py`). Flipping it to `False` would delete the only
+(`rag_grounded_answers_total{mode="shadow", ...}`, see
+`app/observability/rag.py:89-98` and `RAGMetrics.grounded_answer()` at
+lines 176-181). Flipping it to `False` would delete the only
 telemetry this plan has toward ever enabling the gate, so despite reading
 like an inert legacy toggle, **it should stay `True`** — the reconciliation
 here is documentation, not a code change.
@@ -67,7 +68,8 @@ Two caveats that matter for reading its output:
 
 ## `min_citation_coverage`: gating the wrong quantity for its own justification
 
-`GroundedFinalizer.finalize` (`app/services/rag_grounding.py`) computes
+`GroundedAnswerGate.validate` (`app/services/rag_grounding.py:171-196`,
+called internally by `GroundedAnswerGate.finalize`) computes
 `coverage = covered_claim_count / total_claim_count` — **fraction of the
 answer's claims that carry a citation.** The setting's original
 justification (and its field description before this task) described a
@@ -218,7 +220,7 @@ eventually confirm it, its rollback path, and whether reindexing is required.
   `min_citation_coverage` against (see that section above).
 - **Health signals:** once unblocked, a shadow run with a non-degenerate
   distribution of `citation_coverage` values (not uniformly `0.0`), a
-  `grounding_outcome_total{outcome="would_abstain"}` rate low enough that
+  `rag_grounded_answers_total{outcome="would_abstain"}` rate low enough that
   enforcement wouldn't cause routine regeneration, and zero
   `unknown_evidence_id` reason codes from turns with a single search call
   (a two-search-call turn is expected to still show some until Blocker 1 is
@@ -294,10 +296,12 @@ fix it.**
 graph `rag_loop` path, but its final response never reaches
 `RagLoop._apply_grounded_answer_gate`. Today this means shadow metrics
 undercount (some RAG answers never get a shadow validation at all), and if
-the gate were ever enforced, this path would bypass it entirely. **This
-checkout's `app/ai/graph.py` holds another session's uncommitted work; Task
-14 must not touch it.** Whoever picks this up next needs a clean
-`app/ai/graph.py` to route its final response through the same gate.
+the gate were ever enforced, this path would bypass it entirely. **Fixing
+this requires routing `app/ai/graph.py`'s inline-worker final response
+through the same `RagLoop._apply_grounded_answer_gate` call** the graph
+`rag_loop` path already uses — it is not optional for enabling item 7, since
+an ungated path would let enforcement be bypassed simply by taking the
+inline-worker route.
 
 **Blocker 3 — shadow metrics carry no groundedness signal, and this depends
 on Blocker 1.**
@@ -372,8 +376,13 @@ exist and are tested against fakes — the numbers do not exist.
 A repository guard blocks `.env*` paths for both shell commands and the
 file-editing tools used to write this runbook, so this change could not be
 applied directly (attempted once during this task; both the read and the
-write were rejected by the guard). Add the following block near the existing
-`RAG_MULTIMODAL_IMAGE_EMBEDDINGS_ENABLED` line in `.env.example`, by hand:
+write were rejected by the guard). **The same guard blocks reviewers,
+not just authors: nobody in this process has read the live
+`.env.example`, so the block below has not been diffed against its actual
+current contents by anyone.** Whoever applies this by hand must open the
+real file first and merge by hand — do not append blindly on the assumption
+this block is conflict-free. Add it near the existing
+`RAG_MULTIMODAL_IMAGE_EMBEDDINGS_ENABLED` line in `.env.example`:
 
 ```env
 # --- Task 14: default-off RAG rollout flags -----------------------------

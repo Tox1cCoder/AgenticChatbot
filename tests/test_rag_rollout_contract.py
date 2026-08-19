@@ -17,6 +17,7 @@ Two things are pinned here:
    by hand, when the runbook was written).
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -127,16 +128,44 @@ def test_runbook_orders_the_three_grounded_gate_blockers():
 
 
 def test_runbook_states_release_gates_are_non_binding():
+    """Anchored to the dedicated section and requiring several specific
+    facts to co-occur there (fourteen gates, the unmeasured status literal,
+    the word "non-binding", and "nothing" being binding) -- not just two
+    isolated substrings that could each survive an unrelated, or even
+    false, rewrite of the surrounding prose.
+    """
     text = _runbook_text()
-    assert "non-binding" in text
-    assert "fourteen" in text
+    heading = "## No automated quality gate exists behind any of these decisions"
+    assert heading in text, "runbook must have a dedicated non-binding-gates section"
+    section = text.split(heading, 1)[1].split("\n## ", 1)[0]
+    assert "fourteen gates" in section
+    assert '"status": "unmeasured"' in section
+    assert "non-binding" in section
+    assert "nothing" in section.lower()
 
 
-def test_runbook_names_a_rollback_setting_for_every_ordered_entry():
+def test_runbook_names_a_rollback_setting_for_every_risky_flag():
+    """Each risky flag's own rollout-order section must itself contain a
+    Rollback: line naming that same setting.
+
+    A bare document-wide count of "Rollback:" occurrences (the prior version
+    of this test) stays green even if one specific flag's rollback line is
+    deleted -- including item 7's, the grounded-answer gate, the single flag
+    this entire task exists to keep off -- as long as enough *other* entries
+    still have one. This locates each flag's own section by its Setting:
+    line and requires that same section to name itself as the rollback.
+    """
     text = _runbook_text()
-    assert text.count("Rollback:") >= len(_RISKY_FLAGS), (
-        "every entry in the rollout order must name its own rollback setting"
-    )
+    sections = re.split(r"(?=^### \d+\. )", text, flags=re.MULTILINE)
+    for flag in _RISKY_FLAGS:
+        section = next(
+            (s for s in sections if re.search(rf"\*\*Setting:\*\*\s*`{re.escape(flag)}`", s)),
+            None,
+        )
+        assert section is not None, f"no rollout-order section found whose Setting: is {flag}"
+        assert re.search(rf"\*\*Rollback:\*\*.*{re.escape(flag)}", section), (
+            f"{flag}'s rollout-order section must have a Rollback: line naming {flag} itself"
+        )
 
 
 def test_runbook_documents_env_example_block_manually():
