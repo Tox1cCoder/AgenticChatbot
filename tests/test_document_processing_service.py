@@ -379,7 +379,8 @@ def test_mineru_content_list_table_body_is_indexed_as_searchable_text(tmp_path):
     assert "Revenue by segment" in indexed_text
     assert "Cloud" in indexed_text
     assert "12345" in indexed_text
-    assert any(chunk.metadata.get("has_tables") for chunk in built_chunks)
+    table_chunk = next(c for c in built_chunks if "Revenue by segment" in c.content)
+    assert table_chunk.metadata["has_tables"] is True
 
 
 def test_build_chunks_for_indexing_recovers_table_body_from_parse_metadata(tmp_path):
