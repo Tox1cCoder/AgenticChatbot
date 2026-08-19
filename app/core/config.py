@@ -1343,11 +1343,20 @@ class Settings(BaseSettings):
     )
     enable_citation_verification: bool = Field(
         default=True,
-        description="Enable citation verification for RAG agent responses",
+        description="Run the per-turn grounded-answer shadow validation on RAG responses in "
+        "the graph rag_loop path (app/ai/workflow/rag_loop.py). Ships default=True since "
+        "Task 10 -- it was never off, despite an earlier plan draft assuming otherwise. "
+        "Shadow-only (no answer is ever replaced) unless rag_grounded_answer_gate_enabled "
+        "is also True. Does not cover the inline-worker RAG path in app/ai/graph.py. See "
+        "docs/rag-rollout-runbook.md before changing either flag.",
     )
     min_citation_coverage: float = Field(
         default=0.5,
-        description="Minimum fraction of retrieved docs that should be referenced in RAG response",
+        description="Minimum fraction of an answer's claims that must carry a citation for "
+        "the grounded-answer gate to accept it. Unqualified placeholder: chosen for a "
+        "different quantity (fraction of retrieved documents referenced) than the one it "
+        "currently gates, and never re-selected from evaluation results. See "
+        "docs/rag-rollout-runbook.md before changing it.",
     )
     rag_grounded_answer_gate_enabled: bool = Field(
         default=False,

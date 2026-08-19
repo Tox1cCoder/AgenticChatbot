@@ -732,6 +732,24 @@ Raw multimodal image embeddings are disabled by default
 (`RAG_MULTIMODAL_IMAGE_EMBEDDINGS_ENABLED=false`); caption-augmented chunks
 remain the primary image-retrieval path.
 
+### Reversible RAG rollout flags
+
+`RAG_HYBRID_RETRIEVAL_ENABLED`, `RAG_GROUNDED_ANSWER_GATE_ENABLED`,
+`RAG_EXACT_CACHE_ENABLED`, `RAG_SEMANTIC_CHUNKING_ENABLED`, and
+`RAG_MULTIMODAL_IMAGE_EMBEDDINGS_ENABLED` all default `false`. Every one of
+them is code-complete but **unqualified: there is no evaluation evidence
+behind enabling any of them**, and all fourteen quality gates in
+`eval/rag/release_gates.json` are non-binding
+(`status: "unmeasured"`). `ENABLE_CITATION_VERIFICATION` is the one
+exception — it ships `true` and already runs shadow-only citation
+validation on the graph RAG path.
+
+**[`docs/rag-rollout-runbook.md`](docs/rag-rollout-runbook.md)** documents,
+per flag, the evidence still missing, the health signals that would confirm
+it, its rollback setting, and whether reindexing is required — including the
+three ordered defects that currently block the grounded-answer gate. Do not
+enable any of these flags without reading it first.
+
 Document lifecycle events (`UPLOAD_STARTED`, `PROCESSING_STARTED`, `PROCESSING_COMPLETED`, `PROCESSING_FAILED`, `DELETED`) are published on an in-process event bus and logged by [`DocumentEventLogger`](app/services/document_event_listener.py).
 
 ---
