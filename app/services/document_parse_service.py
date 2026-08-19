@@ -28,8 +28,6 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-
 from app.core.config import Settings
 from app.models.document_parse_artifact import DocumentParseArtifact
 from app.observability.rag import rag_metrics
@@ -590,34 +588,6 @@ class DocumentParseService:
             logger.error("Unexpected MinerU error while processing %s: %s", file_path, exc)
             raise RuntimeError(f"Unexpected error in MinerU processing: {str(exc)}") from exc
 
-    def _legacy_char_chunk_size(self) -> int:
-        """Approximate char count for a target-token chunk (~4 chars/token heuristic)."""
-        return max(200, int(self.settings.rag_chunk_target_tokens * 4))
-
-    def _legacy_char_overlap(self) -> int:
-        return max(0, int(self.settings.rag_chunk_overlap_tokens * 4))
-
-    def _create_chunks(
-        self,
-        documents: list,
-        max_chunk_size: int | None = None,
-        overlap: int | None = None,
-    ) -> list[str]:
-        if max_chunk_size is None:
-            max_chunk_size = self._legacy_char_chunk_size()
-        if overlap is None:
-            overlap = self._legacy_char_overlap()
-        separators = ["\n\n", "\n", " ", ""]
-
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=max_chunk_size,
-            chunk_overlap=overlap,
-            length_function=len,
-            separators=separators,
-        )
-        split_docs = text_splitter.split_documents(documents)
-        return [doc.page_content for doc in split_docs]
-
     def _process_excel_workbook(
         self,
         file_path: str,
@@ -724,144 +694,6 @@ class DocumentParseService:
         with open(content_list_path, encoding="utf-8") as f:
             content_list = json.load(f)
         return content_list
-
-    def _create_chunks_with_page_metadata(
-        self,
-        content_blocks: list[dict[str, Any]],
-        page_to_images: dict[int, list[dict[str, Any]]],
-        max_chunk_size: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """Create chunks from content_list.json blocks while preserving page metadata."""
-        if max_chunk_size is None:
-            max_chunk_size = self._legacy_char_chunk_size()
-
-        chunks_with_metadata: list[dict[str, Any]] = []
-        current_chunk_text = ""
-        current_page_start: int | None = None
-        current_page_end: int | None = None
-        current_images: list[dict[str, Any]] = []
-        current_tables: list[dict[str, Any]] = []
-        pages_in_current_chunk: set = set()
-
-        def _finalize_chunk() -> None:
-            nonlocal current_chunk_text, current_page_start, current_page_end
-            nonlocal current_images, current_tables, pages_in_current_chunk
-
-            if not current_chunk_text.strip():
-                return
-
-            chunk_images = current_images.copy()
-            for page in pages_in_current_chunk:
-                if page in page_to_images:
-                    for img in page_to_images[page]:
-                        if img not in chunk_images:
-                            chunk_images.append(img)
-
-            chunks_with_metadata.append(
-                {
-                    "text": current_chunk_text.strip(),
-                    "page_start": current_page_start,
-                    "page_end": current_page_end,
-                    "has_images": bool(chunk_images),
-                    "image_count": len(chunk_images),
-                    "images": chunk_images,
-                    "has_tables": bool(current_tables),
-                    "table_count": len(current_tables),
-                    "tables": current_tables,
-                }
-            )
-
-            current_chunk_text = ""
-            current_page_start = None
-            current_page_end = None
-            current_images = []
-            current_tables = []
-            pages_in_current_chunk = set()
-
-        for block in content_blocks:
-            page_idx = block.get("page_idx", 0)
-            block_type = block.get("type", "text")
-            bbox = block.get("bbox")
-            text_level = block.get("text_level", 0)
-
-            text = ""
-            if block_type == "text":
-                text = block.get("text", "")
-                if text_level and text_level > 0:
-                    heading_prefix = "#" * text_level + " "
-                    text = heading_prefix + text
-            elif block_type == "table":
-                table_entry = {
-                    "page": page_idx,
-                    "bbox": bbox,
-                    "caption": block.get("table_caption", []),
-                    "footnote": block.get("table_footnote", []),
-                    "body": block.get("table_body", ""),
-                }
-                current_tables.append(table_entry)
-                captions = block.get("table_caption", [])
-                footnotes = block.get("table_footnote", [])
-                caption_items = captions if isinstance(captions, list) else [captions]
-                footnote_items = footnotes if isinstance(footnotes, list) else [footnotes]
-                caption_text = " ".join(str(caption) for caption in caption_items if caption)
-                footnote_text = " ".join(str(note) for note in footnote_items if note)
-                table_body = str(block.get("table_body", "") or "").strip()
-
-                table_parts = []
-                if caption_text:
-                    table_parts.append(f"[Table: {caption_text}]")
-                else:
-                    table_parts.append("[Table]")
-                if table_body:
-                    table_parts.append(table_body)
-                if footnote_text:
-                    table_parts.append(f"[Table footnote: {footnote_text}]")
-                text = "\n".join(table_parts)
-            elif block_type == "image":
-                image_entry = {
-                    "page": page_idx,
-                    "bbox": bbox,
-                    "path": block.get("img_path", ""),
-                    "caption": block.get("image_caption", []),
-                    "footnote": block.get("image_footnote", []),
-                }
-                current_images.append(image_entry)
-                captions = block.get("image_caption", [])
-                footnotes = block.get("image_footnote", [])
-                if captions:
-                    text = "[Image: " + " ".join(captions) + "]"
-                elif footnotes:
-                    text = "[Image] " + " ".join(str(note) for note in footnotes if note)
-                else:
-                    text = "[Image]"
-            elif block_type == "equation":
-                text = block.get("text", "")
-                if not text:
-                    text = "[Equation]"
-            else:
-                text = block.get("text", "")
-
-            proposed_length = len(current_chunk_text) + len(text) + 1
-            if current_chunk_text and proposed_length > max_chunk_size:
-                _finalize_chunk()
-
-            if current_page_start is None:
-                current_page_start = page_idx
-            current_page_end = page_idx
-            pages_in_current_chunk.add(page_idx)
-
-            if text:
-                current_chunk_text += text + "\n"
-
-        _finalize_chunk()
-
-        logger.info(
-            "Created %d page-aware chunks from %d content blocks",
-            len(chunks_with_metadata),
-            len(content_blocks),
-        )
-
-        return chunks_with_metadata
 
     # --- Filename normalization helpers ---
 

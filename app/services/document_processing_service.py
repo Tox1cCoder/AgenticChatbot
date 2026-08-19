@@ -399,13 +399,12 @@ class DocumentProcessingService:
     # ---------------------------------------------------------------------------
     # Parse-stage delegation helpers
     # ---------------------------------------------------------------------------
-    # All parse logic lives in DocumentParseService.  These wrappers preserve
-    # the existing public/private API so that:
-    #  * Tests that call these methods directly keep working.
-    #  * Tests that mock them on a service instance keep intercepting the call
-    #    (Python attribute lookup checks the instance dict first).
-    #  * Tests that use object.__new__(DocumentProcessingService) to bypass
-    #    __init__ get a lazy-initialised _parse_service on first access.
+    # process_document dispatches .xlsx and MinerU-format uploads through these
+    # two wrappers so DocumentParseService stays the single owner of parse
+    # logic, while process_document itself keeps its persist-before-vector-
+    # writes ordering as one coherent method (Task 15: DocumentProcessingService
+    # is otherwise a documented cleanup candidate, but this ordering is the
+    # plan-mandated reference implementation and must not be restructured).
     # ---------------------------------------------------------------------------
 
     def _get_parse_service(self) -> "DocumentParseService":
@@ -443,23 +442,6 @@ class DocumentProcessingService:
         self._extracted_images = images_data
         return blocks
 
-    def _legacy_char_chunk_size(self) -> int:
-        """Delegate to parse service."""
-        return self._get_parse_service()._legacy_char_chunk_size()
-
-    def _legacy_char_overlap(self) -> int:
-        """Delegate to parse service."""
-        return self._get_parse_service()._legacy_char_overlap()
-
-    def _create_chunks(
-        self,
-        documents: list,
-        max_chunk_size: int | None = None,
-        overlap: int | None = None,
-    ) -> list[str]:
-        """Delegate to parse service."""
-        return self._get_parse_service()._create_chunks(documents, max_chunk_size, overlap)
-
     def _process_excel_workbook(
         self,
         file_path: str,
@@ -467,64 +449,6 @@ class DocumentProcessingService:
     ) -> list[NormalizedBlock]:
         """Delegate Excel workbook parsing to DocumentParseService."""
         return self._get_parse_service()._process_excel_workbook(file_path, original_filename)
-
-    def _extract_excel_rows(self, formula_sheet: Any, value_sheet: Any | None) -> list[list[str]]:
-        """Delegate to parse service."""
-        return self._get_parse_service()._extract_excel_rows(formula_sheet, value_sheet)
-
-    @classmethod
-    def _excel_rows_to_markdown(cls, sheet_name: str, rows: list[list[str]]) -> str:
-        """Delegate to parse service."""
-        return DocumentParseService._excel_rows_to_markdown(sheet_name, rows)
-
-    @staticmethod
-    def _stringify_excel_cell(value: Any) -> str:
-        return DocumentParseService._stringify_excel_cell(value)
-
-    @staticmethod
-    def _escape_markdown_table_cell(value: str) -> str:
-        return DocumentParseService._escape_markdown_table_cell(value)
-
-    def _parse_content_list_json(self, content_list_path: Path) -> list[dict[str, Any]]:
-        """Delegate to parse service."""
-        return self._get_parse_service()._parse_content_list_json(content_list_path)
-
-    def _create_chunks_with_page_metadata(
-        self,
-        content_blocks: list[dict[str, Any]],
-        page_to_images: dict[int, list[dict[str, Any]]],
-        max_chunk_size: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """Delegate to parse service."""
-        return self._get_parse_service()._create_chunks_with_page_metadata(
-            content_blocks, page_to_images, max_chunk_size
-        )
-
-    @staticmethod
-    def _normalize_filename_token(value: str) -> str:
-        return DocumentParseService._normalize_filename_token(value)
-
-    @staticmethod
-    def _collapse_filename_token(value: str) -> str:
-        return DocumentParseService._collapse_filename_token(value)
-
-    def _build_filename_aliases(
-        self, sanitized_stem: str, original_filename: str | None = None
-    ) -> list[str]:
-        """Delegate to parse service."""
-        return self._get_parse_service()._build_filename_aliases(sanitized_stem, original_filename)
-
-    def _resolve_mineru_output_dir(
-        self, output_dir: Path, filename_candidates: list[str]
-    ) -> Path | None:
-        """Delegate to parse service."""
-        return self._get_parse_service()._resolve_mineru_output_dir(output_dir, filename_candidates)
-
-    def _resolve_markdown_file(
-        self, search_roots: list[Path], filename_candidates: list[str]
-    ) -> Path:
-        """Delegate to parse service."""
-        return self._get_parse_service()._resolve_markdown_file(search_roots, filename_candidates)
 
     # --- End of delegated parse methods ---
 
@@ -627,49 +551,6 @@ class DocumentProcessingService:
 
         results = await asyncio.gather(*[_caption_one(*c) for c in candidates])
         return list(results)
-
-    def _attach_prepared_images_to_chunks(
-        self,
-        chunks_with_metadata: list[dict[str, Any]],
-        prepared_images: list[dict[str, Any]],
-    ) -> None:
-        """Version-1 compatibility helper for mutable chunk dictionaries."""
-        if not prepared_images:
-            return
-
-        for chunk_index, chunk_data in enumerate(chunks_with_metadata):
-            if not isinstance(chunk_data, dict):
-                continue
-
-            matching_images = [
-                image
-                for image in prepared_images
-                if self._image_matches_chunk(image, chunk_data, chunk_index)
-            ]
-            if not matching_images:
-                continue
-
-            existing_images = list(chunk_data.get("images") or [])
-            image_context_lines = []
-            for image in matching_images:
-                if image not in existing_images:
-                    existing_images.append(image)
-                caption = str(image.get("caption") or "").strip()
-                if caption:
-                    image_context_lines.append(f"[Image: {caption}]")
-                else:
-                    image_name = Path(str(image.get("stored_path") or image.get("path"))).name
-                    image_context_lines.append(f"[Image: {image_name}]")
-
-            text = str(chunk_data.get("text", "") or "").rstrip()
-            for line in image_context_lines:
-                if line not in text:
-                    text = f"{text}\n{line}" if text else line
-
-            chunk_data["text"] = text
-            chunk_data["images"] = existing_images
-            chunk_data["has_images"] = True
-            chunk_data["image_count"] = len(existing_images)
 
     def _attach_prepared_images_to_blocks(
         self,
@@ -869,12 +750,6 @@ class DocumentProcessingService:
         start = page_start if page_start is not None else page_end
         end = page_end if page_end is not None else page_start
         return start <= page_number <= end
-
-    @staticmethod
-    def _display_page_number(value: Any) -> int | None:
-        if value is None:
-            return None
-        return int(value) + 1
 
     @staticmethod
     def _document_ref(

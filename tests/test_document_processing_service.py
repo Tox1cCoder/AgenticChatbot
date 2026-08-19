@@ -20,7 +20,6 @@ from PIL import Image
 
 from app.schemas.document_image import DocumentImageCreate
 from app.services.document_blocks import NormalizedBlock
-from app.services.document_parse_service import DocumentParseService
 from app.services.document_processing_service import DocumentProcessingService
 
 
@@ -346,11 +345,19 @@ def test_prepared_images_attach_only_to_their_structural_owner(tmp_path):
 
 
 def test_mineru_content_list_table_body_is_indexed_as_searchable_text(tmp_path):
-    """MinerU table_body values must reach DocumentChunk.content for RAG search."""
-    service = _build_service(tmp_path)
-    parse_service = DocumentParseService(settings=service.settings)
+    """MinerU table_body values must reach DocumentChunk.content for RAG search.
 
-    chunks_with_metadata = parse_service._create_chunks_with_page_metadata(
+    Exercises the current production boundary end to end: MinerU
+    content_list.json-shaped entries go through DocumentNormalizer (the
+    only supported normalizer for MinerU output), and the resulting
+    NormalizedBlocks go through the token-aware DocumentChunkBuilder (via
+    _build_chunks_for_indexing) — not the retired character-count chunker.
+    """
+    from app.services.document_normalizer import DocumentNormalizer
+
+    service = _build_service(tmp_path)
+
+    blocks = DocumentNormalizer().normalize_mineru(
         [
             {"type": "text", "text": "Quarterly financial report", "page_idx": 0},
             {
@@ -363,16 +370,16 @@ def test_mineru_content_list_table_body_is_indexed_as_searchable_text(tmp_path):
                 "table_footnote": [],
             },
         ],
-        page_to_images={},
+        images_data=[],
     )
 
-    built_chunks = service._build_chunks_for_indexing(chunks_with_metadata)
+    built_chunks = service._build_chunks_for_indexing(blocks)
     indexed_text = "\n".join(chunk.content for chunk in built_chunks)
 
     assert "Revenue by segment" in indexed_text
     assert "Cloud" in indexed_text
     assert "12345" in indexed_text
-    assert built_chunks[0].metadata["has_tables"] is True
+    assert any(chunk.metadata.get("has_tables") for chunk in built_chunks)
 
 
 def test_build_chunks_for_indexing_recovers_table_body_from_parse_metadata(tmp_path):
