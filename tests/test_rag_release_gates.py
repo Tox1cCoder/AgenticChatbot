@@ -88,7 +88,7 @@ def test_unmeasured_gate_is_excluded_from_the_overall_pass_fail_decision():
     assert all(result.passed for result in results if result.binding)
 
 
-def test_a_measured_gate_still_uses_reported_values_when_both_are_present():
+def test_an_unmeasured_gate_still_reports_baseline_and_candidate_values_when_present():
     gates = {
         "vector_memory_mb": {
             "direction": "lower",
@@ -106,3 +106,40 @@ def test_a_measured_gate_still_uses_reported_values_when_both_are_present():
     assert results[0].baseline == 100.0
     assert results[0].candidate == 120.0
     assert results[0].binding is False
+
+
+# ---------------------------------------------------------------------------
+# Round-1 review fix: eval/rag/release_gates.json inherited five gates from
+# Task 1 stamped status="measured" with provenance naming an experiment
+# ("pre-hardening-baseline") that was never run (see Task 1's own report and
+# `git show 9c05ff5 -- eval/rag/release_gates.json`, which shows those five
+# entries committed as bare placeholder numbers with no status/provenance
+# field at all). This test locks the honest state of this branch: every gate
+# in the real file is non-binding until a real baseline experiment records
+# one. It must fail again if any gate is ever silently promoted to
+# status="measured" without an experiment that actually produced its number.
+# ---------------------------------------------------------------------------
+
+
+def test_the_real_release_gates_file_has_no_gate_claiming_a_measurement_yet():
+    from pathlib import Path
+
+    from app.evaluation.rag.release_gates import load_release_gates
+
+    gates = load_release_gates(Path("eval/rag/release_gates.json"))
+
+    unmeasured = {
+        metric: rule for metric, rule in gates.items() if rule.get("status") == "unmeasured"
+    }
+    assert unmeasured == gates, (
+        "a gate in eval/rag/release_gates.json claims status='measured' with no "
+        "baseline experiment on record; see docs/rag-scale-runbook.md for how to "
+        "promote a gate honestly, one real result at a time"
+    )
+    for metric, rule in gates.items():
+        assert rule["max_regression"] is None, (
+            f"gate {metric} is unmeasured but carries a non-null max_regression"
+        )
+        assert rule["provenance"]["experiment"] is None, (
+            f"gate {metric} is unmeasured but names a specific experiment in provenance"
+        )

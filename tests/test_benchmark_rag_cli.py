@@ -168,6 +168,17 @@ rag_cache_operations_total{cache="query_embedding",result="miss"} 10
 
 
 def test_stage_latency_from_metrics_text_computes_percentiles_from_real_buckets():
+    # Hand-computed from _SAMPLE_METRICS_TEXT's cumulative buckets
+    # (le=0.005:0, le=0.01:2, le=0.025:8, le=0.05:10, le=+Inf:10; total=10)
+    # via the same linear interpolation PromQL's histogram_quantile() uses:
+    #   p50: target=5.0 -> between (0.01, 2) and (0.025, 8):
+    #        0.01 + (5-2)/(8-2)*(0.025-0.01) = 0.0175s
+    #   p95: target=9.5 -> between (0.025, 8) and (0.05, 10):
+    #        0.025 + (9.5-8)/(10-8)*(0.05-0.025) = 0.04375s
+    #   p99: target=9.9 -> between (0.025, 8) and (0.05, 10):
+    #        0.025 + (9.9-8)/(10-8)*(0.05-0.025) = 0.04875s
+    # An interpolation or off-by-one bug that preserved ordering would not be
+    # caught by asserting p50 <= p95 <= p99 alone, so these are exact values.
     script = _script()
 
     latency = script.stage_latency_from_metrics_text(_SAMPLE_METRICS_TEXT)
@@ -175,8 +186,9 @@ def test_stage_latency_from_metrics_text_computes_percentiles_from_real_buckets(
     assert "dense_retrieval" in latency
     stage = latency["dense_retrieval"]
     assert stage["sample_count"] == 10
-    assert stage["p50_ms"] is not None
-    assert stage["p50_ms"] <= stage["p95_ms"] <= stage["p99_ms"]
+    assert stage["p50_ms"] == 17.5
+    assert stage["p95_ms"] == 43.75
+    assert stage["p99_ms"] == 48.75
 
 
 def test_stage_latency_from_metrics_text_ignores_unrelated_families():

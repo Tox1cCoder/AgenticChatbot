@@ -476,15 +476,17 @@ def _run_quality_phase(
     abstention_inputs: list[dict[str, float]] = []
     latencies_ms: list[float] = []
 
-    def _evaluate_row(row: Mapping[str, Any]) -> tuple[Mapping[str, Any], dict[str, float], float]:
+    def _evaluate_row(
+        row: Mapping[str, Any],
+    ) -> tuple[Mapping[str, Any], dict[str, float], float, dict[str, float]]:
         start = time.perf_counter()
         raw_output = query_target(dict(row["inputs"]))
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         output = output_from_mapping(raw_output)
         reference = reference_from_mapping(row["reference"])
-        return row, evaluate_output(output, reference), elapsed_ms, abstention_metrics(
-            output, reference
-        )
+        scores = evaluate_output(output, reference)
+        abstention = abstention_metrics(output, reference)
+        return row, scores, elapsed_ms, abstention
 
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as executor:
         futures = [executor.submit(_evaluate_row, row) for row in golden_rows]

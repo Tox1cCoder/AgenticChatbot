@@ -212,6 +212,14 @@ def test_run_experiment_never_fabricates_a_recommendation_without_operator_toler
 
 
 def test_run_experiment_computes_a_recommendation_only_from_measured_deltas():
+    # Hand-computed from the fake hook's 0.9 - dimension / 100000:
+    #   768  -> 0.89232 (best)
+    #   1536 -> 0.88464  (delta from best = 0.00768, within 0.01 tolerance)
+    #   3072 -> 0.86928  (delta from best = 0.02304, NOT within tolerance)
+    # within_tolerance = {768, 1536}; the storage-minimizing pick is the
+    # smallest of those, 768 -- not the largest, which would silently invert
+    # the "minimize Qdrant vector storage" intent documented in the
+    # rationale string this test also checks.
     script = _script()
     args = script.parse_args(
         ["--dimensions", "768", "1536", "3072", "--recall-parity-tolerance", "0.01"]
@@ -221,7 +229,8 @@ def test_run_experiment_computes_a_recommendation_only_from_measured_deltas():
     report = script.run_experiment(args, experiment_hook=hook)
 
     recommendation = report["comparison"]["recommendation"]
-    assert recommendation["selected_dimension"] in {768, 1536, 3072}
+    assert recommendation["selected_dimension"] == 768
+    assert "768" in recommendation["rationale"]
     assert "document_recall_at_5" in recommendation["rationale"]
 
 
