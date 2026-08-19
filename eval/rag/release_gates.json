@@ -1,25 +1,141 @@
 {
-  "version": "v1",
+  "version": "v2",
+  "_comment": "status='measured' gates carry an evidence-based max_regression threshold and are binding on the release decision (see app/evaluation/rag/release_gates.py). status='unmeasured' gates have no baseline benchmark yet -- max_regression is null and app/evaluation/rag/release_gates.py's compare_release_gates() treats them as non-binding (passed=null), never as a pass. Do not set max_regression on an unmeasured gate without first running the experiment named in its provenance.source.",
   "metrics": {
     "document_recall_at_5": {
       "direction": "higher",
-      "max_regression": 0.02
+      "max_regression": 0.02,
+      "status": "measured",
+      "provenance": {
+        "source": "scripts/evaluate_rag.py --compare-baseline",
+        "experiment": "pre-hardening-baseline"
+      }
     },
     "citation_validity": {
       "direction": "higher",
-      "max_regression": 0.01
+      "max_regression": 0.01,
+      "status": "measured",
+      "provenance": {
+        "source": "scripts/evaluate_rag.py --compare-baseline",
+        "experiment": "pre-hardening-baseline"
+      }
     },
     "abstention_recall": {
       "direction": "higher",
-      "max_regression": 0.02
+      "max_regression": 0.02,
+      "status": "measured",
+      "provenance": {
+        "source": "scripts/evaluate_rag.py --compare-baseline",
+        "experiment": "pre-hardening-baseline"
+      }
     },
     "latency_ms": {
       "direction": "lower",
-      "max_regression": 0.1
+      "max_regression": 0.1,
+      "status": "measured",
+      "provenance": {
+        "source": "scripts/evaluate_rag.py --compare-baseline",
+        "experiment": "pre-hardening-baseline"
+      }
     },
     "cost_usd": {
       "direction": "lower",
-      "max_regression": 0.1
+      "max_regression": 0.1,
+      "status": "measured",
+      "provenance": {
+        "source": "scripts/evaluate_rag.py --compare-baseline",
+        "experiment": "pre-hardening-baseline"
+      }
+    },
+    "p95_stage_latency_ms": {
+      "direction": "lower",
+      "max_regression": null,
+      "status": "unmeasured",
+      "provenance": {
+        "source": "scripts/benchmark_rag.py --output artifacts/rag-scale-<N>.json (latency.stages.*.p95_ms)",
+        "experiment": null,
+        "note": "Requires a live 1,000-document corpus, PostgreSQL, Qdrant and Redis -- none are available in this environment (Task 13). Not executed."
+      }
+    },
+    "p95_tenant_filter_latency_ms": {
+      "direction": "lower",
+      "max_regression": null,
+      "status": "unmeasured",
+      "provenance": {
+        "source": "scripts/benchmark_rag.py --output artifacts/rag-scale-<N>.json (latency.tenant_filter_ms.p95)",
+        "experiment": null,
+        "note": "Requires the same live scale run as p95_stage_latency_ms. Not executed."
+      }
+    },
+    "vector_memory_mb": {
+      "direction": "lower",
+      "max_regression": null,
+      "status": "unmeasured",
+      "provenance": {
+        "source": "scripts/benchmark_rag.py --qdrant-stats-hook ... (capacity.vector_memory)",
+        "experiment": null,
+        "note": "Requires a live Qdrant instance and an operator-supplied stats hook. Not executed."
+      }
+    },
+    "indexing_lag_p95_seconds": {
+      "direction": "lower",
+      "max_regression": null,
+      "status": "unmeasured",
+      "provenance": {
+        "source": "scripts/benchmark_rag.py --output artifacts/rag-scale-<N>.json (capacity.indexing_lag_seconds.p95_s)",
+        "experiment": null,
+        "note": "Requires a live 1,000-document ingestion run. Not executed."
+      }
+    },
+    "cache_hit_ratio": {
+      "direction": "higher",
+      "max_regression": null,
+      "status": "unmeasured",
+      "provenance": {
+        "source": "scripts/benchmark_rag.py --output artifacts/rag-scale-<N>.json (capacity.cache_ratios)",
+        "experiment": null,
+        "note": "Requires a live Redis-backed exact-cache under real traffic. Not executed."
+      }
+    },
+    "embedding_dimension_recall_delta": {
+      "direction": "higher",
+      "max_regression": null,
+      "status": "unmeasured",
+      "provenance": {
+        "source": "scripts/experiment_embedding_dimensions.py --output artifacts/rag-dimension-matrix.json (comparison.quality_deltas_vs_largest_dimension)",
+        "experiment": null,
+        "note": "Requires Gemini embedding-provider credentials and budget for a real 768/1536/3072 dimension comparison. Not executed."
+      }
+    },
+    "cost_per_document_usd": {
+      "direction": "lower",
+      "max_regression": null,
+      "status": "unmeasured",
+      "provenance": {
+        "source": "scripts/benchmark_rag.py --output artifacts/rag-scale-<N>.json (capacity.cost_per_document_usd)",
+        "experiment": null,
+        "note": "Deferred pending a design decision (Task 12 round-1 review), not merely unmeasured -- app/observability/rag.py has no per-document cost attribution yet. Must stay null, never a computed placeholder."
+      }
+    },
+    "cost_per_question_usd": {
+      "direction": "lower",
+      "max_regression": null,
+      "status": "unmeasured",
+      "provenance": {
+        "source": "scripts/benchmark_rag.py --output artifacts/rag-scale-<N>.json (capacity.cost_per_question_usd)",
+        "experiment": null,
+        "note": "Deferred pending the same design decision as cost_per_document_usd. Must stay null, never a computed placeholder."
+      }
+    },
+    "cached_input_token_ratio": {
+      "direction": "higher",
+      "max_regression": null,
+      "status": "unmeasured",
+      "provenance": {
+        "source": "scripts/benchmark_rag.py --output artifacts/rag-scale-<N>.json (capacity.cached_input_token_ratio)",
+        "experiment": null,
+        "note": "Deferred pending a design decision on cached-token accounting. Must stay null, never a computed placeholder."
+      }
     }
   }
 }

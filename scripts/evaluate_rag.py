@@ -246,7 +246,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"release-gate comparison failed: {error}", file=sys.stderr)
             return 1
         print(json.dumps([verdict.__dict__ for verdict in verdicts], sort_keys=True))
-        if not all(verdict.passed for verdict in verdicts):
+        # Unmeasured gates (status="unmeasured" in release_gates.json) have no
+        # evidence-based threshold yet and carry binding=False; they must never
+        # count as a pass or a failure of the release decision.
+        if not all(verdict.passed for verdict in verdicts if verdict.binding):
             return 2
     print(results)
     return 0
