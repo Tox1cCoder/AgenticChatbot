@@ -1,0 +1,64 @@
+{
+  "_fixture_disclaimer": "SCHEMA EXAMPLE ONLY. Every field below is a placeholder used to test validate_report(). No document was ingested, no query was run, and no number here describes real system behavior. Do not cite this file as a benchmark result.",
+  "schema_version": "1.0",
+  "status": "unexecuted",
+  "generated_at": "1970-01-01T00:00:00+00:00",
+  "git_sha": "example-fixture-not-a-real-run",
+  "config_hash": "example-fixture-not-a-real-run",
+  "config": {
+    "documents": 1000,
+    "corpus_manifest": "eval/rag/corpus_manifest.jsonl"
+  },
+  "corpus": {
+    "manifest_path": "eval/rag/corpus_manifest.jsonl",
+    "documents_requested": 1000,
+    "documents_available": 11,
+    "sufficient": false
+  },
+  "quality": {
+    "measured": false,
+    "rows_evaluated": null,
+    "aggregate": null,
+    "distractor": null,
+    "abstention_precision": null,
+    "abstention_recall": null,
+    "tool_iteration_metrics": null,
+    "reason": "fixture: no query target was configured for this schema example"
+  },
+  "latency": {
+    "measured": false,
+    "tenant_filter_ms": null,
+    "stages": null,
+    "source": null,
+    "reason": "fixture: no metrics source was configured for this schema example"
+  },
+  "capacity": {
+    "measured": false,
+    "total_chunks": null,
+    "indexing_lag_seconds": null,
+    "vector_memory": null,
+    "queue_saturation": null,
+    "cache_ratios": null,
+    "cost_usd": null,
+    "cost_per_document_usd": null,
+    "cost_per_question_usd": null,
+    "cached_input_token_ratio": null,
+    "reason": "fixture: ingestion did not run for this schema example"
+  },
+  "failures": {
+    "measured": false,
+    "requested": false,
+    "kinds": ["provider", "qdrant", "redis", "worker"],
+    "results": [],
+    "reason": "fixture: failure injection was not requested for this schema example"
+  },
+  "provenance": {
+    "prerequisites": [
+      "this is a fixture for schema validation only; it has no execution prerequisites"
+    ],
+    "notes": [
+      "capacity.cost_per_document_usd, capacity.cost_per_question_usd and capacity.cached_input_token_ratio are deferred pending a design decision and must stay null.",
+      "quality.tool_iteration_metrics has no metric owner yet and must stay null."
+    ]
+  }
+}
