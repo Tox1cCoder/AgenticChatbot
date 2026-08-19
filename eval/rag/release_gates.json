@@ -1,50 +1,55 @@
 {
-  "version": "v2",
-  "_comment": "status='measured' gates carry an evidence-based max_regression threshold and are binding on the release decision (see app/evaluation/rag/release_gates.py). status='unmeasured' gates have no baseline benchmark yet -- max_regression is null and app/evaluation/rag/release_gates.py's compare_release_gates() treats them as non-binding (passed=null), never as a pass. Do not set max_regression on an unmeasured gate without first running the experiment named in its provenance.source.",
+  "version": "v3",
+  "_comment": "status='measured' is for a gate carrying a max_regression threshold that was actually derived from a recorded baseline experiment; status='unmeasured' means no such experiment exists yet, max_regression is null, and app/evaluation/rag/release_gates.py's compare_release_gates() treats the gate as non-binding (passed=null), never as a pass. As of this file, all fourteen gates below are unmeasured: the five inherited from Task 1 were committed as placeholder numbers with no baseline experiment ever recorded (confirmed against Task 1's own report and git history), and the nine added in Task 13 have never run either. The release-gate comparator therefore currently has nothing binding to enforce. Do not set status='measured' or a non-null max_regression on any gate without first running the experiment named in its provenance.source and recording the result.",
   "metrics": {
     "document_recall_at_5": {
       "direction": "higher",
-      "max_regression": 0.02,
-      "status": "measured",
+      "max_regression": null,
+      "status": "unmeasured",
       "provenance": {
         "source": "scripts/evaluate_rag.py --compare-baseline",
-        "experiment": "pre-hardening-baseline"
+        "experiment": null,
+        "note": "Inherited from Task 1 (commit 9c05ff5) as a bare placeholder max_regression=0.02 with no status/provenance field at all. Task 1's own report states no LangSmith API key or authenticated RAG target credentials were present, so the 'pre-hardening-baseline' online experiment was never recorded; no later task recorded it either. Corrected here from a wrongly-labeled status='measured' (Task 13 round-1 review) -- max_regression is null until a real baseline experiment runs."
       }
     },
     "citation_validity": {
       "direction": "higher",
-      "max_regression": 0.01,
-      "status": "measured",
+      "max_regression": null,
+      "status": "unmeasured",
       "provenance": {
         "source": "scripts/evaluate_rag.py --compare-baseline",
-        "experiment": "pre-hardening-baseline"
+        "experiment": null,
+        "note": "Inherited from Task 1 (commit 9c05ff5) as a bare placeholder max_regression=0.01 with no status/provenance field at all. Task 1's own report states no LangSmith API key or authenticated RAG target credentials were present, so the 'pre-hardening-baseline' online experiment was never recorded; no later task recorded it either. Corrected here from a wrongly-labeled status='measured' (Task 13 round-1 review) -- max_regression is null until a real baseline experiment runs."
       }
     },
     "abstention_recall": {
       "direction": "higher",
-      "max_regression": 0.02,
-      "status": "measured",
+      "max_regression": null,
+      "status": "unmeasured",
       "provenance": {
         "source": "scripts/evaluate_rag.py --compare-baseline",
-        "experiment": "pre-hardening-baseline"
+        "experiment": null,
+        "note": "Inherited from Task 1 (commit 9c05ff5) as a bare placeholder max_regression=0.02 with no status/provenance field at all. Task 1's own report states no LangSmith API key or authenticated RAG target credentials were present, so the 'pre-hardening-baseline' online experiment was never recorded; no later task recorded it either. Corrected here from a wrongly-labeled status='measured' (Task 13 round-1 review) -- max_regression is null until a real baseline experiment runs."
       }
     },
     "latency_ms": {
       "direction": "lower",
-      "max_regression": 0.1,
-      "status": "measured",
+      "max_regression": null,
+      "status": "unmeasured",
       "provenance": {
         "source": "scripts/evaluate_rag.py --compare-baseline",
-        "experiment": "pre-hardening-baseline"
+        "experiment": null,
+        "note": "Inherited from Task 1 (commit 9c05ff5) as a bare placeholder max_regression=0.1 with no status/provenance field at all. Task 1's own report states no LangSmith API key or authenticated RAG target credentials were present, so the 'pre-hardening-baseline' online experiment was never recorded; no later task recorded it either. Corrected here from a wrongly-labeled status='measured' (Task 13 round-1 review) -- max_regression is null until a real baseline experiment runs."
       }
     },
     "cost_usd": {
       "direction": "lower",
-      "max_regression": 0.1,
-      "status": "measured",
+      "max_regression": null,
+      "status": "unmeasured",
       "provenance": {
         "source": "scripts/evaluate_rag.py --compare-baseline",
-        "experiment": "pre-hardening-baseline"
+        "experiment": null,
+        "note": "Inherited from Task 1 (commit 9c05ff5) as a bare placeholder max_regression=0.1 with no status/provenance field at all. Task 1's own report states no LangSmith API key or authenticated RAG target credentials were present, so the 'pre-hardening-baseline' online experiment was never recorded; no later task recorded it either. Corrected here from a wrongly-labeled status='measured' (Task 13 round-1 review) -- max_regression is null until a real baseline experiment runs."
       }
     },
     "p95_stage_latency_ms": {

@@ -21,17 +21,30 @@ been made yet.** This checkout has:
   plan skips LangSmith uploads by direction (2026-08-13).
 
 Every number an operator sees below is a *placeholder for a real run*, not
-a recorded result. `eval/rag/release_gates.json`'s Task 13 gate entries
-(`p95_stage_latency_ms`, `vector_memory_mb`, `indexing_lag_p95_seconds`,
-`cache_hit_ratio`, `embedding_dimension_recall_delta`, and the three
-deferred cost/token gates) all carry `"status": "unmeasured"` with
-`"max_regression": null` for exactly this reason. Do not hand-edit those
-values to a number you have not measured -- `app/evaluation/rag/
-release_gates.py`'s `compare_release_gates()` treats `status: "unmeasured"`
-gates as **non-binding** (`passed: null`) specifically so an absent
-measurement can never masquerade as a pass. Flip a gate to `"status":
-"measured"` with a real `max_regression` only after the run below produced
-the number in its `provenance.source`.
+a recorded result. **All fourteen gates in `eval/rag/release_gates.json`
+carry `"status": "unmeasured"` with `"max_regression": null`, and the
+release-gate comparator (`app/evaluation/rag/release_gates.py`) currently
+has nothing binding to enforce.** This includes the five gates this plan
+inherited from Task 1 (`document_recall_at_5`, `citation_validity`,
+`abstention_recall`, `latency_ms`, `cost_usd`): they were briefly
+mislabeled `"status": "measured"` with provenance naming a
+`"pre-hardening-baseline"` LangSmith experiment during this task's first
+draft, but that experiment was never run -- Task 1's own report records
+that no LangSmith API key or authenticated RAG target credentials were
+present when it tried, and no later task recorded it either (round-1 code
+review caught this and it was corrected). Their `max_regression` values
+(0.02/0.01/0.02/0.1/0.1) were bare placeholder numbers committed in Task 1
+with no baseline behind them, not evidence-based thresholds -- they are
+null now, and Task 14 must plan around zero binding gates, not five.
+
+Do not hand-edit any gate's value to a number you have not measured --
+`compare_release_gates()` treats `status: "unmeasured"` gates as
+**non-binding** (`passed: null`) specifically so an absent measurement can
+never masquerade as a pass. Flip a gate to `"status": "measured"` with a
+real `max_regression` only after the run below actually produced the
+number in its `provenance.source`, and do it one gate at a time (see
+"Feeding a real result back" below) -- never bulk-promote every gate from
+a single artifact unless that artifact truly measured every one of them.
 
 ## Running the 1,000-document scale benchmark
 
