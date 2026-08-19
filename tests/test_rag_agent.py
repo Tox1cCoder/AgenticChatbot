@@ -175,16 +175,6 @@ def _build_minimal_agent() -> RAGAgent:
     return agent
 
 
-def test_read_document_helper_accepts_server_context_filters():
-    """get_document_full_content must accept user_id/conversation_id filters."""
-    sig = inspect.signature(RAGAgent.get_document_full_content)
-    params = sig.parameters
-    assert "user_id" in params, "get_document_full_content must accept server-context user_id"
-    assert "conversation_id" in params, (
-        "get_document_full_content must accept server-context conversation_id"
-    )
-
-
 def test_grep_document_helper_accepts_server_context_filters():
     sig = inspect.signature(RAGAgent.grep_document)
     params = sig.parameters
@@ -196,52 +186,6 @@ def test_list_conversation_documents_helper_accepts_user_id_filter():
     sig = inspect.signature(RAGAgent.list_conversation_documents)
     params = sig.parameters
     assert "user_id" in params, "list_conversation_documents must accept user_id"
-
-
-def test_get_document_full_content_returns_none_when_user_or_conversation_does_not_match():
-    """Auth filters must short-circuit before any chunk content is hydrated."""
-    agent = _build_minimal_agent()
-
-    chunk_repo = MagicMock()
-    # Repository returns no rows when the auth filters don't match.
-    chunk_repo.get_by_document_for_scope.return_value = []
-
-    document_id = uuid4()
-
-    with patch("app.ai.agents.rag_agent.DocumentChunkRepository") as repo_cls:
-        repo_cls.return_value = chunk_repo
-        result = asyncio.run(
-            agent.get_document_full_content(
-                str(document_id),
-                user_id="other-user",
-                conversation_id="other-conv",
-            )
-        )
-
-    assert result is None
-    # Auth filters must reach the SQL layer, not be applied after the fact.
-    chunk_repo.get_by_document_for_scope.assert_called_once()
-    call_kwargs = chunk_repo.get_by_document_for_scope.call_args.kwargs
-    assert call_kwargs.get("user_id") == "other-user"
-    assert call_kwargs.get("conversation_id") == "other-conv"
-
-
-def test_get_document_full_content_hydrates_when_filters_match():
-    agent = _build_minimal_agent()
-
-    chunk_repo = MagicMock()
-    chunk_repo.get_by_document_for_scope.return_value = [
-        SimpleNamespace(content="alpha"),
-        SimpleNamespace(content="beta"),
-    ]
-
-    with patch("app.ai.agents.rag_agent.DocumentChunkRepository") as repo_cls:
-        repo_cls.return_value = chunk_repo
-        result = asyncio.run(
-            agent.get_document_full_content(str(uuid4()), user_id="u", conversation_id="c")
-        )
-
-    assert result == "alpha\n\nbeta"
 
 
 def test_list_conversation_documents_filters_by_user_when_provided():
@@ -1010,100 +954,6 @@ def test_rag_search_reranks_authorized_typed_pool_before_dict_adapter():
     agent.reranker.rank.assert_awaited_once_with("query", rows)
     assert [result["content"] for result in results] == ["content-2"]
     assert [result["rerank_score"] for result in results] == [3.0]
-
-
-def test_legacy_rerank_dict_adapter_delegates_to_bounded_service():
-    """Keep the legacy helper callable until its Task 15 removal gate."""
-    agent = object.__new__(RAGAgent)
-    agent.reranker = MagicMock()
-    agent.reranker.rank = AsyncMock(
-        side_effect=lambda _query, rows: [replace(rows[1], rerank_score=4.0)]
-    )
-    document_id = uuid4()
-    first_chunk_id = uuid4()
-    second_chunk_id = uuid4()
-    payloads = [
-        {
-            "content": "first",
-            "source": "report.pdf",
-            "document_id": str(document_id),
-            "chunk_id": str(first_chunk_id),
-            "fused_score": 0.2,
-            "custom": "keep-first",
-        },
-        {
-            "content": "second",
-            "source": "report.pdf",
-            "document_id": str(document_id),
-            "chunk_id": str(second_chunk_id),
-            "fused_score": 0.1,
-            "custom": "keep-second",
-        },
-    ]
-
-    ranked = asyncio.run(agent._rerank_results("query", payloads))
-
-    assert ranked == [
-        {
-            **payloads[1],
-            "rerank_score": 4.0,
-        }
-    ]
-
-
-def test_legacy_rerank_dict_adapter_preserves_duplicate_missing_id_positions():
-    """Fail-open output must not collapse duplicate or absent identities."""
-    from app.services.rag_reranker import RAGReranker
-
-    agent = object.__new__(RAGAgent)
-    agent.reranker = RAGReranker(
-        model_loader=lambda _name: pytest.fail("missing IDs must fail open"),
-        output_limit=2,
-    )
-    payloads = [
-        {"content": "first", "source": "a.pdf", "custom": "keep-first"},
-        {"content": "second", "source": "b.pdf", "custom": "keep-second"},
-    ]
-
-    ranked = asyncio.run(agent._rerank_results("query", payloads))
-
-    assert ranked == payloads
-    assert ranked[0] is not ranked[1]
-
-
-def test_legacy_rerank_dict_adapter_preserves_duplicate_valid_id_occurrences():
-    agent = object.__new__(RAGAgent)
-    shared_document_id = uuid4()
-    shared_chunk_id = uuid4()
-    payloads = [
-        {
-            "content": "first occurrence",
-            "source": "a.pdf",
-            "document_id": str(shared_document_id),
-            "chunk_id": str(shared_chunk_id),
-        },
-        {
-            "content": "second occurrence",
-            "source": "a.pdf",
-            "document_id": str(shared_document_id),
-            "chunk_id": str(shared_chunk_id),
-        },
-    ]
-    agent.reranker = MagicMock()
-    agent.reranker.rank = AsyncMock(
-        side_effect=lambda _query, rows: [
-            replace(rows[1], rerank_score=2.0),
-            replace(rows[0], rerank_score=1.0),
-        ]
-    )
-
-    ranked = asyncio.run(agent._rerank_results("query", payloads))
-
-    assert [row["content"] for row in ranked] == [
-        "second occurrence",
-        "first occurrence",
-    ]
-    assert [row["rerank_score"] for row in ranked] == [2.0, 1.0]
 
 
 def test_disabled_agent_path_caps_evidence_without_loading_provider():

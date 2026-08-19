@@ -489,26 +489,6 @@ def test_rag_search_reads_table_metadata_from_sql_chunk():
     assert results[0]["table_count"] == 2
 
 
-def test_get_document_full_content_reads_sql_chunks_not_qdrant_payloads():
-    document_id = uuid4()
-    qdrant = _fake_qdrant()
-    qdrant.scroll.return_value = ([], None)
-    agent = _build_minimal_rag_agent(qdrant, _fake_embedding())
-
-    chunk_repo = MagicMock()
-    chunk_repo.get_by_document_ordered.return_value = [
-        SimpleNamespace(content="First SQL chunk."),
-        SimpleNamespace(content="Second SQL chunk."),
-    ]
-
-    with patch("app.ai.agents.rag_agent.DocumentChunkRepository", create=True) as chunk_repo_cls:
-        chunk_repo_cls.return_value = chunk_repo
-        content = asyncio.run(agent.get_document_full_content(str(document_id)))
-
-    assert content == "First SQL chunk.\n\nSecond SQL chunk."
-    qdrant.scroll.assert_not_called()
-
-
 # ---------------------------------------------------------------------------
 # Task 11: native multimodal image search — off by default, authorized when on
 # ---------------------------------------------------------------------------

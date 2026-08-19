@@ -424,57 +424,6 @@ class RAGAgent(BaseAgent):
             "fused_score": candidate.fused_score,
         }
 
-    async def _rerank_results(
-        self, query: str, results: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        if not self.reranker or not results:
-            return results
-
-        def optional_uuid(value: Any) -> UUID | None:
-            try:
-                return UUID(str(value)) if value else None
-            except (TypeError, ValueError, AttributeError):
-                return None
-
-        candidates: list[RetrievalCandidate] = []
-        for position, result in enumerate(results):
-            chunk_id = optional_uuid(result.get("chunk_id"))
-            image_id = optional_uuid(result.get("image_id"))
-            document_id = optional_uuid(result.get("document_id")) or UUID(int=0)
-            candidate = RetrievalCandidate(
-                document_id=document_id,
-                chunk_id=chunk_id,
-                image_id=image_id,
-                modality="image" if image_id is not None else "text",
-                content=str(result.get("content") or ""),
-                filename=str(result.get("source") or result.get("filename") or "unknown"),
-                page_start=result.get("page_start"),
-                page_end=result.get("page_end"),
-                section_path=tuple(result.get("section_path") or ()),
-                dense_rank=result.get("dense_rank"),
-                dense_score=result.get("dense_score"),
-                lexical_rank=result.get("lexical_rank"),
-                lexical_score=result.get("lexical_score"),
-                fused_score=float(result.get("fused_score") or 0.0),
-                chunk_index=result.get("chunk_index"),
-                metadata={
-                    **dict(result.get("metadata") or {}),
-                    "_legacy_rerank_position": position,
-                },
-            )
-            candidates.append(candidate)
-
-        ranked = await self.reranker.rank(query, candidates)
-        adapted: list[dict[str, Any]] = []
-        for candidate in ranked:
-            position = int((candidate.metadata or {})["_legacy_rerank_position"])
-            original = results[position]
-            payload = dict(original)
-            if candidate.rerank_score is not None:
-                payload["rerank_score"] = candidate.rerank_score
-            adapted.append(payload)
-        return adapted
-
     async def _fetch_images_for_chunks(
         self,
         retrieved_docs: list[dict[str, Any]],
@@ -630,38 +579,6 @@ class RAGAgent(BaseAgent):
             return {"success": False, "document_id": document_id, "error": str(e)}
 
     # === Agentic RAG Content Retrieval Methods ===
-
-    async def get_document_full_content(
-        self,
-        document_id: str,
-        *,
-        user_id: str | None = None,
-        conversation_id: str | None = None,
-    ) -> str | None:
-        try:
-            chunk_repo = DocumentChunkRepository(SessionLocal)
-            doc_uuid = UUID(document_id)
-
-            if user_id is not None or conversation_id is not None:
-                chunks = chunk_repo.get_by_document_for_scope(
-                    doc_uuid,
-                    user_id=user_id,
-                    conversation_id=conversation_id,
-                )
-            else:
-                chunks = chunk_repo.get_by_document_ordered(doc_uuid)
-
-            if not chunks:
-                return None
-
-            return "\n\n".join(chunk.content for chunk in chunks)
-
-        except Exception as e:
-            logger.error(
-                f"Error fetching full content for document {document_id}: {e}",
-                exc_info=True,
-            )
-            return None
 
     async def get_document_preview(
         self,
