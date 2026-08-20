@@ -39,6 +39,7 @@ credentials.json
 .traycer/
 .codex_logs/
 WARP.md
+/.worktrees/
 
 # Jupyter
 .ipynb_checkpoints
