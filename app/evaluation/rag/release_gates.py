@@ -1,17 +1,22 @@
 """Baseline-relative release gate comparison.
 
-A gate entry's ``status`` defaults to ``"measured"``: it carries an
-evidence-based ``max_regression`` threshold and participates in the
-overall pass/fail decision. A gate may instead be marked
-``"status": "unmeasured"`` when no baseline benchmark has produced a
-threshold for it yet (see ``eval/rag/release_gates.json``'s Task 13
-capacity/latency/cost slots) -- the plan's Global Constraints forbid
-hard-coding a threshold that was not selected from evaluation results.
-An unmeasured gate is structurally present (so its shape is reviewed and
-its provenance is recorded) but is **non-binding**: ``compare_release_gates``
-never requires it to be present in ``baseline``/``candidate`` and its
-result carries ``binding=False`` with ``passed=None`` -- never treated as
-either a pass or a failure of the release decision.
+A gate entry's ``status`` defaults to ``"unmeasured"``: a gate is
+non-binding unless it explicitly opts in with ``"status": "measured"``,
+which asserts it carries an evidence-based ``max_regression`` threshold
+selected from a real baseline experiment. This fails closed on the
+central failure mode this plan exists to fix -- a gate silently missing
+its ``status`` key (a bad merge, a hand-edit, a copy-paste from a
+different gate) must never be treated as binding. A gate may instead be
+marked ``"status": "unmeasured"`` explicitly when no baseline benchmark
+has produced a threshold for it yet (see ``eval/rag/release_gates.json``'s
+Task 13 capacity/latency/cost slots) -- the plan's Global Constraints
+forbid hard-coding a threshold that was not selected from evaluation
+results. An unmeasured gate is structurally present (so its shape is
+reviewed and its provenance is recorded) but is **non-binding**:
+``compare_release_gates`` never requires it to be present in
+``baseline``/``candidate`` and its result carries ``binding=False`` with
+``passed=None`` -- never treated as either a pass or a failure of the
+release decision.
 """
 
 from __future__ import annotations
@@ -45,7 +50,7 @@ def load_release_gates(path: str | Path) -> dict[str, dict[str, float]]:
 def _validate_gate_rules(gates: Mapping[str, Mapping[str, float]]) -> None:
     for metric, rule in gates.items():
         direction = rule.get("direction", "higher")
-        status = rule.get("status", _STATUS_MEASURED)
+        status = rule.get("status", _STATUS_UNMEASURED)
         if direction not in {"higher", "lower"}:
             raise ValueError(f"gate {metric} direction must be exactly 'higher' or 'lower'")
         if status not in _VALID_STATUSES:
@@ -66,7 +71,7 @@ def compare_release_gates(
     binding_metrics = {
         metric: rule
         for metric, rule in gates.items()
-        if rule.get("status", _STATUS_MEASURED) != _STATUS_UNMEASURED
+        if rule.get("status", _STATUS_UNMEASURED) != _STATUS_UNMEASURED
     }
     missing_baseline = sorted(metric for metric in binding_metrics if metric not in baseline)
     missing_candidate = sorted(metric for metric in binding_metrics if metric not in candidate)
@@ -77,7 +82,7 @@ def compare_release_gates(
 
     results: list[ReleaseGateResult] = []
     for metric, rule in gates.items():
-        if rule.get("status", _STATUS_MEASURED) == _STATUS_UNMEASURED:
+        if rule.get("status", _STATUS_UNMEASURED) == _STATUS_UNMEASURED:
             results.append(
                 ReleaseGateResult(
                     metric=metric,
