@@ -26,6 +26,7 @@ from app.core.config import get_settings
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUNBOOK_PATH = REPO_ROOT / "docs" / "rag-rollout-runbook.md"
+ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 
 _RISKY_FLAGS = (
     "rag_hybrid_retrieval_enabled",
@@ -57,6 +58,25 @@ def test_semantic_chunking_default_off(settings):
     literal Step 1 list, but the same regression guard applies.
     """
     assert settings.rag_semantic_chunking_enabled is False
+
+
+def test_env_example_documents_default_off_rag_flags():
+    """The operator-facing environment example must expose every risky flag."""
+    assignments = {}
+    for line in ENV_EXAMPLE_PATH.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        assignments[key.strip()] = value.strip()
+
+    expected = {
+        "RAG_HYBRID_RETRIEVAL_ENABLED": "false",
+        "RAG_GROUNDED_ANSWER_GATE_ENABLED": "false",
+        "RAG_EXACT_CACHE_ENABLED": "false",
+        "RAG_SEMANTIC_CHUNKING_ENABLED": "false",
+    }
+    assert {key: assignments.get(key) for key in expected} == expected
 
 
 def test_citation_verification_ships_enabled_by_default(settings):
