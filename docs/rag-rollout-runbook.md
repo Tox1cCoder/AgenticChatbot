@@ -36,6 +36,62 @@ reconstructed from the plan text.
 | `enable_reranking` | `True` | Yes |
 | `langsmith_tracing` | `False` | No (also blocked on quota — see item 2 below) |
 
+## Unconditional changes — apply with every flag off
+
+Everything in "The rollout order" below is gated by a flag and, per the
+table above, every one of those flags is off. The changes in this section
+are **not** behind any flag — they take effect the moment this branch is
+deployed, and one of them breaks retrieval for every pre-existing document
+until a manual, per-document step is run. Read this section before
+deploying, independent of any rollout decision.
+
+**Retrieval now hard-requires an active index generation, unconditionally.**
+`DocumentChunkRepository._active` (`app/repositories/document_chunk.py:179-184`)
+INNER JOINs `document_index_generations` and filters `status == "active"` on
+every chunk read. The Qdrant filter
+(`app/services/rag_retrieval.py:635-650`) separately requires
+`index_generation` to be in the active set, `is_active == True`, and
+`modality == "text"` on every point. Neither condition is behind a flag —
+this applies today, with the table above showing every RAG flag off.
+
+**Three migrations ship with this branch, chained after one project notes
+record as still unapplied.** In revision order:
+
+| Revision | What it does |
+|---|---|
+| `c3d4e5f6a7b8` | Adds `document_index_generations` and backfills one active generation per existing document — the SQL side of the requirement above. |
+| `d4e5f6a7b8c9` | Adds the GIN full-text index used by hybrid retrieval ("The rollout order" item 4 below); unrelated to the generation requirement but chained after it. |
+| `e5f6a7b8c9d0` (head) | Adds `bbox`/`section_path`/`content_sha256` provenance to `document_images`. |
+
+These three sit downstream of `d7e8f9a0b1c2` ("Add chat_images table for
+externalized chat image bytes"), which project session notes record as
+**not yet applied to the live database**. If that is still true at deploy
+time, applying this branch means running **four** pending revisions, not
+three. Run `alembic current` against the live database before assuming only
+this plan's own three migrations are pending — do not repeat the gap this
+repo already shipped once (`chat_images`/`d7e8f9a0b1c2`, Task 4-era).
+
+**`c3d4e5f6a7b8` backfills PostgreSQL. Nothing backfills Qdrant.** The
+pre-branch Qdrant payload (`document_index_service.py` before this plan) has
+neither `index_generation` nor `is_active` on points written before this
+deploy. Every such point fails the Qdrant filter above. Concretely: **dense
+retrieval returns zero results for every document ingested before this
+deploy**, silently — no error, just an empty result — until that document is
+individually reindexed:
+
+```bash
+python scripts/reindex_embeddings.py --document-id <id> --activate
+# or, for every document:
+python scripts/reindex_embeddings.py --all --activate
+```
+
+This re-embeds the document's chunks and images; it is not a metadata-only
+backfill, so it costs one embedding-provider call per chunk and per image,
+for every pre-existing document. Budget and schedule this as part of the
+deploy itself, not as a follow-up — there is no lazy or partial backfill
+path, and an un-reindexed document does not error, it just returns nothing
+from RAG search.
+
 ## Plan-defect reconciliation: `enable_citation_verification`
 
 The plan's Task 10 Step 4 says to "enable `enable_citation_verification` only
