@@ -1,5 +1,6 @@
 """Repository for DocumentImage operations."""
 
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -182,7 +183,12 @@ class DocumentImageRepository:
             db.commit()
             return count
 
-    def delete_unlinked_by_document_id(self, document_id: UUID) -> int:
+    def delete_unlinked_by_document_id(
+        self,
+        document_id: UUID,
+        *,
+        keep_created_at_on_or_before: datetime | None = None,
+    ) -> int:
         """Delete this document's orphaned (``chunk_id IS NULL``) image rows.
 
         Persistence now happens before ``DocumentIndexService.index_document``
@@ -194,16 +200,27 @@ class DocumentImageRepository:
         N failed attempts. A row that has already been linked (``chunk_id``
         set) belongs to a generation that reached ``mark_ready`` and is never
         touched here.
+
+        A row can also be permanently ``chunk_id IS NULL`` by design — a
+        full-page figure with no chunk covering its page (item 3) — while
+        still belonging to the currently active generation. ``chunk_id IS
+        NULL`` alone cannot distinguish that row from an abandoned attempt's
+        leftovers, so when ``keep_created_at_on_or_before`` is given (the
+        active generation's own ``created_at``), only rows created *after*
+        it are deleted: the active generation's own images are always
+        persisted moments before it is created, so anything newer must come
+        from a later attempt that never reached ``mark_ready``/activation.
+        ``None`` (no active generation exists yet) deletes every orphaned
+        row, matching the original pre-item-3 behavior.
         """
         with self.session_factory() as db:
-            images = (
-                db.query(DocumentImage)
-                .filter(
-                    DocumentImage.document_id == document_id,
-                    DocumentImage.chunk_id.is_(None),
-                )
-                .all()
+            query = db.query(DocumentImage).filter(
+                DocumentImage.document_id == document_id,
+                DocumentImage.chunk_id.is_(None),
             )
+            if keep_created_at_on_or_before is not None:
+                query = query.filter(DocumentImage.created_at > keep_created_at_on_or_before)
+            images = query.all()
             count = len(images)
 
             for image in images:

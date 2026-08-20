@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -681,16 +682,32 @@ def test_persist_prepared_images_drops_malformed_bbox_instead_of_failing(tmp_pat
 class _FakeImageRepo:
     """Stateful stand-in tracking rows across repeated persist calls, so a
     retry-accumulation regression is actually observable (a plain MagicMock
-    would happily "create" without ever reflecting prior state)."""
+    would happily "create" without ever reflecting prior state).
+
+    ``created_at`` increments per row so ``keep_created_at_on_or_before``
+    (item 3) can be exercised deterministically, mirroring the real
+    repository's per-insert timestamp ordering.
+    """
 
     def __init__(self):
         self.rows: dict[UUID, SimpleNamespace] = {}
+        self._next_created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
-    def delete_unlinked_by_document_id(self, document_id: UUID) -> int:
+    def delete_unlinked_by_document_id(
+        self,
+        document_id: UUID,
+        *,
+        keep_created_at_on_or_before: datetime | None = None,
+    ) -> int:
         orphans = [
             row_id
             for row_id, row in self.rows.items()
-            if row.document_id == document_id and row.chunk_id is None
+            if row.document_id == document_id
+            and row.chunk_id is None
+            and (
+                keep_created_at_on_or_before is None
+                or row.created_at > keep_created_at_on_or_before
+            )
         ]
         for row_id in orphans:
             del self.rows[row_id]
@@ -702,9 +719,36 @@ class _FakeImageRepo:
             document_id=image_data.document_id,
             chunk_id=image_data.chunk_id,
             image_path=image_data.image_path,
+            created_at=self._next_created_at,
         )
+        self._next_created_at += timedelta(seconds=1)
         self.rows[row.id] = row
         return row
+
+
+def test_active_generation_created_at_reads_from_generation_repository(tmp_path):
+    """Item 3: the orphan-delete narrowing needs the active generation's own
+    ``created_at`` to distinguish it from a later abandoned attempt."""
+    service = _build_service(tmp_path)
+    generation_repo = MagicMock()
+    active_created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    generation_repo.get_active.return_value = SimpleNamespace(created_at=active_created_at)
+    service.document_index_service = SimpleNamespace(generation_repository=generation_repo)
+    document_id = str(uuid4())
+
+    result = service._active_generation_created_at(document_id)
+
+    assert result == active_created_at
+    generation_repo.get_active.assert_called_once_with(UUID(document_id))
+
+
+def test_active_generation_created_at_is_none_without_index_service(tmp_path):
+    """No wired index service (or no active generation yet) must fall back
+    to ``None``, matching the original pre-item-3 delete-everything-orphaned
+    behavior for a document's first attempt."""
+    service = _build_service(tmp_path)  # document_index_service is None
+
+    assert service._active_generation_created_at(str(uuid4())) is None
 
 
 def test_persist_prepared_images_clears_orphans_from_failed_attempts(tmp_path):

@@ -214,6 +214,76 @@ def test_activation_rebinds_images_to_replacement_chunk_before_retiring_old(
         assert db.get(DocumentImage, image_3_id).chunk_id == new_chunk_2_id
 
 
+def test_delete_unlinked_images_keeps_rows_no_newer_than_active_generation(generation_db):
+    """Item 3: a full-page figure with no covering chunk is permanently
+    ``chunk_id IS NULL`` by design, not abandoned. Deleting every
+    ``chunk_id IS NULL`` row unconditionally on the next ingestion attempt
+    would destroy that still-active generation's own visual evidence before
+    the new attempt's outcome is even known. Only rows created *after* the
+    active generation's own ``created_at`` are a later, abandoned attempt's
+    leftovers and safe to delete.
+    """
+    from app.models.document_image import DocumentImage
+    from app.repositories.document_image import DocumentImageRepository
+
+    document_id = uuid4()
+    active_generation_created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    kept_id, deleted_id = uuid4(), uuid4()
+    with generation_db() as db:
+        db.add_all(
+            [
+                DocumentImage(
+                    id=kept_id,
+                    document_id=document_id,
+                    chunk_id=None,
+                    image_path="full-page-figure.png",
+                    mime_type="image/png",
+                    created_at=active_generation_created_at - timedelta(seconds=1),
+                ),
+                DocumentImage(
+                    id=deleted_id,
+                    document_id=document_id,
+                    chunk_id=None,
+                    image_path="abandoned-attempt.png",
+                    mime_type="image/png",
+                    created_at=active_generation_created_at + timedelta(hours=1),
+                ),
+            ]
+        )
+        db.commit()
+
+    repository = DocumentImageRepository(generation_db)
+    deleted_count = repository.delete_unlinked_by_document_id(
+        document_id, keep_created_at_on_or_before=active_generation_created_at
+    )
+
+    assert deleted_count == 1
+    with generation_db() as db:
+        assert db.get(DocumentImage, kept_id) is not None, (
+            "the active generation's own chunk_id=NULL image must survive"
+        )
+        assert db.get(DocumentImage, deleted_id) is None, (
+            "a later abandoned attempt's orphaned row must still be reaped"
+        )
+
+
+def test_document_image_created_at_default_is_evaluated_per_insert():
+    """Item 3: ``default=datetime.now(timezone.utc)`` (a call, not a
+    callable) evaluates once at class-definition/import time and freezes
+    every row this process ever inserts to that one timestamp, silently
+    defeating the ``created_at`` ordering that
+    ``delete_unlinked_by_document_id``'s ``keep_created_at_on_or_before``
+    narrowing depends on. The default must be a callable SQLAlchemy invokes
+    per insert.
+    """
+    from app.models.document_image import DocumentImage
+
+    default = DocumentImage.__table__.c.created_at.default
+    assert default is not None and callable(default.arg), (
+        "created_at column default must be a per-insert callable"
+    )
+
+
 def test_failure_code_is_bounded_without_retiring_active_generation(generation_db):
     from app.repositories.document_index_generation import DocumentIndexGenerationRepository
 

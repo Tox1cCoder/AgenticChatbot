@@ -693,8 +693,22 @@ class DocumentProcessingService:
         would end up with three row sets for the same images). A row that
         was already linked belongs to a generation that reached
         ``mark_ready`` and is left alone.
+
+        A row can also be permanently ``chunk_id IS NULL`` by design — a
+        full-page figure with no chunk covering its page (item 3) — without
+        ever being abandoned. Deleting those unconditionally the next time
+        this document is processed would destroy the still-active
+        generation's own visual evidence before this new attempt's outcome
+        is even known, so the delete is scoped to rows older than the
+        active generation via ``_active_generation_created_at``: that
+        generation's own rows are always persisted moments before it is
+        created, so anything from *after* it must be a later, abandoned
+        attempt.
         """
-        self.document_image_repository.delete_unlinked_by_document_id(uuid.UUID(document_id))
+        self.document_image_repository.delete_unlinked_by_document_id(
+            uuid.UUID(document_id),
+            keep_created_at_on_or_before=self._active_generation_created_at(document_id),
+        )
         persisted: list[Any] = []
         for img_data in prepared_images:
             persisted.append(
@@ -703,6 +717,22 @@ class DocumentProcessingService:
                 )
             )
         return persisted
+
+    def _active_generation_created_at(self, document_id: str) -> datetime | None:
+        """The active generation's creation time, if any, for orphan-delete scoping.
+
+        ``None`` when this document has no active generation yet (its first
+        attempt, or every prior attempt failed) — in that case every
+        existing orphaned row really is abandoned and safe to delete, the
+        original pre-item-3 behavior. Also ``None`` when no index service is
+        wired (unit tests exercising this method in isolation).
+        """
+        index_service = getattr(self, "document_index_service", None)
+        generation_repository = getattr(index_service, "generation_repository", None)
+        if generation_repository is None:
+            return None
+        active = generation_repository.get_active(uuid.UUID(document_id))
+        return getattr(active, "created_at", None)
 
     @staticmethod
     def _image_create_payload(

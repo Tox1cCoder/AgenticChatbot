@@ -879,10 +879,18 @@ class DocumentIndexService:
     def _chunk_id_for_image_page(
         page_number: int | None, persisted_chunks: list[DocumentChunk]
     ) -> UUID | None:
-        if not persisted_chunks:
+        """Match an image to the chunk whose page range covers it.
+
+        Returns ``None`` — never an arbitrary chunk — when no persisted
+        chunk covers the page, or the page is unknown. A full-page figure
+        with no text blocks on its page is the realistic case: falling back
+        to ``persisted_chunks[0]`` would mislink it to an unrelated chunk,
+        and chunk-attached image hydration is not behind any flag (item 3),
+        so that wrong image would surface as visual evidence for that
+        unrelated chunk on every retrieval.
+        """
+        if not persisted_chunks or page_number is None:
             return None
-        if page_number is None:
-            return persisted_chunks[0].id
         for chunk in persisted_chunks:
             page_start = getattr(chunk, "page_start", None)
             page_end = getattr(chunk, "page_end", None)
@@ -892,7 +900,7 @@ class DocumentIndexService:
             end = page_end if page_end is not None else page_start
             if start <= page_number <= end:
                 return chunk.id
-        return persisted_chunks[0].id
+        return None
 
     @staticmethod
     def _point_id_for_image(image_id: UUID, index_generation_id: UUID | None) -> str:

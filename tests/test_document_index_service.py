@@ -776,6 +776,33 @@ def test_index_document_links_image_rows_to_matching_chunk_by_page():
     assert update_data.chunk_id == persisted[0].id
 
 
+def test_index_document_leaves_image_chunk_id_null_when_no_chunk_covers_its_page():
+    """Item 3: a full-page figure with no chunk covering its page must stay
+    unlinked, never fall back to an unrelated chunk. Chunk-attached image
+    hydration is not behind any flag, so mislinking would surface the wrong
+    page's image as visual evidence for every retrieval of that chunk.
+    """
+    document_row = _make_document()
+    persisted = [_persisted_chunk(document_row.id, 0)]  # page_start = page_end = 1
+    repo = MagicMock()
+    repo.replace_document_chunks.return_value = persisted
+    image_repo = _ImageRepoStub()
+    image = document_image(document_row.id, page_number=5)  # no chunk covers page 5
+
+    service = _build_service(chunk_repo=repo, document_image_repository=image_repo)
+    service.index_document(
+        document=document_row,
+        built_chunks=[_make_built_chunk(0)],
+        parse_artifact_id=None,
+        image_rows=[image],
+    )
+
+    assert image_repo.updates == [], (
+        "an image whose page no persisted chunk covers must not be linked "
+        "to an unrelated chunk"
+    )
+
+
 def test_index_document_requires_image_repository_when_image_rows_given():
     import pytest
 

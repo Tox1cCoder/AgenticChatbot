@@ -28,7 +28,17 @@ class DocumentImage(Base):
     bbox = Column(JSONB, nullable=True)
     section_path = Column(JSONB, nullable=False, default=list)
     content_sha256 = Column(String(64), nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc))
+    # A callable default, not an evaluated scalar: SQLAlchemy calls this once
+    # per insert. ``default=datetime.now(timezone.utc)`` would instead
+    # evaluate at class-definition (process-import) time and freeze every
+    # row inserted by this process to that one timestamp — silently
+    # defeating item 3's per-attempt ``created_at`` ordering in
+    # DocumentImageRepository.delete_unlinked_by_document_id.
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
 
     # Relationships
     document = relationship("Document", back_populates="images")
