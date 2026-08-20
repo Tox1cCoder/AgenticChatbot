@@ -68,15 +68,18 @@ def test_env_example_documents_default_off_rag_flags():
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        assignments[key.strip()] = value.strip()
+        assignments.setdefault(key.strip(), []).append(value.strip())
 
     expected = {
         "RAG_HYBRID_RETRIEVAL_ENABLED": "false",
         "RAG_GROUNDED_ANSWER_GATE_ENABLED": "false",
         "RAG_EXACT_CACHE_ENABLED": "false",
         "RAG_SEMANTIC_CHUNKING_ENABLED": "false",
+        "RAG_MULTIMODAL_IMAGE_EMBEDDINGS_ENABLED": "false",
     }
-    assert {key: assignments.get(key) for key in expected} == expected
+    assert {key: assignments.get(key) for key in expected} == {
+        key: [value] for key, value in expected.items()
+    }
 
 
 def test_citation_verification_ships_enabled_by_default(settings):
