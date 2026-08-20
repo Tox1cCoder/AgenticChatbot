@@ -530,6 +530,108 @@ def _configure_boundary_agent(monkeypatch, *, max_input_tokens: int):
     return agent, model
 
 
+class _GeminiCapturingModel:
+    """A langchain-model-shaped fake that is also a Gemini SDK counter target.
+
+    ``ainvoke`` lets it serve as the model the agent actually calls;
+    ``_prepare_request``/``async_client`` let ``BaseAgent._token_counter_for_model``
+    recognize it as Gemini and register a native counter against it.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[list] = []
+        self.native_calls: list[dict] = []
+
+    async def ainvoke(self, messages, _config=None):
+        self.calls.append(list(messages))
+        return AIMessage(content="within budget")
+
+    async def _count_tokens(self, **kwargs):
+        self.native_calls.append(kwargs)
+        return SimpleNamespace(total_tokens=5)
+
+    @property
+    def async_client(self):
+        return SimpleNamespace(models=SimpleNamespace(count_tokens=self._count_tokens))
+
+    def _prepare_request(self, messages, *, tools=None, **_kwargs):
+        del messages, tools
+        return {
+            "model": "models/gemini-2.5-flash",
+            "contents": (),
+            "config": SimpleNamespace(system_instruction="", tools=()),
+        }
+
+
+def _gemini_runtime_with_limit(max_input_tokens: int) -> ResolvedRuntimeModelConfig:
+    return ResolvedRuntimeModelConfig(
+        agent_key="chat",
+        provider="gemini",
+        model="gemini-2.5-flash",
+        temperature=0,
+        api_key=None,
+        key_source="none",
+        source="test",
+        context_window={
+            "max_input_tokens": max_input_tokens,
+            "context_window_tokens": max_input_tokens,
+            "max_output_tokens": 100,
+            "known": True,
+            "source": "test",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_rag_preflight_uses_provider_counter_not_local_estimate(monkeypatch) -> None:
+    """Item 1: the non-RAG chat preflight must reconcile Gemini's local byte-count
+    estimate against the provider's own counter, the same way rag_agent.py:1054
+    already does, instead of silently trusting the (now 3x larger) local bound.
+    """
+    agent = _BoundaryAgent(agent_config_key="chat")
+    model = _GeminiCapturingModel()
+    monkeypatch.setattr(settings, "conversation_summary_default_reserved_output_tokens", 10)
+    monkeypatch.setattr(settings, "conversation_summary_safety_margin_tokens", 10)
+    monkeypatch.setattr(settings, "conversation_summary_soft_context_ratio", 0.70)
+    monkeypatch.setattr(settings, "conversation_summary_hard_context_ratio", 0.85)
+    monkeypatch.setattr(settings, "conversation_summary_timeout_seconds", 1)
+    monkeypatch.setattr(agent, "_init_tools", AsyncMock())
+    monkeypatch.setattr(
+        agent,
+        "_resolve_runtime_model_config",
+        lambda *_args, **_kwargs: _gemini_runtime_with_limit(6_000),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_create_langchain_model_from_runtime",
+        lambda *_args, **_kwargs: (model, False),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_get_llm_with_tools",
+        Mock(side_effect=AssertionError("tools disabled")),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_get_tools_for_binding",
+        Mock(side_effect=AssertionError("tools disabled")),
+    )
+
+    response = await agent.invoke_model_with_history(
+        messages=[HumanMessage(content="current question " * 100)],
+        conversation_history=[],
+        persona=None,
+        disable_tools=True,
+    )
+
+    assert response.message.content == "within budget"
+    assert model.native_calls, (
+        "preflight must escalate to Gemini's native count_tokens once the local "
+        "estimate crosses the escalation ratio, not rely solely on the local "
+        "utf8-byte upper bound"
+    )
+
+
 @pytest.mark.asyncio
 async def test_base_agent_reduces_before_emitting_provider_request(monkeypatch) -> None:
     agent, model = _configure_boundary_agent(monkeypatch, max_input_tokens=1_000)

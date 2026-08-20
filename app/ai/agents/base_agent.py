@@ -1399,6 +1399,7 @@ class BaseAgent(ABC):
                 emergency_compact=emergency_compact,
                 conversation_id=conversation_id,
                 user_id=user_id,
+                token_counter=self._token_counter_for_model(runtime_config.provider, llm),
             )
             if budget_result is not None:
                 history_messages_lc = list(budget_result.envelope.history_messages)

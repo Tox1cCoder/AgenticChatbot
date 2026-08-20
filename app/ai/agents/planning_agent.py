@@ -501,6 +501,7 @@ class PlanningAgent(BaseAgent):
                     tools=[write_todos_tool],
                     conversation_id=conversation_id,
                     user_id=request_user_id,
+                    token_counter=self._token_counter_for_model(runtime_config.provider, llm),
                 )
                 request_messages = (
                     list(budget_result.envelope.messages)
