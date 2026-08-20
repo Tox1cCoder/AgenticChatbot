@@ -302,6 +302,19 @@ eventually confirm it, its rollback path, and whether reindexing is required.
 - **Rollback:** `rag_exact_cache_enabled=False`.
 - **Reindexing required:** no re-embedding. Confirm `REDIS_URL` is
   configured in the target environment first, or the flag is a no-op.
+- **Redis prerequisite:** `RedisRAGExactCache.set_document_embedding`
+  (`app/services/rag_cache.py:215-219`) writes with **no TTL**, into the
+  same Redis instance as `client_runtime_store` and
+  `model_usage_failure_store` — roughly 15KB per 768-float vector per unique
+  chunk content per tenant per model, accumulating forever. On an instance
+  configured with `maxmemory-policy noeviction`, sustained ingestion can
+  push this cache's writes into failure once the instance fills, and because
+  it shares the instance, that failure mode is not contained to RAG — it can
+  take other features' Redis writes down with it. Before enabling this flag
+  in an environment with real ingestion volume, either set
+  `maxmemory-policy` to an eviction policy (e.g. `allkeys-lru`) on the
+  shared instance, or point `rag_exact_cache_enabled`'s traffic at a
+  dedicated Redis database/instance instead.
 
 ### 9. Native image embeddings
 
