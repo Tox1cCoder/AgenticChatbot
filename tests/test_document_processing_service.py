@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
+import pytest
 from PIL import Image
 
 from app.schemas.document_image import DocumentImageCreate
@@ -637,6 +638,44 @@ def test_persist_prepared_images_writes_bbox_section_path_and_content_hash(tmp_p
     assert image_record.bbox == [0.1, 0.2, 0.3, 0.4]
     assert image_record.section_path == ["Results"]
     assert image_record.content_sha256 == "deadbeef" * 8
+
+
+@pytest.mark.parametrize(
+    "malformed_bbox",
+    [
+        {"x": 1},
+        "a,b",
+        [[1, 2], [3, 4]],
+        [1, 2, 3],
+        [1, 2, 3, 4, 5],
+    ],
+)
+def test_persist_prepared_images_drops_malformed_bbox_instead_of_failing(tmp_path, malformed_bbox):
+    """Item 2: unexpected parser bbox shapes must not raise ``ValidationError``.
+
+    ``ValidationError`` subclasses ``ValueError`` and
+    ``document_processor.py`` classifies ``ValueError`` as non-retryable, so
+    an unvalidated bbox from MinerU's untrusted output would permanently
+    fail the whole document. A malformed bbox should just become ``None``.
+    """
+    service = _build_service(tmp_path)
+    prepared = [
+        {
+            "stored_path": "document_images/doc/chart.png",
+            "caption": "A chart",
+            "content_sha256": "deadbeef" * 8,
+            "page_number": 0,
+            "mime_type": "image/png",
+            "bbox": malformed_bbox,
+            "section_path": ["Results"],
+        }
+    ]
+
+    service._persist_prepared_images(prepared, str(uuid4()))
+
+    create_call = service.document_image_repository.create.call_args
+    image_record = create_call.args[0]
+    assert image_record.bbox is None
 
 
 class _FakeImageRepo:

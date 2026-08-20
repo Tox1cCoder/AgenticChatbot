@@ -719,10 +719,31 @@ class DocumentProcessingService:
             image_caption=img_data.get("caption"),
             page_number=page_number + 1 if page_number is not None else None,
             mime_type=img_data["mime_type"],
-            bbox=img_data.get("bbox"),
+            bbox=DocumentProcessingService._coerce_bbox(img_data.get("bbox")),
             section_path=list(img_data.get("section_path") or []),
             content_sha256=img_data.get("content_sha256"),
         )
+
+    @staticmethod
+    def _coerce_bbox(raw_bbox: Any) -> list[float] | None:
+        """Accept only a flat 4-number bounding box; anything else becomes ``None``.
+
+        ``bbox`` is MinerU's raw, untrusted parser output copied verbatim
+        through ``DocumentNormalizer``. An unexpected shape (a dict, a
+        string, nested lists, or the wrong element count) would otherwise
+        reach ``DocumentImageCreate``'s ``list[float] | None`` field and
+        raise a ``ValidationError`` -- which subclasses ``ValueError`` and is
+        classified as non-retryable by ``document_processor.py`` -- failing
+        the entire document instead of just dropping one image's bbox.
+        """
+        if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
+            return None
+        coordinates: list[float] = []
+        for coordinate in raw_bbox:
+            if isinstance(coordinate, bool) or not isinstance(coordinate, (int, float)):
+                return None
+            coordinates.append(float(coordinate))
+        return coordinates
 
     @staticmethod
     def _caption_from_image_metadata(img_data: dict[str, Any]) -> str | None:
