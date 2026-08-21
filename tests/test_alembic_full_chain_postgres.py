@@ -23,7 +23,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _SCRATCH_DATABASE_PREFIX = "chatbot_migration_smoke_"
 _SCRATCH_DATABASE_RE = re.compile(r"chatbot_migration_smoke_[0-9a-f]{32}")
 _OLD_HEAD = "a4b5c6d7e8f9"
-_HEAD = "e5f6a7b8c9d0"
+_HEAD = "a7b8c9d0e1f2"
 _PREVIOUS_HEAD = "b2c3d4e5f6a7"
 _PRE_RECONCILIATION_HEAD = "1ce64a959f7d"
 _PARALLEL_ALLOW_CUSTOM_MODEL_HEAD = "0f1e2d3c4b5a"
@@ -414,7 +414,9 @@ def _assert_previous_head_schema(scratch_url: URL) -> None:
                 for table in ("model_usage_events", "model_usage_minute")
                 for index in schema.get_indexes(table)
             }
-            assert _TIMESTAMP_INDEXES.isdisjoint(all_indexes)
+            # a4b5c6d7e8f9 creates these and is an ancestor of _PREVIOUS_HEAD, so a
+            # downgrade to that revision keeps them.
+            assert all_indexes >= _TIMESTAMP_INDEXES
     finally:
         engine.dispose()
 
@@ -615,6 +617,7 @@ def test_scratch_database_exception_paths_are_redacted(
     [
         "app.alembic.versions.6c6598a9eb26_create_missing_tool_approvals_table",
         "app.alembic.versions.b5c6d7e8f9a0_repair_tool_approvals_schema",
+        "app.alembic.versions.a7b8c9d0e1f2_repair_document_index_generation_timestamps",
     ],
 )
 def test_inspection_migrations_fail_clearly_offline(monkeypatch, module_name: str) -> None:

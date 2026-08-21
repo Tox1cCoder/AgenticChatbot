@@ -32,6 +32,23 @@ def test_live_database_has_no_unmodeled_app_tables():
     assert unmodeled == set()
 
 
+def test_live_database_has_every_modeled_column():
+    """A retro-edited migration leaves stamped databases missing columns silently."""
+    inspector = inspect(_engine())
+    live_tables = set(inspector.get_table_names(schema="public"))
+    missing_columns: dict[str, list[str]] = {}
+    for table_name, table in sorted(Base.metadata.tables.items()):
+        if table_name not in live_tables:
+            missing_columns[table_name] = ["<table absent>"]
+            continue
+        live = {column["name"] for column in inspector.get_columns(table_name, schema="public")}
+        absent = sorted(set(table.columns.keys()) - live)
+        if absent:
+            missing_columns[table_name] = absent
+
+    assert missing_columns == {}
+
+
 def test_conversation_device_bindings_is_not_present():
     inspector = inspect(_engine())
     assert "conversation_device_bindings" not in inspector.get_table_names(schema="public")
