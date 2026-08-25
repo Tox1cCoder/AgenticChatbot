@@ -2338,8 +2338,10 @@ SESSION_STATE_DEFAULTS: dict[str, Callable[[], Any] | Any] = {
     "conversation_messages_page": lambda: 0,
     "has_more_messages": lambda: True,
     "pending_persona_prompt": str,
+    # ``persona_editor_value`` is deliberately absent: it is a widget key, and
+    # Streamlit deletes it whenever the Instructions tab is not rendered. A
+    # pre-created "" default would mask that and blank the editor on return.
     "persona_editor_origin": lambda: None,
-    "persona_editor_value": str,
     "pending_image_attachments": list,
     "message_image_thumbnails": dict,
     "message_chunks": dict,
@@ -4001,11 +4003,49 @@ def _model_reasoning_options(
     return "Reasoning", [None]
 
 
+MODEL_CFG_AGENT_LABELS: dict[str, str] = {
+    "chat": "Chat",
+    "rag": "RAG",
+    "search": "Search",
+    "planning": "Planning",
+}
+MODEL_CFG_AGENT_KEYS = tuple(MODEL_CFG_AGENT_LABELS)
+MODEL_CFG_FORM_STATE_PREFIXES = (
+    "model_cfg_provider_",
+    "model_cfg_model_select_",
+    "model_cfg_model_custom_",
+    "model_cfg_allow_custom_",
+    "model_cfg_temperature_",
+    "model_cfg_reasoning_",
+)
+
+
+def _model_config_form_state_keys() -> list[str]:
+    """Every session-state key the Models tab drives its agent widgets from."""
+    return [
+        f"{prefix}{agent_key}"
+        for agent_key in MODEL_CFG_AGENT_KEYS
+        for prefix in MODEL_CFG_FORM_STATE_PREFIXES
+    ]
+
+
+def _model_config_form_state_is_intact() -> bool:
+    """True while the synced agent form state is still in session state.
+
+    Streamlit deletes widget-keyed session state for widgets a script run does
+    not render, and the workspace renders only the open tab. Switching away from
+    the Models tab therefore drops this form state while the snapshot cache
+    survives, so the caller has to re-seed from the snapshot before the widgets
+    fall back to the head of the provider catalog.
+    """
+    return all(key in st.session_state for key in _model_config_form_state_keys())
+
+
 def _sync_model_config_form_state(snapshot: dict[str, Any]) -> None:
     provider_map = _snapshot_provider_map(snapshot)
     agent_config = _snapshot_agent_config(snapshot)
 
-    for agent_key in ("chat", "rag", "search", "planning"):
+    for agent_key in MODEL_CFG_AGENT_KEYS:
         cfg = agent_config.get(agent_key, {}) if isinstance(agent_config, dict) else {}
         provider = _normalize_provider_type(cfg.get("provider"))
         provider_snapshot = provider_map.get(provider, {})
@@ -11570,6 +11610,21 @@ def render_planning_tab():
                 st.markdown("---")
 
 
+def _persona_editor_needs_seed(conversation_id: str | None) -> bool:
+    """True when the persona editor must be re-seeded from the conversation.
+
+    The origin marker is a plain session-state key, so it survives a workspace
+    tab switch, but the editor text lives under a widget key that Streamlit
+    deletes for every tab it did not render. Checking the origin alone lets the
+    editor return empty for the same conversation, and a save would then clear
+    the stored persona.
+    """
+    return (
+        st.session_state.get("persona_editor_origin") != conversation_id
+        or "persona_editor_value" not in st.session_state
+    )
+
+
 def render_settings_view():
     """Settings and instructions view"""
     st.markdown("# :material/settings: Instructions")
@@ -11594,7 +11649,7 @@ def render_settings_view():
             None,
         )
 
-    if st.session_state.persona_editor_origin != conversation_id:
+    if _persona_editor_needs_seed(conversation_id):
         if has_conversation and current_conv:
             initial_value = current_conv.get("personaPrompt") or ""
         elif is_new_conversation:
@@ -11715,7 +11770,10 @@ def render_models_view() -> None:
         else:
             st.info("No model configuration data is available yet.")
         return
-    if st.session_state.get("model_config_options_needs_form_sync"):
+    if (
+        st.session_state.get("model_config_options_needs_form_sync")
+        or not _model_config_form_state_is_intact()
+    ):
         _sync_model_config_form_state(snapshot)
         st.session_state.model_config_options_needs_form_sync = False
 
@@ -11910,12 +11968,7 @@ def render_models_view() -> None:
     st.subheader("Agent model configuration")
     st.caption("These settings apply automatically to new messages.")
 
-    agents: list[tuple[str, str]] = [
-        ("chat", "Chat"),
-        ("rag", "RAG"),
-        ("search", "Search"),
-        ("planning", "Planning"),
-    ]
+    agents: list[tuple[str, str]] = list(MODEL_CFG_AGENT_LABELS.items())
 
     st.subheader("Configure models and parameters")
     st.caption("Provider and model changes update their dependent controls immediately.")

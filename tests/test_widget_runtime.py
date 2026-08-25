@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from typing import Any, get_type_hints
 
@@ -14,6 +15,7 @@ from pydantic import BaseModel
 
 from app.ai.tool_execution import build_tool_artifact, execute_tool_calls
 from app.core.response_constants import build_bot_metadata, extract_live_widgets_from_artifacts
+from app.services.widget_contract import coerce_widget_state_object
 from app.services.widget_runtime import (
     MAX_WIDGET_STATE_BYTES,
     InMemoryWidgetStore,
@@ -902,6 +904,78 @@ _VALID_HTML_STATE = {
 # ---------------------------------------------------------------------------
 # Widget tool HTML-only contract enforcement
 # ---------------------------------------------------------------------------
+class TestWidgetStateParameterSchema:
+    """The advertised parameter schema is what constrains the model.
+
+    A property-less ``{"type": "object"}`` survives provider schema conversion
+    as a bare OBJECT with nothing to enforce, and the model answers it by
+    serializing the whole state into one string. That doubles the escaping on a
+    large ``html`` document and, past some length, drops the closing quote --
+    which arrives as an unterminated-string parse failure. Naming the contract's
+    fields lets the provider emit ``html`` as a native string instead.
+    """
+
+    STATE_PARAMETERS = (("widget_create", "initial_state"), ("widget_update", "state"))
+
+    async def _state_schema(self, tool_name: str, field: str) -> dict[str, Any]:
+        from app.ai.mcp_servers.widgets_server import mcp
+
+        tools = {tool.name: tool for tool in await mcp.list_tools()}
+        return tools[tool_name].inputSchema["properties"][field]
+
+    @pytest.mark.parametrize(("tool_name", "field"), STATE_PARAMETERS)
+    async def test_state_parameter_declares_the_contract_fields(self, tool_name, field):
+        schema = await self._state_schema(tool_name, field)
+
+        assert schema["type"] == "object"
+        assert schema["properties"]["html"]["type"] == "string"
+        assert schema["properties"]["height"]["type"] == "integer"
+        assert "caption" in schema["properties"]
+        assert schema["required"] == ["html", "height"]
+
+    @pytest.mark.parametrize(("tool_name", "field"), STATE_PARAMETERS)
+    async def test_height_bounds_are_derived_from_the_contract_constants(self, tool_name, field):
+        """The advertised bounds must track the constants, not repeat them."""
+        from app.services.widget_contract import MAX_WIDGET_HEIGHT, MIN_WIDGET_HEIGHT
+
+        schema = await self._state_schema(tool_name, field)
+
+        description = schema["properties"]["height"]["description"]
+        assert str(MIN_WIDGET_HEIGHT) in description
+        assert str(MAX_WIDGET_HEIGHT) in description
+
+    def test_stringified_state_is_reported(self, caplog):
+        """A string here means the provider ignored the declared schema."""
+        from app.ai.mcp_servers import widgets_server
+
+        raw = json.dumps(_VALID_HTML_STATE, ensure_ascii=False)
+        with caplog.at_level(logging.WARNING, logger="app.ai.mcp_servers.widgets_server"):
+            assert widgets_server._coerce_initial_state(raw) == _VALID_HTML_STATE
+
+        assert any("initial_state arrived as a" in record.message for record in caplog.records)
+
+    def test_native_object_state_is_not_reported(self, caplog):
+        from app.ai.mcp_servers import widgets_server
+
+        with caplog.at_level(logging.WARNING, logger="app.ai.mcp_servers.widgets_server"):
+            assert widgets_server._coerce_initial_state(_VALID_HTML_STATE) == _VALID_HTML_STATE
+
+        assert not caplog.records
+
+    @pytest.mark.parametrize(("tool_name", "field"), STATE_PARAMETERS)
+    async def test_declared_fields_survive_mcp_schema_sanitization(self, tool_name, field):
+        """``clone_mcp_tool`` sanitizes before the agent binds the tool."""
+        from app.ai.mcp_servers.widgets_server import mcp
+        from app.core.mcp_adapter_utils import sanitize_mcp_schema
+
+        tools = {tool.name: tool for tool in await mcp.list_tools()}
+        sanitized = sanitize_mcp_schema(tools[tool_name].inputSchema)
+
+        state = sanitized["properties"][field]
+        assert set(state["properties"]) == {"html", "height", "caption"}
+        assert state["required"] == ["html", "height"]
+
+
 class TestWidgetToolHtmlContract:
     def test_widget_create_schema_has_no_widget_type(self):
         import inspect
@@ -1116,6 +1190,71 @@ class TestWidgetToolHtmlContract:
             state=_VALID_HTML_STATE,
         )
         assert json.loads(result)["state"] == _VALID_HTML_STATE
+
+
+# ---------------------------------------------------------------------------
+# Trailing-argument recovery
+# ---------------------------------------------------------------------------
+def _state_with_trailing_arguments(state: dict[str, Any], **indent: Any) -> str:
+    """The observed slip: the next argument glued onto a serialized state.
+
+    Models that serialize this argument sometimes keep writing past the closing
+    brace, appending the remaining keyword arguments in a non-JSON form, e.g.
+    ``{...},session_id:"conv-1"``. Strict JSON reports "Extra data".
+    """
+    return json.dumps(state, ensure_ascii=False, **indent) + ',session_id:"conv-1",title:"Nổi"'
+
+
+class TestWidgetStateTrailingArgumentRecovery:
+    def test_object_followed_by_trailing_arguments_is_recovered(self):
+        raw = _state_with_trailing_arguments(_VALID_HTML_STATE, indent=2)
+
+        assert coerce_widget_state_object(raw) == _VALID_HTML_STATE
+
+    def test_recovery_reports_the_discarded_remainder(self, caplog):
+        raw = _state_with_trailing_arguments(_VALID_HTML_STATE)
+
+        with caplog.at_level(logging.WARNING, logger="app.services.widget_contract"):
+            coerce_widget_state_object(raw)
+
+        assert any("trailing" in record.message.lower() for record in caplog.records)
+
+    def test_trailing_arguments_after_raw_newlines_are_recovered(self):
+        """The two known slips can arrive together: raw control chars + trailing args."""
+        state = {**_VALID_HTML_STATE, "html": "<!doctype html>\n<div>hi</div>"}
+        raw = json.dumps(state, indent=2, ensure_ascii=False).replace("\\n", "\n")
+        raw += ',session_id:"conv-1"'
+
+        assert coerce_widget_state_object(raw) == state
+
+    def test_update_state_field_recovers_the_same_slip(self):
+        raw = _state_with_trailing_arguments(_VALID_HTML_STATE, indent=2)
+
+        assert coerce_widget_state_object(raw, field="state") == _VALID_HTML_STATE
+
+    def test_trailing_arguments_after_a_non_object_still_fail(self):
+        with pytest.raises(ValueError, match="must be an object, not a str"):
+            coerce_widget_state_object('"just text",session_id:"conv-1"')
+
+    def test_truncated_object_is_still_rejected(self):
+        """Recovery must not paper over a genuinely incomplete object."""
+        with pytest.raises(ValueError, match="initial_state must be one JSON object"):
+            coerce_widget_state_object('{"html": "unterminated')
+
+    async def test_widget_create_accepts_state_with_trailing_arguments(self, monkeypatch):
+        import app.services.widget_runtime as widget_runtime
+        from app.ai.mcp_servers import widgets_server
+
+        store = InMemoryWidgetStore()
+        monkeypatch.setattr(widget_runtime, "_widget_store", store)
+
+        result = await widgets_server.widget_create(
+            session_id="conv-trailing",
+            initial_state=_state_with_trailing_arguments(_VALID_HTML_STATE, indent=2),
+        )
+
+        assert json.loads(result)["state"] == _VALID_HTML_STATE
+        assert len(await store.list_by_session("conv-trailing")) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -85,12 +85,16 @@ python scripts/reindex_embeddings.py --document-id <id> --activate
 python scripts/reindex_embeddings.py --all --activate
 ```
 
-This re-embeds the document's chunks and images; it is not a metadata-only
-backfill, so it costs one embedding-provider call per chunk and per image,
-for every pre-existing document. Budget and schedule this as part of the
-deploy itself, not as a follow-up — there is no lazy or partial backfill
-path, and an un-reindexed document does not error, it just returns nothing
-from RAG search.
+This re-embeds text chunks only. `DocumentIndexService.reindex_document`
+rebuilds the chunk rows and calls `index_document` without `image_rows`, so it
+is not a metadata-only backfill — it costs one embedding-provider call per
+chunk, for every pre-existing document — but it does not re-embed images.
+Native image points have no backfill path at all; they are written only when a
+document is ingested with `rag_multimodal_image_embeddings_enabled` on, which
+is a separate rollout step (see "9. Native image embeddings"). Budget and
+schedule the chunk reindex as part of the deploy itself, not as a follow-up
+— there is no lazy or partial backfill path, and an un-reindexed document
+does not error, it just returns nothing from RAG search.
 
 ## Plan-defect reconciliation: `enable_citation_verification`
 
@@ -154,13 +158,28 @@ eventually confirm it, its rollback path, and whether reindexing is required.
   embedding call now sends one `Content` per input and validates returned
   vector count/dimension, failing closed on a mismatch instead of silently
   misaligning chunks to vectors.
-- **Evidence still missing:** none — this is a correctness fix, not a
-  quality tradeoff; nothing about it is gated on evaluation.
+- **Amended 2026-08-21:** the request no longer carries `task_type` or a
+  provider-level `title`. Google documents that `task_type` cannot be used
+  with `gemini-embedding-2` and that the task must be given as an instruction
+  in the prompt; Task 2's plan text mandated the field anyway, and it was sent
+  on every embedding, query and image call until this amendment. The task and
+  title now travel only in the request text (`title: {title} | text: {text}`
+  and `task: {query_task} | query: {query}`), which the service already built.
+  `output_dimensionality` is the only config field that remains.
+- **Evidence still missing:** whether the provider previously rejected the
+  field or silently ignored it. No live API key was available to observe the
+  response, so this is unverified against the running service. If it was
+  rejected, embedding calls were failing outright and nothing was indexed; if
+  it was ignored, existing vectors are unaffected.
 - **Health signals:** absence of `Embedding count mismatch` /
-  `Embedding dimension mismatch` errors in logs.
+  `Embedding dimension mismatch` errors in logs; on the first deploy, absence
+  of `INVALID_ARGUMENT` errors naming `task_type`.
 - **Rollback:** no flag. Reverting would mean reverting the commit, which
   would reintroduce a real data-corruption bug — do not do this.
-- **Reindexing required:** no.
+- **Reindexing required:** not by itself, but this is unproven — see the
+  evidence gap above. Every pre-existing document must be reindexed regardless
+  for the generation filter (see "Unconditional changes"), which also resolves
+  any vector produced under the old request shape.
 
 ### 2. Evaluation tracing
 
@@ -440,18 +459,13 @@ exist and are tested against fakes — the numbers do not exist.
   comparison are all unexecuted. See `docs/rag-scale-runbook.md` for what
   each one requires before it can run.
 
-## `.env.example` — requires a manual edit by the repository owner
+## `.env.example` — applied, and enforced by a test
 
-A repository guard blocks `.env*` paths for both shell commands and the
-file-editing tools used to write this runbook, so this change could not be
-applied directly (attempted once during this task; both the read and the
-write were rejected by the guard). **The same guard blocks reviewers,
-not just authors: nobody in this process has read the live
-`.env.example`, so the block below has not been diffed against its actual
-current contents by anyone.** Whoever applies this by hand must open the
-real file first and merge by hand — do not append blindly on the assumption
-this block is conflict-free. Add it near the existing
-`RAG_MULTIMODAL_IMAGE_EMBEDDINGS_ENABLED` line in `.env.example`:
+The default-off rollout flags are in `.env.example`. This section used to ask
+the repository owner to add them by hand, because a repository guard blocks
+`.env*` paths for both shell commands and the file-editing tools; that edit has
+since been made, so do not apply it again — a second copy of any assignment
+fails the contract test below.
 
 ```env
 # --- Task 14: default-off RAG rollout flags -----------------------------
@@ -467,3 +481,8 @@ RAG_SEMANTIC_CHUNKING_ENABLED=false
 
 Every value above matches the shipped `Settings` default — this is
 documentation of the existing default, not a proposed change to it.
+
+`tests/test_rag_rollout_contract.py` asserts that each of these five keys
+appears in `.env.example` exactly once with the value `false`. The guard still
+blocks reading the file directly, so that test — not an editor — is how you
+verify its contents.

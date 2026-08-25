@@ -9,6 +9,7 @@ the same widget state.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from typing import Annotated, Any
@@ -24,31 +25,81 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 from pydantic import BeforeValidator, WithJsonSchema  # noqa: E402
 
 from app.services.widget_contract import (  # noqa: E402
+    MAX_WIDGET_HEIGHT,
+    MIN_WIDGET_HEIGHT,
     coerce_widget_state_object,
     validate_html_widget_state,
 )
 from app.services.widget_runtime import get_widget_store  # noqa: E402
 
+logger = logging.getLogger(__name__)
+
 mcp = FastMCP("widgets")
 
 
+def _coerce_state_argument(raw: Any, *, field: str) -> Any:
+    """Coerce one state argument, reporting when it did not arrive as an object.
+
+    The declared schema below asks for an object, so a string here means the
+    provider generated the state as text anyway. That is the path where a large
+    ``html`` document can lose its closing quote, so it is worth seeing in the
+    logs rather than only when the recovery ladder finally fails.
+    """
+    if isinstance(raw, str):
+        logger.warning(
+            "Widget %s arrived as a %d-character string rather than an object; coercing it back",
+            field,
+            len(raw),
+        )
+    return coerce_widget_state_object(raw, field=field)
+
+
 def _coerce_initial_state(raw: Any) -> Any:
-    return coerce_widget_state_object(raw, field="initial_state")
+    return _coerce_state_argument(raw, field="initial_state")
 
 
 def _coerce_state(raw: Any) -> Any:
-    return coerce_widget_state_object(raw, field="state")
+    return _coerce_state_argument(raw, field="state")
 
 
-# The advertised schema stays object-only, so the model is still told to send
-# one native object. The BeforeValidator repairs the common slip — a stringified
-# object, usually pretty-printed JSON with raw newlines inside ``html`` — which
-# pydantic would otherwise reject before the tool body ever runs.
-_OBJECT_SCHEMA = WithJsonSchema({"type": "object", "additionalProperties": True})
+# The advertised schema names the contract's own fields. A property-less
+# ``{"type": "object"}`` reaches the provider as a bare OBJECT with nothing to
+# constrain, and the model answers that by serializing the whole state into one
+# string — which doubles the escaping on a large ``html`` document and, past
+# some length, loses the closing quote. Declaring the fields lets the provider
+# generate ``html`` as a native string. The BeforeValidator still repairs a
+# stringified object, because a declared schema makes that slip rare, not
+# impossible.
+_STATE_SCHEMA = WithJsonSchema(
+    {
+        "type": "object",
+        "description": ("The complete widget state as an object. Never a JSON-encoded string."),
+        "properties": {
+            "html": {
+                "type": "string",
+                "description": (
+                    "The entire self-contained document: markup, inline CSS and inline JavaScript."
+                ),
+            },
+            "height": {
+                "type": "integer",
+                "description": (
+                    f"Iframe height in pixels, between {MIN_WIDGET_HEIGHT} and {MAX_WIDGET_HEIGHT}."
+                ),
+            },
+            "caption": {
+                "type": "string",
+                "description": "Short caption in the language of the conversation.",
+            },
+        },
+        "required": ["html", "height"],
+        "additionalProperties": True,
+    }
+)
 InitialWidgetState = Annotated[
-    dict[str, Any], BeforeValidator(_coerce_initial_state), _OBJECT_SCHEMA
+    dict[str, Any], BeforeValidator(_coerce_initial_state), _STATE_SCHEMA
 ]
-WidgetState = Annotated[dict[str, Any], BeforeValidator(_coerce_state), _OBJECT_SCHEMA]
+WidgetState = Annotated[dict[str, Any], BeforeValidator(_coerce_state), _STATE_SCHEMA]
 
 
 @mcp.tool()

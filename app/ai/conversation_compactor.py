@@ -176,12 +176,22 @@ class ConversationCompactor:
             raise ValueError("credential_provider_mismatch")
 
     def evaluate_trigger(self, messages: Sequence[Any]) -> TriggerEvaluation:
-        """Evaluate thresholds against the complete unsummarized window."""
+        """Evaluate thresholds against the complete unsummarized window.
+
+        Counted with the realistic estimate rather than the packing upper
+        bound: this decides whether the conversation is large enough to be
+        worth summarizing, not whether a request fits under a hard provider
+        limit. Over-counting here would summarize far earlier than
+        ``trigger_tokens`` describes -- three times earlier on Gemini, where
+        the upper bound charges one token per UTF-8 byte. ``_bound_selection``
+        keeps the conservative bound, because that one is a fit decision.
+        """
         full_window = tuple(messages)
         count = self.token_counter.count_messages(
             provider=self.provider,
             model=self.model,
             messages=[self._countable_message(message) for message in full_window],
+            bound="estimate",
         )
         message_triggered = self.trigger_messages > 0 and len(full_window) >= self.trigger_messages
         token_triggered = self.trigger_tokens > 0 and count.tokens >= self.trigger_tokens

@@ -200,3 +200,62 @@ def test_runbook_documents_env_example_block_manually():
 def test_readme_points_operators_at_the_runbook():
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     assert "docs/rag-rollout-runbook.md" in readme
+
+
+# ------------------------------------------------------------------
+# The runbook must not describe completed work as outstanding
+# ------------------------------------------------------------------
+
+
+def _runbook_text() -> str:
+    return RUNBOOK_PATH.read_text(encoding="utf-8")
+
+
+def test_runbook_does_not_still_ask_the_owner_to_edit_env_example():
+    """The `.env.example` hand-off is done; the runbook must say so.
+
+    A runbook that asks an operator to re-apply an applied change invites a
+    duplicate assignment, which `test_env_example_declares_each_flag_once`
+    would then fail on.
+    """
+    text = _runbook_text()
+
+    assert "requires a manual edit by the repository owner" not in text
+    assert "nobody in this process has read the live" not in text
+
+
+def test_runbook_records_that_the_env_flags_are_test_enforced():
+    text = _runbook_text()
+
+    assert "tests/test_rag_rollout_contract.py" in text
+
+
+def test_runbook_does_not_claim_the_reindex_command_re_embeds_images():
+    """`DocumentIndexService.reindex_document` calls `index_document` with no
+    `image_rows`, so the command re-embeds text chunks only. Promising an
+    image backfill it does not perform would leave native image points
+    missing after an operator believed the backfill was complete.
+    """
+    text = _runbook_text()
+
+    assert "chunks and images" not in text
+    assert "per chunk and per image" not in text
+
+
+def test_runbook_states_that_native_image_points_need_a_separate_backfill():
+    text = _runbook_text()
+
+    assert "re-embeds text chunks only" in text
+
+
+def test_runbook_records_the_gemini_task_type_removal():
+    """The unconditional embedding change altered the provider request shape.
+
+    An operator reading the "Embedding contract fix" step needs to know that
+    `task_type` is no longer sent and what that means for reindexing, because
+    the step used to state flatly that no reindex was required.
+    """
+    text = _runbook_text()
+
+    assert "task_type" in text
+    assert "gemini-embedding-2" in text

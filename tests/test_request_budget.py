@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -563,6 +564,19 @@ class _GeminiCapturingModel:
         }
 
 
+class _OverflowlessFailingModel:
+    """Fails with a plain provider error, so the agent falls back rather than
+    taking the context-overflow retry branch."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def ainvoke(self, _messages, _config=None):
+        self.calls += 1
+        raise RuntimeError("provider unavailable")
+
+
+
 def _gemini_runtime_with_limit(max_input_tokens: int) -> ResolvedRuntimeModelConfig:
     return ResolvedRuntimeModelConfig(
         agent_key="chat",
@@ -769,3 +783,145 @@ async def test_base_agent_surfaces_second_overflow_after_exactly_one_retry(
     assert overflow_model.calls == 2
     assert response.error == "provider_context_overflow"
     assert "private provider data" not in response.model_dump_json()
+
+
+def _gemini_fallback_runtime(max_input_tokens: int) -> ResolvedRuntimeModelConfig:
+    runtime = _gemini_runtime_with_limit(max_input_tokens)
+    return replace(runtime, api_key="fallback-key", key_source="test")
+
+
+@pytest.mark.asyncio
+async def test_provider_error_fallback_preflight_uses_the_fallback_models_counter(
+    monkeypatch,
+) -> None:
+    """The fallback preflight must count with the provider it is about to call.
+
+    The primary-path preflight already escalates to Gemini's native counter.
+    The fallback path re-runs the whole budget against a different provider,
+    so leaving it on the local utf8-byte upper bound compacts and trims a
+    Gemini conversation at a third of its real size.
+    """
+    agent = _BoundaryAgent(agent_config_key="chat")
+    primary = _OverflowlessFailingModel()
+    fallback_model = _GeminiCapturingModel()
+    created: list[object] = []
+
+    monkeypatch.setattr(settings, "conversation_summary_default_reserved_output_tokens", 10)
+    monkeypatch.setattr(settings, "conversation_summary_safety_margin_tokens", 10)
+    monkeypatch.setattr(settings, "conversation_summary_soft_context_ratio", 0.70)
+    monkeypatch.setattr(settings, "conversation_summary_hard_context_ratio", 0.85)
+    monkeypatch.setattr(settings, "conversation_summary_timeout_seconds", 1)
+    monkeypatch.setattr(agent, "_init_tools", AsyncMock())
+    monkeypatch.setattr(
+        agent,
+        "_resolve_runtime_model_config",
+        lambda *_args, **_kwargs: _runtime_with_limit(6_000),
+    )
+
+    def _create_model(*_args, **_kwargs):
+        model = primary if not created else fallback_model
+        created.append(model)
+        return (model, False)
+
+    monkeypatch.setattr(agent, "_create_langchain_model_from_runtime", _create_model)
+    monkeypatch.setattr(
+        agent,
+        "_create_fallback_runtime_config",
+        lambda *_args, **_kwargs: _gemini_fallback_runtime(6_000),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_get_llm_with_tools",
+        Mock(side_effect=AssertionError("tools disabled")),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_get_tools_for_binding",
+        Mock(side_effect=AssertionError("tools disabled")),
+    )
+
+    response = await agent.invoke_model_with_history(
+        messages=[HumanMessage(content="current question " * 100)],
+        conversation_history=[],
+        persona=None,
+        disable_tools=True,
+    )
+
+    assert response.message.content == "within budget"
+    assert primary.calls >= 1, "the primary provider must be the one that failed"
+    assert fallback_model.native_calls, (
+        "the fallback preflight must count with the fallback provider's native "
+        "counter instead of the local utf8-byte upper bound"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reasoning_summary_fallback_preflight_uses_the_fallback_models_counter(
+    monkeypatch,
+) -> None:
+    """The second fallback preflight needs the same counter as the first.
+
+    When an OpenAI reasoning-summary request fails and the retry without the
+    summary fails too, the agent falls back through a separate preflight call
+    site. It must count with the fallback provider as well.
+    """
+    agent = _BoundaryAgent(agent_config_key="chat")
+    primary = _OverflowlessFailingModel()
+    retry_model = _OverflowlessFailingModel()
+    fallback_model = _GeminiCapturingModel()
+    created: list[object] = []
+
+    monkeypatch.setattr(settings, "conversation_summary_default_reserved_output_tokens", 10)
+    monkeypatch.setattr(settings, "conversation_summary_safety_margin_tokens", 10)
+    monkeypatch.setattr(settings, "conversation_summary_soft_context_ratio", 0.70)
+    monkeypatch.setattr(settings, "conversation_summary_hard_context_ratio", 0.85)
+    monkeypatch.setattr(settings, "conversation_summary_timeout_seconds", 1)
+    monkeypatch.setattr(agent, "_init_tools", AsyncMock())
+    monkeypatch.setattr(
+        agent,
+        "_resolve_runtime_model_config",
+        lambda *_args, **_kwargs: replace(
+            _runtime_with_limit(6_000), api_key="primary-key", key_source="test"
+        ),
+    )
+
+    def _create_model(runtime_config, **_kwargs):
+        if runtime_config.provider == "gemini":
+            created.append(fallback_model)
+            return (fallback_model, False)
+        if not created:
+            created.append(primary)
+            return (primary, True)
+        created.append(retry_model)
+        return (retry_model, False)
+
+    monkeypatch.setattr(agent, "_create_langchain_model_from_runtime", _create_model)
+    monkeypatch.setattr(
+        agent,
+        "_create_fallback_runtime_config",
+        lambda *_args, **_kwargs: _gemini_fallback_runtime(6_000),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_get_llm_with_tools",
+        Mock(side_effect=AssertionError("tools disabled")),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_get_tools_for_binding",
+        Mock(side_effect=AssertionError("tools disabled")),
+    )
+
+    response = await agent.invoke_model_with_history(
+        messages=[HumanMessage(content="current question " * 100)],
+        conversation_history=[],
+        persona=None,
+        disable_tools=True,
+    )
+
+    assert response.message.content == "within budget"
+    assert retry_model.calls >= 1, "the reasoning-summary retry must have been attempted"
+    assert fallback_model.native_calls, (
+        "the reasoning-summary fallback preflight must count with the fallback "
+        "provider's native counter instead of the local utf8-byte upper bound"
+    )

@@ -8,6 +8,8 @@ Key invariants:
 
 * Document inputs are formatted as ``title: {title} | text: {text}``.
 * Query inputs are prefixed with ``task: {query_task} | query: {query}``.
+* Requests carry ``output_dimensionality`` only. gemini-embedding-2 rejects
+  ``task_type``, so the task and title travel in the text above instead.
 * The service returns ``list[list[float]]`` for documents and a flat
   ``list[float]`` for a single query.
 * Response shape mismatches raise a clear :class:`RuntimeError`. We never
@@ -201,16 +203,10 @@ class GeminiRAGEmbeddingService:
             self._text_content(self._format_document(text, title))
             for text, title in zip(batch_texts, batch_titles, strict=True)
         ]
-        # Gemini's config supports one title per request. Preserve it for a
-        # singleton document; batched documents retain their individual title
-        # in their Content text so no title is incorrectly applied to a peer.
-        config_title = batch_titles[0] if len(batch_titles) == 1 else None
         with self._usage_scope(usage_context) as operation:
             return self._embed_with_retries(
                 contents=contents,
                 expected_count=len(batch_texts),
-                task_type="RETRIEVAL_DOCUMENT",
-                title=config_title,
                 operation=operation,
             )
 
@@ -219,16 +215,12 @@ class GeminiRAGEmbeddingService:
         *,
         contents: Any,
         expected_count: int,
-        task_type: str,
-        title: str | None,
         operation: UsageOperation | None,
     ) -> list[list[float]]:
         for attempt in range(1, self._MAX_RETRY_ATTEMPTS + 1):
             try:
                 response = self._run_embed_content(
                     contents=contents,
-                    task_type=task_type,
-                    title=title,
                     operation=operation,
                 )
                 vectors = self._response_vectors(response)
@@ -262,8 +254,6 @@ class GeminiRAGEmbeddingService:
             vectors = self._embed_with_retries(
                 contents=self._text_content(f"task: {self.query_task} | query: {query}"),
                 expected_count=1,
-                task_type="RETRIEVAL_QUERY",
-                title=None,
                 operation=operation,
             )
         return vectors[0]
@@ -283,8 +273,6 @@ class GeminiRAGEmbeddingService:
             vectors = self._embed_with_retries(
                 contents=types.Content(role="user", parts=[part]),
                 expected_count=1,
-                task_type="RETRIEVAL_DOCUMENT",
-                title=None,
                 operation=operation,
             )
         return vectors[0]
@@ -313,11 +301,16 @@ class GeminiRAGEmbeddingService:
         self,
         *,
         contents: Any,
-        task_type: str,
-        title: str | None,
         operation: UsageOperation | None,
     ) -> Any:
-        """Invoke ``embed_content`` once, recording the attempt when enabled."""
+        """Invoke ``embed_content`` once, recording the attempt when enabled.
+
+        ``task_type`` and ``title`` are deliberately absent: gemini-embedding-2
+        rejects ``task_type``, and both the retrieval task and the document
+        title are carried in the request text by :meth:`_format_document` and
+        :meth:`embed_query`, which is the formatting the provider documents as
+        the replacement.
+        """
 
         def _call() -> Any:
             return self.client.models.embed_content(
@@ -325,8 +318,6 @@ class GeminiRAGEmbeddingService:
                 contents=contents,
                 config=types.EmbedContentConfig(
                     output_dimensionality=self.dimension,
-                    task_type=task_type,
-                    title=title,
                 ),
             )
 

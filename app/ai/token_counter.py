@@ -28,6 +28,9 @@ _REQUEST_ENVELOPE_TOKENS = 2
 _TOOL_ENVELOPE_TOKENS = 20
 _TOOL_CALL_ENVELOPE_TOKENS = 10
 _TOOL_RESULT_ENVELOPE_TOKENS = 8
+# Strategy suffix marking the bytes/3 heuristic, which is a realistic estimate
+# rather than a bound the provider's own count cannot exceed.
+_DIV_3_STRATEGY_SUFFIX = ":utf8_bytes_div_3"
 
 # Canonical usage-field aliases and nested-detail paths, shared by
 # TokenCounter.extract_reported_usage and app.usage.normalizers.
@@ -198,8 +201,21 @@ class TokenCounter:
             default=str,
         )
 
-    def count_text(self, *, provider: str, model: str, text: str) -> TokenCount:
+    def count_text(
+        self,
+        *,
+        provider: str,
+        model: str,
+        text: str,
+        bound: Literal["upper", "estimate"] = "upper",
+    ) -> TokenCount:
         """Count one string with the deterministic, local, provider-aware strategy.
+
+        ``bound="upper"`` (the default) answers "can this exceed the provider's
+        limit?", so it must never under-count and every fit decision uses it.
+        ``bound="estimate"`` answers "is this large enough to act on?" and is
+        for threshold decisions, where over-counting means doing avoidable
+        work rather than risking an overflow.
 
         Deliberately never issues a provider call. Evidence packing calls this
         once per incremental fit test, so a round trip here would multiply
@@ -210,15 +226,15 @@ class TokenCounter:
         """
         provider_key = self._normalize_provider(provider)
         raw_text = str(text or "")
-        strategy, encoder = self._text_strategy(provider_key, str(model or ""))
+        strategy, encoder = self._text_strategy(provider_key, str(model or ""), bound=bound)
         if not raw_text:
             return TokenCount(tokens=0, strategy=strategy)
         if encoder is not None:
             tokens = len(encoder.encode(raw_text))
-        elif provider_key == "anthropic":
+        elif strategy.endswith(_DIV_3_STRATEGY_SUFFIX):
             tokens = math.ceil(len(raw_text.encode("utf-8")) / 3)
         else:
-            # One token per UTF-8 byte. Gemini shares this bound rather than the
+            # One token per UTF-8 byte. Gemini uses this bound rather than the
             # old bytes/3 heuristic: bytes/3 is an estimate, not an upper bound,
             # and packing decisions need a bound they cannot exceed.
             tokens = len(raw_text.encode("utf-8"))
@@ -256,9 +272,10 @@ class TokenCounter:
         provider: str,
         model: str,
         messages: Sequence[Any] | None,
+        bound: Literal["upper", "estimate"] = "upper",
     ) -> TokenCount:
         total = _REQUEST_ENVELOPE_TOKENS if messages else 0
-        strategy = self.count_text(provider=provider, model=model, text="").strategy
+        strategy = self.count_text(provider=provider, model=model, text="", bound=bound).strategy
         for message in messages or ():
             total += _MESSAGE_ENVELOPE_TOKENS
             content = self._message_value(message, "content")
@@ -266,6 +283,7 @@ class TokenCounter:
                 provider=provider,
                 model=model,
                 text=self._stringify_content(content),
+                bound=bound,
             ).tokens
 
             tool_calls = self._message_value(message, "tool_calls")
@@ -274,6 +292,7 @@ class TokenCounter:
                     provider=provider,
                     model=model,
                     text=self.canonical_json(tool_calls),
+                    bound=bound,
                 ).tokens
                 total += _TOOL_CALL_ENVELOPE_TOKENS * len(tool_calls)
 
@@ -286,6 +305,7 @@ class TokenCounter:
                     provider=provider,
                     model=model,
                     text=self.canonical_json(identity),
+                    bound=bound,
                 ).tokens
                 total += _TOOL_RESULT_ENVELOPE_TOKENS
 
@@ -759,7 +779,12 @@ class TokenCounter:
         return "text"
 
     @staticmethod
-    def _text_strategy(provider: str, model: str) -> tuple[str, Any | None]:
+    def _text_strategy(
+        provider: str,
+        model: str,
+        *,
+        bound: Literal["upper", "estimate"] = "upper",
+    ) -> tuple[str, Any | None]:
         if provider == "openai":
             try:
                 encoding = tiktoken.encoding_for_model(model)
@@ -775,9 +800,9 @@ class TokenCounter:
                     tiktoken.get_encoding(encoding_name),
                 )
         if provider == "anthropic":
-            return f"{provider}:utf8_bytes_div_3", None
-        if provider == "gemini":
-            return "gemini:utf8_byte_upper_bound", None
+            return f"{provider}{_DIV_3_STRATEGY_SUFFIX}", None
+        if provider == "gemini" and bound == "estimate":
+            return f"gemini{_DIV_3_STRATEGY_SUFFIX}", None
         return f"{provider}:utf8_byte_upper_bound", None
 
 

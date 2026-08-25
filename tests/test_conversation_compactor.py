@@ -355,3 +355,87 @@ async def test_compactor_passes_resolved_provider_key_to_generator() -> None:
 
     assert result.success is True
     assert captured["api_key"] == "server-key"
+
+
+# ------------------------------------------------------------------
+# Trigger counting bound
+# ------------------------------------------------------------------
+
+_THAI_TURN = "การรับประกันครอบคลุมข้อบกพร่องจากการผลิตเป็นเวลาสิบสองเดือน "
+
+
+def test_gemini_trigger_counts_with_the_estimate_not_the_packing_upper_bound() -> None:
+    """The trigger asks "is this conversation big enough to summarize?"
+
+    Counting every UTF-8 byte as a token answers a different question and makes
+    a Gemini conversation look three times its size, so background compaction
+    would fire at a third of the configured threshold. Thai text is the worst
+    case: roughly three bytes per character.
+    """
+    text = _THAI_TURN * 40
+    byte_length = len(text.encode("utf-8"))
+    threshold = byte_length // 2
+
+    compactor = _compactor(
+        lambda **_: _valid_output(),
+        counter=TokenCounter(),
+        messages=0,
+        tokens=threshold,
+    )
+    window = [_message(1, "user", text)]
+
+    evaluation = compactor.evaluate_trigger(window)
+
+    assert byte_length > threshold, "fixture must exceed the threshold under the byte bound"
+    assert evaluation.token_count < threshold
+    assert evaluation.token_triggered is False
+    assert evaluation.should_compact is False
+    assert evaluation.token_strategy.startswith("gemini:utf8_bytes_div_3")
+
+
+def test_gemini_trigger_still_fires_once_the_estimate_reaches_the_threshold() -> None:
+    """Relaxing the bound must not disable the threshold it counts against."""
+    text = _THAI_TURN * 40
+    byte_length = len(text.encode("utf-8"))
+    threshold = byte_length // 4
+
+    compactor = _compactor(
+        lambda **_: _valid_output(),
+        counter=TokenCounter(),
+        messages=0,
+        tokens=threshold,
+    )
+    window = [_message(1, "user", text)]
+
+    evaluation = compactor.evaluate_trigger(window)
+
+    assert evaluation.token_count >= threshold
+    assert evaluation.token_triggered is True
+    assert evaluation.should_compact is True
+
+
+def test_input_fit_trimming_keeps_the_conservative_upper_bound() -> None:
+    """The prompt-fit loop must keep over-counting; under-counting risks a 400.
+
+    ``max_input_tokens`` is a hard provider ceiling, so the selection bound
+    stays on the byte upper bound even though the trigger no longer does.
+    """
+    text = _THAI_TURN * 10
+    byte_length = len(text.encode("utf-8"))
+
+    compactor = _compactor(
+        lambda **_: _valid_output(),
+        counter=TokenCounter(),
+        messages=1,
+        max_input_tokens=byte_length // 2,
+    )
+    selection = compactor._bound_selection(
+        None,
+        SimpleNamespace(
+            full_window=(_message(1, "user", text), _message(2, "assistant", text)),
+            compactable_prefix=(_message(1, "user", text), _message(2, "assistant", text)),
+            retained_recent=(),
+        ),
+    )
+
+    assert selection.compactable_prefix == ()

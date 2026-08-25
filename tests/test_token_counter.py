@@ -454,3 +454,75 @@ def test_reported_token_usage_positional_construction_stays_backward_compatible(
     assert usage.output_text_tokens is None
     assert usage.output_image_tokens is None
     assert usage.source == "reported"
+
+
+# ------------------------------------------------------------------
+# Fit bound versus trigger estimate
+# ------------------------------------------------------------------
+
+_THAI_SENTENCE = "การสรุปบทสนทนาต้องนับโทเค็นภาษาไทยอย่างระมัดระวัง "
+
+
+def test_gemini_estimate_bound_is_a_third_of_the_packing_upper_bound():
+    """Threshold decisions need a realistic count, not the packing upper bound.
+
+    ``bound="upper"`` answers "can this exceed the provider limit?" and must
+    over-count. ``bound="estimate"`` answers "is this conversation large
+    enough to act on?" and must not treat every UTF-8 byte as a token.
+    """
+    counter = TokenCounter()
+    text = _THAI_SENTENCE * 20
+    byte_length = len(text.encode("utf-8"))
+
+    upper = counter.count_text(provider="gemini", model="gemini-2.5-flash", text=text)
+    estimate = counter.count_text(
+        provider="gemini", model="gemini-2.5-flash", text=text, bound="estimate"
+    )
+
+    assert upper.tokens == byte_length
+    assert estimate.tokens == math.ceil(byte_length / 3)
+    assert estimate.strategy == "gemini:utf8_bytes_div_3"
+
+
+def test_upper_bound_remains_the_default_for_gemini():
+    """Every existing caller keeps the conservative bound it was written against."""
+    counter = TokenCounter()
+    text = _THAI_SENTENCE * 5
+
+    default = counter.count_text(provider="gemini", model="gemini-2.5-flash", text=text)
+    explicit = counter.count_text(
+        provider="gemini", model="gemini-2.5-flash", text=text, bound="upper"
+    )
+
+    assert default.tokens == explicit.tokens == len(text.encode("utf-8"))
+    assert default.strategy == explicit.strategy == "gemini:utf8_byte_upper_bound"
+
+
+def test_estimate_bound_does_not_change_providers_with_an_exact_tokenizer():
+    """OpenAI counts with tiktoken, which is already exact - nothing to relax."""
+    counter = TokenCounter()
+    text = "the quick brown fox " * 10
+
+    upper = counter.count_text(provider="openai", model="gpt-4o-mini", text=text)
+    estimate = counter.count_text(
+        provider="openai", model="gpt-4o-mini", text=text, bound="estimate"
+    )
+
+    assert upper.tokens == estimate.tokens
+    assert upper.strategy == estimate.strategy
+
+
+def test_count_messages_threads_the_estimate_bound_through_to_the_text_strategy():
+    counter = TokenCounter()
+    text = _THAI_SENTENCE * 20
+    messages = [{"role": "user", "content": text}]
+    envelope = 2 + 4
+
+    upper = counter.count_messages(provider="gemini", model="gemini-2.5-flash", messages=messages)
+    estimate = counter.count_messages(
+        provider="gemini", model="gemini-2.5-flash", messages=messages, bound="estimate"
+    )
+
+    assert upper.tokens == len(text.encode("utf-8")) + envelope
+    assert estimate.tokens == math.ceil(len(text.encode("utf-8")) / 3) + envelope
+    assert estimate.strategy == "gemini:utf8_bytes_div_3:messages"

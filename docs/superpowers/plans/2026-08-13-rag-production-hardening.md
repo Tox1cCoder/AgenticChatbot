@@ -1,5 +1,16 @@
 # RAG Production Hardening Implementation Plan
 
+> **Execution status — all fifteen tasks were implemented and reviewed.** The
+> step checkboxes below were never ticked during execution; the authoritative
+> record is `.superpowers/sdd/2026-08-13-rag-production-hardening/progress.md`,
+> which carries every task's commit range, its review outcome, and the findings
+> that were parked rather than fixed. Do not read an unticked box as unstarted
+> work. The evaluation-dependent half of the Final Acceptance Gate
+> (`scripts/evaluate_rag.py`, `scripts/benchmark_rag.py`) was never run: the
+> corpus manifest holds 11 documents, not 1,000, and all fourteen release gates
+> are recorded `status: unmeasured`. Instructions superseded after the plan was
+> written are annotated inline as **PLAN CORRECTION**.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the existing PostgreSQL/Qdrant RAG pipeline correct, measurable, grounded, multimodal, and qualified for at least 1,000 representative documents.
@@ -278,7 +289,9 @@ def _validate_vectors(vectors: list[list[float]], *, expected_count: int, dimens
         raise RuntimeError(f"Embedding dimension mismatch at indices {bad}: expected {dimension}")
 ```
 
-Set `task_type="RETRIEVAL_DOCUMENT"` for chunks and `task_type="RETRIEVAL_QUERY"` for queries; pass title through the provider config where supported. Use one retry helper for text, query, and image calls with exponential backoff, jitter, and provider retry hints. Do not retry shape errors.
+**PLAN CORRECTION (2026-08-21):** do **not** set `task_type` or a provider-level `title`. Google's Embeddings documentation states that `task_type` cannot be used with `gemini-embedding-2` and that the task must be given as an instruction in the prompt instead; the title likewise belongs in the request text. `GeminiRAGEmbeddingService` already carries both through `_format_document` (`title: {title} | text: {text}`) and `embed_query` (`task: {query_task} | query: {query}`), and now sends `output_dimensionality` as the only config field. `tests/test_rag_embedding_service.py` pins their absence. The original instruction — "Set `task_type="RETRIEVAL_DOCUMENT"` for chunks and `task_type="RETRIEVAL_QUERY"` for queries; pass title through the provider config where supported" — was implemented as written and had to be reverted; do not reinstate it.
+
+Use one retry helper for text, query, and image calls with exponential backoff, jitter, and provider retry hints. Do not retry shape errors.
 
 - [ ] **Step 4: Run offline and opt-in live verification**
 

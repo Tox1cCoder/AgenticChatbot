@@ -16,6 +16,8 @@ Tests pin:
   * 429 / RESOURCE_EXHAUSTED errors are retried with the suggested delay.
   * Concurrency is capped at ``embedding_max_concurrency`` workers.
   * Query inputs are prefixed with ``task: ... | query: ...``.
+  * Requests carry ``output_dimensionality`` only: gemini-embedding-2 rejects
+    ``task_type``, and the title travels in the document text.
   * The service returns ``list[list[float]]`` for documents and
     ``list[float]`` for a single query.
   * ``embed_image`` only runs when ``rag_multimodal_image_embeddings_enabled``
@@ -89,8 +91,6 @@ def test_embed_documents_uses_doc_format_and_output_dimensionality(monkeypatch):
     ]
     config = kwargs["config"]
     assert getattr(config, "output_dimensionality", None) == 3072
-    assert getattr(config, "task_type", None) == "RETRIEVAL_DOCUMENT"
-    assert getattr(config, "title", None) == "file.pdf"
 
 
 def test_each_batched_text_is_a_separate_content(monkeypatch):
@@ -152,7 +152,6 @@ def test_embed_query_prefixes_with_task_and_returns_single_vector(monkeypatch):
     assert call.kwargs["contents"] == types.Content(
         role="user", parts=[types.Part(text="task: search result | query: what changed?")]
     )
-    assert getattr(call.kwargs["config"], "task_type", None) == "RETRIEVAL_QUERY"
 
 
 def test_embed_query_uses_configured_query_task(monkeypatch):
@@ -526,3 +525,76 @@ def test_embed_documents_without_recorder_records_nothing(monkeypatch):
     # No recorder configured -> no recording, behavior unchanged.
     vectors = service.embed_documents(["a"], titles=["t1"])
     assert vectors == [[0.1, 0.2]]
+
+
+# ------------------------------------------------------------------
+# gemini-embedding-2 request contract
+# ------------------------------------------------------------------
+
+
+def _sent_configs(client):
+    return [call.kwargs["config"] for call in client.models.embed_content.call_args_list]
+
+
+def test_document_request_omits_task_type_unsupported_by_embedding_2(monkeypatch):
+    """``task_type`` is rejected by gemini-embedding-2.
+
+    The provider documents that the field cannot be used with this model and
+    that the task instruction belongs in the prompt text instead, which
+    ``_format_document`` already provides.
+    """
+    service, client = _build_service(monkeypatch, dimension=2)
+    client.models.embed_content.side_effect = [_make_response([0.1, 0.2])]
+
+    service.embed_documents(["body"], titles=["file.pdf"])
+
+    config = _sent_configs(client)[0]
+    assert getattr(config, "task_type", None) is None
+
+
+def test_document_request_omits_title_field_unsupported_by_embedding_2(monkeypatch):
+    """The title belongs in the formatted text, never in the request config."""
+    service, client = _build_service(monkeypatch, dimension=2)
+    client.models.embed_content.side_effect = [_make_response([0.1, 0.2])]
+
+    service.embed_documents(["body"], titles=["file.pdf"])
+
+    config = _sent_configs(client)[0]
+    assert getattr(config, "title", None) is None
+    assert client.models.embed_content.call_args.kwargs["contents"] == [
+        types.Content(role="user", parts=[types.Part(text="title: file.pdf | text: body")])
+    ]
+
+
+def test_query_request_omits_task_type_unsupported_by_embedding_2(monkeypatch):
+    """The query task hint is carried by the ``task: ... | query: ...`` prefix."""
+    service, client = _build_service(monkeypatch, dimension=2)
+    client.models.embed_content.side_effect = [_make_response([0.3, 0.4])]
+
+    service.embed_query("what changed?")
+
+    config = _sent_configs(client)[0]
+    assert getattr(config, "task_type", None) is None
+    assert client.models.embed_content.call_args.kwargs["contents"] == types.Content(
+        role="user", parts=[types.Part(text="task: search result | query: what changed?")]
+    )
+
+
+def test_image_request_omits_task_type_unsupported_by_embedding_2(monkeypatch):
+    service, client = _build_service(monkeypatch, dimension=2)
+    client.models.embed_content.side_effect = [_make_response([0.5, 0.6])]
+
+    service.embed_image(b"\x89PNG...", mime_type="image/png")
+
+    config = _sent_configs(client)[0]
+    assert getattr(config, "task_type", None) is None
+
+
+def test_output_dimensionality_is_still_requested(monkeypatch):
+    """Removing the unsupported fields must not drop the supported one."""
+    service, client = _build_service(monkeypatch, dimension=2)
+    client.models.embed_content.side_effect = [_make_response([0.1, 0.2])]
+
+    service.embed_documents(["body"], titles=[None])
+
+    assert getattr(_sent_configs(client)[0], "output_dimensionality", None) == 2

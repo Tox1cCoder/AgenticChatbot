@@ -1536,6 +1536,14 @@ class BaseAgent(ABC):
                             raise
 
                         runtime_config = fallback_runtime
+                        # Build the fallback model before the preflight so the budget is
+                        # counted with the provider about to be called, not with the
+                        # local upper bound the failed provider left behind.
+                        llm, _ = self._create_langchain_model_from_runtime(
+                            runtime_config,
+                            user_id=user_id,
+                            enable_reasoning_summary=False,
+                        )
                         budget_result = await self._preflight_model_request(
                             runtime_config,
                             system_messages=[langchain_messages[0]],
@@ -1546,15 +1554,13 @@ class BaseAgent(ABC):
                             emergency_compact=emergency_compact,
                             conversation_id=conversation_id,
                             user_id=user_id,
+                            token_counter=self._token_counter_for_model(
+                                runtime_config.provider, llm
+                            ),
                         )
                         if budget_result is not None:
                             history_messages_lc = list(budget_result.envelope.history_messages)
                             langchain_messages = list(budget_result.envelope.messages)
-                        llm, _ = self._create_langchain_model_from_runtime(
-                            runtime_config,
-                            user_id=user_id,
-                            enable_reasoning_summary=False,
-                        )
                         llm_with_tools = (
                             llm
                             if disable_tools
@@ -1582,6 +1588,14 @@ class BaseAgent(ABC):
                         raise
 
                     runtime_config = fallback_runtime
+                    # Build the fallback model before the preflight so the budget is
+                    # counted with the provider about to be called, not with the
+                    # local upper bound the failed provider left behind.
+                    llm, _ = self._create_langchain_model_from_runtime(
+                        runtime_config,
+                        user_id=user_id,
+                        enable_reasoning_summary=False,
+                    )
                     budget_result = await self._preflight_model_request(
                         runtime_config,
                         system_messages=[langchain_messages[0]],
@@ -1592,15 +1606,11 @@ class BaseAgent(ABC):
                         emergency_compact=emergency_compact,
                         conversation_id=conversation_id,
                         user_id=user_id,
+                        token_counter=self._token_counter_for_model(runtime_config.provider, llm),
                     )
                     if budget_result is not None:
                         history_messages_lc = list(budget_result.envelope.history_messages)
                         langchain_messages = list(budget_result.envelope.messages)
-                    llm, _ = self._create_langchain_model_from_runtime(
-                        runtime_config,
-                        user_id=user_id,
-                        enable_reasoning_summary=False,
-                    )
                     llm_with_tools = (
                         llm
                         if disable_tools

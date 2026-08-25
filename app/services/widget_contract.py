@@ -20,8 +20,11 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import re
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 MIN_WIDGET_HEIGHT = 260
 MAX_WIDGET_HEIGHT = 960
@@ -47,7 +50,12 @@ def coerce_widget_state_object(raw: Any, *, field: str = "initial_state") -> dic
     3. strict JSON;
     4. JSON with ``strict=False`` (allows literal control characters inside
        string values, which is exactly the observed failure);
-    5. ``ast.literal_eval`` for Python-style literals (single quotes,
+    5. the first complete JSON object when the model kept writing past the
+       closing brace — it sometimes appends the *remaining tool arguments*
+       (``{...},session_id:"conv-1"``), which strict JSON reports as "Extra
+       data". The trailing text is discarded: ``session_id`` is rebound from
+       the active conversation anyway and ``title`` is optional;
+    6. ``ast.literal_eval`` for Python-style literals (single quotes,
        ``True``/``None``).
 
     On true malformation, raise a ``ValueError`` naming the field and the
@@ -70,6 +78,23 @@ def coerce_widget_state_object(raw: Any, *, field: str = "initial_state") -> dic
         if isinstance(parsed, dict):
             return parsed
         raise ValueError(f"{field} must be an object, not a {type(parsed).__name__}.")
+
+    for strict in (True, False):
+        try:
+            prefix, end = json.JSONDecoder(strict=strict).raw_decode(candidate)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(prefix, dict):
+            raise ValueError(f"{field} must be an object, not a {type(prefix).__name__}.")
+        discarded = candidate[end:].strip()
+        logger.warning(
+            "Recovered %s from a serialized object with %d trailing characters; "
+            "discarded remainder starts with %r",
+            field,
+            len(discarded),
+            discarded[:40],
+        )
+        return prefix
 
     try:
         literal = ast.literal_eval(candidate)
