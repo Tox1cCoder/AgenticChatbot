@@ -112,7 +112,7 @@ class PlanningLoopMixin:
         # Get only current turn messages for the model
         current_turn_messages = self._messages_for_selected_agent(
             state,
-            state.get("selected_agent") or "planning_agent",
+            state.get("active_agent_id") or "planning_agent",
             messages,
         )
         current_turn_messages, has_images = self._apply_current_turn_attachments(
@@ -486,8 +486,8 @@ class PlanningLoopMixin:
     def _should_continue_planning(self, state: GraphState) -> str:
         # hand_off applied during this planning_tools turn re-routes the
         # conversation to a different top-level agent. Honor the new
-        # selected_agent so the planning loop yields to the target node.
-        delegated_agent = state.get("selected_agent")
+        # active_agent_id so the planning loop yields to the target node.
+        delegated_agent = state.get("active_agent_id")
         if isinstance(delegated_agent, str) and delegated_agent != "planning_agent":
             is_base_agent = delegated_agent in self.agents
             is_attached_custom = self._is_attached_custom_agent(state, delegated_agent)

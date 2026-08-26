@@ -79,6 +79,17 @@ def _normalize_provider(value: Any) -> str:
     return provider if provider in SUPPORTED_PROVIDERS else "gemini"
 
 
+def provider_supports_structured_output(provider: Any) -> bool:
+    """Whether the installed LangChain adapter for ``provider`` honors a schema.
+
+    Owned here because provider naming and normalization are provider-config
+    concerns; routing only asks the question.
+    """
+    if not isinstance(provider, str):
+        return False
+    return provider.strip().lower() in STRUCTURED_OUTPUT_PROVIDERS
+
+
 def _normalize_allow_custom_model(value: Any) -> bool:
     return bool(value)
 

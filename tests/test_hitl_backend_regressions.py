@@ -20,7 +20,7 @@ async def test_generic_approval_edit_rewrites_call_executed_by_tool_node(monkeyp
     }
     state = {
         "messages": [AIMessage(content="", tool_calls=[original_call])],
-        "selected_agent": "chat_agent",
+        "active_agent_id": "chat_agent",
         "context": {},
     }
 
@@ -81,7 +81,7 @@ async def test_decision_stream_accepts_all_approval_interrupt_nodes(pending_node
         aget_state=lambda _config: _async_value(
             SimpleNamespace(
                 next=(pending_node,),
-                values={"selected_agent": "chat_agent", "conversation_id": "conv-1"},
+                values={"active_agent_id": "chat_agent", "conversation_id": "conv-1"},
             )
         )
     )

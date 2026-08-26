@@ -32,9 +32,9 @@ class InflightEntry:
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     partial_text: str = ""
     partial_thinking: str = ""
-    selected_agent: str | None = None
+    active_agent_id: str | None = None
     # True once the run has paused on a HITL interrupt and can resume with the
-    # same ``selected_agent``. Paused entries remain in the registry so custom
+    # same ``active_agent_id``. Paused entries remain in the registry so custom
     # agent edit/delete/detach stay blocked until the run resolves.
     paused: bool = False
     started_at: float = field(default_factory=time.monotonic)
@@ -102,7 +102,7 @@ class GenerationRegistry:
         conversation_id: UUID,
         user_id: UUID,
         *,
-        selected_agent: str | None = None,
+        active_agent_id: str | None = None,
         paused: bool = False,
     ) -> InflightEntry:
         """Register a new in-flight generation. Returns the entry."""
@@ -110,7 +110,7 @@ class GenerationRegistry:
         entry = InflightEntry(
             conversation_id=conversation_id,
             user_id=user_id,
-            selected_agent=selected_agent,
+            active_agent_id=active_agent_id,
             paused=paused,
         )
         self._store[key] = entry
@@ -126,11 +126,11 @@ class GenerationRegistry:
             logger.debug("Marked generation paused for user_message_id=%s", user_message_id)
         return entry
 
-    def set_selected_agent(self, user_message_id: UUID, agent_id: str | None) -> None:
+    def set_active_agent_id(self, user_message_id: UUID, agent_id: str | None) -> None:
         """Record the currently selected runtime agent for an entry."""
         entry = self.get(user_message_id)
         if entry is not None:
-            entry.selected_agent = agent_id
+            entry.active_agent_id = agent_id
             entry.touch()
 
     # ------------------------------------------------------------------
@@ -166,12 +166,12 @@ class GenerationRegistry:
         for entry in list(self._store.values()):
             if not self._matches(entry.user_id, owner_id):
                 continue
-            if self._matches(entry.selected_agent, runtime_agent_id):
+            if self._matches(entry.active_agent_id, runtime_agent_id):
                 return True
             if (
                 conversation_id is not None
                 and self._matches(entry.conversation_id, conversation_id)
-                and not entry.selected_agent
+                and not entry.active_agent_id
             ):
                 return True
         return False
@@ -182,7 +182,7 @@ class GenerationRegistry:
             if (
                 self._matches(entry.user_id, owner_id)
                 and self._matches(entry.conversation_id, conversation_id)
-                and not entry.selected_agent
+                and not entry.active_agent_id
             ):
                 return True
         return False

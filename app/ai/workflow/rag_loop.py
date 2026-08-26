@@ -367,9 +367,9 @@ class RagLoopMixin:
         ]
         non_search_outputs_by_id: dict[str, dict[str, Any]] = {}
         rejected_feedback: dict[str, str] = {}
-        selected_agent_name = state.get("selected_agent")
-        agent = self.agents.get(selected_agent_name) if selected_agent_name else None
-        handoff_tool = self._handoff_tool_for_agent(state, selected_agent_name)
+        active_agent_id_name = state.get("active_agent_id")
+        agent = self.agents.get(active_agent_id_name) if active_agent_id_name else None
+        handoff_tool = self._handoff_tool_for_agent(state, active_agent_id_name)
         scoped_internal_tools = [handoff_tool] if handoff_tool else None
 
         if non_search_tool_calls:
@@ -664,10 +664,10 @@ class RagLoopMixin:
             isinstance(handoff, dict)
             and handoff.get("active")
             and handoff.get("source_agent") == "rag_agent"
-            and handoff.get("target_agent") == state.get("selected_agent")
-            and state.get("selected_agent") != "rag_agent"
+            and handoff.get("target_agent") == state.get("active_agent_id")
+            and state.get("active_agent_id") != "rag_agent"
         ):
-            return self._route_target_for(state, state["selected_agent"])
+            return self._route_target_for(state, state["active_agent_id"])
         agentic_iteration = context.get("agentic_rag_iteration", 0)
 
         streak = context.get("tool_error_streak")

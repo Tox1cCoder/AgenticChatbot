@@ -275,11 +275,13 @@ def test_model_usage_operator_constraints_are_documented() -> None:
         assert guidance in readme
 
 
-def test_router_uses_agent_config_model(monkeypatch) -> None:
-    monkeypatch.setitem(agent_config.AGENT_CONFIG, "router", {"model": "configured-router"})
-    monkeypatch.setattr(Router, "_init_gemini", lambda self: None)
+def test_router_uses_the_configured_runtime_model(monkeypatch) -> None:
+    """The router resolves its model through settings, never a hard-coded id."""
+    from app.core.config import settings as app_settings
 
-    assert Router().model_name == "configured-router"
+    monkeypatch.setattr(app_settings, "router_model", "configured-router")
+    assert Router(recorder=None).model_name == "configured-router"
+    assert agent_config.AGENT_CONFIG["router"]["model"]
 
 
 def test_validation_error_paths_do_not_depend_on_starlette_422_names() -> None:

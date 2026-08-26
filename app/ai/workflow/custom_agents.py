@@ -15,12 +15,12 @@ from app.ai.schemas import GraphState, GraphStateView
 class CustomAgentsMixin:
     """Relocated custom_agents methods for :class:`MultiAgentWorkflow`."""
 
-    def _resolve_runtime_agent(self, state: GraphState, selected_agent: str | None) -> Any:
+    def _resolve_runtime_agent(self, state: GraphState, active_agent_id: str | None) -> Any:
         """Resolve a base agent or build a custom agent for the selected id."""
-        if selected_agent in self.agents:
-            return self.agents[selected_agent]
-        if is_custom_runtime_id(selected_agent):
-            return self._build_custom_agent(state, selected_agent)
+        if active_agent_id in self.agents:
+            return self.agents[active_agent_id]
+        if is_custom_runtime_id(active_agent_id):
+            return self._build_custom_agent(state, active_agent_id)
         return None
 
     def _handoff_targets(self, state: GraphState, active_agent_id: str | None) -> list[str]:
@@ -209,10 +209,10 @@ class CustomAgentsMixin:
             return False
         return runtime_agent_id in GraphStateView(state).custom_agents()
 
-    def _route_target_for(self, state: GraphState, selected_agent: str) -> str:
+    def _route_target_for(self, state: GraphState, active_agent_id: str) -> str:
         """Map a selected agent to its graph node name (custom ids → custom_agent)."""
-        if is_custom_runtime_id(selected_agent) and self._is_attached_custom_agent(
-            state, selected_agent
+        if is_custom_runtime_id(active_agent_id) and self._is_attached_custom_agent(
+            state, active_agent_id
         ):
             return "custom_agent"
-        return selected_agent
+        return active_agent_id

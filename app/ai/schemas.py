@@ -173,6 +173,9 @@ class GraphContext(TypedDict, total=False):
     pause_reason: str
     continuation_round: int
     continuation_reason: str
+    # Legacy inter-agent delegation depth for the pre-v2 handoff path. Lives in
+    # turn-scoped context (never top-level state); removed with that path.
+    delegation_count: int
     agentic_rag_iteration: int
     consecutive_errors: int
     all_tasks_completed: bool
@@ -210,11 +213,7 @@ class GraphState(TypedDict):
     conversation_id: NotRequired[str | None]
     user_id: NotRequired[str | None]
     device_id: NotRequired[str | None]
-    selected_agent: NotRequired[str | None]
-    # Agent that produced the previous turn's final response. Persisted across
-    # turns (NOT reset per turn) so a follow-up can stick to the custom agent
-    # the user was already working with instead of being silently re-routed.
-    last_agent: NotRequired[str | None]
+    active_agent_id: NotRequired[str | None]
     response: NotRequired[AgentResponse | None]
     context: NotRequired[GraphContext]
     # Per-conversation custom agents keyed by runtime id ("custom_agent:<uuid>").
@@ -240,8 +239,6 @@ class GraphState(TypedDict):
     planning_phase: NotRequired[str | None]
     # Persisted plan lifecycle (draft/ready/executing/paused/completed); None = no plan yet
     plan_lifecycle: NotRequired[PlanLifecycle | None]
-    # Inter-agent delegation depth counter (reset each user turn)
-    delegation_count: NotRequired[int | None]
     # Stable DB message identifiers for the current turn. ``user_message_id``
     # is the persisted prompt; ``assistant_message_id`` is reserved before
     # generation so the final ``AIMessage`` can carry the same ID that the
@@ -272,8 +269,8 @@ class GraphStateView:
         value = self._state.get("device_id")
         return value if isinstance(value, str) or value is None else str(value)
 
-    def selected_agent(self) -> str | None:
-        value = self._state.get("selected_agent")
+    def active_agent_id(self) -> str | None:
+        value = self._state.get("active_agent_id")
         return value if isinstance(value, str) or value is None else str(value)
 
     def custom_agents(self) -> dict[str, Any]:

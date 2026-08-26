@@ -178,7 +178,7 @@ async def test_streaming_workflow_does_not_compact_before_complete_event(monkeyp
     )
     final_state = {
         "messages": [AIMessage(content="done")],
-        "selected_agent": "chat_agent",
+        "active_agent_id": "chat_agent",
         "response": response,
         "context": {},
     }
@@ -191,7 +191,13 @@ async def test_streaming_workflow_does_not_compact_before_complete_event(monkeyp
             return SimpleNamespace(next=[], values=final_state)
 
     workflow.graph = FakeGraph()
-    workflow._route_node = AsyncMock(return_value={"selected_agent": "chat_agent"})
+    # Routing runs inside the graph now; the stream adapter only needs the
+    # per-turn runtime context and derives `agent_selected` from state updates.
+    workflow.agents = {"chat_agent": object()}
+    workflow.routing_service = object()
+    workflow.routing_context_builder = object()
+    workflow.history_provider = None
+    workflow.document_repository = None
     workflow._get_conversation_history = AsyncMock(return_value=[])
 
     events: list[str] = []

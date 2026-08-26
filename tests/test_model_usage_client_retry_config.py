@@ -84,14 +84,22 @@ def test_agent_config_gemini_client_disables_retries(monkeypatch):
 # --- router --------------------------------------------------------------
 
 
-def test_router_gemini_client_disables_retries(monkeypatch):
-    from app.ai.agents import router
+def test_router_owns_no_provider_sdk_client():
+    """Routing goes through the runtime model abstraction, not a raw SDK client.
 
-    capture = _Capture()
-    monkeypatch.setattr(router.genai, "Client", capture)
-    monkeypatch.setattr(router.settings, "gemini_api_key", "k")
-    router.Router()
-    _assert_genai_no_retry(capture.kwargs)
+    There is no router-owned retry policy to assert because there is no
+    router-owned client: ``ModelFactory`` sets ``max_retries=0`` for every
+    model it builds, and ``RoutingService`` owns the single bounded retry.
+    """
+    import inspect
+
+    from app.ai.agents import router
+    from app.ai.workflow.routing import RoutingService
+
+    source = inspect.getsource(router)
+    assert "genai" not in source
+    assert not hasattr(router, "genai")
+    assert frozenset({"supports_structured_output"}) == RoutingService.REQUIRED_CAPABILITIES
 
 
 # --- rag embedding service ----------------------------------------------

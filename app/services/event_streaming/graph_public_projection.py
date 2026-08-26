@@ -29,6 +29,12 @@ from .events import V3StreamEvent, make_event
 ToolEndEventsFromNodeState = Callable[..., Iterator[dict[str, Any]]]
 
 
+# Agents whose streamed model tokens are internal (an enhanced image prompt,
+# not an answer). Their tokens are suppressed; the finalized response is the
+# only content the client sees.
+INTERNAL_TOKEN_AGENTS = frozenset({"image_generator_agent"})
+
+
 @dataclass
 class StreamProjectionContext:
     """Mutable per-stream accumulator state shared across continuation rounds.
@@ -39,6 +45,7 @@ class StreamProjectionContext:
     """
 
     last_emitted_agent: str | None = None
+    emitted_initial_selection: bool = False
     suppress_tokens: bool = False
     internal_content_only: bool = True
     accumulated_content: str = ""
@@ -287,13 +294,23 @@ class GraphPublicStreamProjector:
         )
 
     @staticmethod
-    def _handoff_agent_selected_event(agent: str) -> V3StreamEvent:
+    def _agent_selected_event(agent: str, *, cause: str) -> V3StreamEvent:
+        """One selection event per accepted route or handoff.
+
+        ``cause`` distinguishes the turn's initial routing decision from a
+        later accepted transition; the client needs both, and they must never
+        be conflated.
+        """
         return make_event(
             "agent_selected",
             sequence=0,
             agent=agent,
-            data={"agent": agent, "reason": "handoff"},
+            data={"agent": agent, "cause": cause, "reason": cause},
         )
+
+    @staticmethod
+    def _selection_cause(ctx: StreamProjectionContext) -> str:
+        return "handoff" if ctx.emitted_initial_selection else "route"
 
     @staticmethod
     def _node_complete_event(node_info: dict[str, Any]) -> V3StreamEvent:
@@ -441,10 +458,13 @@ class GraphPublicStreamProjector:
                 ctx.last_state_values = {}
             ctx.last_state_values.update(node_state)
 
-            new_agent = node_state.get("selected_agent")
+            new_agent = node_state.get("active_agent_id")
             if isinstance(new_agent, str) and new_agent != ctx.last_emitted_agent:
+                cause = self._selection_cause(ctx)
                 ctx.last_emitted_agent = new_agent
-                yield self._handoff_agent_selected_event(new_agent)
+                ctx.emitted_initial_selection = True
+                ctx.suppress_tokens = new_agent in INTERNAL_TOKEN_AGENTS
+                yield self._agent_selected_event(new_agent, cause=cause)
 
         if node_name in ("planning_agent", "planning_tools") and isinstance(node_state, dict):
             node_info: dict[str, Any] = {"node": node_name}
@@ -513,7 +533,7 @@ class GraphPublicStreamProjector:
         """
         values = data.get("values")
         new_messages = data.get("new_messages") or []
-        selected_agent = data.get("selected_agent")
+        selected_agent = data.get("active_agent_id")
 
         if isinstance(values, dict):
             if ctx.last_state_values is None:
@@ -521,8 +541,11 @@ class GraphPublicStreamProjector:
             ctx.last_state_values.update(values)
 
         if isinstance(selected_agent, str) and selected_agent != ctx.last_emitted_agent:
+            cause = self._selection_cause(ctx)
             ctx.last_emitted_agent = selected_agent
-            yield self._handoff_agent_selected_event(selected_agent)
+            ctx.emitted_initial_selection = True
+            ctx.suppress_tokens = selected_agent in INTERNAL_TOKEN_AGENTS
+            yield self._agent_selected_event(selected_agent, cause=cause)
 
         # Best-effort planning node_complete derived from the newly added messages.
         if selected_agent in ("planning_agent", "planning_tools"):

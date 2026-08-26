@@ -812,7 +812,7 @@ class MessageService(IMessageService):
         user_id: UUID | None = None,
         message_id: UUID | None = None,
         tool_artifacts: list[dict[str, Any]] | None = None,
-        selected_agent: str | None = None,
+        active_agent_id: str | None = None,
         custom_agents: dict[str, Any] | None = None,
         require_durable_interrupt: bool = False,
     ) -> MessageRead:
@@ -866,7 +866,7 @@ class MessageService(IMessageService):
             if live_widgets:
                 metadata["live_widgets"] = live_widgets
 
-        self._attach_selected_agent_metadata(metadata, selected_agent, custom_agents)
+        self._attach_active_agent_metadata(metadata, active_agent_id, custom_agents)
 
         bot_message = self._create_bot_response_message(
             conversation_id=conversation_id,
@@ -985,7 +985,7 @@ class MessageService(IMessageService):
                             else None
                         ),
                         user_id=resolved_user_id,
-                        selected_agent=bot_response.agent_id if bot_response else None,
+                        active_agent_id=bot_response.agent_id if bot_response else None,
                         custom_agents=workflow_request.custom_agents,
                     )
 
@@ -1126,11 +1126,11 @@ class MessageService(IMessageService):
                     event_type = event.type
 
                     if event_type == "agent_selected":
-                        selected_agent = event.agent or event.data.get("agent")
-                        inflight.selected_agent = selected_agent
+                        active_agent_id = event.agent or event.data.get("agent")
+                        inflight.active_agent_id = active_agent_id
                         inflight.touch()
                         yield self._agent_selected_event(
-                            selected_agent,
+                            active_agent_id,
                             workflow_request.custom_agents,
                             sequence=event.sequence,
                         )
@@ -1222,14 +1222,14 @@ class MessageService(IMessageService):
                                     user_id=resolved_user_id,
                                     message_id=bot_message_id,
                                     tool_artifacts=stream_tool_artifacts or None,
-                                    selected_agent=inflight.selected_agent,
+                                    active_agent_id=inflight.active_agent_id,
                                     custom_agents=workflow_request.custom_agents,
                                 ).model_dump(mode="json"),
                             },
                         )
                         # Workflow is paused - don't create a bot message yet.
                         # Keep the entry as a paused lock token (carrying the
-                        # resolved selected_agent) so a custom agent cannot be
+                        # resolved active_agent_id) so a custom agent cannot be
                         # edited/deleted/detached while this run can still resume.
                         _cancel_title_task()
                         inflight.resolve()
@@ -1266,9 +1266,9 @@ class MessageService(IMessageService):
                             "persona_used": sanitized_persona,
                             "reply_to_user_message_id": str(user_message_id),
                         }
-                        self._attach_selected_agent_metadata(
+                        self._attach_active_agent_metadata(
                             metadata,
-                            inflight.selected_agent,
+                            inflight.active_agent_id,
                             workflow_request.custom_agents,
                         )
                         bot_message = await self._acreate_bot_response_message(
@@ -1349,9 +1349,9 @@ class MessageService(IMessageService):
                             "persona_used": sanitized_persona,
                             "reply_to_user_message_id": str(user_message_id),
                         }
-                        self._attach_selected_agent_metadata(
+                        self._attach_active_agent_metadata(
                             metadata,
-                            inflight.selected_agent,
+                            inflight.active_agent_id,
                             workflow_request.custom_agents,
                         )
                         bot_msg = self._create_bot_response_message(
@@ -1888,7 +1888,7 @@ class MessageService(IMessageService):
                             user_id=user_id,
                             message_id=bot_message_id,
                             tool_artifacts=resume_tool_artifacts or None,
-                            selected_agent=resume_selected_agent,
+                            active_agent_id=resume_selected_agent,
                             custom_agents=resume_custom_agents,
                             require_durable_interrupt=True,
                         )
@@ -2807,20 +2807,20 @@ class MessageService(IMessageService):
         return make_event("agent_selected", sequence=sequence, agent=agent, data=data)
 
     @staticmethod
-    def _attach_selected_agent_metadata(
+    def _attach_active_agent_metadata(
         metadata: dict[str, Any],
-        selected_agent: str | None,
+        active_agent_id: str | None,
         custom_agents: dict[str, Any] | None,
     ) -> None:
-        if not selected_agent:
+        if not active_agent_id:
             return
 
         from app.ai.agent_metadata import attach_agent_metadata
 
         attach_agent_metadata(
             metadata,
-            response_agent_id=selected_agent,
-            selected_agent_id=selected_agent,
+            response_agent_id=active_agent_id,
+            selected_agent_id=active_agent_id,
             custom_agents=custom_agents,
         )
 
@@ -2842,7 +2842,7 @@ class MessageService(IMessageService):
             return
         attached = set(self._resolve_custom_agents_state(owner_id, conversation_id).keys())
         for entry in paused:
-            selected = entry.selected_agent
+            selected = entry.active_agent_id
             if selected and is_custom_runtime_id(selected) and selected not in attached:
                 raise CustomHTTPException(
                     status_code=409,

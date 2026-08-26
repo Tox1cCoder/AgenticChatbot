@@ -29,10 +29,10 @@ def _build_workflow(recorder):
     )
 
 
-def test_recorder_reaches_router():
+def test_recorder_reaches_the_routing_service():
     recorder = _SentinelRecorder()
     workflow = _build_workflow(recorder)
-    assert workflow.router.recorder is recorder
+    assert workflow.routing_service._usage_recorder is recorder
 
 
 def test_recorder_reaches_every_built_in_agent():

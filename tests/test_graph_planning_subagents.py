@@ -358,7 +358,7 @@ def _planning_tool_state(
     tool_content: str = "done",
 ) -> dict[str, Any]:
     return {
-        "selected_agent": "planning_agent",
+        "active_agent_id": "planning_agent",
         "planning_call_count": planning_call_count,
         "planning_mode_enabled": True,
         "planning_phase": "executing",
@@ -1240,7 +1240,7 @@ async def test_execute_tool_calls_remains_sequential_for_dependent_tools(monkeyp
 @pytest.mark.asyncio
 async def test_planning_tools_node_applies_hand_off_to_target_agent(monkeypatch):
     """When the Planning Agent calls ``hand_off``, planning_tools must swap
-    ``selected_agent`` so the conditional edge routes to the target.
+    ``active_agent_id`` so the conditional edge routes to the target.
     """
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
     workflow.planning_agent = SimpleNamespace(
@@ -1260,7 +1260,7 @@ async def test_planning_tools_node_applies_hand_off_to_target_agent(monkeypatch)
     monkeypatch.setattr("app.ai.workflow.planning_loop.ensure_agent_tool_map", fake_ensure_map)
 
     state: dict[str, Any] = {
-        "selected_agent": "planning_agent",
+        "active_agent_id": "planning_agent",
         "messages": [
             HumanMessage(content="actually, just answer this normally"),
             AIMessage(
@@ -1289,7 +1289,7 @@ async def test_planning_tools_node_applies_hand_off_to_target_agent(monkeypatch)
 
     result_state = await workflow._planning_tools_node(state)
 
-    assert result_state["selected_agent"] == "chat_agent"
+    assert result_state["active_agent_id"] == "chat_agent"
 
 
 def test_should_continue_planning_routes_to_delegated_agent():
@@ -1297,7 +1297,7 @@ def test_should_continue_planning_routes_to_delegated_agent():
     workflow.agents = {"planning_agent": object(), "chat_agent": object()}
 
     state: dict[str, Any] = {
-        "selected_agent": "chat_agent",
+        "active_agent_id": "chat_agent",
         "planning_call_count": 1,
         "planning_mode_enabled": True,
         "planning_phase": "executing",
@@ -1324,7 +1324,7 @@ def test_should_continue_planning_routes_to_delegated_agent():
 async def test_planning_tools_node_handles_hand_off_alongside_dispatch(monkeypatch):
     """When the Planning Agent emits BOTH ``dispatch_subagents`` and
     ``hand_off`` in the same response, the dispatch must still run and produce
-    a ToolMessage, AND the hand_off must reroute ``selected_agent`` so the
+    a ToolMessage, AND the hand_off must reroute ``active_agent_id`` so the
     conditional edge transfers control out of the planning loop.
     """
     monkeypatch.setattr(settings, "planning_subagents_enabled", True)
@@ -1358,7 +1358,7 @@ async def test_planning_tools_node_handles_hand_off_alongside_dispatch(monkeypat
     workflow._run_agent_in_isolated_context = fake_runner  # type: ignore[assignment]
 
     state: dict[str, Any] = {
-        "selected_agent": "planning_agent",
+        "active_agent_id": "planning_agent",
         "messages": [
             HumanMessage(content="research X and then hand me back to chat"),
             AIMessage(
@@ -1407,11 +1407,11 @@ async def test_planning_tools_node_handles_hand_off_alongside_dispatch(monkeypat
     tool_names = sorted(tm.name or "" for tm in tool_messages)
     assert tool_names == ["dispatch_subagents", "hand_off"]
 
-    # hand_off rerouted selected_agent away from planning so the conditional
+    # hand_off rerouted active_agent_id away from planning so the conditional
     # edge transfers control to chat_agent.
-    assert result_state["selected_agent"] == "chat_agent"
+    assert result_state["active_agent_id"] == "chat_agent"
 
-    # _should_continue_planning honors the new selected_agent.
+    # _should_continue_planning honors the new active_agent_id.
     assert workflow._should_continue_planning(result_state) == "chat_agent"
 
     # Dispatch summary metadata is preserved on context even when followed by
@@ -1446,7 +1446,7 @@ async def test_planning_consecutive_errors_only_warns_near_threshold(caplog, mon
 
     def _make_state() -> dict[str, Any]:
         return {
-            "selected_agent": "planning_agent",
+            "active_agent_id": "planning_agent",
             "messages": [
                 HumanMessage(content="try again"),
                 AIMessage(
@@ -1513,7 +1513,7 @@ async def test_planning_consecutive_errors_small_limit_does_not_warn_on_first(ca
     workflow.agents = {"planning_agent": object()}
 
     state: dict[str, Any] = {
-        "selected_agent": "planning_agent",
+        "active_agent_id": "planning_agent",
         "messages": [
             HumanMessage(content="try again"),
             AIMessage(
@@ -1849,7 +1849,7 @@ def test_delegated_agent_messages_strip_handoff_control_messages():
         ),
     ]
     state: dict[str, Any] = {
-        "selected_agent": "search_agent",
+        "active_agent_id": "search_agent",
         "messages": messages,
         "context": {
             "handoff": {
@@ -1903,7 +1903,7 @@ async def test_planning_node_scopes_handoff_control_messages_before_model_call(m
     ]
     state: dict[str, Any] = {
         "messages": messages,
-        "selected_agent": "planning_agent",
+        "active_agent_id": "planning_agent",
         "conversation_id": "conv-1",
         "user_id": "user-1",
         "todos": [],
@@ -1931,7 +1931,7 @@ def test_apply_hand_off_records_control_metadata():
     workflow.agents = {"search_agent": object(), "planning_agent": object()}
 
     state: dict[str, Any] = {
-        "selected_agent": "planning_agent",
+        "active_agent_id": "planning_agent",
         "messages": [],
         "context": {},
     }
@@ -1945,7 +1945,7 @@ def test_apply_hand_off_records_control_metadata():
 
     new_state = workflow._apply_hand_off_if_present(state, tool_outputs)
 
-    assert new_state["selected_agent"] == "search_agent"
+    assert new_state["active_agent_id"] == "search_agent"
     handoff = new_state["context"]["handoff"]
     assert handoff == {
         "active": True,
@@ -1967,7 +1967,7 @@ def test_delegated_agent_messages_passthrough_when_no_active_handoff():
         ToolMessage(content="some result", tool_call_id="t1", name="search_documents"),
     ]
     state: dict[str, Any] = {
-        "selected_agent": "search_agent",
+        "active_agent_id": "search_agent",
         "messages": messages,
         "context": {},
     }
@@ -1986,7 +1986,7 @@ def test_should_continue_planning_routes_handoff_to_custom_agent():
         "search_agent": object(),
     }
     state = {
-        "selected_agent": rid,
+        "active_agent_id": rid,
         "custom_agents": {
             rid: {
                 "id": rid.split(":", 1)[1],

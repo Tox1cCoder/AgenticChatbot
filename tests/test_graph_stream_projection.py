@@ -133,19 +133,25 @@ def test_updates_tuple_tool_message_delegates_to_injected_callable():
     assert seen_kwargs["emitted_tool_result_ids"] is ctx.emitted_tool_result_ids
 
 
-def test_values_snapshot_selected_agent_change_emits_second_agent_selected():
-    """A handoff surfaces as a second ``agent_selected`` with reason=handoff
-    when the v3 ``values`` snapshot's ``selected_agent`` changes."""
+def test_values_snapshot_active_agent_change_emits_a_handoff_selection():
+    """A transition after the initial route surfaces as ``cause=handoff``.
+
+    ``emitted_initial_selection`` is what separates the turn's routing decision
+    from every later accepted transition; without it a handoff would be
+    reported as a fresh routing decision.
+    """
     projector = _make_projector()
-    ctx = StreamProjectionContext(last_emitted_agent="planning_agent")
+    ctx = StreamProjectionContext(
+        last_emitted_agent="planning_agent", emitted_initial_selection=True
+    )
     event = make_event(
         "state_snapshot",
         sequence=5,
         data={
             "kind": "values",
-            "values": {"selected_agent": "search_agent"},
+            "values": {"active_agent_id": "search_agent"},
             "new_messages": [],
-            "selected_agent": "search_agent",
+            "active_agent_id": "search_agent",
         },
     )
 
@@ -155,12 +161,55 @@ def test_values_snapshot_selected_agent_change_emits_second_agent_selected():
     emitted = events[0]
     assert emitted.type == "agent_selected"
     assert emitted.agent == "search_agent"
-    assert emitted.data == {"agent": "search_agent", "reason": "handoff"}
+    assert emitted.data == {
+        "agent": "search_agent",
+        "cause": "handoff",
+        "reason": "handoff",
+    }
     assert ctx.last_emitted_agent == "search_agent"
 
     # No re-emission once the agent has already been announced.
     repeat = list(projector.map_event(event, ctx))
     assert repeat == []
+
+
+def test_first_selection_of_a_turn_is_reported_as_the_routing_decision():
+    projector = _make_projector()
+    ctx = StreamProjectionContext()
+    event = make_event(
+        "state_snapshot",
+        sequence=1,
+        data={
+            "kind": "values",
+            "values": {"active_agent_id": "planning_agent"},
+            "new_messages": [],
+            "active_agent_id": "planning_agent",
+        },
+    )
+
+    [emitted] = list(projector.map_event(event, ctx))
+
+    assert emitted.data["cause"] == "route"
+    assert ctx.emitted_initial_selection is True
+
+
+def test_internal_token_agents_suppress_public_tokens_on_selection():
+    projector = _make_projector()
+    ctx = StreamProjectionContext()
+    event = make_event(
+        "state_snapshot",
+        sequence=1,
+        data={
+            "kind": "values",
+            "values": {"active_agent_id": "image_generator_agent"},
+            "new_messages": [],
+            "active_agent_id": "image_generator_agent",
+        },
+    )
+
+    list(projector.map_event(event, ctx))
+
+    assert ctx.suppress_tokens is True
 
 
 def test_updates_tuple_planning_agent_tool_calls_emit_node_complete():
@@ -216,9 +265,9 @@ def test_planning_node_complete_also_derived_from_values_snapshot():
         sequence=2,
         data={
             "kind": "values",
-            "values": {"selected_agent": "planning_agent"},
+            "values": {"active_agent_id": "planning_agent"},
             "new_messages": [planning_ai_message],
-            "selected_agent": "planning_agent",
+            "active_agent_id": "planning_agent",
         },
     )
 

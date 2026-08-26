@@ -48,7 +48,7 @@ async def test_gate_gates_all_tools_from_a_server_via_policy(monkeypatch):
     wf = _workflow_stub(tool_map, manager, monkeypatch)
 
     state = {
-        "selected_agent": "chat_agent",
+        "active_agent_id": "chat_agent",
         "conversation_id": "c1",
         "user_id": "u1",
         "device_id": None,
@@ -83,7 +83,7 @@ async def test_gate_lets_tool_override_exempt_a_server_tool(monkeypatch):
     wf = _workflow_stub(tool_map, _FakeManager({}), monkeypatch)
 
     state = {
-        "selected_agent": "chat_agent",
+        "active_agent_id": "chat_agent",
         "conversation_id": "c1",
         "user_id": "u1",
         "device_id": None,
@@ -116,7 +116,7 @@ async def test_gate_lets_tool_override_exempt_a_server_tool(monkeypatch):
 async def test_gate_master_off_never_gates(monkeypatch):
     wf = _workflow_stub({}, _FakeManager({}), monkeypatch)
     state = {
-        "selected_agent": "chat_agent",
+        "active_agent_id": "chat_agent",
         "conversation_id": "c1",
         "user_id": "u1",
         "device_id": None,

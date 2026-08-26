@@ -65,19 +65,36 @@ def test_no_summarize_node(topology):
 
 
 def test_route_targets_all_base_agents_plus_custom(topology):
+    """The router reaches every routable specialist, and failure reaches finalize."""
     targets = _targets(topology, "route")
     assert targets >= BASE_AGENTS
     assert "custom_agent" in targets
-    assert "__end__" in targets
+    assert "finalize" in targets
+    # Routing failure terminates through the finalizer, never straight to END.
+    assert "__end__" not in targets
 
 
-def test_standard_tool_calling_agents_route_through_approval_tools_end(topology):
+def test_standard_tool_calling_agents_route_through_approval_tools_validation(topology):
     for agent in STANDARD_TOOL_CALLING_AGENTS:
-        assert _targets(topology, agent) == {"approval", "tools", "__end__"}
+        assert _targets(topology, agent) == {
+            "approval",
+            "tools",
+            "validate_output",
+            "finalize",
+        }
 
 
-def test_planning_tools_fans_out_to_every_agent_and_end(topology):
-    assert _targets(topology, "planning_tools") == BASE_AGENTS | {"custom_agent", "__end__"}
+def test_planning_tools_fans_out_to_every_agent_and_validation(topology):
+    assert _targets(topology, "planning_tools") == BASE_AGENTS | {
+        "custom_agent",
+        "validate_output",
+        "finalize",
+    }
+
+
+def test_only_the_finalizer_reaches_end(topology):
+    terminal = [edge for edge in topology.edges if edge.target == "__end__"]
+    assert [edge.source for edge in terminal] == ["finalize"]
 
 
 def _engine():

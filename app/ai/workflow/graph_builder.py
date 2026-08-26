@@ -1,133 +1,239 @@
-"""Graph topology builder for :class:`MultiAgentWorkflow`.
+"""Parent graph topology for the routing-v2 production workflow.
 
-Extracted verbatim from ``MultiAgentWorkflow._build_graph`` (behavior-preserving).
-The single ``self`` receiver is threaded through as ``workflow`` and the
-checkpointer is passed explicitly so the workflow instance stays the sole
-owner of node handlers and routing callbacks.
+This module owns topology only. Every new turn enters one ``route`` node, and
+every path out of a specialist ends at ``validate_output`` and then
+``finalize``. ``finalize -> END`` is the graph's sole static terminal edge, so
+no specialist can publish an answer or end a turn on its own.
+
+Specialists and tool stages return dynamic ``Command`` values and therefore
+carry no static outgoing edges: a node cannot both command and be routed by an
+edge, which is what made the pre-v2 graph able to execute two paths.
 """
 
+from __future__ import annotations
+
+import logging
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command
 
-from app.ai.schemas import GraphState
+from app.ai.workflow.contracts import AgentTransition, WorkflowRoutingException
+from app.ai.workflow.finalization import make_finalize_node, make_validate_output_node
+from app.ai.workflow.specialists import make_specialist_wrapper, make_tool_stage_wrapper
+from app.ai.workflow.state import WorkflowState
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "BASE_SPECIALIST_NODES",
+    "SPECIALIST_NODE_NAMES",
+    "TOOL_STAGE_NODES",
+    "build_workflow_graph",
+    "make_route_node",
+]
+
+BASE_SPECIALIST_NODES: tuple[str, ...] = (
+    "chat_agent",
+    "rag_agent",
+    "search_agent",
+    "image_generator_agent",
+    "planning_agent",
+    "canvas_agent",
+)
+
+SPECIALIST_NODE_NAMES: frozenset[str] = frozenset({*BASE_SPECIALIST_NODES, "custom_agent"})
+
+# Pre-v2 execution stages that still run as top-level nodes. Task 11 of the
+# cutover moves them inside specialist subgraphs and deletes these entries.
+TOOL_STAGE_NODES: tuple[str, ...] = ("tools", "rag_tools", "planning_tools")
+
+# Every pre-v2 stage decision maps onto a v2 node. ``"end"`` means "this
+# specialist produced a candidate answer", which is validation, never END.
+_STAGE_TARGETS = {"end": "validate_output", "tools": "tools", "approval": "approval"}
 
 
-def build_workflow_graph(workflow: Any, *, checkpointer: Any | None) -> Any:
-    graph = StateGraph(GraphState)
+def make_route_node():
+    """Build the single new-turn routing node.
 
-    # Durable compaction work advances atomically with assistant persistence;
-    # provider-backed processing stays off the request hot path.
-    graph.add_node("route", workflow._route_node)
-    graph.add_node("chat_agent", workflow._chat_node)
-    graph.add_node("rag_agent", workflow._rag_node)
-    graph.add_node("search_agent", workflow._search_node)
-    graph.add_node("image_generator_agent", workflow._image_generator_node)
-    graph.add_node("planning_agent", workflow._planning_node)
-    graph.add_node("canvas_agent", workflow._canvas_node)
-    # Single static node that multiplexes every runtime custom-agent id
-    # (custom_agent:<uuid>). The graph is never rebuilt per conversation.
-    graph.add_node("custom_agent", workflow._custom_agent_node)
-    graph.add_node("planning_tools", workflow._planning_tools_node)
-    graph.add_node("rag_tools", workflow._rag_tools_node)
-    graph.add_node("approval", workflow._approval_node)
-    graph.add_node("tools", workflow._tool_node)
+    The node calls ``RoutingService.route`` exactly once and returns a
+    ``Command``. On failure it records a typed error and goes to ``finalize``:
+    it never selects an agent, and never falls back to chat.
+    """
 
-    # START -> route directly. Long-term summarization no longer runs on
-    # the streaming hot path — it is refreshed after the assistant turn
-    # is persisted (see MessageService).
-    graph.add_edge(START, "route")
+    async def route(state: dict[str, Any], runtime: Any) -> Command:
+        context = getattr(runtime, "context", None)
+        routing_service = getattr(context, "routing_service", None)
+        inventory = getattr(context, "inventory", None)
+        identity = state.get("turn_identity")
+        request_id = getattr(identity, "request_id", None) or "unknown"
 
-    graph.add_conditional_edges(
-        "route",
-        workflow._should_continue,
-        {
-            "chat_agent": "chat_agent",
-            "rag_agent": "rag_agent",
-            "search_agent": "search_agent",
-            "image_generator_agent": "image_generator_agent",
-            "planning_agent": "planning_agent",
-            "canvas_agent": "canvas_agent",
-            "custom_agent": "custom_agent",
-            "end": END,
-        },
-    )
+        try:
+            if routing_service is None or inventory is None:
+                raise WorkflowRoutingException(
+                    _routing_error("routing_provider_unavailable", request_id, "runtime_missing")
+                )
+            routing_context = await _build_routing_context(context, state, inventory, request_id)
+            decision = await routing_service.route(
+                routing_context,
+                inventory,
+                user_id=state.get("user_id"),
+                model_request=state.get("model_request"),
+                request_id=request_id,
+            )
+            target_node = inventory.resolve_node(decision.agent_id)
+        except WorkflowRoutingException as exc:
+            return Command(
+                update={"workflow_error": exc.error, "execution_phase": "failed"},
+                goto="finalize",
+            )
+        except KeyError:
+            return Command(
+                update={
+                    "workflow_error": _routing_error(
+                        "routing_target_unavailable", request_id, "unresolvable_node"
+                    ),
+                    "execution_phase": "failed",
+                },
+                goto="finalize",
+            )
 
-    # Consolidate conditional edges for agents that use standard tool calling
-    tool_calling_agents = [
-        "chat_agent",
-        "search_agent",
-        "image_generator_agent",
-        "canvas_agent",
-        "custom_agent",
-    ]
-    for agent_name in tool_calling_agents:
-        graph.add_conditional_edges(
-            agent_name,
-            workflow._should_call_tools,
-            {
-                "approval": "approval",
-                "tools": "tools",
-                "end": END,
+        return Command(
+            update={
+                "routing_decision": decision,
+                "routing_inventory_version": inventory.version,
+                "active_agent_id": decision.agent_id,
+                "agent_history": [
+                    AgentTransition(
+                        from_agent_id=None, to_agent_id=decision.agent_id, source="router"
+                    )
+                ],
+                "execution_phase": "executing",
             },
+            goto=target_node,
         )
 
-    # RAG agent: direct to END if not agentic, or rag_tools loop if agentic
-    graph.add_conditional_edges(
-        "rag_agent",
-        workflow._should_call_rag_tools,
-        {
-            "rag_tools": "rag_tools",
-            "end": END,
-        },
+    return route
+
+
+async def _build_routing_context(
+    runtime_context: Any, state: dict[str, Any], inventory: Any, request_id: str
+):
+    """Assemble the bounded routing context for this turn.
+
+    The runtime context owns context construction so the node stays a thin
+    adapter: it must not learn how to read documents, canvas, or history.
+    """
+    build = getattr(runtime_context, "build_routing_context", None)
+    if not callable(build):
+        raise WorkflowRoutingException(
+            _routing_error(
+                "routing_provider_unavailable", request_id, "routing_context_builder_missing"
+            )
+        )
+    return await build(state, inventory)
+
+
+def _routing_error(code: str, request_id: str, reason: str):
+    from app.ai.workflow.contracts import WorkflowError
+
+    return WorkflowError(
+        code=code, retriable=True, request_id=request_id, details={"reason": reason}
     )
 
-    rag_tools_routing = {agent_name: agent_name for agent_name in workflow.agents}
-    rag_tools_routing["custom_agent"] = "custom_agent"
-    rag_tools_routing["end"] = END
-    graph.add_conditional_edges(
-        "rag_tools",
-        workflow._should_continue_rag,
-        rag_tools_routing,
+
+def build_workflow_graph(
+    workflow: Any,
+    *,
+    checkpointer: Any | None,
+    context_schema: Any | None = None,
+) -> Any:
+    """Compile the routing-v2 parent graph.
+
+    ``workflow`` supplies the specialist and stage callables. The topology
+    below is the whole contract: one entry, dynamic transitions, one exit.
+    """
+    graph = (
+        StateGraph(WorkflowState, context_schema=context_schema)
+        if context_schema is not None
+        else StateGraph(WorkflowState)
     )
 
-    # Planning agent ReAct loop: planning_agent → planning_tools → planning_agent OR end
-    graph.add_conditional_edges(
-        "planning_agent",
-        workflow._should_call_planning_tools,
-        {
-            "planning_tools": "planning_tools",
-            "end": END,
-        },
+    graph.add_node(
+        "route",
+        make_route_node(),
+        destinations=tuple(sorted({*SPECIALIST_NODE_NAMES, "finalize"})),
     )
 
-    # planning_tools fans out either back into the planning loop, ends the
-    # turn, or — when the Planning Agent invoked hand_off — routes to the
-    # delegated top-level agent. Wiring every agent here is necessary so
-    # LangGraph accepts ``selected_agent`` as a valid return from
-    # ``_should_continue_planning``.
-    planning_tools_routing = {agent_name: agent_name for agent_name in workflow.agents}
-    planning_tools_routing["custom_agent"] = "custom_agent"
-    planning_tools_routing["end"] = END
-    graph.add_conditional_edges(
-        "planning_tools",
-        workflow._should_continue_planning,
-        planning_tools_routing,
-    )
+    specialist_callables = {
+        "chat_agent": workflow._chat_node,
+        "rag_agent": workflow._rag_node,
+        "search_agent": workflow._search_node,
+        "image_generator_agent": workflow._image_generator_node,
+        "planning_agent": workflow._planning_node,
+        "canvas_agent": workflow._canvas_node,
+        "custom_agent": workflow._custom_agent_node,
+    }
+    stage_routers = {
+        "rag_agent": workflow._should_call_rag_tools,
+        "planning_agent": workflow._should_call_planning_tools,
+    }
+    stage_targets_by_node = {
+        "rag_agent": {"end": "validate_output", "rag_tools": "rag_tools"},
+        "planning_agent": {"end": "validate_output", "planning_tools": "planning_tools"},
+    }
 
-    graph.add_edge("approval", "tools")
+    # Declared destinations make the dynamic topology inspectable: the
+    # "only finalize reaches END" invariant is checkable on the compiled graph
+    # instead of living only in prose.
+    stage_destinations = tuple(sorted({*SPECIALIST_NODE_NAMES, "validate_output", "finalize"}))
 
-    # Dynamic tool routing map based on agent registry
-    # Include ALL agents (including rag_agent) so hand_off delegation works.
-    tool_routing_map = {agent_name: agent_name for agent_name in workflow.agents}
-    tool_routing_map["custom_agent"] = "custom_agent"
-    tool_routing_map["end"] = END
+    for node_name, specialist in specialist_callables.items():
+        targets = stage_targets_by_node.get(node_name, _STAGE_TARGETS)
+        graph.add_node(
+            node_name,
+            make_specialist_wrapper(
+                node_name,
+                specialist,
+                stage_router=stage_routers.get(node_name, workflow._should_call_tools),
+                stage_targets=targets,
+            ),
+            destinations=tuple(sorted({*targets.values(), "finalize"})),
+        )
 
-    graph.add_conditional_edges(
+    graph.add_node(
         "tools",
-        workflow._route_tool_output,
-        tool_routing_map,
+        make_tool_stage_wrapper(
+            "tools", workflow._tool_node, stage_router=workflow._route_tool_output
+        ),
+        destinations=tuple(sorted({*stage_destinations, "tools", "approval"})),
     )
+    graph.add_node(
+        "rag_tools",
+        make_tool_stage_wrapper(
+            "rag_tools", workflow._rag_tools_node, stage_router=workflow._should_continue_rag
+        ),
+        destinations=stage_destinations,
+    )
+    graph.add_node(
+        "planning_tools",
+        make_tool_stage_wrapper(
+            "planning_tools",
+            workflow._planning_tools_node,
+            stage_router=workflow._should_continue_planning,
+        ),
+        destinations=stage_destinations,
+    )
+    # Approval pauses for a human decision and then always runs the tools it
+    # gated; it is the one stage whose next step is not a routing choice.
+    graph.add_node("approval", workflow._approval_node)
+
+    graph.add_node("validate_output", make_validate_output_node(), destinations=("finalize",))
+    graph.add_node("finalize", make_finalize_node())
+
+    graph.add_edge(START, "route")
+    graph.add_edge("approval", "tools")
+    graph.add_edge("finalize", END)
 
     if checkpointer:
         return graph.compile(checkpointer=checkpointer)

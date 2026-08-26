@@ -213,7 +213,7 @@ class V3ProtocolTranslator:
 
     Stateful across a single run: tracks emitted sequence numbers, the
     ``ToolMessage`` ids already surfaced from ``values`` snapshots, and the
-    last seen ``selected_agent`` so handoffs can be derived without an
+    last seen ``active_agent_id`` so transitions can be derived without an
     ``updates`` channel.
     """
 
@@ -483,7 +483,7 @@ class V3ProtocolTranslator:
                 "kind": "values",
                 "values": data,
                 "new_messages": new_messages,
-                "selected_agent": data.get("selected_agent"),
+                "active_agent_id": data.get("active_agent_id"),
                 "interrupts": list(interrupts) if interrupts else [],
             },
         )

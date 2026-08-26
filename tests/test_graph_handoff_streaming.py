@@ -41,15 +41,21 @@ async def test_planning_handoff_stream_returns_delegated_agent_answer():
     workflow.checkpointer = None
     workflow.agents = {"planning_agent": object(), "search_agent": object()}
     workflow._build_graph_config = lambda thread_id=None: None
-    workflow._resolve_thread_id = lambda thread_id, conversation_id: conversation_id
+    workflow._resolve_thread_id = (
+        lambda thread_id, conversation_id, turn_id=None: thread_id or conversation_id
+    )
     workflow._build_initial_state_from_request = lambda request: {
         "messages": [HumanMessage(content=request.message)],
         "conversation_id": request.conversation_id,
-        "selected_agent": None,
+        "active_agent_id": None,
         "context": {},
     }
     workflow._get_conversation_history = AsyncMock(return_value=[])
-    workflow._route_node = AsyncMock(return_value={"selected_agent": "planning_agent"})
+    # Routing runs inside the graph; the adapter only supplies runtime context.
+    workflow.routing_service = object()
+    workflow.routing_context_builder = object()
+    workflow.history_provider = None
+    workflow.document_repository = None
     workflow._attach_context_outputs = lambda state, response: response
     workflow._get_agent_type = lambda name: AgentType.SEARCH
     workflow._attach_planning_state_metadata = lambda response, state: response
@@ -69,7 +75,7 @@ async def test_planning_handoff_stream_returns_delegated_agent_answer():
         }
     }
     final_state = {
-        "selected_agent": "search_agent",
+        "active_agent_id": "search_agent",
         "messages": [
             HumanMessage(content="latest info please"),
             AIMessage(
@@ -89,11 +95,14 @@ async def test_planning_handoff_stream_returns_delegated_agent_answer():
 
     class FakeGraph:
         async def astream(self, *_args, **_kwargs):
+            # The route node's state update is what the stream adapter derives
+            # the turn's initial selection from — it never pre-runs routing.
+            yield ("updates", {"route": {"active_agent_id": "planning_agent"}})
             yield (
                 "updates",
                 {
                     "planning_tools": {
-                        "selected_agent": "search_agent",
+                        "active_agent_id": "search_agent",
                         "context": handoff_context,
                     }
                 },
@@ -111,16 +120,12 @@ async def test_planning_handoff_stream_returns_delegated_agent_answer():
             break
 
     agent_selected_events = [event for event in events if event.type == "agent_selected"]
-    # Initial selection carries no reason; the mid-stream handoff carries reason=handoff.
-    assert any(
-        event.agent == "planning_agent" and event.data == {"agent": "planning_agent"}
-        for event in agent_selected_events
-    )
-    assert any(
-        event.agent == "search_agent"
-        and event.data == {"agent": "search_agent", "reason": "handoff"}
-        for event in agent_selected_events
-    )
+    # The turn's first selection is the routing decision; every later one is an
+    # accepted transition. Both are emitted, and they are never conflated.
+    assert [(event.agent, event.data["cause"]) for event in agent_selected_events] == [
+        ("planning_agent", "route"),
+        ("search_agent", "handoff"),
+    ]
 
     complete = next(event for event in events if event.type == "complete")
     assert complete.data["response"].message.content == "Search Agent final answer."
@@ -132,7 +137,7 @@ def test_recover_terminal_response_ignores_handoff_narration():
     final assistant response — there is no real reply to deliver yet."""
     workflow = _make_workflow()
     state = {
-        "selected_agent": "search_agent",
+        "active_agent_id": "search_agent",
         "messages": [
             HumanMessage(content="latest info please"),
             AIMessage(

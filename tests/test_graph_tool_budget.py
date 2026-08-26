@@ -25,7 +25,7 @@ def test_route_tool_output_soft_limit_routes_to_final_synthesis(monkeypatch):
     monkeypatch.setattr(settings, "auto_continue_soft_limit_ratio", 0.5)
 
     state = {
-        "selected_agent": "chat_agent",
+        "active_agent_id": "chat_agent",
         "iteration_count": 5,
         "messages": [
             HumanMessage(content="What happened?"),
@@ -83,7 +83,7 @@ async def test_chat_node_disables_tools_for_forced_final_response():
     )
 
     state = {
-        "selected_agent": "chat_agent",
+        "active_agent_id": "chat_agent",
         "messages": [
             HumanMessage(content="What happened?"),
             AIMessage(content="", tool_calls=[_tool_call()]),
@@ -220,7 +220,7 @@ async def test_tool_node_resolves_pending_calls_when_tool_map_empty(monkeypatch)
     monkeypatch.setattr("app.ai.workflow.tool_loop.ensure_agent_tool_map", _empty_tool_map)
 
     state = {
-        "selected_agent": "chat_agent",
+        "active_agent_id": "chat_agent",
         "messages": [
             HumanMessage(content="run something"),
             AIMessage(
@@ -264,7 +264,7 @@ async def test_canvas_edit_rejects_stale_widget_mutation_before_execution(monkey
     graph._execute_agent_tool_calls = _must_not_execute
 
     state = {
-        "selected_agent": "canvas_agent",
+        "active_agent_id": "canvas_agent",
         "messages": [
             HumanMessage(content="edit the canvas"),
             AIMessage(

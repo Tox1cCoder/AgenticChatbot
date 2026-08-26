@@ -100,7 +100,7 @@ def _workflow():
 
 def _custom_state(runtime_id, *, messages=None, iteration_count=0):
     return {
-        "selected_agent": runtime_id,
+        "active_agent_id": runtime_id,
         "custom_agents": {
             runtime_id: {
                 "id": runtime_id.split(":", 1)[1],
@@ -121,12 +121,14 @@ def _custom_state(runtime_id, *, messages=None, iteration_count=0):
 def test_no_custom_agents_keeps_existing_chat_path():
     wf = _workflow()
     # Base routing unchanged.
-    assert wf._should_continue({"selected_agent": "chat_agent"}) == "chat_agent"
-    assert wf._should_continue({"selected_agent": "rag_agent"}) == "rag_agent"
+    assert wf._should_continue({"active_agent_id": "chat_agent"}) == "chat_agent"
+    assert wf._should_continue({"active_agent_id": "rag_agent"}) == "rag_agent"
     # A custom id with NO attached custom agents falls through to end (no change
     # to behavior for conversations without custom agents).
-    assert wf._should_continue({"selected_agent": "custom_agent:abc", "custom_agents": {}}) == "end"
-    assert wf._should_continue({"selected_agent": "unknown_agent"}) == "end"
+    assert (
+        wf._should_continue({"active_agent_id": "custom_agent:abc", "custom_agents": {}}) == "end"
+    )
+    assert wf._should_continue({"active_agent_id": "unknown_agent"}) == "end"
 
 
 def test_initial_state_injects_attached_custom_agents():
@@ -160,7 +162,7 @@ def test_should_continue_routes_custom_runtime_id_to_static_custom_node():
     assert wf._should_continue(state) == "custom_agent"
     # Unattached custom id is rejected.
     assert (
-        wf._should_continue({"selected_agent": f"custom_agent:{uuid4()}", "custom_agents": {}})
+        wf._should_continue({"active_agent_id": f"custom_agent:{uuid4()}", "custom_agents": {}})
         == "end"
     )
 
@@ -184,7 +186,7 @@ async def test_custom_agent_react_loop_routes_back_to_custom_node_until_done():
 
     # The loop terminates when the custom agent emits no further tool calls.
     done_state = {
-        "selected_agent": rid,
+        "active_agent_id": rid,
         "messages": [
             HumanMessage(content="hi"),
             AIMessage(content="Final answer."),
@@ -193,7 +195,7 @@ async def test_custom_agent_react_loop_routes_back_to_custom_node_until_done():
     assert await wf._should_call_tools(done_state) == "end"
     # And a tool-calling response routes into the tools node.
     tool_state = {
-        "selected_agent": rid,
+        "active_agent_id": rid,
         "messages": [
             AIMessage(content="", tool_calls=[{"id": "t2", "name": "tool_search", "args": {}}]),
         ],
@@ -226,7 +228,7 @@ def _handoff_output(target, tool_call_id="h1"):
 
 def _multi_custom_state(selected, ids):
     return {
-        "selected_agent": selected,
+        "active_agent_id": selected,
         "delegation_count": 0,
         "messages": [HumanMessage(content="hi")],
         "context": {},
@@ -306,7 +308,7 @@ def test_base_agent_can_handoff_to_custom_agent():
     rid = f"custom_agent:{uuid4()}"
     state = _multi_custom_state("chat_agent", [rid])
     new_state = wf._apply_hand_off_if_present(state, _handoff_output(rid))
-    assert new_state["selected_agent"] == rid
+    assert new_state["active_agent_id"] == rid
     assert new_state["context"]["handoff"]["source_agent"] == "chat_agent"
     assert new_state["context"]["handoff"]["target_agent"] == rid
 
@@ -316,7 +318,7 @@ def test_custom_agent_can_handoff_to_base_agent():
     rid = f"custom_agent:{uuid4()}"
     state = _multi_custom_state(rid, [rid])
     new_state = wf._apply_hand_off_if_present(state, _handoff_output("search_agent"))
-    assert new_state["selected_agent"] == "search_agent"
+    assert new_state["active_agent_id"] == "search_agent"
     assert new_state["context"]["handoff"]["source_agent"] == rid
     assert new_state["context"]["handoff"]["target_agent"] == "search_agent"
 
@@ -327,7 +329,7 @@ def test_custom_agent_can_handoff_to_another_attached_custom_agent():
     rid2 = f"custom_agent:{uuid4()}"
     state = _multi_custom_state(rid1, [rid1, rid2])
     new_state = wf._apply_hand_off_if_present(state, _handoff_output(rid2))
-    assert new_state["selected_agent"] == rid2
+    assert new_state["active_agent_id"] == rid2
 
 
 def test_custom_agent_handoff_targets_are_dynamic_graph_targets():
@@ -456,17 +458,17 @@ def test_no_custom_agents_regression_across_paths():
     wf = _workflow()
     # Routing: base agents unchanged, no custom node reachable.
     for base in ("chat_agent", "rag_agent", "search_agent", "canvas_agent", "planning_agent"):
-        assert wf._should_continue({"selected_agent": base, "custom_agents": {}}) == base
+        assert wf._should_continue({"active_agent_id": base, "custom_agents": {}}) == base
     # Handoff to a base target still works without any custom agents.
     state = {
-        "selected_agent": "chat_agent",
+        "active_agent_id": "chat_agent",
         "delegation_count": 0,
         "messages": [HumanMessage(content="hi")],
         "context": {},
         "custom_agents": {},
     }
     out = wf._apply_hand_off_if_present(state, _handoff_output("search_agent"))
-    assert out["selected_agent"] == "search_agent"
+    assert out["active_agent_id"] == "search_agent"
     # Workflow requests default custom_agents to empty for both schemas.
     assert WorkflowExecutionRequest(message="x").custom_agents == {}
     assert AIWorkflowExecutionRequest(message="x").custom_agents == {}
@@ -483,7 +485,7 @@ def test_handoff_to_unattached_custom_agent_rewrites_its_single_tool_result():
 
     # Selection remains unchanged and the interpreter has not appended a
     # duplicate message. The normal tool-output writer creates the sole pair.
-    assert new_state["selected_agent"] == "chat_agent"
+    assert new_state["active_agent_id"] == "chat_agent"
     assert len(new_state["messages"]) == 1
     wf._apply_tool_outputs_to_state(new_state, tool_outputs=outputs)
     handoff_messages = [message for message in new_state["messages"] if message.name == "hand_off"]
@@ -521,7 +523,7 @@ def test_handoff_rewrites_noncanonical_or_multiple_outputs(outputs, expected_err
 
     wf._apply_hand_off_if_present(state, outputs)
 
-    assert state["selected_agent"] == "chat_agent"
+    assert state["active_agent_id"] == "chat_agent"
     assert all(expected_error in output["content"] for output in outputs)
 
 
@@ -543,13 +545,14 @@ def test_handoff_rejects_self_and_revisited_targets():
 def test_handoff_rejects_when_configured_depth_is_exhausted(monkeypatch):
     wf = _workflow()
     state = _multi_custom_state("chat_agent", [])
-    state["delegation_count"] = 1
+    # Delegation depth is turn-scoped context, not a top-level state field.
+    state["context"] = {**(state.get("context") or {}), "delegation_count": 1}
     outputs = _handoff_output("search_agent")
     monkeypatch.setattr(settings, "max_handoff_delegation_depth", 1)
 
     wf._apply_hand_off_if_present(state, outputs)
 
-    assert state["selected_agent"] == "chat_agent"
+    assert state["active_agent_id"] == "chat_agent"
     assert "maximum delegation depth of 1" in outputs[0]["content"]
 
 
@@ -644,7 +647,7 @@ def test_base_agent_multi_agent_kwargs_inject_custom_handoff_tool():
 def test_base_agent_multi_agent_kwargs_are_dynamic_without_custom_agents():
     """Base agents always receive a live roster, not a static handoff tool."""
     wf = _workflow()
-    state = {"selected_agent": "chat_agent", "custom_agents": {}, "context": {}}
+    state = {"active_agent_id": "chat_agent", "custom_agents": {}, "context": {}}
 
     kwargs = wf._multi_agent_kwargs(state, "chat_agent")
 

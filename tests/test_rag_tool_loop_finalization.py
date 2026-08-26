@@ -66,7 +66,7 @@ async def test_rag_handoff_routes_to_search_agent_in_same_turn(monkeypatch):
     monkeypatch.setattr(rag_loop, "execute_tool_calls", execute_tools)
 
     state = {
-        "selected_agent": "rag_agent",
+        "active_agent_id": "rag_agent",
         "messages": [
             AIMessage(
                 content="",
@@ -79,7 +79,7 @@ async def test_rag_handoff_routes_to_search_agent_in_same_turn(monkeypatch):
 
     await workflow._rag_tools_node(state)
 
-    assert state["selected_agent"] == "search_agent"
+    assert state["active_agent_id"] == "search_agent"
     assert workflow._should_continue_rag(state) == "search_agent"
 
 
@@ -139,7 +139,7 @@ async def test_refused_handoff_feedback_reaches_the_tool_message(monkeypatch):
     monkeypatch.setattr(rag_loop, "execute_tool_calls", execute_tools)
 
     state = {
-        "selected_agent": "rag_agent",
+        "active_agent_id": "rag_agent",
         "messages": [
             AIMessage(
                 content="",
@@ -158,7 +158,7 @@ async def test_refused_handoff_feedback_reaches_the_tool_message(monkeypatch):
 
     await workflow._rag_tools_node(state)
 
-    assert state["selected_agent"] == "rag_agent"
+    assert state["active_agent_id"] == "rag_agent"
     tool_message = state["messages"][-1]
     assert isinstance(tool_message, ToolMessage)
     assert tool_message.content.startswith("Hand-off refused:")

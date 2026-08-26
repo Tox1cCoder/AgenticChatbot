@@ -801,7 +801,7 @@ def test_update_blocks_when_custom_agent_active(env):
         uuid4(),
         env.conversation_id,
         env.owner_id,
-        selected_agent=f"custom_agent:{agent.id}",
+        active_agent_id=f"custom_agent:{agent.id}",
     )
     locked = _service_with_registry(env, registry)
 
@@ -822,7 +822,7 @@ def test_conservative_lock_blocks_detach_when_selected_agent_unknown(env):
     )
     registry = GenerationRegistry()
     # Active generation in the conversation, selected agent not yet resolved.
-    registry.register(uuid4(), env.conversation_id, env.owner_id, selected_agent=None)
+    registry.register(uuid4(), env.conversation_id, env.owner_id, active_agent_id=None)
     locked = _service_with_registry(env, registry)
 
     # Detaching the agent (replacing attachments with empty) must be blocked.

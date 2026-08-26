@@ -176,7 +176,7 @@ def _checkpoint_values(token: str | None) -> dict:
         context["subagent_event_sink_token"] = token
     return {
         "messages": [HumanMessage(content="draw a cat")],
-        "selected_agent": "image_generator_agent",
+        "active_agent_id": "image_generator_agent",
         "conversation_id": str(uuid4()),
         "user_id": str(uuid4()),
         "context": context,

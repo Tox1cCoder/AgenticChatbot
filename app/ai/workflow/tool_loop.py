@@ -98,7 +98,7 @@ class ToolLoopMixin:
 
         denied_feedback: dict[str, str] = {}
         if (
-            state.get("selected_agent") == "canvas_agent"
+            state.get("active_agent_id") == "canvas_agent"
             and GraphStateView(state).context().get("canvas_edit_mode") is True
         ):
             for tool_call in tool_calls_pending:
@@ -141,12 +141,12 @@ class ToolLoopMixin:
             )
             return state
 
-        selected_agent_name = state.get("selected_agent")
-        agent = self._resolve_runtime_agent(state, selected_agent_name)
+        active_agent_id_name = state.get("active_agent_id")
+        agent = self._resolve_runtime_agent(state, active_agent_id_name)
         if not agent:
             logger.warning(
-                "Skipping tool execution: selected_agent '%s' not in agent registry",
-                selected_agent_name,
+                "Skipping tool execution: active_agent_id '%s' not in agent registry",
+                active_agent_id_name,
             )
             # Strip tool_calls from the pending AIMessage to prevent downstream
             # routing confusion when the tools node cannot execute anything.
@@ -156,7 +156,7 @@ class ToolLoopMixin:
             )
             return state
 
-        handoff_tool = self._handoff_tool_for_agent(state, selected_agent_name)
+        handoff_tool = self._handoff_tool_for_agent(state, active_agent_id_name)
         scoped_internal_tools = [handoff_tool] if handoff_tool else None
         tool_map = await ensure_agent_tool_map(
             agent,
@@ -225,7 +225,7 @@ class ToolLoopMixin:
             reject(handoff_output, "the tool output must contain exactly one target agent.")
             return state
 
-        source_agent = state.get("selected_agent")
+        source_agent = state.get("active_agent_id")
         if not isinstance(source_agent, str) or not source_agent:
             reject(handoff_output, "the active agent is unavailable.")
             return state
@@ -256,7 +256,8 @@ class ToolLoopMixin:
             reject(handoff_output, f"'{target_agent}' has already handled this turn.")
             return state
 
-        delegation_count = int(state.get("delegation_count") or 0)
+        context = GraphStateView(state).context()
+        delegation_count = int(context.get("delegation_count") or 0)
         max_delegation_depth = settings.max_handoff_delegation_depth
         if delegation_count >= max_delegation_depth:
             reject(
@@ -266,8 +267,10 @@ class ToolLoopMixin:
             return state
 
         logger.info("Delegating from '%s' to '%s'", source_agent, target_agent)
-        state["selected_agent"] = target_agent
-        state["delegation_count"] = delegation_count + 1
+        state["active_agent_id"] = target_agent
+        updated_context = dict(context)
+        updated_context["delegation_count"] = delegation_count + 1
+        state["context"] = updated_context
         context["handoff"] = {
             "active": True,
             "source_agent": source_agent,
@@ -404,9 +407,9 @@ class ToolLoopMixin:
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
             return state
 
-        selected_agent_name = state.get("selected_agent")
-        agent = self._resolve_runtime_agent(state, selected_agent_name)
-        handoff_tool = self._handoff_tool_for_agent(state, selected_agent_name)
+        active_agent_id_name = state.get("active_agent_id")
+        agent = self._resolve_runtime_agent(state, active_agent_id_name)
+        handoff_tool = self._handoff_tool_for_agent(state, active_agent_id_name)
         scoped_internal_tools = [handoff_tool] if handoff_tool else None
         interrupt_payload = await self._prepare_interrupt_payload(
             state,

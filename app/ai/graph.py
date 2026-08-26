@@ -21,6 +21,7 @@ from ..core.response_constants import NO_RESPONSE_GENERATED
 from ..interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..interfaces.workflow_runtime_interface import IWorkflowRuntime
 from ..models.enums import PlanLifecycle
+from ..observability.routing import get_routing_metrics_recorder
 from ..services.event_streaming.events import make_event
 from ..services.event_streaming.graph_public_projection import (
     GraphPublicStreamProjector,
@@ -44,7 +45,6 @@ from .agents.chat_agent import ChatAgent
 from .agents.image_generator_agent import ImageGeneratorAgent
 from .agents.planning_agent import PlanningAgent
 from .agents.rag_agent import RAGAgent
-from .agents.router import Router
 from .agents.search_agent import SearchAgent
 from .canvas_state import CanvasArtifactSnapshot
 from .custom_agent_runtime import is_custom_runtime_id
@@ -64,6 +64,7 @@ from .image_generation import (
     use_image_preview_emitter,
     use_media_delivery_service,
 )
+from .model_factory import ModelFactory
 from .rag_tool_actions import (
     canonicalize_rag_tool_call,
     execute_search_documents_action,
@@ -82,6 +83,8 @@ from .schemas import (
     TodoStatus,
     WorkflowExecutionRequest,
 )
+from .skills_tool import get_available_skill_summaries
+from .time_context import build_runtime_time_context_block
 from .tool_context import rich_response_capable_from_context, tool_execution_context
 from .tool_execution import (
     apply_tool_output_offload,
@@ -96,10 +99,14 @@ from .utils import (
     make_json_safe,
     normalize_tool_call,
 )
+from .workflow.contracts import TurnIdentity
 from .workflow.custom_agents import CustomAgentsMixin
 from .workflow.graph_builder import build_workflow_graph
 from .workflow.planning_loop import PlanningLoopMixin
 from .workflow.rag_loop import RagLoopMixin
+from .workflow.routing import RoutingContextBuilder, RoutingService
+from .workflow.runtime_context import WorkflowRuntimeContext, build_runtime_inventory
+from .workflow.state import build_checkpoint_thread_id
 from .workflow.tool_loop import ToolLoopMixin
 
 logger = logging.getLogger(__name__)
@@ -193,6 +200,7 @@ class MultiAgentWorkflow(
         history_provider: ConversationHistoryProvider | None = None,
         model_usage_recorder: "ModelUsageRecorder | None" = None,
         chat_image_service: Any | None = None,
+        routing_service: Any | None = None,
     ):
         self.qdrant_client = qdrant_client
         # Resolves stored image references back to base64 for the model when
@@ -201,7 +209,22 @@ class MultiAgentWorkflow(
         # Canonical prompt-history source. Workflows without it intentionally
         # run without persisted history rather than using a second source.
         self.history_provider = history_provider
-        self.router = Router(recorder=model_usage_recorder)
+        # Routing-v2: one bounded context builder and one routing service own
+        # new-turn classification. Nothing else may select an agent.
+        self.routing_context_builder = RoutingContextBuilder(
+            history_provider=history_provider,
+            document_repository=document_repository,
+            settings=settings,
+            skill_summary_provider=get_available_skill_summaries,
+        )
+        self.routing_service = routing_service or RoutingService(
+            runtime_model_resolver=runtime_model_resolver,
+            model_factory=ModelFactory,
+            settings=settings,
+            context_builder=self.routing_context_builder,
+            metrics=get_routing_metrics_recorder(),
+            usage_recorder=model_usage_recorder,
+        )
         self.chat_agent = ChatAgent(
             runtime_model_resolver=runtime_model_resolver,
             recorder=model_usage_recorder,
@@ -439,7 +462,7 @@ class MultiAgentWorkflow(
         attach_agent_metadata(
             response.metadata,
             response_agent_id=response.agent_id,
-            selected_agent_id=state.get("selected_agent"),
+            selected_agent_id=state.get("active_agent_id"),
             custom_agents=custom_agents,
         )
 
@@ -457,14 +480,6 @@ class MultiAgentWorkflow(
     def _finalize_agent_response(self, state: GraphState, response: AgentResponse) -> GraphState:
         self._attach_final_agent_metadata(state, response)
         state["response"] = response
-
-        # Remember the agent that produced this turn's response so the next
-        # turn can stick to it (custom-agent stickiness — see _route_node). The
-        # last writer in a turn wins, so after a handoff this lands on the agent
-        # that actually answered, not the source.
-        selected = state.get("selected_agent")
-        if selected:
-            state["last_agent"] = selected
 
         ai_kwargs: dict[str, Any] = {"content": response.message.content}
         assistant_message_id = state.get("assistant_message_id")
@@ -519,8 +534,15 @@ class MultiAgentWorkflow(
             initial_state["user_message_id"] = request.user_message_id
         if request.assistant_message_id is not None:
             initial_state["assistant_message_id"] = request.assistant_message_id
-        initial_state["selected_agent"] = None
         initial_state["response"] = None
+        initial_state["execution_phase"] = "routing"
+        turn_id = request.turn_id or request.user_message_id
+        if request.conversation_id and turn_id:
+            initial_state["turn_identity"] = TurnIdentity(
+                request_id=request.request_id or turn_id,
+                turn_id=turn_id,
+                checkpoint_thread_id=build_checkpoint_thread_id(request.conversation_id, turn_id),
+            )
         initial_state["persona"] = request.persona
         initial_state["planning_mode_enabled"] = request.planning.planning_mode_enabled
         initial_state["has_existing_plan"] = request.planning.has_existing_plan
@@ -668,7 +690,11 @@ class MultiAgentWorkflow(
         self._initialized = True
 
     def _build_graph(self) -> StateGraph:
-        return build_workflow_graph(self, checkpointer=self.checkpointer)
+        return build_workflow_graph(
+            self,
+            checkpointer=self.checkpointer,
+            context_schema=WorkflowRuntimeContext,
+        )
 
     # ------------------------------------------------------------------
     # hand_off delegation helper
@@ -794,9 +820,9 @@ class MultiAgentWorkflow(
             return "end"
 
         normalized_calls = [normalize_tool_call(tc) for tc in last_message.tool_calls]
-        selected_agent_name = state.get("selected_agent")
-        agent = self._resolve_runtime_agent(state, selected_agent_name)
-        handoff_tool = self._handoff_tool_for_agent(state, selected_agent_name)
+        active_agent_id_name = state.get("active_agent_id")
+        agent = self._resolve_runtime_agent(state, active_agent_id_name)
+        handoff_tool = self._handoff_tool_for_agent(state, active_agent_id_name)
         scoped_internal_tools = [handoff_tool] if handoff_tool else None
         if await self._needs_approval(
             state,
@@ -812,17 +838,17 @@ class MultiAgentWorkflow(
         state_view = GraphStateView(state)
         iteration_count = state_view.iteration_count()
         max_iterations = max(1, int(settings.react_agent_max_iterations))
-        selected_agent = state_view.selected_agent() or "end"
+        active_agent_id = state_view.active_agent_id() or "end"
 
         if (
-            selected_agent != "end"
-            and selected_agent not in self.agents
-            and not self._is_attached_custom_agent(state, selected_agent)
+            active_agent_id != "end"
+            and active_agent_id not in self.agents
+            and not self._is_attached_custom_agent(state, active_agent_id)
         ):
             return "end"
 
         can_route_for_final_response = (
-            selected_agent != "end" and self._last_message_is_tool_output(state)
+            active_agent_id != "end" and self._last_message_is_tool_output(state)
         )
 
         streak = (state_view.context() or {}).get("tool_error_streak")
@@ -835,7 +861,7 @@ class MultiAgentWorkflow(
                     count=int(streak.get("count") or 0),
                     limit=int(streak.get("limit") or 0),
                 )
-                return self._route_target_for(state, selected_agent)
+                return self._route_target_for(state, active_agent_id)
             self._set_continuation_signal(
                 state,
                 should_continue=False,
@@ -860,7 +886,7 @@ class MultiAgentWorkflow(
                         count=iteration_count,
                         limit=soft_limit,
                     )
-                    return self._route_target_for(state, selected_agent)
+                    return self._route_target_for(state, active_agent_id)
 
                 self._set_continuation_signal(
                     state,
@@ -881,7 +907,7 @@ class MultiAgentWorkflow(
                     count=iteration_count,
                     limit=max_iterations,
                 )
-                return self._route_target_for(state, selected_agent)
+                return self._route_target_for(state, active_agent_id)
 
             if settings.auto_continue_enabled and state_view.messages():
                 self._set_continuation_signal(
@@ -903,7 +929,7 @@ class MultiAgentWorkflow(
                 )
             return "end"
 
-        return self._route_target_for(state, selected_agent)
+        return self._route_target_for(state, active_agent_id)
 
     def _build_interrupt_agent_response(
         self,
@@ -931,16 +957,16 @@ class MultiAgentWorkflow(
         )
         interrupt_response = build_interrupt_response(interrupt_payload, thread_id, conversation_id)
 
-        selected_agent = state_view.selected_agent() or "search_agent"
+        active_agent_id = state_view.active_agent_id() or "search_agent"
 
-        agent = self.agents.get(selected_agent)
+        agent = self.agents.get(active_agent_id)
         agent_type = (
             agent.agent_type if agent and hasattr(agent, "agent_type") else AgentType.SEARCH
         )
 
         response = AgentResponse(
             agent_type=agent_type,
-            agent_id=selected_agent or "search_agent",
+            agent_id=active_agent_id or "search_agent",
             message=AgentMessage(
                 role=MessageRole.ASSISTANT,
                 content="",
@@ -950,30 +976,17 @@ class MultiAgentWorkflow(
         self._attach_final_agent_metadata(values, response)
         return response
 
-    async def _route_node(self, state: GraphState) -> GraphState:
-        # Reset delegation counter and the per-turn invocation trail at the
-        # start of each new user turn.
-        state["delegation_count"] = 0
+    async def _prepare_turn_runtime_context(self, state: GraphState) -> WorkflowRuntimeContext:
+        """Snapshot the routable inventory and descriptive context for one turn.
+
+        Canvas state and attached custom agents are *context*: they widen what
+        the router can choose, and never preselect an agent.
+        """
         self._reset_agent_trail(state)
 
-        if state.get("selected_agent"):
-            self._record_agent_invocation(state, state.get("selected_agent"), via="preselected")
-            return state
-
-        messages = state.get("messages", [])
-        if not messages:
-            return state
-
-        last_message = messages[-1]
-        content = last_message.content if hasattr(last_message, "content") else str(last_message)
         conversation_id = state.get("conversation_id")
-        has_documents = await self._aconversation_has_documents(conversation_id)
-
-        planning_mode_enabled, has_existing_plan = self._get_planning_flags(state)
-
         active_canvas = await self._get_active_canvas_snapshot(
-            conversation_id,
-            state.get("user_id"),
+            conversation_id, state.get("user_id")
         )
         active_canvas_descriptor = active_canvas.descriptor() if active_canvas else None
         if active_canvas_descriptor:
@@ -981,59 +994,18 @@ class MultiAgentWorkflow(
             context["active_canvas"] = active_canvas_descriptor
             state["context"] = context
 
-        # Canvas is a conversation-scoped working artifact. Keep an immediate
-        # follow-up on the agent that owns the latest persisted canvas; unlike
-        # checkpoint state, this survives message compaction and process restarts.
-        if (
-            not (planning_mode_enabled and has_existing_plan)
-            and active_canvas is not None
-            and active_canvas.is_latest_assistant
-            and "canvas_agent" in self.agents
-        ):
-            state["selected_agent"] = "canvas_agent"
-            context = dict(state.get("context") or {})
-            context["canvas_edit_mode"] = True
-            state["context"] = context
-            self._record_agent_invocation(state, "canvas_agent", via="canvas_continuity")
-            return state
-
-        agent_msg = AgentMessage(
-            role=MessageRole.USER,
-            content=content,
-            metadata={
-                "persona": state.get("persona"),
-                "user_id": state.get("user_id"),
-                "device_id": state.get("device_id"),
-            },
+        inventory = build_runtime_inventory(
+            base_agent_ids=list(self.agents.keys()),
+            custom_agents=GraphStateView(state).custom_agents(),
+            max_custom_agents=settings.router_context_max_custom_agents,
         )
-
-        available_agents = list(self.agents.keys())
-
-        # Surface attached custom agents to the router (runtime ids as routable
-        # targets + descriptors for the prompt / deterministic matching).
-        custom_descriptors = self._custom_agent_descriptors(state)
-        available_agents.extend(d["runtime_agent_id"] for d in custom_descriptors)
-
-        selected_agent = await self.router.route_message(
-            agent_msg,
-            available_agents,
-            has_documents=has_documents,
-            planning_mode_enabled=planning_mode_enabled,
-            has_existing_plan=has_existing_plan,
-            custom_agent_descriptors=custom_descriptors or None,
+        return WorkflowRuntimeContext(
+            routing_service=self.routing_service,
+            inventory=inventory,
+            routing_context_builder=self.routing_context_builder,
             active_canvas=active_canvas_descriptor,
+            runtime_time=build_runtime_time_context_block().strip() or None,
         )
-
-        if selected_agent == "rag_agent" and not has_documents:
-            selected_agent = "chat_agent"
-
-        state["selected_agent"] = selected_agent
-        if selected_agent == "canvas_agent" and active_canvas is not None:
-            context = dict(state.get("context") or {})
-            context["canvas_edit_mode"] = True
-            state["context"] = context
-        self._record_agent_invocation(state, selected_agent, via="router")
-        return state
 
     def _conversation_has_documents(self, conversation_id: str | None) -> bool:
         if not conversation_id or not self.document_repository:
@@ -1139,13 +1111,29 @@ class MultiAgentWorkflow(
         self,
         thread_id: str | None,
         conversation_id: str | None,
+        turn_id: str | None = None,
     ) -> str | None:
-        """Return the checkpoint thread id, falling back to conversation id when omitted."""
+        """Return the per-turn routing-v2 checkpoint thread id.
+
+        Resume passes the exact stored ``thread_id``; it is never reconstructed
+        from the conversation id. A new turn always gets its own thread, so
+        append reducers stay turn-local and no v1 checkpoint is ever loaded.
+        """
         if thread_id:
             return thread_id
-        if conversation_id:
-            return conversation_id
+        if conversation_id and turn_id:
+            return build_checkpoint_thread_id(conversation_id, turn_id)
         return None
+
+    @staticmethod
+    def _with_runtime_context(
+        config: dict[str, Any] | None,
+        runtime_context: "WorkflowRuntimeContext",
+    ) -> dict[str, Any]:
+        """Attach the per-invocation runtime context to a graph config."""
+        merged = dict(config or {})
+        merged["context"] = runtime_context
+        return merged
 
     @staticmethod
     def _set_continuation_signal(
@@ -1477,7 +1465,7 @@ class MultiAgentWorkflow(
         device_id = state.get("device_id")
         current_turn_messages = self._messages_for_selected_agent(
             state,
-            state.get("selected_agent") or "chat_agent",
+            state.get("active_agent_id") or "chat_agent",
             messages,
         )
         current_turn_messages, has_images = self._apply_current_turn_attachments(
@@ -1514,11 +1502,11 @@ class MultiAgentWorkflow(
         if not messages:
             return state
 
-        selected_agent = state.get("selected_agent")
-        agent = self._build_custom_agent(state, selected_agent)
+        active_agent_id = state.get("active_agent_id")
+        agent = self._build_custom_agent(state, active_agent_id)
         if agent is None:
             logger.warning(
-                "custom_agent node reached for unattached/unknown id '%s'", selected_agent
+                "custom_agent node reached for unattached/unknown id '%s'", active_agent_id
             )
             return state
 
@@ -1528,7 +1516,7 @@ class MultiAgentWorkflow(
         conversation_history = await self._get_conversation_history(
             conversation_id, user_id, agent_key="chat", state=state
         )
-        current_turn_messages = self._messages_for_selected_agent(state, selected_agent, messages)
+        current_turn_messages = self._messages_for_selected_agent(state, active_agent_id, messages)
         current_turn_messages, has_images = self._apply_current_turn_attachments(
             state,
             current_turn_messages,
@@ -1543,7 +1531,7 @@ class MultiAgentWorkflow(
             device_id=device_id,
             model_request=state.get("model_request"),
             **self._final_response_kwargs(state),
-            **self._multi_agent_kwargs(state, selected_agent),
+            **self._multi_agent_kwargs(state, active_agent_id),
         )
 
         self._mark_response_has_images(response, has_images)
@@ -1565,7 +1553,7 @@ class MultiAgentWorkflow(
 
         current_turn_messages = self._messages_for_selected_agent(
             state,
-            state.get("selected_agent") or "search_agent",
+            state.get("active_agent_id") or "search_agent",
             messages,
         )
         current_turn_messages, has_images = self._apply_current_turn_attachments(
@@ -1694,7 +1682,7 @@ class MultiAgentWorkflow(
 
         current_turn_messages = self._messages_for_selected_agent(
             state,
-            state.get("selected_agent") or "image_generator_agent",
+            state.get("active_agent_id") or "image_generator_agent",
             messages,
         )
         current_turn_messages, has_images = self._apply_current_turn_attachments(
@@ -1739,7 +1727,7 @@ class MultiAgentWorkflow(
 
         current_turn_messages = self._messages_for_selected_agent(
             state,
-            state.get("selected_agent") or "canvas_agent",
+            state.get("active_agent_id") or "canvas_agent",
             messages,
         )
         current_turn_messages, has_images = self._apply_current_turn_attachments(
@@ -2299,17 +2287,17 @@ class MultiAgentWorkflow(
         return ""
 
     def _should_continue(self, state: GraphState) -> str:
-        selected_agent = state.get("selected_agent")
-        if selected_agent in self.agents:
-            return selected_agent
+        active_agent_id = state.get("active_agent_id")
+        if active_agent_id in self.agents:
+            return active_agent_id
         # Any attached custom runtime id routes to the single static node.
-        if is_custom_runtime_id(selected_agent) and self._is_attached_custom_agent(
-            state, selected_agent
+        if is_custom_runtime_id(active_agent_id) and self._is_attached_custom_agent(
+            state, active_agent_id
         ):
             return "custom_agent"
         return "end"
 
-    def _get_agent_type(self, selected_agent: str | None) -> AgentType:
+    def _get_agent_type(self, active_agent_id: str | None) -> AgentType:
         agent_type_map = {
             "chat_agent": AgentType.CHAT,
             "rag_agent": AgentType.RAG,
@@ -2318,7 +2306,7 @@ class MultiAgentWorkflow(
             "planning_agent": AgentType.PLANNING,
             "canvas_agent": AgentType.CANVAS,
         }
-        return agent_type_map.get(selected_agent, AgentType.CHAT)
+        return agent_type_map.get(active_agent_id, AgentType.CHAT)
 
     @staticmethod
     def _merge_unique_items(
@@ -2358,7 +2346,7 @@ class MultiAgentWorkflow(
         state: dict[str, Any] | None,
         *,
         fallback_content: str | None = None,
-        selected_agent: str | None = None,
+        active_agent_id: str | None = None,
     ) -> AgentResponse | None:
         if not isinstance(state, dict):
             return None
@@ -2391,7 +2379,7 @@ class MultiAgentWorkflow(
         if not content:
             return None
 
-        final_selected_agent = state.get("selected_agent") or selected_agent
+        final_selected_agent = state.get("active_agent_id") or active_agent_id
         recovered_response = AgentResponse(
             agent_type=self._get_agent_type(final_selected_agent),
             agent_id=final_selected_agent or "unknown",
@@ -2415,7 +2403,7 @@ class MultiAgentWorkflow(
     ) -> GraphState:
         """Build a new initial state that carries forward context from a previous round.
 
-        Keeps routing stable (selected_agent preserved), resets per-round
+        Keeps routing stable (active_agent_id preserved), resets per-round
         counters so each round has a fresh budget, and clears "stop" flags
         that would immediately short-circuit the next round.
         """
@@ -2467,8 +2455,14 @@ class MultiAgentWorkflow(
     async def execute_request(self, request: WorkflowExecutionRequest) -> AgentResponse | None:
         initial_state = self._build_initial_state_from_request(request)
         conversation_id = request.conversation_id
-        thread_id = self._resolve_thread_id(request.thread_id, conversation_id)
+        thread_id = self._resolve_thread_id(
+            request.thread_id, conversation_id, request.turn_id or request.user_message_id
+        )
         config = self._build_graph_config(thread_id)
+        # Routing runs inside the graph's `route` node; the runtime context
+        # carries the collaborators it needs without entering checkpoint state.
+        runtime_context = await self._prepare_turn_runtime_context(initial_state)
+        config = self._with_runtime_context(config, runtime_context)
 
         # ── Auto-Continue outer loop ──────────────────────────────────
         max_rounds = settings.auto_continue_max_rounds if settings.auto_continue_enabled else 1
@@ -2574,7 +2568,7 @@ class MultiAgentWorkflow(
             agent_response = self._recover_terminal_response(final_state)
 
         final_selected_agent = (
-            final_state.get("selected_agent") if isinstance(final_state, dict) else None
+            final_state.get("active_agent_id") if isinstance(final_state, dict) else None
         )
         if agent_response and final_selected_agent == "planning_agent":
             agent_response = self._attach_planning_state_metadata(agent_response, final_state)
@@ -2666,7 +2660,7 @@ class MultiAgentWorkflow(
 
         resume_data = build_interrupt_resume_payload(decisions)
 
-        selected_agent = state_snapshot.values.get("selected_agent", "search_agent")
+        active_agent_id = state_snapshot.values.get("active_agent_id", "search_agent")
         conversation_id = state_snapshot.values.get("conversation_id")
 
         # Resume parity: install the SAME request-scoped media sink as the main
@@ -2696,18 +2690,18 @@ class MultiAgentWorkflow(
         yield make_event(
             "agent_selected",
             sequence=0,
-            agent=selected_agent,
-            data={"agent": selected_agent},
+            agent=active_agent_id,
+            data={"agent": active_agent_id},
         )
 
         suppressed_nodes: set = {"image_generator_agent"}
-        suppress_tokens = selected_agent in suppressed_nodes
+        suppress_tokens = active_agent_id in suppressed_nodes
         projector = GraphPublicStreamProjector(
             tool_end_events_from_node_state=self._tool_end_events_from_node_state,
             suppress_internal_stream_chunks=settings.suppress_internal_stream_chunks,
         )
         ctx = StreamProjectionContext(
-            last_emitted_agent=selected_agent,
+            last_emitted_agent=active_agent_id,
             suppress_tokens=suppress_tokens,
         )
 
@@ -2854,18 +2848,20 @@ class MultiAgentWorkflow(
 
             final_state = snapshot.values if snapshot and hasattr(snapshot, "values") else {}
             fallback_content = (
-                accumulated_content if not suppress_tokens and not _internal_content_only else None
+                accumulated_content
+                if not ctx.suppress_tokens and not _internal_content_only
+                else None
             )
             response = self._recover_terminal_response(
                 final_state,
                 fallback_content=fallback_content,
-                selected_agent=selected_agent,
+                active_agent_id=active_agent_id,
             )
             if not response:
                 response = self._recover_terminal_response(
                     last_state_values,
                     fallback_content=fallback_content,
-                    selected_agent=selected_agent,
+                    active_agent_id=active_agent_id,
                 )
             if response:
                 if not _internal_content_only:
@@ -2873,10 +2869,10 @@ class MultiAgentWorkflow(
 
                 response_state = final_state if final_state else last_state_values
                 final_selected_agent = (
-                    response_state.get("selected_agent")
+                    response_state.get("active_agent_id")
                     if isinstance(response_state, dict)
-                    else selected_agent
-                ) or selected_agent
+                    else active_agent_id
+                ) or active_agent_id
                 if final_selected_agent == "planning_agent":
                     response = self._attach_planning_state_metadata(response, response_state)
 
@@ -2904,7 +2900,9 @@ class MultiAgentWorkflow(
                     subagent_event_sink
                 )
         conversation_id = request.conversation_id
-        thread_id = self._resolve_thread_id(request.thread_id, conversation_id)
+        thread_id = self._resolve_thread_id(
+            request.thread_id, conversation_id, request.turn_id or request.user_message_id
+        )
         config = self._build_graph_config(thread_id)
         user_id = request.user_id
 
@@ -2916,40 +2914,29 @@ class MultiAgentWorkflow(
                 self._get_conversation_history(conversation_id, user_id)
             )
 
+        # Routing happens inside the graph's `route` node. The stream adapter
+        # observes the resulting state update and projects `agent_selected`
+        # from it; it never pre-runs a node.
         try:
-            routed_state = await self._route_node(initial_state)
-            selected_agent = routed_state.get("selected_agent")
-            initial_state["selected_agent"] = selected_agent
-        except Exception as e:
+            runtime_context = await self._prepare_turn_runtime_context(initial_state)
+        except Exception as exc:
             if history_prefetch and not history_prefetch.done():
                 history_prefetch.cancel()
-            yield make_event("error", sequence=0, data={"error": str(e)})
+            yield make_event("error", sequence=0, data={"error": str(exc)})
             return
-
-        yield make_event(
-            "agent_selected",
-            sequence=0,
-            agent=selected_agent,
-            data={"agent": selected_agent},
-        )
-
-        # For image_generator_agent the streamed LLM tokens are the internal
-        # enhanced prompt — not meant for the user.  Suppress token events and
-        # let the final "complete" response (which holds the user-facing text)
-        # be the only content the client sees.
-        # Extend this set with any future agent whose raw tokens are internal.
-        suppressed_nodes: set = {"image_generator_agent"}
-        suppress_tokens = selected_agent in suppressed_nodes
+        config = self._with_runtime_context(config, runtime_context)
+        active_agent_id = None
 
         # Per-stream accumulator state shared across continuation rounds and the
-        # canonical event mapper.
+        # canonical event mapper. Token suppression for agents whose raw stream
+        # is internal (image generation) is applied once the route lands.
         projector = GraphPublicStreamProjector(
             tool_end_events_from_node_state=self._tool_end_events_from_node_state,
             suppress_internal_stream_chunks=settings.suppress_internal_stream_chunks,
         )
         ctx = StreamProjectionContext(
-            last_emitted_agent=selected_agent,
-            suppress_tokens=suppress_tokens,
+            last_emitted_agent=None,
+            suppress_tokens=False,
         )
 
         # ── Auto-Continue outer loop ──────────────────────────────────
@@ -3103,19 +3090,19 @@ class MultiAgentWorkflow(
                 final_state = snapshot.values if snapshot and hasattr(snapshot, "values") else {}
                 fallback_content = (
                     accumulated_content
-                    if not suppress_tokens and not _internal_content_only
+                    if not ctx.suppress_tokens and not _internal_content_only
                     else None
                 )
                 response = self._recover_terminal_response(
                     final_state,
                     fallback_content=fallback_content,
-                    selected_agent=selected_agent,
+                    active_agent_id=active_agent_id,
                 )
                 if not response:
                     response = self._recover_terminal_response(
                         last_state_values,
                         fallback_content=fallback_content,
-                        selected_agent=selected_agent,
+                        active_agent_id=active_agent_id,
                     )
                 if response:
                     if not _internal_content_only:
@@ -3123,10 +3110,10 @@ class MultiAgentWorkflow(
 
                     response_state = final_state if final_state else last_state_values
                     final_selected_agent = (
-                        response_state.get("selected_agent")
+                        response_state.get("active_agent_id")
                         if isinstance(response_state, dict)
-                        else selected_agent
-                    ) or selected_agent
+                        else active_agent_id
+                    ) or active_agent_id
                     if final_selected_agent == "planning_agent":
                         response = self._attach_planning_state_metadata(response, response_state)
 
@@ -3142,12 +3129,14 @@ class MultiAgentWorkflow(
                 yield make_event("error", sequence=0, data={"error": str(e)})
         else:
             fallback_content = (
-                accumulated_content if not suppress_tokens and not _internal_content_only else None
+                accumulated_content
+                if not ctx.suppress_tokens and not _internal_content_only
+                else None
             )
             response = self._recover_terminal_response(
                 last_state_values,
                 fallback_content=fallback_content,
-                selected_agent=selected_agent,
+                active_agent_id=active_agent_id,
             )
             if response:
                 if not _internal_content_only:
@@ -3155,10 +3144,10 @@ class MultiAgentWorkflow(
 
                 response_state = last_state_values
                 final_selected_agent = (
-                    response_state.get("selected_agent")
+                    response_state.get("active_agent_id")
                     if isinstance(response_state, dict)
-                    else selected_agent
-                ) or selected_agent
+                    else active_agent_id
+                ) or active_agent_id
                 if final_selected_agent == "planning_agent":
                     response = self._attach_planning_state_metadata(response, response_state)
 
@@ -3193,7 +3182,7 @@ class MultiAgentWorkflow(
             "next": snapshot.next,
             "values": snapshot.values,
             "pending_tool_calls": pending_tool_calls,
-            "selected_agent": snapshot.values.get("selected_agent"),
+            "active_agent_id": snapshot.values.get("active_agent_id"),
         }
 
     async def cleanup(self):

@@ -179,7 +179,7 @@ def test_conflict_409_when_active(api):
     agent_id = owner.post("/custom-agents", json=_create_body()).json()["data"]["id"]
 
     registry = get_generation_registry()
-    entry = registry.register(uuid4(), cid, oid, selected_agent=f"custom_agent:{agent_id}")
+    entry = registry.register(uuid4(), cid, oid, active_agent_id=f"custom_agent:{agent_id}")
     try:
         assert owner.delete(f"/custom-agents/{agent_id}").status_code == 409
         assert owner.patch(f"/custom-agents/{agent_id}", json={"prompt": "x"}).status_code == 409

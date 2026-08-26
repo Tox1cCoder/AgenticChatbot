@@ -146,7 +146,7 @@ def test_resume_revalidation_conflicts_when_custom_agent_detached():
     conv = uuid4()
     registry = get_generation_registry()
     msg_id = uuid4()
-    registry.register(msg_id, conv, owner, selected_agent=rid)
+    registry.register(msg_id, conv, owner, active_agent_id=rid)
     registry.mark_paused(msg_id)
     try:
         # Agent no longer attached -> resume conflict (409).
@@ -171,7 +171,7 @@ def test_resume_lock_blocks_delete_for_paused_custom_agent(paused_env):
     # on a HITL interrupt (mark_paused keeps the entry as a lock token).
     msg_id = uuid4()
     service.generation_registry.register(
-        msg_id, conversation_id, owner_id, selected_agent=runtime_id
+        msg_id, conversation_id, owner_id, active_agent_id=runtime_id
     )
     service.generation_registry.mark_paused(msg_id)
 
@@ -210,7 +210,7 @@ def test_attach_selected_agent_metadata_adds_canonical_custom_agent():
     rid = f"custom_agent:{uuid4()}"
     metadata = {}
 
-    MessageService._attach_selected_agent_metadata(
+    MessageService._attach_active_agent_metadata(
         metadata,
         rid,
         {rid: {"id": rid.split(":", 1)[1], "runtime_agent_id": rid, "name": "Analyst"}},
@@ -230,6 +230,6 @@ def test_attach_selected_agent_metadata_noops_without_selected_agent():
 
     metadata = {"stopped": True}
 
-    MessageService._attach_selected_agent_metadata(metadata, None, {})
+    MessageService._attach_active_agent_metadata(metadata, None, {})
 
     assert metadata == {"stopped": True}

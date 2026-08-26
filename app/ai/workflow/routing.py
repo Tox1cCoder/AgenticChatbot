@@ -33,7 +33,7 @@ from app.core.runtime_modeling import (
     ResolvedRuntimeModelConfig,
     StrictRuntimeResolutionError,
 )
-from app.services.model_config_service import STRUCTURED_OUTPUT_PROVIDERS
+from app.services.model_config_service import provider_supports_structured_output
 from app.usage import begin_usage_operation, bind_usage_context, current_usage_context
 
 logger = logging.getLogger(__name__)
@@ -702,7 +702,7 @@ class RoutingService:
             raise RoutingConfigurationError("router_model is not configured")
 
         provider = str(getattr(self._settings, "router_provider", "gemini") or "gemini").strip()
-        if provider.lower() not in STRUCTURED_OUTPUT_PROVIDERS:
+        if not provider_supports_structured_output(provider):
             raise RoutingConfigurationError(
                 f"router provider {provider!r} has no installed adapter with "
                 "structured-output support"

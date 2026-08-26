@@ -148,6 +148,9 @@ class WorkflowState(TypedDict):
     worker_results: NotRequired[Annotated[list[WorkerResult], append_worker_results]]
     execution_phase: NotRequired[ExecutionPhase]
     workflow_error: NotRequired[WorkflowError | None]
+    # Finalized answer text, buffered here until MessageService commits it.
+    # The stream projector releases public deltas only from this value.
+    validated_public_content: NotRequired[str | None]
 
     # --- request scope ----------------------------------------------------
     conversation_id: NotRequired[str | None]
