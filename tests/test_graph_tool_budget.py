@@ -68,21 +68,8 @@ def test_graph_config_accounts_for_planning_iteration_budget(monkeypatch):
     assert config["recursion_limit"] == 45
 
 
-@pytest.mark.asyncio
-async def test_chat_node_disables_tools_for_forced_final_response():
-    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
-    workflow._get_conversation_history = AsyncMock(return_value=[])
-    workflow.chat_agent = SimpleNamespace()
-    workflow.chat_agent.invoke_model_with_history = AsyncMock(
-        return_value=AgentResponse(
-            agent_type=AgentType.CHAT,
-            agent_id="chat_agent",
-            message=AgentMessage(role=MessageRole.ASSISTANT, content="Final answer"),
-            metadata={},
-        )
-    )
-
-    state = {
+def _forced_final_state() -> dict:
+    return {
         "active_agent_id": "chat_agent",
         "messages": [
             HumanMessage(content="What happened?"),
@@ -100,13 +87,54 @@ async def test_chat_node_disables_tools_for_forced_final_response():
         },
     }
 
-    result = await workflow._chat_node(state)
 
-    call_kwargs = workflow.chat_agent.invoke_model_with_history.call_args.kwargs
-    assert call_kwargs["disable_tools"] is True
-    assert "tool-use budget" in call_kwargs["tool_budget_notice"].lower()
-    assert result["response"].metadata["tool_budget_exhausted"]["limit"] == 5
-    assert "force_final_response" not in result["context"]
+def _budget_workflow() -> MultiAgentWorkflow:
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    workflow._get_conversation_history = AsyncMock(return_value=[])
+    workflow.agents = {"chat_agent": object()}
+    workflow.chat_agent = SimpleNamespace(
+        _convert_history_to_langchain_messages=lambda history: []
+    )
+    return workflow
+
+
+@pytest.mark.asyncio
+async def test_forced_final_response_unbinds_every_tool():
+    """A budget-exhausted turn must be unable to call another tool.
+
+    The guard lives in the tool factory, so it holds no matter which model the
+    framework loop ends up calling.
+    """
+    workflow = _budget_workflow()
+    request = await workflow._specialist_request_for("chat_agent", _forced_final_state())
+
+    assert request.extras["disable_tools"] is True
+    assert "tool-use budget" in request.extras["system_prompt_kwargs"][
+        "tool_budget_notice"
+    ].lower()
+
+    from app.ai.agents.chat_agent import build_chat_specialist_definition
+
+    definition = build_chat_specialist_definition(
+        SimpleNamespace(_init_tools=AsyncMock(), _get_tools_for_binding=lambda **kw: ["a_tool"])
+    )
+    assert await definition.tool_factory(request) == []
+
+
+@pytest.mark.asyncio
+async def test_forced_final_response_records_the_exhausted_budget():
+    workflow = _budget_workflow()
+    state = _forced_final_state()
+    response = AgentResponse(
+        agent_type=AgentType.CHAT,
+        agent_id="chat_agent",
+        message=AgentMessage(role=MessageRole.ASSISTANT, content="Final answer"),
+        metadata={},
+    )
+
+    finalized = workflow._finalize_forced_final_response(state, response)
+
+    assert finalized.metadata["tool_budget_exhausted"]["limit"] == 5
 
 
 class _DummyAgent(BaseAgent):

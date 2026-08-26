@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ...usage.recorder import ModelUsageRecorder
+    from ..workflow.specialists import SpecialistDefinition
 
 # ---------------------------------------------------------------------------
 # System prompt
@@ -410,3 +411,67 @@ class CanvasAgent(BaseAgent):
 
     async def cleanup(self) -> None:
         await super().cleanup()
+
+
+def _has_tool_context(messages: list) -> bool:
+    """Whether this turn already carries tool results.
+
+    Prompts differ before and after tools have run, so the flag is computed
+    from the messages rather than tracked as loop state.
+    """
+    for message in messages or []:
+        if getattr(message, "type", None) == "tool":
+            return True
+        if getattr(message, "tool_calls", None):
+            return True
+        additional = getattr(message, "additional_kwargs", None)
+        if isinstance(additional, dict) and additional.get("tool_calls"):
+            return True
+    return False
+
+
+def build_canvas_specialist_definition(agent: "CanvasAgent") -> "SpecialistDefinition":
+    """Declare canvas_agent as configuration for a ``create_agent`` subgraph.
+
+    The prompt and tool set stay here because they are this agent's domain
+    knowledge; the model/tool loop belongs to the framework.
+    """
+    from ..workflow.specialists import SpecialistDefinition
+
+    async def system_prompt_factory(request) -> str:
+        return agent._build_system_prompt(
+            request.persona,
+            _has_tool_context(request.messages),
+            user_id=request.user_id,
+            device_id=request.device_id,
+            **request.extras.get("system_prompt_kwargs", {}),
+        )
+
+    async def tool_factory(request) -> list:
+        if request.extras.get("disable_tools"):
+            # A forced final response must not be able to call another tool.
+            return []
+        await agent._init_tools()
+        return agent._get_tools_for_binding(
+            conversation_id=request.conversation_id,
+            internal_tools=request.extras.get("internal_tools"),
+            user_id=request.user_id,
+            device_id=request.device_id,
+            include_hand_off=request.extras.get("include_hand_off"),
+            excluded_tool_names=request.extras.get("excluded_tool_names"),
+        )
+
+    return SpecialistDefinition(
+        agent_id="canvas_agent",
+        agent_type=AgentType.CANVAS,
+        model_config_key="canvas",
+        system_prompt_factory=system_prompt_factory,
+        tool_factory=tool_factory,
+        output_policy_ids=(
+            "public_content",
+            "canvas_contract",
+            "artifact_provenance",
+            "tool_message_pairing",
+        ),
+        tokens_are_internal=False,
+    )

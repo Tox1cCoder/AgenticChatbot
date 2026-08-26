@@ -1,0 +1,296 @@
+"""End-to-end proof that a standard specialist runs inside a real subgraph.
+
+These drive a genuine ``create_agent`` graph with a deterministic fake chat
+model. What they establish is that the framework loop — not a bespoke one —
+produces the answer, runs tools, honours the call limits, and hands a
+server-owned outcome back to the parent graph.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.tools import tool
+
+from app.ai.schemas import AgentType
+from app.ai.workflow.contracts import ResponseOutcome
+from app.ai.workflow.specialists import (
+    SpecialistDefinition,
+    SpecialistFactory,
+    SpecialistRequest,
+)
+
+pytestmark = pytest.mark.usefixtures("disable_langsmith_tracing")
+
+
+@pytest.fixture
+def disable_langsmith_tracing(monkeypatch):
+    """Deterministic subgraph tests never emit traces."""
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
+
+
+class ScriptedChatModel(BaseChatModel):
+    """Replays a fixed sequence of AI messages, tool calls included.
+
+    ``GenericFakeChatModel`` cannot bind tools, and every interesting case here
+    needs a tool-calling turn, so this fake implements the small surface
+    ``create_agent`` actually uses.
+    """
+
+    responses: list[AIMessage] = []
+    call_count: int = 0
+    bound_tools: list = []
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted"
+
+    def bind_tools(self, tools, **kwargs):
+        self.bound_tools = list(tools)
+        return self
+
+    def _next(self) -> AIMessage:
+        if self.call_count >= len(self.responses):
+            raise AssertionError("scripted model exhausted: the loop ran longer than scripted")
+        message = self.responses[self.call_count]
+        self.call_count += 1
+        return message
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        return ChatResult(generations=[ChatGeneration(message=self._next())])
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        return ChatResult(generations=[ChatGeneration(message=self._next())])
+
+
+def scripted_model(messages: list[AIMessage]) -> ScriptedChatModel:
+    """A deterministic chat model that replays a fixed sequence of AI messages."""
+    return ScriptedChatModel(responses=list(messages))
+
+
+def _resolver():
+    return SimpleNamespace(
+        resolve_runtime_config=lambda *a, **k: SimpleNamespace(
+            agent_key="chat",
+            provider="gemini",
+            model="gemini-3-flash-preview",
+            temperature=1.0,
+            api_key="key",
+            key_source="user",
+            source="default",
+            warnings=[],
+            capabilities={},
+            fallback_config=None,
+        )
+    )
+
+
+def _factory(model, tools=None, **overrides):
+    definition = SpecialistDefinition(
+        agent_id="chat_agent",
+        agent_type=AgentType.CHAT,
+        model_config_key="chat",
+        system_prompt_factory=lambda request: "You are a helpful assistant.",
+        tool_factory=lambda request: list(tools or []),
+        output_policy_ids=("public_content",),
+    )
+    payload = {
+        "definitions": {"chat_agent": definition},
+        "runtime_model_resolver": _resolver(),
+        "model_factory": SimpleNamespace(create_model_from_runtime=lambda config, **kw: model),
+        "usage_recorder": None,
+        "settings": SimpleNamespace(specialist_max_model_calls=4, specialist_max_tool_calls=4),
+    }
+    payload.update(overrides)
+    return SpecialistFactory(**payload)
+
+
+def _request(**overrides):
+    payload = {
+        "agent_id": "chat_agent",
+        "conversation_id": "conversation-1",
+        "user_id": "user-1",
+        "device_id": "device-1",
+        "persona": None,
+        "model_request": None,
+        "messages": [HumanMessage(content="what is 2+2?")],
+        "history": [],
+        "state": {},
+    }
+    payload.update(overrides)
+    return SpecialistRequest(**payload)
+
+
+async def test_specialist_answers_through_a_real_create_agent_subgraph():
+    model = scripted_model([AIMessage(content="It is 4.")])
+    outcome = await _factory(model).invoke(_request())
+
+    assert isinstance(outcome, ResponseOutcome)
+    assert outcome.agent_id == "chat_agent"
+    assert outcome.response.message.content == "It is 4."
+    assert outcome.provenance.output_policy_ids == ("public_content",)
+
+
+async def test_specialist_runs_a_tool_and_then_answers():
+    calls: list[dict] = []
+
+    @tool
+    def lookup_price(symbol: str) -> str:
+        """Look up a ticker price."""
+        calls.append({"symbol": symbol})
+        return "42"
+
+    model = scripted_model(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[{"id": "call-1", "name": "lookup_price", "args": {"symbol": "ACME"}}],
+            ),
+            AIMessage(content="ACME trades at 42."),
+        ]
+    )
+
+    outcome = await _factory(model, tools=[lookup_price]).invoke(_request())
+
+    assert calls == [{"symbol": "ACME"}]
+    assert outcome.response.message.content == "ACME trades at 42."
+
+
+async def test_intermediate_tool_turn_is_private_not_the_public_answer():
+    @tool
+    def noop() -> str:
+        """Do nothing."""
+        return "done"
+
+    model = scripted_model(
+        [
+            AIMessage(content="", tool_calls=[{"id": "c1", "name": "noop", "args": {}}]),
+            AIMessage(content="All finished."),
+        ]
+    )
+    outcome = await _factory(model, tools=[noop]).invoke(_request())
+
+    assert outcome.response.message.content == "All finished."
+    # The tool-calling turn and the ToolMessage stay in private provenance.
+    private_types = {type(message).__name__ for message in outcome.provenance.private_messages}
+    assert "ToolMessage" in private_types
+
+
+async def test_model_call_limit_raises_the_typed_framework_error():
+    from app.ai.workflow.specialists import ModelCallLimitExceededError
+
+    @tool
+    def spin() -> str:
+        """Always asks to be called again."""
+        return "again"
+
+    model = scripted_model(
+        [
+            AIMessage(content="", tool_calls=[{"id": f"c{i}", "name": "spin", "args": {}}])
+            for i in range(10)
+        ]
+    )
+    factory = _factory(
+        model,
+        tools=[spin],
+        settings=SimpleNamespace(specialist_max_model_calls=2, specialist_max_tool_calls=10),
+    )
+
+    with pytest.raises(ModelCallLimitExceededError):
+        await factory.invoke(_request())
+
+
+async def test_execution_limit_becomes_a_typed_worker_failure():
+    @tool
+    def spin() -> str:
+        """Always asks to be called again."""
+        return "again"
+
+    model = scripted_model(
+        [
+            AIMessage(content="", tool_calls=[{"id": f"c{i}", "name": "spin", "args": {}}])
+            for i in range(10)
+        ]
+    )
+    factory = _factory(
+        model,
+        tools=[spin],
+        settings=SimpleNamespace(specialist_max_model_calls=2, specialist_max_tool_calls=10),
+    )
+
+    result = await factory.invoke_worker(_request(), task_id="t1")
+
+    assert result.status == "failed"
+    assert result.error_code == "agent_execution_limit"
+
+
+async def test_unauthorized_tool_never_reaches_its_implementation():
+    executed: list[str] = []
+
+    @tool
+    def dangerous() -> str:
+        """A tool this caller may not run."""
+        executed.append("ran")
+        return "should not happen"
+
+    model = scripted_model(
+        [
+            AIMessage(content="", tool_calls=[{"id": "c1", "name": "dangerous", "args": {}}]),
+            AIMessage(content="I could not do that."),
+        ]
+    )
+    factory = _factory(
+        model,
+        tools=[dangerous],
+        authorize=lambda name, args, **kwargs: name != "dangerous",
+    )
+
+    outcome = await factory.invoke(_request())
+
+    assert executed == []
+    assert outcome.response.message.content == "I could not do that."
+
+
+async def test_usage_is_recorded_for_every_model_turn_in_the_loop():
+    recorded: list[tuple[str, str]] = []
+
+    class Recorder:
+        async def record_one_async_attempt(self, *, call, provider, model, operation):
+            recorded.append((provider, model))
+            return await call()
+
+    @tool
+    def noop() -> str:
+        """Do nothing."""
+        return "done"
+
+    model = scripted_model(
+        [
+            AIMessage(content="", tool_calls=[{"id": "c1", "name": "noop", "args": {}}]),
+            AIMessage(content="Finished."),
+        ]
+    )
+    await _factory(model, tools=[noop], usage_recorder=Recorder()).invoke(_request())
+
+    assert recorded == [
+        ("gemini", "gemini-3-flash-preview"),
+        ("gemini", "gemini-3-flash-preview"),
+    ]
+
+
+async def test_history_is_sent_but_not_returned_as_produced_output():
+    model = scripted_model([AIMessage(content="Answer.")])
+    outcome = await _factory(model).invoke(
+        _request(history=[HumanMessage(content="earlier"), AIMessage(content="earlier reply")])
+    )
+
+    assert outcome.response.message.content == "Answer."
+    contents = [getattr(m, "content", "") for m in outcome.provenance.private_messages]
+    assert "earlier reply" not in contents

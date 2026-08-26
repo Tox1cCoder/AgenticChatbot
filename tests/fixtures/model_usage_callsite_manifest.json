@@ -73,6 +73,12 @@
   },
   {
     "file": "app/ai/graph.py",
+    "function": "MultiAgentWorkflow.invoke_specialist_subgraph",
+    "call_chain": "self._specialist_factory.invoke",
+    "disposition": "workflow_stream"
+  },
+  {
+    "file": "app/ai/graph.py",
     "function": "MultiAgentWorkflow.resume",
     "call_chain": "self.graph.ainvoke",
     "disposition": "workflow_stream"
@@ -193,6 +199,24 @@
     "operation": "router",
     "exercising_test": "tests/test_model_usage_workflow_instrumentation.py::test_router_records_one_success_attempt",
     "exercise_symbol": "route_message"
+  },
+  {
+    "file": "app/ai/workflow/specialists.py",
+    "function": "SpecialistFactory.invoke",
+    "call_chain": "agent.ainvoke",
+    "disposition": "workflow_stream"
+  },
+  {
+    "file": "app/ai/workflow/specialists.py",
+    "function": "SpecialistFactory.invoke_worker",
+    "call_chain": "agent.ainvoke",
+    "disposition": "workflow_stream"
+  },
+  {
+    "file": "app/ai/workflow/specialists.py",
+    "function": "make_subgraph_specialist_wrapper.wrapper",
+    "call_chain": "invoke",
+    "disposition": "workflow_stream"
   },
   {
     "file": "app/services/ai_service.py",

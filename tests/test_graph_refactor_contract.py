@@ -74,14 +74,17 @@ def test_route_targets_all_base_agents_plus_custom(topology):
     assert "__end__" not in targets
 
 
-def test_standard_tool_calling_agents_route_through_approval_tools_validation(topology):
+def test_standard_specialists_have_no_parent_level_tool_stage(topology):
+    """Their model/tool loop runs inside a compiled create_agent subgraph.
+
+    A parent-level ``tools``/``approval`` hop would mean the loop leaked back
+    out of the subgraph, which is exactly what routing-v2 removed.
+    """
     for agent in STANDARD_TOOL_CALLING_AGENTS:
-        assert _targets(topology, agent) == {
-            "approval",
-            "tools",
-            "validate_output",
-            "finalize",
-        }
+        targets = _targets(topology, agent)
+        assert targets <= {"validate_output", "finalize", "resolve_transition"}, (agent, targets)
+        assert "tools" not in targets
+        assert "approval" not in targets
 
 
 def test_planning_tools_fans_out_to_every_agent_and_validation(topology):

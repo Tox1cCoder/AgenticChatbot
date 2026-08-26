@@ -40,12 +40,16 @@ from .agent_metadata import (
     normalize_handoff_metadata,
     normalize_subagent_metadata,
 )
-from .agents.canvas_agent import CanvasAgent
-from .agents.chat_agent import ChatAgent
-from .agents.image_generator_agent import ImageGeneratorAgent
+from .agents.canvas_agent import CanvasAgent, build_canvas_specialist_definition
+from .agents.chat_agent import ChatAgent, build_chat_specialist_definition
+from .agents.custom_agent import build_custom_specialist_definition
+from .agents.image_generator_agent import (
+    ImageGeneratorAgent,
+    build_image_generator_specialist_definition,
+)
 from .agents.planning_agent import PlanningAgent
 from .agents.rag_agent import RAGAgent
-from .agents.search_agent import SearchAgent
+from .agents.search_agent import SearchAgent, build_search_specialist_definition
 from .canvas_state import CanvasArtifactSnapshot
 from .custom_agent_runtime import is_custom_runtime_id
 from .history import ConversationHistoryProvider
@@ -102,10 +106,12 @@ from .utils import (
 from .workflow.contracts import TurnIdentity
 from .workflow.custom_agents import CustomAgentsMixin
 from .workflow.graph_builder import build_workflow_graph
+from .workflow.inventory import CUSTOM_AGENT_NODE
 from .workflow.planning_loop import PlanningLoopMixin
 from .workflow.rag_loop import RagLoopMixin
 from .workflow.routing import RoutingContextBuilder, RoutingService
 from .workflow.runtime_context import WorkflowRuntimeContext, build_runtime_inventory
+from .workflow.specialists import SpecialistFactory, SpecialistRequest
 from .workflow.state import build_checkpoint_thread_id
 from .workflow.tool_loop import ToolLoopMixin
 
@@ -269,6 +275,7 @@ class MultiAgentWorkflow(
         self._runtime_model_resolver = runtime_model_resolver
         self._model_usage_recorder = model_usage_recorder
 
+        self._specialist_factory = self._build_specialist_factory()
         self.graph = self._build_graph()
         self._cleanup_agents = [
             self.chat_agent,
@@ -1451,45 +1458,150 @@ class MultiAgentWorkflow(
         render = render_results.get(str(tool_call_id))
         return render if isinstance(render, dict) else None
 
-    async def _chat_node(self, state: GraphState) -> GraphState:
-        messages = state.get("messages", [])
-        if not messages:
-            return state
+    # ------------------------------------------------------------------
+    # Routing-v2 specialist subgraphs
+    # ------------------------------------------------------------------
 
-        conversation_id = state.get("conversation_id")
-        user_id = state.get("user_id")
-        conversation_history = await self._get_conversation_history(
-            conversation_id, user_id, agent_key="chat", state=state
+    def _build_specialist_factory(self) -> SpecialistFactory:
+        """Register the standard specialists as per-invocation subgraphs.
+
+        Definitions come from the agent modules so each agent keeps its own
+        prompt and tool knowledge; the loop itself belongs to ``create_agent``.
+        """
+        definitions = {
+            "chat_agent": build_chat_specialist_definition(self.chat_agent),
+            "search_agent": build_search_specialist_definition(self.search_agent),
+            "canvas_agent": build_canvas_specialist_definition(self.canvas_agent),
+            "image_generator_agent": build_image_generator_specialist_definition(
+                self.image_generator_agent
+            ),
+        }
+        return SpecialistFactory(
+            definitions=definitions,
+            runtime_model_resolver=self._runtime_model_resolver,
+            model_factory=ModelFactory,
+            usage_recorder=self._model_usage_recorder,
+            settings=settings,
         )
 
-        device_id = state.get("device_id")
+    async def _specialist_request_for(
+        self, node_name: str, state: GraphState
+    ) -> SpecialistRequest:
+        """Assemble one invocation's authenticated scope and inputs."""
+        state_view = GraphStateView(state)
+        messages = state_view.messages()
+        conversation_id = state_view.conversation_id()
+        user_id = state_view.user_id()
+        active_agent_id = state_view.active_agent_id() or node_name
+
+        # The image generator deliberately borrows the chat history budget.
+        history_key = "search" if node_name == "search_agent" else "chat"
+        conversation_history = await self._get_conversation_history(
+            conversation_id, user_id, agent_key=history_key, state=state
+        )
+
         current_turn_messages = self._messages_for_selected_agent(
-            state,
-            state.get("active_agent_id") or "chat_agent",
-            messages,
+            state, active_agent_id, messages
         )
         current_turn_messages, has_images = self._apply_current_turn_attachments(
-            state,
-            current_turn_messages,
+            state, current_turn_messages
         )
 
-        response = await self.chat_agent.invoke_model_with_history(
-            current_turn_messages,
-            conversation_history,
-            state.get("persona"),
-            conversation_id,
-            user_id=user_id,
-            device_id=device_id,
-            model_request=state.get("model_request"),
+        # Split the legacy invocation kwargs by owner: what shapes the prompt
+        # goes to the prompt factory, what shapes the tool set goes to the tool
+        # factory. Collapsing them would silently re-bind tools on a forced
+        # final response.
+        invocation_kwargs: dict[str, Any] = {
             **self._final_response_kwargs(state),
-            **self._multi_agent_kwargs(state, "chat_agent"),
+            **self._multi_agent_kwargs(state, active_agent_id),
+        }
+        disable_tools = bool(invocation_kwargs.pop("disable_tools", False))
+        internal_tools = invocation_kwargs.pop("internal_tools", None)
+        excluded_tool_names = invocation_kwargs.pop("excluded_tool_names", None)
+        include_hand_off = invocation_kwargs.pop("include_hand_off", None)
+
+        extras: dict[str, Any] = {
+            "has_images": has_images,
+            "disable_tools": disable_tools,
+            "internal_tools": internal_tools,
+            "excluded_tool_names": excluded_tool_names,
+            "include_hand_off": include_hand_off,
+            "system_prompt_kwargs": invocation_kwargs,
+        }
+        if node_name == "canvas_agent":
+            extras["previous_artifact"] = await self._get_active_canvas_snapshot(
+                conversation_id, user_id
+            )
+            extras["system_prompt_kwargs"]["previous_artifact"] = extras["previous_artifact"]
+
+        return SpecialistRequest(
+            agent_id=active_agent_id,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            device_id=state_view.device_id(),
+            persona=state.get("persona"),
+            model_request=state.get("model_request"),
+            messages=current_turn_messages,
+            history=self._convert_history_for_specialist(conversation_history),
+            state=dict(state) if isinstance(state, dict) else {},
+            hitl_policy=state_view.context().get("hitl_policy"),
+            attachments=state_view.attachments(),
+            extras=extras,
         )
 
-        self._mark_response_has_images(response, has_images)
+    def _convert_history_for_specialist(self, conversation_history: list[Any]) -> list[Any]:
+        """Convert canonical prompt history into LangChain messages.
 
+        The conversion (multimodal parts, memory framing) is agent-independent,
+        so one agent's implementation is reused rather than duplicated.
+        """
+        if not conversation_history:
+            return []
+        return self.chat_agent._convert_history_to_langchain_messages(conversation_history)
+
+    async def invoke_specialist_subgraph(self, node_name: str, state: GraphState):
+        """Run one standard specialist and return its ``AgentOutcome``.
+
+        Custom agents resolve their definition from the live attachment on
+        every turn, so an edited or detached configuration takes effect
+        immediately.
+        """
+        request = await self._specialist_request_for(node_name, state)
+
+        if node_name == CUSTOM_AGENT_NODE:
+            custom_agent = self._build_custom_agent(state, request.agent_id)
+            if custom_agent is None:
+                logger.warning(
+                    "custom_agent subgraph reached for unattached id '%s'", request.agent_id
+                )
+                raise ValueError(f"custom agent {request.agent_id} is not attached")
+            self._specialist_factory.register(
+                build_custom_specialist_definition(custom_agent)
+            )
+
+        with (
+            use_image_preview_emitter(self._build_image_preview_emitter(state)),
+            use_media_delivery_service(self._build_media_delivery_service(state)),
+        ):
+            outcome = await self._specialist_factory.invoke(request)
+
+        return self._enrich_specialist_outcome(state, request, outcome)
+
+    def _enrich_specialist_outcome(
+        self, state: GraphState, request: SpecialistRequest, outcome: Any
+    ) -> Any:
+        """Attach the domain metadata the public response still needs.
+
+        Artifact and image provenance stays server-owned: it is copied from the
+        middleware's capture sink, never from model text.
+        """
+        response = outcome.response
+        self._mark_response_has_images(response, bool(request.extras.get("has_images")))
         response = self._finalize_forced_final_response(state, response)
-        self._merge_tool_artifacts(state, response)
-        return self._finalize_agent_response(state, response)
+        append_images = request.agent_id == "image_generator_agent"
+        self._merge_tool_artifacts(state, response, append_images=append_images)
+        self._attach_final_agent_metadata(state, response)
+        return outcome.model_copy(update={"response": response})
 
     # ------------------------------------------------------------------
     # Custom-agent multiplexing
@@ -1497,88 +1609,6 @@ class MultiAgentWorkflow(
     # ------------------------------------------------------------------
     # Multi-agent awareness (roster + per-turn invocation trail)
     # ------------------------------------------------------------------
-    async def _custom_agent_node(self, state: GraphState) -> GraphState:
-        messages = state.get("messages", [])
-        if not messages:
-            return state
-
-        active_agent_id = state.get("active_agent_id")
-        agent = self._build_custom_agent(state, active_agent_id)
-        if agent is None:
-            logger.warning(
-                "custom_agent node reached for unattached/unknown id '%s'", active_agent_id
-            )
-            return state
-
-        conversation_id = state.get("conversation_id")
-        user_id = state.get("user_id")
-        device_id = state.get("device_id")
-        conversation_history = await self._get_conversation_history(
-            conversation_id, user_id, agent_key="chat", state=state
-        )
-        current_turn_messages = self._messages_for_selected_agent(state, active_agent_id, messages)
-        current_turn_messages, has_images = self._apply_current_turn_attachments(
-            state,
-            current_turn_messages,
-        )
-
-        response = await agent.invoke_model_with_history(
-            current_turn_messages,
-            conversation_history,
-            state.get("persona"),
-            conversation_id,
-            user_id=user_id,
-            device_id=device_id,
-            model_request=state.get("model_request"),
-            **self._final_response_kwargs(state),
-            **self._multi_agent_kwargs(state, active_agent_id),
-        )
-
-        self._mark_response_has_images(response, has_images)
-
-        response = self._finalize_forced_final_response(state, response)
-        self._merge_tool_artifacts(state, response)
-        return self._finalize_agent_response(state, response)
-
-    async def _search_node(self, state: GraphState) -> GraphState:
-        messages = state.get("messages", [])
-        if not messages:
-            return state
-
-        conversation_id = state.get("conversation_id")
-        user_id = state.get("user_id")
-        conversation_history = await self._get_conversation_history(
-            conversation_id, user_id, agent_key="search", state=state
-        )
-
-        current_turn_messages = self._messages_for_selected_agent(
-            state,
-            state.get("active_agent_id") or "search_agent",
-            messages,
-        )
-        current_turn_messages, has_images = self._apply_current_turn_attachments(
-            state,
-            current_turn_messages,
-        )
-
-        response = await self.search_agent.invoke_model_with_history(
-            current_turn_messages,
-            conversation_history,
-            state.get("persona"),
-            conversation_id,
-            user_id=user_id,
-            device_id=state.get("device_id"),
-            model_request=state.get("model_request"),
-            **self._final_response_kwargs(state),
-            **self._multi_agent_kwargs(state, "search_agent"),
-        )
-
-        self._mark_response_has_images(response, has_images)
-
-        response = self._finalize_forced_final_response(state, response)
-        self._merge_tool_artifacts(state, response)
-        return self._finalize_agent_response(state, response)
-
     def _build_chat_image_loader(self, user_id):
         """Build a per-run resolver that maps a stored ``image_id`` to a base64
         data URL, so historical image references are re-sent to the model. The
@@ -1667,92 +1697,6 @@ class MultiAgentWorkflow(
             ),
             request_id=str(conversation_id) if conversation_id else None,
         )
-
-    async def _image_generator_node(self, state: GraphState) -> GraphState:
-        messages = state.get("messages", [])
-        if not messages:
-            return state
-
-        conversation_id = state.get("conversation_id")
-        user_id = state.get("user_id")
-        # NOTE: Image generator deliberately borrows the "chat" history budget.
-        conversation_history = await self._get_conversation_history(
-            conversation_id, user_id, agent_key="chat", state=state
-        )
-
-        current_turn_messages = self._messages_for_selected_agent(
-            state,
-            state.get("active_agent_id") or "image_generator_agent",
-            messages,
-        )
-        current_turn_messages, has_images = self._apply_current_turn_attachments(
-            state,
-            current_turn_messages,
-        )
-
-        with (
-            use_image_preview_emitter(self._build_image_preview_emitter(state)),
-            use_media_delivery_service(self._build_media_delivery_service(state)),
-        ):
-            response = await self.image_generator_agent.invoke_model_with_history(
-                current_turn_messages,
-                conversation_history,
-                state.get("persona"),
-                conversation_id,
-                user_id=user_id,
-                device_id=state.get("device_id"),
-                model_request=state.get("model_request"),
-                **self._final_response_kwargs(state),
-                **self._multi_agent_kwargs(state, "image_generator_agent"),
-            )
-
-        self._mark_response_has_images(response, has_images)
-
-        response = self._finalize_forced_final_response(state, response)
-        self._merge_tool_artifacts(state, response, append_images=True)
-        return self._finalize_agent_response(state, response)
-
-    async def _canvas_node(self, state: GraphState) -> GraphState:
-        """Canvas agent node — generates self-contained HTML/SVG/React artifacts."""
-        messages = state.get("messages", [])
-        if not messages:
-            return state
-
-        conversation_id = state.get("conversation_id")
-        user_id = state.get("user_id")
-        conversation_history = await self._get_conversation_history(
-            conversation_id, user_id, agent_key="chat", state=state
-        )
-        previous_artifact = await self._get_active_canvas_snapshot(conversation_id, user_id)
-
-        current_turn_messages = self._messages_for_selected_agent(
-            state,
-            state.get("active_agent_id") or "canvas_agent",
-            messages,
-        )
-        current_turn_messages, has_images = self._apply_current_turn_attachments(
-            state,
-            current_turn_messages,
-        )
-
-        response = await self.canvas_agent.invoke_model_with_history(
-            current_turn_messages,
-            conversation_history,
-            state.get("persona"),
-            conversation_id,
-            user_id=user_id,
-            device_id=state.get("device_id"),
-            model_request=state.get("model_request"),
-            previous_artifact=previous_artifact,
-            **self._final_response_kwargs(state),
-            **self._multi_agent_kwargs(state, "canvas_agent"),
-        )
-
-        self._mark_response_has_images(response, has_images)
-
-        response = self._finalize_forced_final_response(state, response)
-        self._merge_tool_artifacts(state, response)
-        return self._finalize_agent_response(state, response)
 
     async def _run_agent_in_isolated_context(
         self,

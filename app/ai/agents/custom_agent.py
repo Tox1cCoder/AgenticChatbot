@@ -38,6 +38,7 @@ from .base_agent import BaseAgent
 
 if TYPE_CHECKING:
     from ...usage.recorder import ModelUsageRecorder
+    from ..workflow.specialists import SpecialistDefinition
 
 CUSTOM_MODEL_AGENT_KEY = "custom"
 
@@ -356,3 +357,58 @@ class CustomAgent(BaseAgent):
                 )
             )
         return tools
+
+
+def _has_tool_context(messages: list) -> bool:
+    """Whether this turn already carries tool results."""
+    for message in messages or []:
+        if getattr(message, "type", None) == "tool":
+            return True
+        if getattr(message, "tool_calls", None):
+            return True
+        additional = getattr(message, "additional_kwargs", None)
+        if isinstance(additional, dict) and additional.get("tool_calls"):
+            return True
+    return False
+
+
+def build_custom_specialist_definition(agent: CustomAgent) -> SpecialistDefinition:
+    """Declare one attached custom agent as a per-invocation specialist.
+
+    Built fresh from the live attachment on every turn, so an edited
+    configuration applies immediately and a detached agent stops being
+    reachable.
+    """
+    from ..workflow.specialists import SpecialistDefinition
+
+    async def system_prompt_factory(request) -> str:
+        return agent._build_system_prompt(
+            request.persona,
+            _has_tool_context(request.messages),
+            user_id=request.user_id,
+            device_id=request.device_id,
+            **request.extras.get("system_prompt_kwargs", {}),
+        )
+
+    async def tool_factory(request) -> list:
+        if request.extras.get("disable_tools"):
+            # A forced final response must not be able to call another tool.
+            return []
+        await agent._init_tools()
+        return agent._get_tools_for_binding(
+            conversation_id=request.conversation_id,
+            internal_tools=request.extras.get("internal_tools"),
+            user_id=request.user_id,
+            device_id=request.device_id,
+            include_hand_off=request.extras.get("include_hand_off"),
+            excluded_tool_names=request.extras.get("excluded_tool_names"),
+        )
+
+    return SpecialistDefinition(
+        agent_id=agent.agent_id,
+        agent_type=agent.agent_type,
+        model_config_key=CUSTOM_MODEL_AGENT_KEY,
+        system_prompt_factory=system_prompt_factory,
+        tool_factory=tool_factory,
+        output_policy_ids=("public_content", "artifact_provenance", "tool_message_pairing"),
+    )

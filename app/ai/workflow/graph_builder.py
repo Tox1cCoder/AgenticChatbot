@@ -20,13 +20,18 @@ from langgraph.types import Command
 
 from app.ai.workflow.contracts import AgentTransition, WorkflowRoutingException
 from app.ai.workflow.finalization import make_finalize_node, make_validate_output_node
-from app.ai.workflow.specialists import make_specialist_wrapper, make_tool_stage_wrapper
+from app.ai.workflow.specialists import (
+    make_specialist_wrapper,
+    make_subgraph_specialist_wrapper,
+    make_tool_stage_wrapper,
+)
 from app.ai.workflow.state import WorkflowState
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "BASE_SPECIALIST_NODES",
+    "SUBGRAPH_SPECIALIST_NODES",
     "SPECIALIST_NODE_NAMES",
     "TOOL_STAGE_NODES",
     "build_workflow_graph",
@@ -43,6 +48,16 @@ BASE_SPECIALIST_NODES: tuple[str, ...] = (
 )
 
 SPECIALIST_NODE_NAMES: frozenset[str] = frozenset({*BASE_SPECIALIST_NODES, "custom_agent"})
+
+# Specialists whose model/tool loop already runs inside a compiled
+# ``create_agent`` subgraph. RAG and Planning join them in Tasks 7 and 8.
+SUBGRAPH_SPECIALIST_NODES: tuple[str, ...] = (
+    "chat_agent",
+    "search_agent",
+    "image_generator_agent",
+    "canvas_agent",
+    "custom_agent",
+)
 
 # Pre-v2 execution stages that still run as top-level nodes. Task 11 of the
 # cutover moves them inside specialist subgraphs and deletes these entries.
@@ -165,14 +180,19 @@ def build_workflow_graph(
         destinations=tuple(sorted({*SPECIALIST_NODE_NAMES, "finalize"})),
     )
 
+    # Standard specialists run their whole model/tool loop inside a compiled
+    # ``create_agent`` subgraph, so they have no parent-level tool stage. RAG
+    # and Planning keep theirs until Tasks 7 and 8 move them into subgraphs.
+    subgraph_specialists = {
+        node_name: make_subgraph_specialist_wrapper(
+            node_name, _specialist_invoker(workflow, node_name)
+        )
+        for node_name in SUBGRAPH_SPECIALIST_NODES
+    }
+
     specialist_callables = {
-        "chat_agent": workflow._chat_node,
         "rag_agent": workflow._rag_node,
-        "search_agent": workflow._search_node,
-        "image_generator_agent": workflow._image_generator_node,
         "planning_agent": workflow._planning_node,
-        "canvas_agent": workflow._canvas_node,
-        "custom_agent": workflow._custom_agent_node,
     }
     stage_routers = {
         "rag_agent": workflow._should_call_rag_tools,
@@ -182,6 +202,15 @@ def build_workflow_graph(
         "rag_agent": {"end": "validate_output", "rag_tools": "rag_tools"},
         "planning_agent": {"end": "validate_output", "planning_tools": "planning_tools"},
     }
+
+    for node_name, wrapper in subgraph_specialists.items():
+        graph.add_node(
+            node_name,
+            wrapper,
+            destinations=("finalize", "resolve_transition", "validate_output")
+            if _has_transition_resolver(workflow)
+            else ("finalize", "validate_output"),
+        )
 
     # Declared destinations make the dynamic topology inspectable: the
     # "only finalize reaches END" invariant is checkable on the compiled graph
@@ -238,3 +267,16 @@ def build_workflow_graph(
     if checkpointer:
         return graph.compile(checkpointer=checkpointer)
     return graph.compile()
+
+
+def _specialist_invoker(workflow: Any, node_name: str):
+    """Bind the workflow's per-node subgraph entry point."""
+
+    async def invoke(state: dict[str, Any]):
+        return await workflow.invoke_specialist_subgraph(node_name, state)
+
+    return invoke
+
+
+def _has_transition_resolver(workflow: Any) -> bool:
+    return hasattr(workflow, "_resolve_transition_node")

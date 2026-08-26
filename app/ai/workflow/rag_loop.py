@@ -347,11 +347,7 @@ class RagLoopMixin:
             return remaining_evidence_allowance
 
         last_human_idx = self._find_last_human_message_index(messages)
-        question = (
-            str(messages[last_human_idx].content)
-            if last_human_idx is not None
-            else ""
-        )
+        question = str(messages[last_human_idx].content) if last_human_idx is not None else ""
 
         # Track agentic iteration count
         agentic_iteration = context.get("agentic_rag_iteration", 0) + 1
@@ -441,9 +437,7 @@ class RagLoopMixin:
                     user_id,
                     agent_key,
                     device_id,
-                    rich_response_capable=rich_response_capable_from_context(
-                        state.get("context")
-                    ),
+                    rich_response_capable=rich_response_capable_from_context(state.get("context")),
                 ):
                     outputs, artifacts, images = await execute_tool_calls(
                         tool_calls=tool_calls_to_execute,
@@ -478,16 +472,14 @@ class RagLoopMixin:
                         entry["render"] = render
                 else:
                     entry["content"] = f"Error: Tool {tool_name} not found"
-                fitted_content, consumed_tokens, budget_omitted = (
-                    fit_rag_tool_message_content(
-                        content=entry["content"],
-                        allowance=enforceable_allowance(tool_name),
-                        token_counter=evidence_token_counter,
-                        provider=evidence_provider,
-                        model=evidence_model,
-                        tool_call_id=tool_id,
-                        tool_name=tool_name,
-                    )
+                fitted_content, consumed_tokens, budget_omitted = fit_rag_tool_message_content(
+                    content=entry["content"],
+                    allowance=enforceable_allowance(tool_name),
+                    token_counter=evidence_token_counter,
+                    provider=evidence_provider,
+                    model=evidence_model,
+                    tool_call_id=tool_id,
+                    tool_name=tool_name,
                 )
                 entry["content"] = fitted_content
                 if budget_omitted:
@@ -532,16 +524,14 @@ class RagLoopMixin:
                     conversation_id=conversation_id,
                     user_id=user_id,
                 )
-                public_text, consumed_tokens, budget_omitted = (
-                    fit_rag_tool_message_content(
-                        content=public_text,
-                        allowance=enforceable_allowance(tool_name),
-                        token_counter=evidence_token_counter,
-                        provider=evidence_provider,
-                        model=evidence_model,
-                        tool_call_id=tool_id,
-                        tool_name=tool_name,
-                    )
+                public_text, consumed_tokens, budget_omitted = fit_rag_tool_message_content(
+                    content=public_text,
+                    allowance=enforceable_allowance(tool_name),
+                    token_counter=evidence_token_counter,
+                    provider=evidence_provider,
+                    model=evidence_model,
+                    tool_call_id=tool_id,
+                    tool_name=tool_name,
                 )
             remaining_evidence_allowance = max(
                 0,

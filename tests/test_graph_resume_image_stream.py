@@ -88,8 +88,12 @@ class _RecordingStore:
         }
 
 
-class _FakeImageAgent:
-    """Stands in for the wired agent, but runs the REAL stream consumer."""
+class _FakeImageSpecialistFactory:
+    """Stands in for the compiled subgraph, but runs the REAL stream consumer.
+
+    The point of the test is the emitter/media-delivery binding around the
+    invocation, so the consumer must be genuine while the model is not.
+    """
 
     agent_id = "image_generator_agent"
 
@@ -97,7 +101,12 @@ class _FakeImageAgent:
         self.model_name = "gemini-3-pro-image-preview"
         self.default_aspect_ratio = "1:1"
 
-    async def invoke_model_with_history(self, *_args, **_kwargs) -> AgentResponse:
+    def register(self, definition) -> None:  # pragma: no cover - interface parity
+        pass
+
+    async def invoke(self, request):
+        from app.ai.workflow.contracts import OutcomeProvenance, ResponseOutcome
+
         outcome = await ImageGeneratorAgent._consume_image_stream(
             self,
             _FakeImageProvider(),
@@ -105,11 +114,15 @@ class _FakeImageAgent:
             "a cat",
             handle=None,
         )
-        return AgentResponse(
-            agent_type="image_generator",
+        return ResponseOutcome(
             agent_id=self.agent_id,
-            message=AgentMessage(role="assistant", content=outcome.narrative),
-            metadata={"images": outcome.images},
+            response=AgentResponse(
+                agent_type="image_generator",
+                agent_id=self.agent_id,
+                message=AgentMessage(role="assistant", content=outcome.narrative),
+                metadata={"images": outcome.images},
+            ),
+            provenance=OutcomeProvenance(),
         )
 
 
@@ -127,12 +140,21 @@ def _dead_sink_token() -> str:
     return token
 
 
+async def _empty_history(*_args, **_kwargs):
+    return []
+
+
 def _build_workflow(*, store: _RecordingStore, checkpoint_values: dict):
     workflow = graph_module.MultiAgentWorkflow.__new__(graph_module.MultiAgentWorkflow)
     workflow.checkpointer = object()
     workflow.chat_image_service = store
-    workflow.image_generator_agent = _FakeImageAgent()
-    workflow.agents = {}
+    workflow.image_generator_agent = _FakeImageSpecialistFactory()
+    workflow._specialist_factory = workflow.image_generator_agent
+    workflow.chat_agent = SimpleNamespace(
+        _convert_history_to_langchain_messages=lambda history: []
+    )
+    workflow._get_conversation_history = _empty_history
+    workflow.agents = {"image_generator_agent": object()}
 
     async def _aget_state(_config):
         return SimpleNamespace(next=("approval",), values=checkpoint_values)
@@ -149,12 +171,27 @@ def _build_workflow(*, store: _RecordingStore, checkpoint_values: dict):
         if isinstance(update, dict):
             node_state.update(update)
 
-        result = await workflow._image_generator_node(node_state)
-        response = result["response"]
+        outcome = await workflow.invoke_specialist_subgraph(
+            "image_generator_agent", node_state
+        )
+        response = outcome.response
 
         chunk = SimpleNamespace(content=response.message.content, content_blocks=None)
         yield ("messages", (chunk, {"langgraph_node": "image_generator_agent"}))
         yield ("updates", {"image_generator_agent": {"messages": []}})
+        # Only ``finalize`` publishes a response, so the resumed run must reach
+        # it before the stream can complete.
+        yield (
+            "updates",
+            {
+                "finalize": {
+                    "messages": [],
+                    "response": response,
+                    "final_agent_id": "image_generator_agent",
+                    "execution_phase": "completed",
+                }
+            },
+        )
 
     workflow.graph = SimpleNamespace(aget_state=_aget_state, astream=_astream)
     return workflow
@@ -236,6 +273,8 @@ async def test_resumed_graph_run_emits_early_image_reference(monkeypatch):
     # ``image_generator_agent`` suppresses its narrative tokens by design (they
     # are the internal enhanced prompt), so the terminal event is what the
     # image must beat — FR-IMG-002's "before narrative completion".
+    errors = [e for e in events if e.type == "error"]
+    assert not errors, f"resumed run errored: {[e.data for e in errors]}"
     assert "complete" in types, f"resumed run never terminated; order={types}"
     assert events.index(finals[0]) < types.index("complete"), (
         "early delivery violated: the final image reference arrived at or "
