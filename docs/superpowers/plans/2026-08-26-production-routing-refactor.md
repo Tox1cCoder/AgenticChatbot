@@ -1623,6 +1623,48 @@ git diff --check
 
 Confirm the diff contains no credentials, captured prompts, generated evaluation secrets, or `.artifacts` output. Commit only actual code/test/document fixes; do not commit the live evaluation output if it contains request text.
 
+## Implementation Status — 2026-08-26
+
+Tasks 1-11 are implemented and committed on `Thai-Postgre-FastAPI`. Task 12 was
+skipped as redundant (see its section). Tasks 13-14 are not started.
+
+**Landed and verified** (full non-live suite: 4534 passed, 3 pre-existing
+failures unrelated to this work; `ruff check app tests` clean):
+
+- Typed workflow contracts, `WorkflowState`, set-once/append-only reducers, and
+  checkpoint round-trip allowlisting.
+- Bounded language-neutral routing context and live specialist inventory.
+- `RoutingService`: schema-constrained output, strict runtime resolution with no
+  provider fallback, four typed failure codes, at most two attempts, no
+  `chat_agent` substitution anywhere.
+- The routing-v2 parent graph: one `route` node per new turn, dynamic
+  `Command` transitions, per-turn checkpoint threads, `finalize -> END` as the
+  only terminal edge, and no streaming pre-routing.
+- Standard specialists (chat, search, canvas, image, custom) running inside
+  per-invocation `create_agent` subgraphs with focused middleware.
+- Handoffs as parent commands with a single transition resolver.
+- The shared RAG execution graph, with grounding made mandatory and the
+  shadow-mode rollout flags deleted.
+- The Planning orchestrator with `Send` fan-out and typed worker results.
+- The provenance policy registry and universal public finalization.
+- Typed `WorkflowError` at the service boundary with allowlisted details.
+
+**Known gaps, tracked by `tests/test_routing_legacy_removal.py`:**
+
+1. The `rag_agent` and `planning_agent` graph nodes still run the pre-v2 loops.
+   `RagExecutionGraphFactory` and `PlanningOrchestrator` are built and tested
+   but are not yet what production executes. Grounding enforcement *did* ship
+   on the live RAG path.
+2. `_recover_terminal_response` still exists in the runtime adapter and can
+   publish text the finalizer never validated.
+3. `_tool_node` / `_approval_node` are unreachable from the graph but retained:
+   they still hold canvas-edit denial and HITL edit-rewrite behavior that the
+   v2 middleware has not absorbed.
+4. Routing accuracy is unmeasured — Task 12's evaluation program was skipped,
+   and no component here has been exercised against a live model.
+
+---
+
 ## Final Acceptance Checklist
 
 - [ ] Every new user turn enters one route node and calls `RoutingService.route(...)` once; that call makes at most two attempts against the same resolved provider/model.

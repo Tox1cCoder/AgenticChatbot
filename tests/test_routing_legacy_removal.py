@@ -144,6 +144,35 @@ def test_rag_and_planning_still_use_their_pre_v2_nodes():
     assert "planning_tools" in nodes
 
 
+def test_terminal_response_recovery_is_still_present_in_the_runtime_adapter():
+    """Records that stale-response recovery has not been removed yet.
+
+    The finalizer is now the only component that builds a public response
+    inside the graph, but ``app/ai/graph.py`` still falls back to scanning
+    accumulated stream chunks and checkpoint messages when the graph produced
+    no response. That fallback can publish text the finalizer never validated,
+    so it is tracked here until the streaming adapter reads
+    ``validated_public_content`` exclusively.
+    """
+    source = (REPO_ROOT / "app" / "ai" / "graph.py").read_text(encoding="utf-8")
+    assert "_recover_terminal_response" in source, (
+        "recovery was removed — delete this test and assert its absence in "
+        "REMOVED_RUNTIME_TOKENS instead"
+    )
+
+
+def test_the_finalizer_is_the_only_in_graph_response_builder():
+    """Whatever the adapter does, no graph node but finalize sets a response."""
+    from app.ai.workflow import finalization, graph_builder
+
+    assert "PublicResponseFinalizer" in dir(finalization)
+    assert graph_builder.SPECIALIST_NODE_NAMES
+    builder_source = (REPO_ROOT / "app" / "ai" / "workflow" / "graph_builder.py").read_text(
+        encoding="utf-8"
+    )
+    assert builder_source.count('graph.add_edge("finalize", END)') == 1
+
+
 def test_the_shared_rag_graph_and_planning_orchestrator_exist_and_are_importable():
     """The v2 components are built; only the cutover to them is outstanding."""
     from app.ai.workflow.planning_execution import PlanningOrchestrator
