@@ -593,3 +593,116 @@ def test_history_provider_canvas_artifact_is_conversation_scoped():
     assert snapshot is None
     message_repo.get_canvas_artifact_candidates.assert_called_once_with(conversation_id)
     message_repo.get_latest_assistant_by_conversation.assert_called_once_with(conversation_id)
+
+
+# ----------------------------------------------------------------------
+# routing-v2: router history budget + durable previous-final-agent lookup
+# ----------------------------------------------------------------------
+
+
+def _router_settings() -> SimpleNamespace:
+    settings = _fake_settings()
+    settings.router_history_max_messages = 12
+    settings.router_history_max_tokens = 3000
+    return settings
+
+
+def test_history_budget_config_resolves_router_bounds_from_settings():
+    from app.ai.token_instrumentation import HistoryBudgetConfig
+
+    config = HistoryBudgetConfig.for_agent("router", _router_settings())
+
+    assert config.max_messages == 12
+    assert config.max_tokens == 3000
+
+
+def test_history_provider_uses_the_router_budget_for_agent_key_router():
+    from app.ai.history import ConversationHistoryProvider
+
+    provider = ConversationHistoryProvider(
+        message_repository=MagicMock(),
+        summary_repository=MagicMock(),
+        settings=_router_settings(),
+    )
+
+    budget = provider._budget_for("router")
+
+    assert budget.agent_key == "router"
+    assert budget.max_messages == 12
+    assert budget.max_tokens == 3000
+
+
+def _assistant_with_agent(agent_id: str | None, *, content: str = "final answer") -> Message:
+    metadata = {"agent": {"id": agent_id, "kind": "base", "name": agent_id}} if agent_id else {}
+    return _make_message(
+        conversation_id=uuid4(),
+        sender=MessageRole.assistant.value,
+        content=content,
+        created_at=datetime(2026, 8, 26, 10, 0, tzinfo=timezone.utc),
+        metadata=metadata,
+    )
+
+
+def _provider_for_latest_assistant(latest) -> object:
+    from app.ai.history import ConversationHistoryProvider
+
+    message_repo = MagicMock()
+    message_repo.get_latest_assistant_by_conversation.return_value = latest
+    summary_repo = MagicMock()
+    summary_repo.get_owned_valid_memory.return_value = None
+    return ConversationHistoryProvider(
+        message_repository=message_repo,
+        summary_repository=summary_repo,
+        settings=_router_settings(),
+    )
+
+
+def test_previous_final_agent_id_reads_durable_message_metadata():
+    provider = _provider_for_latest_assistant(_assistant_with_agent("search_agent"))
+
+    result = asyncio.run(
+        provider.get_previous_final_agent_id(conversation_id=uuid4(), user_id=uuid4())
+    )
+
+    assert result == "search_agent"
+
+
+def test_previous_final_agent_id_ignores_deleted_and_empty_placeholders():
+    deleted = _assistant_with_agent("search_agent")
+    deleted.deleted_at = datetime(2026, 8, 26, 11, 0, tzinfo=timezone.utc)
+    assert (
+        asyncio.run(
+            _provider_for_latest_assistant(deleted).get_previous_final_agent_id(
+                conversation_id=uuid4(), user_id=uuid4()
+            )
+        )
+        is None
+    )
+
+    paused = _assistant_with_agent("search_agent", content="   ")
+    assert (
+        asyncio.run(
+            _provider_for_latest_assistant(paused).get_previous_final_agent_id(
+                conversation_id=uuid4(), user_id=uuid4()
+            )
+        )
+        is None
+    )
+
+
+def test_previous_final_agent_id_returns_none_without_agent_metadata():
+    provider = _provider_for_latest_assistant(_assistant_with_agent(None))
+    assert (
+        asyncio.run(provider.get_previous_final_agent_id(conversation_id=uuid4(), user_id=uuid4()))
+        is None
+    )
+
+
+def test_previous_final_agent_id_validates_identifiers():
+    import pytest
+
+    provider = _provider_for_latest_assistant(_assistant_with_agent("chat_agent"))
+    with pytest.raises(ValueError):
+        asyncio.run(
+            provider.get_previous_final_agent_id(conversation_id="not-a-uuid", user_id=uuid4())
+        )

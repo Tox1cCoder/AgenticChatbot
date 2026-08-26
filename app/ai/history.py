@@ -221,6 +221,47 @@ class ConversationHistoryProvider:
         # the next call. Holding a stale lock would only slow callers down.
         self._locks.pop(prefix, None)
 
+    async def get_previous_final_agent_id(
+        self,
+        *,
+        conversation_id: UUID | str,
+        user_id: UUID | str,
+    ) -> str | None:
+        """Return the agent that produced the previous terminal assistant reply.
+
+        Read from user-owned durable message metadata, never from a previous
+        checkpoint: routing must not depend on state that message compaction or
+        a process restart can drop. Soft-deleted and empty paused/interrupt
+        placeholders are ignored by the repository lookup.
+        """
+        conversation_uuid = self._coerce_uuid(conversation_id)
+        # Preserve identifier validation at this trusted boundary.
+        self._coerce_uuid(user_id)
+
+        try:
+            latest = self.message_repository.get_latest_assistant_by_conversation(conversation_uuid)
+        except Exception as exc:
+            logger.warning(
+                "History provider could not load the previous final agent for %s: %s",
+                conversation_uuid,
+                exc,
+            )
+            return None
+
+        if latest is None or getattr(latest, "deleted_at", None) is not None:
+            return None
+        if not (getattr(latest, "content", "") or "").strip():
+            return None
+
+        metadata = getattr(latest, "message_metadata", None)
+        if not isinstance(metadata, dict):
+            return None
+        agent = metadata.get("agent")
+        if not isinstance(agent, dict):
+            return None
+        agent_id = agent.get("id")
+        return str(agent_id) if isinstance(agent_id, str) and agent_id.strip() else None
+
     async def get_latest_canvas_artifact(
         self,
         *,

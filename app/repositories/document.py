@@ -188,6 +188,52 @@ class DocumentRepository(RepositorySessionMixin):
             lambda db: self._count_by_conversation_in_session(db, conversation_id)
         )
 
+    @staticmethod
+    def _routing_descriptors_in_session(db, conversation_id: UUID, limit: int) -> list[dict]:
+        """Metadata-only document projection shared by both transports.
+
+        Returns no chunk text, no parsed body, and no image payloads: routing
+        context must describe what was uploaded, never what it says.
+        """
+        rows = (
+            db.query(Document)
+            .filter(Document.conversation_id == conversation_id)
+            .order_by(desc(Document.upload_time))
+            .limit(max(0, int(limit)))
+            .all()
+        )
+        return [
+            {
+                "document_id": str(row.id),
+                "filename": row.filename or "",
+                "file_type": row.file_type or "",
+                "status": str(row.status),
+                "upload_time": row.upload_time.isoformat() if row.upload_time else None,
+            }
+            for row in rows
+        ]
+
+    def get_routing_descriptors(self, conversation_id: UUID, limit: int = 20) -> list[dict]:
+        """Bounded metadata-only descriptors for the router context."""
+        return self._run(
+            lambda db: self._routing_descriptors_in_session(db, conversation_id, limit)
+        )
+
+    async def aget_routing_descriptors(
+        self, conversation_id: UUID | str, limit: int = 20
+    ) -> list[dict]:
+        """Async twin of :meth:`get_routing_descriptors`.
+
+        Routing runs before the first token, so this lookup must not block the
+        event loop and stall other in-flight streams.
+        """
+        resolved = (
+            conversation_id if isinstance(conversation_id, UUID) else UUID(str(conversation_id))
+        )
+        return await self._arun(
+            lambda db: self._routing_descriptors_in_session(db, resolved, limit)
+        )
+
     # Authorization helpers
     def exists(self, document_id: UUID) -> bool:
         """Check if a document exists by ID."""

@@ -785,6 +785,58 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- routing-v2 bounded router context -------------------------------
+    # Every bound below is validated positive and may be tuned downward. They
+    # cap what the router model can read; none of them selects an agent.
+    router_history_max_messages: int = Field(
+        default=12,
+        ge=0,
+        le=50,
+        description="Maximum prior messages included in the router context (0 = none)",
+    )
+    router_history_max_tokens: int = Field(
+        default=3000,
+        ge=0,
+        le=12000,
+        description="Approximate maximum tokens of history included in the router context",
+    )
+    router_context_max_documents: int = Field(
+        default=20,
+        ge=0,
+        le=100,
+        description="Maximum uploaded-document descriptors in the router context",
+    )
+    router_context_max_tools: int = Field(
+        default=40,
+        ge=0,
+        le=200,
+        description="Maximum tool summaries in the router context",
+    )
+    router_context_max_skills: int = Field(
+        default=20,
+        ge=0,
+        le=100,
+        description="Maximum skill summaries in the router context",
+    )
+    router_context_max_custom_agents: int = Field(
+        default=20,
+        ge=0,
+        le=100,
+        description="Maximum attached custom-agent descriptors in the router context",
+    )
+    router_context_field_max_chars: int = Field(
+        default=500,
+        ge=64,
+        le=4000,
+        description="Per-field character bound for untrusted router-context text",
+    )
+    router_context_max_chars: int = Field(
+        default=24000,
+        ge=2000,
+        le=64000,
+        description="Total character bound for the serialized router-context payload",
+    )
+
     suppress_internal_stream_chunks: bool = Field(
         default=True,
         description="When True, stream chunks tagged as 'internal' "

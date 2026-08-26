@@ -246,3 +246,32 @@ async def test_aget_by_conversation_id_matches_sync(
     assert [row.id for row in actual.items] == [row.id for row in expected.items]
     assert len(actual.items) >= 1
     assert actual.meta.total == expected.meta.total
+
+
+async def test_document_aget_routing_descriptors_matches_sync(
+    document_repository, seeded_conversation_id
+):
+    expected = document_repository.get_routing_descriptors(seeded_conversation_id, limit=20)
+    actual = await document_repository.aget_routing_descriptors(seeded_conversation_id, limit=20)
+    assert actual == expected
+
+
+async def test_document_routing_descriptors_carry_metadata_only(
+    document_repository, seeded_conversation_id
+):
+    """Routing context describes what was uploaded, never what it says."""
+    rows = await document_repository.aget_routing_descriptors(seeded_conversation_id, limit=20)
+    for row in rows:
+        assert set(row) == {
+            "document_id",
+            "filename",
+            "file_type",
+            "status",
+            "upload_time",
+        }
+
+
+async def test_document_aget_routing_descriptors_honours_limit(
+    document_repository, seeded_conversation_id
+):
+    assert await document_repository.aget_routing_descriptors(seeded_conversation_id, limit=0) == []
