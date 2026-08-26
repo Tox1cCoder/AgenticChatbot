@@ -19,6 +19,8 @@ from ..ai.schemas import (
     WorkflowExecutionRequest as AIWorkflowExecutionRequest,
 )
 from ..ai.utils import make_json_safe
+from ..ai.workflow.contracts import WORKFLOW_ERROR_CODES, WorkflowError
+from ..ai.workflow.errors import workflow_error, workflow_error_payload
 from ..core.config import settings
 from ..core.response_constants import (
     ERROR_NO_RESPONSE,
@@ -85,13 +87,25 @@ class AIService:
             return
         await self.workflow.compact_checkpoint_after_terminal_response(str(thread_id))
 
-    def _build_error_response(self, message: str = ERROR_NO_RESPONSE) -> WorkflowResponse:
+    def _build_error_response(
+        self,
+        message: str = ERROR_NO_RESPONSE,
+        *,
+        code: str = "finalization_failed",
+        request_id: str = "unknown",
+    ) -> WorkflowResponse:
+        """Build the service-level failure response.
+
+        ``message`` stays the display copy the API renders; ``error`` carries
+        the machine-readable code, retriability, and request id so a caller can
+        decide what to do without reading English.
+        """
         return WorkflowResponse(
             agent_type="chat",
             agent_id="chat_agent",
             message=WorkflowResponseMessage(content=message),
             metadata={"error": True},
-            error=message,
+            error=workflow_error_payload(workflow_error(code, request_id=request_id)),
         )
 
     @staticmethod
@@ -204,8 +218,36 @@ class AIService:
             ),
             metadata=metadata,
             tool_artifacts=getattr(response, "tool_artifacts", None),
-            error=getattr(response, "error", None),
+            error=self._service_error_payload(response, metadata),
             suggested_questions=getattr(response, "suggested_questions", None),
+        )
+
+    @staticmethod
+    def _service_error_payload(
+        response: AIAgentResponse, metadata: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Project the terminal failure as the typed public payload.
+
+        The finalizer records the whole ``WorkflowError`` in workflow metadata;
+        the agent-level ``error`` field carries only its code. Preferring the
+        recorded error keeps ``retriable`` and ``request_id`` intact instead of
+        making the caller infer them from a string.
+        """
+        recorded = (metadata.get("workflow") or {}).get("error")
+        if isinstance(recorded, dict) and recorded.get("code"):
+            return workflow_error_payload(WorkflowError.model_validate(recorded))
+
+        code = getattr(response, "error", None)
+        if not code:
+            return None
+        if code in WORKFLOW_ERROR_CODES:
+            return workflow_error_payload(workflow_error(code, request_id="unknown"))
+        # An agent-level diagnostic that is not a terminal workflow code still
+        # reaches the caller as structured data rather than raw prose.
+        return workflow_error_payload(
+            workflow_error(
+                "tool_execution_failed", request_id="unknown", details={"reason": "agent_error"}
+            )
         )
 
     @staticmethod

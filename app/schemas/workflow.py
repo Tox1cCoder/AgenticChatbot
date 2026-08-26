@@ -158,7 +158,14 @@ class WorkflowResponse(BaseModel):
         default=None,
         description="Artifacts produced while executing tools",
     )
-    error: str | None = Field(default=None, description="Workflow execution error")
+    error: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Typed WorkflowError payload: code, retriable, request_id, and allowlisted "
+            "details. Localized display copy is added by the API layer; this stays "
+            "machine-readable and free of English prose."
+        ),
+    )
     suggested_questions: list[str] | None = Field(
         default=None,
         description="Optional follow-up questions surfaced by the workflow",
