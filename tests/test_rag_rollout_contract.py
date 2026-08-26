@@ -30,7 +30,6 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 
 _RISKY_FLAGS = (
     "rag_hybrid_retrieval_enabled",
-    "rag_grounded_answer_gate_enabled",
     "rag_multimodal_image_embeddings_enabled",
     "rag_exact_cache_enabled",
     "rag_semantic_chunking_enabled",
@@ -48,9 +47,13 @@ def test_risky_rag_features_default_off(settings):
     them (10-13). Kept as a regression guard, not a RED-to-GREEN exercise.
     """
     assert settings.rag_hybrid_retrieval_enabled is False
-    assert settings.rag_grounded_answer_gate_enabled is False
     assert settings.rag_multimodal_image_embeddings_enabled is False
     assert settings.rag_exact_cache_enabled is False
+
+
+def test_grounding_is_not_a_rollout_flag(settings):
+    """Grounded-answer validation is mandatory, so it has no default-off flag."""
+    assert not hasattr(settings, "rag_grounded_answer_gate_enabled")
 
 
 def test_semantic_chunking_default_off(settings):

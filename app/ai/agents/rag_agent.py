@@ -1302,10 +1302,8 @@ class RAGAgent(BaseAgent):
 
         system_prompt = f"{AGENTIC_RAG_SYSTEM_PROMPT}{MARKDOWN_CURRENCY_GUIDANCE}"
         system_prompt = f"{system_prompt}{TOOL_EXPLORATION_SUFFIX}"
-        if getattr(settings, "rag_grounded_answer_gate_enabled", False):
-            # Only ask for evidence-id citations when the gate will act on them;
-            # the disabled path must keep the current answer format unchanged.
-            system_prompt = f"{system_prompt}{GROUNDED_ANSWER_CITATION_INSTRUCTIONS}"
+        # Grounding always acts on evidence-id citations, so always ask for them.
+        system_prompt = f"{system_prompt}{GROUNDED_ANSWER_CITATION_INSTRUCTIONS}"
         handoff_bound = any(
             getattr(tool, "name", None) == "hand_off" for tool in internal_tools or []
         )

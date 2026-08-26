@@ -151,45 +151,39 @@ class RagLoopMixin:
     ) -> AgentResponse:
         """Validate one final RAG answer against the current turn's evidence.
 
-        Enforcement is opt-in. With ``rag_grounded_answer_gate_enabled`` off the
-        model's answer is returned unchanged and only the shadow validation
-        record is attached. The live evidence token counter is already consumed
-        or discarded before this runs, and the regeneration is a tool-free pass
-        that registers no descriptor, so this exit stays leak-free.
+        Enforcement is unconditional. The live evidence token counter is
+        already consumed or discarded before this runs, and the regeneration is
+        a tool-free pass that registers no descriptor, so this exit stays
+        leak-free.
         """
-        if not getattr(settings, "enable_citation_verification", False):
-            return response
         if getattr(response, "error", None):
             # A failed turn reports its own error. It is not an answer to ground,
             # and replacing it would hide the failure from the user.
             return response
         text = str(response.message.content or "")
-        if not text.strip():
-            return response
 
         messages = state.get("messages", []) or []
         evidence, ambiguous_evidence_id_count = self._current_turn_evidence(state, messages)
-        enforced = bool(getattr(settings, "rag_grounded_answer_gate_enabled", False))
+
+        # Grounding is not optional and has no shadow mode: every RAG answer is
+        # validated, including one produced from zero evidence. A zero-evidence
+        # answer may clarify or abstain, but it may not claim a source.
         finalization = await self._grounded_answer_gate().finalize_answer(
             question=question,
             evidence=evidence,
             answer=parse_grounded_answer(text),
-            regenerate=(
-                self._grounded_regenerator(state, question, evidence) if enforced else None
-            ),
-            mode="enforced" if enforced else "shadow",
+            regenerate=self._grounded_regenerator(state, question, evidence),
+            mode="enforced",
             ambiguous_evidence_id_count=ambiguous_evidence_id_count,
         )
         metadata = response.metadata if isinstance(response.metadata, dict) else {}
         metadata["grounded_answer"] = finalization.to_metadata()
         response.metadata = metadata
-        if not enforced:
-            return response
 
         # A regenerated answer renders from its own raw text so its markdown
-        # structure survives (finding 3); an abstention replaces the answer
-        # outright and ignores ``text`` entirely; otherwise keep the model's
-        # original formatting and let the server append the citation block.
+        # structure survives; an abstention replaces the answer outright and
+        # ignores ``text`` entirely; otherwise keep the model's original
+        # formatting and let the server append the citation block.
         keep_prose = not finalization.answer.abstained and not finalization.regenerated
         response.message.content = render_grounded_answer(
             finalization.answer,

@@ -61,5 +61,9 @@ def test_rag_node_merges_existing_search_document_artifacts_into_response():
 
     asyncio.run(workflow._rag_node(state))
 
+    # Artifact visibility is independent of what grounding decides about the
+    # answer: the tool's own output stays attached either way. The answer text
+    # itself is now an abstention, because this fixture's artifact carries no
+    # structured evidence pack for a claim to cite.
     assert state["response"].tool_artifacts == [artifact]
-    assert state["response"].message.content == "The retrieved chunks show revenue increased."
+    assert state["response"].metadata["grounded_answer"]["mode"] == "enforced"

@@ -1421,12 +1421,11 @@ class Settings(BaseSettings):
     )
     enable_citation_verification: bool = Field(
         default=True,
-        description="Run the per-turn grounded-answer shadow validation on RAG responses in "
-        "the graph rag_loop path (app/ai/workflow/rag_loop.py). Ships default=True since "
-        "Task 10 -- it was never off, despite an earlier plan draft assuming otherwise. "
-        "Shadow-only (no answer is ever replaced) unless rag_grounded_answer_gate_enabled "
-        "is also True. Does not cover the inline-worker RAG path in app/ai/graph.py. See "
-        "docs/rag-rollout-runbook.md before changing either flag.",
+        description=(
+            "Retained for operational visibility only. Grounded-answer validation is "
+            "mandatory for every RAG result in routing-v2 and cannot be turned off; "
+            "there is no shadow mode and no path that skips it."
+        ),
     )
     min_citation_coverage: float = Field(
         default=0.5,
@@ -1436,15 +1435,6 @@ class Settings(BaseSettings):
         "currently gates, and never re-selected from evaluation results. See "
         "docs/rag-rollout-runbook.md before changing it.",
     )
-    rag_grounded_answer_gate_enabled: bool = Field(
-        default=False,
-        description=(
-            "Enforce the grounded-answer gate on RAG final responses: constrained citation "
-            "prompting, one regeneration, and explicit abstention. Disabled keeps the current "
-            "final response and only records validation shadow metrics."
-        ),
-    )
-
     # LangGraph Checkpoint Configuration
     enable_langgraph_checkpoints: bool = Field(
         default=True,

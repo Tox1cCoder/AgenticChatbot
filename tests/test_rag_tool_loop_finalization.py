@@ -1191,31 +1191,29 @@ def _grounded_workflow(*, final_text: str, regenerated_answer=None):
     return workflow, calls
 
 
-def test_disabled_grounded_gate_keeps_the_answer_but_records_shadow_metrics(monkeypatch):
+def test_an_uncited_answer_is_not_published_as_written(monkeypatch):
+    """There is no shadow mode: a below-coverage answer is acted on, not logged.
+
+    Previously this same input was recorded as ``would_abstain`` and published
+    unchanged. Mandatory grounding means the turn now spends its one
+    regeneration and then abstains rather than shipping the uncited claim.
+    """
     monkeypatch.setattr(settings, "enable_citation_verification", True, raising=False)
-    monkeypatch.setattr(settings, "rag_grounded_answer_gate_enabled", False, raising=False)
     state = _grounded_state()
     workflow, calls = _grounded_workflow(final_text="Revenue rose to 10 million.")
 
     asyncio.run(workflow._rag_node(state))
 
-    response = state["response"]
-    assert response.message.content == "Revenue rose to 10 million."
-    shadow = response.metadata["grounded_answer"]
-    assert shadow["mode"] == "shadow"
-    assert shadow["valid"] is False
-    assert shadow["reason_codes"] == ["citation_coverage_below_minimum"]
-    assert shadow["evidence_id_count"] == 1
-    # Shadow mode never replaces the answer, so this is a floor measurement,
-    # not a live abstention — it must read differently from "abstained"
-    # (round-1 finding 4).
-    assert shadow["outcome"] == "would_abstain"
-    assert calls["regenerations"] == [], "the disabled path must never spend a regeneration"
+    grounded = state["response"].metadata["grounded_answer"]
+    assert grounded["mode"] == "enforced"
+    assert grounded["outcome"] != "would_abstain"
+    assert grounded["valid"] is False
+    assert grounded["evidence_id_count"] == 1
+    assert calls["regenerations"], "enforcement must spend its one regeneration"
 
 
 def test_enforced_grounded_gate_appends_server_rendered_sources(monkeypatch):
     monkeypatch.setattr(settings, "enable_citation_verification", True, raising=False)
-    monkeypatch.setattr(settings, "rag_grounded_answer_gate_enabled", True, raising=False)
     state = _grounded_state()
     workflow, calls = _grounded_workflow(
         final_text="Revenue rose to 10 million [E1] [Source: forged.pdf, Page 99].",
@@ -1235,7 +1233,6 @@ def test_enforced_grounded_gate_regenerates_once_then_abstains(monkeypatch):
     from app.services.rag_grounding import GroundedAnswer, GroundedClaim
 
     monkeypatch.setattr(settings, "enable_citation_verification", True, raising=False)
-    monkeypatch.setattr(settings, "rag_grounded_answer_gate_enabled", True, raising=False)
     state = _grounded_state()
     workflow, calls = _grounded_workflow(
         final_text="Revenue rose to 10 million [E9].",
@@ -1263,7 +1260,6 @@ def test_enforced_grounded_gate_regenerates_once_then_abstains(monkeypatch):
 def test_grounded_gate_ignores_evidence_from_other_tool_calls(monkeypatch):
     """Only the current turn's pack authorizes a citation."""
     monkeypatch.setattr(settings, "enable_citation_verification", True, raising=False)
-    monkeypatch.setattr(settings, "rag_grounded_answer_gate_enabled", False, raising=False)
     state = _grounded_state()
     stale = dict(state["context"]["tool_artifacts"][0])
     stale["tool_call_id"] = "search-from-an-earlier-turn"
@@ -1272,15 +1268,14 @@ def test_grounded_gate_ignores_evidence_from_other_tool_calls(monkeypatch):
 
     asyncio.run(workflow._rag_node(state))
 
-    shadow = state["response"].metadata["grounded_answer"]
-    assert shadow["evidence_id_count"] == 0
-    assert shadow["reason_codes"] == ["unknown_evidence_id", "answer_without_evidence"]
+    grounded = state["response"].metadata["grounded_answer"]
+    assert grounded["evidence_id_count"] == 0
+    assert grounded["reason_codes"] == ["unknown_evidence_id", "answer_without_evidence"]
 
 
 def test_grounded_gate_leaves_failed_rag_turns_reporting_their_own_error(monkeypatch):
     """An error response is not an answer: replacing it would hide the failure."""
     monkeypatch.setattr(settings, "enable_citation_verification", True, raising=False)
-    monkeypatch.setattr(settings, "rag_grounded_answer_gate_enabled", True, raising=False)
     state = _grounded_state()
     workflow, calls = _grounded_workflow(final_text="unused")
 
@@ -1308,16 +1303,21 @@ def test_grounded_gate_leaves_failed_rag_turns_reporting_their_own_error(monkeyp
     assert calls["regenerations"] == []
 
 
-def test_citation_verification_disabled_skips_the_gate_entirely(monkeypatch):
+def test_grounding_runs_even_with_citation_verification_turned_off(monkeypatch):
+    """No setting can skip validation on a RAG answer.
+
+    ``enable_citation_verification`` is retained for operational visibility;
+    it is not an off switch, because a RAG turn that publishes unvalidated
+    claims is the failure grounding exists to prevent.
+    """
     monkeypatch.setattr(settings, "enable_citation_verification", False, raising=False)
-    monkeypatch.setattr(settings, "rag_grounded_answer_gate_enabled", False, raising=False)
     state = _grounded_state()
     workflow, _calls = _grounded_workflow(final_text="Revenue rose to 10 million.")
 
     asyncio.run(workflow._rag_node(state))
 
-    assert state["response"].message.content == "Revenue rose to 10 million."
-    assert "grounded_answer" not in state["response"].metadata
+    assert "grounded_answer" in state["response"].metadata
+    assert state["response"].metadata["grounded_answer"]["mode"] == "enforced"
 
 
 def test_enforced_regeneration_preserves_the_regenerated_markdown_structure(monkeypatch):
@@ -1326,7 +1326,6 @@ def test_enforced_regeneration_preserves_the_regenerated_markdown_structure(monk
     from app.services.rag_grounding import parse_grounded_answer
 
     monkeypatch.setattr(settings, "enable_citation_verification", True, raising=False)
-    monkeypatch.setattr(settings, "rag_grounded_answer_gate_enabled", True, raising=False)
     state = _grounded_state()
     regenerated_text = "Revenue rose [E1].\n\n- Costs fell [E1]\n- Margins widened [E1]"
     workflow, calls = _grounded_workflow(
@@ -1351,7 +1350,6 @@ def test_grounded_gate_reports_ambiguous_evidence_id_count(monkeypatch):
     from uuid import UUID
 
     monkeypatch.setattr(settings, "enable_citation_verification", True, raising=False)
-    monkeypatch.setattr(settings, "rag_grounded_answer_gate_enabled", False, raising=False)
 
     def _artifact(tool_call_id: str, filename: str) -> dict:
         return {

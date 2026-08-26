@@ -140,7 +140,6 @@ def _tool_policy_snapshot() -> tuple[Any, ...]:
         settings.agentic_max_iterations,
         settings.enable_citation_verification,
         settings.min_citation_coverage,
-        settings.rag_grounded_answer_gate_enabled,
     )
 
 
@@ -544,10 +543,16 @@ async def test_injected_document_commands_never_reach_the_regeneration_policy(ca
     assert GROUNDED_ANSWER_CITATION_INSTRUCTIONS in str(system_messages[0].content)
 
 
-def test_grounded_gate_setting_defaults_off():
+def test_grounded_gate_has_no_off_switch():
+    """Grounding is mandatory in routing-v2; there is no rollout flag left.
+
+    A setting that could disable validation is the thing that let one RAG path
+    publish unvalidated claims, so it is removed rather than defaulted off.
+    """
     from app.core.config import get_settings
 
-    assert get_settings().rag_grounded_answer_gate_enabled is False
+    settings = get_settings()
+    assert not hasattr(settings, "rag_grounded_answer_gate_enabled")
 
 
 # --------------------------------------------------------------------------
