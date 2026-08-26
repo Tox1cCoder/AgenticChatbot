@@ -1169,6 +1169,34 @@ class Settings(BaseSettings):
         default=5,
         description="Maximum inter-agent handoffs permitted in one user turn",
     )
+
+    # --- Planning worker orchestration -----------------------------------
+    # Conservative bounds on one Planning turn. Each is validated positive so a
+    # misconfiguration fails at startup rather than fanning out unbounded work.
+    planning_worker_max_tasks: int = Field(
+        default=8,
+        gt=0,
+        le=64,
+        description="Maximum worker tasks Planning may dispatch in one turn",
+    )
+    planning_worker_max_concurrency: int = Field(
+        default=4,
+        gt=0,
+        le=32,
+        description="Maximum Planning workers executing concurrently",
+    )
+    planning_worker_objective_max_chars: int = Field(
+        default=4000,
+        gt=0,
+        le=64_000,
+        description="Character bound on one worker task objective",
+    )
+    planning_parent_context_max_chars: int = Field(
+        default=12000,
+        gt=0,
+        le=200_000,
+        description="Character bound on the parent context passed to Planning synthesis",
+    )
     react_agent_recursion_limit: int = Field(
         default=105,
         description=(
