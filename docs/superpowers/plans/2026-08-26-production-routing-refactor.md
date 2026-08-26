@@ -1355,6 +1355,15 @@ Expected: the runtime contains only v2 routing/execution; old checkpoint data re
 
 ### Task 12: Add routing observability and a versioned multilingual evaluation gate
 
+> **SKIPPED — marked redundant by Thai on 2026-08-26.** The live multilingual
+> evaluation program (golden dataset, human-review manifest, release-gate CLI)
+> is not being built. Content-free runtime routing metrics already landed in
+> Task 3 as `app/observability/routing.py`, which covers the observability half
+> of this task. Consequences carried forward: the router's real-world routing
+> accuracy is **unmeasured**, and the Task 14 acceptance gate loses its
+> `macro_f1`, per-language accuracy, and structured-output-success thresholds.
+> Do not describe routing quality as validated.
+
 **Files:**
 - Modify: `app/observability/routing.py`
 - Create: `app/evaluation/routing/__init__.py`
@@ -1632,7 +1641,7 @@ Confirm the diff contains no credentials, captured prompts, generated evaluation
 - [ ] Same-conversation turns are serialized through persistence; different conversations remain concurrent.
 - [ ] Checkpoint retention preserves active interrupts, expires completed/failed turns by policy, and honors conversation/account deletion.
 - [ ] Legacy routing, fallback, continuation, duplicated RAG, shadow grounding, and stale recovery code are deleted.
-- [ ] The golden dataset hash has human-review approval, and deterministic, concurrency, streaming, HITL, grounding, full non-live, and live multilingual gates pass for the deployed provider/model/inventory tuple.
+- [ ] Deterministic, concurrency, streaming, HITL, grounding, and full non-live gates pass. (The live multilingual routing gate was removed with Task 12; routing accuracy is unmeasured.)
 
 ## Execution Handoff
 
