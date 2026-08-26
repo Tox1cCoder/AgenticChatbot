@@ -1785,7 +1785,7 @@ class MessageService(IMessageService):
         bot_message_persisted = False
         resume_tool_artifacts: list[dict[str, Any]] = []
         resume_tool_args_by_id: dict[str, Any] = {}
-        resume_selected_agent: str | None = None
+        resume_active_agent_id: str | None = None
 
         sequence = 0
 
@@ -1821,9 +1821,9 @@ class MessageService(IMessageService):
                 event_type = event.type
 
                 if event_type == "agent_selected":
-                    resume_selected_agent = event.agent or event.data.get("agent")
+                    resume_active_agent_id = event.agent or event.data.get("agent")
                     yield self._agent_selected_event(
-                        resume_selected_agent,
+                        resume_active_agent_id,
                         resume_custom_agents,
                         sequence=event.sequence,
                     )
@@ -1888,7 +1888,7 @@ class MessageService(IMessageService):
                             user_id=user_id,
                             message_id=bot_message_id,
                             tool_artifacts=resume_tool_artifacts or None,
-                            active_agent_id=resume_selected_agent,
+                            active_agent_id=resume_active_agent_id,
                             custom_agents=resume_custom_agents,
                             require_durable_interrupt=True,
                         )
@@ -2820,7 +2820,7 @@ class MessageService(IMessageService):
         attach_agent_metadata(
             metadata,
             response_agent_id=active_agent_id,
-            selected_agent_id=active_agent_id,
+            active_agent_id=active_agent_id,
             custom_agents=custom_agents,
         )
 

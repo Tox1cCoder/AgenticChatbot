@@ -1,6 +1,6 @@
 """Graph state and reducers for the routing-v2 production workflow.
 
-``WorkflowState`` replaces the mutable ``selected_agent`` vocabulary with three
+``WorkflowState`` replaces the pre-v2 mutable routing field with three
 separate concerns:
 
 * ``routing_decision`` — the immutable, model-owned decision for the new turn.

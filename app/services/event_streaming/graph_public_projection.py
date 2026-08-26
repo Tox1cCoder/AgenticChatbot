@@ -533,22 +533,22 @@ class GraphPublicStreamProjector:
         """
         values = data.get("values")
         new_messages = data.get("new_messages") or []
-        selected_agent = data.get("active_agent_id")
+        active_agent_id = data.get("active_agent_id")
 
         if isinstance(values, dict):
             if ctx.last_state_values is None:
                 ctx.last_state_values = {}
             ctx.last_state_values.update(values)
 
-        if isinstance(selected_agent, str) and selected_agent != ctx.last_emitted_agent:
+        if isinstance(active_agent_id, str) and active_agent_id != ctx.last_emitted_agent:
             cause = self._selection_cause(ctx)
-            ctx.last_emitted_agent = selected_agent
+            ctx.last_emitted_agent = active_agent_id
             ctx.emitted_initial_selection = True
-            ctx.suppress_tokens = selected_agent in INTERNAL_TOKEN_AGENTS
-            yield self._agent_selected_event(selected_agent, cause=cause)
+            ctx.suppress_tokens = active_agent_id in INTERNAL_TOKEN_AGENTS
+            yield self._agent_selected_event(active_agent_id, cause=cause)
 
         # Best-effort planning node_complete derived from the newly added messages.
-        if selected_agent in ("planning_agent", "planning_tools"):
+        if active_agent_id in ("planning_agent", "planning_tools"):
             planning_ai = next(
                 (
                     msg

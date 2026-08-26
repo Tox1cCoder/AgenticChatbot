@@ -110,7 +110,7 @@ class PlanningLoopMixin:
         persona = state.get("persona")
 
         # Get only current turn messages for the model
-        current_turn_messages = self._messages_for_selected_agent(
+        current_turn_messages = self._messages_for_active_agent(
             state,
             state.get("active_agent_id") or "planning_agent",
             messages,

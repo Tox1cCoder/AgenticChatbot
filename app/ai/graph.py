@@ -470,7 +470,7 @@ class MultiAgentWorkflow(
         attach_agent_metadata(
             response.metadata,
             response_agent_id=response.agent_id,
-            selected_agent_id=state.get("active_agent_id"),
+            active_agent_id=state.get("active_agent_id"),
             custom_agents=custom_agents,
         )
 
@@ -710,7 +710,7 @@ class MultiAgentWorkflow(
     # ------------------------------------------------------------------
     # Delegated-agent message scoping
     # ------------------------------------------------------------------
-    def _messages_for_selected_agent(
+    def _messages_for_active_agent(
         self,
         state: GraphState,
         agent_name: str,
@@ -1517,7 +1517,7 @@ class MultiAgentWorkflow(
             conversation_id, user_id, agent_key=history_key, state=state
         )
 
-        current_turn_messages = self._messages_for_selected_agent(
+        current_turn_messages = self._messages_for_active_agent(
             state, active_agent_id, messages
         )
         current_turn_messages, has_images = self._apply_current_turn_attachments(
@@ -2340,10 +2340,10 @@ class MultiAgentWorkflow(
         if not content:
             return None
 
-        final_selected_agent = state.get("active_agent_id") or active_agent_id
+        final_agent_id = state.get("active_agent_id") or active_agent_id
         recovered_response = AgentResponse(
-            agent_type=self._get_agent_type(final_selected_agent),
-            agent_id=final_selected_agent or "unknown",
+            agent_type=self._get_agent_type(final_agent_id),
+            agent_id=final_agent_id or "unknown",
             message=AgentMessage(
                 role=MessageRole.ASSISTANT,
                 content=content,
@@ -2528,10 +2528,10 @@ class MultiAgentWorkflow(
             )
             agent_response = self._recover_terminal_response(final_state)
 
-        final_selected_agent = (
+        final_agent_id = (
             final_state.get("active_agent_id") if isinstance(final_state, dict) else None
         )
-        if agent_response and final_selected_agent == "planning_agent":
+        if agent_response and final_agent_id == "planning_agent":
             agent_response = self._attach_planning_state_metadata(agent_response, final_state)
 
         # Add continuation metadata when multiple rounds ran
@@ -2829,12 +2829,12 @@ class MultiAgentWorkflow(
                     apply_accumulated_thinking(response, accumulated_thinking)
 
                 response_state = final_state if final_state else last_state_values
-                final_selected_agent = (
+                final_agent_id = (
                     response_state.get("active_agent_id")
                     if isinstance(response_state, dict)
                     else active_agent_id
                 ) or active_agent_id
-                if final_selected_agent == "planning_agent":
+                if final_agent_id == "planning_agent":
                     response = self._attach_planning_state_metadata(response, response_state)
 
                 if round_num > 1:
@@ -3070,12 +3070,12 @@ class MultiAgentWorkflow(
                         apply_accumulated_thinking(response, accumulated_thinking)
 
                     response_state = final_state if final_state else last_state_values
-                    final_selected_agent = (
+                    final_agent_id = (
                         response_state.get("active_agent_id")
                         if isinstance(response_state, dict)
                         else active_agent_id
                     ) or active_agent_id
-                    if final_selected_agent == "planning_agent":
+                    if final_agent_id == "planning_agent":
                         response = self._attach_planning_state_metadata(response, response_state)
 
                     # Add continuation metadata when multiple rounds ran
@@ -3104,12 +3104,12 @@ class MultiAgentWorkflow(
                     apply_accumulated_thinking(response, accumulated_thinking)
 
                 response_state = last_state_values
-                final_selected_agent = (
+                final_agent_id = (
                     response_state.get("active_agent_id")
                     if isinstance(response_state, dict)
                     else active_agent_id
                 ) or active_agent_id
-                if final_selected_agent == "planning_agent":
+                if final_agent_id == "planning_agent":
                     response = self._attach_planning_state_metadata(response, response_state)
 
                 if round_num > 1:

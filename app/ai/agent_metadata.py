@@ -97,9 +97,15 @@ def attach_agent_metadata(
     metadata: dict[str, Any],
     *,
     response_agent_id: str | None,
-    selected_agent_id: str | None,
+    active_agent_id: str | None,
     custom_agents: dict[str, Any] | None,
 ) -> None:
+    """Attach the responding agent's public identity.
+
+    ``response_agent_id`` is who produced the answer; ``active_agent_id`` is
+    who was executing. They differ only when a response carries no identity of
+    its own, and the recorded ``source`` says which one was used.
+    """
     compat_runtime_id = metadata.get("runtime_agent_id")
     compat_name = metadata.get("custom_agent_name")
     compat_custom_id = metadata.get("custom_agent_id")
@@ -111,8 +117,8 @@ def attach_agent_metadata(
         source = "response"
         agent_id = compat_runtime_id
     else:
-        source = "selected_agent"
-        agent_id = selected_agent_id
+        source = "active_agent"
+        agent_id = active_agent_id
 
     identity = agent_identity(
         agent_id,

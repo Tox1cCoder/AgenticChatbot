@@ -39,7 +39,7 @@ def test_attach_agent_metadata_prefers_response_agent_id():
     attach_agent_metadata(
         metadata,
         response_agent_id="search_agent",
-        selected_agent_id="chat_agent",
+        active_agent_id="chat_agent",
         custom_agents={},
     )
 
@@ -57,7 +57,7 @@ def test_attach_agent_metadata_uses_custom_response_compat_fields():
     attach_agent_metadata(
         metadata,
         response_agent_id=None,
-        selected_agent_id=None,
+        active_agent_id=None,
         custom_agents={},
     )
 

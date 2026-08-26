@@ -1861,7 +1861,7 @@ def test_delegated_agent_messages_strip_handoff_control_messages():
         },
     }
 
-    delegated = workflow._messages_for_selected_agent(state, "search_agent", messages)
+    delegated = workflow._messages_for_active_agent(state, "search_agent", messages)
 
     assert delegated == [messages[0]]
 
@@ -1972,7 +1972,7 @@ def test_delegated_agent_messages_passthrough_when_no_active_handoff():
         "context": {},
     }
 
-    delegated = workflow._messages_for_selected_agent(state, "search_agent", messages)
+    delegated = workflow._messages_for_active_agent(state, "search_agent", messages)
 
     assert delegated == messages[2:]
 

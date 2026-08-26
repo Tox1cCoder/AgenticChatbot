@@ -433,7 +433,7 @@ class PublicResponseFinalizer:
         attach_agent_metadata(
             metadata,
             response_agent_id=outcome.agent_id,
-            selected_agent_id=active_agent_id,
+            active_agent_id=active_agent_id,
             custom_agents=state.get("custom_agents"),
         )
 
