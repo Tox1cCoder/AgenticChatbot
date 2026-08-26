@@ -23,6 +23,7 @@ from app.ai.reasoning_controls import validate_reasoning_effort
 from app.core.runtime_modeling import (
     ResolvedRuntimeModelConfig,
     RuntimeFallbackConfig,
+    StrictRuntimeResolutionError,
 )
 from app.interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from app.repositories.agent_model_config import AgentModelConfigRepository
@@ -44,8 +45,14 @@ SUPPORTED_RUNTIME_AGENT_KEYS = (
     # request override (provider/model from the custom_agents row); they are
     # never persisted as agent_model_configs rows (not in SUPPORTED_AGENT_KEYS).
     "custom",
+    # Routing-v2 router. Resolved strictly (no provider fallback) and never
+    # persisted as an agent_model_configs row.
+    "router",
 )
 SUPPORTED_PROVIDERS = ("gemini", "openai")
+# Providers whose installed LangChain adapter implements
+# ``with_structured_output``. Anything absent here fails closed for router use.
+STRUCTURED_OUTPUT_PROVIDERS = frozenset({"gemini", "openai"})
 
 logger = logging.getLogger(__name__)
 
@@ -306,9 +313,7 @@ class ModelConfigService(IRuntimeModelResolver):
                 )
             except ValueError as exc:
                 reasoning_effort = None
-                effective[agent_key]["warnings"].append(
-                    f"{exc} Using Provider default."
-                )
+                effective[agent_key]["warnings"].append(f"{exc} Using Provider default.")
 
             effective[agent_key].update(
                 {
@@ -460,9 +465,7 @@ class ModelConfigService(IRuntimeModelResolver):
             provider,
             model,
             raw_effort,
-            supports_reasoning=bool(
-                model_metadata and model_metadata.get("supports_reasoning")
-            ),
+            supports_reasoning=bool(model_metadata and model_metadata.get("supports_reasoning")),
         )
 
         return {
@@ -492,6 +495,11 @@ class ModelConfigService(IRuntimeModelResolver):
         model_id: str,
         provider_snapshot: Mapping[str, Any],
     ) -> dict[str, bool]:
+        # Schema-constrained output comes from the installed LangChain adapter,
+        # not from the provider catalog. Unknown providers fail closed so the
+        # router can never select an adapter that cannot honor a schema.
+        structured_output = provider in STRUCTURED_OUTPUT_PROVIDERS
+
         metadata = self._get_model_metadata(provider_snapshot, model_id)
         if metadata:
             return {
@@ -499,6 +507,9 @@ class ModelConfigService(IRuntimeModelResolver):
                 "supports_tool_calling": bool(metadata.get("supports_tool_calling")),
                 "supports_streaming": bool(metadata.get("supports_streaming", True)),
                 "supports_reasoning": bool(metadata.get("supports_reasoning")),
+                "supports_structured_output": bool(
+                    metadata.get("supports_structured_output", structured_output)
+                ),
             }
 
         model_lower = model_id.lower()
@@ -511,6 +522,16 @@ class ModelConfigService(IRuntimeModelResolver):
                 "supports_tool_calling": True,
                 "supports_streaming": True,
                 "supports_reasoning": model_lower.startswith(("o1", "o3", "o4", "gpt-5")),
+                "supports_structured_output": structured_output,
+            }
+
+        if provider != "gemini":
+            return {
+                "supports_vision": False,
+                "supports_tool_calling": False,
+                "supports_streaming": False,
+                "supports_reasoning": False,
+                "supports_structured_output": structured_output,
             }
 
         return {
@@ -518,6 +539,7 @@ class ModelConfigService(IRuntimeModelResolver):
             "supports_tool_calling": True,
             "supports_streaming": True,
             "supports_reasoning": any(token in model_lower for token in ("2.5", "3", "pro")),
+            "supports_structured_output": structured_output,
         }
 
     def _resolve_context_window_metadata(
@@ -601,6 +623,69 @@ class ModelConfigService(IRuntimeModelResolver):
         return None
 
     def resolve_runtime_config(
+        self,
+        user_id: UUID | None,
+        agent_key: str,
+        request_override: Mapping[str, Any] | None = None,
+        *,
+        require_capabilities: frozenset[str] = frozenset(),
+        allow_provider_fallback: bool = True,
+    ) -> ResolvedRuntimeModelConfig:
+        resolved = self._resolve_runtime_config(user_id, agent_key, request_override)
+        if allow_provider_fallback and not require_capabilities:
+            return resolved
+        return self._enforce_strict_resolution(
+            resolved,
+            require_capabilities=require_capabilities,
+            allow_provider_fallback=allow_provider_fallback,
+        )
+
+    @staticmethod
+    def _enforce_strict_resolution(
+        resolved: ResolvedRuntimeModelConfig,
+        *,
+        require_capabilities: frozenset[str],
+        allow_provider_fallback: bool,
+    ) -> ResolvedRuntimeModelConfig:
+        """Reject any resolution that silently changed provider, model, or key.
+
+        Strict callers must fail closed rather than consume a substituted
+        candidate; the caller decides what to tell the user.
+        """
+        if not allow_provider_fallback:
+            if resolved.provider_fallback:
+                raise StrictRuntimeResolutionError(
+                    "provider_fallback",
+                    f"strict resolution refused a provider fallback for {resolved.agent_key}",
+                )
+            if resolved.fallback_config is not None:
+                raise StrictRuntimeResolutionError(
+                    "fallback_candidate",
+                    f"strict resolution refused a fallback candidate for {resolved.agent_key}",
+                )
+            if not (resolved.api_key or "").strip():
+                raise StrictRuntimeResolutionError(
+                    "missing_credentials",
+                    f"no credential for provider {resolved.provider}",
+                )
+            if not (resolved.model or "").strip():
+                raise StrictRuntimeResolutionError(
+                    "missing_model", f"no model configured for {resolved.agent_key}"
+                )
+
+        missing = sorted(
+            capability
+            for capability in require_capabilities
+            if not resolved.capabilities.get(capability)
+        )
+        if missing:
+            raise StrictRuntimeResolutionError(
+                "missing_capabilities",
+                f"{resolved.provider}:{resolved.model} lacks {', '.join(missing)}",
+            )
+        return resolved
+
+    def _resolve_runtime_config(
         self,
         user_id: UUID | None,
         agent_key: str,

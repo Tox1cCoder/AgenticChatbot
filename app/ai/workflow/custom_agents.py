@@ -179,26 +179,6 @@ class CustomAgentsMixin:
             for runtime_id, entry in GraphStateView(state).custom_agents().items()
         ]
 
-    def _sticky_custom_agent(self, state: GraphState, content: str | None) -> str | None:
-        """Return the previous turn's custom agent if a follow-up should stay on it.
-
-        Stickiness applies only to an attached custom agent. It is released when
-        the user explicitly names a *different* attached custom agent (the
-        router's deterministic override then selects that one), or when the
-        previous custom agent is no longer attached to the conversation.
-        """
-        last_agent = state.get("last_agent")
-        if not is_custom_runtime_id(last_agent):
-            return None
-        if not self._is_attached_custom_agent(state, last_agent):
-            return None
-        explicit = self.router._match_explicit_custom_agent(
-            content or "", self._custom_agent_descriptors(state)
-        )
-        if explicit and explicit != last_agent:
-            return None
-        return last_agent
-
     def _build_custom_agent(
         self, state: GraphState, runtime_agent_id: str | None
     ) -> CustomAgent | None:

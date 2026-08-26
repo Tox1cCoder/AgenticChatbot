@@ -290,9 +290,18 @@ def test_inventory_contains_only_git_tracked_source_files():
 
 def test_inventory_detects_provider_callable_passed_to_asyncio_to_thread():
     assert {
-        "file": "app/ai/agents/router.py",
-        "function": "Router._call_llm._generate",
-        "call_chain": "self.gemini_client.models.generate_content",
+        "file": "app/ai/suggestion_generator.py",
+        "function": "SuggestionGenerator._get_cached_suggestions._generate",
+        "call_chain": "self.client.models.generate_content",
+    } in _discover_callsites()
+
+
+def test_inventory_detects_the_structured_router_provider_call():
+    """Routing-v2 calls the provider through LangChain, not a raw SDK client."""
+    assert {
+        "file": "app/ai/workflow/routing.py",
+        "function": "RoutingService._invoke_recorded._call",
+        "call_chain": "structured.ainvoke",
     } in _discover_callsites()
 
 

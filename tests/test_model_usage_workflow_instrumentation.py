@@ -375,18 +375,73 @@ async def test_concurrent_users_keep_separate_attribution():
 # --------------------------------------------------------------------------
 
 
-async def _make_router(monkeypatch, recorder, *, client) -> Router:
-    monkeypatch.setattr(Router, "_init_gemini", lambda self: None)
-    router = Router(recorder=recorder)
-    router.gemini_client = client
-    return router
+def _routing_service_for(recorder, *, decision=None, error=None):
+    """Build a real RoutingService whose only fake is the provider transport."""
+    from app.ai.workflow.routing import RoutingDecisionValidator, RoutingService
+
+    class _Structured:
+        def __init__(self, owner):
+            self._owner = owner
+
+        async def ainvoke(self, messages, config=None):
+            self._owner.calls += 1
+            if error is not None:
+                raise error
+            return {"raw": SimpleNamespace(content=""), "parsed": decision, "parsing_error": None}
+
+    class _Model:
+        def __init__(self):
+            self.calls = 0
+
+        def with_structured_output(self, schema, **kwargs):
+            return _Structured(self)
+
+    class _Resolver:
+        def resolve_runtime_config(
+            self,
+            user_id,
+            agent_key,
+            request_override=None,
+            *,
+            require_capabilities=frozenset(),
+            allow_provider_fallback=True,
+        ):
+            return ResolvedRuntimeModelConfig(
+                agent_key="router",
+                provider="gemini",
+                model=settings.router_model,
+                temperature=1.0,
+                api_key="key",
+                key_source="user",
+                source="default",
+                capabilities={"supports_structured_output": True},
+            )
+
+    model = _Model()
+
+    class _Factory:
+        @staticmethod
+        def create_model_from_runtime(config, **kwargs):
+            return model
+
+    return RoutingService(
+        runtime_model_resolver=_Resolver(),
+        model_factory=_Factory(),
+        settings=settings,
+        validator=RoutingDecisionValidator(),
+        usage_recorder=recorder,
+    ), model
 
 
-async def test_router_records_one_success_attempt(monkeypatch):
+async def test_router_records_one_success_attempt():
+    from app.ai.workflow.contracts import RoutingDecision
+
     recorder, repo = make_recorder()
-    router = await _make_router(
-        monkeypatch, recorder, client=FakeGeminiClient(response=_FakeGenResponse("search_agent"))
+    service, _ = _routing_service_for(
+        recorder,
+        decision=RoutingDecision(agent_id="search_agent", confidence=0.9, reason="current news"),
     )
+    router = Router(recorder=recorder, routing_service=service)
 
     with bind_usage_context(UsageContext(user_id=uuid4(), operation="workflow")):
         result = await router.route_message(
@@ -404,46 +459,61 @@ async def test_router_records_one_success_attempt(monkeypatch):
     assert command.status == "success"
 
 
-async def test_router_provider_error_records_error_attempt_and_defaults(monkeypatch):
-    recorder, repo = make_recorder()
-    router = await _make_router(
-        monkeypatch, recorder, client=FakeGeminiClient(raises=RuntimeError("gemini down"))
-    )
+async def test_router_provider_error_records_every_attempt_and_never_defaults():
+    """Both bounded attempts are recorded; neither substitutes chat_agent."""
+    from app.ai.workflow.contracts import WorkflowRoutingException
 
-    with bind_usage_context(UsageContext(user_id=uuid4(), operation="workflow")):
-        result = await router.route_message(
+    recorder, repo = make_recorder()
+    service, model = _routing_service_for(recorder, error=ConnectionError("gemini down"))
+    router = Router(recorder=recorder, routing_service=service)
+
+    with (
+        bind_usage_context(UsageContext(user_id=uuid4(), operation="workflow")),
+        pytest.raises(WorkflowRoutingException) as exc,
+    ):
+        await router.route_message(
             AgentMessage(role=MessageRole.USER, content="find the news"),
             ["chat_agent", "search_agent"],
         )
 
-    assert result == "chat_agent"
-    assert len(repo.commands) == 1
-    assert repo.commands[0].status == "error"
-    assert repo.commands[0].context.operation == "router"
+    assert exc.value.error.code == "routing_provider_unavailable"
+    assert model.calls == 2
+    assert len(repo.commands) == 2
+    assert {command.status for command in repo.commands} == {"error"}
+    assert {command.context.operation for command in repo.commands} == {"router"}
 
 
-async def test_router_deterministic_shortcircuits_record_zero_events(monkeypatch):
+async def test_router_records_zero_events_when_no_provider_call_is_made():
+    """A strict-resolution failure fails closed before any provider attempt."""
+    from app.ai.workflow.contracts import WorkflowRoutingException
+    from app.ai.workflow.routing import RoutingDecisionValidator, RoutingService
+    from app.core.runtime_modeling import StrictRuntimeResolutionError
+
     recorder, repo = make_recorder()
 
-    # No available agents at all: returns immediately, no provider call.
-    router = await _make_router(
-        monkeypatch, recorder, client=FakeGeminiClient(response=_FakeGenResponse("x"))
-    )
-    with bind_usage_context(UsageContext(user_id=uuid4(), operation="workflow")):
-        result = await router.route_message(AgentMessage(role=MessageRole.USER, content="hi"), [])
-    assert result == "chat_agent"
+    class _Resolver:
+        def resolve_runtime_config(self, *args, **kwargs):
+            raise StrictRuntimeResolutionError("missing_credentials", "no router key")
 
-    # No client configured: deterministic fallback, still no provider call.
-    router_no_client = await _make_router(monkeypatch, recorder, client=None)
-    with bind_usage_context(UsageContext(user_id=uuid4(), operation="workflow")):
-        assert (
-            await router_no_client.route_message(
-                AgentMessage(role=MessageRole.USER, content="hi"),
-                ["chat_agent", "search_agent"],
-            )
-            == "chat_agent"
+    service = RoutingService(
+        runtime_model_resolver=_Resolver(),
+        model_factory=SimpleNamespace(create_model_from_runtime=lambda config, **kw: None),
+        settings=settings,
+        validator=RoutingDecisionValidator(),
+        usage_recorder=recorder,
+    )
+    router = Router(recorder=recorder, routing_service=service)
+
+    with (
+        bind_usage_context(UsageContext(user_id=uuid4(), operation="workflow")),
+        pytest.raises(WorkflowRoutingException) as exc,
+    ):
+        await router.route_message(
+            AgentMessage(role=MessageRole.USER, content="hi"),
+            ["chat_agent", "search_agent"],
         )
 
+    assert exc.value.error.code == "routing_provider_unavailable"
     assert repo.commands == []
 
 

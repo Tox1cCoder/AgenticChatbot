@@ -29,3 +29,17 @@ class ResolvedRuntimeModelConfig:
     fallback_config: RuntimeFallbackConfig | None = None
     reasoning_effort: str | None = None
     context_window: dict[str, Any] | None = None
+
+
+class StrictRuntimeResolutionError(RuntimeError):
+    """Raised when strict runtime resolution cannot honor the request.
+
+    Strict resolution (``allow_provider_fallback=False``) never substitutes a
+    provider, model, or credential. Callers translate ``reason`` into their own
+    typed error; they never parse the message text.
+    """
+
+    def __init__(self, reason: str, detail: str = "") -> None:
+        super().__init__(detail or reason)
+        self.reason = reason
+        self.detail = detail

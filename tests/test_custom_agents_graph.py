@@ -238,10 +238,13 @@ def _multi_custom_state(selected, ids):
 
 
 @pytest.mark.asyncio
-async def test_router_can_select_attached_custom_agent_by_name():
-    router = Router.__new__(Router)
-    router.gemini_client = None  # force deterministic-only path
-    router.model_name = "x"
+async def test_attached_custom_agent_is_a_routable_target_chosen_by_the_model():
+    """The model selects a custom agent from the inventory.
+
+    There is no explicit-name matcher: naming an agent in the message must not
+    select it in Python. It only makes the model's choice more likely.
+    """
+    from app.ai.workflow.contracts import RoutingDecision
 
     rid = f"custom_agent:{uuid4()}"
     descriptors = [
@@ -252,15 +255,50 @@ async def test_router_can_select_attached_custom_agent_by_name():
             "agent_order": 0,
         }
     ]
+
+    class _Service:
+        def __init__(self):
+            self.last_inventory = None
+
+        async def route(self, context, inventory, *, user_id, model_request, request_id):
+            self.last_inventory = inventory
+            return RoutingDecision(agent_id=rid, confidence=0.9, reason="analytics specialist")
+
+    service = _Service()
+    router = Router(recorder=None, routing_service=service)
     msg = AgentMessage(
         role=MessageRole.USER,
         content="Please ask the Data Analyst to summarize this.",
         metadata={},
     )
+
     result = await router.route_message(
         msg, ["chat_agent", "rag_agent", rid], custom_agent_descriptors=descriptors
     )
+
     assert result == rid
+    assert service.last_inventory.is_routable(rid) is True
+    assert service.last_inventory.resolve_node(rid) == "custom_agent"
+
+
+@pytest.mark.asyncio
+async def test_naming_an_agent_does_not_select_it_without_the_model():
+    """A message naming an agent still routes wherever the model decides."""
+    from app.ai.workflow.contracts import RoutingDecision
+
+    rid = f"custom_agent:{uuid4()}"
+
+    class _Service:
+        async def route(self, context, inventory, *, user_id, model_request, request_id):
+            return RoutingDecision(agent_id="chat_agent", confidence=0.6, reason="general help")
+
+    router = Router(recorder=None, routing_service=_Service())
+    result = await router.route_message(
+        AgentMessage(role=MessageRole.USER, content=f"use {rid} now", metadata={}),
+        ["chat_agent", rid],
+        custom_agent_descriptors=[{"runtime_agent_id": rid, "name": "Data Analyst"}],
+    )
+    assert result == "chat_agent"
 
 
 def test_base_agent_can_handoff_to_custom_agent():

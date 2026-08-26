@@ -11,7 +11,10 @@ from app.ai.graph import create_workflow
 from app.ai.history import ConversationHistoryProvider
 from app.ai.mcp_integration import MCPManager
 from app.ai.mcp_registry import MCPRegistry
+from app.ai.model_factory import ModelFactory
 from app.ai.planning_runtime_adapter import PlanningRuntimeAdapter
+from app.ai.skills_tool import get_available_skill_summaries
+from app.ai.workflow.routing import RoutingContextBuilder, RoutingService
 from app.core.config import settings
 from app.core.dependency_injection import AppAutoInjector, AppContainerInjector
 from app.database.database import Database
@@ -29,6 +32,7 @@ from app.interfaces.task_plan_service_interface import ITaskPlanService
 from app.observability.model_usage import model_usage_metrics as model_usage_metrics_singleton
 from app.observability.rag import rag_metrics as rag_metrics_singleton
 from app.observability.rich_images import rich_image_metrics as rich_image_metrics_singleton
+from app.observability.routing import get_routing_metrics_recorder
 from app.repositories.agent_model_config import AgentModelConfigRepository
 from app.repositories.chat_image import ChatImageRepository
 from app.repositories.conversation import ConversationRepository
@@ -481,6 +485,27 @@ class Container(containers.DeclarativeContainer):
         ModelConfigService,
         repository=agent_model_config_repository,
         provider_service=provider_service,
+    )
+
+    # Routing-v2: the sole owner of new-turn classification. Resolved strictly
+    # (no provider fallback) through the same runtime model abstraction every
+    # other agent uses.
+    routing_context_builder = providers.Factory(
+        RoutingContextBuilder,
+        history_provider=history_provider,
+        document_repository=document_repository,
+        settings=providers.Object(settings),
+        skill_summary_provider=providers.Object(get_available_skill_summaries),
+    )
+
+    routing_service = providers.Factory(
+        RoutingService,
+        runtime_model_resolver=model_config_service,
+        model_factory=providers.Object(ModelFactory),
+        settings=providers.Object(settings),
+        context_builder=routing_context_builder,
+        metrics=providers.Callable(get_routing_metrics_recorder),
+        usage_recorder=model_usage_recorder,
     )
 
     # Planning agent

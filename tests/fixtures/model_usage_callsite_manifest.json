@@ -54,21 +54,6 @@
     "exercise_symbol": "_generate_user_facing_response"
   },
   {
-    "file": "app/ai/agents/router.py",
-    "function": "Router._call_llm._generate",
-    "call_chain": "self.gemini_client.models.generate_content",
-    "disposition": "instrumented",
-    "operation": "router",
-    "exercising_test": "tests/test_model_usage_workflow_instrumentation.py::test_router_records_one_success_attempt",
-    "exercise_symbol": "route_message"
-  },
-  {
-    "file": "app/ai/agents/router.py",
-    "function": "Router._init_gemini",
-    "call_chain": "genai.Client",
-    "disposition": "startup_validation"
-  },
-  {
     "file": "app/ai/context_overflow.py",
     "function": "invoke_with_context_overflow_retry",
     "call_chain": "invoke",
@@ -91,6 +76,12 @@
     "function": "MultiAgentWorkflow.resume",
     "call_chain": "self.graph.ainvoke",
     "disposition": "workflow_stream"
+  },
+  {
+    "file": "app/ai/image_discovery_flow.py",
+    "function": "discover_images",
+    "call_chain": "brave_tool.ainvoke",
+    "disposition": "non_provider_tool_dispatch"
   },
   {
     "file": "app/ai/image_generation/gemini.py",
@@ -130,12 +121,6 @@
     "operation": "image_generation",
     "exercising_test": "tests/test_model_usage_image_generation.py::test_openai_generate_sdk_terminal_is_inside_image_generation_recorder_boundary",
     "exercise_symbol": "generate"
-  },
-  {
-    "file": "app/ai/image_discovery_flow.py",
-    "function": "discover_images",
-    "call_chain": "brave_tool.ainvoke",
-    "disposition": "non_provider_tool_dispatch"
   },
   {
     "file": "app/ai/mcp_integration.py",
@@ -199,6 +184,15 @@
     "function": "_run_search",
     "call_chain": "tool.ainvoke",
     "disposition": "non_provider_tool_dispatch"
+  },
+  {
+    "file": "app/ai/workflow/routing.py",
+    "function": "RoutingService._invoke_recorded._call",
+    "call_chain": "structured.ainvoke",
+    "disposition": "instrumented",
+    "operation": "router",
+    "exercising_test": "tests/test_model_usage_workflow_instrumentation.py::test_router_records_one_success_attempt",
+    "exercise_symbol": "route_message"
   },
   {
     "file": "app/services/ai_service.py",

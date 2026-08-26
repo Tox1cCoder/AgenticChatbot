@@ -398,7 +398,33 @@ class Settings(BaseSettings):
     search_agent_model: str = Field(default="gemini-3-flash-preview")
     router_model: str = Field(
         default="gemini-3-flash-preview",
-        description="Gemini model identifier used for request routing",
+        description="Model identifier used for request routing",
+    )
+    router_provider: str = Field(
+        default="gemini",
+        description=(
+            "Provider used for request routing. Must have an installed LangChain "
+            "adapter with structured-output support; validated at startup."
+        ),
+    )
+    routing_timeout_seconds: float = Field(
+        default=8.0,
+        gt=0.0,
+        le=30.0,
+        description="Total deadline covering every router attempt for one turn",
+    )
+    routing_max_attempts: int = Field(
+        default=2,
+        ge=1,
+        le=2,
+        description=(
+            "Maximum router calls per turn against the same resolved provider/model. "
+            "The retry never changes provider, model, or agent."
+        ),
+    )
+    workflow_graph_version: str = Field(
+        default="routing-v2",
+        description="Checkpoint namespace and graph version for the production workflow",
     )
     image_generator_tool_model: str = Field(
         default="gemini-3-flash-preview",

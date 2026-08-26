@@ -425,9 +425,7 @@ class MultiAgentWorkflow(
                 response.metadata["_rich_item_candidates"] = list(rich_candidates)
             presented_image_ids = context.get("_presented_rich_image_ids")
             if isinstance(presented_image_ids, list):
-                response.metadata["_presented_rich_image_ids"] = list(
-                    presented_image_ids
-                )
+                response.metadata["_presented_rich_image_ids"] = list(presented_image_ids)
 
     def _attach_final_agent_metadata(
         self,
@@ -998,19 +996,6 @@ class MultiAgentWorkflow(
             state["context"] = context
             self._record_agent_invocation(state, "canvas_agent", via="canvas_continuity")
             return state
-
-        # Custom-agent stickiness: keep a natural follow-up on the custom agent
-        # that handled the previous turn instead of letting the router silently
-        # re-route a terse follow-up to a base agent (which would lose the custom
-        # agent's deferred tools/skills and trigger a handoff storm). Skipped
-        # when planning supervises; released inside the helper when the user
-        # explicitly names a different attached custom agent.
-        if not (planning_mode_enabled and has_existing_plan):
-            sticky_agent = self._sticky_custom_agent(state, content)
-            if sticky_agent:
-                state["selected_agent"] = sticky_agent
-                self._record_agent_invocation(state, sticky_agent, via="sticky")
-                return state
 
         agent_msg = AgentMessage(
             role=MessageRole.USER,
@@ -1934,9 +1919,7 @@ class MultiAgentWorkflow(
                     int(raw_allowance if allowance_authoritative else 0),
                 )
                 evidence_provider = str(response_metadata.get("provider") or "gemini")
-                evidence_model = str(
-                    response_metadata.get("model") or "gemini-2.5-flash"
-                )
+                evidence_model = str(response_metadata.get("model") or "gemini-2.5-flash")
                 evidence_token_counter = self._consume_evidence_token_counter(
                     agent,
                     response_metadata,
@@ -2107,9 +2090,7 @@ class MultiAgentWorkflow(
                                     output.get("tool_call_id") or tool_id
                                 ):
                                     artifact["model_output_omitted"] = True
-                                    artifact["model_output_omitted_reason"] = (
-                                        "context_budget"
-                                    )
+                                    artifact["model_output_omitted_reason"] = "context_budget"
                         rag_tool_messages.append(
                             ToolMessage(
                                 content=output_content,

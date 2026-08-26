@@ -84,28 +84,34 @@ def test_base_agent_full_system_prompt_injects_runtime_time_context(monkeypatch)
     assert "RUNTIME TIME BLOCK" in prompt
 
 
-def test_router_prompt_injects_runtime_time_context(monkeypatch):
-    monkeypatch.setattr(
-        Router,
-        "_init_gemini",
-        lambda self: setattr(self, "gemini_client", None),
-    )
+async def test_router_context_carries_runtime_time_as_data(monkeypatch):
+    """Clock context reaches the router as bounded context data, not an instruction."""
+    from app.ai.schemas import AgentMessage, MessageRole
+    from app.ai.workflow.contracts import RoutingDecision
+
     monkeypatch.setattr(
         "app.ai.agents.router.build_runtime_time_context_block",
         lambda: "RUNTIME TIME BLOCK",
     )
-    router = Router()
 
-    prompt = router._build_prompt(
-        content="create an analysis about a pro team play this season",
-        persona=None,
-        available_agents=["chat_agent", "search_agent"],
-        has_documents=False,
-        planning_mode_enabled=False,
-        has_existing_plan=False,
-        user_id=None,
-        device_id=None,
+    captured = {}
+
+    class _Service:
+        async def route(self, context, inventory, *, user_id, model_request, request_id):
+            captured["context"] = context
+            return RoutingDecision(agent_id="chat_agent", confidence=0.5, reason="general")
+
+    router = Router(recorder=None, routing_service=_Service())
+    message = "create an analysis about a pro team play this season"
+
+    await router.route_message(
+        AgentMessage(role=MessageRole.USER, content=message, metadata={}),
+        ["chat_agent", "search_agent"],
     )
 
-    assert "RUNTIME TIME BLOCK" in prompt
-    assert "create an analysis about a pro team play this season" in prompt
+    context = captured["context"]
+    assert context.runtime_time == "RUNTIME TIME BLOCK"
+    assert context.message == message
+    # Both live in the untrusted JSON payload, never in the system instruction.
+    assert "RUNTIME TIME BLOCK" in context.serialized_json
+    assert message in context.serialized_json

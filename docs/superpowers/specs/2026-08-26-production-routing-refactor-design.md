@@ -1,6 +1,6 @@
 # Production Routing and Agent Execution Refactor Design
 
-**Status:** Approved design
+**Status:** Approved design, reconciled with the codebase-reviewed implementation plan
 
 **Date:** 2026-08-26
 
@@ -46,6 +46,8 @@ paths.
    completed; never guess `chat_agent`.
 8. Provide deterministic control-plane validation, durable resume, bounded
    execution, tracing, and production evaluation coverage.
+9. Isolate checkpoint state per user turn and define explicit concurrency,
+   retention, and privacy-deletion behavior.
 
 ## Non-goals
 
@@ -80,8 +82,10 @@ valid public response. These checks do not infer user intent.
 - LangGraph owns state transitions, persistence, interrupts, and resume.
 - Agent subgraphs own model/tool loops.
 - `RagExecutionGraph` owns document evidence acquisition and grounding.
-- `PublicResponseFinalizer` owns the public output contract.
-- The API stream adapter owns the public event protocol.
+- `PublicResponseFinalizer` owns graph-level validation and response construction.
+- `MessageService` owns the transactional conversation-history write.
+- The API stream adapter owns the public event protocol and releases answer text
+  only after validation and persistence succeed.
 
 ### No silent recovery
 
@@ -93,7 +97,7 @@ stale assistant text from a previous graph state.
 ## Architecture
 
 ```text
-New user message
+Persisted user message and turn ID
         |
         v
 LLM triage router
@@ -115,13 +119,25 @@ Specialist subgraph   Validate output
                   Universal finalizer
                           |
                           v
-                         END
+                      graph END
+                          |
+                          v
+                  MessageService persistence
+                          |
+                          v
+                  public answer + complete
 ```
 
 Planning is an orchestrator-worker specialist. RAG is a reusable specialist
 subgraph. Standard chat, search, image, canvas, and custom agents use LangChain
 agent loops with focused middleware. No specialist node connects directly to
 `END`.
+
+Each new turn uses a unique checkpoint thread ID:
+`routing-v2:{conversation_id}:{turn_id}`, where `turn_id` is the persisted user
+message ID. Resume uses the exact thread ID stored with the durable interrupt;
+it never reconstructs a conversation-scoped ID. This prevents append reducers
+from loading state belonging to an earlier turn.
 
 ## State model
 
@@ -130,30 +146,61 @@ The old `selected_agent` field is removed.
 ```python
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from langchain_core.messages import BaseMessage
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from typing_extensions import NotRequired, TypedDict
 
 
 class RoutingDecision(BaseModel):
-    agent_id: str = Field(min_length=1)
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    agent_id: str = Field(min_length=1, max_length=160)
     confidence: float = Field(ge=0.0, le=1.0)
     reason: str = Field(min_length=1, max_length=500)
 
 
+class TurnIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    request_id: str = Field(min_length=1, max_length=160)
+    turn_id: str = Field(min_length=1, max_length=160)
+    checkpoint_thread_id: str = Field(min_length=1, max_length=320)
+
+
 class AgentTransition(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
     from_agent_id: str | None
-    to_agent_id: str = Field(min_length=1)
+    to_agent_id: str = Field(min_length=1, max_length=160)
     source: Literal["router", "handoff", "resume"]
     tool_call_id: str | None = None
 
 
+class PendingTransition(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    from_agent_id: str
+    to_agent_id: str
+    tool_call_id: str
+    tool_message_id: str
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class OutcomeProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    output_policy_ids: tuple[str, ...] = ()
+    evidence: tuple[dict[str, JsonValue], ...] = ()
+    artifacts: tuple[dict[str, JsonValue], ...] = ()
+    images: tuple[dict[str, JsonValue], ...] = ()
+    private_messages: tuple[BaseMessage, ...] = ()
+
+
 class ResponseOutcome(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     kind: Literal["response"] = "response"
     agent_id: str
     response: "AgentResponse"
+    provenance: OutcomeProvenance
 
 
 class HandoffOutcome(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     kind: Literal["handoff"] = "handoff"
     agent_id: str
     handoff: AgentTransition
@@ -163,9 +210,12 @@ AgentOutcome = ResponseOutcome | HandoffOutcome
 
 
 class TurnExecutionState(TypedDict):
+    turn_identity: TurnIdentity
     routing_decision: NotRequired[RoutingDecision | None]
     active_agent_id: NotRequired[str | None]
+    final_agent_id: NotRequired[str | None]
     agent_history: list[AgentTransition]
+    pending_transition: NotRequired[PendingTransition | None]
     execution_phase: Literal[
         "routing",
         "executing",
@@ -181,13 +231,23 @@ class TurnExecutionState(TypedDict):
 The actual graph state continues to include messages, conversation and user
 identifiers, attachments, model request, artifacts, evidence, plan data, and
 interrupt metadata. Reducers append messages, transitions, artifacts, evidence,
-and worker results without overwriting earlier state.
+and worker results without overwriting earlier state. `routing_decision` uses a
+set-once reducer: `None -> decision` and replay of the same frozen value are
+valid, while replacement is a state error. All checkpointed Pydantic types are
+explicitly allowlisted and must round-trip without degrading to dictionaries.
+`OutcomeProvenance` is assembled from server-owned tool/runtime records; model
+text cannot declare its own evidence, artifact, image, or validation authority.
 
 `routing_decision` is written exactly once per new turn and is immutable for
 that turn. `active_agent_id` changes as execution moves between agents.
 `agent_history` records the initial route, every accepted handoff, and a resumed
 execution transition. Worker identities live in structured planning worker
 records and do not replace the public `active_agent_id`.
+
+`TurnIdentity.request_id` comes from the API correlation ID when available and
+otherwise from the stable user-message ID. `turn_id` is the persisted
+user-message ID. The service constructs `checkpoint_thread_id` once and stores
+that exact value in every interrupt payload and durable HITL record.
 
 The model-reported confidence value is telemetry. It is not treated as a
 calibrated probability and does not trigger a hard-coded routing branch.
@@ -209,11 +269,23 @@ contains:
 - available tool and skill summaries relevant to agent selection;
 - runtime time and locale context when available.
 
+Default limits are 12 recent messages, 3,000 history tokens, 20 documents, 40
+tools, 20 skills, 20 custom agents, 500 characters per untrusted descriptor
+field, and 24,000 characters for the serialized routing payload. Settings are
+validated as positive and may be tuned downward. Truncation is deterministic,
+preserves descriptor IDs, and records content-free telemetry.
+
+History and the previous final agent come from user-owned durable message
+metadata, not the current checkpoint. Document descriptors use the repository's
+bounded asynchronous lookup. Tool and skill descriptors are derived from the
+authenticated request scope. Locale is passed only when supplied by trusted
+request/account metadata; the application does not guess language from text.
+
 The context contains no instruction that unconditionally selects an agent.
 Untrusted user-supplied names, descriptions, personas, skill descriptions, and
-conversation text are clearly delimited as data. Router system instructions are
-passed through the provider's system-instruction interface rather than
-concatenated into one user prompt.
+conversation text are clearly delimited as data. Router instructions use a
+`SystemMessage`; the bounded context is canonical JSON in a separate
+`HumanMessage`. They are never concatenated into one user prompt.
 
 ## Routing service
 
@@ -221,8 +293,17 @@ concatenated into one user prompt.
 model/provider abstraction used by other agents. Direct imports and clients for
 Gemini are removed from the router.
 
-The router is a one-shot model call using a Pydantic `RoutingDecision` schema
-through LangChain `with_structured_output`. The configured router provider and
+The runtime resolver has a dedicated `router` key, requires the
+`supports_structured_output` capability, and is always called with
+`allow_provider_fallback=False`. A missing credential, unsupported adapter, or
+provider/model mismatch fails closed; the router never consumes a fallback
+candidate. Startup validates only static settings and installed adapter
+capabilities. User-scoped credentials and request overrides are validated at
+request time because they cannot be known safely at process startup.
+
+The router is one logical `RoutingService.route(...)` invocation using a
+Pydantic `RoutingDecision` schema through LangChain
+`with_structured_output(include_raw=True)`. The configured router provider and
 model must support schema-constrained output; unsupported configurations fail
 startup validation. The application does not parse free text, search for agent
 tokens, match explicit custom-agent names, or implement a tool-call fallback
@@ -239,7 +320,10 @@ The router receives the live agent inventory as data. After the model returns,
 
 Validation does not reinterpret the message or substitute another agent.
 
-The routing node runs once per new turn and returns a LangGraph
+The routing node and `RoutingService.route(...)` each run exactly once per new
+turn. The service may make at most two attempts against the same resolved model
+object, provider, model, schema, inventory, context, and total deadline. It
+returns a LangGraph
 `Command(update=..., goto=...)`. Streaming observes this state update and emits
 the initial `agent_selected` event. The streaming API no longer invokes the
 routing node before starting the graph.
@@ -255,6 +339,7 @@ The implementation uses the installed LangGraph 1.2 and LangChain 1.3 APIs.
 - `Send` for planning worker fan-out;
 - per-invocation specialist subgraphs;
 - PostgreSQL checkpoint persistence;
+- allowlisted checkpoint serialization for v2 workflow contracts;
 - `interrupt()` and `Command(resume=...)` for human approval;
 - `create_agent` for standard ReAct model/tool loops;
 - `ToolNode` for bespoke RAG tool execution;
@@ -299,12 +384,31 @@ Model and tool limits are enforced by middleware. The custom auto-continuation
 round mechanism is removed. A complex task that requires explicit decomposition
 uses Planning rather than silently starting another top-level execution round.
 
+Specifically, specialists use `ModelCallLimitMiddleware` and
+`ToolCallLimitMiddleware` with `exit_behavior="error"`. Only
+`ModelCallLimitExceededError` and `ToolCallLimitExceededError` map to
+`agent_execution_limit`; unrelated failures retain their typed mappings.
+Authorization runs before HITL policy evaluation, and approval runs before the
+tool implementation. Approve, edit, reject, and respond resume the checkpointed
+invocation without duplicating a tool side effect or paired message.
+
+The migration preserves current runtime behavior with explicit ownership:
+runtime model overrides and usage recording live in middleware; bounded history
+and message metadata live in the specialist factory; request budgets live in
+request-budget/token instrumentation; authenticated client, widget,
+read-tool-result, and web-research bindings live in tool-scope middleware; and
+canvas snapshots, image injection/delivery, artifact harvesting, and request
+time context remain in their domain factories. Compiled specialist graphs are
+not cached across users or devices.
+
 ## Handoffs
 
 The live handoff tool is built from the current reachable-agent inventory. The
 model selects the target through the tool's schema. The tool returns a LangGraph
 `Command` that records a pending transition and appends the matching
-`ToolMessage`, preserving valid tool-call history.
+`ToolMessage`, preserving valid tool-call history. The request marker has the
+deterministic message ID `handoff:{tool_call_id}`, which is also stored as
+`PendingTransition.tool_message_id` and survives checkpoint serialization.
 
 `resolve_transition` validates only control-plane invariants:
 
@@ -315,10 +419,14 @@ model selects the target through the tool's schema. The tool returns a LangGraph
 - the configured delegation-depth limit is not exceeded;
 - the tool-call ID matches the originating handoff call.
 
-An accepted handoff appends `AgentTransition`, updates `active_agent_id`, clears
-the pending transition, and navigates to the target specialist. A rejected
-handoff appends model-visible structured feedback and returns to the originating
-specialist. The original `routing_decision` never changes.
+An accepted handoff retains exactly one paired tool message, appends
+`AgentTransition(source="handoff")`, updates `active_agent_id`, clears the
+pending transition, and navigates through the inventory's resolved graph node
+name. A rejected handoff returns structured feedback with the same deterministic
+message ID, causing the message reducer to replace the request marker rather
+than append a duplicate, then returns to the resolved originating specialist.
+Only accepted handoffs consume transition depth; resume transitions do not. The
+original `routing_decision` never changes.
 
 ## Planning orchestration
 
@@ -333,7 +441,7 @@ to per-invocation specialist subgraphs. Reducers collect typed results:
 class WorkerResult(BaseModel):
     task_id: str
     agent_id: str
-    status: Literal["completed", "failed", "awaiting_approval"]
+    status: Literal["completed", "failed"]
     content: str
     artifacts: list[dict]
     evidence: list[dict]
@@ -346,9 +454,31 @@ publish public assistant messages or perform top-level handoffs; Planning owns
 delegation and synthesis. Worker intermediate messages remain inside their
 subgraphs.
 
+A worker that requires human approval interrupts the Planning graph. It does
+not fabricate an `awaiting_approval` result. Resume continues the exact
+checkpointed task, reuses completed branch writes, and executes an approved side
+effect at most once. Timeouts and execution limits become failed results with
+stable `worker_timeout` or `agent_execution_limit` codes. Recursive Planning is
+rejected as `recursive_planning`.
+
+The topology is `planning_model -> dispatch_workers -> worker ->
+collect_results -> planning_model_or_synthesize -> package_result`. It preserves
+plan create/modify/review actions, revision/lifecycle metadata, rubrics, todo
+changes, existing-plan context, custom-agent/model overrides, and task-correlated
+subagent events. Defaults bound a turn to eight worker tasks, four concurrent
+workers, 4,000 objective characters per task, and 12,000 parent-context
+characters. Worker objectives/results are delimited as untrusted data, and
+results are ordered by original task position before synthesis.
+
+The corresponding validated settings are `planning_worker_max_tasks=8`,
+`planning_worker_max_concurrency=4`,
+`planning_worker_objective_max_chars=4000`, and
+`planning_parent_context_max_chars=12000`.
+
 Planning synthesizes the collected results and returns one `AgentOutcome` to
 the parent graph. Evidence and artifacts retain server-owned provenance through
-synthesis.
+synthesis. Task-correlated worker progress uses graph custom events rather than
+checkpointed callback objects.
 
 ## Unified RAG execution and grounding
 
@@ -380,13 +510,18 @@ collect evidence and artifacts
                        +----------> explicit abstention
 ```
 
-The same graph instance/factory is used for top-level RAG and planning workers.
+The same graph factory and execution contract are used for top-level RAG and
+planning workers; request-scoped graph state is never shared across users.
 There is no inline special case. Evidence IDs, token budgets, evidence packs,
 tool artifacts, image provenance, regeneration, and abstention follow one code
-path.
+path. A per-run server-owned allocator creates evidence IDs, and typed reducers
+merge evidence. Duplicate or ambiguous IDs fail validation rather than selecting
+the first match.
 
-Grounding enforcement is mandatory. The shadow-only and enforcement rollout
-branches are removed. A RAG worker result is validated before it reaches
+Grounding enforcement is mandatory for every RAG result, including a retrieval
+with no evidence. A zero-evidence result may return a bounded clarification or
+abstention but cannot make source-backed claims. The shadow-only and enforcement
+rollout branches are removed. A RAG worker result is validated before it reaches
 Planning. In addition, any public synthesis carrying RAG evidence is validated
 against the accumulated server-owned evidence before publication. This prevents
 a planning synthesis from distorting an otherwise grounded worker result.
@@ -399,7 +534,9 @@ agent has a direct edge to `END`.
 `validate_output` selects policies from response provenance rather than relying
 only on the final agent name. It applies:
 
-- grounded claim and citation validation whenever RAG evidence is present;
+- grounded claim and citation validation whenever RAG evidence is present and
+  for every outcome that declares the `rag_grounding` policy, including an
+  empty-evidence RAG result;
 - artifact and selected-image provenance validation;
 - tool-call/message pairing validation;
 - public content and error-shape validation;
@@ -407,20 +544,34 @@ only on the final agent name. It applies:
 
 `PublicResponseFinalizer` then:
 
-- assigns the durable assistant message ID;
+- requires the reserved durable assistant message ID and immutable routing
+  decision;
 - appends exactly one terminal `AIMessage`;
 - attaches the immutable routing decision;
-- attaches the initial, active, and final agent identities;
+- sets `final_agent_id = active_agent_id` and attaches the initial, active, and
+  final identities;
 - attaches ordered transition history;
 - merges validated tool artifacts, images, canvas data, planning metadata, and
   grounding metadata;
 - normalizes rich-response placement;
+- records applied policy IDs and implementation versions;
 - records final usage and observability data;
+- exposes `validated_public_content` for later stream projection;
 - sets `execution_phase="completed"` and routes to `END`.
+
+The finalizer builds an immutable response/state update locally before returning
+it, so metadata normalization cannot leave partially mutated state. It
+guarantees graph-level validation, response construction, and serialization; it
+does not claim that the database write has committed. After graph completion,
+`MessageService` transactionally persists the finalizer-owned response. A
+persistence failure returns `response_persistence_failed` and publishes no
+answer or completion event.
 
 Intermediate tool-calling messages remain internal and receive derived IDs only
 when checkpoint cleanup requires them. Terminal recovery does not scan old
-messages for plausible assistant text.
+messages for plausible assistant text. Specialist answer tokens remain private
+until validation succeeds, and `validated_public_content` remains buffered until
+the `MessageService` transaction commits.
 
 Worker outputs use the same validation policy registry through a
 `WorkerOutputFinalizer`, but they do not receive public message IDs or enter the
@@ -432,14 +583,27 @@ Errors use a stable API payload:
 
 ```python
 class WorkflowError(BaseModel):
-    code: str
+    code: Literal[
+        "routing_timeout",
+        "routing_provider_unavailable",
+        "routing_invalid_output",
+        "routing_target_unavailable",
+        "agent_execution_limit",
+        "tool_execution_failed",
+        "response_validation_failed",
+        "finalization_failed",
+        "response_persistence_failed",
+        "conversation_turn_conflict",
+    ]
     retriable: bool
     request_id: str
-    details: dict[str, object] = Field(default_factory=dict)
+    details: dict[str, JsonValue] = Field(default_factory=dict)
 ```
 
 The API/localization layer owns user-facing copy. Core workflow errors do not
-depend on English messages.
+depend on English messages. `request_id` comes from `TurnIdentity`, never an
+optional provider response. Structured details use an allowlist and exclude
+credentials, provider payloads, document content, prompt text, and stack traces.
 
 ### Routing
 
@@ -471,8 +635,12 @@ changes provider, model, or agent. After the second failure, the graph enters
 - A second grounding failure returns a validated abstention.
 - `response_validation_failed` fails the turn when a non-grounding public
   contract cannot be satisfied.
-- `finalization_failed` fails the turn before publication if the terminal
-  response cannot be serialized or persisted correctly.
+- `finalization_failed` fails the graph before publication if the terminal
+  response cannot be normalized or serialized.
+- `response_persistence_failed` fails the service boundary if the finalized
+  response cannot be committed to conversation history.
+- `conversation_turn_conflict` is a bounded, retriable failure to acquire the
+  same-conversation turn coordinator.
 
 No error path silently routes to chat, publishes stale content, or skips the
 finalizer.
@@ -486,21 +654,53 @@ nodes itself.
 A normal turn emits, in order:
 
 1. one initial `agent_selected` event after the routing decision;
-2. model, tool, artifact, and thinking events from the active specialist;
+2. progress, tool, artifact, preview, and thinking events from the active
+   specialist, but no public answer text;
 3. an additional `agent_selected` event for every accepted handoff;
 4. zero or more interrupt/resume events;
-5. exactly one `complete` event after universal finalization, or one `error`
-   event after terminal failure.
+5. after validation, graph completion, and successful response persistence,
+   public `message_delta` chunks that exactly reproduce
+   `validated_public_content`;
+6. exactly one `complete` event, or one typed `error` with no finalized answer,
+   answer delta, or completion event after terminal/persistence failure.
 
 Planning worker events carry task and worker IDs and never enter the main answer
 token stream. RAG worker and top-level RAG events share the same event schema.
+The projector filters nested graph namespaces so internal specialist/RAG/model
+messages cannot leak into the main answer stream.
+
+Initial selection is derived from the first `routing_decision` state update.
+Later selections are derived only from newly appended accepted handoff
+transitions. A `source="resume"` transition is retained for audit history but
+does not emit another selection or consume handoff depth. Resume loads the exact
+durable checkpoint thread ID and never routes again.
+
+## Concurrency and checkpoint lifecycle
+
+Different conversations may execute concurrently. Turns for the same
+conversation acquire a cross-process PostgreSQL advisory lock, or an
+equivalently durable coordinator, before history/context snapshotting and hold
+it through response persistence. Lock acquisition is bounded; failure returns
+the retriable `conversation_turn_conflict` error. Production does not fall back
+to an in-process-only lock. The coordinator releases the lock in a `finally`
+path after success or failure.
+
+Retention distinguishes completed v2 turns, failed v2 turns, active/interrupted
+HITL turns, and unreadable v1 checkpoints. Cleanup obtains exact owned thread
+IDs from durable metadata and validates the
+`routing-v2:{conversation_id}:{turn_id}` shape before deletion; it never deletes
+by an unbounded prefix. Active interrupts survive normal cleanup. Conversation
+or account deletion removes every owned checkpoint ID and HITL row. V1 data is
+ignored by v2 readers and expires through a separately reviewed namespace job
+after the rollback window. Cleanup retries are idempotent.
 
 ## Observability
 
 Every turn records:
 
 - router provider, model, latency, attempt count, usage, and schema outcome;
-- the structured routing decision and live inventory version;
+- the routing target/confidence and live inventory version; model-generated
+  reason text is excluded from metrics and ordinary logs;
 - initial, active, and final agent IDs;
 - accepted and rejected transition records;
 - model/tool calls and configured limit consumption;
@@ -510,11 +710,15 @@ Every turn records:
 - finalizer validation policies and completion/failure;
 - terminal workflow error code and retriable flag.
 
-Metrics include route volume by agent, invalid routing output rate, target-race
-rate, routing latency, handoff correction rate, rejected handoffs, transition
-depth, agent execution limits, worker failures, grounding outcomes, and
-finalization failures. Traces retain bounded metadata and avoid raw secrets,
-credentials, document contents, and unrestricted prompts.
+Metrics include route volume by bounded base-agent kind, invalid routing output
+rate, target-race rate, routing latency, handoff correction rate, rejected
+handoffs, transition depth, agent execution limits, worker failures, grounding
+outcomes, and finalization failures. Metric labels are allowlisted enums plus bounded
+provider/model/inventory identifiers. Request, conversation, user,
+custom-agent-instance, message, and evidence IDs are forbidden as metric labels
+and may appear only in access-controlled sampled logs/traces. Traces retain
+bounded metadata and avoid raw secrets, credentials, document contents, and
+unrestricted prompts.
 
 ## Testing strategy
 
@@ -522,12 +726,16 @@ credentials, document contents, and unrestricted prompts.
 
 - valid structured decisions for base and dynamic custom agents;
 - timeout, transient error, schema error, and two-attempt exhaustion;
+- strict runtime resolution with no provider/model fallback and request-time
+  user-credential validation;
 - unknown, disabled, detached, and concurrently removed targets;
 - canvas, documents, planning, previous agent, tools, and skills appear only in
   routing context;
 - no semantic message inspection in Python;
 - multilingual and mixed-language fixtures across multiple scripts;
-- exactly one logical routing-node execution per new turn.
+- exactly one logical routing-node execution per new turn;
+- exactly one `RoutingService.route(...)` invocation per new turn, with no more
+  than two same-model provider attempts.
 
 ### Graph integration tests
 
@@ -537,12 +745,20 @@ credentials, document contents, and unrestricted prompts.
 - initial decisions remain unchanged across handoffs;
 - transition history is ordered and append-only;
 - invalid, cyclic, self, detached, and over-depth handoffs produce paired
-  model-visible feedback;
-- HITL approve, edit, and reject paths resume durably;
+  model-visible feedback with one stable tool-message ID;
+- HITL approve, edit, reject, and respond paths resume durably without duplicate
+  messages or side effects;
 - streaming emits selections, transitions, interrupts, completion, and errors
   exactly once and in order;
-- concurrent turns do not leak routing, tools, workers, evidence, or device
-  context.
+- different-conversation turns remain concurrent, same-conversation turns do
+  not overlap context snapshot through persistence, and neither case leaks
+  routing, tools, workers, evidence, or device context;
+- every new turn uses a distinct v2 checkpoint thread, a fresh workflow process
+  can resume the exact durable ID, and v1 state is ignored;
+- checkpoint serialization restores typed frozen contracts rather than plain
+  dictionaries;
+- retention preserves active interrupts, expires eligible exact thread IDs,
+  rejects malformed IDs, and honors conversation/account deletion.
 
 ### Agent and RAG contract tests
 
@@ -550,19 +766,34 @@ credentials, document contents, and unrestricted prompts.
 - top-level and worker RAG use the same graph factory and policy registry;
 - both RAG entry points enforce the same evidence budget and grounding result;
 - invalid citations regenerate once and then abstain;
+- zero-evidence RAG still runs validation and returns clarification/abstention
+  rather than unsupported source-backed claims;
 - a Planning synthesis containing RAG evidence is validated again before
   publication;
 - workers return `WorkerResult` and never public `AIMessage` objects;
 - tool/model limits produce typed terminal errors;
 - final messages always contain IDs, artifacts, routing metadata, transition
-  history, and final-agent identity.
+  history, and final-agent identity;
+- no public answer delta appears before validation and response persistence, and
+  emitted deltas exactly reproduce finalized content.
 
 ### Live routing evaluation
 
 A versioned evaluation dataset contains multilingual, mixed-language,
 multi-intent, ambiguous-follow-up, canvas, document, planning, custom-agent,
 image, current-information, and general-chat cases. Labels may specify one
-expected route or an explicit set of acceptable routes.
+canonical `primary_agent_id` and an explicit non-empty set of
+`acceptable_agent_ids` containing that primary label. Acceptable-set accuracy
+counts a prediction as correct when it belongs to that set. Per-agent
+precision/recall/F1, macro-F1, and the confusion matrix use the canonical
+primary label so multi-label rows are not double-counted.
+
+The dataset contains at least 210 cases: at least 30 each for English, Thai,
+Vietnamese, Chinese, Japanese, Arabic, and mixed-language input, with every
+intent category represented at least ten times. A separate review manifest
+records the dataset SHA-256, approved status, reviewing team alias, timestamp,
+and label-guideline version. Missing approval or a hash mismatch fails closed;
+dataset generation cannot self-approve its labels.
 
 The pre-deployment gate requires:
 
@@ -578,14 +809,20 @@ The pre-deployment gate requires:
 
 Live model evaluation runs as a pre-deployment job, not ordinary unit-test CI.
 It records model/provider versions with its results so a model update can be
-compared against the prior accepted baseline.
+compared against the prior accepted baseline. The release checker requires a
+fresh passing report for the exact provider/model/inventory tuple being
+deployed. A missing, stale, mismatched, or `not_run` report does not pass the
+deployment gate. Deterministic test commands set `LANGSMITH_TRACING=false`.
 
 ## Breaking cutover
 
-The new graph uses a new checkpoint namespace and graph version. Existing
-conversation messages and durable summaries remain available as input history.
-Old graph checkpoints and interrupted executions are retained in storage for
-audit/operational rollback but are ignored by the new graph.
+The new graph uses the per-turn
+`routing-v2:{conversation_id}:{turn_id}` checkpoint namespace and graph version.
+Existing conversation messages and durable summaries remain available as input
+history, but previous checkpoints are never used as new-turn state. Old graph
+checkpoints and interrupted executions are retained only for the documented
+rollback window, ignored by the new graph, and then removed by the reviewed v1
+retention job. Privacy deletion overrides ordinary retention.
 
 The deployment contains:
 
@@ -604,19 +841,23 @@ The deployment contains:
 The change is deployed to a canary environment after unit, integration, RAG,
 streaming, concurrency, and live routing evaluations pass. Operational rollback
 reverts the deployment artifact; old runtime branches are not kept in the new
-code.
+code. The live release report must match the provider, model, inventory, and
+human-reviewed dataset hash used for the canary.
 
 ## Acceptance criteria
 
 The refactor is complete when:
 
-1. Every new user turn is semantically routed by the configured LLM using a
-   validated `RoutingDecision`.
+1. Every new user turn enters one route node and calls
+   `RoutingService.route(...)` once; the call uses at most two attempts against
+   the same configured provider/model and returns a validated
+   `RoutingDecision`.
 2. Application code contains no language-dependent or phrase-dependent routing
    rules.
 3. Router failure returns a typed retriable error and never selects chat.
-4. `routing_decision`, `active_agent_id`, and `agent_history` replace
-   `selected_agent` throughout the runtime and public metadata.
+4. `routing_decision`, `active_agent_id`, `final_agent_id`, and append-only
+   `agent_history` replace `selected_agent` throughout the runtime and public
+   metadata.
 5. Streaming does not pre-run the routing node.
 6. Handoffs use LangGraph state commands and preserve valid message pairing.
 7. Standard specialists use framework agent loops; RAG uses one bespoke shared
@@ -624,12 +865,17 @@ The refactor is complete when:
 8. Planning workers use isolated per-invocation subgraphs and typed results.
 9. Top-level RAG, worker RAG, and evidence-bearing public synthesis enforce the
    same grounding policy.
-10. Every public response traverses validation and universal finalization before
-    `END`.
-11. Legacy routing, fallback, continuation, duplicated RAG, and terminal
+10. Every public response traverses validation and universal graph finalization;
+    answer text and completion are released only after transactional persistence.
+11. Every new turn uses a unique per-turn v2 checkpoint; resume uses the exact
+    durable ID without routing, and retention/privacy cleanup follows the
+    documented lifecycle.
+12. Different conversations remain concurrent while same-conversation turns are
+    serialized through persistence.
+13. Legacy routing, fallback, continuation, duplicated RAG, and terminal
     recovery paths are removed.
-12. The documented unit, integration, concurrency, streaming, grounding, and
-    live-evaluation gates pass.
+14. The reviewed dataset hash and the documented unit, integration, concurrency,
+    streaming, grounding, non-live, and tuple-matched live-evaluation gates pass.
 
 ## Public references
 

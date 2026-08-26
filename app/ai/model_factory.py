@@ -18,6 +18,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
 from ..core.config import settings
+from ..core.runtime_modeling import ResolvedRuntimeModelConfig, StrictRuntimeResolutionError
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +177,43 @@ class ModelFactory:
                 model_kwargs.pop("reasoning", None)
                 return ChatOpenAI(**model_kwargs)
             raise
+
+    @staticmethod
+    def create_model_from_runtime(
+        config: ResolvedRuntimeModelConfig,
+        **kwargs: Any,
+    ) -> BaseChatModel:
+        """Build the configured chat model from a resolved runtime config.
+
+        This performs no fallback of its own: a missing credential or an
+        unsupported provider raises ``StrictRuntimeResolutionError`` so the
+        caller can return a typed failure instead of silently substituting a
+        different model.
+        """
+        api_key = (config.api_key or "").strip()
+        if not api_key:
+            raise StrictRuntimeResolutionError(
+                "missing_credentials",
+                f"no credential available for provider {config.provider}",
+            )
+        model_id = (config.model or "").strip()
+        if not model_id:
+            raise StrictRuntimeResolutionError(
+                "missing_model", f"no model configured for agent {config.agent_key}"
+            )
+
+        try:
+            return ModelFactory.create_model(
+                provider=config.provider,
+                model=model_id,
+                api_key=api_key,
+                temperature=config.temperature,
+                **kwargs,
+            )
+        except ValueError as exc:
+            raise StrictRuntimeResolutionError(
+                "unsupported_provider", f"provider {config.provider} is not supported"
+            ) from exc
 
     @staticmethod
     def bind_tools_to_model(

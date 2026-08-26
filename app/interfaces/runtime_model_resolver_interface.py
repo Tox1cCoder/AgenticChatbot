@@ -17,6 +17,18 @@ class IRuntimeModelResolver(ABC):
         user_id: UUID | None,
         agent_key: str,
         request_override: Mapping[str, Any] | None = None,
+        *,
+        require_capabilities: frozenset[str] = frozenset(),
+        allow_provider_fallback: bool = True,
     ) -> ResolvedRuntimeModelConfig:
-        """Return the effective runtime model configuration for the request."""
+        """Return the effective runtime model configuration for the request.
+
+        ``require_capabilities`` names capabilities the resolved model must
+        advertise; a missing capability raises
+        :class:`~app.core.runtime_modeling.StrictRuntimeResolutionError`.
+
+        ``allow_provider_fallback=False`` forbids substituting a different
+        provider, model, or credential. The defaults preserve the historic
+        behavior for every existing caller; only the router opts out.
+        """
         pass
