@@ -60,9 +60,7 @@ class PlanningLimits(BaseModel):
         return cls(
             max_tasks=int(getattr(settings, "planning_worker_max_tasks", 8)),
             max_concurrency=int(getattr(settings, "planning_worker_max_concurrency", 4)),
-            objective_max_chars=int(
-                getattr(settings, "planning_worker_objective_max_chars", 4000)
-            ),
+            objective_max_chars=int(getattr(settings, "planning_worker_objective_max_chars", 4000)),
             parent_context_max_chars=int(
                 getattr(settings, "planning_parent_context_max_chars", 12000)
             ),
@@ -109,9 +107,7 @@ def dispatch_workers(state: PlanningState) -> list[Send]:
 
     bounded = tasks[: limits.max_tasks]
     if len(tasks) > len(bounded):
-        logger.info(
-            "Planning dispatch bounded to %d of %d tasks", len(bounded), len(tasks)
-        )
+        logger.info("Planning dispatch bounded to %d of %d tasks", len(bounded), len(tasks))
 
     return [
         Send(
@@ -253,12 +249,8 @@ class PlanningOrchestrator:
         if hasattr(content, "__await__"):
             content = await content
 
-        evidence = tuple(
-            record for result in results for record in (result.evidence or ())
-        )
-        artifacts = tuple(
-            artifact for result in results for artifact in (result.artifacts or ())
-        )
+        evidence = tuple(record for result in results for record in (result.evidence or ()))
+        artifacts = tuple(artifact for result in results for artifact in (result.artifacts or ()))
         policies: tuple[str, ...] = ("public_content",)
         if evidence:
             policies = (*policies, "rag_grounding")

@@ -143,8 +143,7 @@ class TransitionResolver:
         if accepted_handoffs >= self._max_delegation_depth:
             raise TransitionRejection(
                 "over_depth",
-                f"this turn reached the maximum delegation depth of "
-                f"{self._max_delegation_depth}.",
+                f"this turn reached the maximum delegation depth of {self._max_delegation_depth}.",
             )
 
     # -- rejection -------------------------------------------------------

@@ -79,9 +79,7 @@ class ScriptedRagRuntime:
         self.regeneration_calls += 1
         if not self._regenerations:
             return None
-        return self._regenerations[
-            min(self.regeneration_calls, len(self._regenerations)) - 1
-        ]
+        return self._regenerations[min(self.regeneration_calls, len(self._regenerations)) - 1]
 
     async def retrieve(self, request):
         return self.evidence
@@ -106,9 +104,7 @@ def _factory(runtime, gate=None, **overrides):
 
 
 async def test_top_level_and_worker_use_the_same_factory():
-    runtime = ScriptedRagRuntime(
-        answers=[_answer("E1")], evidence=_evidence_payload("E1")
-    )
+    runtime = ScriptedRagRuntime(answers=[_answer("E1")], evidence=_evidence_payload("E1"))
     factory = _factory(runtime)
 
     public = await factory.build().ainvoke(_request(mode="public"))
@@ -120,9 +116,7 @@ async def test_top_level_and_worker_use_the_same_factory():
 
 
 async def test_worker_and_public_enforce_the_same_evidence_budget():
-    runtime = ScriptedRagRuntime(
-        answers=[_answer("E1")], evidence=_evidence_payload("E1")
-    )
+    runtime = ScriptedRagRuntime(answers=[_answer("E1")], evidence=_evidence_payload("E1"))
     factory = _factory(runtime)
 
     public = await factory.build().ainvoke(_request(mode="public"))
@@ -138,9 +132,7 @@ async def test_worker_and_public_enforce_the_same_evidence_budget():
 
 
 async def test_a_grounded_answer_is_accepted():
-    runtime = ScriptedRagRuntime(
-        answers=[_answer("E1")], evidence=_evidence_payload("E1")
-    )
+    runtime = ScriptedRagRuntime(answers=[_answer("E1")], evidence=_evidence_payload("E1"))
     result = await _factory(runtime).build().ainvoke(_request())
 
     assert result.abstained is False
@@ -176,9 +168,7 @@ async def test_one_regeneration_can_rescue_the_answer():
 
 
 async def test_unknown_evidence_id_never_reaches_the_public_result():
-    runtime = ScriptedRagRuntime(
-        answers=[_answer("E404")], evidence=_evidence_payload("E1")
-    )
+    runtime = ScriptedRagRuntime(answers=[_answer("E404")], evidence=_evidence_payload("E1"))
     result = await _factory(runtime).build().ainvoke(_request())
 
     assert "E404" not in result.content
@@ -195,9 +185,7 @@ async def test_no_evidence_still_runs_grounding_and_cannot_claim_sources():
 
 
 async def test_a_zero_evidence_clarification_is_allowed_through():
-    clarification = GroundedAnswer(
-        claims=[], raw_text="Which document should I look in?"
-    )
+    clarification = GroundedAnswer(claims=[], raw_text="Which document should I look in?")
     runtime = ScriptedRagRuntime(answers=[clarification], evidence={})
     result = await _factory(runtime).build().ainvoke(_request())
 
@@ -208,9 +196,7 @@ async def test_a_zero_evidence_clarification_is_allowed_through():
 
 
 async def test_grounding_never_reports_a_shadow_outcome():
-    runtime = ScriptedRagRuntime(
-        answers=[_answer("E1")], evidence=_evidence_payload("E1")
-    )
+    runtime = ScriptedRagRuntime(answers=[_answer("E1")], evidence=_evidence_payload("E1"))
     result = await _factory(runtime).build().ainvoke(_request())
 
     assert result.grounding.outcome in {
@@ -315,9 +301,7 @@ async def test_ambiguous_evidence_fails_validation_rather_than_picking_one():
 
 
 async def test_result_carries_server_owned_provenance():
-    runtime = ScriptedRagRuntime(
-        answers=[_answer("E1")], evidence=_evidence_payload("E1")
-    )
+    runtime = ScriptedRagRuntime(answers=[_answer("E1")], evidence=_evidence_payload("E1"))
     result = await _factory(runtime).build().ainvoke(_request())
 
     assert result.evidence_ids == ("E1",)
@@ -326,9 +310,7 @@ async def test_result_carries_server_owned_provenance():
 
 
 async def test_worker_mode_result_is_private():
-    runtime = ScriptedRagRuntime(
-        answers=[_answer("E1")], evidence=_evidence_payload("E1")
-    )
+    runtime = ScriptedRagRuntime(answers=[_answer("E1")], evidence=_evidence_payload("E1"))
     result = await _factory(runtime).build().ainvoke(_request(mode="worker"))
 
     assert result.mode == "worker"

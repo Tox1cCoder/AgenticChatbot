@@ -87,20 +87,23 @@ def test_details_outside_the_allowlist_are_dropped():
 
 
 def test_allowlist_covers_only_bounded_diagnostic_keys():
-    assert frozenset(
-        {
-            "attempts",
-            "cause",
-            "reason",
-            "agent",
-            "node",
-            "provider",
-            "model",
-            "limit_kind",
-            "stage",
-            "inventory_version",
-        }
-    ) == ALLOWED_ERROR_DETAIL_KEYS
+    assert (
+        frozenset(
+            {
+                "attempts",
+                "cause",
+                "reason",
+                "agent",
+                "node",
+                "provider",
+                "model",
+                "limit_kind",
+                "stage",
+                "inventory_version",
+            }
+        )
+        == ALLOWED_ERROR_DETAIL_KEYS
+    )
 
 
 def test_sanitized_details_stay_json_safe():

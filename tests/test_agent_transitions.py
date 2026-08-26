@@ -195,9 +195,7 @@ async def test_custom_target_routes_to_resolved_node_name():
     "case", ["self", "cycle", "detached", "unknown", "over_depth", "source_mismatch"]
 )
 async def test_rejected_handoff_returns_to_source_with_paired_feedback(case):
-    inventory = _inventory(
-        {"custom_agent:detached": {"runtime_agent_id": "custom_agent:detached"}}
-    )
+    inventory = _inventory({"custom_agent:detached": {"runtime_agent_id": "custom_agent:detached"}})
     state = _routed_state()
 
     if case == "self":
@@ -301,9 +299,7 @@ async def test_only_accepted_handoffs_consume_transition_depth():
     state = _routed_state(
         history=[
             AgentTransition(from_agent_id=None, to_agent_id="chat_agent", source="router"),
-            AgentTransition(
-                from_agent_id="chat_agent", to_agent_id="chat_agent", source="resume"
-            ),
+            AgentTransition(from_agent_id="chat_agent", to_agent_id="chat_agent", source="resume"),
         ]
     )
     state["pending_transition"] = _pending(target="search_agent")

@@ -492,13 +492,17 @@ def test_rag_zero_allowance_does_not_fall_back_to_independent_budget(monkeypatch
 
     async def fake_execute_search_documents_action(**kwargs):
         captured.update(kwargs)
-        return "", "search_chunks", {
-            "records": [],
-            "evidence_ids": [],
-            "token_count": 0,
-            "omitted_count": 1,
-            "truncated_count": 0,
-        }
+        return (
+            "",
+            "search_chunks",
+            {
+                "records": [],
+                "evidence_ids": [],
+                "token_count": 0,
+                "omitted_count": 1,
+                "truncated_count": 0,
+            },
+        )
 
     monkeypatch.setattr(
         "app.ai.workflow.rag_loop.execute_search_documents_action",
@@ -545,13 +549,17 @@ def test_rag_search_calls_share_one_cumulative_evidence_allowance(monkeypatch):
         allowance = kwargs["evidence_max_tokens"]
         allowances.append(allowance)
         used = min(60, allowance)
-        return "bounded", "search_chunks", {
-            "records": [{"evidence_id": f"E{len(allowances)}"}],
-            "evidence_ids": [f"E{len(allowances)}"],
-            "token_count": used,
-            "omitted_count": 0,
-            "truncated_count": 0,
-        }
+        return (
+            "bounded",
+            "search_chunks",
+            {
+                "records": [{"evidence_id": f"E{len(allowances)}"}],
+                "evidence_ids": [f"E{len(allowances)}"],
+                "token_count": used,
+                "omitted_count": 0,
+                "truncated_count": 0,
+            },
+        )
 
     monkeypatch.setattr(
         "app.ai.workflow.rag_loop.execute_search_documents_action",
@@ -593,13 +601,17 @@ def test_mixed_rag_actions_charge_non_pack_content_before_later_search(monkeypat
         if action == "list_documents":
             return "one two three four", action, {"documents": []}
         search_allowances.append(kwargs["evidence_max_tokens"])
-        return "pack", action, {
-            "records": [{"evidence_id": "E1"}],
-            "evidence_ids": ["E1"],
-            "token_count": 1,
-            "omitted_count": 0,
-            "truncated_count": 0,
-        }
+        return (
+            "pack",
+            action,
+            {
+                "records": [{"evidence_id": "E1"}],
+                "evidence_ids": ["E1"],
+                "token_count": 1,
+                "omitted_count": 0,
+                "truncated_count": 0,
+            },
+        )
 
     class FourWordCounter:
         def count_text(self, **kwargs):
@@ -670,13 +682,17 @@ def test_oversized_last_non_pack_result_is_omitted_before_tool_message_append(mo
     async def fake_execute_search_documents_action(**kwargs):
         action = kwargs["tool_args"]["action"]
         if action == "search_chunks":
-            return "bounded pack", action, {
-                "records": [{"evidence_id": "E1"}],
-                "evidence_ids": ["E1"],
-                "token_count": 20,
-                "omitted_count": 0,
-                "truncated_count": 0,
-            }
+            return (
+                "bounded pack",
+                action,
+                {
+                    "records": [{"evidence_id": "E1"}],
+                    "evidence_ids": ["E1"],
+                    "token_count": 20,
+                    "omitted_count": 0,
+                    "truncated_count": 0,
+                },
+            )
         return oversized, action, {"documents": []}
 
     monkeypatch.setattr(
@@ -1037,9 +1053,7 @@ async def test_list_documents_returns_one_server_bounded_page_with_total_count()
         "page": 3,
         "page_size": 25,
     }
-    rag_agent = SimpleNamespace(
-        list_conversation_documents=AsyncMock(return_value=documents_page)
-    )
+    rag_agent = SimpleNamespace(list_conversation_documents=AsyncMock(return_value=documents_page))
 
     result, action, evidence = await execute_search_documents_action(
         rag_agent=rag_agent,
@@ -1296,8 +1310,7 @@ def test_grounded_gate_leaves_failed_rag_turns_reporting_their_own_error(monkeyp
     asyncio.run(workflow._rag_node(state))
 
     assert (
-        state["response"].message.content
-        == "Error during document exploration: provider timeout"
+        state["response"].message.content == "Error during document exploration: provider timeout"
     )
     assert "grounded_answer" not in state["response"].metadata
     assert calls["regenerations"] == []

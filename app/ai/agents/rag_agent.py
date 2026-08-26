@@ -575,9 +575,7 @@ class RAGAgent(BaseAgent):
                 "operation_result": str(result),
             }
         except Exception as e:
-            logger.error(
-                "Error deleting vectors for document %s", document_id, exc_info=True
-            )
+            logger.error("Error deleting vectors for document %s", document_id, exc_info=True)
             return {"success": False, "document_id": document_id, "error": str(e)}
 
     # === Agentic RAG Content Retrieval Methods ===

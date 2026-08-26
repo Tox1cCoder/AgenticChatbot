@@ -387,9 +387,7 @@ class AIService:
                         tool_data["duration_ms"] = int((perf_counter() - started_at) * 1000)
                 if infer_tool_state(phase="end", result=result) == "error":
                     tool_data["error"] = str(result)
-                yield event.model_copy(
-                    update={"sequence": _next_sequence(), "data": tool_data}
-                )
+                yield event.model_copy(update={"sequence": _next_sequence(), "data": tool_data})
                 # Emit a `rich_items` upsert for safe non-image candidates as
                 # soon as the tool result exists. Image records are never
                 # streamed transiently; canvas source is excluded.
@@ -498,8 +496,7 @@ class AIService:
         async for mapped_event in self._map_workflow_stream(
             context_bound_stream,
             emit_rich_items=bool(
-                getattr(settings, "inline_rich_response_enabled", False)
-                and inline_rich_response_v1
+                getattr(settings, "inline_rich_response_enabled", False) and inline_rich_response_v1
             ),
         ):
             yield mapped_event

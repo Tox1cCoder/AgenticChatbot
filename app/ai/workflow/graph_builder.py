@@ -275,5 +275,3 @@ def _specialist_invoker(workflow: Any, node_name: str):
         return await workflow.invoke_specialist_subgraph(node_name, state)
 
     return invoke
-
-

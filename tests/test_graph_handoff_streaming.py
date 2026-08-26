@@ -41,8 +41,8 @@ async def test_planning_handoff_stream_returns_delegated_agent_answer():
     workflow.checkpointer = None
     workflow.agents = {"planning_agent": object(), "search_agent": object()}
     workflow._build_graph_config = lambda thread_id=None: None
-    workflow._resolve_thread_id = (
-        lambda thread_id, conversation_id, turn_id=None: thread_id or conversation_id
+    workflow._resolve_thread_id = lambda thread_id, conversation_id, turn_id=None: (
+        thread_id or conversation_id
     )
     workflow._build_initial_state_from_request = lambda request: {
         "messages": [HumanMessage(content=request.message)],

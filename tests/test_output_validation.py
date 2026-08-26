@@ -161,9 +161,7 @@ async def test_tool_message_pairing_accepts_a_matched_pair():
     outcome = _outcome(
         output_policy_ids=("tool_message_pairing",),
         private_messages=(
-            AIMessage(
-                content="", id="a-1", tool_calls=[{"id": "c1", "name": "t", "args": {}}]
-            ),
+            AIMessage(content="", id="a-1", tool_calls=[{"id": "c1", "name": "t", "args": {}}]),
             ToolMessage(content="result", tool_call_id="c1", id="t-1"),
         ),
     )

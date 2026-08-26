@@ -39,9 +39,7 @@ BASE_AGENT_IDS = [
 
 
 def _inventory(custom_agents=None):
-    return build_routing_inventory(
-        base_agent_ids=BASE_AGENT_IDS, custom_agents=custom_agents or {}
-    )
+    return build_routing_inventory(base_agent_ids=BASE_AGENT_IDS, custom_agents=custom_agents or {})
 
 
 def _turn_identity(conversation_id="conversation-1", turn_id="message-1") -> TurnIdentity:
@@ -91,9 +89,7 @@ class FakeWorkflow:
         from app.ai.workflow.transitions import TransitionResolver
 
         return TransitionResolver(
-            inventory=build_routing_inventory(
-                base_agent_ids=BASE_AGENT_IDS, custom_agents={}
-            ),
+            inventory=build_routing_inventory(base_agent_ids=BASE_AGENT_IDS, custom_agents={}),
             max_delegation_depth=5,
         )
 
@@ -114,9 +110,7 @@ def test_only_finalizer_reaches_end(compiled_graph):
 
 def test_compatibility_specialists_still_end_through_finalizer(compiled_graph):
     graph = compiled_graph.get_graph()
-    assert not any(
-        edge.target == "__end__" and edge.source != "finalize" for edge in graph.edges
-    )
+    assert not any(edge.target == "__end__" and edge.source != "finalize" for edge in graph.edges)
 
 
 def test_specialist_nodes_have_no_static_outgoing_edges(compiled_graph):
@@ -179,9 +173,7 @@ def test_transition_resolver_is_the_only_route_between_specialists(compiled_grap
         targets = {edge.target for edge in graph.edges if edge.source == node_name}
         assert not (targets & SPECIALIST_NODE_NAMES), (node_name, targets)
 
-    resolver_targets = {
-        edge.target for edge in graph.edges if edge.source == "resolve_transition"
-    }
+    resolver_targets = {edge.target for edge in graph.edges if edge.source == "resolve_transition"}
     assert resolver_targets >= SPECIALIST_NODE_NAMES
     assert "__end__" not in resolver_targets
 
@@ -225,9 +217,7 @@ async def test_route_node_returns_command_with_immutable_decision():
     service = FakeRoutingService(decision=decision)
     node = make_route_node()
 
-    command = await node(
-        {"turn_identity": _turn_identity(), "messages": []}, _runtime(service)
-    )
+    command = await node({"turn_identity": _turn_identity(), "messages": []}, _runtime(service))
 
     assert isinstance(command, Command)
     assert command.goto == "search_agent"

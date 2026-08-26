@@ -477,14 +477,16 @@ def test_httpx2_testclient_dependency_is_declared_in_every_manifest() -> None:
 
 def test_tavily_sdk_pin_is_synchronized_across_shipping_manifests() -> None:
     expected = "tavily-python==0.7.15"
-    dependencies = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
-        "project"
-    ]["dependencies"]
+    dependencies = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"][
+        "dependencies"
+    ]
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
     environment = (ROOT / "environment.yml").read_text(encoding="utf-8").splitlines()
     client_requirements = (
-        ROOT / "scripts" / "client-backend-bundle" / "requirements-client.txt"
-    ).read_text(encoding="utf-8").splitlines()
+        (ROOT / "scripts" / "client-backend-bundle" / "requirements-client.txt")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
 
     assert expected in dependencies
     assert expected in requirements

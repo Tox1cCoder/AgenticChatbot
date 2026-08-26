@@ -239,13 +239,7 @@ def test_parse_extracts_server_shaped_ids_and_drops_model_written_sources():
 
 
 def test_parse_ignores_headings_bullets_markers_and_the_sources_appendix():
-    text = (
-        "## Findings\n"
-        "- Revenue rose [E1]\n"
-        "[E2]\n"
-        "Sources:\n"
-        "- report.pdf, page 3 [E4]\n"
-    )
+    text = "## Findings\n- Revenue rose [E1]\n[E2]\nSources:\n- report.pdf, page 3 [E4]\n"
 
     answer = parse_grounded_answer(text)
 
@@ -288,14 +282,12 @@ def test_render_derives_filename_and_pages_from_server_records_only():
     assert "Page 99" not in rendered
     assert '[E1] "report.pdf" pages 3-4' in rendered
     assert '[E2] "appendix.pdf"' in rendered
-    assert "[E2] \"appendix.pdf\" page" not in rendered
+    assert '[E2] "appendix.pdf" page' not in rendered
 
 
 def test_render_omits_ids_absent_from_the_current_pack():
     pack = evidence_pack("E1")
-    answer = GroundedAnswer(
-        claims=[GroundedClaim(text="Revenue rose", evidence_ids=("E1", "E9"))]
-    )
+    answer = GroundedAnswer(claims=[GroundedClaim(text="Revenue rose", evidence_ids=("E1", "E9"))])
 
     rendered = render_grounded_answer(answer, pack)
 
@@ -384,7 +376,7 @@ async def test_second_failure_abstains_without_a_third_generation(gate):
 @pytest.mark.asyncio
 async def test_shadow_mode_records_validation_without_regenerating(gate):
     pack = evidence_pack("E1")
-    ungrounded = GroundedAnswer(claims=[GroundedClaim(text="Revenue rose.", evidence_ids=()) ])
+    ungrounded = GroundedAnswer(claims=[GroundedClaim(text="Revenue rose.", evidence_ids=())])
 
     finalization = await gate.finalize_answer(
         question="What was revenue?",
@@ -401,9 +393,9 @@ async def test_shadow_mode_records_validation_without_regenerating(gate):
     assert metadata["citation_coverage"] == pytest.approx(0.0)
     assert metadata["claim_count"] == 1
     assert metadata["evidence_id_count"] == 1
-    assert all(
-        isinstance(value, (bool, int, float, str, list)) for value in metadata.values()
-    ), "shadow metrics must stay msgpack-safe for checkpointed response metadata"
+    assert all(isinstance(value, (bool, int, float, str, list)) for value in metadata.values()), (
+        "shadow metrics must stay msgpack-safe for checkpointed response metadata"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -659,10 +651,7 @@ def test_clarifying_question_over_no_evidence_is_not_treated_as_unstructured(gat
 
 def test_table_rows_count_as_one_claim_group_not_one_claim_per_row(gate):
     text = (
-        "| Metric | Value |\n"
-        "| --- | --- |\n"
-        "| Revenue | 10 million [E1] |\n"
-        "| Costs | 4 million |\n"
+        "| Metric | Value |\n| --- | --- |\n| Revenue | 10 million [E1] |\n| Costs | 4 million |\n"
     )
     pack = evidence_pack("E1")
 
@@ -799,9 +788,7 @@ def test_filename_forging_evidence_framing_is_sanitized_to_one_json_string(gate)
     filename that tries to forge a new evidence boundary must collapse into
     a single neutralized, JSON-quoted line, not multi-line framing."""
     case = next(
-        case
-        for case in _injection_cases()
-        if case["id"] == "filename_forges_evidence_framing"
+        case for case in _injection_cases() if case["id"] == "filename_forges_evidence_framing"
     )
     pack = _injected_pack(case)
     answer = parse_grounded_answer(case["model_answer"])
@@ -811,7 +798,7 @@ def test_filename_forging_evidence_framing_is_sanitized_to_one_json_string(gate)
 
     from app.services.rag_grounding import _display_filename
 
-    expected_line = f'[E1] {_display_filename(case["injected_text"])} page 3'
+    expected_line = f"[E1] {_display_filename(case['injected_text'])} page 3"
     assert decided.abstained is False, "this case cites its evidence and must be accepted"
     assert expected_line in rendered
     assert rendered.count("\n") == 3, "the forged filename must not add any extra line breaks"
@@ -824,7 +811,8 @@ _RENDERED_ABSTENTIONS_BY_REASON: dict[tuple[str, ...], str] = {}
 
 
 @pytest.mark.parametrize(
-    "case", [case for case in _injection_cases() if case["surface"] != "filename"],
+    "case",
+    [case for case in _injection_cases() if case["surface"] != "filename"],
     ids=lambda case: case["id"],
 )
 def test_content_surface_injections_render_identically_regardless_of_surface(case):

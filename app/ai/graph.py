@@ -1501,9 +1501,7 @@ class MultiAgentWorkflow(
             settings=settings,
         )
 
-    async def _specialist_request_for(
-        self, node_name: str, state: GraphState
-    ) -> SpecialistRequest:
+    async def _specialist_request_for(self, node_name: str, state: GraphState) -> SpecialistRequest:
         """Assemble one invocation's authenticated scope and inputs."""
         state_view = GraphStateView(state)
         messages = state_view.messages()
@@ -1517,9 +1515,7 @@ class MultiAgentWorkflow(
             conversation_id, user_id, agent_key=history_key, state=state
         )
 
-        current_turn_messages = self._messages_for_active_agent(
-            state, active_agent_id, messages
-        )
+        current_turn_messages = self._messages_for_active_agent(state, active_agent_id, messages)
         current_turn_messages, has_images = self._apply_current_turn_attachments(
             state, current_turn_messages
         )
@@ -1592,9 +1588,7 @@ class MultiAgentWorkflow(
                     "custom_agent subgraph reached for unattached id '%s'", request.agent_id
                 )
                 raise ValueError(f"custom agent {request.agent_id} is not attached")
-            self._specialist_factory.register(
-                build_custom_specialist_definition(custom_agent)
-            )
+            self._specialist_factory.register(build_custom_specialist_definition(custom_agent))
 
         with (
             use_image_preview_emitter(self._build_image_preview_emitter(state)),

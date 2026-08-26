@@ -92,9 +92,7 @@ def _budget_workflow() -> MultiAgentWorkflow:
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
     workflow._get_conversation_history = AsyncMock(return_value=[])
     workflow.agents = {"chat_agent": object()}
-    workflow.chat_agent = SimpleNamespace(
-        _convert_history_to_langchain_messages=lambda history: []
-    )
+    workflow.chat_agent = SimpleNamespace(_convert_history_to_langchain_messages=lambda history: [])
     return workflow
 
 
@@ -109,9 +107,7 @@ async def test_forced_final_response_unbinds_every_tool():
     request = await workflow._specialist_request_for("chat_agent", _forced_final_state())
 
     assert request.extras["disable_tools"] is True
-    assert "tool-use budget" in request.extras["system_prompt_kwargs"][
-        "tool_budget_notice"
-    ].lower()
+    assert "tool-use budget" in request.extras["system_prompt_kwargs"]["tool_budget_notice"].lower()
 
     from app.ai.agents.chat_agent import build_chat_specialist_definition
 

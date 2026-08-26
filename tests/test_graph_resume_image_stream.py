@@ -150,9 +150,7 @@ def _build_workflow(*, store: _RecordingStore, checkpoint_values: dict):
     workflow.chat_image_service = store
     workflow.image_generator_agent = _FakeImageSpecialistFactory()
     workflow._specialist_factory = workflow.image_generator_agent
-    workflow.chat_agent = SimpleNamespace(
-        _convert_history_to_langchain_messages=lambda history: []
-    )
+    workflow.chat_agent = SimpleNamespace(_convert_history_to_langchain_messages=lambda history: [])
     workflow._get_conversation_history = _empty_history
     workflow.agents = {"image_generator_agent": object()}
 
@@ -171,9 +169,7 @@ def _build_workflow(*, store: _RecordingStore, checkpoint_values: dict):
         if isinstance(update, dict):
             node_state.update(update)
 
-        outcome = await workflow.invoke_specialist_subgraph(
-            "image_generator_agent", node_state
-        )
+        outcome = await workflow.invoke_specialist_subgraph("image_generator_agent", node_state)
         response = outcome.response
 
         chunk = SimpleNamespace(content=response.message.content, content_blocks=None)
@@ -260,11 +256,7 @@ async def test_resumed_graph_run_emits_early_image_reference(monkeypatch):
         "final delivery must be by reference, never inline base64"
     )
 
-    partials = [
-        event
-        for event in previews
-        if (event.data or {}).get("status") == "partial"
-    ]
+    partials = [event for event in previews if (event.data or {}).get("status") == "partial"]
     assert partials, f"no transient partial preview on resume; order={types}"
     assert events.index(partials[0]) < events.index(finals[0]), (
         f"partial must precede the final reference; order={types}"
@@ -302,8 +294,7 @@ async def test_resumed_graph_run_without_persisted_token_still_streams_image(
         f"preview; events={[event.type for event in events]}"
     )
     assert any(
-        (event.data or {}).get("delivery", {}).get("kind") == "reference"
-        for event in previews
+        (event.data or {}).get("delivery", {}).get("kind") == "reference" for event in previews
     )
 
 

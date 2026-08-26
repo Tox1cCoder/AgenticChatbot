@@ -157,9 +157,7 @@ def test_outcome_provenance_is_server_owned_and_complete():
 
 def test_provenance_records_evidence_and_image_ids():
     state = _validated_state(
-        agent_outcome=_outcome(
-            evidence=({"evidence_id": "E1"},), images=({"image_id": "img-1"},)
-        )
+        agent_outcome=_outcome(evidence=({"evidence_id": "E1"},), images=({"image_id": "img-1"},))
     )
     provenance = _finalizer().finalize(state)["response"].metadata["provenance"]
     assert provenance["evidence_ids"] == ["E1"]

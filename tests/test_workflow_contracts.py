@@ -158,9 +158,7 @@ def test_worker_result_status_has_no_awaiting_approval():
     assert "public_messages" not in WorkerResult.model_fields
 
     with pytest.raises(ValidationError):
-        WorkerResult(
-            task_id="t1", agent_id="search_agent", status="awaiting_approval", content=""
-        )
+        WorkerResult(task_id="t1", agent_id="search_agent", status="awaiting_approval", content="")
 
 
 def test_workflow_error_codes_are_closed_and_details_are_json_safe():

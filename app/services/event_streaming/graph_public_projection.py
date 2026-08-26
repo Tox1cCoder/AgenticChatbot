@@ -143,9 +143,7 @@ class GraphPublicStreamProjector:
         self._tool_end_events_from_node_state = tool_end_events_from_node_state
         self._suppress_internal_stream_chunks = suppress_internal_stream_chunks
 
-    def map_event(
-        self, event: Any, ctx: StreamProjectionContext
-    ) -> Iterator[V3StreamEvent]:
+    def map_event(self, event: Any, ctx: StreamProjectionContext) -> Iterator[V3StreamEvent]:
         """Curate one canonical ``V3StreamEvent`` into the service-facing
         canonical stream.
 
@@ -277,14 +275,10 @@ class GraphPublicStreamProjector:
             return
         if tool_call_id:
             ctx.emitted_tool_call_ids.add(tool_call_id)
-        yield self._tool_start_event(
-            tool_call_id=tool_call_id, tool_name=tool_name, args=args
-        )
+        yield self._tool_start_event(tool_call_id=tool_call_id, tool_name=tool_name, args=args)
 
     @staticmethod
-    def _tool_start_event(
-        *, tool_call_id: Any, tool_name: Any, args: Any
-    ) -> V3StreamEvent:
+    def _tool_start_event(*, tool_call_id: Any, tool_name: Any, args: Any) -> V3StreamEvent:
         return make_event(
             "tool_call_available",
             sequence=0,

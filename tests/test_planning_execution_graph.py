@@ -228,9 +228,7 @@ async def test_recursive_planning_is_rejected():
 
 async def test_worker_timeout_becomes_a_typed_failed_result():
     orchestrator = _orchestrator(FakeSpecialistFactory(raises=TimeoutError()))
-    result = await orchestrator.run_worker(
-        {"task": _task("t1"), "runtime_request": {}}
-    )
+    result = await orchestrator.run_worker({"task": _task("t1"), "runtime_request": {}})
 
     worker = result["worker_results"][0]
     assert worker.status == "failed"
@@ -240,9 +238,7 @@ async def test_worker_timeout_becomes_a_typed_failed_result():
 async def test_worker_cannot_perform_a_parent_level_handoff():
     """A worker returns data, never a navigation command."""
     orchestrator = _orchestrator()
-    result = await orchestrator.run_worker(
-        {"task": _task("t1"), "runtime_request": {}}
-    )
+    result = await orchestrator.run_worker({"task": _task("t1"), "runtime_request": {}})
 
     assert set(result) == {"worker_results"}
     assert "pending_transition" not in result

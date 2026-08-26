@@ -103,8 +103,7 @@ STILL_LIVE_LEGACY_MODULES = {
     "app/ai/workflow/rag_loop.py": "the rag_agent node still runs the pre-v2 RAG loop",
     "app/ai/workflow/planning_loop.py": "the planning_agent node still runs the pre-v2 loop",
     "app/ai/workflow/tool_loop.py": (
-        "rag_tools and planning_tools still use its approval, artifact, and "
-        "tool-error helpers"
+        "rag_tools and planning_tools still use its approval, artifact, and tool-error helpers"
     ),
     "app/ai/agents/base_agent.py": (
         "specialist definitions delegate prompt and tool assembly to it; only its "
