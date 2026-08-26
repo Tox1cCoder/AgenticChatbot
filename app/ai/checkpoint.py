@@ -8,6 +8,17 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from psycopg_pool import AsyncConnectionPool
 
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+from app.ai.workflow.contracts import (
+    AgentTransition,
+    HandoffOutcome,
+    OutcomeProvenance,
+    PendingTransition,
+    ResponseOutcome,
+    RoutingDecision,
+    TurnIdentity,
+    WorkerResult,
+    WorkflowError,
+)
 from app.core.config import Settings
 
 _CHECKPOINT_ALLOWED_TYPES = (
@@ -15,6 +26,17 @@ _CHECKPOINT_ALLOWED_TYPES = (
     MessageRole,
     AgentResponse,
     AgentMessage,
+    # routing-v2 control-plane contracts. Every Pydantic type stored directly
+    # in graph state must round-trip as its own class, never as ``dict``.
+    TurnIdentity,
+    RoutingDecision,
+    AgentTransition,
+    PendingTransition,
+    OutcomeProvenance,
+    ResponseOutcome,
+    HandoffOutcome,
+    WorkerResult,
+    WorkflowError,
 )
 
 _CHECKPOINT_ALLOWED_JSON_MODULES: list[tuple[str, ...]] = [

@@ -6,12 +6,32 @@ import pytest
 
 import app.ai.checkpoint as checkpoint_module
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+from app.ai.workflow.contracts import (
+    AgentTransition,
+    HandoffOutcome,
+    OutcomeProvenance,
+    PendingTransition,
+    ResponseOutcome,
+    RoutingDecision,
+    TurnIdentity,
+    WorkerResult,
+    WorkflowError,
+)
 
 _CHECKPOINT_TYPES = (
     AgentType,
     MessageRole,
     AgentResponse,
     AgentMessage,
+    TurnIdentity,
+    RoutingDecision,
+    AgentTransition,
+    PendingTransition,
+    OutcomeProvenance,
+    ResponseOutcome,
+    HandoffOutcome,
+    WorkerResult,
+    WorkflowError,
 )
 
 
@@ -133,3 +153,126 @@ async def test_checkpoint_manager_delete_thread_falls_back_to_pool_sql():
         ('DELETE FROM "public"."checkpoint_blobs" WHERE thread_id = %s', ("thread-1",)),
         ('DELETE FROM "public"."checkpoints" WHERE thread_id = %s', ("thread-1",)),
     ]
+
+
+def _routed_checkpoint_state() -> dict[str, object]:
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    from app.ai.workflow.contracts import (
+        AgentTransition,
+        OutcomeProvenance,
+        PendingTransition,
+        ResponseOutcome,
+        RoutingDecision,
+        TurnIdentity,
+        WorkerResult,
+        WorkflowError,
+    )
+
+    return {
+        "turn_identity": TurnIdentity(
+            request_id="request-1",
+            turn_id="message-1",
+            checkpoint_thread_id="routing-v2:conversation-1:message-1",
+        ),
+        "routing_decision": RoutingDecision(
+            agent_id="search_agent", confidence=0.91, reason="needs current sources"
+        ),
+        "agent_history": [
+            AgentTransition(from_agent_id=None, to_agent_id="chat_agent", source="router"),
+            AgentTransition(
+                from_agent_id="chat_agent",
+                to_agent_id="search_agent",
+                source="handoff",
+                tool_call_id="call-1",
+            ),
+        ],
+        "pending_transition": PendingTransition(
+            from_agent_id="chat_agent",
+            to_agent_id="search_agent",
+            tool_call_id="call-1",
+            tool_message_id="handoff:call-1",
+            reason="needs current sources",
+        ),
+        "agent_outcome": ResponseOutcome(
+            agent_id="search_agent",
+            response=AgentResponse(
+                agent_type=AgentType.SEARCH,
+                agent_id="search_agent",
+                message=AgentMessage(role=MessageRole.ASSISTANT, content="answer"),
+            ),
+            provenance=OutcomeProvenance(
+                output_policy_ids=("public_content",),
+                evidence=({"evidence_id": "E1"},),
+                private_messages=(
+                    AIMessage(content="private", id="private-1"),
+                    ToolMessage(content="ok", tool_call_id="call-1", id="handoff:call-1"),
+                ),
+            ),
+        ),
+        "worker_results": [
+            WorkerResult(
+                task_id="t1", agent_id="rag_agent", status="failed", error_code="worker_timeout"
+            )
+        ],
+        "workflow_error": WorkflowError(
+            code="routing_timeout",
+            retriable=True,
+            request_id="request-1",
+            details={"attempts": 2},
+        ),
+    }
+
+
+def test_checkpoint_serializer_round_trips_v2_contract_types():
+    from app.ai.workflow.contracts import (
+        AgentTransition,
+        PendingTransition,
+        ResponseOutcome,
+        RoutingDecision,
+        TurnIdentity,
+        WorkerResult,
+        WorkflowError,
+    )
+
+    serializer = checkpoint_module._build_checkpoint_serializer()
+    state = _routed_checkpoint_state()
+
+    restored = serializer.loads_typed(serializer.dumps_typed(state))
+
+    assert isinstance(restored["turn_identity"], TurnIdentity)
+    assert isinstance(restored["routing_decision"], RoutingDecision)
+    assert isinstance(restored["agent_history"][0], AgentTransition)
+    assert isinstance(restored["pending_transition"], PendingTransition)
+    assert isinstance(restored["agent_outcome"], ResponseOutcome)
+    assert isinstance(restored["worker_results"][0], WorkerResult)
+    assert isinstance(restored["workflow_error"], WorkflowError)
+
+
+def test_checkpoint_round_trip_preserves_nested_typed_contract_details():
+    serializer = checkpoint_module._build_checkpoint_serializer()
+    state = _routed_checkpoint_state()
+
+    restored = serializer.loads_typed(serializer.dumps_typed(state))
+
+    outcome = restored["agent_outcome"]
+    assert outcome.kind == "response"
+    assert isinstance(outcome.response, AgentResponse)
+    assert outcome.provenance.output_policy_ids == ("public_content",)
+    assert outcome.provenance.evidence == ({"evidence_id": "E1"},)
+    assert [type(message).__name__ for message in outcome.provenance.private_messages] == [
+        "AIMessage",
+        "ToolMessage",
+    ]
+    assert restored["workflow_error"].details == {"attempts": 2}
+    assert restored["agent_history"][1].tool_call_id == "call-1"
+
+
+def test_checkpointed_contract_types_stay_frozen_after_restore():
+    import pydantic
+
+    serializer = checkpoint_module._build_checkpoint_serializer()
+    restored = serializer.loads_typed(serializer.dumps_typed(_routed_checkpoint_state()))
+
+    with pytest.raises(pydantic.ValidationError):
+        restored["routing_decision"].agent_id = "chat_agent"

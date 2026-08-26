@@ -142,6 +142,11 @@ class WorkflowExecutionRequest(BaseModel):
     assistant_message_id: str | None = None
     inline_rich_response_v1: bool = False
     hitl_policy: dict[str, Any] | None = None
+    # routing-v2 turn identity. ``turn_id`` is the persisted user-message ID and
+    # ``request_id`` is the API correlation ID when available. The service
+    # boundary supplies both; direct runtime callers must pass them explicitly.
+    request_id: str | None = None
+    turn_id: str | None = None
 
 
 class ContinuationSignal(TypedDict, total=False):

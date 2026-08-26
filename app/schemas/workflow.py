@@ -117,6 +117,20 @@ class WorkflowExecutionRequest(BaseModel):
             "and carried into graph context. None falls back to the global policy."
         ),
     )
+    request_id: str | None = Field(
+        default=None,
+        description=(
+            "API correlation ID for this turn. Falls back to the stable user-message ID "
+            "so every typed workflow error can carry a request_id."
+        ),
+    )
+    turn_id: str | None = Field(
+        default=None,
+        description=(
+            "Persisted user-message ID identifying this turn. Combined with the "
+            "conversation ID it forms the routing-v2 checkpoint thread."
+        ),
+    )
 
 
 class WorkflowResponseMessage(BaseModel):
