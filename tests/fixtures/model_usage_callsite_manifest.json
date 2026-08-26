@@ -192,6 +192,12 @@
     "disposition": "non_provider_tool_dispatch"
   },
   {
+    "file": "app/ai/workflow/planning_execution.py",
+    "function": "PlanningOrchestrator._run_rag_worker",
+    "call_chain": "run.ainvoke",
+    "disposition": "workflow_stream"
+  },
+  {
     "file": "app/ai/workflow/rag_execution.py",
     "function": "_RagExecutionRun.ainvoke",
     "call_chain": "self._compiled.ainvoke",
