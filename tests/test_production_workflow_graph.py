@@ -87,6 +87,19 @@ class FakeWorkflow:
         self._should_continue_planning = lambda state: "end"
         self._route_tool_output = lambda state: "end"
 
+    def build_transition_resolver(self):
+        from app.ai.workflow.transitions import TransitionResolver
+
+        return TransitionResolver(
+            inventory=build_routing_inventory(
+                base_agent_ids=BASE_AGENT_IDS, custom_agents={}
+            ),
+            max_delegation_depth=5,
+        )
+
+    async def invoke_specialist_subgraph(self, node_name, state):  # pragma: no cover
+        raise AssertionError("topology tests never execute a specialist")
+
 
 @pytest.fixture
 def compiled_graph():
@@ -128,6 +141,7 @@ def test_specialist_destinations_are_validation_or_execution_only(compiled_graph
         assert targets <= {
             "validate_output",
             "finalize",
+            "resolve_transition",
             "tools",
             "approval",
             "rag_tools",
@@ -150,8 +164,26 @@ def test_graph_starts_at_the_route_node(compiled_graph):
 
 def test_graph_registers_validation_and_finalization_nodes(compiled_graph):
     nodes = set(compiled_graph.get_graph().nodes)
-    assert {"route", "validate_output", "finalize"} <= nodes
+    assert {"route", "validate_output", "finalize", "resolve_transition"} <= nodes
     assert nodes >= SPECIALIST_NODE_NAMES
+
+
+def test_transition_resolver_is_the_only_route_between_specialists(compiled_graph):
+    """Every specialist can reach the resolver, and the resolver reaches them.
+
+    No specialist targets another specialist directly: moving execution between
+    agents is one component's job.
+    """
+    graph = compiled_graph.get_graph()
+    for node_name in SPECIALIST_NODE_NAMES:
+        targets = {edge.target for edge in graph.edges if edge.source == node_name}
+        assert not (targets & SPECIALIST_NODE_NAMES), (node_name, targets)
+
+    resolver_targets = {
+        edge.target for edge in graph.edges if edge.source == "resolve_transition"
+    }
+    assert resolver_targets >= SPECIALIST_NODE_NAMES
+    assert "__end__" not in resolver_targets
 
 
 # ----------------------------------------------------------------------

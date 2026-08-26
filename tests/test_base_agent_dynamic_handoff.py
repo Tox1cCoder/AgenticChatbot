@@ -33,12 +33,22 @@ def _agent() -> _DummyBase:
     return _DummyBase(agent_config_key="chat")
 
 
-def test_hand_off_tool_accepts_only_target_agent():
-    schema = create_hand_off_tool(["search_agent"]).args_schema
+def test_hand_off_tool_schema_takes_a_target_and_a_reason():
+    """``reason`` is part of the transition record, so the model supplies it.
 
-    assert schema.model_validate({"target_agent": "search_agent"}).target_agent == "search_agent"
+    Anything else is refused: the schema is the only way a target is chosen,
+    and the tool call id is injected rather than model-authored.
+    """
+    schema = create_hand_off_tool(
+        source_agent_id="chat_agent", allowed_targets=["search_agent"]
+    ).args_schema
+
+    decided = schema.model_validate({"target_agent": "search_agent", "reason": "current info"})
+    assert decided.target_agent == "search_agent"
+    assert decided.reason == "current info"
+
     with pytest.raises(ValidationError):
-        schema.model_validate({"target_agent": "search_agent", "reason": "legacy"})
+        schema.model_validate({"target_agent": "search_agent", "unexpected": "field"})
 
 
 def test_build_delegation_suffix_is_empty_without_live_targets():
@@ -96,8 +106,9 @@ def test_build_system_prompt_omits_delegation_without_a_bound_handoff_tool():
 def test_injected_handoff_tool_is_the_only_bound_handoff():
     """The graph-injected handoff is the only handoff BaseAgent can bind."""
     dynamic = create_hand_off_tool(
-        ["search_agent", "custom_agent:abc"],
-        {"custom_agent:abc": "Legal Reviewer: contracts."},
+        source_agent_id="chat_agent",
+        allowed_targets=["search_agent", "custom_agent:abc"],
+        target_descriptions={"custom_agent:abc": "Legal Reviewer: contracts."},
     )
     tools = _agent()._get_tools_for_binding(internal_tools=[dynamic])
 

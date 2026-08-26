@@ -352,8 +352,9 @@ class CustomAgent(BaseAgent):
         if spec.allowed_handoff_targets:
             tools.append(
                 create_hand_off_tool(
-                    spec.allowed_handoff_targets,
-                    spec.handoff_target_descriptions,
+                    source_agent_id=spec.runtime_agent_id,
+                    allowed_targets=spec.allowed_handoff_targets,
+                    target_descriptions=spec.handoff_target_descriptions,
                 )
             )
         return tools

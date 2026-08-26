@@ -139,7 +139,9 @@ async def test_approval_helpers_rebuild_the_live_scoped_handoff_map(monkeypatch)
     from app.ai.hand_off_tool import create_hand_off_tool
 
     wf = graph_module.MultiAgentWorkflow.__new__(graph_module.MultiAgentWorkflow)
-    handoff_tool = create_hand_off_tool(["search_agent"])
+    handoff_tool = create_hand_off_tool(
+        source_agent_id="chat_agent", allowed_targets=["search_agent"]
+    )
     observed_internal_tools: list[list[object] | None] = []
 
     async def fake_ensure_agent_tool_map(agent, **kwargs):

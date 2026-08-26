@@ -922,7 +922,9 @@ def test_planning_agent_binding_includes_graph_injected_hand_off(monkeypatch):
     agent.mcp_manager = None
     agent.tools = []
 
-    dynamic_handoff = create_hand_off_tool(["search_agent"])
+    dynamic_handoff = create_hand_off_tool(
+        source_agent_id="chat_agent", allowed_targets=["search_agent"]
+    )
     tools = agent._get_tools_for_binding(
         conversation_id="conversation-1",
         internal_tools=[dynamic_handoff],
@@ -953,7 +955,9 @@ def test_planning_agent_binding_honors_excluded_tool_names(monkeypatch):
 
     tools = agent._get_tools_for_binding(
         conversation_id="conversation-1",
-        internal_tools=[create_hand_off_tool(["search_agent"])],
+        internal_tools=[
+            create_hand_off_tool(source_agent_id="chat_agent", allowed_targets=["search_agent"])
+        ],
         excluded_tool_names={"hand_off"},
     )
     tool_names = {tool.name for tool in tools}

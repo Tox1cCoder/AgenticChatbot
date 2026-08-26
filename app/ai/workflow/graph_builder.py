@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "BASE_SPECIALIST_NODES",
+    "TRANSITION_RESOLVER_NODE",
     "SUBGRAPH_SPECIALIST_NODES",
     "SPECIALIST_NODE_NAMES",
     "TOOL_STAGE_NODES",
@@ -49,6 +50,8 @@ BASE_SPECIALIST_NODES: tuple[str, ...] = (
 
 SPECIALIST_NODE_NAMES: frozenset[str] = frozenset({*BASE_SPECIALIST_NODES, "custom_agent"})
 
+TRANSITION_RESOLVER_NODE = "resolve_transition"
+
 # Specialists whose model/tool loop already runs inside a compiled
 # ``create_agent`` subgraph. RAG and Planning join them in Tasks 7 and 8.
 SUBGRAPH_SPECIALIST_NODES: tuple[str, ...] = (
@@ -59,13 +62,14 @@ SUBGRAPH_SPECIALIST_NODES: tuple[str, ...] = (
     "custom_agent",
 )
 
-# Pre-v2 execution stages that still run as top-level nodes. Task 11 of the
-# cutover moves them inside specialist subgraphs and deletes these entries.
-TOOL_STAGE_NODES: tuple[str, ...] = ("tools", "rag_tools", "planning_tools")
+# Pre-v2 execution stages that still run as top-level nodes. RAG and Planning
+# move theirs inside subgraphs in Tasks 7 and 8; the standard specialists no
+# longer have one at all.
+TOOL_STAGE_NODES: tuple[str, ...] = ("rag_tools", "planning_tools")
 
 # Every pre-v2 stage decision maps onto a v2 node. ``"end"`` means "this
 # specialist produced a candidate answer", which is validation, never END.
-_STAGE_TARGETS = {"end": "validate_output", "tools": "tools", "approval": "approval"}
+_STAGE_TARGETS = {"end": "validate_output"}
 
 
 def make_route_node():
@@ -207,10 +211,17 @@ def build_workflow_graph(
         graph.add_node(
             node_name,
             wrapper,
-            destinations=("finalize", "resolve_transition", "validate_output")
-            if _has_transition_resolver(workflow)
-            else ("finalize", "validate_output"),
+            destinations=("finalize", "resolve_transition", "validate_output"),
         )
+
+    # The one component allowed to choose the next top-level specialist. A
+    # specialist's handoff tool records a pending transition and comes here;
+    # nothing else may move execution between agents.
+    graph.add_node(
+        "resolve_transition",
+        workflow.build_transition_resolver(),
+        destinations=tuple(sorted({*SPECIALIST_NODE_NAMES, "finalize"})),
+    )
 
     # Declared destinations make the dynamic topology inspectable: the
     # "only finalize reaches END" invariant is checkable on the compiled graph
@@ -231,13 +242,6 @@ def build_workflow_graph(
         )
 
     graph.add_node(
-        "tools",
-        make_tool_stage_wrapper(
-            "tools", workflow._tool_node, stage_router=workflow._route_tool_output
-        ),
-        destinations=tuple(sorted({*stage_destinations, "tools", "approval"})),
-    )
-    graph.add_node(
         "rag_tools",
         make_tool_stage_wrapper(
             "rag_tools", workflow._rag_tools_node, stage_router=workflow._should_continue_rag
@@ -253,15 +257,10 @@ def build_workflow_graph(
         ),
         destinations=stage_destinations,
     )
-    # Approval pauses for a human decision and then always runs the tools it
-    # gated; it is the one stage whose next step is not a routing choice.
-    graph.add_node("approval", workflow._approval_node)
-
     graph.add_node("validate_output", make_validate_output_node(), destinations=("finalize",))
     graph.add_node("finalize", make_finalize_node())
 
     graph.add_edge(START, "route")
-    graph.add_edge("approval", "tools")
     graph.add_edge("finalize", END)
 
     if checkpointer:
@@ -278,5 +277,3 @@ def _specialist_invoker(workflow: Any, node_name: str):
     return invoke
 
 
-def _has_transition_resolver(workflow: Any) -> bool:
-    return hasattr(workflow, "_resolve_transition_node")

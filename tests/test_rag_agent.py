@@ -1609,7 +1609,9 @@ def test_rag_system_prompt_includes_dynamic_delegation_roster():
         agent._process_message_agentic(
             msg,
             "conv-1",
-            internal_tools=[create_hand_off_tool(["search_agent"])],
+            internal_tools=[
+                create_hand_off_tool(source_agent_id="chat_agent", allowed_targets=["search_agent"])
+            ],
             handoff_target_descriptions={"search_agent": "Current web research."},
         )
     )

@@ -62,8 +62,9 @@ class CustomAgentsMixin:
         if not targets:
             return None
         return create_hand_off_tool(
-            targets,
-            self._custom_handoff_target_descriptions(state, active_agent_id),
+            source_agent_id=str(active_agent_id),
+            allowed_targets=targets,
+            target_descriptions=self._custom_handoff_target_descriptions(state, active_agent_id),
         )
 
     def _multi_agent_kwargs(self, state: GraphState, active_agent_id: str | None) -> dict[str, Any]:

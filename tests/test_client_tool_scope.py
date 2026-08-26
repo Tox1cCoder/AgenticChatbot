@@ -214,7 +214,7 @@ def test_deferred_binding_keeps_graph_injected_hand_off_available(monkeypatch):
         lambda **kwargs: [],
     )
 
-    hand_off = create_hand_off_tool(["search_agent"])
+    hand_off = create_hand_off_tool(source_agent_id="chat_agent", allowed_targets=["search_agent"])
     tools = agent._get_tools_for_binding(
         conversation_id="conversation-1",
         internal_tools=[hand_off],

@@ -114,6 +114,7 @@ from .workflow.runtime_context import WorkflowRuntimeContext, build_runtime_inve
 from .workflow.specialists import SpecialistFactory, SpecialistRequest
 from .workflow.state import build_checkpoint_thread_id
 from .workflow.tool_loop import ToolLoopMixin
+from .workflow.transitions import TransitionResolver
 
 logger = logging.getLogger(__name__)
 
@@ -982,6 +983,22 @@ class MultiAgentWorkflow(
         )
         self._attach_final_agent_metadata(values, response)
         return response
+
+    def build_transition_resolver(self) -> TransitionResolver:
+        """The sole parent-level transition resolver for this workflow.
+
+        It validates against the same live inventory the router used, so a
+        target that was routable at routing time is judged by the same rules
+        when a specialist tries to hand off to it.
+        """
+        return TransitionResolver(
+            inventory=build_runtime_inventory(
+                base_agent_ids=list(self.agents.keys()),
+                custom_agents={},
+                max_custom_agents=settings.router_context_max_custom_agents,
+            ),
+            max_delegation_depth=settings.max_handoff_delegation_depth,
+        )
 
     async def _prepare_turn_runtime_context(self, state: GraphState) -> WorkflowRuntimeContext:
         """Snapshot the routable inventory and descriptive context for one turn.
