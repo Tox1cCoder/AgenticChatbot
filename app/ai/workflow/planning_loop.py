@@ -171,6 +171,15 @@ class PlanningLoopMixin:
 
         response = self._finalize_forced_final_response(state, response)
         self._merge_tool_artifacts(state, response)
+
+        # Grounding every worker is not enough: Planning writes the public
+        # answer itself, so it can introduce a citation no worker retrieved.
+        # Only a final answer is checked — an intermediate tool-calling step
+        # publishes nothing, and rewriting it would touch a message the model
+        # still has to pair with its results.
+        if not response.message.tool_calls:
+            response = await self._apply_grounded_answer_gate(state, response)
+
         return self._finalize_agent_response(state, response)
 
     async def _review_planning_todos_with_rubric(

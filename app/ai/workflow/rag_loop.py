@@ -83,7 +83,10 @@ class RagLoopMixin:
             discard(descriptor)
 
     def _grounded_answer_gate(self) -> GroundedAnswerGate:
-        gate = getattr(self.rag_agent, "grounded_answer_gate", None)
+        # Planning grounds its own synthesis, so the gate has to be reachable
+        # without a RAG agent in play. Its configuration never depended on
+        # one — only the cached instance did.
+        gate = getattr(getattr(self, "rag_agent", None), "grounded_answer_gate", None)
         if isinstance(gate, GroundedAnswerGate):
             return gate
         return GroundedAnswerGate(

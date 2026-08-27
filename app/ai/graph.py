@@ -1845,7 +1845,23 @@ class MultiAgentWorkflow(
                             if artifact not in existing_artifacts:
                                 existing_artifacts.append(artifact)
                         response.tool_artifacts = existing_artifacts
-                    return response
+                    # This answer goes to Planning, which will synthesize it into
+                    # a public one. Grounding it here is what stops a worker's
+                    # unchecked citation from arriving wearing the same brackets
+                    # as a real one. The same gate as the top-level RAG node, on
+                    # the evidence this worker itself retrieved: worker context
+                    # is local, so a wider pool would let one worker authorize
+                    # another's citation.
+                    return await self._apply_grounded_answer_gate(
+                        {
+                            # ``rag_tool_messages`` carries this worker's own
+                            # tool calls, which is how the gate scopes evidence
+                            # to the calls that actually produced it.
+                            "messages": list(rag_tool_messages),
+                            "context": {"tool_artifacts": list(accumulated_artifacts)},
+                        },
+                        response,
+                    )
 
                 normalized_calls = [
                     canonicalize_rag_tool_call(normalize_tool_call(tc)) for tc in tool_calls

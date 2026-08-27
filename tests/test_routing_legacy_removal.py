@@ -100,7 +100,11 @@ def test_only_the_finalizer_reaches_end():
 # Legacy modules still reachable in production. Each entry names what still
 # runs through it, so the remaining work is visible rather than implied.
 STILL_LIVE_LEGACY_MODULES = {
-    "app/ai/workflow/rag_loop.py": "the rag_agent node still runs the pre-v2 RAG loop",
+    "app/ai/workflow/rag_loop.py": (
+        "the rag_agent node still runs the pre-v2 RAG loop — but it now owns "
+        "the one grounding gate every RAG answer passes through, including "
+        "Planning workers and the Planning synthesis"
+    ),
     "app/ai/workflow/planning_loop.py": "the planning_agent node still runs the pre-v2 loop",
     "app/ai/workflow/tool_loop.py": (
         "rag_tools and planning_tools still use its approval, artifact, and tool-error helpers"
