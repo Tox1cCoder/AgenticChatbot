@@ -1626,7 +1626,10 @@ Confirm the diff contains no credentials, captured prompts, generated evaluation
 ## Implementation Status — 2026-08-26
 
 Tasks 1-11 are implemented and committed on `Thai-Postgre-FastAPI`. Task 12 was
-skipped as redundant (see its section). Tasks 13-14 are not started.
+skipped as redundant (see its section). Task 13 is partially done: the
+conversation turn coordinator, per-turn checkpoint retention, and the rollout
+runbook have landed; the end-to-end scenario suite has not. Task 14 is not
+started.
 
 **Landed and verified** (full non-live suite: 4534 passed, 3 pre-existing
 failures unrelated to this work; `ruff check app tests` clean):
@@ -1649,14 +1652,23 @@ failures unrelated to this work; `ruff check app tests` clean):
 - The provenance policy registry and universal public finalization.
 - Typed `WorkflowError` at the service boundary with allowlisted details.
 
+**Also landed since:** `ConversationTurnCoordinator` (per-conversation advisory
+lock, bounded acquisition, released in a `finally`, in-process backend rejected
+in production); per-turn checkpoint retention that enumerates exact owned thread
+IDs rather than deleting by prefix — which also fixed a real leak where deleting
+a conversation left every turn's checkpoint behind; and
+`docs/operations/routing-v2-rollout.md`.
+
 **Known gaps, tracked by `tests/test_routing_legacy_removal.py`:**
 
 1. The `rag_agent` and `planning_agent` graph nodes still run the pre-v2 loops.
    `RagExecutionGraphFactory` and `PlanningOrchestrator` are built and tested
    but are not yet what production executes. Grounding enforcement *did* ship
    on the live RAG path.
-2. `_recover_terminal_response` still exists in the runtime adapter and can
-   publish text the finalizer never validated.
+2. ~~`_recover_terminal_response` can publish unvalidated text.~~ **Fixed.**
+   It no longer scans stream chunks or checkpoint messages; it returns the
+   finalizer's response or nothing, and a turn with no finalized response
+   yields a typed error.
 3. `_tool_node` / `_approval_node` are unreachable from the graph but retained:
    they still hold canvas-edit denial and HITL edit-rewrite behavior that the
    v2 middleware has not absorbed.
