@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from app.ai.workflow.inventory import build_routing_inventory
 from app.ai.workflow.routing import (
+    RoutingContext,
     RoutingContextBuilder,
     RoutingContextRequest,
     RoutingDocumentDescriptor,
@@ -138,17 +139,27 @@ async def test_context_preserves_original_language_message():
 
 
 def test_context_excludes_canvas_source_and_document_content():
+    """The descriptors carry identity. Neither type can hold the content."""
+    from app.ai.workflow.routing import RoutingCanvasDescriptor, RoutingDocumentDescriptor
+
     builder = _builder()
-    context = builder.build_sync_for_test(
+    context = RoutingContext(
         message="hello",
-        canvas_title="Site",
-        canvas_content="SECRET CANVAS SOURCE",
-        document_body="SECRET DOCUMENT BODY",
+        active_canvas=RoutingCanvasDescriptor(artifact_id="canvas:main", title="Site"),
+        documents=(
+            RoutingDocumentDescriptor(document_id="doc-1", filename="a.pdf", status="ready"),
+        ),
     )
+
     payload = builder.serialize(context)
-    assert "SECRET CANVAS SOURCE" not in payload
-    assert "SECRET DOCUMENT BODY" not in payload
+
     assert json.loads(payload)["active_canvas"]["title"] == "Site"
+    with pytest.raises(ValidationError):
+        RoutingCanvasDescriptor(artifact_id="canvas:main", content="SECRET CANVAS SOURCE")
+    with pytest.raises(ValidationError):
+        RoutingDocumentDescriptor(
+            document_id="doc-1", filename="a.pdf", body="SECRET DOCUMENT BODY"
+        )
 
 
 async def test_context_enforces_every_collection_and_text_bound():

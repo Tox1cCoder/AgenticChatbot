@@ -45,6 +45,20 @@ REMOVED_RUNTIME_TOKENS = (
     "_extract_agent_name",
     # The grounding rollout branch.
     "rag_grounded_answer_gate_enabled",
+    # The auto-continuation outer loop. A second round re-enters ``route``,
+    # and the turn's routing decision is set-once.
+    "auto_continue_enabled",
+    "auto_continue_max_rounds",
+    "_build_continuation_state",
+    "_capture_state_for_continuation",
+    # Parent-level tool and approval stages: a standard specialist runs its
+    # whole loop, approval included, inside its own subgraph.
+    "_approval_node",
+    "_route_tool_output",
+    # A handoff is a parent command, never a value a specialist returns.
+    "HandoffOutcome",
+    # An authorization hook production never supplied, so it allowed everything.
+    "ToolAuthorizationMiddleware",
 )
 
 
@@ -107,7 +121,8 @@ STILL_LIVE_LEGACY_MODULES = {
     ),
     "app/ai/workflow/planning_loop.py": "the planning_agent node still runs the pre-v2 loop",
     "app/ai/workflow/tool_loop.py": (
-        "rag_tools and planning_tools still use its approval, artifact, and tool-error helpers"
+        "rag_tools and planning_tools still use its approval, artifact, and "
+        "tool-error helpers; its own tool and approval nodes are gone"
     ),
     "app/ai/agents/base_agent.py": (
         "specialist definitions delegate prompt and tool assembly to it; only its "
@@ -153,9 +168,10 @@ def test_response_recovery_no_longer_fabricates_an_answer():
 
     ``_recover_terminal_response`` still exists as the adapter's accessor for
     the finalizer's response, but it no longer scans accumulated stream chunks
-    or checkpoint messages for assistant-looking text. A turn with no finalized
-    response now yields a typed error instead of an unvalidated draft. Covered
-    in detail by tests/test_no_unvalidated_response_recovery.py.
+    or checkpoint messages for assistant-looking text, and it no longer takes
+    a parameter to pass such text in through. A turn with no finalized response
+    yields a typed error instead of an unvalidated draft. Covered in detail by
+    tests/test_no_unvalidated_response_recovery.py.
     """
     import ast
 
@@ -190,10 +206,28 @@ def test_the_finalizer_is_the_only_in_graph_response_builder():
     assert builder_source.count('graph.add_edge("finalize", END)') == 1
 
 
-def test_the_shared_rag_graph_and_planning_orchestrator_exist_and_are_importable():
-    """The v2 components are built; only the cutover to them is outstanding."""
-    from app.ai.workflow.planning_execution import PlanningOrchestrator
-    from app.ai.workflow.rag_execution import RagExecutionGraphFactory
+def test_the_shared_rag_graph_and_planning_orchestrator_are_not_wired_yet():
+    """Recorded, not excused: these are components, not the running path.
 
-    assert PlanningOrchestrator is not None
-    assert RagExecutionGraphFactory is not None
+    ``RagExecutionGraphFactory`` and ``PlanningOrchestrator`` are importable
+    and unit-tested, but nothing in ``app`` constructs either one — the RAG and
+    Planning nodes still run their pre-v2 loops. Delete this test when the
+    cutover lands; do not weaken it.
+    """
+    import pathlib
+    import re
+
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    constructed = [
+        path.relative_to(repo_root).as_posix()
+        for path in sorted((repo_root / "app").rglob("*.py"))
+        if path.name not in {"rag_execution.py", "planning_execution.py"}
+        and re.search(
+            r"(RagExecutionGraphFactory|PlanningOrchestrator)\s*\(",
+            path.read_text(encoding="utf-8"),
+        )
+    ]
+    assert constructed == [], (
+        f"the v2 RAG/Planning components are now constructed in {constructed} — "
+        "the cutover advanced, so update this record and the STILL_LIVE entries"
+    )

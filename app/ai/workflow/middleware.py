@@ -27,8 +27,6 @@ from app.ai.context_overflow import is_context_overflow_error
 from app.ai.hitl_config import (
     build_tool_interrupt_payload,
     calls_requiring_approval,
-    identity_requires_approval,
-    resolve_call_identity,
 )
 from app.ai.tool_context import tool_execution_context
 from app.ai.tool_execution import (
@@ -476,21 +474,3 @@ def build_specialist_middleware(
 
 def _policy_is_active(hitl_policy: dict[str, Any] | None) -> bool:
     return isinstance(hitl_policy, dict) and bool(hitl_policy.get("master_enabled", True))
-
-
-def policy_requires_approval(
-    tool_call: Any,
-    *,
-    hitl_policy: dict[str, Any] | None,
-    tool_map: dict[str, Any] | None = None,
-    mcp_manager: Any = None,
-) -> bool:
-    """Whether one resolved call identity needs approval under the policy.
-
-    Kept in application code because it needs origin, server, and mutation
-    provenance that the framework's tool-name matching cannot see.
-    """
-    if not isinstance(hitl_policy, dict):
-        return False
-    identity = resolve_call_identity(tool_call, tool_map=tool_map, mcp_manager=mcp_manager)
-    return identity_requires_approval(identity, hitl_policy)

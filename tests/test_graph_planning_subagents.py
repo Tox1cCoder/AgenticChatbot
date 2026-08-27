@@ -381,8 +381,6 @@ def _planning_tool_state(
 
 def test_should_continue_planning_does_not_end_on_soft_budget_with_tool_result(monkeypatch):
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
-    monkeypatch.setattr(settings, "auto_continue_enabled", True)
-    monkeypatch.setattr(settings, "auto_continue_soft_limit_ratio", 0.5)
     monkeypatch.setattr(settings, "planning_max_iterations", 10)
 
     state = _planning_tool_state(planning_call_count=5)
@@ -399,7 +397,6 @@ def test_should_continue_planning_hard_budget_forces_final_synthesis_after_tool_
     monkeypatch,
 ):
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
-    monkeypatch.setattr(settings, "auto_continue_enabled", True)
     monkeypatch.setattr(settings, "planning_max_iterations", 10)
 
     state = _planning_tool_state(planning_call_count=10)
@@ -417,8 +414,6 @@ def test_should_continue_planning_ignores_budget_when_disabled_after_tool_result
     monkeypatch,
 ):
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
-    monkeypatch.setattr(settings, "auto_continue_enabled", True)
-    monkeypatch.setattr(settings, "auto_continue_soft_limit_ratio", 0.5)
     monkeypatch.setattr(settings, "planning_max_iterations", 0)
 
     state = _planning_tool_state(planning_call_count=999)

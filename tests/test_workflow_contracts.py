@@ -8,7 +8,6 @@ from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from app.ai.workflow.contracts import (
     EXECUTION_PHASES,
     AgentTransition,
-    HandoffOutcome,
     OutcomeProvenance,
     PendingTransition,
     ResponseOutcome,
@@ -120,29 +119,20 @@ def test_outcome_provenance_preserves_message_subclasses():
     ]
 
 
-def test_response_and_handoff_outcomes_are_discriminated_on_kind():
-    response = ResponseOutcome(
+def test_a_specialist_outcome_carries_only_server_owned_fields():
+    """There is one outcome shape. A handoff leaves as a parent command."""
+    outcome = ResponseOutcome(
         agent_id="chat_agent", response=_agent_response(), provenance=OutcomeProvenance()
     )
-    handoff = HandoffOutcome(
-        agent_id="chat_agent",
-        handoff=AgentTransition(
-            from_agent_id="chat_agent",
-            to_agent_id="search_agent",
-            source="handoff",
-            tool_call_id="call-1",
-        ),
-    )
-    assert response.kind == "response"
-    assert handoff.kind == "handoff"
+    assert outcome.agent_id == "chat_agent"
 
     with pytest.raises(ValidationError):
         ResponseOutcome.model_validate(
             {
-                "kind": "handoff",
                 "agent_id": "chat_agent",
                 "response": _agent_response().model_dump(),
                 "provenance": {},
+                "handoff": {"to_agent_id": "search_agent"},
             }
         )
 

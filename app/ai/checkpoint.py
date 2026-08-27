@@ -1,7 +1,5 @@
 import contextlib
-import inspect
 import logging
-from typing import Any
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -10,7 +8,6 @@ from psycopg_pool import AsyncConnectionPool
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from app.ai.workflow.contracts import (
     AgentTransition,
-    HandoffOutcome,
     OutcomeProvenance,
     PendingTransition,
     ResponseOutcome,
@@ -34,7 +31,6 @@ _CHECKPOINT_ALLOWED_TYPES = (
     PendingTransition,
     OutcomeProvenance,
     ResponseOutcome,
-    HandoffOutcome,
     WorkerResult,
     WorkflowError,
 )
@@ -50,26 +46,16 @@ logger = logging.getLogger(__name__)
 
 
 def _build_checkpoint_serializer() -> JsonPlusSerializer:
-    """Build a checkpoint serializer compatible with current and newer LangGraph APIs."""
-    serializer_kwargs: dict[str, Any] = {
-        "allowed_json_modules": _CHECKPOINT_ALLOWED_JSON_MODULES,
-    }
+    """Build the serializer that round-trips every checkpointed contract.
 
-    try:
-        serializer_params = inspect.signature(JsonPlusSerializer.__init__).parameters
-    except (TypeError, ValueError):
-        serializer_params = {}
-
-    msgpack_supported_in_constructor = "allowed_msgpack_modules" in serializer_params
-    if msgpack_supported_in_constructor:
-        serializer_kwargs["allowed_msgpack_modules"] = _CHECKPOINT_ALLOWED_MSGPACK_MODULES
-
-    serializer = JsonPlusSerializer(**serializer_kwargs)
-    if not msgpack_supported_in_constructor:
-        with_msgpack_allowlist = getattr(serializer, "with_msgpack_allowlist", None)
-        if callable(with_msgpack_allowlist):
-            serializer = with_msgpack_allowlist(_CHECKPOINT_ALLOWED_MSGPACK_MODULES)
-    return serializer
+    Both allowlists are required: a type missing from either comes back as a
+    plain dict, and a control-plane contract that degrades to a dict stops
+    being validated on the way out of the checkpoint.
+    """
+    return JsonPlusSerializer(
+        allowed_json_modules=_CHECKPOINT_ALLOWED_JSON_MODULES,
+        allowed_msgpack_modules=_CHECKPOINT_ALLOWED_MSGPACK_MODULES,
+    )
 
 
 class CheckpointManager:

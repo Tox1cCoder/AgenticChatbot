@@ -74,9 +74,7 @@ class SubagentModelOverride(BaseModel):
     )
     reasoning_effort: str | None = Field(
         default=None,
-        description=(
-            "Exact provider-native reasoning value. Omit for Provider default."
-        ),
+        description=("Exact provider-native reasoning value. Omit for Provider default."),
     )
 
     @field_validator("model")
@@ -236,7 +234,7 @@ class PlanningSubagentResult(BaseModel):
     agent_name: str | None = Field(default=None)
     agent_kind: Literal["base", "custom"] | None = None
     custom_agent_id: str | None = None
-    status: Literal["completed", "failed", "timeout", "requires_approval"]
+    status: Literal["completed", "failed", "timeout"]
     elapsed_ms: int
     summary: str = Field(
         description=(
@@ -444,13 +442,6 @@ def _build_task_prompt(task: PlanningSubagentTask) -> str:
     return "\n".join(parts).strip()
 
 
-def _is_requires_approval_response(response: AgentResponse) -> bool:
-    metadata = response.metadata or {}
-    if metadata.get("requires_approval") is True:
-        return True
-    return metadata.get("pause_reason") == "awaiting_approval"
-
-
 def _summarize_requested_model(
     override: SubagentModelOverride | None,
 ) -> dict[str, Any] | None:
@@ -536,7 +527,7 @@ class PlanningSubagentDispatcher:
         default_identity = agent_identity(task.agent, custom_agents)
 
         def _result(
-            status: Literal["completed", "failed", "timeout", "requires_approval"],
+            status: Literal["completed", "failed", "timeout"],
             answer: str,
             error: str | None = None,
             artifacts: list[dict[str, Any]] | None = None,
@@ -667,20 +658,6 @@ class PlanningSubagentDispatcher:
                     "failed",
                     response.message.content or response.error or "(no output)",
                     error=response.error,
-                    artifacts=worker_artifacts,
-                    resolved_model=resolved_model,
-                    identity=response_identity,
-                    thinking=worker_thinking,
-                )
-            )
-
-        if _is_requires_approval_response(response):
-            return await _emit_end(
-                _result(
-                    "requires_approval",
-                    response.message.content
-                    or "Worker stopped awaiting human approval; supervisor must handle directly.",
-                    error="requires_approval",
                     artifacts=worker_artifacts,
                     resolved_model=resolved_model,
                     identity=response_identity,

@@ -7,10 +7,8 @@ import json
 import logging
 from typing import Any
 
-from langchain_core.messages import AIMessage, ToolMessage
-from langgraph.types import interrupt
+from langchain_core.messages import ToolMessage
 
-from app.ai.canvas_state import CANVAS_EDIT_DENIED_TOOL_NAMES
 from app.ai.hitl_config import (
     any_call_requires_approval,
     build_tool_interrupt_payload,
@@ -26,13 +24,11 @@ from app.ai.tool_context import (
     tool_execution_context,
 )
 from app.ai.tool_execution import (
-    build_rejected_tool_artifacts,
     ensure_agent_tool_map,
     execute_tool_calls,
 )
 from app.ai.utils import (
     apply_hitl_decisions,
-    find_pending_tool_call_message,
     make_json_safe,
     normalize_tool_call,
 )
@@ -70,127 +66,6 @@ class ToolLoopMixin:
         if existing_candidates:
             context["rich_item_candidates"] = existing_candidates
             apply_rich_image_selection(context)
-
-    async def _tool_node(self, state: GraphState) -> GraphState:
-        messages = state.get("messages", [])
-        pending_tool_message = find_pending_tool_call_message(messages)
-        if not pending_tool_message:
-            return state
-
-        pending_message_idx, pending_message = pending_tool_message
-
-        # Skip tool calls that already have a ToolMessage (e.g. HITL rejections).
-        # This keeps the AIMessage tool_calls intact (needed for a valid LLM message
-        # sequence) while avoiding re-execution of calls that were already resolved.
-        already_resolved_ids = {
-            msg.tool_call_id
-            for msg in messages[pending_message_idx + 1 :]
-            if isinstance(msg, ToolMessage) and getattr(msg, "tool_call_id", None)
-        }
-        tool_calls_pending = [
-            tc
-            for tc in pending_message.tool_calls
-            if normalize_tool_call(tc).get("id") not in already_resolved_ids
-        ]
-        if not tool_calls_pending:
-            # All tool calls for this AI message are already resolved (all rejected).
-            # Return early so _route_tool_output can send the agent back to re-respond.
-            return state
-
-        denied_feedback: dict[str, str] = {}
-        if (
-            state.get("active_agent_id") == "canvas_agent"
-            and GraphStateView(state).context().get("canvas_edit_mode") is True
-        ):
-            for tool_call in tool_calls_pending:
-                normalized = normalize_tool_call(tool_call)
-                if normalized.get("name") in CANVAS_EDIT_DENIED_TOOL_NAMES:
-                    tool_call_id = normalized.get("id")
-                    if tool_call_id:
-                        denied_feedback[str(tool_call_id)] = (
-                            "This widget mutation is unavailable during a canvas edit. "
-                            "Return the complete updated canvas artifact or hand off the "
-                            "inline-widget work."
-                        )
-
-        denied_outputs = [
-            {
-                "tool_call_id": normalize_tool_call(tool_call).get("id"),
-                "name": normalize_tool_call(tool_call).get("name"),
-                "content": denied_feedback[str(normalize_tool_call(tool_call).get("id"))],
-            }
-            for tool_call in tool_calls_pending
-            if str(normalize_tool_call(tool_call).get("id")) in denied_feedback
-        ]
-        denied_artifacts = build_rejected_tool_artifacts(
-            tool_calls=tool_calls_pending,
-            rejected_feedback=denied_feedback,
-        )
-        tool_calls_pending = [
-            tool_call
-            for tool_call in tool_calls_pending
-            if str(normalize_tool_call(tool_call).get("id")) not in denied_feedback
-        ]
-
-        if not tool_calls_pending:
-            self._apply_tool_outputs_to_state(
-                state,
-                tool_outputs=denied_outputs,
-                tool_artifacts=denied_artifacts,
-                all_images=[],
-                truncate_outputs=True,
-            )
-            return state
-
-        active_agent_id_name = state.get("active_agent_id")
-        agent = self._resolve_runtime_agent(state, active_agent_id_name)
-        if not agent:
-            logger.warning(
-                "Skipping tool execution: active_agent_id '%s' not in agent registry",
-                active_agent_id_name,
-            )
-            # Strip tool_calls from the pending AIMessage to prevent downstream
-            # routing confusion when the tools node cannot execute anything.
-            sanitized = AIMessage(content=pending_message.content or "")
-            state["messages"] = (
-                messages[:pending_message_idx] + [sanitized] + messages[pending_message_idx + 1 :]
-            )
-            return state
-
-        handoff_tool = self._handoff_tool_for_agent(state, active_agent_id_name)
-        scoped_internal_tools = [handoff_tool] if handoff_tool else None
-        tool_map = await ensure_agent_tool_map(
-            agent,
-            conversation_id=state.get("conversation_id"),
-            user_id=state.get("user_id"),
-            device_id=state.get("device_id"),
-            internal_tools=scoped_internal_tools,
-        )
-
-        tool_outputs, tool_artifacts, all_images = await self._execute_agent_tool_calls(
-            state=state,
-            agent=agent,
-            tool_calls=tool_calls_pending,
-            tool_map=tool_map,
-            capture_images=True,
-            internal_tools=scoped_internal_tools,
-        )
-        tool_outputs = [*denied_outputs, *tool_outputs]
-        tool_artifacts = [*denied_artifacts, *tool_artifacts]
-
-        # Inter-agent delegation is interpreted before ToolMessages are
-        # persisted so a rejected handoff rewrites its one matching output
-        # instead of appending a duplicate ToolMessage.
-        state = self._apply_hand_off_if_present(state, tool_outputs)
-        self._apply_tool_outputs_to_state(
-            state,
-            tool_outputs=tool_outputs,
-            tool_artifacts=tool_artifacts,
-            all_images=all_images,
-            truncate_outputs=True,
-        )
-
-        return state
 
     def _apply_hand_off_if_present(self, state: GraphState, tool_outputs: list) -> GraphState:
         """Interpret one canonical handoff output before ToolMessages are persisted."""
@@ -407,85 +282,6 @@ class ToolLoopMixin:
         state["context"] = context
 
         return payload
-
-    async def _approval_node(self, state: GraphState) -> GraphState:
-        messages = state.get("messages", [])
-        if not messages:
-            return state
-
-        last_message = messages[-1]
-        if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
-            return state
-
-        active_agent_id_name = state.get("active_agent_id")
-        agent = self._resolve_runtime_agent(state, active_agent_id_name)
-        handoff_tool = self._handoff_tool_for_agent(state, active_agent_id_name)
-        scoped_internal_tools = [handoff_tool] if handoff_tool else None
-        interrupt_payload = await self._prepare_interrupt_payload(
-            state,
-            tool_calls=last_message.tool_calls,
-            agent=agent,
-            internal_tools=scoped_internal_tools,
-        )
-        interrupt_payload["action_requests"]
-
-        # Label the stop reason before yielding to the human so callers can
-        # distinguish approval-gate pauses from budget/error pauses.
-        context = dict(state.get("context") or {})
-        context["pause_reason"] = "awaiting_approval"
-        state["context"] = context
-
-        human_decisions = interrupt(interrupt_payload)
-        context = GraphStateView(state).context_copy()
-        context.pop("pause_reason", None)
-        state["context"] = context
-
-        if not human_decisions:
-            approved_tool_calls, rejected_feedback = _apply_decisions(last_message.tool_calls, [])
-        else:
-            approved_tool_calls, rejected_feedback = _apply_decisions(
-                last_message.tool_calls, human_decisions
-            )
-
-        # ``apply_hitl_decisions`` returns edited calls with the approver's
-        # replacement args.  Persist those edits on the AIMessage consumed by
-        # the downstream tools node; otherwise it finds and executes the
-        # original, pre-approval args.  Rejected calls remain on the message so
-        # their ToolMessages still form a valid assistant/tool sequence.
-        approved_by_id = {
-            normalize_tool_call(tool_call).get("id"): tool_call for tool_call in approved_tool_calls
-        }
-        rewritten_tool_calls = [
-            approved_by_id.get(normalize_tool_call(tool_call).get("id"), tool_call)
-            for tool_call in last_message.tool_calls
-        ]
-        last_message = last_message.model_copy(update={"tool_calls": rewritten_tool_calls})
-
-        rejection_messages = [
-            ToolMessage(
-                content=rejected_feedback[tc.get("id")],
-                tool_call_id=tc.get("id"),
-                name=tc.get("name"),
-            )
-            for tc in last_message.tool_calls
-            if tc.get("id") in rejected_feedback
-        ]
-
-        if rejected_feedback:
-            context = state.get("context", {})
-            existing_artifacts = context.get("tool_artifacts", [])
-            existing_artifacts.extend(
-                build_rejected_tool_artifacts(
-                    tool_calls=last_message.tool_calls,
-                    rejected_feedback=rejected_feedback,
-                )
-            )
-            context["tool_artifacts"] = existing_artifacts
-            state["context"] = context
-
-        state["messages"] = messages[:-1] + [last_message] + rejection_messages
-
-        return state
 
     async def _execute_agent_tool_calls(
         self,

@@ -400,7 +400,6 @@ class PublicResponseFinalizer:
             "response": response,
             "final_agent_id": outcome.agent_id,
             "execution_phase": "completed",
-            "validated_public_content": response.message.content,
         }
 
     def _build_response(self, state: dict[str, Any], outcome: ResponseOutcome) -> AgentResponse:
@@ -495,7 +494,6 @@ class PublicResponseFinalizer:
             ),
             "workflow_error": error,
             "execution_phase": "failed",
-            "validated_public_content": "",
         }
 
 

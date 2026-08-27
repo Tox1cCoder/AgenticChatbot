@@ -17,33 +17,6 @@ def _tool_call() -> dict:
     return {"id": "tool-call-1", "name": "lookup", "args": {"query": "status"}}
 
 
-def test_route_tool_output_soft_limit_routes_to_final_synthesis(monkeypatch):
-    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
-    workflow.agents = {"chat_agent": object()}
-    monkeypatch.setattr(settings, "react_agent_max_iterations", 10)
-    monkeypatch.setattr(settings, "auto_continue_enabled", True)
-    monkeypatch.setattr(settings, "auto_continue_soft_limit_ratio", 0.5)
-
-    state = {
-        "active_agent_id": "chat_agent",
-        "iteration_count": 5,
-        "messages": [
-            HumanMessage(content="What happened?"),
-            AIMessage(content="", tool_calls=[_tool_call()]),
-            ToolMessage(content="The lookup result", tool_call_id="tool-call-1", name="lookup"),
-        ],
-        "context": {},
-    }
-
-    route = workflow._route_tool_output(state)
-
-    assert route == "chat_agent"
-    assert state["context"]["force_final_response"] is True
-    assert state["context"]["tool_budget"]["reason"] == "soft_budget"
-    assert state["context"]["tool_budget"]["count"] == 5
-    assert state["context"]["tool_budget"]["limit"] == 5
-
-
 def test_graph_config_clamps_recursion_limit_for_final_synthesis(monkeypatch):
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
     workflow.checkpointer = None
@@ -229,89 +202,101 @@ async def test_base_agent_ainvoke_with_retries_forwards_run_config():
 
 
 @pytest.mark.asyncio
-async def test_tool_node_resolves_pending_calls_when_tool_map_empty(monkeypatch):
-    graph = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+async def test_an_unresolvable_tool_answers_the_model_instead_of_raising(monkeypatch):
+    """A call the execution map cannot resolve is model-visible feedback.
 
-    class _Agent:
-        agent_config_key = "chat"
-        tool_state_key = "chat"
+    The model can only recover from a bad call if it gets told; raising would
+    end the turn on an exception the model never sees.
+    """
+    from app.ai.workflow.middleware import SpecialistToolScope, ToolExecutionMiddleware
 
-    graph._resolve_runtime_agent = lambda state, selected: _Agent()
+    scope = SpecialistToolScope(
+        agent=None,
+        agent_key="chat",
+        conversation_id="conversation-1",
+        user_id="user-1",
+        device_id=None,
+    )
 
-    async def _empty_tool_map(*args, **kwargs):
-        return {}
+    async def _no_tools():
+        return []
 
-    monkeypatch.setattr("app.ai.workflow.tool_loop.ensure_agent_tool_map", _empty_tool_map)
+    middleware = ToolExecutionMiddleware(scope=scope, tool_factory=_no_tools)
+    request = SimpleNamespace(
+        tool_call={"id": "call-1", "name": "missing_tool", "args": {}},
+        state={},
+        runtime=SimpleNamespace(context=None),
+    )
 
-    state = {
-        "active_agent_id": "chat_agent",
-        "messages": [
-            HumanMessage(content="run something"),
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "id": "call-1",
-                        "name": "missing_tool",
-                        "args": {},
-                    }
-                ],
-            ),
-        ],
-    }
+    async def _must_not_execute(_request):
+        raise AssertionError("the framework must not execute an unresolved tool")
 
-    updated = await graph._tool_node(state)
+    message = await middleware.awrap_tool_call(request, _must_not_execute)
 
-    assert isinstance(updated["messages"][-1], ToolMessage)
-    assert updated["messages"][-1].tool_call_id == "call-1"
-    assert "missing_tool" in updated["messages"][-1].content
+    assert message.tool_call_id == "call-1"
+    assert message.status == "error"
+    assert "missing_tool" in message.content
 
 
 @pytest.mark.asyncio
-async def test_canvas_edit_rejects_stale_widget_mutation_before_execution(monkeypatch):
-    graph = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+async def test_canvas_edit_never_binds_the_widget_mutations(monkeypatch):
+    """Editing a canvas returns the whole artifact, so a widget mutation in
+    the same turn would be overwritten by the rewrite. The tools are withheld
+    rather than refused after the model has already spent a call on one."""
+    from app.ai.canvas_state import CANVAS_EDIT_DENIED_TOOL_NAMES
 
-    class _Agent:
-        agent_config_key = "canvas"
-        tool_state_key = "canvas"
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    workflow.agents = {"canvas_agent": object()}
+    workflow.chat_agent = SimpleNamespace(_convert_history_to_langchain_messages=lambda h: [])
 
-    graph._resolve_runtime_agent = lambda state, selected: _Agent()
-    graph._handoff_tool_for_agent = lambda state, selected: None
+    async def _history(*_args, **_kwargs):
+        return []
 
-    async def _tool_map(*args, **kwargs):
-        return {"widget_create": object()}
+    async def _snapshot(*_args, **_kwargs):
+        return SimpleNamespace(content="<html>previous</html>")
 
-    async def _must_not_execute(**kwargs):
-        raise AssertionError("denied widget mutation reached execution")
-
-    monkeypatch.setattr("app.ai.workflow.tool_loop.ensure_agent_tool_map", _tool_map)
-    graph._execute_agent_tool_calls = _must_not_execute
+    workflow._get_conversation_history = _history
+    workflow._get_active_canvas_snapshot = _snapshot
 
     state = {
         "active_agent_id": "canvas_agent",
-        "messages": [
-            HumanMessage(content="edit the canvas"),
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "id": "call-widget",
-                        "name": "widget_create",
-                        "args": {},
-                    }
-                ],
-            ),
-        ],
-        "context": {"canvas_edit_mode": True},
+        "conversation_id": "conversation-1",
+        "user_id": "user-1",
+        "messages": [HumanMessage(content="tweak the heading")],
+        "context": {},
     }
 
-    updated = await graph._tool_node(state)
+    request = await workflow._specialist_request_for("canvas_agent", state)
 
-    assert isinstance(updated["messages"][-1], ToolMessage)
-    assert updated["messages"][-1].tool_call_id == "call-widget"
-    assert "canvas edit" in updated["messages"][-1].content.lower()
-    artifact = updated["context"]["tool_artifacts"][-1]
-    assert artifact["status"] == "rejected"
+    assert request.extras["excluded_tool_names"] == CANVAS_EDIT_DENIED_TOOL_NAMES
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_canvas_still_binds_the_widget_tools():
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    workflow.agents = {"canvas_agent": object()}
+    workflow.chat_agent = SimpleNamespace(_convert_history_to_langchain_messages=lambda h: [])
+
+    async def _history(*_args, **_kwargs):
+        return []
+
+    async def _no_snapshot(*_args, **_kwargs):
+        return None
+
+    workflow._get_conversation_history = _history
+    workflow._get_active_canvas_snapshot = _no_snapshot
+
+    state = {
+        "active_agent_id": "canvas_agent",
+        "conversation_id": "conversation-1",
+        "user_id": "user-1",
+        "messages": [HumanMessage(content="make me a dashboard")],
+        "context": {},
+    }
+
+    request = await workflow._specialist_request_for("canvas_agent", state)
+
+    assert request.extras["excluded_tool_names"] is None
 
 
 def test_apply_tool_outputs_tracks_same_error_streak(monkeypatch):

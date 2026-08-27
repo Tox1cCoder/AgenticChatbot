@@ -1601,33 +1601,6 @@ class Settings(BaseSettings):
     )
 
     # Auto-Continue Configuration
-    auto_continue_enabled: bool = Field(
-        default=True,
-        description="Enable automatic continuation when agent hits iteration limits",
-    )
-    auto_continue_max_rounds: int = Field(
-        default=5,
-        description="Maximum number of continuation rounds per user message (safety cap)",
-    )
-    auto_continue_soft_limit_ratio: float = Field(
-        default=0.8,
-        description=(
-            "Fraction of the loop budget to consume per round before rolling to the "
-            "next round (0.1-1.0)"
-        ),
-    )
-    auto_continue_emit_events: bool = Field(
-        default=False,
-        description="Emit continuation_start events during streaming (debug/UX)",
-    )
-    auto_continue_max_total_iterations: int = Field(
-        default=200,
-        description="Absolute max iterations across all continuation rounds",
-    )
-    auto_continue_timeout_seconds: int = Field(
-        default=300,
-        description="Maximum wall-clock time for all continuation rounds (seconds)",
-    )
 
     # Planning Agent Explicit Settings (promoted from getattr defaults)
     planning_max_iterations: int = Field(
@@ -1939,9 +1912,6 @@ class Settings(BaseSettings):
         "react_agent_recursion_limit",
         "planning_rubric_max_iterations",
         "agentic_max_iterations",
-        "auto_continue_max_rounds",
-        "auto_continue_max_total_iterations",
-        "auto_continue_timeout_seconds",
         "planning_consecutive_errors_limit",
         "tool_execution_consecutive_errors_limit",
         "celery_worker_concurrency",
@@ -2085,17 +2055,6 @@ class Settings(BaseSettings):
         v = int(v)
         if v < 0:
             raise ValueError("Value must be non-negative")
-        return v
-
-    @field_validator(
-        "auto_continue_soft_limit_ratio",
-        mode="before",
-    )
-    @classmethod
-    def _validate_fraction_fields(cls, v: float) -> float:
-        v = float(v)
-        if not (0.0 < v <= 1.0):
-            raise ValueError("Value must be in the range (0.0, 1.0]")
         return v
 
     @model_validator(mode="after")

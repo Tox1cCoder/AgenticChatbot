@@ -23,11 +23,12 @@ import asyncio
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import START, StateGraph
+from langgraph.types import Command
 
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from app.ai.workflow.contracts import (
     AgentTransition,
-    HandoffOutcome,
     OutcomeProvenance,
     PendingTransition,
     ResponseOutcome,
@@ -77,18 +78,6 @@ def _answer(agent_id: str, content: str = "answer", **provenance) -> ResponseOut
         agent_id=agent_id,
         response=_response(agent_id, content),
         provenance=OutcomeProvenance(**provenance),
-    )
-
-
-def _handoff(from_agent: str, to_agent: str, call_id: str = "call-1") -> HandoffOutcome:
-    return HandoffOutcome(
-        agent_id=from_agent,
-        handoff=AgentTransition(
-            from_agent_id=from_agent,
-            to_agent_id=to_agent,
-            source="handoff",
-            tool_call_id=call_id,
-        ),
     )
 
 
@@ -150,20 +139,23 @@ class ScriptedWorkflow:
         if self._on_invoke is not None:
             self._on_invoke(agent_id, state)
         queue = self._outcomes.get(str(agent_id))
-        if not queue:
-            return _answer(str(agent_id))
-        return queue.pop(0)
+        return queue.pop(0) if queue else _answer(str(agent_id))
 
     async def invoke_specialist_subgraph(self, _node_name, state):
-        return self._next(state.get("active_agent_id"), state)
+        outcome = self._next(state.get("active_agent_id"), state)
+        if isinstance(outcome, PendingTransition):
+            # Run the handoff through a real subgraph, because that is what
+            # makes it a parent command: LangGraph rewrites the namespace one
+            # level up as the exception bubbles, and the wrapper never sees it.
+            await _handoff_subgraph(outcome).ainvoke({})
+            raise AssertionError("the handoff command did not leave the subgraph")
+        return outcome
 
     def build_transition_resolver(self):
         from app.ai.workflow.transitions import TransitionResolver
 
         return TransitionResolver(
-            inventory=build_routing_inventory(
-                base_agent_ids=BASE_AGENT_IDS, custom_agents={}
-            ),
+            inventory=build_routing_inventory(base_agent_ids=BASE_AGENT_IDS, custom_agents={}),
             max_delegation_depth=2,
         )
 
@@ -241,9 +233,7 @@ async def test_a_turn_completes_through_every_base_specialist(agent_id):
 
 async def test_a_turn_completes_through_a_dynamic_custom_specialist():
     custom_id = "custom_agent:writer"
-    custom_agents = {
-        custom_id: {"name": "Writer", "description": "writes", "enabled": True}
-    }
+    custom_agents = {custom_id: {"name": "Writer", "description": "writes", "enabled": True}}
     workflow = ScriptedWorkflow({custom_id: [_answer(custom_id, "custom answer")]})
     routing = ScriptedRoutingService(custom_id)
 
@@ -284,22 +274,33 @@ def _pending(to_agent: str, *, from_agent: str = "chat_agent", call_id: str = "c
     )
 
 
+def _handoff_subgraph(pending: PendingTransition):
+    """A one-node subgraph whose node returns the real hand_off command."""
+
+    def emit(_state):
+        return Command(
+            graph=Command.PARENT,
+            update={"pending_transition": pending},
+            goto="resolve_transition",
+        )
+
+    graph = StateGraph(dict)
+    graph.add_node("hand_off", emit)
+    graph.add_edge(START, "hand_off")
+    return graph.compile()
+
+
 async def _run_handoff(workflow, *, pending, active="chat_agent", history=None):
     """Route to ``active``, which hands off, and let the resolver decide.
 
-    Production reaches the resolver from the hand_off tool's parent Command;
-    this reaches it through the wrapper's HandoffOutcome branch. Both arrive
-    with ``pending_transition`` already in state, which is the resolver's
-    actual contract, so what is under test here is identical either way.
+    The handoff arrives the way production delivers it: as a parent command
+    raised out of the specialist subgraph, bypassing the wrapper entirely.
     """
     state = _initial_state()
-    state["pending_transition"] = pending
     if history is not None:
         state["agent_history"] = history
 
-    workflow._outcomes.setdefault(
-        active, [_handoff(active, pending.to_agent_id, pending.tool_call_id)]
-    )
+    workflow._outcomes.setdefault(active, [pending])
     final, _ = await _run_turn(workflow, ScriptedRoutingService(active), state=state)
     return final
 
@@ -396,31 +397,32 @@ async def test_handoff_depth_is_bounded():
     assert final["final_agent_id"] == "search_agent"
 
 
-def test_the_handoff_outcome_branch_is_unreachable_in_production():
-    """Recorded, not excused: nothing constructs a HandoffOutcome.
+def test_a_handoff_reaches_the_resolver_without_a_specialist_outcome():
+    """The wrapper has no handoff branch, and must not grow one back.
 
-    The specialist wrapper has an ``isinstance(outcome, HandoffOutcome)``
-    branch routing to the resolver, but a real handoff never gets there — the
-    hand_off tool returns ``Command(graph=PARENT, goto=resolve_transition)``
-    from inside the subgraph, so the wrapper is bypassed entirely. The branch
-    also cannot work on its own: it updates ``agent_outcome`` but never
-    ``pending_transition``, and the resolver fails closed without one. The
-    tests above reach it only because they seed the pending transition.
-
-    Delete the branch or give it the pending update — do not loosen this.
+    A handoff is a parent command, not a value the specialist returns. A
+    wrapper branch for it would be a second way to move between agents, which
+    is exactly what the single transition resolver exists to prevent.
     """
+    import ast
     import pathlib
-    import re
 
-    repo_root = pathlib.Path(__file__).resolve().parent.parent
-    constructors = [
-        path.name
-        for path in sorted((repo_root / "app").rglob("*.py"))
-        if re.search(r"(?<!class )HandoffOutcome\s*\(", path.read_text(encoding="utf-8"))
-    ]
-    assert constructors == [], (
-        f"HandoffOutcome is constructed now ({constructors}) — the wrapper branch "
-        "is live, so verify it also sets pending_transition"
+    source = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "app"
+        / "ai"
+        / "workflow"
+        / "specialists.py"
+    ).read_text(encoding="utf-8")
+    literals = {
+        node.value
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+
+    assert "HandoffOutcome" not in source
+    assert "resolve_transition" not in literals, (
+        "a specialist wrapper must not be able to name the resolver as a target"
     )
 
 
@@ -457,14 +459,12 @@ async def test_a_failed_turn_publishes_no_assistant_text():
     final, _ = await _run_turn(ScriptedWorkflow({}), ScriptedRoutingService(error=error))
 
     assert final["response"].message.content == ""
-    assert not final.get("validated_public_content")
+    assert not [message for message in final["messages"] if getattr(message, "type", None) == "ai"]
 
 
 async def test_a_router_failure_never_substitutes_chat():
     """The one substitution this refactor exists to remove."""
-    error = WorkflowError(
-        code="routing_timeout", retriable=True, request_id="request-message-1"
-    )
+    error = WorkflowError(code="routing_timeout", retriable=True, request_id="request-message-1")
     final, _ = await _run_turn(ScriptedWorkflow({}), ScriptedRoutingService(error=error))
 
     assert final.get("routing_decision") is None
@@ -499,11 +499,7 @@ async def test_a_completed_turn_appends_exactly_one_assistant_message():
     workflow = ScriptedWorkflow({"chat_agent": [_answer("chat_agent", "just one")]})
     final, _ = await _run_turn(workflow, ScriptedRoutingService("chat_agent"))
 
-    assistant = [
-        message
-        for message in final["messages"]
-        if getattr(message, "type", None) == "ai"
-    ]
+    assistant = [message for message in final["messages"] if getattr(message, "type", None) == "ai"]
     assert len(assistant) == 1
     assert assistant[0].content == "just one"
     assert assistant[0].id == "assistant-message-1"
@@ -521,12 +517,15 @@ async def test_the_finalizer_records_all_three_agent_identities():
     assert workflow_metadata["final_agent_id"] == "search_agent"
 
 
-async def test_validated_content_matches_the_published_message():
+async def test_the_published_message_is_the_finalized_response():
+    """One text, one place it comes from. The terminal message and the
+    response the service persists must not be able to disagree."""
     workflow = ScriptedWorkflow({"chat_agent": [_answer("chat_agent", "exact text")]})
     final, _ = await _run_turn(workflow, ScriptedRoutingService("chat_agent"))
 
-    assert final["validated_public_content"] == "exact text"
-    assert final["response"].message.content == "exact text"
+    terminal = [message for message in final["messages"] if getattr(message, "type", None) == "ai"]
+    assert len(terminal) == 1
+    assert terminal[0].content == final["response"].message.content == "exact text"
 
 
 # ----------------------------------------------------------------------
@@ -545,8 +544,7 @@ async def test_each_turn_gets_its_own_checkpoint_thread():
         )
 
     threads = {
-        checkpoint.config["configurable"]["thread_id"]
-        async for checkpoint in saver.alist(None)
+        checkpoint.config["configurable"]["thread_id"] async for checkpoint in saver.alist(None)
     }
     assert threads == {
         "routing-v2:conversation-1:message-1",
@@ -610,11 +608,7 @@ async def test_a_specialist_never_sees_another_turns_evidence():
     """Evidence is turn-scoped; a second turn starts from an empty pack."""
     saver = InMemorySaver()
     first = ScriptedWorkflow(
-        {
-            "rag_agent": [
-                _answer("rag_agent", "grounded", evidence=({"evidence_id": "E1"},))
-            ]
-        }
+        {"rag_agent": [_answer("rag_agent", "grounded", evidence=({"evidence_id": "E1"},))]}
     )
     await _run_turn(
         first,

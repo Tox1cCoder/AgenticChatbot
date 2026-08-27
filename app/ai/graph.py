@@ -1,14 +1,12 @@
 import asyncio
 import contextlib
 import logging
-import time
 from typing import TYPE_CHECKING, Any, Optional
 from uuid import UUID
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.errors import GraphRecursionError
 from langgraph.graph import StateGraph
 from langgraph.graph.message import RemoveMessage
 from langgraph.types import Command
@@ -50,7 +48,7 @@ from .agents.image_generator_agent import (
 from .agents.planning_agent import PlanningAgent
 from .agents.rag_agent import RAGAgent
 from .agents.search_agent import SearchAgent, build_search_specialist_definition
-from .canvas_state import CanvasArtifactSnapshot
+from .canvas_state import CANVAS_EDIT_DENIED_TOOL_NAMES, CanvasArtifactSnapshot
 from .custom_agent_runtime import is_custom_runtime_id
 from .history import ConversationHistoryProvider
 from .hitl_config import (
@@ -818,127 +816,6 @@ class MultiAgentWorkflow(
             payload["metadata"] = metadata
         return payload
 
-    async def _should_call_tools(self, state: GraphState) -> str:
-        messages = state.get("messages", [])
-        if not messages:
-            return "end"
-
-        last_message = messages[-1]
-        if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
-            return "end"
-
-        normalized_calls = [normalize_tool_call(tc) for tc in last_message.tool_calls]
-        active_agent_id_name = state.get("active_agent_id")
-        agent = self._resolve_runtime_agent(state, active_agent_id_name)
-        handoff_tool = self._handoff_tool_for_agent(state, active_agent_id_name)
-        scoped_internal_tools = [handoff_tool] if handoff_tool else None
-        if await self._needs_approval(
-            state,
-            normalized_calls,
-            agent=agent,
-            internal_tools=scoped_internal_tools,
-        ):
-            return "approval"
-
-        return "tools"
-
-    def _route_tool_output(self, state: GraphState) -> str:
-        state_view = GraphStateView(state)
-        iteration_count = state_view.iteration_count()
-        max_iterations = max(1, int(settings.react_agent_max_iterations))
-        active_agent_id = state_view.active_agent_id() or "end"
-
-        if (
-            active_agent_id != "end"
-            and active_agent_id not in self.agents
-            and not self._is_attached_custom_agent(state, active_agent_id)
-        ):
-            return "end"
-
-        can_route_for_final_response = (
-            active_agent_id != "end" and self._last_message_is_tool_output(state)
-        )
-
-        streak = (state_view.context() or {}).get("tool_error_streak")
-        if isinstance(streak, dict) and streak.get("count", 0) >= streak.get("limit", 3):
-            if can_route_for_final_response:
-                self._mark_force_final_response(
-                    state,
-                    reason="consecutive_tool_errors",
-                    scope="runtime",
-                    count=int(streak.get("count") or 0),
-                    limit=int(streak.get("limit") or 0),
-                )
-                return self._route_target_for(state, active_agent_id)
-            self._set_continuation_signal(
-                state,
-                should_continue=False,
-                reason="consecutive_tool_errors",
-                scope="runtime",
-                count=int(streak.get("count") or 0),
-                limit=int(streak.get("limit") or 0),
-            )
-            return "end"
-
-        # Soft-limit: if auto-continue is enabled, trigger continuation at
-        # a fraction of the budget so the outer loop can start a new round
-        # before the hard LangGraph recursion limit is hit.
-        if settings.auto_continue_enabled:
-            soft_limit = max(1, int(max_iterations * settings.auto_continue_soft_limit_ratio))
-            if iteration_count >= soft_limit:
-                if can_route_for_final_response:
-                    self._mark_force_final_response(
-                        state,
-                        reason="soft_budget",
-                        scope="runtime",
-                        count=iteration_count,
-                        limit=soft_limit,
-                    )
-                    return self._route_target_for(state, active_agent_id)
-
-                self._set_continuation_signal(
-                    state,
-                    should_continue=True,
-                    reason="soft_budget",
-                    scope="runtime",
-                    count=iteration_count,
-                    limit=soft_limit,
-                )
-                return "end"
-
-        if iteration_count >= max_iterations:
-            if can_route_for_final_response:
-                self._mark_force_final_response(
-                    state,
-                    reason="max_iterations_reached",
-                    scope="runtime",
-                    count=iteration_count,
-                    limit=max_iterations,
-                )
-                return self._route_target_for(state, active_agent_id)
-
-            if settings.auto_continue_enabled and state_view.messages():
-                self._set_continuation_signal(
-                    state,
-                    should_continue=True,
-                    reason="max_iterations_reached",
-                    scope="runtime",
-                    count=iteration_count,
-                    limit=max_iterations,
-                )
-            else:
-                self._set_continuation_signal(
-                    state,
-                    should_continue=False,
-                    reason="max_iterations_reached",
-                    scope="runtime",
-                    count=iteration_count,
-                    limit=max_iterations,
-                )
-            return "end"
-
-        return self._route_target_for(state, active_agent_id)
-
     def _build_interrupt_agent_response(
         self,
         state_snapshot: Any,
@@ -1163,15 +1040,19 @@ class MultiAgentWorkflow(
     def _set_continuation_signal(
         state: GraphState,
         *,
-        should_continue: bool,
         reason: str,
         scope: str,
         count: int,
         limit: int,
     ) -> None:
+        """Record why a loop stopped short of a final answer.
+
+        Read back by ``_get_planning_pause_details`` to report the pause to the
+        caller. It does not resume anything: a turn that runs out of budget
+        ends, and a task that needs more work is decomposed by Planning.
+        """
         context = GraphStateView(state).context_copy()
         context["continuation_signal"] = {
-            "should_continue": should_continue,
             "reason": reason,
             "scope": scope,
             "count": count,
@@ -1275,17 +1156,6 @@ class MultiAgentWorkflow(
         state_values: dict[str, Any] | None,
     ) -> ContinuationSignal:
         return GraphStateView(state_values).continuation_signal()
-
-    @classmethod
-    def _get_requested_continuation_reason(
-        cls,
-        state_values: dict[str, Any] | None,
-    ) -> str | None:
-        signal = cls._get_continuation_signal(state_values)
-        if not signal.get("should_continue"):
-            return None
-        reason = signal.get("reason")
-        return reason if isinstance(reason, str) else None
 
     @classmethod
     def _get_planning_pause_details(
@@ -1542,10 +1412,15 @@ class MultiAgentWorkflow(
             "system_prompt_kwargs": invocation_kwargs,
         }
         if node_name == "canvas_agent":
-            extras["previous_artifact"] = await self._get_active_canvas_snapshot(
-                conversation_id, user_id
-            )
-            extras["system_prompt_kwargs"]["previous_artifact"] = extras["previous_artifact"]
+            previous_artifact = await self._get_active_canvas_snapshot(conversation_id, user_id)
+            extras["previous_artifact"] = previous_artifact
+            extras["system_prompt_kwargs"]["previous_artifact"] = previous_artifact
+            if previous_artifact is not None:
+                # Editing an existing canvas returns the whole updated artifact,
+                # so an in-place widget mutation would be overwritten by the
+                # rewrite. Not binding the tools is what keeps the model from
+                # spending a turn on one.
+                extras["excluded_tool_names"] = CANVAS_EDIT_DENIED_TOOL_NAMES
 
         return SpecialistRequest(
             agent_id=active_agent_id,
@@ -1573,7 +1448,7 @@ class MultiAgentWorkflow(
         return self.chat_agent._convert_history_to_langchain_messages(conversation_history)
 
     async def invoke_specialist_subgraph(self, node_name: str, state: GraphState):
-        """Run one standard specialist and return its ``AgentOutcome``.
+        """Run one standard specialist and return its ``ResponseOutcome``.
 
         Custom agents resolve their definition from the live attachment on
         every turn, so an edited or detached configuration takes effect
@@ -2283,17 +2158,6 @@ class MultiAgentWorkflow(
                 return str(message.content or "")
         return ""
 
-    def _should_continue(self, state: GraphState) -> str:
-        active_agent_id = state.get("active_agent_id")
-        if active_agent_id in self.agents:
-            return active_agent_id
-        # Any attached custom runtime id routes to the single static node.
-        if is_custom_runtime_id(active_agent_id) and self._is_attached_custom_agent(
-            state, active_agent_id
-        ):
-            return "custom_agent"
-        return "end"
-
     def _get_agent_type(self, active_agent_id: str | None) -> AgentType:
         agent_type_map = {
             "chat_agent": AgentType.CHAT,
@@ -2341,9 +2205,6 @@ class MultiAgentWorkflow(
     def _recover_terminal_response(
         self,
         state: dict[str, Any] | None,
-        *,
-        fallback_content: str | None = None,
-        active_agent_id: str | None = None,
     ) -> AgentResponse | None:
         """Return the finalizer's validated response, or nothing.
 
@@ -2353,12 +2214,8 @@ class MultiAgentWorkflow(
         policy had approved, attributed to an agent the runtime inferred.
 
         A turn that produced no finalized response is a failed turn: the caller
-        emits its typed error rather than a recovered draft. ``fallback_content``
-        and ``active_agent_id`` remain in the signature for call-site
-        compatibility and are intentionally unused.
+        emits its typed error rather than a recovered draft.
         """
-        del fallback_content, active_agent_id
-
         if not isinstance(state, dict):
             return None
 
@@ -2379,63 +2236,6 @@ class MultiAgentWorkflow(
     # Continuation helpers
     # ------------------------------------------------------------------
 
-    def _build_continuation_state(
-        self,
-        previous_state: dict[str, Any],
-        round_num: int,
-        reason: str,
-    ) -> GraphState:
-        """Build a new initial state that carries forward context from a previous round.
-
-        Keeps routing stable (active_agent_id preserved), resets per-round
-        counters so each round has a fresh budget, and clears "stop" flags
-        that would immediately short-circuit the next round.
-        """
-        state: GraphState = dict(previous_state or {})
-        state_view = GraphStateView(state)
-
-        # Reset per-round counters so the next round has fresh budget.
-        state["iteration_count"] = 0
-        state["planning_call_count"] = 0
-
-        # Clear response artifacts from previous round (only the final
-        # round's response is used).
-        state.pop("response", None)
-
-        # Clear "stop" flags so they don't immediately short-circuit the
-        # next round.
-        ctx = state_view.context_copy()
-        ctx.pop("pause_reason", None)
-        ctx.pop("continuation_signal", None)
-
-        # Add lightweight trace context (helpful for logs/prompts).
-        ctx["continuation_round"] = round_num
-        ctx["continuation_reason"] = reason
-        state["context"] = ctx
-
-        return state
-
-    async def _capture_state_for_continuation(
-        self,
-        config: dict[str, Any] | None,
-        thread_id: str | None,
-        fallback_state: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Capture current graph state for continuation.
-
-        When using checkpointer, reads the latest checkpoint snapshot.
-        Otherwise, falls back to the in-memory state accumulated from
-        the streaming loop's "updates" events.
-        """
-        if self.checkpointer and thread_id:
-            try:
-                snapshot = await self.graph.aget_state(config)
-                if snapshot and hasattr(snapshot, "values") and snapshot.values:
-                    return dict(snapshot.values)
-            except Exception as exc:
-                logger.warning("Failed to capture checkpoint state for continuation: %s", exc)
-        return dict(fallback_state) if fallback_state else {}
-
     async def execute_request(self, request: WorkflowExecutionRequest) -> AgentResponse | None:
         initial_state = self._build_initial_state_from_request(request)
         conversation_id = request.conversation_id
@@ -2448,83 +2248,8 @@ class MultiAgentWorkflow(
         runtime_context = await self._prepare_turn_runtime_context(initial_state)
         config = self._with_runtime_context(config, runtime_context)
 
-        # ── Auto-Continue outer loop ──────────────────────────────────
-        max_rounds = settings.auto_continue_max_rounds if settings.auto_continue_enabled else 1
-        total_iterations = 0
-        start_time = time.monotonic()
-        current_state = initial_state
-        result: dict[str, Any] | None = None
+        result = await self.graph.ainvoke(initial_state, config=config)
 
-        for round_num in range(1, max_rounds + 1):
-            # Safety: wall-clock timeout
-            if (
-                round_num > 1
-                and time.monotonic() - start_time > settings.auto_continue_timeout_seconds
-            ):
-                logger.warning(
-                    "Auto-continue timeout reached after %d rounds (execute)",
-                    round_num - 1,
-                )
-                break
-
-            should_continue = False
-            continue_reason: str | None = None
-
-            try:
-                result = await self.graph.ainvoke(current_state, config=config)
-            except GraphRecursionError:
-                logger.warning(
-                    "GraphRecursionError caught in round %d (execute) — will attempt continuation",
-                    round_num,
-                )
-                should_continue = True
-                continue_reason = "recursion_limit"
-                result = None
-
-            # Detect soft-budget continuation signal from the result
-            if not should_continue and result:
-                continue_reason = self._get_requested_continuation_reason(result)
-                if continue_reason:
-                    should_continue = True
-
-            if not should_continue:
-                break  # Normal completion
-
-            # Safety: total iteration cap
-            captured = await self._capture_state_for_continuation(
-                config=config,
-                thread_id=thread_id,
-                fallback_state=result,
-            )
-            round_iterations = int(
-                (captured.get("iteration_count") or 0) + (captured.get("planning_call_count") or 0)
-            )
-            total_iterations += round_iterations
-            if total_iterations >= settings.auto_continue_max_total_iterations:
-                logger.warning(
-                    "Auto-continue total iteration cap reached: %d (execute)",
-                    total_iterations,
-                )
-                break
-
-            if round_num >= max_rounds:
-                logger.info("Auto-continue max rounds (%d) reached (execute)", max_rounds)
-                break
-
-            # Prepare state for next round
-            current_state = self._build_continuation_state(
-                previous_state=captured,
-                round_num=round_num + 1,
-                reason=continue_reason or "soft_budget",
-            )
-            logger.info(
-                "Auto-continue (execute): starting round %d (reason=%s, total_iters=%d)",
-                round_num + 1,
-                continue_reason,
-                total_iterations,
-            )
-
-        # ── Post-loop: finalize response ──────────────────────────────
         if self.checkpointer and thread_id:
             state_snapshot = await self.graph.aget_state(config)
             if state_snapshot.next and len(state_snapshot.next) > 0:
@@ -2533,12 +2258,6 @@ class MultiAgentWorkflow(
                 )
                 if interrupt_agent_response:
                     return interrupt_agent_response
-
-        if result is None:
-            # GraphRecursionError on last round with no usable result
-            result = await self._capture_state_for_continuation(
-                config=config, thread_id=thread_id, fallback_state=None
-            )
 
         final_state = result if isinstance(result, dict) else None
         agent_response = self._recover_terminal_response(final_state)
@@ -2556,20 +2275,6 @@ class MultiAgentWorkflow(
         )
         if agent_response and final_agent_id == "planning_agent":
             agent_response = self._attach_planning_state_metadata(agent_response, final_state)
-
-        # Add continuation metadata when multiple rounds ran
-        if agent_response and total_iterations > 0:
-            if agent_response.metadata is None:
-                agent_response.metadata = {}
-            agent_response.metadata["continuation_rounds"] = round_num
-            agent_response.metadata["total_iterations"] = total_iterations
-
-        if (
-            agent_response
-            and isinstance(agent_response.metadata, dict)
-            and "interrupt" in agent_response.metadata
-        ):
-            return agent_response
 
         return agent_response
 
@@ -2689,193 +2394,31 @@ class MultiAgentWorkflow(
             suppress_tokens=suppress_tokens,
         )
 
-        max_rounds = settings.auto_continue_max_rounds if settings.auto_continue_enabled else 1
-        round_num = 1
-        continue_reason: str | None = "initial"
-        total_iterations = 0
-        start_time = time.monotonic()
-        current_state: Any = Command(resume=resume_data, update=resume_state_update)
         # Rehydrate historical image references for the model on resume too,
         # otherwise a replayed turn drops prior images from context.
         chat_image_loader = self._build_chat_image_loader(state_snapshot.values.get("user_id"))
 
-        while round_num <= max_rounds:
-            if (
-                round_num > 1
-                and time.monotonic() - start_time > settings.auto_continue_timeout_seconds
-            ):
-                logger.warning("Auto-continue timeout reached after %d rounds", round_num - 1)
-                break
-
-            if round_num > 1 and settings.auto_continue_emit_events:
-                yield make_event(
-                    "state_snapshot",
-                    sequence=0,
-                    data={
-                        "round": round_num,
-                        "max_rounds": max_rounds,
-                        "reason": continue_reason,
-                        "legacy_type": "continuation_start",
-                    },
-                )
-
-            should_continue = False
-            continue_reason = None
-
-            try:
-                merged = stream_with_subagent_events(
-                    iter_v3_events_from_graph(self.graph, current_state, config=config),
-                    subagent_event_sink,
-                )
-                with use_chat_image_loader(chat_image_loader):
-                    async for event in merged:
-                        for public_event in projector.map_event(event, ctx):
-                            yield public_event
-
-            except GraphRecursionError:
-                logger.warning(
-                    "GraphRecursionError caught in round %d — will attempt continuation",
-                    round_num,
-                )
-                should_continue = True
-                continue_reason = "recursion_limit"
-
-            except Exception as e:
-                yield make_event("error", sequence=0, data={"error": str(e)})
-                return
-
-            if not should_continue and ctx.last_state_values:
-                continue_reason = self._get_requested_continuation_reason(ctx.last_state_values)
-                if continue_reason:
-                    should_continue = True
-
-            if not should_continue:
-                break
-
-            captured = await self._capture_state_for_continuation(
-                config=config,
-                thread_id=thread_id,
-                fallback_state=ctx.last_state_values,
-            )
-            round_iterations = int(
-                (captured.get("iteration_count") or 0) + (captured.get("planning_call_count") or 0)
-            )
-            total_iterations += round_iterations
-            if total_iterations >= settings.auto_continue_max_total_iterations:
-                logger.warning(
-                    "Auto-continue total iteration cap reached: %d",
-                    total_iterations,
-                )
-                break
-
-            if round_num >= max_rounds:
-                logger.info(
-                    "Auto-continue max rounds (%d) reached — returning partial result",
-                    max_rounds,
-                )
-                break
-
-            current_state = self._build_continuation_state(
-                previous_state=captured,
-                round_num=round_num + 1,
-                reason=continue_reason or "soft_budget",
-            )
-            logger.info(
-                "Auto-continue: starting round %d (reason=%s, total_iters=%d)",
-                round_num + 1,
-                continue_reason,
-                total_iterations,
-            )
-            round_num += 1
-            ctx.current_tool_calls = {}
-
-        # The citation filter may still be holding a few characters — a
-        # marker it had not yet seen the end of. Releasing it here is what
-        # keeps a truncated answer from being the cost of judging citations
-        # mid-stream.
-        for public_event in flush_answer_text(ctx):
-            yield public_event
-
-        accumulated_content = ctx.accumulated_content
-        accumulated_thinking = ctx.accumulated_thinking
-        _internal_content_only = ctx.internal_content_only
-        last_state_values = ctx.last_state_values
-
         try:
-            snapshot = await self.graph.aget_state(config)
-
-            if snapshot.next and len(snapshot.next) > 0:
-                messages = snapshot.values.get("messages", [])
-                if messages:
-                    last_msg = messages[-1]
-                    if (
-                        isinstance(last_msg, AIMessage)
-                        and hasattr(last_msg, "tool_calls")
-                        and last_msg.tool_calls
-                    ):
-                        interrupt_payload = self._interrupt_payload_from_pending_interrupts(
-                            snapshot
-                        ) or self._get_interrupt_payload_from_state(
-                            snapshot.values,
-                            last_msg.tool_calls,
-                        )
-                        pending_tool_calls = interrupt_payload["action_requests"]
-                        interrupt_response = build_interrupt_response(
-                            interrupt_payload,
-                            thread_id,
-                            conversation_id or "",
-                        )
-                        yield make_event(
-                            "interrupt",
-                            sequence=0,
-                            data={
-                                "next": snapshot.next,
-                                "thread_id": thread_id,
-                                "pending_tool_calls": pending_tool_calls,
-                                "interrupt": interrupt_response,
-                            },
-                        )
-                        return
-
-            final_state = snapshot.values if snapshot and hasattr(snapshot, "values") else {}
-            fallback_content = (
-                accumulated_content
-                if not ctx.suppress_tokens and not _internal_content_only
-                else None
+            merged = stream_with_subagent_events(
+                iter_v3_events_from_graph(
+                    self.graph,
+                    Command(resume=resume_data, update=resume_state_update),
+                    config=config,
+                ),
+                subagent_event_sink,
             )
-            response = self._recover_terminal_response(
-                final_state,
-                fallback_content=fallback_content,
-                active_agent_id=active_agent_id,
-            )
-            if not response:
-                response = self._recover_terminal_response(
-                    last_state_values,
-                    fallback_content=fallback_content,
-                    active_agent_id=active_agent_id,
-                )
-            if response:
-                if not _internal_content_only:
-                    apply_accumulated_thinking(response, accumulated_thinking)
+            with use_chat_image_loader(chat_image_loader):
+                async for event in merged:
+                    for public_event in projector.map_event(event, ctx):
+                        yield public_event
+        except Exception as exc:
+            yield make_event("error", sequence=0, data={"error": str(exc)})
+            return
 
-                response_state = final_state if final_state else last_state_values
-                final_agent_id = (
-                    response_state.get("active_agent_id")
-                    if isinstance(response_state, dict)
-                    else active_agent_id
-                ) or active_agent_id
-                if final_agent_id == "planning_agent":
-                    response = self._attach_planning_state_metadata(response, response_state)
-
-                if round_num > 1:
-                    response.metadata["continuation_rounds"] = round_num
-                    response.metadata["total_iterations"] = total_iterations
-
-                yield make_event("complete", sequence=0, data={"response": response})
-            else:
-                yield make_event("error", sequence=0, data={"error": NO_RESPONSE_GENERATED})
-        except Exception as e:
-            yield make_event("error", sequence=0, data={"error": str(e)})
+        async for public_event in self._finish_stream(
+            ctx, config=config, thread_id=thread_id, conversation_id=conversation_id
+        ):
+            yield public_event
 
     async def execute_request_stream(self, request: WorkflowExecutionRequest):
         initial_state = self._build_initial_state_from_request(request)
@@ -2916,11 +2459,10 @@ class MultiAgentWorkflow(
             yield make_event("error", sequence=0, data={"error": str(exc)})
             return
         config = self._with_runtime_context(config, runtime_context)
-        active_agent_id = None
 
-        # Per-stream accumulator state shared across continuation rounds and the
-        # canonical event mapper. Token suppression for agents whose raw stream
-        # is internal (image generation) is applied once the route lands.
+        # Per-stream accumulator state for the canonical event mapper. Token
+        # suppression for agents whose raw stream is internal (image
+        # generation) is applied once the route lands.
         projector = GraphPublicStreamProjector(
             tool_end_events_from_node_state=self._tool_end_events_from_node_state,
             suppress_internal_stream_chunks=settings.suppress_internal_stream_chunks,
@@ -2930,232 +2472,113 @@ class MultiAgentWorkflow(
             suppress_tokens=False,
         )
 
-        # ── Auto-Continue outer loop ──────────────────────────────────
-        max_rounds = settings.auto_continue_max_rounds if settings.auto_continue_enabled else 1
-        round_num = 1
-        continue_reason: str | None = "initial"
-        total_iterations = 0
-        start_time = time.monotonic()
-        current_state = initial_state
         chat_image_loader = self._build_chat_image_loader(user_id)
 
-        while round_num <= max_rounds:
-            # Safety: wall-clock timeout across all rounds
-            if (
-                round_num > 1
-                and time.monotonic() - start_time > settings.auto_continue_timeout_seconds
-            ):
-                logger.warning("Auto-continue timeout reached after %d rounds", round_num - 1)
-                break
-
-            # Emit continuation_start event for rounds > 1
-            if round_num > 1 and settings.auto_continue_emit_events:
-                yield make_event(
-                    "state_snapshot",
-                    sequence=0,
-                    data={
-                        "round": round_num,
-                        "max_rounds": max_rounds,
-                        "reason": continue_reason,
-                        "legacy_type": "continuation_start",
-                    },
-                )
-
-            should_continue = False
-            continue_reason = None
-
-            try:
-                merged = stream_with_subagent_events(
-                    iter_v3_events_from_graph(self.graph, current_state, config=config),
-                    subagent_event_sink,
-                )
-                with use_chat_image_loader(chat_image_loader):
-                    async for event in merged:
-                        for public_event in projector.map_event(event, ctx):
-                            yield public_event
-
-            except GraphRecursionError:
-                logger.warning(
-                    "GraphRecursionError caught in round %d — will attempt continuation",
-                    round_num,
-                )
-                should_continue = True
-                continue_reason = "recursion_limit"
-
-            except Exception as e:
-                yield make_event("error", sequence=0, data={"error": str(e)})
-                return
-
-            # ── Check if graph ended because we *want* to continue ─────
-            if not should_continue and ctx.last_state_values:
-                continue_reason = self._get_requested_continuation_reason(ctx.last_state_values)
-                if continue_reason:
-                    should_continue = True
-
-            if not should_continue:
-                break  # Normal completion — exit loop and finalize
-
-            # ── Safety: total iteration cap ────────────────────────────
-            captured = await self._capture_state_for_continuation(
-                config=config,
-                thread_id=thread_id,
-                fallback_state=ctx.last_state_values,
+        try:
+            merged = stream_with_subagent_events(
+                iter_v3_events_from_graph(self.graph, initial_state, config=config),
+                subagent_event_sink,
             )
-            round_iterations = int(
-                (captured.get("iteration_count") or 0) + (captured.get("planning_call_count") or 0)
-            )
-            total_iterations += round_iterations
-            if total_iterations >= settings.auto_continue_max_total_iterations:
-                logger.warning(
-                    "Auto-continue total iteration cap reached: %d",
-                    total_iterations,
-                )
-                break
+            with use_chat_image_loader(chat_image_loader):
+                async for event in merged:
+                    for public_event in projector.map_event(event, ctx):
+                        yield public_event
+        except Exception as exc:
+            yield make_event("error", sequence=0, data={"error": str(exc)})
+            return
 
-            if round_num >= max_rounds:
-                logger.info(
-                    "Auto-continue max rounds (%d) reached — returning partial result",
-                    max_rounds,
-                )
-                break
+        async for public_event in self._finish_stream(
+            ctx, config=config, thread_id=thread_id, conversation_id=conversation_id
+        ):
+            yield public_event
 
-            # ── Prepare state for next round ───────────────────────────
-            current_state = self._build_continuation_state(
-                previous_state=captured,
-                round_num=round_num + 1,
-                reason=continue_reason or "soft_budget",
-            )
-            logger.info(
-                "Auto-continue: starting round %d (reason=%s, total_iters=%d)",
-                round_num + 1,
-                continue_reason,
-                total_iterations,
-            )
-            round_num += 1
-            # Reset per-round tool call tracking (accumulators persist)
-            ctx.current_tool_calls = {}
+    async def _finish_stream(
+        self,
+        ctx: StreamProjectionContext,
+        *,
+        config: dict[str, Any] | None,
+        thread_id: str | None,
+        conversation_id: str | None,
+    ):
+        """Close out a streamed turn: pending interrupt, or the final response.
 
-        # The citation filter may still be holding a few characters — a
-        # marker it had not yet seen the end of. Releasing it here is what
-        # keeps a truncated answer from being the cost of judging citations
-        # mid-stream.
+        Both entry points end the same way, and the citation filter has to be
+        flushed before either — it may still be holding the tail of a marker it
+        had not yet seen the end of, and dropping it would truncate the answer.
+        """
         for public_event in flush_answer_text(ctx):
             yield public_event
 
-        accumulated_content = ctx.accumulated_content
-        accumulated_thinking = ctx.accumulated_thinking
-        _internal_content_only = ctx.internal_content_only
-        last_state_values = ctx.last_state_values
-
-        # ── Post-stream: finalize response ─────────────────────────────
+        snapshot = None
         if self.checkpointer and thread_id:
             try:
                 snapshot = await self.graph.aget_state(config)
+            except Exception as exc:  # noqa: BLE001 - reported, never published
+                yield make_event("error", sequence=0, data={"error": str(exc)})
+                return
 
-                if snapshot.next and len(snapshot.next) > 0:
-                    messages = snapshot.values.get("messages", [])
-                    if messages:
-                        last_msg = messages[-1]
-                        if (
-                            isinstance(last_msg, AIMessage)
-                            and hasattr(last_msg, "tool_calls")
-                            and last_msg.tool_calls
-                        ):
-                            interrupt_payload = self._interrupt_payload_from_pending_interrupts(
-                                snapshot
-                            ) or self._get_interrupt_payload_from_state(
-                                snapshot.values,
-                                last_msg.tool_calls,
-                            )
-                            pending_tool_calls = interrupt_payload["action_requests"]
-                            interrupt_response = build_interrupt_response(
-                                interrupt_payload,
-                                thread_id,
-                                conversation_id or "",
-                            )
-                            yield make_event(
-                                "interrupt",
-                                sequence=0,
-                                data={
-                                    "next": snapshot.next,
-                                    "thread_id": thread_id,
-                                    "pending_tool_calls": pending_tool_calls,
-                                    "interrupt": interrupt_response,
-                                },
-                            )
-                            return
+        if snapshot is not None and snapshot.next:
+            interrupt_event = self._pending_interrupt_event(
+                snapshot, thread_id=thread_id, conversation_id=conversation_id
+            )
+            if interrupt_event is not None:
+                yield interrupt_event
+                return
 
-                final_state = snapshot.values if snapshot and hasattr(snapshot, "values") else {}
-                fallback_content = (
-                    accumulated_content
-                    if not ctx.suppress_tokens and not _internal_content_only
-                    else None
-                )
-                response = self._recover_terminal_response(
-                    final_state,
-                    fallback_content=fallback_content,
-                    active_agent_id=active_agent_id,
-                )
-                if not response:
-                    response = self._recover_terminal_response(
-                        last_state_values,
-                        fallback_content=fallback_content,
-                        active_agent_id=active_agent_id,
-                    )
-                if response:
-                    if not _internal_content_only:
-                        apply_accumulated_thinking(response, accumulated_thinking)
-
-                    response_state = final_state if final_state else last_state_values
-                    final_agent_id = (
-                        response_state.get("active_agent_id")
-                        if isinstance(response_state, dict)
-                        else active_agent_id
-                    ) or active_agent_id
-                    if final_agent_id == "planning_agent":
-                        response = self._attach_planning_state_metadata(response, response_state)
-
-                    # Add continuation metadata when multiple rounds ran
-                    if round_num > 1:
-                        response.metadata["continuation_rounds"] = round_num
-                        response.metadata["total_iterations"] = total_iterations
-
-                    yield make_event("complete", sequence=0, data={"response": response})
-                else:
-                    yield make_event("error", sequence=0, data={"error": NO_RESPONSE_GENERATED})
-            except Exception as e:
-                yield make_event("error", sequence=0, data={"error": str(e)})
+        # The checkpoint is authoritative when it holds the finalized response;
+        # the streamed updates are what a run without a checkpointer leaves
+        # behind. Neither is a salvage path — both carry only what ``finalize``
+        # already validated.
+        for final_state in (getattr(snapshot, "values", None), ctx.last_state_values):
+            response = self._recover_terminal_response(final_state)
+            if response is not None:
+                break
         else:
-            fallback_content = (
-                accumulated_content
-                if not ctx.suppress_tokens and not _internal_content_only
-                else None
-            )
-            response = self._recover_terminal_response(
-                last_state_values,
-                fallback_content=fallback_content,
-                active_agent_id=active_agent_id,
-            )
-            if response:
-                if not _internal_content_only:
-                    apply_accumulated_thinking(response, accumulated_thinking)
+            final_state = None
+            response = None
 
-                response_state = last_state_values
-                final_agent_id = (
-                    response_state.get("active_agent_id")
-                    if isinstance(response_state, dict)
-                    else active_agent_id
-                ) or active_agent_id
-                if final_agent_id == "planning_agent":
-                    response = self._attach_planning_state_metadata(response, response_state)
+        if response is None:
+            yield make_event("error", sequence=0, data={"error": NO_RESPONSE_GENERATED})
+            return
 
-                if round_num > 1:
-                    response.metadata["continuation_rounds"] = round_num
-                    response.metadata["total_iterations"] = total_iterations
+        if not ctx.internal_content_only:
+            apply_accumulated_thinking(response, ctx.accumulated_thinking)
+        if isinstance(final_state, dict) and final_state.get("active_agent_id") == "planning_agent":
+            response = self._attach_planning_state_metadata(response, final_state)
 
-                yield make_event("complete", sequence=0, data={"response": response})
-            else:
-                yield make_event("error", sequence=0, data={"error": NO_RESPONSE_GENERATED})
+        yield make_event("complete", sequence=0, data={"response": response})
+
+    def _pending_interrupt_event(
+        self,
+        snapshot: Any,
+        *,
+        thread_id: str | None,
+        conversation_id: str | None,
+    ):
+        """The interrupt event for a paused turn, or nothing if it is not paused.
+
+        A pause is only an approval stop when the last message is still holding
+        tool calls; anything else pending is a run that failed to reach the
+        finalizer, which is an error rather than a question for the user.
+        """
+        messages = snapshot.values.get("messages") or []
+        last_message = messages[-1] if messages else None
+        if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
+            return None
+
+        payload = self._interrupt_payload_from_pending_interrupts(
+            snapshot
+        ) or self._get_interrupt_payload_from_state(snapshot.values, last_message.tool_calls)
+        return make_event(
+            "interrupt",
+            sequence=0,
+            data={
+                "next": snapshot.next,
+                "thread_id": thread_id,
+                "pending_tool_calls": payload["action_requests"],
+                "interrupt": build_interrupt_response(payload, thread_id, conversation_id or ""),
+            },
+        )
 
     async def get_state(self, thread_id: str) -> dict:
         if not self.checkpointer:

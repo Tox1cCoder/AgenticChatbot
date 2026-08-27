@@ -244,7 +244,7 @@ class PlanningAgent(BaseAgent):
                 - Workers CANNOT mutate todos. After the call returns, read
                   each `answer` (the full worker answer) and call
                   `write_todos` (complete or update) for related todos. If a
-                  result is `failed`, `timeout`, or `requires_approval`,
+                  result is `failed` or `timeout`,
                   leave the todo pending and explain the blocker in your
                   reply.
                 - You are the only actor allowed to call `write_todos`.

@@ -150,7 +150,6 @@ class WorkflowExecutionRequest(BaseModel):
 
 
 class ContinuationSignal(TypedDict, total=False):
-    should_continue: bool
     reason: str
     scope: str
     count: int

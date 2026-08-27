@@ -21,11 +21,11 @@ from langgraph.graph.message import add_messages
 
 from app.ai.schemas import AgentResponse, GraphContext
 from app.ai.workflow.contracts import (
-    AgentOutcome,
     AgentTransition,
     ExecutionPhase,
     InvalidWorkflowStateUpdate,
     PendingTransition,
+    ResponseOutcome,
     RoutingDecision,
     TurnIdentity,
     WorkerResult,
@@ -144,13 +144,10 @@ class WorkflowState(TypedDict):
     final_agent_id: NotRequired[str | None]
     agent_history: NotRequired[Annotated[list[AgentTransition], append_transitions]]
     pending_transition: NotRequired[PendingTransition | None]
-    agent_outcome: NotRequired[AgentOutcome | None]
+    agent_outcome: NotRequired[ResponseOutcome | None]
     worker_results: NotRequired[Annotated[list[WorkerResult], append_worker_results]]
     execution_phase: NotRequired[ExecutionPhase]
     workflow_error: NotRequired[WorkflowError | None]
-    # Finalized answer text, buffered here until MessageService commits it.
-    # The stream projector releases public deltas only from this value.
-    validated_public_content: NotRequired[str | None]
 
     # --- request scope ----------------------------------------------------
     conversation_id: NotRequired[str | None]

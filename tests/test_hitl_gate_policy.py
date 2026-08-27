@@ -3,9 +3,9 @@
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage
 
 from app.ai import graph as graph_module
+from app.ai.hitl_config import calls_requiring_approval
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from app.ai.workflow import tool_loop as tool_loop_module
 
@@ -40,37 +40,34 @@ def _workflow_stub(tool_map, manager, monkeypatch):
     return wf
 
 
-@pytest.mark.asyncio
-async def test_gate_gates_all_tools_from_a_server_via_policy(monkeypatch):
-    server_tool = SimpleNamespace(name="search", metadata={})
-    tool_map = {"search": server_tool}
-    manager = _FakeManager({id(server_tool): "tavily"})
-    wf = _workflow_stub(tool_map, manager, monkeypatch)
-
-    state = {
-        "active_agent_id": "chat_agent",
-        "conversation_id": "c1",
-        "user_id": "u1",
-        "device_id": None,
-        "context": {
-            "hitl_policy": {
-                "master_enabled": True,
-                "client_rules": {
-                    "client_mcp": {"servers": {}, "tools": {}},
-                    "client_skill": {"servers": {}, "tools": {}},
-                },
-                "global_tools": ["search"],
-            }
+def _policy(*, master_enabled=True, global_tools=(), client_mcp=None):
+    return {
+        "master_enabled": master_enabled,
+        "client_rules": {
+            "client_mcp": client_mcp or {"servers": {}, "tools": {}},
+            "client_skill": {"servers": {}, "tools": {}},
         },
-        "messages": [
-            AIMessage(content="", tool_calls=[{"name": "search", "args": {}, "id": "call-1"}])
-        ],
+        "global_tools": list(global_tools),
     }
-    assert await wf._should_call_tools(state) == "approval"
 
 
-@pytest.mark.asyncio
-async def test_gate_lets_tool_override_exempt_a_server_tool(monkeypatch):
+def test_gate_gates_all_tools_from_a_server_via_policy():
+    """A standard specialist gates on the same policy every other caller uses."""
+    server_tool = SimpleNamespace(name="search", metadata={})
+    manager = _FakeManager({id(server_tool): "tavily"})
+    calls = [{"name": "search", "args": {}, "id": "call-1"}]
+
+    gated = calls_requiring_approval(
+        calls,
+        policy=_policy(global_tools=["search"]),
+        tool_map={"search": server_tool},
+        mcp_manager=manager,
+    )
+
+    assert gated == {"call-1"}
+
+
+def test_gate_lets_tool_override_exempt_a_server_tool():
     tool = SimpleNamespace(
         name="client__desktop_commander__list_files",
         metadata={
@@ -79,60 +76,34 @@ async def test_gate_lets_tool_override_exempt_a_server_tool(monkeypatch):
             "tool_origin": "client_mcp",
         },
     )
-    tool_map = {tool.name: tool}
-    wf = _workflow_stub(tool_map, _FakeManager({}), monkeypatch)
+    calls = [{"name": tool.name, "args": {}, "id": "call-1"}]
 
-    state = {
-        "active_agent_id": "chat_agent",
-        "conversation_id": "c1",
-        "user_id": "u1",
-        "device_id": None,
-        "context": {
-            "hitl_policy": {
-                "master_enabled": True,
-                "client_rules": {
-                    "client_mcp": {
-                        "servers": {"desktop_commander": True},
-                        "tools": {"desktop_commander::list_files": False},
-                    },
-                    "client_skill": {"servers": {}, "tools": {}},
-                },
-                "global_tools": [],
+    gated = calls_requiring_approval(
+        calls,
+        policy=_policy(
+            client_mcp={
+                "servers": {"desktop_commander": True},
+                "tools": {"desktop_commander::list_files": False},
             }
-        },
-        "messages": [
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {"name": "client__desktop_commander__list_files", "args": {}, "id": "call-1"}
-                ],
-            )
-        ],
-    }
-    assert await wf._should_call_tools(state) == "tools"
+        ),
+        tool_map={tool.name: tool},
+        mcp_manager=_FakeManager({}),
+    )
+
+    assert gated == set()
 
 
-@pytest.mark.asyncio
-async def test_gate_master_off_never_gates(monkeypatch):
-    wf = _workflow_stub({}, _FakeManager({}), monkeypatch)
-    state = {
-        "active_agent_id": "chat_agent",
-        "conversation_id": "c1",
-        "user_id": "u1",
-        "device_id": None,
-        "context": {
-            "hitl_policy": {
-                "master_enabled": False,
-                "client_rules": {
-                    "client_mcp": {"servers": {}, "tools": {}},
-                    "client_skill": {"servers": {}, "tools": {}},
-                },
-                "global_tools": ["search"],
-            }
-        },
-        "messages": [AIMessage(content="", tool_calls=[{"name": "search", "args": {}, "id": "x"}])],
-    }
-    assert await wf._should_call_tools(state) == "tools"
+def test_gate_master_off_never_gates():
+    calls = [{"name": "search", "args": {}, "id": "x"}]
+
+    gated = calls_requiring_approval(
+        calls,
+        policy=_policy(master_enabled=False, global_tools=["search"]),
+        tool_map={},
+        mcp_manager=_FakeManager({}),
+    )
+
+    assert gated == set()
 
 
 @pytest.mark.asyncio

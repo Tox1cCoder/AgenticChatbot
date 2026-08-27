@@ -92,7 +92,7 @@ def test_finalizer_appends_exactly_one_terminal_ai_message():
 def test_terminal_message_carries_the_validated_content():
     update = _finalizer().finalize(_validated_state())
     assert update["messages"][0].content == "final answer"
-    assert update["validated_public_content"] == "final answer"
+    assert update["response"].message.content == "final answer"
 
 
 def test_finalizer_completes_the_execution_phase():
@@ -180,7 +180,7 @@ def test_a_failed_turn_publishes_no_assistant_message():
     update = _finalizer().finalize(state)
 
     assert update.get("messages", []) == []
-    assert update["validated_public_content"] == ""
+    assert update["response"].message.content == ""
     assert update["execution_phase"] == "failed"
 
 
@@ -229,5 +229,3 @@ def test_the_finalizer_does_not_claim_the_database_write_committed():
     update = _finalizer().finalize(_validated_state())
     assert "persisted" not in update
     assert update["execution_phase"] == "completed"
-    # The answer is buffered for the stream projector, not yet published.
-    assert update["validated_public_content"] == "final answer"

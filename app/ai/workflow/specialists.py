@@ -4,7 +4,7 @@ A wrapper does three things and nothing else:
 
 1. verifies the node it is running in matches ``state["active_agent_id"]``;
 2. runs the specialist;
-3. converts the result into an ``AgentOutcome`` and a dynamic ``Command``.
+3. converts the result into a ``ResponseOutcome`` and a dynamic ``Command``.
 
 Wrappers have no static outgoing edges, so the parent graph's dynamic routing
 is the only thing that decides what runs next. No wrapper appends the terminal
@@ -29,7 +29,6 @@ from langgraph.types import Command
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from app.ai.tool_context import rich_response_capable_from_context
 from app.ai.workflow.contracts import (
-    HandoffOutcome,
     OutcomeProvenance,
     ResponseOutcome,
     WorkerResult,
@@ -250,6 +249,11 @@ def make_subgraph_specialist_wrapper(
     tool stage to return to: the specialist either produced a candidate answer
     (go validate it) or hit a typed execution limit (go fail through the
     finalizer).
+
+    A handoff never arrives here. The ``hand_off`` tool returns
+    ``Command(graph=PARENT, goto="resolve_transition")``, which propagates out
+    of the subgraph as a ``ParentCommand`` the parent loop applies directly —
+    this wrapper is bypassed entirely.
     """
 
     async def wrapper(state: dict[str, Any], runtime: Any = None) -> Command:
@@ -289,12 +293,6 @@ def make_subgraph_specialist_wrapper(
                     ),
                 },
                 goto="finalize",
-            )
-
-        if isinstance(outcome, HandoffOutcome):
-            return Command(
-                update={"agent_outcome": outcome, "execution_phase": "executing"},
-                goto="resolve_transition",
             )
 
         return Command(

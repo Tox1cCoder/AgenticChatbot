@@ -76,14 +76,14 @@ def test_assistant_text_in_messages_is_never_promoted_to_an_answer():
     assert _workflow()._recover_terminal_response(state) is None
 
 
-def test_accumulated_stream_text_is_never_promoted_to_an_answer():
-    state = {"response": None, "active_agent_id": "chat_agent", "messages": []}
+def test_recovery_takes_no_text_but_the_finalized_response():
+    """There is no second argument to pass streamed text in through."""
+    import inspect
 
-    recovered = _workflow()._recover_terminal_response(
-        state, fallback_content="tokens the model streamed before validation"
-    )
+    from app.ai.graph import MultiAgentWorkflow
 
-    assert recovered is None
+    parameters = inspect.signature(MultiAgentWorkflow._recover_terminal_response).parameters
+    assert list(parameters) == ["self", "state"]
 
 
 def test_accumulated_text_does_not_backfill_an_empty_finalized_response():
@@ -94,11 +94,7 @@ def test_accumulated_text_does_not_backfill_an_empty_finalized_response():
     """
     state = {"response": _finalized(content=""), "messages": []}
 
-    recovered = _workflow()._recover_terminal_response(
-        state, fallback_content="raw streamed tokens"
-    )
-
-    assert recovered is None or recovered.message.content != "raw streamed tokens"
+    assert _workflow()._recover_terminal_response(state) is None
 
 
 def test_a_turn_with_no_response_recovers_nothing():
@@ -113,4 +109,4 @@ def test_recovery_does_not_fabricate_an_agent_identity():
         "messages": [AIMessage(content="orphan text", id="private-1")],
     }
 
-    assert _workflow()._recover_terminal_response(state, active_agent_id="chat_agent") is None
+    assert _workflow()._recover_terminal_response(state) is None

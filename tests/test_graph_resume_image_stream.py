@@ -221,7 +221,6 @@ async def test_resumed_graph_run_emits_early_image_reference(monkeypatch):
     """FR-IMG-008: a HITL-resumed run delivers the final image by protected
     reference BEFORE the narrative, exactly like a fresh run."""
     monkeypatch.setattr(settings, "enable_image_streaming", True)
-    monkeypatch.setattr(settings, "auto_continue_enabled", False)
 
     token = _dead_sink_token()
     assert resolve_subagent_event_sink(token) is None, (
@@ -282,7 +281,6 @@ async def test_resumed_graph_run_without_persisted_token_still_streams_image(
     """A checkpoint written before sink tokens were persisted must still get a
     sink — the resume path injects a fresh token through ``Command(update=)``."""
     monkeypatch.setattr(settings, "enable_image_streaming", True)
-    monkeypatch.setattr(settings, "auto_continue_enabled", False)
 
     store = _RecordingStore()
     workflow = _build_workflow(store=store, checkpoint_values=_checkpoint_values(None))
@@ -305,7 +303,6 @@ async def test_resumed_image_is_persisted_even_with_image_streaming_disabled(
     """Durable persistence is independent of the transient preview flag: with
     streaming off the resumed run emits no preview but still stores the bytes."""
     monkeypatch.setattr(settings, "enable_image_streaming", False)
-    monkeypatch.setattr(settings, "auto_continue_enabled", False)
 
     store = _RecordingStore()
     token = _dead_sink_token()

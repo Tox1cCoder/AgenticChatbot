@@ -23,10 +23,8 @@ from app.ai.schemas import AgentResponse
 __all__ = [
     "EXECUTION_PHASES",
     "WORKFLOW_ERROR_CODES",
-    "AgentOutcome",
     "AgentTransition",
     "ExecutionPhase",
-    "HandoffOutcome",
     "InvalidWorkflowStateUpdate",
     "OutcomeProvenance",
     "PendingTransition",
@@ -156,27 +154,17 @@ class OutcomeProvenance(BaseModel):
 
 
 class ResponseOutcome(BaseModel):
-    """A specialist finished its work and produced a candidate public answer."""
+    """A specialist finished its work and produced a candidate public answer.
+
+    There is no sibling handoff outcome: a handoff leaves the subgraph as a
+    parent ``Command`` and never passes through the specialist wrapper.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["response"] = "response"
     agent_id: str = Field(min_length=1, max_length=160)
     response: AgentResponse
     provenance: OutcomeProvenance = Field(default_factory=OutcomeProvenance)
-
-
-class HandoffOutcome(BaseModel):
-    """A specialist asked the parent graph to move to another specialist."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    kind: Literal["handoff"] = "handoff"
-    agent_id: str = Field(min_length=1, max_length=160)
-    handoff: AgentTransition
-
-
-AgentOutcome = ResponseOutcome | HandoffOutcome
 
 
 class WorkerResult(BaseModel):

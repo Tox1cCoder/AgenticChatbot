@@ -8,7 +8,6 @@ import app.ai.checkpoint as checkpoint_module
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from app.ai.workflow.contracts import (
     AgentTransition,
-    HandoffOutcome,
     OutcomeProvenance,
     PendingTransition,
     ResponseOutcome,
@@ -29,7 +28,6 @@ _CHECKPOINT_TYPES = (
     PendingTransition,
     OutcomeProvenance,
     ResponseOutcome,
-    HandoffOutcome,
     WorkerResult,
     WorkflowError,
 )
@@ -43,22 +41,10 @@ def _expected_msgpack_allowlist() -> list[tuple[str, str]]:
     return [(symbol.__module__, symbol.__name__) for symbol in _CHECKPOINT_TYPES]
 
 
-def test_build_checkpoint_serializer_uses_json_allowlist_for_current_langgraph(monkeypatch):
-    captured: dict[str, object] = {}
-
-    class FakeSerializer:
-        def __init__(self, *, allowed_json_modules=None):
-            captured["allowed_json_modules"] = allowed_json_modules
-
-    monkeypatch.setattr(checkpoint_module, "JsonPlusSerializer", FakeSerializer)
-
-    serializer = checkpoint_module._build_checkpoint_serializer()
-
-    assert isinstance(serializer, FakeSerializer)
-    assert list(captured["allowed_json_modules"]) == _expected_json_allowlist()
-
-
-def test_build_checkpoint_serializer_adds_msgpack_allowlist_when_supported(monkeypatch):
+def test_build_checkpoint_serializer_passes_both_allowlists():
+    """Both are required. A type missing from either comes back as a dict,
+    and a control-plane contract that degrades to a dict is no longer typed
+    when it is read back out of the checkpoint."""
     captured: dict[str, object] = {}
 
     class FakeSerializer:
@@ -66,31 +52,12 @@ def test_build_checkpoint_serializer_adds_msgpack_allowlist_when_supported(monke
             captured["allowed_json_modules"] = allowed_json_modules
             captured["allowed_msgpack_modules"] = allowed_msgpack_modules
 
-    monkeypatch.setattr(checkpoint_module, "JsonPlusSerializer", FakeSerializer)
-
-    serializer = checkpoint_module._build_checkpoint_serializer()
-
-    assert isinstance(serializer, FakeSerializer)
-    assert list(captured["allowed_json_modules"]) == _expected_json_allowlist()
-    assert list(captured["allowed_msgpack_modules"]) == _expected_msgpack_allowlist()
-
-
-def test_build_checkpoint_serializer_uses_msgpack_allowlist_method_when_constructor_lacks_kwarg(
-    monkeypatch,
-):
-    captured: dict[str, object] = {}
-
-    class FakeSerializer:
-        def __init__(self, *, allowed_json_modules=None):
-            captured["allowed_json_modules"] = allowed_json_modules
-
-        def with_msgpack_allowlist(self, allowlist):
-            captured["allowed_msgpack_modules"] = allowlist
-            return self
-
-    monkeypatch.setattr(checkpoint_module, "JsonPlusSerializer", FakeSerializer)
-
-    serializer = checkpoint_module._build_checkpoint_serializer()
+    original = checkpoint_module.JsonPlusSerializer
+    checkpoint_module.JsonPlusSerializer = FakeSerializer
+    try:
+        serializer = checkpoint_module._build_checkpoint_serializer()
+    finally:
+        checkpoint_module.JsonPlusSerializer = original
 
     assert isinstance(serializer, FakeSerializer)
     assert list(captured["allowed_json_modules"]) == _expected_json_allowlist()
@@ -256,7 +223,7 @@ def test_checkpoint_round_trip_preserves_nested_typed_contract_details():
     restored = serializer.loads_typed(serializer.dumps_typed(state))
 
     outcome = restored["agent_outcome"]
-    assert outcome.kind == "response"
+    assert isinstance(outcome, ResponseOutcome)
     assert isinstance(outcome.response, AgentResponse)
     assert outcome.provenance.output_policy_ids == ("public_content",)
     assert outcome.provenance.evidence == ({"evidence_id": "E1"},)

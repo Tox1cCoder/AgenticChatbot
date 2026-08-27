@@ -2,74 +2,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from langchain_core.messages import AIMessage
 
 from app.ai import graph as graph_module
 from app.ai.schemas import InterruptDecision
 from app.services.message_service import MessageService
-
-
-@pytest.mark.asyncio
-async def test_generic_approval_edit_rewrites_call_executed_by_tool_node(monkeypatch):
-    workflow = graph_module.MultiAgentWorkflow.__new__(graph_module.MultiAgentWorkflow)
-    agent = object()
-    original_call = {
-        "id": "call-1",
-        "name": "mutate",
-        "args": {"value": "original"},
-    }
-    state = {
-        "messages": [AIMessage(content="", tool_calls=[original_call])],
-        "active_agent_id": "chat_agent",
-        "context": {},
-    }
-
-    workflow._resolve_runtime_agent = lambda _state, _name: agent
-    workflow._handoff_tool_for_agent = lambda _state, _name: None
-
-    async def prepare_payload(_state, **_kwargs):
-        return {"action_requests": [original_call]}
-
-    executed_calls = []
-
-    async def execute_calls(**kwargs):
-        executed_calls.extend(kwargs["tool_calls"])
-        return (
-            [
-                {
-                    "tool_call_id": "call-1",
-                    "name": "mutate",
-                    "content": "ok",
-                }
-            ],
-            [],
-            [],
-        )
-
-    workflow._prepare_interrupt_payload = prepare_payload
-    workflow._execute_agent_tool_calls = execute_calls
-    workflow._apply_hand_off_if_present = lambda current_state, _outputs: current_state
-    monkeypatch.setattr(
-        "app.ai.workflow.tool_loop.interrupt",
-        lambda _payload: [
-            {
-                "type": "edit",
-                "tool_call_id": "call-1",
-                "args": {"value": "edited"},
-            }
-        ],
-    )
-
-    await workflow._approval_node(state)
-    assert state["messages"][0].tool_calls[0]["args"] == {"value": "edited"}
-
-    monkeypatch.setattr(
-        "app.ai.workflow.tool_loop.ensure_agent_tool_map",
-        AsyncMock(return_value={}),
-    )
-    await workflow._tool_node(state)
-
-    assert executed_calls[0]["args"] == {"value": "edited"}
 
 
 @pytest.mark.asyncio

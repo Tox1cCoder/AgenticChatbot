@@ -134,7 +134,7 @@ async def test_specialist_result_becomes_a_server_owned_response_outcome():
     factory = _factory()
     outcome = await factory.invoke(_request())
 
-    assert outcome.kind == "response"
+    assert isinstance(outcome, ResponseOutcome)
     assert outcome.agent_id == "chat_agent"
     assert outcome.response.message.content == "specialist answer"
     assert outcome.provenance.output_policy_ids == ("public_content",)

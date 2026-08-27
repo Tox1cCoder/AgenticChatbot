@@ -46,9 +46,7 @@ def _agent_with_calls(*calls: dict, final_text: str = "done"):
         AgentResponse(
             agent_type=AgentType.RAG,
             agent_id="rag_agent",
-            message=AgentMessage(
-                role=MessageRole.ASSISTANT, content="", tool_calls=list(calls)
-            ),
+            message=AgentMessage(role=MessageRole.ASSISTANT, content="", tool_calls=list(calls)),
             metadata={"provider": "test", "model": "test-model"},
         ),
         AgentResponse(
@@ -235,13 +233,16 @@ async def test_an_ordinary_worker_call_is_untouched(monkeypatch):
 # ----------------------------------------------------------------------
 
 
-def test_the_top_level_graph_still_routes_to_approval():
-    """Only workers are restricted. The top-level node runs as a real graph
-    node, so it can interrupt and must keep doing so."""
+def test_the_top_level_specialist_still_interrupts_for_approval():
+    """Only workers are restricted. A top-level specialist runs as a real graph
+    node, so it can pause for a human and must keep doing so."""
     import inspect
 
-    source = inspect.getsource(MultiAgentWorkflow._should_call_tools)
-    assert 'return "approval"' in source
+    from app.ai.workflow.middleware import ToolApprovalMiddleware
+
+    source = inspect.getsource(ToolApprovalMiddleware.aafter_model)
+    assert "interrupt(" in source
+    assert "calls_requiring_approval(" in source
 
 
 def test_no_worker_path_fabricates_an_awaiting_approval_status():

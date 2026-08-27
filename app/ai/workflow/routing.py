@@ -526,31 +526,6 @@ class RoutingContextBuilder:
             for row in rows[:limit]
         )
 
-    # -- test support ----------------------------------------------------
-
-    def build_sync_for_test(
-        self,
-        *,
-        message: str,
-        canvas_title: str = "",
-        canvas_content: str = "",
-        document_body: str = "",
-    ) -> RoutingContext:
-        """Build a context from literal values without any repository access.
-
-        ``canvas_content`` and ``document_body`` are accepted and deliberately
-        discarded so a test can prove they never reach the serialized payload.
-        """
-        del canvas_content, document_body
-        context = RoutingContext(
-            message=message,
-            active_canvas=RoutingCanvasDescriptor(artifact_id="canvas:main", title=canvas_title),
-            documents=(
-                RoutingDocumentDescriptor(document_id="doc-1", filename="a.pdf", status="ready"),
-            ),
-        )
-        return self._with_serialized_payload(context)
-
 
 # ======================================================================
 # Router system instruction

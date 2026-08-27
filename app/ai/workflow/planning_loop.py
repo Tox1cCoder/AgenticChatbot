@@ -567,7 +567,6 @@ class PlanningLoopMixin:
 
             self._set_continuation_signal(
                 state,
-                should_continue=settings.auto_continue_enabled,
                 reason="max_iterations_reached",
                 scope="planning",
                 count=planning_call_count,
@@ -575,33 +574,6 @@ class PlanningLoopMixin:
             )
             logger.warning(f"Planning budget exceeded: {planning_call_count} >= {max_iterations}")
             return "end"
-
-        # Soft-limit: if auto-continue is enabled, trigger continuation at
-        # a fraction of the planning budget.
-        if planning_budget_enabled and settings.auto_continue_enabled:
-            soft_limit = max(1, int(max_iterations * settings.auto_continue_soft_limit_ratio))
-            if planning_call_count >= soft_limit:
-                if last_message_is_tool_output:
-                    logger.debug(
-                        "[Should Continue Planning] Decision: planning_agent "
-                        "(soft budget reached after tool output; reconcile before pausing)"
-                    )
-                    return "planning_agent"
-
-                self._set_continuation_signal(
-                    state,
-                    should_continue=True,
-                    reason="soft_budget",
-                    scope="planning",
-                    count=planning_call_count,
-                    limit=soft_limit,
-                )
-                logger.info(
-                    "Planning soft-limit reached: %d >= %d, requesting auto-continue",
-                    planning_call_count,
-                    soft_limit,
-                )
-                return "end"
 
         # Circuit breaker: check consecutive errors
         consecutive_errors = context.get("consecutive_errors", 0)
@@ -612,7 +584,6 @@ class PlanningLoopMixin:
             state["context"] = context
             self._set_continuation_signal(
                 state,
-                should_continue=False,
                 reason="consecutive_errors_limit",
                 scope="planning",
                 count=consecutive_errors,

@@ -76,7 +76,7 @@ def test_custom_agent_prompt_mentions_missing_device_capabilities():
 # --------------------------------------------------------------------------- #
 
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
+from langchain_core.messages import HumanMessage, ToolMessage  # noqa: E402
 
 from app.ai.graph import MultiAgentWorkflow  # noqa: E402
 
@@ -120,15 +120,11 @@ def _custom_state(runtime_id, *, messages=None, iteration_count=0):
 
 def test_no_custom_agents_keeps_existing_chat_path():
     wf = _workflow()
-    # Base routing unchanged.
-    assert wf._should_continue({"active_agent_id": "chat_agent"}) == "chat_agent"
-    assert wf._should_continue({"active_agent_id": "rag_agent"}) == "rag_agent"
-    # A custom id with NO attached custom agents falls through to end (no change
-    # to behavior for conversations without custom agents).
-    assert (
-        wf._should_continue({"active_agent_id": "custom_agent:abc", "custom_agents": {}}) == "end"
-    )
-    assert wf._should_continue({"active_agent_id": "unknown_agent"}) == "end"
+    # A base agent is its own node.
+    assert wf._route_target_for({"custom_agents": {}}, "chat_agent") == "chat_agent"
+    assert wf._route_target_for({"custom_agents": {}}, "rag_agent") == "rag_agent"
+    # A custom id nobody attached is not reachable as the custom node.
+    assert wf._route_target_for({"custom_agents": {}}, "custom_agent:abc") == "custom_agent:abc"
 
 
 def test_initial_state_injects_attached_custom_agents():
@@ -155,52 +151,13 @@ def test_initial_state_injects_attached_custom_agents():
     assert state["custom_agents"][rid]["name"] == "Analyst"
 
 
-def test_should_continue_routes_custom_runtime_id_to_static_custom_node():
+def test_an_attached_custom_agent_routes_to_the_single_custom_node():
     wf = _workflow()
     rid = f"custom_agent:{uuid4()}"
     state = _custom_state(rid)
-    assert wf._should_continue(state) == "custom_agent"
-    # Unattached custom id is rejected.
-    assert (
-        wf._should_continue({"active_agent_id": f"custom_agent:{uuid4()}", "custom_agents": {}})
-        == "end"
-    )
 
-
-async def test_custom_agent_react_loop_routes_back_to_custom_node_until_done():
-    wf = _workflow()
-    rid = f"custom_agent:{uuid4()}"
-
-    # After a tool executed (last message is a ToolMessage), the loop routes
-    # back to the static custom node while under the iteration budget.
-    state = _custom_state(
-        rid,
-        messages=[
-            HumanMessage(content="hi"),
-            AIMessage(content="", tool_calls=[{"id": "t1", "name": "tool_search", "args": {}}]),
-            ToolMessage(content="result", tool_call_id="t1", name="tool_search"),
-        ],
-        iteration_count=0,
-    )
-    assert wf._route_tool_output(state) == "custom_agent"
-
-    # The loop terminates when the custom agent emits no further tool calls.
-    done_state = {
-        "active_agent_id": rid,
-        "messages": [
-            HumanMessage(content="hi"),
-            AIMessage(content="Final answer."),
-        ],
-    }
-    assert await wf._should_call_tools(done_state) == "end"
-    # And a tool-calling response routes into the tools node.
-    tool_state = {
-        "active_agent_id": rid,
-        "messages": [
-            AIMessage(content="", tool_calls=[{"id": "t2", "name": "tool_search", "args": {}}]),
-        ],
-    }
-    assert await wf._should_call_tools(tool_state) == "tools"
+    assert wf._route_target_for(state, rid) == "custom_agent"
+    assert not wf._is_attached_custom_agent(state, f"custom_agent:{uuid4()}")
 
 
 # --------------------------------------------------------------------------- #
@@ -458,7 +415,7 @@ def test_no_custom_agents_regression_across_paths():
     wf = _workflow()
     # Routing: base agents unchanged, no custom node reachable.
     for base in ("chat_agent", "rag_agent", "search_agent", "canvas_agent", "planning_agent"):
-        assert wf._should_continue({"active_agent_id": base, "custom_agents": {}}) == base
+        assert wf._route_target_for({"custom_agents": {}}, base) == base
     # Handoff to a base target still works without any custom agents.
     state = {
         "active_agent_id": "chat_agent",

@@ -67,10 +67,6 @@ SUBGRAPH_SPECIALIST_NODES: tuple[str, ...] = (
 # longer have one at all.
 TOOL_STAGE_NODES: tuple[str, ...] = ("rag_tools", "planning_tools")
 
-# Every pre-v2 stage decision maps onto a v2 node. ``"end"`` means "this
-# specialist produced a candidate answer", which is validation, never END.
-_STAGE_TARGETS = {"end": "validate_output"}
-
 
 def make_route_node():
     """Build the single new-turn routing node.
@@ -229,13 +225,13 @@ def build_workflow_graph(
     stage_destinations = tuple(sorted({*SPECIALIST_NODE_NAMES, "validate_output", "finalize"}))
 
     for node_name, specialist in specialist_callables.items():
-        targets = stage_targets_by_node.get(node_name, _STAGE_TARGETS)
+        targets = stage_targets_by_node[node_name]
         graph.add_node(
             node_name,
             make_specialist_wrapper(
                 node_name,
                 specialist,
-                stage_router=stage_routers.get(node_name, workflow._should_call_tools),
+                stage_router=stage_routers[node_name],
                 stage_targets=targets,
             ),
             destinations=tuple(sorted({*targets.values(), "finalize"})),
