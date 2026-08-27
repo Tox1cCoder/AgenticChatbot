@@ -155,6 +155,23 @@ class MessageCRUDStrategy(
         )
         return int(db.execute(statement).scalar() or 0)
 
+    def get_user_message_ids(self, db: Session, conversation_id: UUID) -> list[UUID]:
+        """Every user-message ID in a conversation, oldest first.
+
+        These are the conversation's routing-v2 turn IDs. Soft-deleted rows are
+        included on purpose: their checkpoint threads still exist and still
+        need reaping when the conversation is deleted.
+        """
+        statement = (
+            select(Message.id)
+            .where(
+                Message.conversation_id == conversation_id,
+                Message.sender == MessageRole.user.value,
+            )
+            .order_by(Message.sequence.asc())
+        )
+        return [row for row in db.execute(statement).scalars().all()]
+
     def get_prompt_history(
         self,
         db: Session,
@@ -467,6 +484,17 @@ class MessageRepository(RepositorySessionMixin):
     def delete(self, id: UUID) -> bool:
         """Soft-delete a message and invalidate covered memory atomically."""
         return self._compaction_repository.invalidate_for_mutation(id, delete=True)
+
+    def get_user_message_ids(self, conversation_id: UUID | str) -> list[str]:
+        """Turn IDs for a conversation, as strings ready for thread-id building."""
+        resolved = (
+            conversation_id if isinstance(conversation_id, UUID) else UUID(str(conversation_id))
+        )
+        with self.session_factory() as session:
+            return [
+                str(message_id)
+                for message_id in self._crud_strategy.get_user_message_ids(session, resolved)
+            ]
 
     def get_prompt_history(
         self,

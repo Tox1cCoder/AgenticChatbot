@@ -426,6 +426,16 @@ class Settings(BaseSettings):
         default="routing-v2",
         description="Checkpoint namespace and graph version for the production workflow",
     )
+    conversation_turn_lock_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        le=300.0,
+        description=(
+            "How long a turn waits for its conversation's lock before returning the "
+            "retriable conversation_turn_conflict error. Waiting forever would turn a "
+            "contended conversation into a hung request."
+        ),
+    )
     image_generator_tool_model: str = Field(
         default="gemini-3-flash-preview",
         description="Gemini model identifier used for image-agent tool calling",

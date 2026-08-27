@@ -59,6 +59,10 @@ from app.services.ai_service import AIService
 from app.services.auth_service import AuthService
 from app.services.chat_image_service import ChatImageStorageService
 from app.services.conversation_service import ConversationService
+from app.services.conversation_turn_coordinator import (
+    ConversationTurnCoordinator,
+    PostgresAdvisoryLockBackend,
+)
 from app.services.custom_agent_service import CustomAgentService
 from app.services.document_chunk_builder import DocumentChunkBuilder
 from app.services.document_index_service import DocumentIndexService
@@ -485,6 +489,19 @@ class Container(containers.DeclarativeContainer):
         ModelConfigService,
         repository=agent_model_config_repository,
         provider_service=provider_service,
+    )
+
+    # Serializes turns within one conversation and nothing wider. The
+    # PostgreSQL advisory-lock backend is the only one durable across workers,
+    # so it is the only one production accepts.
+    conversation_turn_coordinator = providers.Singleton(
+        ConversationTurnCoordinator,
+        backend=providers.Singleton(
+            PostgresAdvisoryLockBackend,
+            session_factory=db.provided.session,
+        ),
+        timeout_seconds=providers.Object(settings.conversation_turn_lock_timeout_seconds),
+        production=providers.Object(True),
     )
 
     # Routing-v2: the sole owner of new-turn classification. Resolved strictly

@@ -134,6 +134,10 @@ def cleanup_abandoned_interrupts():
             container = get_container()
             hitl_repo = container.hitl_interrupt_repository()
             conversation_repo = container.conversation_repository()
+            # Routing-v2 gives each turn its own checkpoint thread, so deleting
+            # a conversation needs its turn IDs; without them the per-turn
+            # threads survive the conversation they belong to.
+            message_repo = container.message_repository()
 
             # psycopg3 async requires a SelectorEventLoop; the default loop on
             # Windows is a ProactorEventLoop the checkpoint pool cannot use
@@ -150,6 +154,7 @@ def cleanup_abandoned_interrupts():
                         hitl_repo=hitl_repo,
                         conversation_repo=conversation_repo,
                         redis_expired_thread_ids=redis_expired_threads,
+                        message_repo=message_repo,
                     )
                 )
             finally:
@@ -265,6 +270,7 @@ async def _run_checkpoint_retention_cleanup(
     hitl_repo,
     conversation_repo,
     redis_expired_thread_ids: list[str],
+    message_repo=None,
 ) -> tuple[dict[str, int], int]:
     """
     Run CheckpointRetentionService plus ad-hoc cleanup for Redis-sourced threads.
@@ -290,6 +296,7 @@ async def _run_checkpoint_retention_cleanup(
             checkpoint_manager=checkpoint_manager,
             hitl_interrupt_repository=hitl_repo,
             conversation_repository=conversation_repo,
+            message_repository=message_repo,
         )
         retention_counts = await retention_service.cleanup_expired_and_deleted_threads(now=now)
 
