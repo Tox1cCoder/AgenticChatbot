@@ -4,11 +4,11 @@ Top-level RAG and Planning RAG workers run the *same* compiled graph. Two
 implementations were how one path could quietly skip validation, so there is no
 inline special case here and no rollout branch that turns grounding off.
 
-Grounding runs for every result, including a retrieval that returned nothing. A
-zero-evidence answer may ask a bounded clarifying question or abstain, but it
-may never make a source-backed claim. One invalid answer earns exactly one
-constrained regeneration; a second invalid answer becomes an explicit
-abstention.
+Grounding runs for every result, including a retrieval that returned nothing.
+Validation reports; it does not rewrite. A zero-evidence answer may ask a
+bounded clarifying question, and it may not make a source-backed claim --
+enforced by neutralizing any citation the server cannot resolve, not by
+replacing the answer after the reader has already seen it.
 
 Evidence identity is server-owned: IDs come from a per-run allocator, and a
 duplicate or ambiguous ID fails validation rather than silently selecting the
@@ -45,7 +45,7 @@ __all__ = [
 ]
 
 RagMode = Literal["public", "worker"]
-GroundingOutcome = Literal["accepted", "regenerated", "clarification", "abstained"]
+GroundingOutcome = Literal["accepted", "accepted_with_findings", "clarification"]
 
 
 class EvidenceIdAllocator:
@@ -216,21 +216,17 @@ class RagExecutionGraphFactory:
 
     async def _validate_grounding(self, state: RagExecutionState) -> dict[str, Any]:
         """Validate every result. There is no path that skips this node."""
-        request = state["request"]
         evidence = state.get("evidence") or EvidencePack()
         answer = state.get("answer") or GroundedAnswer()
 
         finalization = await self._gate.finalize_answer(
-            question=request.objective,
             evidence=evidence,
             answer=answer,
-            regenerate=self._regenerator(),
-            mode="enforced",
             ambiguous_evidence_id_count=int(state.get("ambiguous_evidence_id_count") or 0),
         )
         return {
             "answer": finalization.answer,
-            "regeneration_count": 1 if finalization.regenerated else 0,
+            "regeneration_count": 0,
             "finalization": finalization,
         }
 
@@ -260,7 +256,7 @@ class RagExecutionGraphFactory:
         )
         result = RagExecutionResult(
             content=content,
-            abstained=bool(answer.abstained),
+            abstained=False,
             grounding=report,
             evidence_ids=tuple(evidence.evidence_ids),
             mode=request.mode,
@@ -270,9 +266,6 @@ class RagExecutionGraphFactory:
 
     # -- helpers ---------------------------------------------------------
 
-    def _regenerator(self) -> Any | None:
-        regenerate = getattr(self._runtime, "regenerate", None)
-        return regenerate if callable(regenerate) else None
 
 
 class _RagExecutionRun:
@@ -296,15 +289,16 @@ def _outcome_for(
 ) -> GroundingOutcome:
     """Name what validation decided.
 
-    ``clarification`` is a real outcome, not a soft abstention: with no
-    evidence retrieved and nothing asserted, asking the user a bounded question
-    is the correct grounded response.
+    ``clarification`` is a real outcome: with no evidence retrieved and nothing
+    asserted, asking the user a bounded question is the correct grounded
+    response. ``accepted_with_findings`` means validation recorded something —
+    a density shortfall, an unresolvable id — that the reader is protected from
+    at the citation level rather than by suppressing the answer.
     """
-    if answer.abstained:
-        return "abstained"
     if not answer.claims and not evidence.records and (answer.raw_text or "").strip():
         return "clarification"
-    return "regenerated" if getattr(finalization, "regenerated", False) else "accepted"
+    validation = getattr(finalization, "validation", None)
+    return "accepted" if getattr(validation, "valid", True) else "accepted_with_findings"
 
 
 def _render(answer: GroundedAnswer, evidence: EvidencePack) -> str:

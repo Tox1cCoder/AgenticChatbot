@@ -1205,12 +1205,13 @@ def _grounded_workflow(*, final_text: str, regenerated_answer=None):
     return workflow, calls
 
 
-def test_an_uncited_answer_is_not_published_as_written(monkeypatch):
-    """There is no shadow mode: a below-coverage answer is acted on, not logged.
+def test_an_uncited_answer_is_published_with_its_shortfall_recorded(monkeypatch):
+    """Citation density is measured, not enforced by replacing the answer.
 
-    Previously this same input was recorded as ``would_abstain`` and published
-    unchanged. Mandatory grounding means the turn now spends its one
-    regeneration and then abstains rather than shipping the uncited claim.
+    Density is only knowable once the answer is complete, so enforcing it
+    meant deciding the whole answer after the reader had already watched it
+    arrive. The shortfall is recorded instead; what protects the reader is
+    that a citation naming nothing does not render as a citation.
     """
     monkeypatch.setattr(settings, "enable_citation_verification", True, raising=False)
     state = _grounded_state()
@@ -1219,11 +1220,11 @@ def test_an_uncited_answer_is_not_published_as_written(monkeypatch):
     asyncio.run(workflow._rag_node(state))
 
     grounded = state["response"].metadata["grounded_answer"]
-    assert grounded["mode"] == "enforced"
-    assert grounded["outcome"] != "would_abstain"
     assert grounded["valid"] is False
+    assert grounded["outcome"] == "accepted_with_findings"
     assert grounded["evidence_id_count"] == 1
-    assert calls["regenerations"], "enforcement must spend its one regeneration"
+    assert calls["regenerations"] == [], "a density shortfall must not cost a second call"
+    assert "Revenue rose to 10 million." in state["response"].message.content
 
 
 def test_enforced_grounded_gate_appends_server_rendered_sources(monkeypatch):
@@ -1243,24 +1244,24 @@ def test_enforced_grounded_gate_appends_server_rendered_sources(monkeypatch):
     assert state["response"].metadata["grounded_answer"]["outcome"] == "accepted"
 
 
-def test_enforced_grounded_gate_regenerates_once_then_abstains(monkeypatch):
-    from app.services.rag_grounding import GroundedAnswer, GroundedClaim
+def test_an_unresolvable_citation_never_reaches_the_reader(monkeypatch):
+    """The invariant that abstention used to protect, enforced at the citation.
 
+    ``E9`` names nothing this turn retrieved, so it must not render as a
+    citation and must not pull a source name into the answer. The prose around
+    it survives, because nothing about it was wrong.
+    """
     monkeypatch.setattr(settings, "enable_citation_verification", True, raising=False)
     state = _grounded_state()
-    workflow, calls = _grounded_workflow(
-        final_text="Revenue rose to 10 million [E9].",
-        regenerated_answer=GroundedAnswer(
-            claims=[GroundedClaim(text="Revenue rose to 10 million.", evidence_ids=("E8",))]
-        ),
-    )
+    workflow, calls = _grounded_workflow(final_text="Revenue rose to 10 million [E9].")
 
     asyncio.run(workflow._rag_node(state))
 
     metadata = state["response"].metadata
-    assert calls["regenerations"] == [(("unknown_evidence_id",), "What was revenue?")]
-    assert metadata["grounded_answer"]["outcome"] == "abstained"
-    assert metadata["grounded_answer"]["regenerated"] is True
+    assert calls["regenerations"] == []
+    assert metadata["grounded_answer"]["outcome"] == "accepted_with_findings"
+    assert metadata["grounded_answer"]["regenerated"] is False
+    assert "Revenue rose to 10 million" in state["response"].message.content
     assert "E9" not in state["response"].message.content
     assert "report.pdf" not in state["response"].message.content
     assert "evidence_tokenization" not in metadata
@@ -1333,27 +1334,25 @@ def test_grounding_runs_even_with_citation_verification_turned_off(monkeypatch):
     assert state["response"].metadata["grounded_answer"]["mode"] == "enforced"
 
 
-def test_enforced_regeneration_preserves_the_regenerated_markdown_structure(monkeypatch):
-    """Round-1 finding 3: a regenerated answer must render from its own raw
-    text, not a space-joined run-on paragraph built from its claims."""
-    from app.services.rag_grounding import parse_grounded_answer
+def test_the_models_markdown_structure_survives_rendering(monkeypatch):
+    """Round-1 finding 3, now unconditional: rendering never reflows the answer.
 
+    What is published is the model's own prose with unresolvable citations
+    removed and a source list appended. Nested lists and blank lines are not
+    the server's to rewrite.
+    """
     monkeypatch.setattr(settings, "enable_citation_verification", True, raising=False)
     state = _grounded_state()
-    regenerated_text = "Revenue rose [E1].\n\n- Costs fell [E1]\n- Margins widened [E1]"
-    workflow, calls = _grounded_workflow(
-        final_text="Revenue rose to 10 million [E9].",
-        regenerated_answer=parse_grounded_answer(regenerated_text),
-    )
+    answer_text = "Revenue rose [E1].\n\n- Costs fell [E1]\n- Margins widened [E1]"
+    workflow, calls = _grounded_workflow(final_text=answer_text)
 
     asyncio.run(workflow._rag_node(state))
 
     content = state["response"].message.content
-    assert calls["regenerations"] == [(("unknown_evidence_id",), "What was revenue?")]
-    assert state["response"].metadata["grounded_answer"]["outcome"] == "regenerated"
+    assert calls["regenerations"] == []
     assert "\n\n- Costs fell [E1]\n- Margins widened [E1]" in content, (
-        "regenerated markdown structure must survive rendering, not be "
-        "flattened into one space-joined paragraph"
+        "the model's markdown must survive rendering, not be flattened into "
+        "one space-joined paragraph"
     )
 
 

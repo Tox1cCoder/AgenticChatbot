@@ -141,30 +141,20 @@ async def test_a_grounded_answer_is_accepted():
     assert result.grounding.regeneration_count == 0
 
 
-async def test_invalid_citations_regenerate_once_then_abstain():
-    runtime = ScriptedRagRuntime(
-        answers=[_answer("E99")],
-        regenerations=[_answer("E98")],
-        evidence=_evidence_payload("E1"),
-    )
-    result = await _factory(runtime).build().ainvoke(_request())
+async def test_invalid_citations_are_recorded_without_a_second_generation():
+    """An unresolvable id is a finding, not grounds for regenerating the turn.
 
-    assert result.abstained is True
-    assert result.grounding.regeneration_count == 1
-    assert runtime.regeneration_calls == 1
-
-
-async def test_one_regeneration_can_rescue_the_answer():
-    runtime = ScriptedRagRuntime(
-        answers=[_answer("E99")],
-        regenerations=[_answer("E1")],
-        evidence=_evidence_payload("E1"),
-    )
+    The reader is protected where the citation renders, so there is no second
+    model call and no draft to discard.
+    """
+    runtime = ScriptedRagRuntime(answers=[_answer("E99")], evidence=_evidence_payload("E1"))
     result = await _factory(runtime).build().ainvoke(_request())
 
     assert result.abstained is False
-    assert result.grounding.outcome == "regenerated"
-    assert result.grounding.regeneration_count == 1
+    assert result.grounding.regeneration_count == 0
+    assert runtime.regeneration_calls == 0
+    assert result.grounding.outcome == "accepted_with_findings"
+    assert "unknown_evidence_id" in result.grounding.reason_codes
 
 
 async def test_unknown_evidence_id_never_reaches_the_public_result():
@@ -176,12 +166,18 @@ async def test_unknown_evidence_id_never_reaches_the_public_result():
 
 
 async def test_no_evidence_still_runs_grounding_and_cannot_claim_sources():
+    """With nothing retrieved, every citation is unresolvable — so none render.
+
+    The invariant is unchanged; only its enforcement moved. It is no longer
+    "replace the answer", it is "a citation to nothing is not a citation".
+    """
     runtime = ScriptedRagRuntime(answers=[_answer("E1")], evidence={})
     result = await _factory(runtime).build().ainvoke(_request())
 
     assert result.grounding.validated is True
-    assert result.grounding.outcome in {"abstained", "clarification"}
     assert result.evidence_ids == ()
+    assert "[E1]" not in result.content
+    assert "E1" not in result.content
 
 
 async def test_a_zero_evidence_clarification_is_allowed_through():

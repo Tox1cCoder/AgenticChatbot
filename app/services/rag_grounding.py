@@ -1,4 +1,4 @@
-"""Deterministic grounded-answer validation, citation rendering, and abstention.
+"""Deterministic grounded-answer validation and citation rendering.
 
 Every decision in this module is computed from server-owned data: the
 ``EvidencePack`` assembled for the current turn and the evidence ids the model
@@ -7,9 +7,13 @@ from documents are untrusted reference data — they are never read as
 instructions, never used to authorize a citation, and never rendered without
 being neutralized first.
 
+Validation reports; it does not rewrite. The check that protects the reader --
+a citation naming evidence this turn never retrieved -- is enforced where the
+citation renders, so an answer is never withheld or replaced after the reader
+has begun to see it. Citation density is measured and recorded instead.
+
 The module is pure CPU work over short strings (regex scans of one answer), so
-it is safe to call directly from the event loop. The single I/O step, one
-constrained regeneration, is supplied by the caller as an awaitable.
+it is safe to call directly from the event loop, and it performs no I/O at all.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 from uuid import UUID
@@ -155,7 +159,7 @@ class GroundedFinalization(BaseModel):
 
 
 class GroundedAnswerGate:
-    """Accept a grounded answer, ask for one constrained rewrite, or abstain."""
+    """Validate one grounded answer and report what validation found."""
 
     def __init__(
         self,
@@ -242,66 +246,44 @@ class GroundedAnswerGate:
     async def finalize_answer(
         self,
         *,
-        question: str,
         evidence: EvidencePack,
         answer: GroundedAnswer,
-        regenerate: Any | None = None,
-        mode: str = "shadow",
         ambiguous_evidence_id_count: int = 0,
     ) -> GroundedFinalization:
-        """Validate, allow exactly one constrained regeneration, then abstain."""
-        validation_seconds = 0.0
+        """Validate one answer and report what validation found.
+
+        Validation reports; it does not rewrite. The two checks that protect
+        the reader — a citation to something never retrieved, and a claim made
+        with nothing retrieved at all — are decidable from the evidence set,
+        which is fixed before the first answer token exists. They are enforced
+        where a citation is rendered, so an unresolvable one never reaches the
+        reader as a citation.
+
+        The other two findings are about citation *density*, and density is
+        only knowable once the answer is complete. Enforcing it meant deciding
+        the whole answer: regenerate it, or replace it with a canned
+        abstention. A draft that can be replaced wholesale cannot be streamed,
+        which is why density enforcement — not citation checking — was what
+        kept RAG answers hidden until the turn finished. It is recorded now
+        instead of acted on.
+        """
         started_at = time.monotonic()
         validation = self.validate(answer, evidence)
-        validation_seconds += time.monotonic() - started_at
-        regenerated = False
-        if not validation.valid and regenerate is not None:
-            candidate = await self._regenerate_once(regenerate, validation.reason_codes)
-            if candidate is not None:
-                regenerated = True
-                answer = candidate
-                revalidate_at = time.monotonic()
-                validation = self.validate(answer, evidence)
-                validation_seconds += time.monotonic() - revalidate_at
+        self._record_stage(time.monotonic() - started_at)
 
-        finalize_at = time.monotonic()
-        decided = self.finalize(question=question, evidence=evidence, answer=answer)
-        validation_seconds += time.monotonic() - finalize_at
-        self._record_stage(validation_seconds)
-        accepted_outcome = "regenerated" if regenerated else "accepted"
-        if decided.abstained:
-            # Shadow mode never actually replaces the answer (see
-            # ``_apply_grounded_answer_gate``), so calling this "abstained"
-            # invites reading a floor measurement as a live abstention. Only
-            # enforced mode has actually abstained (round-1 finding 4).
-            outcome = "would_abstain" if mode == "shadow" else "abstained"
-        else:
-            outcome = accepted_outcome
         finalization = GroundedFinalization(
-            answer=decided,
+            answer=answer,
             validation=validation,
-            regenerated=regenerated,
-            mode=str(mode),
+            regenerated=False,
+            mode="enforced",
             claim_count=len(answer.claims),
             cited_claim_count=sum(bool(claim.evidence_ids) for claim in answer.claims),
             evidence_id_count=len(evidence.evidence_ids),
             ambiguous_evidence_id_count=int(ambiguous_evidence_id_count),
-            outcome=outcome,
+            outcome="accepted" if validation.valid else "accepted_with_findings",
         )
         self._record(finalization)
         return finalization
-
-    @staticmethod
-    async def _regenerate_once(
-        regenerate: Any,
-        reason_codes: Sequence[str],
-    ) -> GroundedAnswer | None:
-        try:
-            candidate = await regenerate(reason_codes=tuple(reason_codes))
-        except Exception:
-            logger.exception("Constrained grounded-answer regeneration failed")
-            return None
-        return candidate if isinstance(candidate, GroundedAnswer) else None
 
     def _record_stage(self, elapsed_seconds: float) -> None:
         recorder = getattr(self.metrics, "stage", None)
@@ -430,8 +412,38 @@ def render_grounded_answer(
             if evidence_id in known and evidence_id not in cited:
                 cited.append(evidence_id)
     body = _strip_model_citations(text) if text is not None else _render_claims(answer, known)
+    # A marker the server cannot resolve must not render as a citation. This is
+    # the enforcement that replaced abstention, and it is deliberately the same
+    # rule the stream filter applies, so what the reader watched arrive and what
+    # is stored say the same thing.
+    body = _neutralize_unknown_markers(body, known)
     sources = _render_sources(cited, evidence)
     return f"{body}\n\n{sources}" if sources else body
+
+
+def neutralize_unknown_markers(text: str, known_evidence_ids: Iterable[str]) -> str:
+    """Drop citation markers that name evidence this turn never retrieved.
+
+    Shared with the stream projector so a citation is judged by one rule in
+    both places. A marker naming several ids keeps the resolvable ones.
+    """
+    return _neutralize_unknown_markers(str(text or ""), frozenset(known_evidence_ids))
+
+
+def _neutralize_unknown_markers(text: str, known: Any) -> str:
+    known_ids = {str(evidence_id).upper() for evidence_id in (known or ())}
+
+    def _rewrite(match: re.Match[str]) -> str:
+        ids = [
+            evidence_id.strip().upper()
+            for evidence_id in _SERVER_EVIDENCE_ID.findall(match.group(1).upper())
+        ]
+        kept = [evidence_id for evidence_id in ids if evidence_id in known_ids]
+        if not kept:
+            return ""
+        return f"[{', '.join(kept)}]" if len(kept) > 1 else f"[{kept[0]}]"
+
+    return _SPACE_BEFORE_PUNCTUATION.sub(r"\1", _EVIDENCE_MARKER.sub(_rewrite, text)).strip()
 
 
 def evidence_pack_from_payloads(payloads: Sequence[Mapping[str, Any]]) -> EvidencePack:

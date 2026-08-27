@@ -120,41 +120,16 @@ class RagLoopMixin:
         ]
         return merge_evidence_payloads(payloads)
 
-    def _grounded_regenerator(
-        self,
-        state: GraphState,
-        question: str,
-        evidence: EvidencePack,
-    ) -> Any | None:
-        regenerate = getattr(self.rag_agent, "regenerate_grounded_answer", None)
-        if not callable(regenerate):
-            return None
-
-        async def _regenerate(*, reason_codes: Any):
-            return await regenerate(
-                question=question,
-                evidence=evidence,
-                reason_codes=reason_codes,
-                conversation_id=state.get("conversation_id"),
-                user_id=state.get("user_id"),
-                model_request=state.get("model_request"),
-            )
-
-        return _regenerate
-
     async def _apply_grounded_answer_gate(
         self,
         state: GraphState,
         response: AgentResponse,
-        *,
-        question: str,
     ) -> AgentResponse:
         """Validate one final RAG answer against the current turn's evidence.
 
-        Enforcement is unconditional. The live evidence token counter is
-        already consumed or discarded before this runs, and the regeneration is
-        a tool-free pass that registers no descriptor, so this exit stays
-        leak-free.
+        Validation is unconditional; enforcement is at the citation, not the
+        answer. The live evidence token counter is already consumed or
+        discarded before this runs, so this exit stays leak-free.
         """
         if getattr(response, "error", None):
             # A failed turn reports its own error. It is not an answer to ground,
@@ -165,30 +140,28 @@ class RagLoopMixin:
         messages = state.get("messages", []) or []
         evidence, ambiguous_evidence_id_count = self._current_turn_evidence(state, messages)
 
-        # Grounding is not optional and has no shadow mode: every RAG answer is
-        # validated, including one produced from zero evidence. A zero-evidence
-        # answer may clarify or abstain, but it may not claim a source.
+        # Grounding is not optional: every RAG answer is validated, including
+        # one produced from zero evidence. What validation does with a finding
+        # changed — it records it. The reader is protected by the rendering
+        # rule below, which drops any citation the server cannot resolve, not
+        # by withholding or rewriting the answer after the fact.
         finalization = await self._grounded_answer_gate().finalize_answer(
-            question=question,
             evidence=evidence,
             answer=parse_grounded_answer(text),
-            regenerate=self._grounded_regenerator(state, question, evidence),
-            mode="enforced",
             ambiguous_evidence_id_count=ambiguous_evidence_id_count,
         )
         metadata = response.metadata if isinstance(response.metadata, dict) else {}
         metadata["grounded_answer"] = finalization.to_metadata()
         response.metadata = metadata
 
-        # A regenerated answer renders from its own raw text so its markdown
-        # structure survives; an abstention replaces the answer outright and
-        # ignores ``text`` entirely; otherwise keep the model's original
-        # formatting and let the server append the citation block.
-        keep_prose = not finalization.answer.abstained and not finalization.regenerated
+        # The model's own prose and markdown survive. The server neutralizes
+        # unresolvable citation markers and appends the source list it owns —
+        # both additive or subtractive at the citation level, never a rewrite
+        # of the answer, so what streamed and what is stored agree.
         response.message.content = render_grounded_answer(
             finalization.answer,
             evidence,
-            text=text if keep_prose else finalization.answer.raw_text,
+            text=text,
         )
         return response
 
@@ -266,11 +239,7 @@ class RagLoopMixin:
                 self.rag_agent,
                 response.metadata or {},
             )
-            response = await self._apply_grounded_answer_gate(
-                state,
-                response,
-                question=str(original_query or ""),
-            )
+            response = await self._apply_grounded_answer_gate(state, response)
         self._merge_tool_artifacts(state, response)
         state["response"] = response
 

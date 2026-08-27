@@ -320,74 +320,35 @@ def test_abstention_text_is_bounded_and_free_of_document_content():
 
 
 @pytest.mark.asyncio
-async def test_invalid_answer_triggers_exactly_one_regeneration_then_accepts(gate):
+async def test_an_unresolvable_citation_is_recorded_and_the_answer_kept(gate):
+    """No second generation, no abstention: the finding is reported.
+
+    The reader is protected where the citation renders — an id naming nothing
+    does not render as a citation — so there is no reason to discard prose the
+    reader may already have watched arrive.
+    """
     pack = evidence_pack("E1")
     ungrounded = GroundedAnswer(claims=[GroundedClaim(text="Revenue rose.", evidence_ids=("E9",))])
-    grounded = GroundedAnswer(claims=[GroundedClaim(text="Revenue rose.", evidence_ids=("E1",))])
-    attempts: list[tuple[str, ...]] = []
 
-    async def regenerate(*, reason_codes):
-        attempts.append(tuple(reason_codes))
-        return grounded
+    finalization = await gate.finalize_answer(evidence=pack, answer=ungrounded)
 
-    finalization = await gate.finalize_answer(
-        question="What was revenue?",
-        evidence=pack,
-        answer=ungrounded,
-        regenerate=regenerate,
-        mode="enforced",
-    )
-
-    assert attempts == [("unknown_evidence_id",)]
-    assert finalization.regenerated is True
-    assert finalization.answer == grounded
-    assert finalization.validation.valid is True
-    assert finalization.to_metadata()["outcome"] == "regenerated"
+    assert finalization.regenerated is False
+    assert finalization.answer == ungrounded
+    assert finalization.answer.abstained is False
+    assert finalization.validation.reason_codes == ("unknown_evidence_id",)
+    assert finalization.to_metadata()["outcome"] == "accepted_with_findings"
 
 
 @pytest.mark.asyncio
-async def test_second_failure_abstains_without_a_third_generation(gate):
-    pack = evidence_pack("E1")
-    ungrounded = GroundedAnswer(claims=[GroundedClaim(text="Revenue rose.", evidence_ids=("E9",))])
-    attempts: list[tuple[str, ...]] = []
-
-    async def regenerate(*, reason_codes):
-        attempts.append(tuple(reason_codes))
-        return GroundedAnswer(
-            claims=[GroundedClaim(text="Revenue definitely rose.", evidence_ids=("E8",))]
-        )
-
-    finalization = await gate.finalize_answer(
-        question="What was revenue?",
-        evidence=pack,
-        answer=ungrounded,
-        regenerate=regenerate,
-        mode="enforced",
-    )
-
-    assert len(attempts) == 1
-    assert finalization.answer.abstained is True
-    assert finalization.answer.reason_code == "unknown_evidence_id"
-    metadata = finalization.to_metadata()
-    assert metadata["outcome"] == "abstained"
-    assert metadata["mode"] == "enforced"
-
-
-@pytest.mark.asyncio
-async def test_shadow_mode_records_validation_without_regenerating(gate):
+async def test_validation_findings_stay_checkpoint_safe(gate):
     pack = evidence_pack("E1")
     ungrounded = GroundedAnswer(claims=[GroundedClaim(text="Revenue rose.", evidence_ids=())])
 
-    finalization = await gate.finalize_answer(
-        question="What was revenue?",
-        evidence=pack,
-        answer=ungrounded,
-        regenerate=None,
-    )
+    finalization = await gate.finalize_answer(evidence=pack, answer=ungrounded)
 
     metadata = finalization.to_metadata()
     assert finalization.regenerated is False
-    assert metadata["mode"] == "shadow"
+    assert metadata["mode"] == "enforced"
     assert metadata["valid"] is False
     assert metadata["reason_codes"] == ["citation_coverage_below_minimum"]
     assert metadata["citation_coverage"] == pytest.approx(0.0)
@@ -733,10 +694,7 @@ async def test_ambiguous_evidence_id_count_is_recorded_in_shadow_metadata(gate):
     answer = GroundedAnswer(claims=[GroundedClaim(text="Revenue rose.", evidence_ids=("E1",))])
 
     finalization = await gate.finalize_answer(
-        question="What was revenue?",
-        evidence=pack,
-        answer=answer,
-        ambiguous_evidence_id_count=2,
+        evidence=pack, answer=answer, ambiguous_evidence_id_count=2
     )
 
     assert finalization.to_metadata()["ambiguous_evidence_id_count"] == 2
@@ -747,9 +705,7 @@ async def test_ambiguous_evidence_id_count_defaults_to_zero(gate):
     pack = evidence_pack("E1")
     answer = GroundedAnswer(claims=[GroundedClaim(text="Revenue rose.", evidence_ids=("E1",))])
 
-    finalization = await gate.finalize_answer(
-        question="What was revenue?", evidence=pack, answer=answer
-    )
+    finalization = await gate.finalize_answer(evidence=pack, answer=answer)
 
     assert finalization.to_metadata()["ambiguous_evidence_id_count"] == 0
 
