@@ -27,6 +27,7 @@ from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededErr
 from langgraph.types import Command
 
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+from app.ai.tool_context import rich_response_capable_from_context
 from app.ai.workflow.contracts import (
     HandoffOutcome,
     OutcomeProvenance,
@@ -35,7 +36,12 @@ from app.ai.workflow.contracts import (
     WorkflowError,
 )
 from app.ai.workflow.inventory import CUSTOM_AGENT_NODE, CUSTOM_AGENT_PREFIX
-from app.ai.workflow.middleware import ArtifactCaptureMiddleware, build_specialist_middleware
+from app.ai.workflow.middleware import (
+    SpecialistToolScope,
+    ToolApprovalMiddleware,
+    ToolExecutionMiddleware,
+    build_specialist_middleware,
+)
 
 PLANNING_AGENT_ID = "planning_agent"
 
@@ -380,6 +386,11 @@ class SpecialistDefinition:
     Deliberately configuration, not behavior: the model/tool loop belongs to
     the framework, so a specialist declares its prompt, its tools, and the
     output contracts its answers must satisfy — nothing else.
+
+    ``agent`` is the object those factories already close over. It is named
+    here because tool *execution* needs it too: the execution map, the
+    deferred-tool state key, and the mid-turn tool refresh are all keyed off
+    the agent that owns the tools.
     """
 
     agent_id: str
@@ -387,10 +398,8 @@ class SpecialistDefinition:
     model_config_key: str
     system_prompt_factory: Callable[[SpecialistRequest], Awaitable[str] | str]
     tool_factory: Callable[[SpecialistRequest], Awaitable[list[Any]] | list[Any]]
+    agent: Any = None
     output_policy_ids: tuple[str, ...] = ()
-    # Set for specialists whose streamed tokens are internal rather than an
-    # answer (an enhanced image prompt, for example).
-    tokens_are_internal: bool = False
 
 
 @dataclass
@@ -444,8 +453,6 @@ class SpecialistFactory:
         agent_builder: Callable[..., Any] | None = None,
         usage_recorder: Any = None,
         settings: Any = None,
-        authorize: Callable[..., bool] | None = None,
-        preflight: Any = None,
     ) -> None:
         self._definitions = dict(definitions)
         self._runtime_model_resolver = runtime_model_resolver
@@ -453,8 +460,6 @@ class SpecialistFactory:
         self._agent_builder = agent_builder or _default_agent_builder
         self._usage_recorder = usage_recorder
         self._settings = settings
-        self._authorize = authorize or (lambda *args, **kwargs: True)
-        self._preflight = preflight
 
     # -- registry --------------------------------------------------------
 
@@ -474,16 +479,16 @@ class SpecialistFactory:
     async def invoke(self, request: SpecialistRequest) -> ResponseOutcome:
         """Run a specialist for a public turn and return a server-owned outcome."""
         definition = self.definition_for(request.agent_id)
-        artifact_sink = ArtifactCaptureMiddleware()
-        agent = await self._build(definition, request, artifact_sink)
+        agent, tool_execution = await self._build(definition, request)
 
         result = await agent.ainvoke(
             {"messages": self._invocation_messages(request)},
             context=self._runtime_context(request),
             config=self._run_config(request),
         )
+        _reject_swallowed_interrupt(result, request.agent_id)
         produced = self._produced_messages(request, result)
-        return self._to_outcome(definition, request, produced, artifact_sink)
+        return self._to_outcome(definition, request, produced, tool_execution)
 
     async def invoke_worker(self, request: SpecialistRequest, *, task_id: str) -> WorkerResult:
         """Run a specialist as a Planning worker.
@@ -501,8 +506,7 @@ class SpecialistFactory:
 
         try:
             definition = self.definition_for(request.agent_id)
-            artifact_sink = ArtifactCaptureMiddleware()
-            agent = await self._build(definition, request, artifact_sink)
+            agent, tool_execution = await self._build(definition, request)
             result = await agent.ainvoke(
                 {"messages": self._invocation_messages(request)},
                 context=self._runtime_context(request),
@@ -537,7 +541,7 @@ class SpecialistFactory:
             agent_id=request.agent_id,
             status="completed",
             content=_final_text(produced),
-            artifacts=tuple(artifact_sink.artifacts),
+            artifacts=tuple(tool_execution.artifacts),
         )
 
     # -- construction ----------------------------------------------------
@@ -546,10 +550,27 @@ class SpecialistFactory:
         self,
         definition: SpecialistDefinition,
         request: SpecialistRequest,
-        artifact_sink: ArtifactCaptureMiddleware,
-    ) -> Any:
+    ) -> tuple[Any, ToolExecutionMiddleware]:
         system_prompt = await _resolve(definition.system_prompt_factory, request)
         tools = await _resolve(definition.tool_factory, request) or []
+
+        scope = SpecialistToolScope(
+            agent=definition.agent,
+            agent_key=_tool_state_key(definition),
+            conversation_id=request.conversation_id,
+            user_id=request.user_id,
+            device_id=request.device_id,
+            rich_response_capable=rich_response_capable_from_context(request.state.get("context")),
+            internal_tools=request.extras.get("internal_tools"),
+        )
+        # Seed the scope with the tools bound at build time. A resumed run
+        # re-enters after the model call, so the refresh in the execution
+        # middleware never fires and this is the only offer it gets.
+        scope.offer(tools)
+        tool_execution = ToolExecutionMiddleware(
+            scope=scope,
+            tool_factory=lambda: _resolve(definition.tool_factory, request),
+        )
 
         middleware = build_specialist_middleware(
             runtime_model_resolver=self._runtime_model_resolver,
@@ -557,26 +578,26 @@ class SpecialistFactory:
             agent_key=definition.model_config_key,
             agent_id=definition.agent_id,
             user_id=request.user_id,
-            device_id=request.device_id,
             model_request=request.model_request,
             usage_recorder=self._usage_recorder,
-            authorize=self._authorize,
             hitl_policy=request.hitl_policy,
             max_model_calls=self._limit("specialist_max_model_calls", 8),
             max_tool_calls=self._limit("specialist_max_tool_calls", 16),
-            preflight=self._preflight,
-            artifact_sink=artifact_sink,
+            tool_execution=tool_execution,
+            approval=ToolApprovalMiddleware(scope=scope, hitl_policy=request.hitl_policy or {}),
+            preflight=_preflight_for(definition, request),
         )
 
         # The model is resolved inside RuntimeModelMiddleware per attempt; the
         # placeholder here only satisfies create_agent's constructor.
-        return self._agent_builder(
+        agent = self._agent_builder(
             model=None,
             tools=tools,
             system_prompt=system_prompt,
             middleware=middleware,
             context_schema=SpecialistRuntimeContext,
         )
+        return agent, tool_execution
 
     def _limit(self, name: str, default: int) -> int:
         return int(getattr(self._settings, name, default) or default)
@@ -611,26 +632,84 @@ class SpecialistFactory:
         definition: SpecialistDefinition,
         request: SpecialistRequest,
         produced: list[Any],
-        artifact_sink: ArtifactCaptureMiddleware,
+        tool_execution: ToolExecutionMiddleware,
     ) -> ResponseOutcome:
-        content = _final_text(produced)
+        artifacts = list(tool_execution.artifacts)
+        images = list(tool_execution.images)
         response = AgentResponse(
             agent_type=definition.agent_type,
             agent_id=request.agent_id,
-            message=AgentMessage(role=MessageRole.ASSISTANT, content=content),
-            metadata={},
-            tool_artifacts=list(artifact_sink.artifacts) or None,
+            message=AgentMessage(role=MessageRole.ASSISTANT, content=_final_text(produced)),
+            metadata={"images": images} if images else {},
+            tool_artifacts=artifacts or None,
         )
         return ResponseOutcome(
             agent_id=request.agent_id,
             response=response,
             provenance=OutcomeProvenance(
                 output_policy_ids=definition.output_policy_ids,
-                artifacts=tuple(artifact_sink.artifacts),
-                images=tuple(artifact_sink.images),
+                artifacts=tuple(artifacts),
+                images=tuple(images),
                 private_messages=tuple(produced),
             ),
         )
+
+
+def _preflight_for(definition: SpecialistDefinition, request: SpecialistRequest):
+    """The token-budget preflight for one specialist invocation.
+
+    The budget is a property of the resolved provider and the assembled
+    request, so it runs per model attempt rather than once per turn: a
+    fallback to a different provider is a different budget.
+    """
+    agent = definition.agent
+    if agent is None or not hasattr(agent, "_preflight_model_request"):
+        return None
+
+    async def preflight(model_request: Any, runtime_config: Any) -> list[Any] | None:
+        if runtime_config is None:
+            return None
+        messages = list(model_request.messages)
+        turn_start = min(len(request.history), len(messages))
+        system_message = getattr(model_request, "system_message", None)
+        result = await agent._preflight_model_request(
+            runtime_config,
+            system_messages=[system_message] if system_message is not None else [],
+            history_messages=messages[:turn_start],
+            current_messages=messages[turn_start:],
+            tools=list(getattr(model_request, "tools", None) or ()),
+            attachments=request.attachments,
+            conversation_id=request.conversation_id,
+            user_id=request.user_id,
+        )
+        if result is None:
+            return None
+        envelope = result.envelope
+        return [*envelope.history_messages, *envelope.current_messages]
+
+    return preflight
+
+
+def _reject_swallowed_interrupt(result: Any, agent_id: str) -> None:
+    """Refuse to answer for a run that actually paused for approval.
+
+    Running inside a parent graph, ``interrupt()`` propagates and the parent
+    pauses. Running standalone there is no loop to pause, so the subgraph
+    returns a state carrying ``__interrupt__`` and an empty answer — which
+    would publish silence as if the specialist had nothing to say.
+    """
+    if isinstance(result, dict) and result.get("__interrupt__"):
+        raise RuntimeError(f"{agent_id} paused for approval outside a resumable graph")
+
+
+def _tool_state_key(definition: SpecialistDefinition) -> str:
+    """The key deferred tool state and the execution context are filed under."""
+    agent = definition.agent
+    return str(
+        getattr(agent, "tool_state_key", None)
+        or getattr(agent, "agent_config_key", None)
+        or definition.model_config_key
+    )
 
 
 def _default_agent_builder(**kwargs: Any) -> Any:

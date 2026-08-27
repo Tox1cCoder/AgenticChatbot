@@ -104,7 +104,7 @@ from .utils import (
 )
 from .workflow.contracts import TurnIdentity
 from .workflow.custom_agents import CustomAgentsMixin
-from .workflow.graph_builder import build_workflow_graph
+from .workflow.graph_builder import SPECIALIST_NODE_NAMES, build_workflow_graph
 from .workflow.inventory import CUSTOM_AGENT_NODE
 from .workflow.planning_loop import PlanningLoopMixin
 from .workflow.rag_loop import RagLoopMixin
@@ -124,10 +124,11 @@ if TYPE_CHECKING:
 
 _apply_decisions = apply_hitl_decisions
 
-# Generic agents pause in the dedicated ``approval`` node. Planning and RAG
-# perform their approval gates inside their tool-loop nodes, so LangGraph
-# reports those nodes as the pending continuation target.
-_APPROVAL_INTERRUPT_NODES = frozenset({"approval", "planning_tools", "rag_tools"})
+# Where a turn can be waiting for a human. A standard specialist gates inside
+# its own subgraph, so LangGraph reports the specialist node itself; Planning
+# and RAG gate inside their tool-loop nodes. Resume validates against this set,
+# so a node missing here is a turn that can pause but never continue.
+_APPROVAL_INTERRUPT_NODES = frozenset({*SPECIALIST_NODE_NAMES, "planning_tools", "rag_tools"})
 
 
 def _has_approval_interrupt(next_nodes: Any) -> bool:
@@ -1589,11 +1590,17 @@ class MultiAgentWorkflow(
                 raise ValueError(f"custom agent {request.agent_id} is not attached")
             self._specialist_factory.register(build_custom_specialist_definition(custom_agent))
 
+        agent = self._resolve_runtime_agent(state, request.agent_id)
+        # Deferred tools loaded on an earlier turn live in the checkpoint, not
+        # in process memory, so they have to be restored before the subgraph
+        # resolves its tool set and persisted after it may have loaded more.
+        self._hydrate_deferred_tool_snapshot_from_state(state, agent=agent)
         with (
             use_image_preview_emitter(self._build_image_preview_emitter(state)),
             use_media_delivery_service(self._build_media_delivery_service(state)),
         ):
             outcome = await self._specialist_factory.invoke(request)
+        self._persist_deferred_tool_snapshot_to_state(state, agent=agent)
 
         return self._enrich_specialist_outcome(state, request, outcome)
 
@@ -1602,9 +1609,10 @@ class MultiAgentWorkflow(
     ) -> Any:
         """Attach the domain metadata the public response still needs.
 
-        Artifact and image provenance stays server-owned: it is copied from the
-        middleware's capture sink, never from model text.
+        Artifact and image provenance stays server-owned: it is copied from
+        what the tool pipeline recorded, never from model text.
         """
+        self._record_specialist_tool_results(state, outcome.provenance)
         response = outcome.response
         self._mark_response_has_images(response, bool(request.extras.get("has_images")))
         response = self._finalize_forced_final_response(state, response)
@@ -1612,6 +1620,40 @@ class MultiAgentWorkflow(
         self._merge_tool_artifacts(state, response, append_images=append_images)
         self._attach_final_agent_metadata(state, response)
         return outcome.model_copy(update={"response": response})
+
+    def _record_specialist_tool_results(self, state: GraphState, provenance: Any) -> None:
+        """Publish a subgraph's tool records into turn context.
+
+        The trace panel, rich-item registry, and evidence lookup all read turn
+        context rather than the subgraph's private state, so a specialist that
+        keeps its records to itself is invisible to every one of them.
+        """
+        artifacts = list(provenance.artifacts)
+        images = list(provenance.images)
+        if not artifacts and not images:
+            return
+
+        context = GraphStateView(state).context_copy()
+        if artifacts:
+            context["tool_artifacts"] = [*context.get("tool_artifacts", []), *artifacts]
+            renders = dict(context.get("tool_render_results", {}))
+            renders.update(
+                {
+                    str(artifact["tool_call_id"]): make_json_safe(artifact["render"])
+                    for artifact in artifacts
+                    if artifact.get("tool_call_id") and isinstance(artifact.get("render"), dict)
+                }
+            )
+            if renders:
+                context["tool_render_results"] = renders
+        if images:
+            context["tool_images"] = [*context.get("tool_images", []), *images]
+
+        # Candidate records are turn-internal handoff data. Lift and remove
+        # them before tool artifacts can reach persisted response metadata.
+        self._lift_rich_candidates(context, artifacts)
+        state["context"] = context
+        self._update_tool_error_streak(state, artifacts)
 
     # ------------------------------------------------------------------
     # Custom-agent multiplexing
@@ -1887,10 +1929,8 @@ class MultiAgentWorkflow(
                 # A worker cannot ask for approval, so a gated call is refused
                 # rather than abandoning the turn. See
                 # ``_refuse_worker_approval_gated_calls``.
-                runnable_calls, approval_refusals = (
-                    await self._refuse_worker_approval_gated_calls(
-                        parent_state, normalized_calls, agent=agent
-                    )
+                runnable_calls, approval_refusals = await self._refuse_worker_approval_gated_calls(
+                    parent_state, normalized_calls, agent=agent
                 )
 
                 # Every call the model made stays on the AIMessage, refused or
@@ -1944,9 +1984,7 @@ class MultiAgentWorkflow(
                             question=task_prompt,
                             max_agentic_images=max_agentic_images,
                             allowance=(
-                                remaining_evidence_allowance
-                                if allowance_authoritative
-                                else None
+                                remaining_evidence_allowance if allowance_authoritative else None
                             ),
                             remaining_allowance=remaining_evidence_allowance,
                             evidence_token_counter=evidence_token_counter,
@@ -2136,10 +2174,11 @@ class MultiAgentWorkflow(
             # A worker cannot ask for approval, so a gated call is refused
             # rather than abandoning the turn. See
             # ``_refuse_worker_approval_gated_calls``.
-            runnable_worker_calls, approval_refusals = (
-                await self._refuse_worker_approval_gated_calls(
-                    parent_state, normalized_worker_calls, tool_map=tool_map
-                )
+            (
+                runnable_worker_calls,
+                approval_refusals,
+            ) = await self._refuse_worker_approval_gated_calls(
+                parent_state, normalized_worker_calls, tool_map=tool_map
             )
 
             # Every call the model made stays on the AIMessage, refused or not:

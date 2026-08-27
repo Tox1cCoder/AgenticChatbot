@@ -411,5 +411,6 @@ def build_custom_specialist_definition(agent: CustomAgent) -> SpecialistDefiniti
         model_config_key=CUSTOM_MODEL_AGENT_KEY,
         system_prompt_factory=system_prompt_factory,
         tool_factory=tool_factory,
+        agent=agent,
         output_policy_ids=("public_content", "artifact_provenance", "tool_message_pairing"),
     )

@@ -488,11 +488,11 @@ def build_image_generator_specialist_definition(
         model_config_key="image_generator",
         system_prompt_factory=system_prompt_factory,
         tool_factory=tool_factory,
+        agent=agent,
         output_policy_ids=(
             "public_content",
             "image_delivery",
             "artifact_provenance",
             "tool_message_pairing",
         ),
-        tokens_are_internal=True,
     )

@@ -11,14 +11,13 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from app.ai.workflow.middleware import (
-    ArtifactCaptureMiddleware,
     RequestBudgetMiddleware,
     RuntimeModelMiddleware,
-    ToolAuthorizationDenied,
-    ToolAuthorizationMiddleware,
+    SpecialistToolScope,
+    ToolExecutionMiddleware,
     UsageRecordingMiddleware,
     build_specialist_middleware,
 )
@@ -232,100 +231,130 @@ def _tool_request(name="do_thing", args=None, call_id="call-1"):
     )
 
 
-async def test_authorization_runs_before_the_tool_implementation():
-    executed: list[str] = []
+class FakeTool:
+    def __init__(self, name: str):
+        self.name = name
 
-    def authorize(tool_name, args, *, user_id, device_id):
-        return tool_name != "forbidden_tool"
 
-    middleware = ToolAuthorizationMiddleware(
-        authorize=authorize, user_id="user-1", device_id="device-1"
-    )
+def _scope(agent=None, **overrides):
+    payload = {
+        "agent": agent,
+        "agent_key": "chat",
+        "conversation_id": "conversation-1",
+        "user_id": "user-1",
+        "device_id": "device-1",
+    }
+    payload.update(overrides)
+    return SpecialistToolScope(**payload)
+
+
+async def test_the_execution_map_contains_the_tools_the_model_was_offered():
+    """Approval and execution must judge the objects the model actually saw."""
+    scope = _scope()
+    offered = FakeTool("do_thing")
+    scope.offer([offered])
+
+    assert (await scope.tool_map())["do_thing"] is offered
+
+
+async def test_a_tool_loaded_mid_turn_joins_the_same_execution_map():
+    scope = _scope()
+    scope.offer([FakeTool("do_thing")])
+    resolved = await scope.tool_map()
+    resolved["late_arrival"] = FakeTool("late_arrival")
+
+    assert "late_arrival" in await scope.tool_map(), "the map must not be rebuilt per call"
+
+
+async def test_tool_execution_runs_inside_the_authenticated_scope(monkeypatch):
+    from app.ai import tool_context
+    from app.ai.workflow import middleware as middleware_module
+
+    seen: dict = {}
+
+    async def fake_execute(**kwargs):
+        context = tool_context.get_tool_context()
+        seen.update(
+            conversation_id=context.conversation_id,
+            user_id=context.user_id,
+            device_id=context.device_id,
+            agent_key=context.agent_key,
+        )
+        return (
+            [{"tool_call_id": "call-1", "name": "do_thing", "content": "ran"}],
+            [{"tool_call_id": "call-1", "tool": "do_thing", "status": "success"}],
+            [],
+        )
+
+    monkeypatch.setattr(middleware_module, "execute_tool_calls", fake_execute)
+
+    scope = _scope()
+    scope.offer([FakeTool("do_thing")])
+    middleware = ToolExecutionMiddleware(scope=scope, tool_factory=_no_tools)
 
     async def handler(request):
-        executed.append(request.tool_call["name"])
-        return ToolMessage(content="ran", tool_call_id="call-1")
-
-    result = await middleware.awrap_tool_call(_tool_request("forbidden_tool"), handler)
-
-    assert executed == []
-    assert isinstance(result, ToolMessage)
-    assert result.status == "error"
-    assert "not authorized" in result.content
-
-
-async def test_authorized_tools_reach_the_implementation():
-    executed: list[str] = []
-
-    middleware = ToolAuthorizationMiddleware(
-        authorize=lambda *a, **k: True, user_id="user-1", device_id="device-1"
-    )
-
-    async def handler(request):
-        executed.append(request.tool_call["name"])
-        return ToolMessage(content="ran", tool_call_id="call-1")
-
-    await middleware.awrap_tool_call(_tool_request(), handler)
-    assert executed == ["do_thing"]
-
-
-async def test_authorization_denial_is_model_visible_not_an_exception():
-    middleware = ToolAuthorizationMiddleware(
-        authorize=lambda *a, **k: False, user_id=None, device_id=None
-    )
-
-    async def handler(request):
-        raise AssertionError("implementation must not run")
+        raise AssertionError("the framework must not execute the tool itself")
 
     message = await middleware.awrap_tool_call(_tool_request(), handler)
-    assert message.tool_call_id == "call-1"
+
+    assert seen == {
+        "conversation_id": "conversation-1",
+        "user_id": "user-1",
+        "device_id": "device-1",
+        "agent_key": "chat",
+    }
+    assert message.content == "ran"
+    assert middleware.artifacts == [
+        {"tool_call_id": "call-1", "tool": "do_thing", "status": "success"}
+    ]
 
 
-def test_tool_authorization_denied_carries_the_tool_name():
-    error = ToolAuthorizationDenied("secret_tool", "device scope")
-    assert error.tool_name == "secret_tool"
-    assert "device scope" in str(error)
+async def test_a_failed_tool_call_is_reported_as_an_error_result(monkeypatch):
+    from app.ai.workflow import middleware as middleware_module
+
+    async def fake_execute(**kwargs):
+        return (
+            [{"tool_call_id": "call-1", "name": "do_thing", "content": "boom"}],
+            [{"tool_call_id": "call-1", "tool": "do_thing", "status": "error"}],
+            [],
+        )
+
+    monkeypatch.setattr(middleware_module, "execute_tool_calls", fake_execute)
+
+    scope = _scope()
+    scope.offer([FakeTool("do_thing")])
+    middleware = ToolExecutionMiddleware(scope=scope, tool_factory=_no_tools)
+
+    message = await middleware.awrap_tool_call(_tool_request(), _unused_handler)
+    assert message.status == "error"
 
 
-# ----------------------------------------------------------------------
-# artifact capture
-# ----------------------------------------------------------------------
+async def test_images_are_collected_separately_from_artifacts(monkeypatch):
+    from app.ai.workflow import middleware as middleware_module
+
+    async def fake_execute(**kwargs):
+        return (
+            [{"tool_call_id": "call-1", "name": "do_thing", "content": "ok"}],
+            [{"tool_call_id": "call-1", "tool": "do_thing", "status": "success"}],
+            [{"image_id": "img-1"}],
+        )
+
+    monkeypatch.setattr(middleware_module, "execute_tool_calls", fake_execute)
+
+    scope = _scope()
+    scope.offer([FakeTool("do_thing")])
+    middleware = ToolExecutionMiddleware(scope=scope, tool_factory=_no_tools)
+
+    await middleware.awrap_tool_call(_tool_request(), _unused_handler)
+    assert middleware.images == [{"image_id": "img-1"}]
 
 
-async def test_artifacts_are_captured_into_private_state_not_public_content():
-    middleware = ArtifactCaptureMiddleware()
-
-    async def handler(request):
-        message = ToolMessage(content="done", tool_call_id="call-1")
-        message.artifact = {"artifact_id": "artifact-1", "kind": "table"}
-        return message
-
-    await middleware.awrap_tool_call(_tool_request(), handler)
-
-    assert middleware.artifacts == [{"artifact_id": "artifact-1", "kind": "table"}]
+async def _no_tools():
+    return []
 
 
-async def test_artifact_capture_ignores_tools_without_artifacts():
-    middleware = ArtifactCaptureMiddleware()
-
-    async def handler(request):
-        return ToolMessage(content="done", tool_call_id="call-1")
-
-    await middleware.awrap_tool_call(_tool_request(), handler)
-    assert middleware.artifacts == []
-
-
-async def test_artifact_capture_collects_images_separately():
-    middleware = ArtifactCaptureMiddleware()
-
-    async def handler(request):
-        message = ToolMessage(content="done", tool_call_id="call-1")
-        message.artifact = {"artifact_id": "a-1", "kind": "image", "image_id": "img-1"}
-        return message
-
-    await middleware.awrap_tool_call(_tool_request(), handler)
-
-    assert middleware.images == [{"artifact_id": "a-1", "kind": "image", "image_id": "img-1"}]
+async def _unused_handler(request):
+    raise AssertionError("the framework must not execute the tool itself")
 
 
 # ----------------------------------------------------------------------
@@ -376,65 +405,50 @@ async def test_request_budget_preflight_can_replace_the_messages():
 # ----------------------------------------------------------------------
 
 
-def test_specialist_stack_orders_authorization_before_approval():
-    stack = build_specialist_middleware(
-        runtime_model_resolver=FakeResolver(),
-        model_factory=FakeFactory(),
-        agent_key="chat",
-        agent_id="chat_agent",
-        user_id="user-1",
-        device_id="device-1",
-        model_request=None,
-        usage_recorder=None,
-        authorize=lambda *a, **k: True,
-        hitl_policy={"master_enabled": True, "global_tools": ["do_thing"]},
-        max_model_calls=8,
-        max_tool_calls=16,
-    )
+def test_specialist_stack_installs_the_approval_gate_when_a_policy_is_active():
+    stack = _stack(hitl_policy={"master_enabled": True, "global_tools": ["do_thing"]})
     names = [type(item).__name__ for item in stack]
 
-    authorization_index = names.index("ToolAuthorizationMiddleware")
-    assert "HumanInTheLoopMiddleware" in names
-    assert authorization_index < names.index("HumanInTheLoopMiddleware")
+    assert "ToolApprovalMiddleware" in names
+    assert "ToolExecutionMiddleware" in names
+
+
+def test_a_disabled_policy_installs_no_approval_gate():
+    """Master-off is the one way approval is skipped, and it is explicit."""
+    stack = _stack(hitl_policy={"master_enabled": False})
+    assert "ToolApprovalMiddleware" not in [type(item).__name__ for item in stack]
 
 
 def test_specialist_stack_enforces_framework_call_limits_with_error_exit():
-    stack = build_specialist_middleware(
-        runtime_model_resolver=FakeResolver(),
-        model_factory=FakeFactory(),
-        agent_key="chat",
-        agent_id="chat_agent",
-        user_id="user-1",
-        device_id="device-1",
-        model_request=None,
-        usage_recorder=None,
-        authorize=lambda *a, **k: True,
-        hitl_policy=None,
-        max_model_calls=8,
-        max_tool_calls=16,
-    )
-    names = [type(item).__name__ for item in stack]
+    names = [type(item).__name__ for item in _stack(hitl_policy=None)]
     assert "ModelCallLimitMiddleware" in names
     assert "ToolCallLimitMiddleware" in names
-    # No HITL middleware is installed when the turn has no approval policy.
-    assert "HumanInTheLoopMiddleware" not in names
+    assert "ToolApprovalMiddleware" not in names
 
 
 def test_specialist_stack_records_usage_inside_the_fallback_loop():
     """Each provider attempt must be recorded, including a fallback attempt."""
-    stack = build_specialist_middleware(
-        runtime_model_resolver=FakeResolver(),
-        model_factory=FakeFactory(),
-        agent_key="chat",
-        agent_id="chat_agent",
-        user_id="user-1",
-        device_id="device-1",
-        model_request=None,
-        usage_recorder=SpyUsageRecorder(),
-        authorize=lambda *a, **k: True,
-        hitl_policy=None,
-        max_model_calls=8,
-        max_tool_calls=16,
-    )
-    names = [type(item).__name__ for item in stack]
+    names = [type(item).__name__ for item in _stack(usage_recorder=SpyUsageRecorder())]
     assert names.index("RuntimeModelMiddleware") < names.index("UsageRecordingMiddleware")
+
+
+def _stack(**overrides):
+    from app.ai.workflow.middleware import ToolApprovalMiddleware
+
+    scope = _scope()
+    payload = {
+        "runtime_model_resolver": FakeResolver(),
+        "model_factory": FakeFactory(),
+        "agent_key": "chat",
+        "agent_id": "chat_agent",
+        "user_id": "user-1",
+        "model_request": None,
+        "usage_recorder": None,
+        "hitl_policy": None,
+        "max_model_calls": 8,
+        "max_tool_calls": 16,
+        "tool_execution": ToolExecutionMiddleware(scope=scope, tool_factory=_no_tools),
+        "approval": ToolApprovalMiddleware(scope=scope, hitl_policy={}),
+    }
+    payload.update(overrides)
+    return build_specialist_middleware(**payload)

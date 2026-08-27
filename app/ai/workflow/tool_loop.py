@@ -13,9 +13,9 @@ from langgraph.types import interrupt
 from app.ai.canvas_state import CANVAS_EDIT_DENIED_TOOL_NAMES
 from app.ai.hitl_config import (
     any_call_requires_approval,
+    build_tool_interrupt_payload,
     calls_requiring_approval,
     policy_from_context,
-    redact_sensitive_args,
 )
 from app.ai.mcp_registry import get_global_mcp_manager
 from app.ai.rich_image_selection import apply_rich_image_selection
@@ -396,69 +396,16 @@ class ToolLoopMixin:
                 internal_tools=internal_tools,
             )
 
-        device_id = state_view.device_id()
-        provenance: dict[str, dict[str, Any]] = {}
-        enriched_calls: list[dict[str, Any]] = []
-
-        for tool_call in normalized_calls:
-            enriched_call = dict(tool_call)
-            # Redact sensitive-looking argument values from the human approval
-            # prompt (and thus the downstream API InterruptResponse, which
-            # re-parses this payload). redact_sensitive_args returns a fresh
-            # dict, so the tool call that ACTUALLY executes on approval keeps
-            # its real args untouched. Conservative key-name match, so normal
-            # arguments stay visible for the approver.
-            if isinstance(enriched_call.get("args"), dict):
-                enriched_call["args"] = redact_sensitive_args(enriched_call["args"])
-            tool_call_id = enriched_call.get("id") or enriched_call.get("tool_call_id")
-            if tool_call_id and "tool_call_id" not in enriched_call:
-                enriched_call["tool_call_id"] = tool_call_id
-
-            tool_name = enriched_call.get("name")
-            tool = tool_map.get(tool_name) if tool_map and tool_name else None
-            tool_metadata = getattr(tool, "metadata", None) if tool is not None else None
-
-            provenance_entry: dict[str, Any] = {}
-            if device_id:
-                provenance_entry["device_id"] = device_id
-            if isinstance(tool_metadata, dict):
-                for field_name in (
-                    "tool_origin",
-                    "server_name",
-                    "qualified_tool_id",
-                    "tool_instance_id",
-                    "session_id",
-                    "catalog_version",
-                ):
-                    if field_name not in tool_metadata:
-                        continue
-                    if tool_metadata[field_name] is None:
-                        continue
-                    if tool_metadata[field_name] == "":
-                        continue
-                    provenance_entry[field_name] = tool_metadata[field_name]
-
-            if provenance_entry:
-                provenance_key = str(tool_call_id or tool_name or len(provenance))
-                provenance[provenance_key] = provenance_entry
-
-            enriched_calls.append(enriched_call)
-
-        interrupt_metadata: dict[str, Any] = {}
-        if device_id:
-            interrupt_metadata["device_id"] = device_id
-        if provenance:
-            interrupt_metadata["tool_provenance"] = provenance
+        payload = build_tool_interrupt_payload(
+            normalized_calls, tool_map=tool_map, device_id=state_view.device_id()
+        )
 
         context = state_view.context_copy()
-        context["pending_action_requests"] = enriched_calls
-        if interrupt_metadata:
-            context["interrupt_metadata"] = interrupt_metadata
+        context["pending_action_requests"] = payload["action_requests"]
+        if payload.get("metadata"):
+            context["interrupt_metadata"] = payload["metadata"]
         state["context"] = context
 
-        payload: dict[str, Any] = {"action_requests": enriched_calls}
-        if interrupt_metadata:
-            payload["metadata"] = interrupt_metadata
         return payload
 
     async def _approval_node(self, state: GraphState) -> GraphState:

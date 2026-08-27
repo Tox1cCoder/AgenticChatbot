@@ -467,11 +467,11 @@ def build_canvas_specialist_definition(agent: "CanvasAgent") -> "SpecialistDefin
         model_config_key="canvas",
         system_prompt_factory=system_prompt_factory,
         tool_factory=tool_factory,
+        agent=agent,
         output_policy_ids=(
             "public_content",
             "canvas_contract",
             "artifact_provenance",
             "tool_message_pairing",
         ),
-        tokens_are_internal=False,
     )

@@ -376,6 +376,6 @@ def build_chat_specialist_definition(agent: "ChatAgent") -> "SpecialistDefinitio
         model_config_key="chat",
         system_prompt_factory=system_prompt_factory,
         tool_factory=tool_factory,
+        agent=agent,
         output_policy_ids=("public_content", "artifact_provenance", "tool_message_pairing"),
-        tokens_are_internal=False,
     )

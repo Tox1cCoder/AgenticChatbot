@@ -231,33 +231,6 @@ async def test_execution_limit_becomes_a_typed_worker_failure():
     assert result.error_code == "agent_execution_limit"
 
 
-async def test_unauthorized_tool_never_reaches_its_implementation():
-    executed: list[str] = []
-
-    @tool
-    def dangerous() -> str:
-        """A tool this caller may not run."""
-        executed.append("ran")
-        return "should not happen"
-
-    model = scripted_model(
-        [
-            AIMessage(content="", tool_calls=[{"id": "c1", "name": "dangerous", "args": {}}]),
-            AIMessage(content="I could not do that."),
-        ]
-    )
-    factory = _factory(
-        model,
-        tools=[dangerous],
-        authorize=lambda name, args, **kwargs: name != "dangerous",
-    )
-
-    outcome = await factory.invoke(_request())
-
-    assert executed == []
-    assert outcome.response.message.content == "I could not do that."
-
-
 async def test_usage_is_recorded_for_every_model_turn_in_the_loop():
     recorded: list[tuple[str, str]] = []
 

@@ -205,6 +205,69 @@ def _tool_call_id(tool_call) -> str | None:
     return str(value) if value else None
 
 
+# Tool metadata fields an approver needs to judge a call: where it came from
+# and which server or session it will reach. Credentials and raw config never
+# appear here.
+_PROVENANCE_FIELDS = (
+    "tool_origin",
+    "server_name",
+    "qualified_tool_id",
+    "tool_instance_id",
+    "session_id",
+    "catalog_version",
+)
+
+
+def build_tool_interrupt_payload(
+    tool_calls: list[dict],
+    *,
+    tool_map: dict | None = None,
+    device_id: str | None = None,
+) -> dict:
+    """Build the approval payload the API re-parses into an ``InterruptResponse``.
+
+    Argument values whose key looks sensitive are redacted here and only here:
+    the returned dict is what a human reads, while the tool call that actually
+    runs on approval keeps its real arguments.
+    """
+    action_requests: list[dict] = []
+    provenance: dict[str, dict] = {}
+
+    for tool_call in tool_calls:
+        request = dict(tool_call)
+        if isinstance(request.get("args"), dict):
+            request["args"] = redact_sensitive_args(request["args"])
+        call_id = request.get("id") or request.get("tool_call_id")
+        if call_id and "tool_call_id" not in request:
+            request["tool_call_id"] = call_id
+        action_requests.append(request)
+
+        tool = tool_map.get(request.get("name")) if tool_map and request.get("name") else None
+        metadata = getattr(tool, "metadata", None)
+        entry = {"device_id": device_id} if device_id else {}
+        if isinstance(metadata, dict):
+            entry.update(
+                {
+                    field: metadata[field]
+                    for field in _PROVENANCE_FIELDS
+                    if metadata.get(field) not in (None, "")
+                }
+            )
+        if entry:
+            provenance[str(call_id or request.get("name") or len(provenance))] = entry
+
+    metadata: dict = {}
+    if device_id:
+        metadata["device_id"] = device_id
+    if provenance:
+        metadata["tool_provenance"] = provenance
+
+    payload: dict = {"action_requests": action_requests}
+    if metadata:
+        payload["metadata"] = metadata
+    return payload
+
+
 # Lowercased substrings that mark an argument key as sensitive. Kept
 # conservative and generic (not tool-specific) so this never fires on the
 # ordinary argument names existing MCP approval prompts already use.

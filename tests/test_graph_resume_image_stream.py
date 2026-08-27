@@ -155,7 +155,7 @@ def _build_workflow(*, store: _RecordingStore, checkpoint_values: dict):
     workflow.agents = {"image_generator_agent": object()}
 
     async def _aget_state(_config):
-        return SimpleNamespace(next=("approval",), values=checkpoint_values)
+        return SimpleNamespace(next=("image_generator_agent",), values=checkpoint_values)
 
     async def _astream(state, config=None, stream_mode=None):
         """Run the resumed image node, then emit the narrative deltas.

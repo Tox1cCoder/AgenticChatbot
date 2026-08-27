@@ -38,6 +38,10 @@ from app.usage import begin_usage_operation, bind_usage_context, current_usage_c
 
 logger = logging.getLogger(__name__)
 
+# Fraction of a bounded collection dropped per shrink pass when the serialized
+# routing payload is over budget.
+_TRUNCATION_DROP_RATIO = 0.25
+
 __all__ = [
     "ROUTER_SYSTEM_PROMPT",
     "RETRIABLE_ROUTING_EXCEPTIONS",
@@ -201,6 +205,15 @@ class RoutingContextBuilder:
     def _total_max_chars(self) -> int:
         return int(getattr(self.settings, "router_context_max_chars", 24000))
 
+    @staticmethod
+    def _drop_count(size: int) -> int:
+        """How many entries one shrink pass removes: a quarter, at least one.
+
+        Removing at least one entry is what guarantees the shrink loop
+        terminates on a short collection.
+        """
+        return max(1, round(size * _TRUNCATION_DROP_RATIO))
+
     def _clip(self, value: Any, *, truncated: list[str], label: str) -> str:
         text = "" if value is None else str(value)
         limit = self._field_max_chars
@@ -290,7 +303,7 @@ class RoutingContextBuilder:
         ):
             values = getattr(working, field)
             while values and len(self.serialize(working)) > self._total_max_chars:
-                values = values[: max(0, len(values) - max(1, len(values) // 4))]
+                values = values[: -self._drop_count(len(values))]
                 working = working.model_copy(update={field: values})
                 if label not in truncated:
                     truncated.append(label)

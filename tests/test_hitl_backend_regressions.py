@@ -73,7 +73,9 @@ async def test_generic_approval_edit_rewrites_call_executed_by_tool_node(monkeyp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("pending_node", ["approval", "planning_tools", "rag_tools"])
+@pytest.mark.parametrize(
+    "pending_node", ["chat_agent", "custom_agent", "planning_tools", "rag_tools"]
+)
 async def test_decision_stream_accepts_all_approval_interrupt_nodes(pending_node):
     workflow = graph_module.MultiAgentWorkflow.__new__(graph_module.MultiAgentWorkflow)
     workflow.checkpointer = object()

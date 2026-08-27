@@ -20,6 +20,18 @@ BASE_URL = take100_api.BASE_URL
 Take100Client = take100_api.Take100Client
 
 
+def _persisted_cookie(name: str, value: str) -> dict:
+    """One cookie in the on-disk cache format the client reads back."""
+    return {
+        "name": name,
+        "value": value,
+        "domain": "take100.jp",
+        "path": "/",
+        "secure": True,
+        "expires": None,
+    }
+
+
 class FakeResponse:
     def __init__(
         self,
@@ -97,7 +109,11 @@ def test_login_persists_session_cache(tmp_path: Path) -> None:
 
     saved = json.loads(session_cache_path.read_text(encoding="utf-8"))
     assert saved["email"] == "user@example.com"
-    assert saved["cookies"]["XSRF-TOKEN"] == "fresh-xsrf"
+    # Cookies persist as records, not name/value pairs: a restored cookie
+    # without its domain collides with the one the server sets.
+    assert [cookie["value"] for cookie in saved["cookies"] if cookie["name"] == "XSRF-TOKEN"] == [
+        "fresh-xsrf"
+    ]
 
 
 def test_ensure_authenticated_reuses_valid_cached_session_without_login(
@@ -108,7 +124,7 @@ def test_ensure_authenticated_reuses_valid_cached_session_without_login(
         json.dumps(
             {
                 "email": "user@example.com",
-                "cookies": {"XSRF-TOKEN": "persisted-xsrf"},
+                "cookies": [_persisted_cookie("XSRF-TOKEN", "persisted-xsrf")],
             }
         ),
         encoding="utf-8",
@@ -133,7 +149,7 @@ def test_request_reauthenticates_once_after_login_redirect(tmp_path: Path) -> No
         json.dumps(
             {
                 "email": "user@example.com",
-                "cookies": {"XSRF-TOKEN": "persisted-xsrf"},
+                "cookies": [_persisted_cookie("XSRF-TOKEN", "persisted-xsrf")],
             }
         ),
         encoding="utf-8",
