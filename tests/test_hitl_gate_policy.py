@@ -136,7 +136,14 @@ async def test_gate_master_off_never_gates(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generic_worker_uses_parent_state_hitl_policy(monkeypatch):
+async def test_generic_worker_refuses_a_gated_tool_from_the_parent_policy(monkeypatch):
+    """The worker consults the parent's policy and refuses, rather than pausing.
+
+    A worker cannot ask for approval — it runs inside ``asyncio.gather``, so an
+    ``interrupt()`` would cancel its siblings. It used to fabricate an
+    ``awaiting_approval`` result, which the design forbids and which has no
+    resume. It now refuses the gated call and keeps going.
+    """
     server_tool = SimpleNamespace(name="search", metadata={})
     tool_map = {"search": server_tool}
     manager = _FakeManager({id(server_tool): "tavily"})
@@ -179,5 +186,13 @@ async def test_generic_worker_uses_parent_state_hitl_policy(monkeypatch):
         task_prompt="use search",
         parent_state=parent_state,
     )
-    assert response.metadata["requires_approval"] is True
-    assert response.metadata["pause_reason"] == "awaiting_approval"
+    metadata = response.metadata or {}
+    assert metadata.get("requires_approval") is not True
+    assert metadata.get("pause_reason") != "awaiting_approval"
+    refused = [
+        artifact
+        for artifact in (response.tool_artifacts or [])
+        if artifact.get("tool_call_id") == "call-1"
+    ]
+    assert refused, "the gated call produced no refusal the model can read"
+    assert "approval" in str(refused[0].get("output") or "").lower()

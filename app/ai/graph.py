@@ -91,6 +91,7 @@ from .skills_tool import get_available_skill_summaries
 from .time_context import build_runtime_time_context_block
 from .tool_context import rich_response_capable_from_context, tool_execution_context
 from .tool_execution import (
+    build_rejected_tool_artifacts,
     ensure_agent_tool_map,
     execute_tool_calls,
 )
@@ -1883,15 +1884,18 @@ class MultiAgentWorkflow(
                     provider=evidence_provider,
                     model=evidence_model,
                 )
-                if await self._needs_approval(parent_state, normalized_calls, agent=agent):
-                    if response.metadata is None:
-                        response.metadata = {}
-                    response.metadata["requires_approval"] = True
-                    response.metadata["pause_reason"] = "awaiting_approval"
-                    if accumulated_artifacts:
-                        response.tool_artifacts = accumulated_artifacts
-                    return response
+                # A worker cannot ask for approval, so a gated call is refused
+                # rather than abandoning the turn. See
+                # ``_refuse_worker_approval_gated_calls``.
+                runnable_calls, approval_refusals = (
+                    await self._refuse_worker_approval_gated_calls(
+                        parent_state, normalized_calls, agent=agent
+                    )
+                )
 
+                # Every call the model made stays on the AIMessage, refused or
+                # not: a request without its paired result is an invalid history
+                # the next model call has to reconcile.
                 rag_tool_messages.append(
                     AIMessage(
                         content=response.message.content or "",
@@ -1905,8 +1909,28 @@ class MultiAgentWorkflow(
                         ],
                     )
                 )
+                if approval_refusals:
+                    accumulated_artifacts.extend(
+                        build_rejected_tool_artifacts(
+                            tool_calls=normalized_calls,
+                            rejected_feedback=approval_refusals,
+                        )
+                    )
+                    for tool_call in normalized_calls:
+                        feedback = approval_refusals.get(str(tool_call.get("id") or ""))
+                        if not feedback:
+                            continue
+                        rag_tool_messages.append(
+                            ToolMessage(
+                                content=feedback,
+                                tool_call_id=tool_call.get("id"),
+                                name=tool_call.get("name") or "unknown",
+                            )
+                        )
+                        legacy_tool_context.append(feedback)
+
                 rag_iteration_start = len(accumulated_artifacts)
-                for tool_call_data in normalized_calls:
+                for tool_call_data in runnable_calls:
                     tool_name = tool_call_data.get("name")
                     tool_id = tool_call_data.get("id")
 
@@ -2109,21 +2133,41 @@ class MultiAgentWorkflow(
                     user_id=user_id,
                     device_id=device_id,
                 )
-            if await self._needs_approval(parent_state, normalized_worker_calls, tool_map=tool_map):
-                if response.metadata is None:
-                    response.metadata = {}
-                response.metadata["requires_approval"] = True
-                response.metadata["pause_reason"] = "awaiting_approval"
-                if accumulated_worker_artifacts:
-                    existing = list(response.tool_artifacts or [])
-                    existing.extend(accumulated_worker_artifacts)
-                    response.tool_artifacts = existing
-                return response
+            # A worker cannot ask for approval, so a gated call is refused
+            # rather than abandoning the turn. See
+            # ``_refuse_worker_approval_gated_calls``.
+            runnable_worker_calls, approval_refusals = (
+                await self._refuse_worker_approval_gated_calls(
+                    parent_state, normalized_worker_calls, tool_map=tool_map
+                )
+            )
 
+            # Every call the model made stays on the AIMessage, refused or not:
+            # a request without its paired result is an invalid history the next
+            # model call has to reconcile.
             ai_kwargs: dict[str, Any] = {"content": response.message.content or ""}
             if tool_calls:
                 ai_kwargs["tool_calls"] = tool_calls
             worker_messages.append(AIMessage(**ai_kwargs))
+
+            if approval_refusals:
+                accumulated_worker_artifacts.extend(
+                    build_rejected_tool_artifacts(
+                        tool_calls=normalized_worker_calls,
+                        rejected_feedback=approval_refusals,
+                    )
+                )
+                for tool_call in normalized_worker_calls:
+                    feedback = approval_refusals.get(str(tool_call.get("id") or ""))
+                    if not feedback:
+                        continue
+                    worker_messages.append(
+                        ToolMessage(
+                            content=feedback,
+                            tool_call_id=tool_call.get("id"),
+                            name=tool_call.get("name") or "unknown",
+                        )
+                    )
 
             with tool_execution_context(
                 conversation_id,
@@ -2135,7 +2179,7 @@ class MultiAgentWorkflow(
                 ),
             ):
                 outputs, artifacts, _images = await execute_tool_calls(
-                    tool_calls=tool_calls,
+                    tool_calls=runnable_worker_calls,
                     tool_map=tool_map,
                     capture_images=False,
                     device_id=device_id,

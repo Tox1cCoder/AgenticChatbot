@@ -174,6 +174,37 @@ def any_call_requires_approval(
     return False
 
 
+def calls_requiring_approval(
+    tool_calls, *, policy: dict, tool_map: dict | None = None, mcp_manager=None
+) -> set[str]:
+    """Which of these calls require approval, by tool-call id.
+
+    ``any_call_requires_approval`` answers a whole batch, which is the right
+    question for a node that is about to interrupt for all of them. A caller
+    that must refuse only the gated calls and run the rest needs to know
+    *which*, so it does not punish an ordinary call for sharing a batch.
+    """
+    if not policy.get("master_enabled", True):
+        return set()
+    gated: set[str] = set()
+    for tool_call in tool_calls or []:
+        identity = resolve_call_identity(tool_call, tool_map=tool_map, mcp_manager=mcp_manager)
+        if not identity_requires_approval(identity, policy):
+            continue
+        call_id = _tool_call_id(tool_call)
+        if call_id:
+            gated.add(call_id)
+    return gated
+
+
+def _tool_call_id(tool_call) -> str | None:
+    if isinstance(tool_call, dict):
+        value = tool_call.get("id") or tool_call.get("tool_call_id")
+    else:
+        value = getattr(tool_call, "id", None)
+    return str(value) if value else None
+
+
 # Lowercased substrings that mark an argument key as sensitive. Kept
 # conservative and generic (not tool-specific) so this never fires on the
 # ordinary argument names existing MCP approval prompts already use.

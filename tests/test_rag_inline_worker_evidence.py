@@ -453,7 +453,7 @@ async def test_inline_worker_stop_exits_never_return_counter_descriptor(
 
 
 @pytest.mark.asyncio
-async def test_inline_worker_strips_private_counter_before_approval_return():
+async def test_inline_worker_strips_private_counter_when_a_call_is_refused():
     consumed: list[dict] = []
     response = AgentResponse(
         agent_type=AgentType.RAG,
@@ -480,8 +480,24 @@ async def test_inline_worker_strips_private_counter_before_approval_return():
         },
     )
 
+    # The worker no longer exits early for approval, so the model has to stop
+    # asking or the loop runs to its iteration limit.
+    replies = [
+        response,
+        AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content="done"),
+            metadata={},
+        ),
+    ]
+
     async def process_message(_message, _conversation_id):
-        return response
+        return replies.pop(0)
+
+    class _Counter:
+        def count_text(self, **kwargs):
+            return SimpleNamespace(tokens=len(str(kwargs["text"]).split()), strategy="words")
 
     agent = SimpleNamespace(
         process_message=process_message,
@@ -489,13 +505,12 @@ async def test_inline_worker_strips_private_counter_before_approval_return():
         tool_state_key="rag",
         agent_type=AgentType.RAG,
         _take_evidence_token_counter=lambda descriptor, **_kwargs: (
-            consumed.append(descriptor) or object()
+            consumed.append(descriptor) or _Counter()
         ),
     )
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
     workflow.rag_agent = agent
     workflow.agents = {"rag_agent": agent}
-    workflow._needs_approval = AsyncMock(return_value=True)
 
     approved = await workflow._run_agent_in_isolated_context(
         agent_name="rag_agent",
@@ -503,6 +518,9 @@ async def test_inline_worker_strips_private_counter_before_approval_return():
         parent_state={"conversation_id": "conv", "user_id": "owner", "context": {}},
     )
 
-    assert approved.metadata["requires_approval"] is True
+    # The counter is consumed before the approval decision, so the descriptor
+    # is stripped whether the call is refused or run. A live counter object
+    # surviving in metadata would be checkpointed.
     assert "evidence_tokenization" not in approved.metadata
+    assert "_evidence_token_counter" not in approved.metadata
     assert consumed[0]["reference"] == "approval-counter"

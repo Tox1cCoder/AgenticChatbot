@@ -13,6 +13,7 @@ from langgraph.types import interrupt
 from app.ai.canvas_state import CANVAS_EDIT_DENIED_TOOL_NAMES
 from app.ai.hitl_config import (
     any_call_requires_approval,
+    calls_requiring_approval,
     policy_from_context,
     redact_sensitive_args,
 )
@@ -311,6 +312,68 @@ class ToolLoopMixin:
         return any_call_requires_approval(
             normalized_calls, policy=policy, tool_map=tool_map, mcp_manager=mcp_manager
         )
+
+    async def _refuse_worker_approval_gated_calls(
+        self,
+        state: GraphState,
+        normalized_calls: list[dict[str, Any]],
+        *,
+        agent: Any | None = None,
+        tool_map: dict[str, Any] | None = None,
+        internal_tools: list[Any] | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        """Split a worker's calls into runnable ones and refused ones.
+
+        A worker cannot ask for approval. It runs inside ``asyncio.gather``
+        rather than as a framework-managed task, so ``interrupt()`` would
+        propagate through the gather and cancel every sibling worker. The
+        previous answer was to fabricate an ``awaiting_approval`` result, which
+        the design forbids and which has no resume: the worker starts over,
+        re-spending its budget and repeating any side effect it already
+        performed.
+
+        So the gated calls are refused with model-visible feedback and the rest
+        run. It fails closed, keeps the work already done, and leaves approval
+        where it can actually be honoured — the top-level agent, which is a real
+        graph node and can interrupt.
+
+        Returns ``(runnable_calls, refusal_text_by_call_id)``.
+        """
+        policy = policy_from_context(state.get("context"))
+        if not policy.get("master_enabled", True):
+            return list(normalized_calls), {}
+
+        if tool_map is None and agent is not None:
+            view = GraphStateView(state)
+            tool_map = await ensure_agent_tool_map(
+                agent,
+                conversation_id=view.conversation_id(),
+                user_id=view.user_id(),
+                device_id=view.device_id(),
+                internal_tools=internal_tools,
+            )
+        mcp_manager = await get_global_mcp_manager() if tool_map is not None else None
+
+        gated = calls_requiring_approval(
+            normalized_calls, policy=policy, tool_map=tool_map, mcp_manager=mcp_manager
+        )
+        if not gated:
+            return list(normalized_calls), {}
+
+        runnable: list[dict[str, Any]] = []
+        refusals: dict[str, str] = {}
+        for tool_call in normalized_calls:
+            call_id = str(tool_call.get("id") or "")
+            if call_id and call_id in gated:
+                refusals[call_id] = (
+                    f"Tool {tool_call.get('name') or 'unknown'!s} requires human approval, "
+                    "which cannot be requested from a delegated worker. It was not run. "
+                    "Complete the task another way, or report that this step needs the "
+                    "supervisor to run it directly."
+                )
+                continue
+            runnable.append(tool_call)
+        return runnable, refusals
 
     async def _prepare_interrupt_payload(
         self,
