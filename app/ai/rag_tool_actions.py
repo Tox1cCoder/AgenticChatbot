@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
 from langchain_core.messages import ToolMessage
 
 from app.ai.token_counter import TokenCounter
+from app.ai.tool_execution import apply_tool_output_offload, build_tool_artifact
+from app.ai.utils import make_json_safe
 from app.observability.rag import rag_metrics
 from app.services.rag_evidence import EvidenceAssembler
 from app.services.rag_retrieval import RetrievalScope
@@ -644,3 +648,119 @@ async def execute_search_documents_action(
         logger.debug("RAG Agentic: %s - %s", action, reason)
 
     return result, action, evidence
+
+
+@dataclass(frozen=True)
+class RagSearchToolOutcome:
+    """One search_documents call's model-visible text, artifact, and cost."""
+
+    public_text: str
+    artifact: dict[str, Any]
+    consumed_tokens: int
+    evidence: dict[str, Any]
+
+
+async def execute_rag_search_tool_call(
+    *,
+    rag_agent: Any,
+    tool_call: dict[str, Any],
+    conversation_id: Any,
+    user_id: Any,
+    context: dict[str, Any],
+    question: str,
+    max_agentic_images: int,
+    allowance: int | None,
+    remaining_allowance: int,
+    evidence_token_counter: Any,
+    evidence_provider: str,
+    evidence_model: str,
+) -> RagSearchToolOutcome:
+    """Run one ``search_documents`` call and package its result.
+
+    Both RAG loops — the graph node and the Planning worker — used to carry
+    their own copy of this: the evidence-pack-versus-offload branch, the budget
+    arithmetic, the error parsing, and the artifact assembly. Two copies of
+    token accounting is two places for a budget to drift, and the copies had
+    already diverged on which tools an allowance may bound.
+
+    An evidence pack reports its own token count and is never offloaded: it is
+    already bounded by construction, and offloading it would strip the framing
+    that makes a citation checkable.
+    """
+    tool_name = tool_call.get("name")
+    tool_id = tool_call.get("id")
+    tool_args = tool_call.get("args", {})
+
+    result, _, evidence = await execute_search_documents_action(
+        rag_agent=rag_agent,
+        conversation_id=conversation_id,
+        tool_args=tool_args,
+        context=context,
+        max_agentic_images=max_agentic_images,
+        user_id=user_id,
+        question=question,
+        evidence_max_tokens=remaining_allowance,
+        evidence_provider=evidence_provider,
+        evidence_model=evidence_model,
+        evidence_token_counter=evidence_token_counter,
+    )
+
+    parsed_error: dict[str, Any] | None = None
+    if isinstance(result, str):
+        with contextlib.suppress(Exception):
+            candidate = json.loads(result)
+            if isinstance(candidate, dict) and candidate.get("status") == "error":
+                parsed_error = candidate
+    error = result if parsed_error or result.startswith("Error") else None
+
+    if evidence.get("records") is not None:
+        public_text, blob_info = result, None
+        consumed_tokens = int(evidence.get("token_count") or 0)
+        budget_omitted = False
+    else:
+        public_text, blob_info = apply_tool_output_offload(
+            output_text=result,
+            tool_call_id=tool_id,
+            tool_name=tool_name,
+            conversation_id=conversation_id,
+            user_id=user_id,
+        )
+        public_text, consumed_tokens, budget_omitted = fit_rag_tool_message_content(
+            content=public_text,
+            allowance=allowance,
+            token_counter=evidence_token_counter,
+            provider=evidence_provider,
+            model=evidence_model,
+            tool_call_id=tool_id,
+            tool_name=tool_name,
+        )
+
+    artifact = build_tool_artifact(
+        tool_call_id=tool_id,
+        tool_name=tool_name,
+        tool_args=tool_args,
+        output_text=public_text,
+        error=error,
+    )
+    if budget_omitted:
+        artifact.update(
+            {
+                "model_output_omitted": True,
+                "model_output_omitted_reason": "context_budget",
+                "original_output_chars": len(str(result or "")),
+            }
+        )
+    if parsed_error:
+        artifact["error_type"] = parsed_error.get("error_type")
+        artifact["retryable"] = bool(parsed_error.get("retryable"))
+    if blob_info:
+        artifact.update(blob_info)
+    if evidence:
+        artifact["rag_evidence"] = make_json_safe(evidence)
+
+    return RagSearchToolOutcome(
+        public_text=public_text or "",
+        artifact=artifact,
+        consumed_tokens=int(consumed_tokens or 0),
+        evidence=evidence,
+    )

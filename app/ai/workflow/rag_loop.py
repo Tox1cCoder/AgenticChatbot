@@ -3,8 +3,6 @@
 Methods are relocated verbatim; behavior is identical.
 """
 
-import contextlib
-import json
 import logging
 from typing import Any
 
@@ -13,7 +11,7 @@ from langgraph.types import interrupt
 
 from app.ai.rag_tool_actions import (
     canonicalize_rag_tool_call,
-    execute_search_documents_action,
+    execute_rag_search_tool_call,
     fit_rag_tool_message_content,
 )
 from app.ai.schemas import AgentMessage, AgentResponse, GraphState, MessageRole
@@ -23,9 +21,7 @@ from app.ai.tool_context import (
     tool_execution_context,
 )
 from app.ai.tool_execution import (
-    apply_tool_output_offload,
     build_rejected_tool_artifacts,
-    build_tool_artifact,
     ensure_agent_tool_map,
     execute_tool_calls,
 )
@@ -423,7 +419,6 @@ class RagLoopMixin:
         for tool_call_data in normalized_tool_calls:
             tool_name = tool_call_data.get("name")
             tool_id = tool_call_data.get("id")
-            tool_args = tool_call_data.get("args", {})
 
             if tool_name != "search_documents":
                 stored = non_search_outputs_by_id.get(tool_id)
@@ -457,83 +452,32 @@ class RagLoopMixin:
                 )
                 continue
 
-            result, _, evidence = await execute_search_documents_action(
+            search = await execute_rag_search_tool_call(
                 rag_agent=self.rag_agent,
+                tool_call=tool_call_data,
                 conversation_id=conversation_id,
-                tool_args=tool_args,
+                user_id=user_id,
                 context=context,
-                max_agentic_images=max_agentic_images,
-                user_id=state.get("user_id"),
                 question=question,
-                evidence_max_tokens=remaining_evidence_allowance,
+                max_agentic_images=max_agentic_images,
+                allowance=enforceable_allowance(tool_name),
+                remaining_allowance=remaining_evidence_allowance,
+                evidence_token_counter=evidence_token_counter,
                 evidence_provider=evidence_provider,
                 evidence_model=evidence_model,
-                evidence_token_counter=evidence_token_counter,
             )
-
-            parsed_error: dict[str, Any] | None = None
-            if isinstance(result, str):
-                with contextlib.suppress(Exception):
-                    candidate = json.loads(result)
-                    if isinstance(candidate, dict) and candidate.get("status") == "error":
-                        parsed_error = candidate
-            error = result if parsed_error or result.startswith("Error") else None
-            if evidence.get("records") is not None:
-                public_text, blob_info = result, None
-                consumed_tokens = int(evidence.get("token_count") or 0)
-                budget_omitted = False
-            else:
-                public_text, blob_info = apply_tool_output_offload(
-                    output_text=result,
-                    tool_call_id=tool_id,
-                    tool_name=tool_name,
-                    conversation_id=conversation_id,
-                    user_id=user_id,
-                )
-                public_text, consumed_tokens, budget_omitted = fit_rag_tool_message_content(
-                    content=public_text,
-                    allowance=enforceable_allowance(tool_name),
-                    token_counter=evidence_token_counter,
-                    provider=evidence_provider,
-                    model=evidence_model,
-                    tool_call_id=tool_id,
-                    tool_name=tool_name,
-                )
             remaining_evidence_allowance = max(
                 0,
-                remaining_evidence_allowance - consumed_tokens,
+                remaining_evidence_allowance - search.consumed_tokens,
             )
-            artifact = build_tool_artifact(
-                tool_call_id=tool_id,
-                tool_name=tool_name,
-                tool_args=tool_args,
-                output_text=public_text,
-                error=error,
-            )
-            if budget_omitted:
-                artifact.update(
-                    {
-                        "model_output_omitted": True,
-                        "model_output_omitted_reason": "context_budget",
-                        "original_output_chars": len(str(result or "")),
-                    }
-                )
-            if parsed_error:
-                artifact["error_type"] = parsed_error.get("error_type")
-                artifact["retryable"] = bool(parsed_error.get("retryable"))
-            if blob_info:
-                artifact.update(blob_info)
-            if evidence:
-                artifact["rag_evidence"] = make_json_safe(evidence)
-            tool_artifacts.append(artifact)
+            tool_artifacts.append(search.artifact)
             tool_outputs.append(
                 {
                     "tool_call_id": tool_id,
                     "name": tool_name,
-                    "content": public_text,
+                    "content": search.public_text,
                 }
             )
-
         # Interpret delegation before persisting ToolMessages so rejection
         # feedback replaces the matching result rather than adding a duplicate.
         # This rewrites entries of ``tool_outputs`` in place, so it must receive

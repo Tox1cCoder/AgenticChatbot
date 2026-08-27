@@ -92,9 +92,9 @@ def _install_retrieval(monkeypatch, *evidence_ids: str):
             },
         )
 
-    monkeypatch.setattr("app.ai.graph.execute_search_documents_action", fake_action)
+    monkeypatch.setattr("app.ai.rag_tool_actions.execute_search_documents_action", fake_action)
     monkeypatch.setattr(
-        "app.ai.graph.apply_tool_output_offload",
+        "app.ai.rag_tool_actions.apply_tool_output_offload",
         lambda **kwargs: (kwargs["output_text"], None),
     )
 
@@ -443,8 +443,37 @@ async def test_a_tool_calling_planning_step_is_not_grounded(monkeypatch):
 # needs the production RAG runtime that rag_execution.py was never given.
 
 
+def test_neither_rag_loop_carries_its_own_search_call_any_more():
+    """The budget arithmetic lives in one place, not two.
+
+    Both loops used to carry their own copy of the evidence-pack-versus-offload
+    branch, the token accounting, the error parsing, and the artifact assembly.
+    Two copies of token accounting is two places for a budget to drift, and
+    these two had already diverged on which tools an allowance may bound.
+    """
+    import pathlib
+
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    for relative in ("app/ai/graph.py", "app/ai/workflow/rag_loop.py"):
+        source = (repo_root / relative).read_text(encoding="utf-8")
+        assert "execute_rag_search_tool_call" in source, f"{relative} bypasses the shared call"
+        assert "execute_search_documents_action" not in source, (
+            f"{relative} grew its own search call again — the copy is back"
+        )
+        assert "apply_tool_output_offload" not in source, (
+            f"{relative} grew its own offload branch again"
+        )
+
+
 def test_the_two_rag_loops_are_still_separate_implementations():
-    """Records the half that remains, so a green suite cannot imply otherwise.
+    """Records what the shared search call did NOT collapse.
+
+    The surrounding loop is still duplicated: the model call, the approval
+    decision, the iteration and error-streak limits, non-search tool execution,
+    and message assembly. Collapsing those is the Task 7 cutover, and it has a
+    real behavioural fork in it — the graph node calls ``interrupt()`` for
+    approval, while the worker returns an ``awaiting_approval`` result the
+    design says it should not fabricate.
 
     Delete this when the loops collapse into one — not by loosening it.
     """
@@ -456,9 +485,9 @@ def test_the_two_rag_loops_are_still_separate_implementations():
         encoding="utf-8"
     )
 
-    assert "execute_search_documents_action" in graph
-    assert "execute_search_documents_action" in rag_loop, (
-        "the two search loops merged — remove this test and the ledger entry "
+    assert "execute_tool_calls" in graph
+    assert "execute_tool_calls" in rag_loop, (
+        "the two tool loops merged — remove this test and the ledger entry "
         "in test_routing_legacy_removal.py"
     )
 

@@ -774,11 +774,11 @@ async def test_run_agent_in_isolated_context_drives_rag_search_loop(monkeypatch)
         return "SEARCH RESULT", "scan_all", {"documents": [{"document_id": "doc-1"}]}
 
     monkeypatch.setattr(
-        "app.ai.graph.execute_search_documents_action",
+        "app.ai.rag_tool_actions.execute_search_documents_action",
         fake_execute_search_documents_action,
     )
     monkeypatch.setattr(
-        "app.ai.graph.apply_tool_output_offload",
+        "app.ai.rag_tool_actions.apply_tool_output_offload",
         lambda **kwargs: (kwargs["output_text"], None),
     )
 
@@ -913,11 +913,11 @@ async def test_run_agent_in_isolated_context_allows_rag_worker_under_iteration_c
         return "SEARCH RESULT", "scan_all", {"documents": [{"document_id": "doc-1"}]}
 
     monkeypatch.setattr(
-        "app.ai.graph.execute_search_documents_action",
+        "app.ai.rag_tool_actions.execute_search_documents_action",
         fake_execute_search_documents_action,
     )
     monkeypatch.setattr(
-        "app.ai.graph.apply_tool_output_offload",
+        "app.ai.rag_tool_actions.apply_tool_output_offload",
         lambda **kwargs: (kwargs["output_text"], None),
     )
 
@@ -2150,11 +2150,11 @@ async def test_rag_worker_stops_after_iteration_limit(monkeypatch):
         return "SEARCH RESULT", "scan_all", {}
 
     monkeypatch.setattr(
-        "app.ai.graph.execute_search_documents_action",
+        "app.ai.rag_tool_actions.execute_search_documents_action",
         fake_execute_search_documents_action,
     )
     monkeypatch.setattr(
-        "app.ai.graph.apply_tool_output_offload",
+        "app.ai.rag_tool_actions.apply_tool_output_offload",
         lambda **kwargs: (kwargs["output_text"], None),
     )
 

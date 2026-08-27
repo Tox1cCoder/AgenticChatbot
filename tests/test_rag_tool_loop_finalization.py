@@ -360,7 +360,7 @@ def test_rag_document_tool_results_are_recorded_as_response_artifacts(monkeypatc
         raise AssertionError(f"Unexpected action: {action}")
 
     monkeypatch.setattr(
-        "app.ai.workflow.rag_loop.execute_search_documents_action",
+        "app.ai.rag_tool_actions.execute_search_documents_action",
         fake_execute_search_documents_action,
     )
 
@@ -433,11 +433,11 @@ def test_rag_search_passes_authoritative_allowance_and_persists_pack(monkeypatch
         )
 
     monkeypatch.setattr(
-        "app.ai.workflow.rag_loop.execute_search_documents_action",
+        "app.ai.rag_tool_actions.execute_search_documents_action",
         fake_execute_search_documents_action,
     )
     monkeypatch.setattr(
-        "app.ai.workflow.rag_loop.apply_tool_output_offload",
+        "app.ai.rag_tool_actions.apply_tool_output_offload",
         lambda **_kwargs: (_ for _ in ()).throw(
             AssertionError("bounded evidence serialization must remain the ToolMessage")
         ),
@@ -505,7 +505,7 @@ def test_rag_zero_allowance_does_not_fall_back_to_independent_budget(monkeypatch
         )
 
     monkeypatch.setattr(
-        "app.ai.workflow.rag_loop.execute_search_documents_action",
+        "app.ai.rag_tool_actions.execute_search_documents_action",
         fake_execute_search_documents_action,
     )
     state = {
@@ -562,7 +562,7 @@ def test_rag_search_calls_share_one_cumulative_evidence_allowance(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "app.ai.workflow.rag_loop.execute_search_documents_action",
+        "app.ai.rag_tool_actions.execute_search_documents_action",
         fake_execute_search_documents_action,
     )
     state = {
@@ -623,7 +623,7 @@ def test_mixed_rag_actions_charge_non_pack_content_before_later_search(monkeypat
     workflow.agents = {}
 
     monkeypatch.setattr(
-        "app.ai.workflow.rag_loop.execute_search_documents_action",
+        "app.ai.rag_tool_actions.execute_search_documents_action",
         fake_execute_search_documents_action,
     )
     state = {
@@ -696,11 +696,11 @@ def test_oversized_last_non_pack_result_is_omitted_before_tool_message_append(mo
         return oversized, action, {"documents": []}
 
     monkeypatch.setattr(
-        "app.ai.workflow.rag_loop.execute_search_documents_action",
+        "app.ai.rag_tool_actions.execute_search_documents_action",
         fake_execute_search_documents_action,
     )
     monkeypatch.setattr(
-        "app.ai.workflow.rag_loop.apply_tool_output_offload",
+        "app.ai.rag_tool_actions.apply_tool_output_offload",
         lambda **kwargs: (kwargs["output_text"], None),
     )
     state = {
@@ -776,11 +776,11 @@ def test_missing_authoritative_allowance_keeps_model_visible_tool_text(monkeypat
         return "AVAILABLE DOCUMENTS: report.pdf", kwargs["tool_args"]["action"], {}
 
     monkeypatch.setattr(
-        "app.ai.workflow.rag_loop.execute_search_documents_action",
+        "app.ai.rag_tool_actions.execute_search_documents_action",
         fake_execute_search_documents_action,
     )
     monkeypatch.setattr(
-        "app.ai.workflow.rag_loop.apply_tool_output_offload",
+        "app.ai.rag_tool_actions.apply_tool_output_offload",
         lambda **kwargs: (kwargs["output_text"], None),
     )
     state = {
@@ -900,7 +900,7 @@ def test_rag_action_named_tool_call_is_canonicalized_to_search_documents(monkeyp
         raise AssertionError("RAG document actions must not use generic deferred tool execution")
 
     monkeypatch.setattr(
-        "app.ai.workflow.rag_loop.execute_search_documents_action",
+        "app.ai.rag_tool_actions.execute_search_documents_action",
         fake_execute_search_documents_action,
     )
     monkeypatch.setattr("app.ai.workflow.rag_loop.execute_tool_calls", fail_execute_tool_calls)
@@ -953,11 +953,11 @@ async def test_rag_tools_node_tracks_document_tool_error_streak(monkeypatch):
         return "Error: Unknown action: nope", "nope", {}
 
     monkeypatch.setattr(
-        "app.ai.workflow.rag_loop.execute_search_documents_action",
+        "app.ai.rag_tool_actions.execute_search_documents_action",
         fake_execute_search_documents_action,
     )
     monkeypatch.setattr(
-        "app.ai.workflow.rag_loop.apply_tool_output_offload",
+        "app.ai.rag_tool_actions.apply_tool_output_offload",
         lambda **kwargs: (kwargs["output_text"], None),
     )
 

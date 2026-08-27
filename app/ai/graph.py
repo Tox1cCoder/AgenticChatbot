@@ -1,6 +1,5 @@
 import asyncio
 import contextlib
-import json
 import logging
 import time
 from typing import TYPE_CHECKING, Any, Optional
@@ -72,7 +71,7 @@ from .image_generation import (
 from .model_factory import ModelFactory
 from .rag_tool_actions import (
     canonicalize_rag_tool_call,
-    execute_search_documents_action,
+    execute_rag_search_tool_call,
     fit_rag_tool_message_content,
 )
 from .research_budget import reset_research_budget
@@ -92,8 +91,6 @@ from .skills_tool import get_available_skill_summaries
 from .time_context import build_runtime_time_context_block
 from .tool_context import rich_response_capable_from_context, tool_execution_context
 from .tool_execution import (
-    apply_tool_output_offload,
-    build_tool_artifact,
     ensure_agent_tool_map,
     execute_tool_calls,
 )
@@ -1912,94 +1909,39 @@ class MultiAgentWorkflow(
                 for tool_call_data in normalized_calls:
                     tool_name = tool_call_data.get("name")
                     tool_id = tool_call_data.get("id")
-                    tool_args = tool_call_data.get("args", {})
 
                     if tool_name == "search_documents":
-                        result, _, evidence = await execute_search_documents_action(
+                        search = await execute_rag_search_tool_call(
                             rag_agent=agent,
+                            tool_call=tool_call_data,
                             conversation_id=conversation_id,
-                            tool_args=tool_args,
-                            context=rag_context,
-                            max_agentic_images=max_agentic_images,
                             user_id=user_id,
+                            context=rag_context,
                             question=task_prompt,
-                            evidence_max_tokens=remaining_evidence_allowance,
+                            max_agentic_images=max_agentic_images,
+                            allowance=(
+                                remaining_evidence_allowance
+                                if allowance_authoritative
+                                else None
+                            ),
+                            remaining_allowance=remaining_evidence_allowance,
+                            evidence_token_counter=evidence_token_counter,
                             evidence_provider=evidence_provider,
                             evidence_model=evidence_model,
-                            evidence_token_counter=evidence_token_counter,
                         )
-                        parsed_error: dict[str, Any] | None = None
-                        if isinstance(result, str):
-                            with contextlib.suppress(Exception):
-                                candidate = json.loads(result)
-                                if (
-                                    isinstance(candidate, dict)
-                                    and candidate.get("status") == "error"
-                                ):
-                                    parsed_error = candidate
-                        error = result if parsed_error or result.startswith("Error") else None
-                        if evidence.get("records") is not None:
-                            public_text, blob_info = result, None
-                            consumed_tokens = int(evidence.get("token_count") or 0)
-                            budget_omitted = False
-                        else:
-                            public_text, blob_info = apply_tool_output_offload(
-                                output_text=result,
-                                tool_call_id=tool_id,
-                                tool_name=tool_name,
-                                conversation_id=conversation_id,
-                                user_id=user_id,
-                            )
-                            public_text, consumed_tokens, budget_omitted = (
-                                fit_rag_tool_message_content(
-                                    content=public_text,
-                                    allowance=(
-                                        remaining_evidence_allowance
-                                        if allowance_authoritative
-                                        else None
-                                    ),
-                                    token_counter=evidence_token_counter,
-                                    provider=evidence_provider,
-                                    model=evidence_model,
-                                    tool_call_id=tool_id,
-                                    tool_name=tool_name,
-                                )
-                            )
                         remaining_evidence_allowance = max(
                             0,
-                            remaining_evidence_allowance - consumed_tokens,
+                            remaining_evidence_allowance - search.consumed_tokens,
                         )
-                        artifact = build_tool_artifact(
-                            tool_call_id=tool_id,
-                            tool_name=tool_name,
-                            tool_args=tool_args,
-                            output_text=public_text,
-                            error=error,
-                        )
-                        if budget_omitted:
-                            artifact.update(
-                                {
-                                    "model_output_omitted": True,
-                                    "model_output_omitted_reason": "context_budget",
-                                    "original_output_chars": len(str(result or "")),
-                                }
-                            )
-                        if parsed_error:
-                            artifact["error_type"] = parsed_error.get("error_type")
-                            artifact["retryable"] = bool(parsed_error.get("retryable"))
-                        if blob_info:
-                            artifact.update(blob_info)
-                        if evidence:
-                            artifact["rag_evidence"] = make_json_safe(evidence)
-                        accumulated_artifacts.append(artifact)
+                        accumulated_artifacts.append(search.artifact)
                         rag_tool_messages.append(
                             ToolMessage(
-                                content=public_text or "",
+                                content=search.public_text,
                                 tool_call_id=tool_id,
                                 name=tool_name,
                             )
                         )
-                        legacy_tool_context.append(public_text or "")
+                        legacy_tool_context.append(search.public_text)
                         continue
 
                     if rag_tool_map is None:

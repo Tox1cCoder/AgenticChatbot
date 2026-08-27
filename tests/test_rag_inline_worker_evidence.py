@@ -79,9 +79,11 @@ async def test_reachable_inline_rag_worker_feeds_real_role_group_to_rag_agent(mo
             "truncated_count": 0,
         }
 
-    monkeypatch.setattr("app.ai.graph.execute_search_documents_action", fake_search_action)
     monkeypatch.setattr(
-        "app.ai.graph.apply_tool_output_offload",
+        "app.ai.rag_tool_actions.execute_search_documents_action", fake_search_action
+    )
+    monkeypatch.setattr(
+        "app.ai.rag_tool_actions.apply_tool_output_offload",
         lambda **_kwargs: (_ for _ in ()).throw(
             AssertionError("structured evidence must not be generically offloaded")
         ),
@@ -180,9 +182,9 @@ async def test_inline_worker_charges_non_pack_content_before_later_search(monkey
             "truncated_count": 0,
         }
 
-    monkeypatch.setattr("app.ai.graph.execute_search_documents_action", fake_action)
+    monkeypatch.setattr("app.ai.rag_tool_actions.execute_search_documents_action", fake_action)
     monkeypatch.setattr(
-        "app.ai.graph.apply_tool_output_offload",
+        "app.ai.rag_tool_actions.apply_tool_output_offload",
         lambda **kwargs: (kwargs["output_text"], None),
     )
 
@@ -262,9 +264,9 @@ async def test_inline_worker_omits_oversized_non_pack_result_before_next_request
     async def fake_action(**kwargs):
         return oversized, kwargs["tool_args"]["action"], {"documents": []}
 
-    monkeypatch.setattr("app.ai.graph.execute_search_documents_action", fake_action)
+    monkeypatch.setattr("app.ai.rag_tool_actions.execute_search_documents_action", fake_action)
     monkeypatch.setattr(
-        "app.ai.graph.apply_tool_output_offload",
+        "app.ai.rag_tool_actions.apply_tool_output_offload",
         lambda **kwargs: (kwargs["output_text"], None),
     )
 
@@ -334,9 +336,9 @@ async def test_inline_worker_keeps_tool_text_when_no_allowance_was_propagated(mo
     async def fake_action(**kwargs):
         return "SCAN RESULT", kwargs["tool_args"]["action"], {"documents": []}
 
-    monkeypatch.setattr("app.ai.graph.execute_search_documents_action", fake_action)
+    monkeypatch.setattr("app.ai.rag_tool_actions.execute_search_documents_action", fake_action)
     monkeypatch.setattr(
-        "app.ai.graph.apply_tool_output_offload",
+        "app.ai.rag_tool_actions.apply_tool_output_offload",
         lambda **kwargs: (kwargs["output_text"], None),
     )
 
@@ -430,9 +432,9 @@ async def test_inline_worker_stop_exits_never_return_counter_descriptor(
     async def fake_action(**kwargs):
         return action_result, kwargs["tool_args"]["action"], {"documents": []}
 
-    monkeypatch.setattr("app.ai.graph.execute_search_documents_action", fake_action)
+    monkeypatch.setattr("app.ai.rag_tool_actions.execute_search_documents_action", fake_action)
     monkeypatch.setattr(
-        "app.ai.graph.apply_tool_output_offload",
+        "app.ai.rag_tool_actions.apply_tool_output_offload",
         lambda **kwargs: (kwargs["output_text"], None),
     )
 
