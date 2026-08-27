@@ -203,3 +203,75 @@ async def test_planning_synthesis_with_rag_evidence_is_revalidated():
     with pytest.raises(OutputValidationError) as exc:
         await OutputValidator().validate(outcome, {})
     assert exc.value.reason == "unknown_evidence_id"
+
+
+# ----------------------------------------------------------------------
+# a claim selects its own policy
+# ----------------------------------------------------------------------
+#
+# Selecting only on what the runtime recorded leaves the worst case unchecked:
+# a response that publishes an artifact, an image, or a citation when the
+# runtime recorded *nothing* skips the very policy that exists to catch it.
+# Empty provenance is not "nothing to verify" — against a response that claims
+# something, it is the strongest evidence there is that the claim is invented.
+
+
+def _claiming_outcome(*, content="an answer", artifacts=None, images=None):
+    response = AgentResponse(
+        agent_type=AgentType.CHAT,
+        agent_id="chat_agent",
+        message=AgentMessage(role=MessageRole.ASSISTANT, content=content),
+        metadata={"images": images} if images else {},
+    )
+    if artifacts is not None:
+        response.tool_artifacts = artifacts
+    return ResponseOutcome(
+        agent_id="chat_agent", response=response, provenance=OutcomeProvenance()
+    )
+
+
+def test_a_citation_selects_grounding_even_with_no_recorded_evidence():
+    assert "rag_grounding" in select_policies(
+        _claiming_outcome(content="Revenue rose [E1].")
+    )
+
+
+def test_a_published_artifact_selects_provenance_with_nothing_recorded():
+    assert "artifact_provenance" in select_policies(
+        _claiming_outcome(artifacts=[{"artifact_id": "a1"}])
+    )
+
+
+def test_a_published_image_selects_delivery_with_nothing_recorded():
+    assert "image_delivery" in select_policies(
+        _claiming_outcome(images=[{"image_id": "i1"}])
+    )
+
+
+def test_a_plain_answer_still_selects_only_the_content_policy():
+    """Selection widens for claims, not for everything."""
+    assert select_policies(_claiming_outcome()) == ("public_content",)
+
+
+async def test_a_citation_with_nothing_retrieved_is_rejected():
+    with pytest.raises(OutputValidationError) as exc:
+        await OutputValidator().validate(
+            _claiming_outcome(content="Revenue rose [E9]."), {}
+        )
+    assert exc.value.reason == "unknown_evidence_id"
+
+
+async def test_an_artifact_the_runtime_never_recorded_is_rejected():
+    with pytest.raises(OutputValidationError) as exc:
+        await OutputValidator().validate(
+            _claiming_outcome(artifacts=[{"artifact_id": "forged"}]), {}
+        )
+    assert exc.value.reason == "unrecorded_artifact"
+
+
+async def test_an_image_the_runtime_never_recorded_is_rejected():
+    with pytest.raises(OutputValidationError) as exc:
+        await OutputValidator().validate(
+            _claiming_outcome(images=[{"image_id": "forged"}]), {}
+        )
+    assert exc.value.reason == "unrecorded_image"

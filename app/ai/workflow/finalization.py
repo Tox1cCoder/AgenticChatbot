@@ -240,10 +240,22 @@ def select_policies(outcome: ResponseOutcome) -> tuple[str, ...]:
         if policy_id not in selected:
             selected.append(policy_id)
 
+    # A policy is selected when the runtime recorded something of its kind, or
+    # when the response *claims* something of its kind. Selecting only on what
+    # the runtime recorded left the worst case unchecked: a response publishing
+    # an artifact, image, or citation with nothing recorded at all skipped the
+    # policy written to catch exactly that. Empty provenance is not "nothing to
+    # verify" — against a response that claims something, it is the strongest
+    # evidence there is that the claim was invented.
+    response = outcome.response
+    metadata = response.metadata or {}
     for present, policy_id in (
-        (provenance.evidence, "rag_grounding"),
-        (provenance.artifacts, "artifact_provenance"),
-        (provenance.images, "image_delivery"),
+        (
+            provenance.evidence or _CITATION_PATTERN.search(response.message.content or ""),
+            "rag_grounding",
+        ),
+        (provenance.artifacts or response.tool_artifacts, "artifact_provenance"),
+        (provenance.images or metadata.get("images"), "image_delivery"),
     ):
         if present and policy_id not in selected:
             selected.append(policy_id)

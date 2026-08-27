@@ -79,7 +79,9 @@ def _with_finalizer_ownership(state: dict[str, Any]) -> dict[str, Any]:
     return working
 
 
-def _response_outcome(agent_id: str, response: AgentResponse) -> ResponseOutcome:
+def _response_outcome(
+    agent_id: str, response: AgentResponse, state: dict[str, Any] | None = None
+) -> ResponseOutcome:
     """Build a server-owned outcome from a specialist response.
 
     Provenance is assembled from runtime records only. Model text can never
@@ -93,8 +95,34 @@ def _response_outcome(agent_id: str, response: AgentResponse) -> ResponseOutcome
     return ResponseOutcome(
         agent_id=agent_id,
         response=response,
-        provenance=OutcomeProvenance(artifacts=artifacts, images=images),
+        provenance=OutcomeProvenance(
+            artifacts=artifacts, images=images, evidence=_recorded_evidence(state)
+        ),
     )
+
+
+def _recorded_evidence(state: dict[str, Any] | None) -> tuple[dict[str, Any], ...]:
+    """The evidence records this turn's own tool calls produced.
+
+    A citation selects the grounding policy, so an answer that legitimately
+    cites ``[E1]`` is rejected as invented unless the ids the runtime actually
+    retrieved travel with it. They live on the tool artifacts, which is the
+    same place the grounded-answer gate reads them from.
+    """
+    context = (state or {}).get("context")
+    if not isinstance(context, dict):
+        return ()
+    records: list[dict[str, Any]] = []
+    for artifact in context.get("tool_artifacts") or ():
+        if not isinstance(artifact, dict):
+            continue
+        evidence = artifact.get("rag_evidence")
+        if not isinstance(evidence, dict):
+            continue
+        for record in evidence.get("records") or ():
+            if isinstance(record, dict) and record.get("evidence_id"):
+                records.append(record)
+    return tuple(records)
 
 
 def _carry_forward(state: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
@@ -196,7 +224,7 @@ def make_specialist_wrapper(
                     goto="finalize",
                 )
             update["agent_outcome"] = _response_outcome(
-                active_agent_id or response.agent_id, response
+                active_agent_id or response.agent_id, response, result
             )
             update["execution_phase"] = "validating"
 
@@ -298,7 +326,7 @@ def make_tool_stage_wrapper(
             response = result.get("response")
             if isinstance(response, AgentResponse):
                 update["agent_outcome"] = _response_outcome(
-                    str(result.get("active_agent_id") or response.agent_id), response
+                    str(result.get("active_agent_id") or response.agent_id), response, result
                 )
                 update["execution_phase"] = "validating"
                 return Command(update=update, goto="validate_output")
