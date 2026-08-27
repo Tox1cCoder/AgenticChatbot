@@ -18,6 +18,7 @@ from app.ai.workflow.routing import RoutingContextBuilder, RoutingService
 from app.core.config import settings
 from app.core.dependency_injection import AppAutoInjector, AppContainerInjector
 from app.database.database import Database
+from app.database.session import SessionLocal
 from app.interfaces import (
     IAuthService,
     IConversationService,
@@ -122,6 +123,21 @@ def _build_document_chunk_builder(
         max_tokens=max_tokens,
         semantic_boundary_detector=detector,
     )
+
+
+def _turn_lock_session():
+    """A raw sync Session for the conversation turn lock.
+
+    Deliberately not ``db.provided.session``: that is a ``@contextmanager``,
+    and a context-managed session closes when its block exits — releasing the
+    advisory lock it was opened to hold. This factory hands back a Session the
+    backend keeps open from acquire to release.
+
+    A module-level function rather than ``SessionLocal`` itself because the
+    container deep-copies its provider arguments, and a ``sessionmaker`` is not
+    copyable.
+    """
+    return SessionLocal()
 
 
 class Container(containers.DeclarativeContainer):
@@ -498,7 +514,7 @@ class Container(containers.DeclarativeContainer):
         ConversationTurnCoordinator,
         backend=providers.Singleton(
             PostgresAdvisoryLockBackend,
-            session_factory=db.provided.session,
+            session_factory=_turn_lock_session,
         ),
         timeout_seconds=providers.Object(settings.conversation_turn_lock_timeout_seconds),
         production=providers.Object(True),
@@ -625,6 +641,7 @@ class Container(containers.DeclarativeContainer):
         tool_approval_setting_repository=tool_approval_setting_repository,
         chat_image_service=chat_image_service,
         web_image_service=web_image_service,
+        turn_coordinator=conversation_turn_coordinator,
     )
 
     feedback_service: providers.Provider[IFeedbackService] = providers.Factory(

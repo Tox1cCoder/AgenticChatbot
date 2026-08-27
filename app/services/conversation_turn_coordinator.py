@@ -91,6 +91,23 @@ class PostgresAdvisoryLockBackend:
         self._sessions: dict[str, Any] = {}
 
     @staticmethod
+    def _require_raw_session(candidate: Any) -> Any:
+        """Reject a ``@contextmanager`` session factory at the wiring boundary.
+
+        A context-managed session is closed when its block exits, which would
+        release the advisory lock the moment it was taken. The failure mode
+        without this check is an ``AttributeError`` on the first query, which
+        names neither the cause nor the fix.
+        """
+        if hasattr(candidate, "execute"):
+            return candidate
+        raise TypeError(
+            "the advisory-lock session factory must return a Session held open "
+            "until release, not a context manager; got "
+            f"{type(candidate).__name__}"
+        )
+
+    @staticmethod
     def lock_key(conversation_id: str) -> int:
         """Hash a conversation ID into a signed 64-bit advisory-lock key."""
         digest = hashlib.sha256(str(conversation_id).encode("utf-8")).digest()
@@ -105,7 +122,7 @@ class PostgresAdvisoryLockBackend:
 
         # The lock lives on the session that took it, so that exact session is
         # held open until release rather than returned to the pool.
-        session = self._session_factory()
+        session = self._require_raw_session(self._session_factory())
         while True:
             acquired = await asyncio.to_thread(
                 lambda: session.execute(

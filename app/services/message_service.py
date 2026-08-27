@@ -18,6 +18,8 @@ from fastapi import status as http_status
 
 from app.ai.suggestion_generator import generate_follow_up_suggestions
 from app.ai.utils import resolve_interrupt_decision_id
+from app.ai.workflow.contracts import WorkflowRoutingException
+from app.ai.workflow.errors import workflow_error_payload
 from app.core.config import settings
 from app.core.exceptions import CustomHTTPException, PauseReason
 from app.core.response_constants import (
@@ -68,6 +70,7 @@ from app.utils.validation.pagination_validation import validate_pagination_param
 
 if TYPE_CHECKING:
     from app.interfaces.task_plan_service_interface import ITaskPlanService
+    from app.services.conversation_turn_coordinator import ConversationTurnCoordinator
 
 
 def _merge_stream_tool_artifacts_into_response(
@@ -138,6 +141,7 @@ class MessageService(IMessageService):
         tool_approval_setting_repository=None,
         chat_image_service=None,
         web_image_service=None,
+        turn_coordinator: ConversationTurnCoordinator | None = None,
     ):
         self.repository = message_repository
         self.conversation_validation_utils = conversation_validation_utils
@@ -154,7 +158,26 @@ class MessageService(IMessageService):
         self.web_image_service = web_image_service
         # Resolves the per-user HITL approval policy into workflow state each turn.
         self.tool_approval_setting_repository = tool_approval_setting_repository
+        # Serializes turns within one conversation from context snapshot
+        # through response persistence. Injected rather than constructed here
+        # so the lock's durability is a deployment decision, not this class's.
+        self._turn_coordinator = turn_coordinator
         self.redis_client = self._init_redis_client()
+
+    def _hold_turn(self, conversation_id: Any, *, request_id: str):
+        """Hold this conversation's turn lock for the body of the turn.
+
+        Returns a null context when no coordinator is configured. Tests build
+        this service with ``__new__`` and doubles; the container-wired service
+        always has one, which
+        ``test_the_container_wires_a_durable_turn_coordinator_into_message_service``
+        asserts so an unlocked production path cannot pass unnoticed.
+        """
+        coordinator = getattr(self, "_turn_coordinator", None)
+        if coordinator is None:
+            return contextlib.nullcontext()
+        key = str(conversation_id) if conversation_id else None
+        return coordinator.hold(key, request_id=request_id)
 
     def _init_redis_client(self):
         redis_url = getattr(settings, "redis_url", "") or ""
@@ -916,6 +939,17 @@ class MessageService(IMessageService):
     async def create_message(
         self, message_create_data: MessageCreate, user_id: UUID
     ) -> MessageRead:
+        # Same turn lock as the streaming path: this entrypoint runs the same
+        # snapshot-generate-persist sequence, so leaving it unlocked would let
+        # a non-streamed turn race a streamed one in the same conversation.
+        async with self._hold_turn(
+            message_create_data.conversation_id, request_id=str(uuid4())
+        ):
+            return await self._create_message_holding_turn(message_create_data, user_id)
+
+    async def _create_message_holding_turn(
+        self, message_create_data: MessageCreate, user_id: UUID
+    ) -> MessageRead:
         # This is an async endpoint path, so its database work uses the async
         # transport; a sync call here blocks the loop for every other request.
         await self.conversation_validation_utils.avalidate_conversation_access(
@@ -1012,10 +1046,43 @@ class MessageService(IMessageService):
         user_id: UUID,
         bot_message_id: UUID | None = None,
     ):
+        """Stream one turn while holding this conversation's turn lock.
+
+        The lock wraps the whole turn — user-message write, context snapshot,
+        generation, and response persistence — because releasing before the
+        write would leave exactly the window that matters unprotected. A
+        contended conversation surfaces as one typed retriable error event
+        rather than an unhandled exception, so the client can retry rather
+        than see a broken stream.
+        """
         # Reserve the assistant DB id up-front when the caller did not supply
-        # one so the workflow request can carry a stable id.
+        # one so the workflow request can carry a stable id, and so a conflict
+        # reported before any row exists still has a stable correlation id.
         if bot_message_id is None:
             bot_message_id = uuid4()
+
+        try:
+            async with self._hold_turn(
+                message_create_data.conversation_id, request_id=str(bot_message_id)
+            ):
+                async for event in self._create_message_stream_holding_turn(
+                    message_create_data, user_id, bot_message_id
+                ):
+                    yield event
+        except WorkflowRoutingException as exc:
+            yield make_event(
+                "error",
+                sequence=0,
+                conversation_id=str(message_create_data.conversation_id),
+                data=workflow_error_payload(exc.error),
+            )
+
+    async def _create_message_stream_holding_turn(
+        self,
+        message_create_data: MessageCreate,
+        user_id: UUID,
+        bot_message_id: UUID,
+    ):
         """
         Create a message and stream the bot response.
         Yields chunks as they arrive from the AI service.
