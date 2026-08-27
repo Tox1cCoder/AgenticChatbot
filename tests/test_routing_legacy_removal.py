@@ -144,21 +144,34 @@ def test_rag_and_planning_still_use_their_pre_v2_nodes():
     assert "planning_tools" in nodes
 
 
-def test_terminal_response_recovery_is_still_present_in_the_runtime_adapter():
-    """Records that stale-response recovery has not been removed yet.
+def test_response_recovery_no_longer_fabricates_an_answer():
+    """The salvage path around the finalizer is gone.
 
-    The finalizer is now the only component that builds a public response
-    inside the graph, but ``app/ai/graph.py`` still falls back to scanning
-    accumulated stream chunks and checkpoint messages when the graph produced
-    no response. That fallback can publish text the finalizer never validated,
-    so it is tracked here until the streaming adapter reads
-    ``validated_public_content`` exclusively.
+    ``_recover_terminal_response`` still exists as the adapter's accessor for
+    the finalizer's response, but it no longer scans accumulated stream chunks
+    or checkpoint messages for assistant-looking text. A turn with no finalized
+    response now yields a typed error instead of an unvalidated draft. Covered
+    in detail by tests/test_no_unvalidated_response_recovery.py.
     """
+    import ast
+
     source = (REPO_ROOT / "app" / "ai" / "graph.py").read_text(encoding="utf-8")
-    assert "_recover_terminal_response" in source, (
-        "recovery was removed — delete this test and assert its absence in "
-        "REMOVED_RUNTIME_TOKENS instead"
+    tree = ast.parse(source)
+    recover = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_recover_terminal_response"
     )
+
+    # No AgentResponse is constructed inside it any more — it only returns one
+    # that the finalizer already built and validated.
+    constructed = {
+        node.func.id
+        for node in ast.walk(recover)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "AgentResponse" not in constructed
+    assert "AgentMessage" not in constructed
 
 
 def test_the_finalizer_is_the_only_in_graph_response_builder():

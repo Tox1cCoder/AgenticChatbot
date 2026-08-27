@@ -2303,48 +2303,35 @@ class MultiAgentWorkflow(
         fallback_content: str | None = None,
         active_agent_id: str | None = None,
     ) -> AgentResponse | None:
+        """Return the finalizer's validated response, or nothing.
+
+        This deliberately does not salvage. It used to scan accumulated stream
+        chunks and checkpoint messages for assistant-looking text and publish
+        that — a path around ``validate_output`` carrying content no output
+        policy had approved, attributed to an agent the runtime inferred.
+
+        A turn that produced no finalized response is a failed turn: the caller
+        emits its typed error rather than a recovered draft. ``fallback_content``
+        and ``active_agent_id`` remain in the signature for call-site
+        compatibility and are intentionally unused.
+        """
+        del fallback_content, active_agent_id
+
         if not isinstance(state, dict):
             return None
 
         response = state.get("response")
-        fallback_text = coerce_response_text(fallback_content)
-
-        if response:
-            response_message = getattr(response, "message", None)
-            if getattr(response_message, "tool_calls", None):
-                response = None
-            else:
-                response_content = coerce_response_text(getattr(response_message, "content", None))
-                if fallback_text and response.message and not response_content:
-                    response.message.content = fallback_text
-                return self._attach_context_outputs(state, response)
-
-        content = fallback_text
-        if not content:
-            messages = state.get("messages", [])
-            for message in reversed(messages):
-                if not isinstance(message, AIMessage):
-                    continue
-                if getattr(message, "tool_calls", None):
-                    continue
-                content = coerce_response_text(getattr(message, "content", None))
-                if content:
-                    break
-
-        if not content:
+        if not response:
             return None
 
-        final_agent_id = state.get("active_agent_id") or active_agent_id
-        recovered_response = AgentResponse(
-            agent_type=self._get_agent_type(final_agent_id),
-            agent_id=final_agent_id or "unknown",
-            message=AgentMessage(
-                role=MessageRole.ASSISTANT,
-                content=content,
-            ),
-            metadata={},
-        )
-        return self._attach_context_outputs(state, recovered_response)
+        # A response still carrying tool calls is mid-flight, not an answer.
+        response_message = getattr(response, "message", None)
+        if getattr(response_message, "tool_calls", None):
+            return None
+        if not coerce_response_text(getattr(response_message, "content", None)):
+            return None
+
+        return self._attach_context_outputs(state, response)
 
     # ------------------------------------------------------------------
     # Continuation helpers

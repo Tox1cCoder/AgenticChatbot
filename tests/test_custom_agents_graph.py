@@ -603,17 +603,56 @@ def test_finalize_response_adds_handoff_metadata():
     assert "reason" not in response.metadata["handoff"]
 
 
-def test_recover_terminal_response_adds_canonical_agent_metadata():
-    wf = _workflow()
+def test_finalized_custom_agent_response_carries_canonical_agent_metadata():
+    """A custom agent's public identity is resolved from the attachment map.
+
+    This used to be asserted against recovered text scanned out of the message
+    list. Recovery no longer fabricates a response, so the property is checked
+    where it now lives: the finalizer.
+    """
+    from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+    from app.ai.workflow.contracts import (
+        AgentTransition,
+        OutcomeProvenance,
+        ResponseOutcome,
+        RoutingDecision,
+        TurnIdentity,
+    )
+    from app.ai.workflow.finalization import PublicResponseFinalizer
+
     rid = f"custom_agent:{uuid4()}"
     state = _multi_custom_state(rid, [rid])
-    state["messages"].append(AIMessage(content="answer"))
+    state.update(
+        {
+            "turn_identity": TurnIdentity(
+                request_id="request-1",
+                turn_id="message-1",
+                checkpoint_thread_id="routing-v2:conversation-1:message-1",
+            ),
+            "assistant_message_id": "assistant-1",
+            "routing_decision": RoutingDecision(
+                agent_id=rid, confidence=0.9, reason="attached specialist"
+            ),
+            "agent_history": [
+                AgentTransition(from_agent_id=None, to_agent_id=rid, source="router")
+            ],
+            "agent_outcome": ResponseOutcome(
+                agent_id=rid,
+                response=AgentResponse(
+                    agent_type=AgentType.CHAT,
+                    agent_id=rid,
+                    message=AgentMessage(role=MessageRole.ASSISTANT, content="answer"),
+                ),
+                provenance=OutcomeProvenance(),
+            ),
+        }
+    )
 
-    response = wf._recover_terminal_response(state)
+    response = PublicResponseFinalizer().finalize(state)["response"]
 
-    assert response is not None
     assert response.metadata["agent"]["id"] == rid
     assert response.metadata["agent"]["name"] == "A0"
+    assert response.metadata["agent"]["kind"] == "custom"
 
 
 # --------------------------------------------------------------------------- #
