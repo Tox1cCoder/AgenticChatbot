@@ -37,6 +37,12 @@ logger = logging.getLogger(__name__)
 # else the model or a document produces is not an id this server ever issued.
 _SERVER_EVIDENCE_ID = re.compile(r"E\d+")
 _EVIDENCE_MARKER = re.compile(r"\[\s*(E\d+(?:\s*,\s*E\d+)*)\s*\]", re.IGNORECASE)
+# Same marker with the horizontal whitespace around it, so removing one can
+# close the gap it leaves instead of stranding a double space or a space before
+# a full stop.
+_EVIDENCE_MARKER_WITH_GAP = re.compile(
+    r"([ \t]*)\[\s*(E\d+(?:\s*,\s*E\d+)*)\s*\]([ \t]*)", re.IGNORECASE
+)
 _MODEL_SOURCE_SPAN = re.compile(r"\[\s*sources?\s*:[^\]]*\]", re.IGNORECASE)
 # Same span, but including the immediately adjacent horizontal whitespace so a
 # targeted excision can close the gap it leaves without reflowing anything
@@ -421,6 +427,71 @@ def render_grounded_answer(
     return f"{body}\n\n{sources}" if sources else body
 
 
+class CitationStreamFilter:
+    """Applies the citation rule to text arriving in arbitrary pieces.
+
+    The renderer sees a whole answer; the stream sees whatever the provider
+    happened to chunk. Both must reach the same text, or the reader watches one
+    answer arrive and a different one is stored — so both call the same rule
+    and this class exists only to decide when enough text has arrived to apply
+    it.
+
+    It holds back exactly one thing: an open ``[`` whose contents could still
+    become an evidence marker. Anything that cannot — ``[note``, ``[1`` —
+    flushes immediately, so ordinary prose in brackets never stalls.
+    """
+
+    #: An open bracket is worth holding only while it could still close into a
+    #: marker. Anything outside this character set settles the question.
+    _POSSIBLE_MARKER_PREFIX = re.compile(r"^\[[\sEe0-9,]*$")
+
+    def __init__(self) -> None:
+        self._known: set[str] = set()
+        self._pending = ""
+
+    def learn(self, evidence_ids: Iterable[str]) -> None:
+        """Record the ids this turn retrieved. Safe to call more than once."""
+        self._known |= {str(evidence_id).strip().upper() for evidence_id in evidence_ids or ()}
+
+    def feed(self, text: str) -> str:
+        """Return the part of ``text`` that is safe to publish now."""
+        self._pending += str(text or "")
+        settled, self._pending = self._split(self._pending)
+        return _rewrite_markers(settled, self._known) if settled else ""
+
+    def flush(self) -> str:
+        """Release whatever is still held, at end of stream."""
+        remainder, self._pending = self._pending, ""
+        return _rewrite_markers(remainder, self._known) if remainder else ""
+
+    def _split(self, text: str) -> tuple[str, str]:
+        """Split into (safe to publish now, must wait).
+
+        Three things have to wait, all for the same reason — the rule cannot
+        be applied to them yet without possibly getting the answer wrong:
+
+        * a trailing run of spaces, which a marker arriving next would absorb;
+        * an open ``[`` that could still close into a marker;
+        * a *complete* marker at the very end, because whether its trailing
+          gap closes depends on the character that follows it.
+        """
+        index = text.rfind("[")
+        if index == -1:
+            return _hold_trailing_spaces(text)
+        tail = text[index:]
+        if self._POSSIBLE_MARKER_PREFIX.match(tail) or _EVIDENCE_MARKER.fullmatch(tail):
+            # The spaces before the marker go with it. Emitting them early is
+            # what strands a gap the rule would otherwise have closed.
+            settled, spaces = _hold_trailing_spaces(text[:index])
+            return settled, spaces + tail
+        return _hold_trailing_spaces(text)
+
+
+def _hold_trailing_spaces(text: str) -> tuple[str, str]:
+    stripped = text.rstrip(" \t")
+    return stripped, text[len(stripped) :]
+
+
 def neutralize_unknown_markers(text: str, known_evidence_ids: Iterable[str]) -> str:
     """Drop citation markers that name evidence this turn never retrieved.
 
@@ -431,19 +502,35 @@ def neutralize_unknown_markers(text: str, known_evidence_ids: Iterable[str]) -> 
 
 
 def _neutralize_unknown_markers(text: str, known: Any) -> str:
-    known_ids = {str(evidence_id).upper() for evidence_id in (known or ())}
+    return _rewrite_markers(text, known).strip()
+
+
+def _rewrite_markers(text: str, known: Any) -> str:
+    """Keep the resolvable ids in every marker; drop the marker if none remain.
+
+    Whitespace handling stays local: only the gap a removed marker leaves is
+    closed, so markdown the model wrote elsewhere is untouched. Shared verbatim
+    by the renderer and the stream filter, which is what keeps the answer the
+    reader watched arrive identical to the one that gets stored.
+    """
+    known_ids = {str(evidence_id).strip().upper() for evidence_id in (known or ())}
 
     def _rewrite(match: re.Match[str]) -> str:
+        before, ids_text, after = match.group(1), match.group(2), match.group(3)
         ids = [
             evidence_id.strip().upper()
-            for evidence_id in _SERVER_EVIDENCE_ID.findall(match.group(1).upper())
+            for evidence_id in _SERVER_EVIDENCE_ID.findall(ids_text.upper())
         ]
         kept = [evidence_id for evidence_id in ids if evidence_id in known_ids]
-        if not kept:
-            return ""
-        return f"[{', '.join(kept)}]" if len(kept) > 1 else f"[{kept[0]}]"
+        if kept:
+            marker = f"[{', '.join(kept)}]" if len(kept) > 1 else f"[{kept[0]}]"
+            return f"{before}{marker}{after}"
+        # The marker goes; the gap it leaves closes to at most one space, the
+        # same way a model-written [Source: ...] span is excised.
+        return " " if (before or after) else ""
 
-    return _SPACE_BEFORE_PUNCTUATION.sub(r"\1", _EVIDENCE_MARKER.sub(_rewrite, text)).strip()
+    rewritten = _EVIDENCE_MARKER_WITH_GAP.sub(_rewrite, text)
+    return _SPACE_BEFORE_PUNCTUATION.sub(r"\1", rewritten)
 
 
 def evidence_pack_from_payloads(payloads: Sequence[Mapping[str, Any]]) -> EvidencePack:

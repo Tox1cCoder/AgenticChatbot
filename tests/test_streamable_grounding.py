@@ -273,3 +273,193 @@ def test_the_answer_model_still_carries_its_abstention_fields():
     """
     assert "abstained" in GroundedAnswer.model_fields
     assert GroundedAnswer().abstained is False
+
+
+# ----------------------------------------------------------------------
+# the same rule, applied token by token
+# ----------------------------------------------------------------------
+#
+# The stream filter and the renderer must agree, or the reader watches one
+# answer arrive and a different one gets stored. Both call the same rule.
+
+
+def _filter(*known: str):
+    from app.services.rag_grounding import CitationStreamFilter
+
+    stream_filter = CitationStreamFilter()
+    stream_filter.learn(known)
+    return stream_filter
+
+
+def _stream(stream_filter, *chunks: str) -> str:
+    return "".join(stream_filter.feed(chunk) for chunk in chunks) + stream_filter.flush()
+
+
+def test_a_resolvable_marker_streams_through_intact():
+    assert _stream(_filter("E1"), "Revenue rose ", "[E1]", ".") == "Revenue rose [E1]."
+
+
+def test_an_unresolvable_marker_never_reaches_the_reader():
+    assert _stream(_filter("E1"), "Revenue rose ", "[E9]", ".") == "Revenue rose."
+
+
+def test_a_marker_split_across_chunks_is_still_judged_whole():
+    """Token boundaries are arbitrary; a marker must not slip through halved."""
+    assert _stream(_filter("E1"), "Revenue rose [", "E", "9", "]", " sharply.") == (
+        "Revenue rose sharply."
+    )
+
+
+def test_a_resolvable_marker_split_across_chunks_survives():
+    assert _stream(_filter("E1"), "Revenue rose [", "E", "1", "]", ".") == "Revenue rose [E1]."
+
+
+def test_a_grouped_marker_keeps_only_resolvable_ids_mid_stream():
+    assert _stream(_filter("E1"), "Both [E1, E9] apply.") == "Both [E1] apply."
+
+
+def test_ordinary_brackets_are_not_held_back():
+    """Only evidence markers are candidates; prose in brackets must flow."""
+    assert _stream(_filter("E1"), "See [note] and [1] here.") == "See [note] and [1] here."
+
+
+def test_an_unclosed_bracket_is_flushed_rather_than_swallowed():
+    assert _stream(_filter("E1"), "Revenue rose [E1") == "Revenue rose [E1"
+
+
+def test_nothing_is_emitted_twice():
+    stream_filter = _filter("E1")
+    first = stream_filter.feed("Revenue rose [E1")
+    second = stream_filter.feed("] sharply.")
+    assert first + second + stream_filter.flush() == "Revenue rose [E1] sharply."
+
+
+def test_with_no_evidence_learned_every_marker_is_dropped():
+    assert _stream(_filter(), "Revenue rose [E1].") == "Revenue rose."
+
+
+def test_the_filter_and_the_renderer_agree():
+    """One rule, two call sites — drift between them is the bug this prevents."""
+    evidence = _evidence("E1")
+    text = "Revenue rose [E1] and fell [E9]."
+
+    streamed = _stream(_filter("E1"), *text)
+    rendered = render_grounded_answer(
+        GroundedAnswer(
+            claims=[GroundedClaim(text="Revenue rose.", evidence_ids=["E1", "E9"])],
+            raw_text=text,
+        ),
+        evidence,
+        text=text,
+    )
+
+    assert streamed == rendered.split("\n\nSources")[0]
+
+
+# ----------------------------------------------------------------------
+# wired into the real projector
+# ----------------------------------------------------------------------
+#
+# The filter working in isolation says nothing about whether the stream uses
+# it. These drive the projector the graph actually runs.
+
+
+def _projector_and_context():
+    from app.services.event_streaming.graph_public_projection import (
+        GraphPublicStreamProjector,
+        StreamProjectionContext,
+    )
+
+    projector = GraphPublicStreamProjector(
+        tool_end_events_from_node_state=lambda **_kwargs: iter(()),
+        suppress_internal_stream_chunks=False,
+    )
+    return projector, StreamProjectionContext()
+
+
+def _retrieval_update(*evidence_ids: str):
+    from app.services.event_streaming.events import make_event
+
+    return make_event(
+        "state_snapshot",
+        sequence=1,
+        node="rag_tools",
+        data={
+            "kind": "updates_tuple",
+            "node_state": {
+                "context": {
+                    "tool_artifacts": [
+                        {
+                            "tool_call_id": "call-1",
+                            "rag_evidence": {
+                                "records": [
+                                    {"evidence_id": evidence_id} for evidence_id in evidence_ids
+                                ]
+                            },
+                        }
+                    ]
+                }
+            },
+        },
+    )
+
+
+def _answer_chunks(projector, ctx, *chunks: str):
+    from app.services.event_streaming.events import make_event
+    from app.services.event_streaming.graph_public_projection import flush_answer_text
+
+    emitted = []
+    running = ""
+    for index, chunk in enumerate(chunks):
+        running += chunk
+        for event in projector.map_event(
+            make_event("message_delta", sequence=index + 2, data={"text": running}), ctx
+        ):
+            if event.type == "message_delta":
+                emitted.append(event.data["text"])
+    emitted.extend(event.data["text"] for event in flush_answer_text(ctx))
+    return "".join(emitted)
+
+
+def test_the_projector_learns_this_turns_evidence_from_its_retrieval():
+    projector, ctx = _projector_and_context()
+    list(projector.map_event(_retrieval_update("E1", "E2"), ctx))
+
+    assert ctx.citation_filter._known == {"E1", "E2"}
+
+
+def test_a_streamed_answer_keeps_citations_the_turn_retrieved():
+    projector, ctx = _projector_and_context()
+    list(projector.map_event(_retrieval_update("E1"), ctx))
+
+    published = _answer_chunks(projector, ctx, "Revenue rose ", "[E1]", ".")
+
+    assert published == "Revenue rose [E1]."
+
+
+def test_a_streamed_answer_drops_a_citation_the_turn_never_retrieved():
+    """The hole this closes: an invented citation reaching the reader live."""
+    projector, ctx = _projector_and_context()
+    list(projector.map_event(_retrieval_update("E1"), ctx))
+
+    published = _answer_chunks(projector, ctx, "Revenue rose ", "[E9]", ".")
+
+    assert published == "Revenue rose."
+
+
+def test_a_turn_with_no_retrieval_publishes_no_citations():
+    projector, ctx = _projector_and_context()
+
+    published = _answer_chunks(projector, ctx, "Revenue rose [E1].")
+
+    assert published == "Revenue rose."
+
+
+def test_held_text_is_released_rather_than_lost():
+    """Judging a marker must never cost the reader the end of the answer."""
+    projector, ctx = _projector_and_context()
+    list(projector.map_event(_retrieval_update("E1"), ctx))
+
+    published = _answer_chunks(projector, ctx, "Revenue rose [E1")
+
+    assert published == "Revenue rose [E1"

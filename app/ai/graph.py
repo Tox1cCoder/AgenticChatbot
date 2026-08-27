@@ -26,6 +26,7 @@ from ..services.event_streaming.events import make_event
 from ..services.event_streaming.graph_public_projection import (
     GraphPublicStreamProjector,
     StreamProjectionContext,
+    flush_answer_text,
 )
 from ..services.event_streaming.langchain_v3 import iter_v3_events_from_graph
 from ..services.event_streaming.subagents import (
@@ -2747,6 +2748,13 @@ class MultiAgentWorkflow(
             round_num += 1
             ctx.current_tool_calls = {}
 
+        # The citation filter may still be holding a few characters — a
+        # marker it had not yet seen the end of. Releasing it here is what
+        # keeps a truncated answer from being the cost of judging citations
+        # mid-stream.
+        for public_event in flush_answer_text(ctx):
+            yield public_event
+
         accumulated_content = ctx.accumulated_content
         accumulated_thinking = ctx.accumulated_thinking
         _internal_content_only = ctx.internal_content_only
@@ -2985,6 +2993,13 @@ class MultiAgentWorkflow(
             round_num += 1
             # Reset per-round tool call tracking (accumulators persist)
             ctx.current_tool_calls = {}
+
+        # The citation filter may still be holding a few characters — a
+        # marker it had not yet seen the end of. Releasing it here is what
+        # keeps a truncated answer from being the cost of judging citations
+        # mid-stream.
+        for public_event in flush_answer_text(ctx):
+            yield public_event
 
         accumulated_content = ctx.accumulated_content
         accumulated_thinking = ctx.accumulated_thinking

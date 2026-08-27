@@ -20,6 +20,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, ToolMessage
 
 from ...ai.utils import coerce_response_text, make_json_safe, normalize_tool_call
+from ..rag_grounding import CitationStreamFilter
 from .events import V3StreamEvent, make_event
 
 # Bound to MultiAgentWorkflow._tool_end_events_from_node_state — stays on the
@@ -54,6 +55,52 @@ class StreamProjectionContext:
     current_tool_calls: dict[Any, dict[str, Any]] = field(default_factory=dict)
     emitted_tool_call_ids: set[str] = field(default_factory=set)
     emitted_tool_result_ids: set[str] = field(default_factory=set)
+    # Applies the server's citation rule to answer text as it arrives, using
+    # the same helper the renderer uses on the finished answer. Per stream:
+    # one turn's retrieved ids authorize that turn's citations and no other's.
+    citation_filter: CitationStreamFilter = field(default_factory=CitationStreamFilter)
+
+
+def _publish_answer_text(delta: str, ctx: StreamProjectionContext):
+    """Emit answer text once the citation rule can be applied to it.
+
+    A marker split across chunks would otherwise reach the reader half-judged,
+    so the filter may hold a few characters back. Whatever it holds is released
+    by ``flush_answer_text`` when the stream ends.
+    """
+    publishable = ctx.citation_filter.feed(delta)
+    if publishable:
+        yield make_event("message_delta", sequence=0, data={"text": publishable})
+
+
+def flush_answer_text(ctx: StreamProjectionContext):
+    """Release any text the citation filter is still holding."""
+    remainder = ctx.citation_filter.flush()
+    if remainder:
+        yield make_event("message_delta", sequence=0, data={"text": remainder})
+
+
+def _learn_turn_evidence(node_state: dict[str, Any], ctx: StreamProjectionContext) -> None:
+    """Record the evidence ids this turn retrieved, as its tools report them.
+
+    Retrieval completes before the answer is generated, which is the whole
+    reason a citation can be judged mid-stream: by the time the first answer
+    token arrives, the set of ids that could legitimately be cited is closed.
+    """
+    context = node_state.get("context")
+    if not isinstance(context, dict):
+        return
+    for artifact in context.get("tool_artifacts") or ():
+        if not isinstance(artifact, dict):
+            continue
+        evidence = artifact.get("rag_evidence")
+        if not isinstance(evidence, dict):
+            continue
+        ctx.citation_filter.learn(
+            str(record.get("evidence_id"))
+            for record in evidence.get("records") or ()
+            if isinstance(record, dict) and record.get("evidence_id")
+        )
 
 
 def _is_internal_stream_chunk(metadata: Any) -> bool:
@@ -164,7 +211,7 @@ class GraphPublicStreamProjector:
                 ctx.accumulated_content, data.get("text", "")
             )
             if delta and not ctx.suppress_tokens:
-                yield make_event("message_delta", sequence=0, data={"text": delta})
+                yield from _publish_answer_text(delta, ctx)
             return
 
         if etype == "reasoning_delta":
@@ -339,7 +386,7 @@ class GraphPublicStreamProjector:
                         ctx.accumulated_content, block.get("text", "")
                     )
                     if delta and not ctx.suppress_tokens:
-                        yield make_event("message_delta", sequence=0, data={"text": delta})
+                        yield from _publish_answer_text(delta, ctx)
                 elif block_type == "thinking":
                     thinking_content = block.get("thinking", "") or block.get("text", "")
                     if thinking_content:
@@ -406,13 +453,13 @@ class GraphPublicStreamProjector:
                             ctx.accumulated_content, part.get("text", "")
                         )
                         if delta and not ctx.suppress_tokens:
-                            yield make_event("message_delta", sequence=0, data={"text": delta})
+                            yield from _publish_answer_text(delta, ctx)
                 elif isinstance(part, str) and part:
                     ctx.accumulated_content, delta = _consume_stream_text_chunk(
                         ctx.accumulated_content, part
                     )
                     if delta and not ctx.suppress_tokens:
-                        yield make_event("message_delta", sequence=0, data={"text": delta})
+                        yield from _publish_answer_text(delta, ctx)
 
         elif (
             hasattr(message_chunk, "content")
@@ -424,7 +471,7 @@ class GraphPublicStreamProjector:
                 ctx.accumulated_content, content
             )
             if delta and not ctx.suppress_tokens:
-                yield make_event("message_delta", sequence=0, data={"text": delta})
+                yield from _publish_answer_text(delta, ctx)
 
         if hasattr(message_chunk, "chunk_position") and message_chunk.chunk_position == "last":
             for tool_call in ctx.current_tool_calls.values():
@@ -451,6 +498,7 @@ class GraphPublicStreamProjector:
             if ctx.last_state_values is None:
                 ctx.last_state_values = {}
             ctx.last_state_values.update(node_state)
+            _learn_turn_evidence(node_state, ctx)
 
             new_agent = node_state.get("active_agent_id")
             if isinstance(new_agent, str) and new_agent != ctx.last_emitted_agent:
