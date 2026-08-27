@@ -1623,16 +1623,19 @@ git diff --check
 
 Confirm the diff contains no credentials, captured prompts, generated evaluation secrets, or `.artifacts` output. Commit only actual code/test/document fixes; do not commit the live evaluation output if it contains request text.
 
-## Implementation Status — 2026-08-26
+## Implementation Status — 2026-08-27
 
-Tasks 1-11 are implemented and committed on `Thai-Postgre-FastAPI`. Task 12 was
-skipped as redundant (see its section). Task 13 is partially done: the
-conversation turn coordinator, per-turn checkpoint retention, and the rollout
-runbook have landed; the end-to-end scenario suite has not. Task 14 is not
-started.
+Tasks 1-11 are committed on `Thai-Postgre-FastAPI`. Task 12 was skipped as
+redundant (see its section). Task 13 is partially done: the conversation turn
+coordinator, per-turn checkpoint retention, and the rollout runbook landed; the
+end-to-end scenario suite has not. Task 14 has not been run.
 
-**Landed and verified** (full non-live suite: 4534 passed, 3 pre-existing
-failures unrelated to this work; `ruff check app tests` clean):
+Full non-live suite: **4697 passed, 0 failed**, 77 skipped. `ruff check app
+tests` is clean. (The three long-standing failures are fixed: two `take100`
+tests asserted a cookie-cache format the client had already replaced, and the
+routing context's list-shrink tripped the duplicate-token-estimator guard.)
+
+**Landed and verified**
 
 - Typed workflow contracts, `WorkflowState`, set-once/append-only reducers, and
   checkpoint round-trip allowlisting.
@@ -1640,42 +1643,54 @@ failures unrelated to this work; `ruff check app tests` clean):
 - `RoutingService`: schema-constrained output, strict runtime resolution with no
   provider fallback, four typed failure codes, at most two attempts, no
   `chat_agent` substitution anywhere.
-- The routing-v2 parent graph: one `route` node per new turn, dynamic
-  `Command` transitions, per-turn checkpoint threads, `finalize -> END` as the
-  only terminal edge, and no streaming pre-routing.
+- The routing-v2 parent graph: one `route` node per new turn, dynamic `Command`
+  transitions, per-turn checkpoint threads, `finalize -> END` as the only
+  terminal edge, and no streaming pre-routing.
 - Standard specialists (chat, search, canvas, image, custom) running inside
-  per-invocation `create_agent` subgraphs with focused middleware.
+  per-invocation `create_agent` subgraphs, executing their tools through the
+  product pipeline: tool execution context, artifacts, images, offloading, rich
+  items, deferred-tool refresh, budget preflight, and an approval gate on the
+  full policy that interrupts and resumes through the parent graph.
 - Handoffs as parent commands with a single transition resolver.
 - The shared RAG execution graph, with grounding made mandatory and the
   shadow-mode rollout flags deleted.
 - The Planning orchestrator with `Send` fan-out and typed worker results.
 - The provenance policy registry and universal public finalization.
 - Typed `WorkflowError` at the service boundary with allowlisted details.
+- `ConversationTurnCoordinator` (per-conversation advisory lock, bounded
+  acquisition, released in a `finally`, in-process backend rejected in
+  production); per-turn checkpoint retention that enumerates exact owned thread
+  IDs rather than deleting by prefix; and `docs/operations/routing-v2-rollout.md`.
+- The auto-continuation outer loop is gone, along with its settings and state
+  rebuilders. It was not merely legacy: a continuation round re-entered `route`,
+  and since `routing_decision` became set-once, round two raised.
 
-**Also landed since:** `ConversationTurnCoordinator` (per-conversation advisory
-lock, bounded acquisition, released in a `finally`, in-process backend rejected
-in production); per-turn checkpoint retention that enumerates exact owned thread
-IDs rather than deleting by prefix — which also fixed a real leak where deleting
-a conversation left every turn's checkpoint behind; and
-`docs/operations/routing-v2-rollout.md`.
-
-**Known gaps, tracked by `tests/test_routing_legacy_removal.py`:**
+**Known gaps, tracked by `tests/test_routing_legacy_removal.py`**
 
 1. The `rag_agent` and `planning_agent` graph nodes still run the pre-v2 loops.
-   `RagExecutionGraphFactory` and `PlanningOrchestrator` are built and tested
-   but are not yet what production executes. Grounding enforcement *did* ship
-   on the live RAG path.
-2. ~~`_recover_terminal_response` can publish unvalidated text.~~ **Fixed.**
-   It no longer scans stream chunks or checkpoint messages; it returns the
-   finalizer's response or nothing, and a turn with no finalized response
-   yields a typed error.
-3. `_tool_node` / `_approval_node` are unreachable from the graph but retained:
-   they still hold canvas-edit denial and HITL edit-rewrite behavior that the
-   v2 middleware has not absorbed.
-4. Routing accuracy is unmeasured — Task 12's evaluation program was skipped,
+   `RagExecutionGraphFactory` and `PlanningOrchestrator` are importable and
+   unit-tested but nothing in `app` constructs either one, and neither is a
+   drop-in replacement yet:
+   - `RagExecutionGraphFactory` compiles a linear
+     `prepare -> collect_evidence -> model -> validate -> package` graph that
+     delegates retrieval and answering to an injected `runtime` object that has
+     no production implementation. It has no `ToolNode`, no model/tool loop, no
+     regeneration, and it packages empty `evidence`/`artifacts`/`images`.
+   - `PlanningOrchestrator` is a set of helpers, not a compiled graph. Nothing
+     assembles `dispatch_workers` into a `StateGraph` with a `worker` node, so
+     the `Send` fan-out it returns is never dispatched.
+   Grounding enforcement *did* ship on the live RAG path, and Planning workers
+   are grounded by the same gate.
+2. Planning workers still run through `_run_agent_in_isolated_context`, a
+   530-line inline implementation with two near-duplicate tool loops. A worker
+   cannot ask for approval — `asyncio.gather` would cancel its siblings on a
+   `GraphInterrupt` — so a gated call is refused with model-visible feedback
+   instead. The `Send` migration is the prerequisite that makes `interrupt()`
+   usable there.
+3. Routing accuracy is unmeasured — Task 12's evaluation program was skipped,
    and no component here has been exercised against a live model.
-
----
+4. The environment template still lists six `AUTO_CONTINUE` keys for settings
+   that no longer exist. Settings ignores unknown variables, so nothing breaks.
 
 ## Final Acceptance Checklist
 
