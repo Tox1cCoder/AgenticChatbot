@@ -1,8 +1,8 @@
 # Production Routing and Agent Execution Refactor Design
 
-**Status:** Approved design, reconciled with the codebase-reviewed implementation plan
+**Status:** Approved design, amended after production interrupt/replay verification
 
-**Date:** 2026-08-26
+**Date:** 2026-08-26; root-cause amendment approved 2026-08-28
 
 ## Context
 
@@ -48,6 +48,8 @@ paths.
    execution, tracing, and production evaluation coverage.
 9. Isolate checkpoint state per user turn and define explicit concurrency,
    retention, and privacy-deletion behavior.
+10. Make Planning-worker approval resume-safe without replaying completed
+    workers, and make mutation retry guarantees explicit and enforceable.
 
 ## Non-goals
 
@@ -434,44 +436,111 @@ Planning is selected semantically by the router; an existing plan does not
 force it before routing. Once selected, Planning acts as the orchestrator for
 that turn.
 
-Planning creates typed worker tasks. LangGraph `Send` fans independent tasks out
-to per-invocation specialist subgraphs. Reducers collect typed results:
+The Planning fan-out is part of the outer production `StateGraph`. It is not a
+compiled child graph invoked from `planning_agent`, `planning_tools`, a tool
+function, or an orchestration helper. This placement is a correctness
+requirement: LangGraph resumes an interrupted subgraph call by re-entering the
+parent node that invoked it. If that parent node constructs or invokes the
+fan-out, already-completed sibling workers can execute again before their
+pending writes are reused. Registering `planning_dispatch` and
+`planning_worker` as real nodes in the same graph that owns the turn
+checkpointer lets LangGraph preserve completed sibling writes and resume only
+unfinished worker tasks.
+
+Planning exposes `dispatch_subagents` to the model as a control schema only. It
+is never executable through `execute_tool_calls`. The graph validates a whole
+dispatch before scheduling any worker. A dispatch containing duplicate task
+IDs, recursive Planning, unavailable agents, too many tasks, oversized fields,
+or a mix of dispatch and handoff control calls receives paired deterministic
+`ToolMessage` feedback and starts no partial fan-out.
+
+Model-proposed dispatch data is converted to server-owned, checkpoint-safe
+worker tasks. The server supplies dispatch identity, original position,
+authenticated scope, effective model request, and the intersection of the
+specialist's tools, device capabilities, and authorization policy. Model input
+cannot widen a worker's tool scope.
 
 ```python
-class WorkerResult(BaseModel):
+class WorkerTask(BaseModel):
+    dispatch_id: str
     task_id: str
+    position: int
+    objective: str
+    agent_id: str
+    parent_context: dict[str, JsonValue]
+    allowed_tool_ids: tuple[str, ...]
+    model_request: dict[str, JsonValue] | None = None
+    related_todo_ids: tuple[str, ...] = ()
+
+
+class WorkerResult(BaseModel):
+    dispatch_id: str
+    task_id: str
+    position: int
     agent_id: str
     status: Literal["completed", "failed"]
     content: str
     artifacts: list[dict]
     evidence: list[dict]
+    images: list[dict]
     error_code: str | None = None
 ```
 
-Workers receive an explicit objective, bounded context, allowed tools, model
-request, user/device/conversation scope, and output contract. Workers cannot
-publish public assistant messages or perform top-level handoffs; Planning owns
-delegation and synthesis. Worker intermediate messages remain inside their
-subgraphs.
+The reducer treats `(dispatch_id, task_id)` as the unique worker identity and
+rejects duplicate writes. Collection orders results by `position`, then creates
+one deterministic `ToolMessage` paired with the original
+`dispatch_subagents` tool-call ID. Planning sees worker content as delimited
+untrusted data and may then update todos or synthesize the public answer.
 
-A worker that requires human approval interrupts the Planning graph. It does
-not fabricate an `awaiting_approval` result. Resume continues the exact
-checkpointed task, reuses completed branch writes, and executes an approved side
-effect at most once. Timeouts and execution limits become failed results with
-stable `worker_timeout` or `agent_execution_limit` codes. Recursive Planning is
-rejected as `recursive_planning`.
+Workers receive an explicit objective as a bounded `HumanMessage`, bounded
+parent context, allowed tools, model request, user/device/conversation scope,
+HITL policy, custom-agent inventory, attachment descriptors, and output
+contract. Objectives and model-proposed context never enter system
+instructions. Workers cannot publish public assistant messages or perform
+top-level handoffs; Planning owns delegation and synthesis. Worker intermediate
+messages remain inside their per-invocation specialist execution.
 
-The topology is `planning_model -> dispatch_workers -> worker ->
-collect_results -> planning_model_or_synthesize -> package_result`. It preserves
-plan create/modify/review actions, revision/lifecycle metadata, rubrics, todo
-changes, existing-plan context, custom-agent/model overrides, and task-correlated
-subagent events. Defaults bound a turn to eight worker tasks, four concurrent
-workers, 4,000 objective characters per task, and 12,000 parent-context
-characters. Worker objectives/results are delimited as untrusted data, and
-results are ordered by original task position before synthesis.
+A worker that requires human approval interrupts the outer workflow graph. It
+does not fabricate an `awaiting_approval` result and is not given model-visible
+refusal feedback. `GraphBubbleUp` and `GraphInterrupt` are always re-raised
+before ordinary worker exception normalization. Resume continues the exact
+checkpointed task and reuses completed sibling writes. Timeouts and execution
+limits become failed results with stable `worker_timeout` or
+`agent_execution_limit` codes. Agent disappearance becomes
+`agent_unavailable`; recursive Planning is rejected as `recursive_planning`.
+
+The parent-level topology is:
+
+```text
+planning_model
+  | final answer --------------------------> planning_package
+  | write_todos ---------------------------> planning_actions -> planning_model
+  | hand_off ------------------------------> resolve_transition
+  | dispatch_subagents
+  v
+planning_dispatch -- Send --> planning_worker -- join --> planning_collect
+                                                        |
+                                                        v
+                                                 planning_model
+```
+
+`planning_package` routes to universal output validation and never to `END`.
+`planning_actions` owns deterministic todo changes and rubric state; Planning
+does not execute arbitrary product tools directly. A handoff is exclusive with
+a dispatch in one model message because it changes parent control flow.
+
+The topology preserves plan create/modify/review actions, revision/lifecycle
+metadata, rubrics, todo changes, existing-plan context, custom-agent/model
+overrides, and task-correlated subagent events. Defaults bound a turn to eight
+worker tasks total, four concurrent workers, two dispatch waves, 4,000 objective
+characters per task, and 12,000 parent-context characters. Limits apply across
+the turn rather than independently to each dispatch. Oversized dispatches fail
+validation visibly; they are not silently truncated. The second wave is the
+only dependency/revision wave, preventing unbounded recursive delegation.
 
 The corresponding validated settings are `planning_worker_max_tasks=8`,
 `planning_worker_max_concurrency=4`,
+`planning_worker_max_dispatch_waves=2`,
 `planning_worker_objective_max_chars=4000`, and
 `planning_parent_context_max_chars=12000`.
 
@@ -510,13 +579,18 @@ collect evidence and artifacts
                        +----------> explicit abstention
 ```
 
-The same graph factory and execution contract are used for top-level RAG and
-planning workers; request-scoped graph state is never shared across users.
-There is no inline special case. Evidence IDs, token budgets, evidence packs,
-tool artifacts, image provenance, regeneration, and abstention follow one code
-path. A per-run server-owned allocator creates evidence IDs, and typed reducers
-merge evidence. Duplicate or ambiguous IDs fail validation rather than selecting
-the first match.
+The RAG topology is compiled once when the production workflow is constructed
+and invoked with request-scoped state for both top-level RAG and Planning
+workers. Compiled graph structure is reusable; authenticated state, tools,
+credentials, evidence allocation, and messages are not shared between
+invocations. The RAG graph inherits the outer turn checkpointer and its approval
+middleware interrupts before any gated tool in the model batch executes. There
+is no per-run graph construction and no inline special case.
+
+Evidence IDs, token budgets, evidence packs, tool artifacts, image provenance,
+regeneration, and abstention follow one code path. A per-run server-owned
+allocator creates evidence IDs, and typed reducers merge evidence. Duplicate or
+ambiguous IDs fail validation rather than selecting the first match.
 
 Grounding enforcement is mandatory for every RAG result, including a retrieval
 with no evidence. A zero-evidence result may return a bounded clarification or
@@ -624,10 +698,37 @@ changes provider, model, or agent. After the second failure, the graph enters
 - Recoverable tool invocation errors become bounded `ToolMessage` feedback.
 - Authorization failures never reach the tool implementation.
 - Approval-required calls interrupt and resume through LangGraph persistence.
+- Worker and specialist boundaries re-raise LangGraph control-flow exceptions;
+  they never normalize an interrupt into `tool_execution_failed`.
+- Invalid worker dispatches fail atomically with paired model-visible feedback;
+  no subset of their tasks starts.
+- Worker-local failures use stable result codes: `worker_timeout`,
+  `agent_execution_limit`, `agent_unavailable`, `recursive_planning`, or
+  `tool_execution_failed`.
 - `agent_execution_limit` ends the run when model or tool limits are exhausted.
 - Repeated identical tool failures are terminated by middleware and reported as
   `tool_execution_failed`.
 - Unexpected infrastructure exceptions bubble to the API boundary and tracing.
+
+Checkpoint topology prevents an ordinary approval resume from replaying a
+completed worker. It does not by itself make an external mutation exactly once
+across a process crash after the mutation succeeds but before its checkpoint
+write commits. Every mutation therefore receives a server-generated execution
+key derived from `(checkpoint_thread_id, dispatch_id, task_id, tool_call_id)`.
+Application-owned mutations record that key in a durable execution-receipt
+table with a unique constraint in the same transaction as the mutation.
+External adapters pass the key to providers that support idempotency and record
+the provider receipt. A provider without idempotency support is described as
+retry-safe only; the runtime never makes an untrue exactly-once guarantee.
+
+The receipt stores a SHA-256 execution key, owning user/conversation/turn IDs,
+tool identity, status (`reserved | completed | failed | outcome_unknown`), a
+bounded serialized result or server-owned artifact reference, provider receipt
+ID when available, and timestamps. The model cannot supply or read the key.
+Repeated completed executions return the recorded result. A reserved execution
+is retried only through an adapter with provider idempotency; otherwise a crash
+after dispatch becomes `outcome_unknown` and requires explicit reconciliation
+instead of automatic mutation replay.
 
 ### Validation
 
@@ -647,9 +748,9 @@ finalizer.
 
 ## Streaming and events
 
-The public stream adapter consumes LangGraph update/message/interrupt events and
-projects them into the existing API event vocabulary. It does not invoke graph
-nodes itself.
+The public stream adapter consumes LangGraph update, message, interrupt, task,
+and custom events and projects them into the existing API event vocabulary. It
+does not invoke graph nodes itself.
 
 A normal turn emits, in order:
 
@@ -664,10 +765,14 @@ A normal turn emits, in order:
 6. exactly one `complete` event, or one typed `error` with no finalized answer,
    answer delta, or completion event after terminal/persistence failure.
 
-Planning worker events carry task and worker IDs and never enter the main answer
-token stream. RAG worker and top-level RAG events share the same event schema.
-The projector filters nested graph namespaces so internal specialist/RAG/model
-messages cannot leak into the main answer stream.
+Planning nodes receive an injected LangGraph `StreamWriter` and emit typed
+custom events carrying dispatch, task, worker, tool-call, and lifecycle IDs.
+This works on the supported Python 3.10 floor without relying on async context
+variable propagation. Worker events never enter the main answer token stream.
+RAG worker and top-level RAG events share the same event schema. The projector
+filters nested graph namespaces so internal specialist/RAG/model messages
+cannot leak into the main answer stream. No weak-reference event-sink registry,
+sink token, or queue object enters checkpoint state.
 
 Initial selection is derived from the first `routing_decision` state update.
 Later selections are derived only from newly appended accepted handoff
@@ -676,6 +781,20 @@ does not emit another selection or consume handoff depth. Resume loads the exact
 durable checkpoint thread ID and never routes again.
 
 ## Concurrency and checkpoint lifecycle
+
+Planning schedules worker branches through parent-level `Send` tasks. The
+outer graph invocation applies `planning_worker_max_concurrency` as its
+server-owned concurrency bound. If one worker interrupts, successfully
+completed siblings remain as checkpoint pending writes; resuming the same turn
+does not execute those sibling nodes again. Multiple interrupted workers retain
+separate interrupt IDs. Resume decisions are mapped to exact interrupt IDs and
+unanswered workers remain pending.
+
+Interrupt presentation and recovery use the checkpoint's pending interrupt
+objects as the source of truth. They do not require a worker-private tool call
+to appear in the parent's last `AIMessage`, and they do not classify approval
+by a hard-coded node-name allowlist. Aggregation merges provenance per tool-call
+ID without allowing one parallel worker's metadata to overwrite another's.
 
 Different conversations may execute concurrently. Turns for the same
 conversation acquire a cross-process PostgreSQL advisory lock, or an
@@ -741,6 +860,17 @@ unrestricted prompts.
 
 - routing uses `Command` to reach every specialist type;
 - resume continues the interrupted node without starting a new routing turn;
+- a real parent-level Planning fan-out completes `w1`, interrupts `w2`, and
+  resumes in a newly constructed workflow against the same checkpointer with
+  side effects exactly `w1, w2`, never `w1, w1, w2`;
+- the same replay test runs against both the in-memory checkpointer and the
+  PostgreSQL checkpointer used in production;
+- a compiled Planning child graph, tool-invoked fan-out, or
+  `planning_tools -> dispatch_subagents` execution path is absent from the
+  production topology;
+- multiple worker interrupts preserve separate payloads and provenance;
+  approve, edit, and reject decisions address exact interrupt IDs while
+  unanswered workers stay pending;
 - all response paths traverse `validate_output` and `finalize`;
 - initial decisions remain unchanged across handoffs;
 - transition history is ordered and append-only;
@@ -759,6 +889,9 @@ unrestricted prompts.
   dictionaries;
 - retention preserves active interrupts, expires eligible exact thread IDs,
   rejects malformed IDs, and honors conversation/account deletion.
+- mutation execution receipts reject repeated execution keys, return the prior
+  result on safe retry, and never leak keys or provider receipts into model
+  arguments.
 
 ### Agent and RAG contract tests
 
@@ -771,6 +904,13 @@ unrestricted prompts.
 - a Planning synthesis containing RAG evidence is validated again before
   publication;
 - workers return `WorkerResult` and never public `AIMessage` objects;
+- every worker receives its bounded objective, authenticated HITL policy,
+  custom-agent snapshot, task-local model request, and server-restricted tool
+  scope;
+- `GraphBubbleUp` passes through Planning, specialist, RAG, and tool-execution
+  exception boundaries;
+- dispatch limits are turn-wide, oversized or invalid dispatches start zero
+  workers, and at most one dependency/revision wave follows the initial wave;
 - tool/model limits produce typed terminal errors;
 - final messages always contain IDs, artifacts, routing metadata, transition
   history, and final-agent identity;
@@ -833,6 +973,13 @@ The deployment contains:
 - no Gemini-specific router client;
 - no `chat_agent` routing fallback;
 - no inline planning-worker RAG loop;
+- no executable `dispatch_subagents` tool or nested Planning fan-out graph;
+- no `_run_agent_in_isolated_context` worker loop;
+- no worker approval-refusal branch;
+- no parent `planning_tools` or `rag_tools` stage;
+- no weak-reference subagent event sink or checkpointed sink token;
+- no duplicate Planning task/result contract or legacy dispatch-result JSON
+  plumbing;
 - no direct agent-to-`END` edges;
 - no auto-continuation outer loop;
 - no stale terminal-response recovery;
@@ -862,7 +1009,10 @@ The refactor is complete when:
 6. Handoffs use LangGraph state commands and preserve valid message pairing.
 7. Standard specialists use framework agent loops; RAG uses one bespoke shared
    subgraph.
-8. Planning workers use isolated per-invocation subgraphs and typed results.
+8. Planning dispatch and worker fan-out are real nodes in the outer checkpointed
+   graph; completed sibling writes survive approval resume, workers use isolated
+   per-invocation specialist execution, and results are typed and uniquely keyed
+   by dispatch/task identity.
 9. Top-level RAG, worker RAG, and evidence-bearing public synthesis enforce the
    same grounding policy.
 10. Every public response traverses validation and universal graph finalization;
@@ -872,10 +1022,13 @@ The refactor is complete when:
     documented lifecycle.
 12. Different conversations remain concurrent while same-conversation turns are
     serialized through persistence.
-13. Legacy routing, fallback, continuation, duplicated RAG, and terminal
-    recovery paths are removed.
+13. Legacy routing, fallback, continuation, duplicated RAG, executable
+    `dispatch_subagents`, nested Planning fan-out, worker refusal, sink-token
+    streaming, and terminal recovery paths are removed.
 14. The reviewed dataset hash and the documented unit, integration, concurrency,
     streaming, grounding, non-live, and tuple-matched live-evaluation gates pass.
+15. Mutation retries use stable server-owned execution keys and durable receipts;
+    external exactly-once claims are made only when the provider supports them.
 
 ## Public references
 
@@ -887,5 +1040,7 @@ The refactor is complete when:
 - [LangGraph: Graph API and Command](https://docs.langchain.com/oss/python/langgraph/graph-api#command)
 - [LangChain: Multi-agent handoffs](https://docs.langchain.com/oss/python/langchain/multi-agent/handoffs)
 - [LangGraph: Subgraphs and persistence](https://docs.langchain.com/oss/python/langgraph/use-subgraphs#subgraph-persistence)
+- [LangGraph: Interrupts and node replay](https://docs.langchain.com/oss/python/langgraph/interrupts)
+- [LangGraph: Custom streaming data](https://docs.langchain.com/oss/python/langgraph/streaming#custom-data)
 - [LangChain: Human-in-the-loop middleware](https://docs.langchain.com/oss/python/langchain/human-in-the-loop)
 - [LangChain: ToolNode](https://docs.langchain.com/oss/python/langchain/tools#toolnode)
