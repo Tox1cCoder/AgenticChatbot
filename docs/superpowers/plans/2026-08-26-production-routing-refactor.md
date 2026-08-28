@@ -1682,11 +1682,28 @@ routing context's list-shrink tripped the duplicate-token-estimator guard.)
    Grounding enforcement *did* ship on the live RAG path, and Planning workers
    are grounded by the same gate.
 2. Planning workers still run through `_run_agent_in_isolated_context`, a
-   530-line inline implementation with two near-duplicate tool loops. A worker
-   cannot ask for approval — `asyncio.gather` would cancel its siblings on a
-   `GraphInterrupt` — so a gated call is refused with model-visible feedback
-   instead. The `Send` migration is the prerequisite that makes `interrupt()`
-   usable there.
+   530-line inline implementation with two near-duplicate tool loops, and a
+   gated tool call is refused with model-visible feedback rather than pausing.
+
+   The `Send` migration has landed, and so have both prerequisites for a real
+   `interrupt()`: control-flow exceptions now travel out of `execute_tool_calls`
+   instead of being rendered as failed calls, and resume decisions are addressed
+   to the interrupt that asked for them.
+
+   The worker still cannot interrupt, for a reason found by probing the real
+   nesting rather than reasoning about it. The pause *does* reach the turn — but
+   resuming replays the `planning_tools` node, which re-runs the
+   `dispatch_subagents` tool call, which builds a fresh fan-out graph from the
+   top. A worker that had already completed runs a **second time**; with an
+   ungated `w1` and a gated `w2`, side effects came out `w1, w1, w2`. Compiling
+   the fan-out with `checkpointer=True` does not change it, because the replay
+   starts above the fan-out.
+
+   A worker can therefore only interrupt safely once the fan-out is graph
+   topology in the parent — `planning_model -> dispatch_workers -> worker ->
+   collect_results` as real nodes — which is this task's remaining work. Until
+   then the refusal path stays: it fails closed, keeps completed work, and
+   repeats nothing.
 3. Routing accuracy is unmeasured — Task 12's evaluation program was skipped,
    and no component here has been exercised against a live model.
 
