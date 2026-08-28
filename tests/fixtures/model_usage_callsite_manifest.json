@@ -159,6 +159,12 @@
     "disposition": "startup_validation"
   },
   {
+    "file": "app/ai/planning_subagents.py",
+    "function": "PlanningSubagentDispatcher.dispatch",
+    "call_chain": "self._fan_out_graph.ainvoke",
+    "disposition": "workflow_stream"
+  },
+  {
     "file": "app/ai/suggestion_generator.py",
     "function": "SuggestionGenerator._get_cached_suggestions._generate",
     "call_chain": "self.client.models.generate_content",

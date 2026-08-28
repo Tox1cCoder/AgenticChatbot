@@ -20,16 +20,33 @@ import logging
 import time
 from collections.abc import Callable
 from enum import Enum
-from typing import Any, Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol
 
 from langchain_core.tools import StructuredTool
+from langgraph.errors import GraphBubbleUp
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Send
 from pydantic import BaseModel, Field, field_validator, model_validator
+from typing_extensions import TypedDict
 
 from ..core.config import settings as global_settings
 from .agent_metadata import agent_identity
 from .schemas import AgentResponse
+from .workflow.planning_execution import PlanningLimits
 
 logger = logging.getLogger(__name__)
+
+
+def _collect_results(existing: list | None, update: list | None) -> list:
+    return [*(existing or []), *(update or [])]
+
+
+class _FanOutState(TypedDict):
+    """Private state of one dispatch. Never shared across turns."""
+
+    tasks: list
+    parent_state: dict
+    results: Annotated[list, _collect_results]
 
 
 # ---------------------------------------------------------------------------
@@ -501,16 +518,62 @@ class PlanningSubagentDispatcher:
         self._settings = settings or global_settings
         self._event_sink = event_sink
 
+    def _limits(self) -> PlanningLimits:
+        return PlanningLimits.from_settings(self._settings)
+
     async def dispatch(
         self,
         request: DispatchSubagentsInput,
         *,
         parent_state: dict[str, Any],
     ) -> DispatchSubagentsResult:
-        """Run all worker tasks concurrently and return ordered results."""
-        coros = [self.run_one(task, parent_state=parent_state) for task in request.tasks]
-        results = await asyncio.gather(*coros, return_exceptions=False)
-        return DispatchSubagentsResult.from_results(list(results), rationale=request.rationale)
+        """Fan the tasks out through the graph and return ordered results.
+
+        ``Send`` rather than ``asyncio.gather`` because a gathered coroutine is
+        invisible to the framework: nothing bounds how many run at once, and a
+        worker that pauses for a human takes its siblings down with it. A
+        framework-managed task can be bounded and can pause on its own.
+        """
+        limits = self._limits()
+        tasks = list(request.tasks)[: limits.max_tasks]
+        if len(tasks) < len(request.tasks):
+            logger.info(
+                "Planning dispatch bounded to %d of %d tasks (planning_worker_max_tasks)",
+                len(tasks),
+                len(request.tasks),
+            )
+
+        final = await self._fan_out_graph().ainvoke(
+            {"tasks": tasks, "parent_state": parent_state, "results": []},
+            config={"max_concurrency": limits.max_concurrency},
+        )
+
+        # Results arrive in completion order; synthesis reads the plan in the
+        # order it was written, so order by original task position.
+        by_id = {result.id: result for result in final.get("results") or ()}
+        ordered = [by_id[task.id] for task in tasks if task.id in by_id]
+        return DispatchSubagentsResult.from_results(ordered, rationale=request.rationale)
+
+    def _fan_out_graph(self):
+        """Compile the one-shot worker fan-out for this dispatch."""
+
+        def send_workers(state: _FanOutState) -> list[Send]:
+            return [
+                Send("worker", {"task": task, "parent_state": state["parent_state"]})
+                for task in state["tasks"]
+            ]
+
+        async def worker(payload: dict[str, Any]) -> dict[str, Any]:
+            result = await self.run_one(payload["task"], parent_state=payload["parent_state"])
+            return {"results": [result]}
+
+        graph = StateGraph(_FanOutState)
+        graph.add_node("plan", lambda _state: {})
+        graph.add_node("worker", worker)
+        graph.add_edge(START, "plan")
+        graph.add_conditional_edges("plan", send_workers, ["worker"])
+        graph.add_edge("worker", END)
+        return graph.compile()
 
     async def run_one(
         self,
@@ -603,6 +666,11 @@ class PlanningSubagentDispatcher:
                     error="timeout",
                 )
             )
+        except GraphBubbleUp:
+            # An interrupt or a parent command, not a failure. Reporting it as
+            # one would let Planning synthesize an answer from a worker that is
+            # still waiting for a human.
+            raise
         except Exception as exc:  # pragma: no cover - sanity net
             logger.warning("Subagent worker %s raised: %s", task.id, exc)
             return await _emit_end(
