@@ -94,6 +94,7 @@ from .tool_execution import (
     execute_tool_calls,
 )
 from .utils import (
+    address_decisions_to_interrupts,
     apply_hitl_decisions,
     build_interrupt_resume_payload,
     coerce_response_text,
@@ -127,6 +128,18 @@ _apply_decisions = apply_hitl_decisions
 # and RAG gate inside their tool-loop nodes. Resume validates against this set,
 # so a node missing here is a turn that can pause but never continue.
 _APPROVAL_INTERRUPT_NODES = frozenset({*SPECIALIST_NODE_NAMES, "planning_tools", "rag_tools"})
+
+
+def _pending_interrupts(snapshot: Any) -> list[Any]:
+    """Every interrupt this checkpoint is waiting on, across all pending tasks."""
+    interrupts = list(getattr(snapshot, "interrupts", None) or ())
+    if interrupts:
+        return interrupts
+    return [
+        item
+        for task in getattr(snapshot, "tasks", None) or ()
+        for item in (getattr(task, "interrupts", None) or ())
+    ]
 
 
 def _has_approval_interrupt(next_nodes: Any) -> bool:
@@ -2347,7 +2360,9 @@ class MultiAgentWorkflow(
         if not _has_approval_interrupt(state_snapshot.next):
             raise ValueError(f"Unexpected interrupt state: next nodes are {state_snapshot.next}")
 
-        resume_data = build_interrupt_resume_payload(decisions)
+        resume_data = address_decisions_to_interrupts(
+            build_interrupt_resume_payload(decisions), _pending_interrupts(state_snapshot)
+        )
 
         active_agent_id = state_snapshot.values.get("active_agent_id", "search_agent")
         conversation_id = state_snapshot.values.get("conversation_id")

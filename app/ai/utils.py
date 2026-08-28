@@ -540,6 +540,53 @@ def build_interrupt_resume_payload(decisions: Sequence[Any]) -> list[dict[str, A
     return payload
 
 
+def address_decisions_to_interrupts(decisions: list[dict], interrupts) -> Any:
+    """Address resume decisions to the interrupt each one answers.
+
+    LangGraph takes a bare resume value only while one interrupt is pending.
+    With two — which is what workers pausing in parallel produces — it requires
+    a mapping keyed by interrupt id and raises otherwise. Clients do not know
+    interrupt ids, but every pending interrupt names the tool calls it is
+    asking about, so the mapping is derivable here.
+
+    A decision that matches no pending interrupt, or an interrupt left without
+    one, is an error rather than a guess: sending a decision to the wrong
+    interrupt approves a different tool call, and resuming an interrupt with no
+    answer replays it as a rejection nobody made.
+    """
+    pending = list(interrupts or [])
+    if len(pending) < 2:
+        return decisions
+
+    owner_by_call: dict[str, str] = {}
+    for item in pending:
+        value = getattr(item, "value", None)
+        requests = value.get("action_requests") if isinstance(value, dict) else None
+        for request in requests or ():
+            call_id = request.get("tool_call_id") or request.get("id")
+            if call_id:
+                owner_by_call[str(call_id)] = str(item.id)
+
+    addressed: dict[str, list[dict]] = {str(item.id): [] for item in pending}
+    for decision in decisions:
+        call_id = str(decision.get("tool_call_id") or decision.get("task_id") or "")
+        owner = owner_by_call.get(call_id)
+        if owner is None:
+            raise ValueError(
+                f"decision for {call_id!r} matches no pending interrupt; "
+                "resuming it would answer a different tool call"
+            )
+        addressed[owner].append(decision)
+
+    unanswered = sorted(key for key, value in addressed.items() if not value)
+    if unanswered:
+        raise ValueError(
+            f"no decision for pending interrupt(s) {unanswered}; "
+            "resuming without one replays them as a rejection"
+        )
+    return addressed
+
+
 def build_rejection_tool_message(
     tool_call: Any,
     decision: dict[str, Any] | None = None,
