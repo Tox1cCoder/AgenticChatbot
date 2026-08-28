@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from anyio import ClosedResourceError
+from langgraph.errors import GraphBubbleUp
 
 from ..core.config import settings
 from ..core.rich_image_selection import (
@@ -1638,6 +1639,12 @@ async def invoke_tool_with_policy(
             }
             return outcome.result, None, None, diagnostics
 
+        if isinstance(outcome.exception, GraphBubbleUp):
+            # An interrupt or a parent command. The catch-all below exists so a
+            # broken tool becomes model-visible feedback rather than ending the
+            # turn; a control decision is neither broken nor the model's to see.
+            raise outcome.exception
+
         summary = classify_tool_error(
             outcome.exception,
             tool_name=tool_name,
@@ -2166,6 +2173,11 @@ async def execute_tool_calls(
                     device_id=device_id,
                     tool_scope=tool_scope,
                 )
+        except GraphBubbleUp:
+            # An interrupt or a parent command travelling out of a tool. It is
+            # a control decision, not a failed call, and rendering it as one
+            # would drop the pause and let the agent carry on regardless.
+            raise
         except Exception as exc:
             error_msg = f"Error: {exc}"
             normalized_result = normalize_tool_result_for_rendering(
