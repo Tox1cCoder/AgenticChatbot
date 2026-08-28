@@ -386,3 +386,42 @@ async def test_the_human_decision_decides_whether_the_tool_runs(decision, expect
 
     assert executed == expected_runs
     assert final["execution_phase"] == "completed"
+
+
+async def test_a_handoff_still_leaves_the_subgraph_as_a_parent_command():
+    """Running tools through the product pipeline must not swallow a handoff.
+
+    The framework's tool node recognises a tool that returns a ``Command`` and
+    raises it as a ``ParentCommand`` for the enclosing graph. A pipeline that
+    only knows about text results would stringify it into a ToolMessage
+    instead, and the turn would carry on with the wrong agent.
+    """
+    from langgraph.errors import ParentCommand
+
+    from app.ai.hand_off_tool import create_hand_off_tool
+
+    hand_off = create_hand_off_tool(
+        source_agent_id="chat_agent", allowed_targets=["search_agent"]
+    )
+    model = ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "name": "hand_off",
+                        "args": {"target_agent": "search_agent", "reason": "better suited"},
+                    }
+                ],
+            ),
+            AIMessage(content="unreachable"),
+        ]
+    )
+
+    with pytest.raises(ParentCommand) as raised:
+        await _factory(model, [hand_off]).invoke(_request())
+
+    command = raised.value.args[0]
+    assert command.goto == "resolve_transition"
+    assert command.update["pending_transition"].to_agent_id == "search_agent"

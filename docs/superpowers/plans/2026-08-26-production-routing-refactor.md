@@ -1689,8 +1689,6 @@ routing context's list-shrink tripped the duplicate-token-estimator guard.)
    usable there.
 3. Routing accuracy is unmeasured — Task 12's evaluation program was skipped,
    and no component here has been exercised against a live model.
-4. The environment template still lists six `AUTO_CONTINUE` keys for settings
-   that no longer exist. Settings ignores unknown variables, so nothing breaks.
 
 ## Final Acceptance Checklist
 

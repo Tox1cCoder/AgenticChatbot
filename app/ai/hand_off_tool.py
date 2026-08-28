@@ -121,4 +121,9 @@ def create_hand_off_tool(
         name=HAND_OFF_TOOL_NAME,
         description=_HAND_OFF_DOC.format(targets=targets_block),
         args_schema=HandOffInput,
+        # This tool's result is a control decision, not a value. The framework
+        # tool node knows how to turn it into a parent command; the product
+        # tool pipeline would render it as text and the turn would carry on
+        # with the wrong agent. The marker is what tells them apart.
+        metadata={"tool_origin": "internal", "returns_control_command": True},
     )

@@ -297,6 +297,13 @@ class ToolExecutionMiddleware(AgentMiddleware):
         call = normalize_tool_call(request.tool_call)
         tool_map = await self._scope.tool_map()
 
+        if _returns_control_command(tool_map.get(call.get("name"))):
+            # A control decision, not a value. The framework tool node turns
+            # the returned Command into a parent command; running it through
+            # the product pipeline would render it as text and the turn would
+            # carry on with the wrong agent.
+            return await handler(request)
+
         with self._scope.execution_context():
             outputs, artifacts, images = await execute_tool_calls(
                 tool_calls=[call],
@@ -318,6 +325,12 @@ class ToolExecutionMiddleware(AgentMiddleware):
             name=str(output.get("name") or call.get("name") or "tool"),
             status="error" if _is_error(artifacts) else "success",
         )
+
+
+def _returns_control_command(tool: Any) -> bool:
+    """Whether this tool's result is a control decision rather than a value."""
+    metadata = getattr(tool, "metadata", None)
+    return bool(isinstance(metadata, dict) and metadata.get("returns_control_command"))
 
 
 def _is_error(artifacts: list[dict[str, Any]]) -> bool:
