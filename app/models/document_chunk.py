@@ -19,6 +19,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
@@ -36,9 +37,23 @@ class DocumentChunk(Base):
             name="uq_document_chunk_generation_index",
         ),
         Index("idx_document_chunks_document_id", "document_id"),
+        Index("idx_document_chunks_index_generation_id", "index_generation_id"),
         Index("idx_document_chunks_parse_artifact_id", "parse_artifact_id"),
         Index("idx_document_chunks_content_sha256", "content_sha256"),
         Index("idx_document_chunks_index_status", "index_status"),
+        # Lexical half of hybrid retrieval, from migration d4e5f6a7b8c9. Declared
+        # with the same expression the migration used so autogenerate does not
+        # read it as an index the models never asked for.
+        #
+        # ``ddl_if`` is required, not decorative: the index stays in the metadata
+        # so ``alembic check`` can compare it, but ``to_tsvector`` does not exist
+        # outside PostgreSQL and emitting it would break every ``create_all``
+        # against the SQLite engine the repository tests use.
+        Index(
+            "idx_document_chunks_content_simple_fts",
+            text("to_tsvector('simple', content)"),
+            postgresql_using="gin",
+        ).ddl_if(dialect="postgresql"),
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

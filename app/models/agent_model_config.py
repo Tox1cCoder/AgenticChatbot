@@ -6,7 +6,7 @@ Stores persistent per-agent provider/model selection per user.
 
 import uuid
 
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Index, Text, func
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Index, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -34,7 +34,10 @@ class AgentModelConfig(Base):
     model = Column(Text, nullable=False)
     allow_custom_model = Column(Boolean, default=False, nullable=False)
     temperature = Column(Float, nullable=True)
-    reasoning_effort = Column(Text, nullable=True)
+    # String(32), not Text: migration e8f9a0b1c2d3 shipped VARCHAR(32) and the
+    # values are short provider effort levels. Declaring Text here made the
+    # model permanently disagree with the live column.
+    reasoning_effort = Column(String(32), nullable=True)
 
     user = relationship("User", back_populates="agent_model_configs")
 
