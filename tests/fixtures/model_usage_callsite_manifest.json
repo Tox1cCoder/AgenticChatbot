@@ -315,6 +315,12 @@
     "exercise_symbol": "embed_content"
   },
   {
+    "file": "app/services/tool_execution_receipt_service.py",
+    "function": "ToolExecutionReceiptService._call",
+    "call_chain": "invoke",
+    "disposition": "non_provider_tool_dispatch"
+  },
+  {
     "file": "app/services/web_image_service.py",
     "function": "WebImageService._fetch_once",
     "call_chain": "client.stream",

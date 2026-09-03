@@ -226,9 +226,8 @@ class ToolExecutionReceiptService:
         A provider that ignores the key would silently accept a duplicate, so
         the key is offered only to an adapter that declares it honors one.
         """
-        if scope.provider_idempotency and _accepts_idempotency_key(invoke):
-            return await invoke(idempotency_key=key)
-        return await invoke()
+        offer_key = scope.provider_idempotency and _accepts_idempotency_key(invoke)
+        return await invoke(**({"idempotency_key": key} if offer_key else {}))
 
 
 def _accepts_idempotency_key(invoke: MutationInvoke) -> bool:

@@ -43,9 +43,9 @@ class ToolExecutionReceipt(Base):
     """One mutating tool call, keyed by its execution identity.
 
     ``execution_key`` is a SHA-256 digest of ``(thread_id, dispatch_id,
-    task_id, tool_call_id)`` and is unique. The uniqueness constraint is the
-    mechanism, not a safety net: two concurrent replays race to insert, one
-    wins, and the loser reads the winner's row instead of calling the provider.
+    task_id, tool_call_id)``, and its unique index is the mechanism rather than
+    a safety net: two concurrent replays race to insert, one wins, and the
+    loser reads the winner's row instead of calling the provider.
     """
 
     __tablename__ = "tool_execution_receipts"
@@ -58,7 +58,11 @@ class ToolExecutionReceipt(Base):
     completed_at = Column(DateTime(timezone=True), nullable=True)
 
     # --- execution identity ---------------------------------------------
-    execution_key = Column(String(64), nullable=False, unique=True)
+    # Declared as a unique *index* in ``__table_args__`` rather than
+    # ``unique=True`` here. PostgreSQL implements both the same way, but
+    # autogenerate distinguishes a UNIQUE constraint from a unique index, and a
+    # model/migration mismatch on that shows up forever as schema drift.
+    execution_key = Column(String(64), nullable=False)
     status = Column(
         SQLEnum(
             ReceiptStatus,
@@ -96,6 +100,7 @@ class ToolExecutionReceipt(Base):
     error_code = Column(String(128), nullable=True)
 
     __table_args__ = (
+        Index("uq_tool_execution_receipts_execution_key", "execution_key", unique=True),
         Index("ix_tool_execution_receipts_owner_status", "user_id", "status"),
         Index("ix_tool_execution_receipts_conversation_turn", "conversation_id", "turn_id"),
     )

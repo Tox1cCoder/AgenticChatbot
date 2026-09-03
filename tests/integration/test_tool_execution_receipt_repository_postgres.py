@@ -9,13 +9,17 @@ unit test in ``test_tool_execution_receipt_service.py`` and duplicate real
 effects in production.
 
 Mirrors the ``session_factory``/``create_all`` pattern in
-``test_tool_result_blob_repository_postgres.py``.
+``test_tool_result_blob_repository_postgres.py``. The module-wide
+``selector_event_loop`` marker is required, not cosmetic: async psycopg raises
+``InterfaceError`` at connect time on Windows' default ``ProactorEventLoop``
+(see ``pytest_asyncio_loop_factories`` in ``tests/conftest.py``).
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from collections.abc import Iterator
 from uuid import UUID, uuid4
 
@@ -33,6 +37,8 @@ from app.services.tool_execution_receipt_service import (
     MutationExecutionScope,
     execution_key,
 )
+
+pytestmark = pytest.mark.selector_event_loop
 
 Seeded = tuple[ToolExecutionReceiptRepository, UUID, UUID, UUID, UUID, object]
 
@@ -64,7 +70,10 @@ def engines():
         yield factory, async_factory
     finally:
         engine.dispose()
-        asyncio.get_event_loop_policy().new_event_loop().run_until_complete(async_engine.dispose())
+        if sys.platform == "win32":
+            asyncio.run(async_engine.dispose(), loop_factory=asyncio.SelectorEventLoop)
+        else:
+            asyncio.run(async_engine.dispose())
 
 
 @pytest.fixture()

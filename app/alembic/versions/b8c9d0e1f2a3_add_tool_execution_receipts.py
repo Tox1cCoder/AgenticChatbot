@@ -18,24 +18,26 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ENUM, JSONB, UUID
 
 revision: str = "b8c9d0e1f2a3"
 down_revision: str | None = "a7b8c9d0e1f2"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-_STATUS_ENUM = sa.Enum(
-    "reserved",
-    "completed",
-    "failed",
-    "outcome_unknown",
-    name="tool_execution_receipt_status",
-)
+_STATUS_VALUES = ("reserved", "completed", "failed", "outcome_unknown")
+
+# ``create_type=False`` is load-bearing. ``op.create_table`` auto-creates any
+# enum type a column references, with no ``checkfirst``, so leaving it True
+# makes the CREATE TYPE run twice and the migration abort on DuplicateObject.
+# The type is created once, explicitly, below.
+_STATUS_ENUM = ENUM(*_STATUS_VALUES, name="tool_execution_receipt_status", create_type=False)
 
 
 def upgrade() -> None:
-    _STATUS_ENUM.create(op.get_bind(), checkfirst=True)
+    ENUM(*_STATUS_VALUES, name="tool_execution_receipt_status").create(
+        op.get_bind(), checkfirst=True
+    )
 
     op.create_table(
         "tool_execution_receipts",
@@ -115,4 +117,4 @@ def downgrade() -> None:
     op.drop_index("ix_tool_execution_receipts_user_id", table_name="tool_execution_receipts")
     op.drop_index("uq_tool_execution_receipts_execution_key", table_name="tool_execution_receipts")
     op.drop_table("tool_execution_receipts")
-    _STATUS_ENUM.drop(op.get_bind(), checkfirst=True)
+    ENUM(*_STATUS_VALUES, name="tool_execution_receipt_status").drop(op.get_bind(), checkfirst=True)
