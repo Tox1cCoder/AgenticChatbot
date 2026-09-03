@@ -24,18 +24,13 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from app.ai.graph import create_workflow
+from app.ai.workflow.graph_builder import BASE_SPECIALIST_NODES, PLANNING_ENTRY_NODE
+from app.ai.workflow.planning_execution import PLANNING_NODE_NAMES
 from app.core.config import settings
 
-BASE_AGENTS = frozenset(
-    {
-        "chat_agent",
-        "rag_agent",
-        "search_agent",
-        "image_generator_agent",
-        "planning_agent",
-        "canvas_agent",
-    }
-)
+# Node names, not public agent IDs: Planning's node is ``planning_model``.
+# Read from the builder so this cannot drift away from the graph it describes.
+BASE_AGENTS = frozenset(BASE_SPECIALIST_NODES)
 STANDARD_TOOL_CALLING_AGENTS = frozenset(
     {"chat_agent", "search_agent", "image_generator_agent", "canvas_agent", "custom_agent"}
 )
@@ -87,12 +82,38 @@ def test_standard_specialists_have_no_parent_level_tool_stage(topology):
         assert "approval" not in targets
 
 
-def test_planning_tools_fans_out_to_every_agent_and_validation(topology):
-    assert _targets(topology, "planning_tools") == BASE_AGENTS | {
-        "custom_agent",
+def test_planning_has_no_parent_level_tool_stage(topology):
+    """Fan-out is topology now. A ``planning_tools`` node is the replay bug.
+
+    A tool call is one unit of work to the checkpointer, so a worker pausing
+    inside one left the whole call unfinished and the resume re-ran every
+    sibling that had already completed.
+    """
+    assert "planning_tools" not in topology.nodes
+    assert set(PLANNING_NODE_NAMES) <= set(topology.nodes)
+
+
+def test_planning_reaches_only_its_own_nodes_and_the_shared_exits(topology):
+    """Planning never targets another specialist directly.
+
+    Moving execution between agents is the transition resolver's job, so a
+    Planning handoff goes there rather than jumping to the target.
+    """
+    targets = _targets(topology, PLANNING_ENTRY_NODE)
+
+    assert targets <= {
+        *PLANNING_NODE_NAMES,
+        "resolve_transition",
         "validate_output",
         "finalize",
-    }
+    }, targets
+    assert not (targets & (BASE_AGENTS - {PLANNING_ENTRY_NODE})), targets
+    assert "__end__" not in targets
+
+
+def test_planning_packaging_revalidates_before_publication(topology):
+    """Planning writes the public answer itself, so it is validated again."""
+    assert "validate_output" in _targets(topology, "planning_package")
 
 
 def test_only_the_finalizer_reaches_end(topology):

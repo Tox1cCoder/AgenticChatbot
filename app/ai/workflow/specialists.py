@@ -37,7 +37,11 @@ from app.ai.workflow.contracts import (
     WorkerTask,
     WorkflowError,
 )
-from app.ai.workflow.inventory import CUSTOM_AGENT_NODE, CUSTOM_AGENT_PREFIX
+from app.ai.workflow.inventory import (
+    BASE_AGENT_NODE_OVERRIDES,
+    CUSTOM_AGENT_NODE,
+    CUSTOM_AGENT_PREFIX,
+)
 from app.ai.workflow.middleware import (
     TOP_LEVEL_DISPATCH_ID,
     SpecialistToolScope,
@@ -82,10 +86,17 @@ StageRouter = Callable[[dict[str, Any]], Any]
 
 
 def resolve_node_for_agent_id(agent_id: str | None) -> str | None:
-    """Map an agent ID onto its graph node without consulting the inventory."""
+    """Map an agent ID onto its graph node without consulting the inventory.
+
+    Must agree with ``RoutingInventory.resolve_node``; both read the same
+    override table so a Planning handoff lands on ``planning_model`` whichever
+    path resolved it.
+    """
     if not agent_id:
         return None
-    return CUSTOM_AGENT_NODE if agent_id.startswith(CUSTOM_AGENT_PREFIX) else agent_id
+    if agent_id.startswith(CUSTOM_AGENT_PREFIX):
+        return CUSTOM_AGENT_NODE
+    return BASE_AGENT_NODE_OVERRIDES.get(agent_id, agent_id)
 
 
 def _with_finalizer_ownership(state: dict[str, Any]) -> dict[str, Any]:
@@ -736,16 +747,23 @@ def _extra_str(request: SpecialistRequest, key: str) -> str | None:
 
 
 def _worker_tool_scope(request: SpecialistRequest) -> WorkerToolScopeMiddleware | None:
-    """The scope guard for a worker invocation, or nothing for a public turn.
+    """The scope guard for a worker invocation, or nothing when unrestricted.
 
-    A worker with an empty allowed set still gets a guard: "no tools" is a
-    decision the dispatch made, not an absence of configuration.
+    An *empty* ``allowed_tool_ids`` means "this agent's own scope", not "no
+    tools". The restriction a dispatch applies is the agent identity it chose —
+    a chat worker already cannot reach canvas tools — and per-task narrowing is
+    server-derived, not yet computed. Reading empty as fail-closed would leave
+    every worker toolless while looking like a security property.
+
+    A non-empty set is a real narrowing and is enforced: the model is offered
+    only those tools, and any call outside them is refused before approval.
     """
     if not request.extras.get("worker"):
         return None
-    return WorkerToolScopeMiddleware(
-        allowed_tool_ids=tuple(request.extras.get("allowed_tool_ids") or ())
-    )
+    allowed = tuple(request.extras.get("allowed_tool_ids") or ())
+    if not allowed:
+        return None
+    return WorkerToolScopeMiddleware(allowed_tool_ids=allowed)
 
 
 def _failed_worker(task: WorkerTask, error_code: str) -> WorkerResult:

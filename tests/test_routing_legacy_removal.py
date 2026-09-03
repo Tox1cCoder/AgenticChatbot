@@ -145,22 +145,35 @@ def test_known_live_legacy_module_still_exists(relative_path):
     )
 
 
-def test_rag_and_planning_still_use_their_pre_v2_nodes():
-    """Records that Tasks 7 and 8 built their components but did not cut over.
+def test_planning_has_cut_over_and_rag_has_not():
+    """Half the cutover has landed. This records exactly which half.
 
-    The shared RAG graph and the Planning orchestrator exist and are tested,
-    but the graph still routes rag_agent and planning_agent to the pre-v2
-    loops. This asserts that gap so it cannot be mistaken for finished work.
+    Planning is now six real parent nodes with no tool stage, so a paused
+    worker no longer replays its completed siblings. RAG still routes through
+    ``rag_agent`` -> ``rag_tools``, the pre-v2 loop, even though the shared
+    compiled graph exists and is wired: moving the *topology* is the remaining
+    step. Do not weaken this to "the graph compiles" — the point is that the
+    unfinished half stays visible.
     """
     from unittest.mock import MagicMock
 
     from app.ai.graph import create_workflow
+    from app.ai.workflow.planning_execution import PLANNING_NODE_NAMES
 
     workflow = create_workflow(qdrant_client=MagicMock(), embedding_service=MagicMock())
     nodes = set(workflow.graph.get_graph().nodes)
 
-    assert "rag_tools" in nodes
-    assert "planning_tools" in nodes
+    assert set(PLANNING_NODE_NAMES) <= nodes
+    assert "planning_tools" not in nodes, (
+        "the planning tool stage came back — fan-out inside a tool call is the "
+        "replay bug Task 4 removed"
+    )
+
+    assert "rag_tools" in nodes, (
+        "RAG cut over — remove this assertion, the rag_loop entry in "
+        "STILL_LIVE_LEGACY_MODULES, and "
+        "test_the_two_rag_loops_are_still_separate_implementations"
+    )
 
 
 def test_response_recovery_no_longer_fabricates_an_answer():

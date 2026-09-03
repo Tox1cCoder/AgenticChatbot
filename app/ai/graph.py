@@ -106,7 +106,14 @@ from .workflow.contracts import TurnIdentity
 from .workflow.custom_agents import CustomAgentsMixin
 from .workflow.graph_builder import SPECIALIST_NODE_NAMES, build_workflow_graph
 from .workflow.inventory import CUSTOM_AGENT_NODE
-from .workflow.planning_execution import PlanningLimits, PlanningWorkerRuntime
+from .workflow.planning_execution import (
+    PLANNING_AGENT_ID,
+    PlanningLimits,
+    PlanningNodeFactory,
+    PlanningWorkerRuntime,
+    TodoActionOutcome,
+    build_dispatch_control_tool,
+)
 from .workflow.planning_loop import PlanningLoopMixin
 from .workflow.rag_execution import ProductionRagRuntime, RagExecutionGraph
 from .workflow.rag_loop import RagLoopMixin
@@ -314,10 +321,23 @@ class MultiAgentWorkflow(
         )
         # The worker runtime holds the *same* graph object rather than a factory,
         # so a worker cannot end up on a differently configured RAG path.
+        planning_limits = PlanningLimits.from_settings(settings)
         self.planning_worker_runtime = PlanningWorkerRuntime(
             specialist_factory=self._specialist_factory,
             rag_execution_graph=self.rag_execution_graph,
-            limits=PlanningLimits.from_settings(settings),
+            limits=planning_limits,
+        )
+        # Planning's six parent-graph nodes. The factory holds only
+        # collaborators; the topology it describes is registered by
+        # build_workflow_graph, which is the sole owner of graph shape.
+        self.planning_node_factory = PlanningNodeFactory(
+            call_model=self._planning_model_call,
+            worker_runtime=self.planning_worker_runtime,
+            limits=planning_limits,
+            inventory_for=self._planning_inventory_for,
+            resolve_allowed_tools=self._planning_allowed_tools,
+            apply_todo_actions=self._planning_apply_todo_actions,
+            review_rubric=self._planning_review_rubric,
         )
 
         self.graph = self._build_graph()
@@ -1401,6 +1421,163 @@ class MultiAgentWorkflow(
     # ------------------------------------------------------------------
     # Routing-v2 specialist subgraphs
     # ------------------------------------------------------------------
+
+    # ============================================================
+    # Planning node collaborators
+    # ============================================================
+
+    async def _planning_model_call(self, state: GraphState) -> AgentResponse:
+        """One Planning model turn, and nothing else.
+
+        Deliberately free of state mutation and of the grounding gate: the node
+        owns both, so a helper that also wrote state would give the turn two
+        places to decide what happened. ``dispatch_subagents`` is bound here as
+        a schema only -- the server reads the proposal and owns the tasks.
+        """
+        state_view = GraphStateView(state)
+        messages = state_view.messages()
+        conversation_id = state_view.conversation_id()
+        user_id = state_view.user_id()
+
+        conversation_history = await self._get_conversation_history(
+            conversation_id, user_id, agent_key="planning", state=state
+        )
+        context = state_view.context_copy()
+        should_describe_plan = bool(context.pop("generate_plan_response", False))
+        if should_describe_plan:
+            state["context"] = context
+
+        current_turn_messages = self._messages_for_active_agent(
+            state, state.get("active_agent_id") or PLANNING_AGENT_ID, messages
+        )
+        current_turn_messages, has_images = self._apply_current_turn_attachments(
+            state, current_turn_messages
+        )
+
+        multi_agent_kwargs = self._multi_agent_kwargs(state, PLANNING_AGENT_ID)
+        internal_tools = [
+            build_dispatch_control_tool(),
+            *(multi_agent_kwargs.get("internal_tools") or []),
+        ]
+        custom_workers = [
+            {
+                "runtime_agent_id": entry.get("runtime_agent_id") or runtime_id,
+                "name": entry.get("name"),
+                "description": entry.get("description"),
+            }
+            for runtime_id, entry in state_view.custom_agents().items()
+        ]
+
+        response = await self.planning_agent.invoke_model_with_history(
+            messages=current_turn_messages,
+            conversation_history=conversation_history,
+            persona=state.get("persona"),
+            conversation_id=conversation_id,
+            user_id=user_id,
+            device_id=state.get("device_id"),
+            model_request=state.get("model_request"),
+            todos=state.get("todos") or [],
+            current_task_index=state.get("current_task_index"),
+            planning_phase=state.get("planning_phase", "planning"),
+            should_describe_plan=should_describe_plan,
+            internal_tools=internal_tools or None,
+            custom_workers=custom_workers or None,
+            planning_rubric_feedback=context.get("planning_rubric_feedback"),
+            handoff_target_descriptions=multi_agent_kwargs.get("handoff_target_descriptions"),
+            multi_agent_activity=multi_agent_kwargs.get("multi_agent_activity"),
+            **self._final_response_kwargs(state),
+        )
+        self._mark_response_has_images(response, has_images)
+        return self._finalize_forced_final_response(state, response)
+
+    def _planning_inventory_for(self, state: GraphState):
+        """The live inventory a dispatch proposal is validated against.
+
+        The same snapshot the router and the transition resolver use, so an
+        agent that is routable for this request is judged by one rule wherever
+        it is named.
+        """
+        return build_runtime_inventory(
+            base_agent_ids=list(self.agents.keys()),
+            custom_agents=GraphStateView(state).custom_agents(),
+            max_custom_agents=settings.router_context_max_custom_agents,
+        )
+
+    @staticmethod
+    def _planning_allowed_tools(agent_id: str, state: GraphState) -> tuple[str, ...]:
+        """Per-task tool narrowing for one worker.
+
+        Empty means "this agent's own scope", not "no tools": the restriction a
+        dispatch actually applies today is the *agent identity* it chose, and a
+        chat worker already cannot reach canvas tools. Returning a name list
+        here would require async tool discovery per task, so per-task narrowing
+        is not derived yet -- ``WorkerToolScopeMiddleware`` enforces whatever
+        this returns, so narrowing becomes available the moment it does.
+        """
+        return ()
+
+    async def _planning_apply_todo_actions(
+        self, state: GraphState, calls: list[dict[str, Any]]
+    ) -> TodoActionOutcome:
+        """Apply this turn's ``write_todos`` calls through the shared applier.
+
+        The plan-mutation rules and the todo cap live in ``todo_actions``;
+        reimplementing them in the graph layer is how they would drift.
+        """
+        from .todo_actions import apply_write_todos_action
+
+        todos = list(state.get("todos") or [])
+        current_task_index = state.get("current_task_index")
+        max_todos = getattr(settings, "max_todos_per_plan", 50)
+
+        messages: list[Any] = []
+        actions: list[str] = []
+        had_error = False
+
+        for call in calls:
+            tool_args = call.get("args") or {}
+            try:
+                todos, current_task_index, result, action = apply_write_todos_action(
+                    todos=todos,
+                    current_task_index=current_task_index,
+                    tool_args=tool_args,
+                    max_todos=max_todos,
+                )
+                actions.append(action)
+                if action == "set_todos" and result.startswith("Error: Plan exceeds maximum"):
+                    logger.warning(
+                        "Rejected plan with %d todos (max: %d)",
+                        len(tool_args.get("todos", []) or []),
+                        max_todos,
+                    )
+            except Exception as exc:  # noqa: BLE001 - reported back to the model
+                raw_action = tool_args.get("action")
+                action = getattr(raw_action, "value", raw_action)
+                result = f"Error executing {action}: {exc}"
+                had_error = True
+
+            messages.append(
+                ToolMessage(
+                    content=result,
+                    tool_call_id=str(call.get("id") or ""),
+                    name=str(call.get("name") or "write_todos"),
+                    status="error" if had_error else "success",
+                )
+            )
+
+        return TodoActionOutcome(
+            todos=todos,
+            current_task_index=current_task_index,
+            tool_messages=tuple(messages),
+            actions=tuple(actions),
+            had_error=had_error,
+        )
+
+    async def _planning_review_rubric(self, state: GraphState, todos: list[dict[str, Any]]):
+        """Grade a plan mutation against the planning rubric."""
+        return await self._review_planning_todos_with_rubric(
+            state=state, todos=todos, source="planning_actions"
+        )
 
     def _build_specialist_factory(self, receipt_service: Any = None) -> SpecialistFactory:
         """Register the standard specialists as per-invocation subgraphs.

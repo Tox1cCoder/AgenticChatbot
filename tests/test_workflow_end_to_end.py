@@ -20,6 +20,7 @@ plan's open items rather than silently omitted.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
@@ -39,8 +40,10 @@ from app.ai.workflow.contracts import (
 )
 from app.ai.workflow.graph_builder import build_workflow_graph
 from app.ai.workflow.inventory import build_routing_inventory
+from app.ai.workflow.planning_execution import PLANNING_AGENT_ID
 from app.ai.workflow.runtime_context import WorkflowRuntimeContext
 from app.ai.workflow.state import build_checkpoint_thread_id
+from tests.planning_graph_support import scripted_planning_node_factory
 
 BASE_AGENT_IDS = [
     "chat_agent",
@@ -124,14 +127,14 @@ class ScriptedWorkflow:
             return {**state, "response": outcome.response}
 
         self._rag_node = _legacy_node
-        self._planning_node = _legacy_node
         self._rag_tools_node = _legacy_node
-        self._planning_tools_node = _legacy_node
         self._should_call_tools = lambda _state: "end"
         self._should_call_rag_tools = lambda _state: "end"
-        self._should_call_planning_tools = lambda _state: "end"
+        # Planning answers through its own nodes now, so it is scripted from the
+        # same ``outcomes`` mapping as every other specialist rather than
+        # through ``invoke_specialist_subgraph``.
+        self.planning_node_factory = scripted_planning_node_factory(self._planning_model_turn)
         self._should_continue_rag = lambda _state: "end"
-        self._should_continue_planning = lambda _state: "end"
 
     def _next(self, agent_id, state):
         self.visited.append(str(agent_id))
@@ -140,6 +143,35 @@ class ScriptedWorkflow:
             self._on_invoke(agent_id, state)
         queue = self._outcomes.get(str(agent_id))
         return queue.pop(0) if queue else _answer(str(agent_id))
+
+    async def _planning_model_turn(self, state):
+        """One scripted Planning model turn.
+
+        A queued ``PendingTransition`` becomes a ``hand_off`` call, which is how
+        Planning delegates now: the model asks and the resolver decides.
+        """
+        outcome = self._next(PLANNING_AGENT_ID, state)
+        if isinstance(outcome, PendingTransition):
+            return SimpleNamespace(
+                message=SimpleNamespace(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "hand_off",
+                            "id": outcome.tool_call_id,
+                            "args": {
+                                "to_agent_id": outcome.to_agent_id,
+                                "reason": outcome.reason,
+                            },
+                        }
+                    ],
+                ),
+                metadata={},
+            )
+        return SimpleNamespace(
+            message=SimpleNamespace(content=outcome.response.message.content, tool_calls=[]),
+            metadata={},
+        )
 
     async def invoke_specialist_subgraph(self, _node_name, state):
         outcome = self._next(state.get("active_agent_id"), state)

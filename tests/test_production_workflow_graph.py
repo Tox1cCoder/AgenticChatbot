@@ -21,12 +21,15 @@ from app.ai.workflow.contracts import (
     WorkflowRoutingException,
 )
 from app.ai.workflow.graph_builder import (
+    PLANNING_ENTRY_NODE,
     SPECIALIST_NODE_NAMES,
     build_workflow_graph,
     make_route_node,
 )
 from app.ai.workflow.inventory import build_routing_inventory
+from app.ai.workflow.planning_execution import PLANNING_NODE_NAMES
 from app.ai.workflow.state import build_checkpoint_thread_id
+from tests.planning_graph_support import stub_planning_node_factory
 
 BASE_AGENT_IDS = [
     "chat_agent",
@@ -65,15 +68,20 @@ class FakeWorkflow:
             "_rag_node",
             "_search_node",
             "_image_generator_node",
-            "_planning_node",
             "_canvas_node",
             "_custom_agent_node",
             "_tool_node",
             "_approval_node",
             "_rag_tools_node",
-            "_planning_tools_node",
         ):
             setattr(self, attribute, _noop)
+
+        # Planning contributes six real nodes. The builder registers them from
+        # this factory, so a topology test has to supply one to see the graph
+        # the production builder actually produces.
+        self.planning_node_factory = stub_planning_node_factory(
+            base_agent_ids=tuple(BASE_AGENT_IDS)
+        )
 
         async def _end(state):
             return "end"
@@ -139,7 +147,7 @@ def test_specialist_destinations_are_validation_or_execution_only(compiled_graph
             "tools",
             "approval",
             "rag_tools",
-            "planning_tools",
+            *PLANNING_NODE_NAMES,
         }, (node_name, targets)
 
 
@@ -307,3 +315,44 @@ def test_state_has_no_legacy_routing_vocabulary():
 
     for forbidden in ("selected_agent", "last_agent", "delegation_count"):
         assert forbidden not in WorkflowState.__annotations__
+
+
+def test_every_planning_node_is_registered_and_no_tool_stage_remains(compiled_graph):
+    """Planning is six parent nodes. A planning tool stage is the old bug."""
+    nodes = set(compiled_graph.get_graph().nodes)
+
+    assert set(PLANNING_NODE_NAMES) <= nodes
+    assert "planning_tools" not in nodes
+    assert "planning_agent" not in nodes
+
+
+def test_the_router_enters_planning_at_the_model_node(compiled_graph):
+    """``planning_agent`` is a public agent ID; ``planning_model`` is its node.
+
+    Entering ``planning_collect`` or ``planning_package`` instead would answer
+    the turn for work that never ran.
+    """
+    inventory = _inventory()
+    assert inventory.resolve_node("planning_agent") == PLANNING_ENTRY_NODE
+    assert PLANNING_ENTRY_NODE in SPECIALIST_NODE_NAMES
+
+    graph = compiled_graph.get_graph()
+    route_targets = {edge.target for edge in graph.edges if edge.source == "route"}
+    assert PLANNING_ENTRY_NODE in route_targets
+
+    resolver_targets = {edge.target for edge in graph.edges if edge.source == "resolve_transition"}
+    assert PLANNING_ENTRY_NODE in resolver_targets
+
+
+def test_no_planning_node_reaches_end_directly(compiled_graph):
+    graph = compiled_graph.get_graph()
+    for node_name in PLANNING_NODE_NAMES:
+        targets = {edge.target for edge in graph.edges if edge.source == node_name}
+        assert "__end__" not in targets, node_name
+
+
+def test_the_planning_package_node_revalidates_before_publication(compiled_graph):
+    """Planning writes the public answer itself, so it is validated again."""
+    graph = compiled_graph.get_graph()
+    targets = {edge.target for edge in graph.edges if edge.source == "planning_package"}
+    assert "validate_output" in targets

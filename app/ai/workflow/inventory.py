@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.ai.agent_metadata import BASE_AGENT_CAPABILITIES, BASE_AGENT_DISPLAY_NAMES
 
 __all__ = [
+    "BASE_AGENT_NODE_OVERRIDES",
     "CUSTOM_AGENT_NODE",
     "CUSTOM_AGENT_PREFIX",
     "AgentDescriptor",
@@ -27,6 +28,12 @@ __all__ = [
 
 CUSTOM_AGENT_PREFIX = "custom_agent:"
 CUSTOM_AGENT_NODE = "custom_agent"
+
+#: Base agents whose graph node name is not their public agent ID. Planning is
+#: six parent nodes rather than one, and ``planning_model`` is the only one a
+#: router or a handoff may enter -- landing on ``planning_collect`` or
+#: ``planning_package`` would answer for work that never ran.
+BASE_AGENT_NODE_OVERRIDES: dict[str, str] = {"planning_agent": "planning_model"}
 
 AgentKind = Literal["base", "custom"]
 
@@ -102,13 +109,15 @@ class RoutingInventory(BaseModel):
     def resolve_node(self, agent_id: str) -> str:
         """Map an agent ID to its graph node name.
 
-        Custom agents share one parametrized wrapper node, so the agent ID is
-        never assumed to be a node name.
+        Custom agents share one parametrized wrapper node and Planning spans
+        six, so the agent ID is never assumed to be a node name.
         """
         descriptor = self.get(agent_id)
         if descriptor is None:
             raise KeyError(f"unknown agent_id: {agent_id!r}")
-        return CUSTOM_AGENT_NODE if descriptor.kind == "custom" else descriptor.agent_id
+        if descriptor.kind == "custom":
+            return CUSTOM_AGENT_NODE
+        return BASE_AGENT_NODE_OVERRIDES.get(descriptor.agent_id, descriptor.agent_id)
 
     def routable_ids(self) -> tuple[str, ...]:
         return tuple(

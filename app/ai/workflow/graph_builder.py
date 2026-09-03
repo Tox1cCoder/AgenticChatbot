@@ -20,6 +20,7 @@ from langgraph.types import Command
 
 from app.ai.workflow.contracts import AgentTransition, WorkflowRoutingException
 from app.ai.workflow.finalization import make_finalize_node, make_validate_output_node
+from app.ai.workflow.planning_execution import PLANNING_NODE_NAMES
 from app.ai.workflow.specialists import (
     make_specialist_wrapper,
     make_subgraph_specialist_wrapper,
@@ -31,6 +32,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "BASE_SPECIALIST_NODES",
+    "PLANNING_ENTRY_NODE",
+    "PLANNING_NODE_NAMES",
     "TRANSITION_RESOLVER_NODE",
     "SUBGRAPH_SPECIALIST_NODES",
     "SPECIALIST_NODE_NAMES",
@@ -39,12 +42,16 @@ __all__ = [
     "make_route_node",
 ]
 
+# The one Planning node a router or a handoff may enter. Planning is six
+# parent nodes; entering any other one would answer for work that never ran.
+PLANNING_ENTRY_NODE = "planning_model"
+
 BASE_SPECIALIST_NODES: tuple[str, ...] = (
     "chat_agent",
     "rag_agent",
     "search_agent",
     "image_generator_agent",
-    "planning_agent",
+    PLANNING_ENTRY_NODE,
     "canvas_agent",
 )
 
@@ -53,7 +60,7 @@ SPECIALIST_NODE_NAMES: frozenset[str] = frozenset({*BASE_SPECIALIST_NODES, "cust
 TRANSITION_RESOLVER_NODE = "resolve_transition"
 
 # Specialists whose model/tool loop already runs inside a compiled
-# ``create_agent`` subgraph. RAG and Planning join them in Tasks 7 and 8.
+# ``create_agent`` subgraph. RAG joins them in the Task 6 cutover.
 SUBGRAPH_SPECIALIST_NODES: tuple[str, ...] = (
     "chat_agent",
     "search_agent",
@@ -62,10 +69,10 @@ SUBGRAPH_SPECIALIST_NODES: tuple[str, ...] = (
     "custom_agent",
 )
 
-# Pre-v2 execution stages that still run as top-level nodes. RAG and Planning
-# move theirs inside subgraphs in Tasks 7 and 8; the standard specialists no
-# longer have one at all.
-TOOL_STAGE_NODES: tuple[str, ...] = ("rag_tools", "planning_tools")
+# Pre-v2 execution stages that still run as top-level nodes. Planning no longer
+# has one -- its fan-out is real topology as of Task 4 -- and RAG's moves inside
+# the shared compiled graph in Task 6.
+TOOL_STAGE_NODES: tuple[str, ...] = ("rag_tools",)
 
 
 def make_route_node():
@@ -192,15 +199,12 @@ def build_workflow_graph(
 
     specialist_callables = {
         "rag_agent": workflow._rag_node,
-        "planning_agent": workflow._planning_node,
     }
     stage_routers = {
         "rag_agent": workflow._should_call_rag_tools,
-        "planning_agent": workflow._should_call_planning_tools,
     }
     stage_targets_by_node = {
         "rag_agent": {"end": "validate_output", "rag_tools": "rag_tools"},
-        "planning_agent": {"end": "validate_output", "planning_tools": "planning_tools"},
     }
 
     for node_name, wrapper in subgraph_specialists.items():
@@ -244,15 +248,14 @@ def build_workflow_graph(
         ),
         destinations=stage_destinations,
     )
-    graph.add_node(
-        "planning_tools",
-        make_tool_stage_wrapper(
-            "planning_tools",
-            workflow._planning_tools_node,
-            stage_router=workflow._should_continue_planning,
-        ),
-        destinations=stage_destinations,
-    )
+    # Planning is real parent-graph topology: six nodes registered from one
+    # inspectable descriptor table, each returning a dynamic Command and
+    # therefore carrying no static outgoing edge. There is no planning tool
+    # stage -- a tool call is one unit of work to the checkpointer, so fan-out
+    # inside one re-ran every completed sibling on resume.
+    for node_name, node, destinations in workflow.planning_node_factory.descriptors():
+        graph.add_node(node_name, node, destinations=destinations)
+
     graph.add_node("validate_output", make_validate_output_node(), destinations=("finalize",))
     graph.add_node("finalize", make_finalize_node())
 

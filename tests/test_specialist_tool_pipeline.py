@@ -26,6 +26,7 @@ from app.ai.workflow.specialists import (
     SpecialistFactory,
     SpecialistRequest,
 )
+from tests.planning_graph_support import stub_planning_node_factory
 
 pytestmark = pytest.mark.usefixtures("no_tracing")
 
@@ -282,14 +283,11 @@ class _ParentGraphWorkflow:
             raise AssertionError("no pre-v2 node runs in this test")
 
         self._rag_node = _unused
-        self._planning_node = _unused
         self._rag_tools_node = _unused
-        self._planning_tools_node = _unused
         self._should_call_tools = lambda _state: "end"
         self._should_call_rag_tools = lambda _state: "end"
-        self._should_call_planning_tools = lambda _state: "end"
+        self.planning_node_factory = stub_planning_node_factory()
         self._should_continue_rag = lambda _state: "end"
-        self._should_continue_planning = lambda _state: "end"
 
     async def invoke_specialist_subgraph(self, _node_name, state):
         return await self._factory.invoke(_request(hitl_policy=self._policy))

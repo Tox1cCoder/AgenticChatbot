@@ -29,7 +29,9 @@ from typing import Any
 
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.errors import GraphBubbleUp
+from langgraph.types import Command, Send
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from typing_extensions import NotRequired, TypedDict
 
@@ -37,6 +39,7 @@ from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from app.ai.workflow.contracts import (
     DispatchSubagentsInput,
     OutcomeProvenance,
+    PendingTransition,
     PlanningDispatch,
     ResponseOutcome,
     WorkerResult,
@@ -49,12 +52,20 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "DISPATCH_CONTROL_TOOL_NAME",
+    "DispatchControlSchemaExecuted",
+    "EXECUTION_ACTIONS",
     "HANDOFF_TOOL_NAME",
     "PLANNING_AGENT_ID",
+    "PLANNING_NODE_NAMES",
+    "PLAN_MODIFYING_ACTIONS",
+    "WRITE_TODOS_TOOL_NAME",
     "InvalidPlanningDispatch",
     "PlanningLimits",
+    "PlanningNodeFactory",
     "PlanningState",
     "PlanningWorkerRuntime",
+    "TodoActionOutcome",
+    "build_dispatch_control_tool",
     "build_planning_outcome",
     "collect_worker_results",
     "failed_worker",
@@ -62,6 +73,17 @@ __all__ = [
     "render_worker_results",
     "validate_dispatch_call",
 ]
+
+#: The exact set of parent-graph nodes Planning owns, in registration order.
+#: ``planning_tools`` is deliberately absent: fan-out is topology, not a tool.
+PLANNING_NODE_NAMES: tuple[str, ...] = (
+    "planning_model",
+    "planning_dispatch",
+    "planning_worker",
+    "planning_collect",
+    "planning_actions",
+    "planning_package",
+)
 
 PLANNING_AGENT_ID = "planning_agent"
 RAG_AGENT_ID = "rag_agent"
@@ -108,6 +130,48 @@ class InvalidPlanningDispatch(ValueError):
         super().__init__(code)
         self.code = code
         self.tool_call_id = tool_call_id
+
+
+class DispatchControlSchemaExecuted(RuntimeError):
+    """Raised if anything ever tries to *run* the dispatch control schema.
+
+    ``dispatch_subagents`` is bound to the Planning model so the model can
+    propose a fan-out. It is not a tool: the server reads the proposal,
+    validates it, and owns the tasks. Reaching this is a wiring bug in which
+    the common tool pipeline resolved a control schema, and failing loudly
+    beats fanning out from an unvalidated proposal.
+    """
+
+
+def build_dispatch_control_tool() -> Any:
+    """The model-facing dispatch schema, with no executable body.
+
+    ``returns_control_command`` keeps the specialist middleware from routing it
+    through the product execution pipeline, and ``non_executable`` is what the
+    execution-policy allowlist checks so it can never be resolved as a tool.
+    """
+    from langchain_core.tools import tool
+
+    @tool(
+        DISPATCH_CONTROL_TOOL_NAME,
+        args_schema=DispatchSubagentsInput,
+    )
+    def dispatch_subagents(**kwargs: Any) -> str:
+        """Delegate independent pieces of the plan to specialist subagents.
+
+        Propose one task per independent piece of work: a short task_id, the
+        objective in plain words, and which agent should do it. The server
+        validates the whole proposal and runs the tasks; results come back as
+        one paired result for this call.
+        """
+        raise DispatchControlSchemaExecuted(DISPATCH_CONTROL_TOOL_NAME)
+
+    dispatch_subagents.metadata = {
+        "non_executable": True,
+        "returns_control_command": True,
+        "tool_origin": "internal",
+    }
+    return dispatch_subagents
 
 
 def planning_control_message_id(tool_call_id: str) -> str:
@@ -502,3 +566,516 @@ def build_planning_outcome(*, content: str, results: Sequence[WorkerResult]) -> 
             images=images,
         ),
     )
+
+
+class TodoActionOutcome(BaseModel):
+    """What one round of ``write_todos`` calls decided.
+
+    Returned by the workflow's own todo applier rather than computed here: the
+    plan-mutation rules, the todo cap, and the phase transitions are existing
+    product behavior, and reimplementing them in the graph layer is how they
+    would drift.
+    """
+
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    todos: list[dict[str, Any]] = Field(default_factory=list)
+    current_task_index: int | None = None
+    tool_messages: tuple[Any, ...] = ()
+    actions: tuple[str, ...] = ()
+    had_error: bool = False
+    planning_phase: str | None = None
+    plan_just_modified: bool = False
+
+
+#: Plan-mutating todo actions. These are the ones the rubric grades, because
+#: they are the ones that change what the plan says.
+PLAN_MODIFYING_ACTIONS = frozenset({"set_todos", "add_todo", "update_todo", "remove_todo"})
+
+#: Todo actions that move the plan from writing into doing.
+EXECUTION_ACTIONS = frozenset({"start_todo", "complete_todo"})
+
+WRITE_TODOS_TOOL_NAME = "write_todos"
+
+
+class PlanningNodeFactory:
+    """The six real outer-graph nodes that make up Planning.
+
+    Fan-out is topology here, not a tool. That is the whole point: a tool call
+    is one unit of work to the checkpointer, so a worker pausing for approval
+    left the entire call unfinished and the resume re-ran every sibling that
+    had already completed. ``Send`` from a checkpointed parent node gives each
+    worker its own recorded result, so a resume runs only what never finished.
+
+    Nothing here invokes or compiles a child graph, and no node reaches
+    ``END`` -- ``finalize`` owns termination.
+    """
+
+    def __init__(
+        self,
+        *,
+        call_model: Callable[[Mapping[str, Any]], Any],
+        worker_runtime: Any,
+        limits: PlanningLimits,
+        inventory_for: Callable[[Mapping[str, Any]], RoutingInventory],
+        resolve_allowed_tools: Callable[[str, Mapping[str, Any]], tuple[str, ...]],
+        apply_todo_actions: Callable[[Mapping[str, Any], Sequence[dict[str, Any]]], Any],
+        review_rubric: Callable[[Mapping[str, Any], list[dict[str, Any]]], Any] | None = None,
+    ) -> None:
+        self._call_model = call_model
+        self._worker_runtime = worker_runtime
+        self.limits = limits
+        self._inventory_for = inventory_for
+        self._resolve_allowed_tools = resolve_allowed_tools
+        self._apply_todo_actions = apply_todo_actions
+        self._review_rubric = review_rubric
+
+    # -- topology ---------------------------------------------------------
+
+    def descriptors(self) -> tuple[tuple[str, Callable[..., Any], tuple[str, ...]], ...]:
+        """One inspectable table of node name, callable, and destinations.
+
+        The builder registers from this rather than naming nodes inline, so
+        "which Planning nodes exist" is a single readable fact and a test can
+        assert it without reconstructing the graph.
+        """
+        return (
+            (
+                "planning_model",
+                self.planning_model,
+                (
+                    "planning_dispatch",
+                    "planning_actions",
+                    "planning_package",
+                    "resolve_transition",
+                    "finalize",
+                ),
+            ),
+            ("planning_dispatch", self._dispatch_node, ("planning_worker",)),
+            ("planning_worker", self._worker_node, ("planning_collect",)),
+            ("planning_collect", self.planning_collect, ("planning_model", "finalize")),
+            ("planning_actions", self.planning_actions, ("planning_model", "finalize")),
+            ("planning_package", self.planning_package, ("validate_output", "finalize")),
+        )
+
+    # -- the model node ---------------------------------------------------
+
+    async def planning_model(self, state: Mapping[str, Any], runtime: Any = None) -> Command:
+        """One Planning model turn, and the one decision it produces.
+
+        ``dispatch_subagents`` is bound to this model as a schema only. It is
+        never executed by the common tool pipeline, so nothing it says can
+        reach a provider or a credential -- the server reads the proposal,
+        validates it in full, and owns every task that results.
+        """
+        response = await self._call_model(state)
+        content = str(getattr(getattr(response, "message", None), "content", "") or "")
+        tool_calls = [
+            dict(call)
+            for call in (getattr(getattr(response, "message", None), "tool_calls", None) or [])
+        ]
+
+        if not tool_calls:
+            return Command(
+                update={
+                    "messages": [AIMessage(content=content)],
+                    "execution_phase": "executing",
+                },
+                goto="planning_package",
+            )
+
+        ai_message = AIMessage(content=content, tool_calls=tool_calls)
+        names = {str(call.get("name") or "") for call in tool_calls}
+
+        if DISPATCH_CONTROL_TOOL_NAME in names:
+            return self._route_dispatch(state, ai_message, tool_calls)
+
+        if HANDOFF_TOOL_NAME in names and len(tool_calls) == 1:
+            return self._route_handoff(state, ai_message, tool_calls[0])
+
+        if WRITE_TODOS_TOOL_NAME in names:
+            return Command(
+                update={"messages": [ai_message], "execution_phase": "executing"},
+                goto="planning_actions",
+            )
+
+        # A call Planning has no node for. Answering it with deterministic
+        # feedback is what lets the model correct itself; leaving it unpaired
+        # would strand a tool call the provider requires a result for.
+        return Command(
+            update={
+                "messages": [
+                    ai_message,
+                    *(_control_message(call, "unsupported_planning_tool") for call in tool_calls),
+                ]
+            },
+            goto="planning_model",
+        )
+
+    def _route_dispatch(
+        self,
+        state: Mapping[str, Any],
+        ai_message: AIMessage,
+        tool_calls: Sequence[dict[str, Any]],
+    ) -> Command:
+        """Validate the proposal in full, then either fan out or report back."""
+        dispatch_call = next(
+            call for call in tool_calls if call.get("name") == DISPATCH_CONTROL_TOOL_NAME
+        )
+        # Validation reads sibling calls off the message, so it has to see the
+        # message this turn produced rather than the one already in state.
+        validation_state = {**dict(state), "messages": [*(state.get("messages") or []), ai_message]}
+
+        try:
+            dispatch = validate_dispatch_call(
+                tool_call=dispatch_call,
+                state=validation_state,
+                inventory=self._inventory_for(state),
+                limits=self.limits,
+                resolve_allowed_tools=self._resolve_allowed_tools,
+            )
+        except InvalidPlanningDispatch as invalid:
+            return Command(
+                update={
+                    "messages": [
+                        ai_message,
+                        *(
+                            _control_message(
+                                call,
+                                invalid.code
+                                if call.get("id") == invalid.tool_call_id
+                                else "dispatch_rejected",
+                            )
+                            for call in tool_calls
+                        ),
+                    ]
+                },
+                goto="planning_model",
+            )
+
+        return Command(
+            update={
+                "messages": [ai_message],
+                "planning_dispatch": dispatch,
+                "planning_control_call_id": dispatch.tool_call_id,
+                "execution_phase": "executing",
+            },
+            goto="planning_dispatch",
+        )
+
+    def _route_handoff(
+        self, state: Mapping[str, Any], ai_message: AIMessage, call: Mapping[str, Any]
+    ) -> Command:
+        """Record the requested transition; the resolver decides if it happens."""
+        args = call.get("args") if isinstance(call.get("args"), Mapping) else {}
+        tool_call_id = str(call.get("id") or "")
+        target = str((args or {}).get("to_agent_id") or "")
+        reason = str((args or {}).get("reason") or "planning delegated the turn")
+
+        if not target:
+            return Command(
+                update={"messages": [ai_message, _control_message(call, "handoff_missing_target")]},
+                goto="planning_model",
+            )
+
+        pending = PendingTransition(
+            from_agent_id=PLANNING_AGENT_ID,
+            to_agent_id=target,
+            tool_call_id=tool_call_id,
+            tool_message_id=f"handoff:{tool_call_id}",
+            reason=reason[:500],
+        )
+        return Command(
+            update={
+                "messages": [
+                    ai_message,
+                    ToolMessage(
+                        content=f"handoff requested: {target}",
+                        tool_call_id=tool_call_id,
+                        name=HANDOFF_TOOL_NAME,
+                        id=pending.tool_message_id,
+                    ),
+                ],
+                "pending_transition": pending,
+            },
+            goto="resolve_transition",
+        )
+
+    # -- fan-out ----------------------------------------------------------
+
+    def _dispatch_node(self, state: Mapping[str, Any]) -> Command:
+        """Register :meth:`planning_dispatch` as a node.
+
+        A node must return a state update or a ``Command``; a bare list of
+        ``Send`` is only valid from a conditional edge. Keeping the ``Send``
+        construction in its own method leaves it directly assertable, and the
+        ``Command`` is what makes the fan-out a real parent-graph step -- which
+        is the property the whole task exists for.
+        """
+        sends = self.planning_dispatch(state)
+        if not sends:
+            return Command(goto="planning_model")
+        return Command(goto=sends)
+
+    def planning_dispatch(self, state: Mapping[str, Any]) -> list[Send]:
+        """Fan the validated wave out as real parent-graph tasks.
+
+        Every task here came from one already-completed validation, so there is
+        no window in which some workers are running while others are still
+        being checked. Nothing is invoked or compiled.
+        """
+        dispatch = state.get("planning_dispatch")
+        if dispatch is None:
+            logger.warning("planning_dispatch ran with no validated dispatch in state")
+            return []
+
+        scope = _bounded_parent_scope(state)
+        return [
+            Send("planning_worker", {"worker_task": task, "worker_parent_state": scope})
+            for task in dispatch.tasks
+        ]
+
+    async def _worker_node(self, payload: Mapping[str, Any]) -> Command:
+        """Register :meth:`planning_worker` as a node.
+
+        The ``goto`` is what fans back in. Every parallel worker names the same
+        target, and LangGraph runs it once for the whole wave with all results
+        accumulated -- so collection sees the complete set without the worker
+        needing a static outgoing edge.
+        """
+        return Command(update=await self.planning_worker(payload), goto="planning_collect")
+
+    async def planning_worker(
+        self,
+        payload: Mapping[str, Any],
+        writer: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        """Run exactly one dispatched task and return only its typed result.
+
+        The writer is resolved from the live run when the caller does not pass
+        one, so events flow in production without the node signature depending
+        on framework injection.
+        """
+        task: WorkerTask = payload["worker_task"]
+        parent_state = payload.get("worker_parent_state") or {}
+        result = await self._worker_runtime.run(task, parent_state, writer or _stream_writer())
+        return {"worker_results": [result]}
+
+    def planning_collect(self, state: Mapping[str, Any]) -> Command:
+        """Answer the dispatch call with this wave's ordered results.
+
+        One ``ToolMessage`` paired to the original call: the model made one
+        call and a provider requires exactly one result for it. Ordering is by
+        server-owned ``position``, because completion order is an accident of
+        latency and would make the same plan synthesize differently on
+        different runs.
+        """
+        dispatch = state.get("planning_dispatch")
+        if dispatch is None:
+            logger.warning("planning_collect ran with no dispatch to collect")
+            return Command(goto="planning_model")
+
+        ordered = collect_worker_results(dispatch, state.get("worker_results") or [])
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=render_worker_results(
+                            _dispatch_objective(dispatch), ordered, self.limits
+                        ),
+                        tool_call_id=dispatch.tool_call_id,
+                        name=DISPATCH_CONTROL_TOOL_NAME,
+                        id=planning_control_message_id(dispatch.tool_call_id),
+                    )
+                ],
+                # Cleared so a resumed turn cannot re-dispatch a wave it has
+                # already collected, and so the wave counters are the only
+                # thing deciding whether another dispatch is allowed.
+                "planning_dispatch": None,
+                "planning_control_call_id": None,
+                "planning_dispatch_waves": dispatch.wave,
+                "planning_dispatched_task_count": int(
+                    state.get("planning_dispatched_task_count") or 0
+                )
+                + len(dispatch.tasks),
+            },
+            goto="planning_model",
+        )
+
+    # -- todos ------------------------------------------------------------
+
+    async def planning_actions(self, state: Mapping[str, Any]) -> Command:
+        """Apply this turn's ``write_todos`` calls and grade the result.
+
+        The rubric runs only on plan-mutating actions. Grading a
+        ``start_todo`` would score the plan for something that did not change
+        it, and ``needs_revision`` routes back to the model with feedback
+        instead of emitting the normal plan-summary pass.
+        """
+        calls = [
+            call for call in _last_tool_calls(state) if call.get("name") == WRITE_TODOS_TOOL_NAME
+        ]
+        outcome = _as_todo_outcome(await _maybe_await(self._apply_todo_actions(state, calls)))
+
+        update: dict[str, Any] = {
+            "messages": list(outcome.tool_messages),
+            "todos": list(outcome.todos),
+            "current_task_index": outcome.current_task_index,
+        }
+        if outcome.planning_phase:
+            update["planning_phase"] = outcome.planning_phase
+        elif any(action in EXECUTION_ACTIONS for action in outcome.actions):
+            update["planning_phase"] = "executing"
+
+        context = dict(state.get("context") or {})
+        if outcome.plan_just_modified or any(
+            action in PLAN_MODIFYING_ACTIONS for action in outcome.actions
+        ):
+            context["plan_just_modified"] = True
+            context = await self._graded_context(state, context, outcome)
+        update["context"] = context
+
+        return Command(update=update, goto="planning_model")
+
+    async def _graded_context(
+        self,
+        state: Mapping[str, Any],
+        context: dict[str, Any],
+        outcome: TodoActionOutcome,
+    ) -> dict[str, Any]:
+        if self._review_rubric is None:
+            return context
+
+        attempt = await _maybe_await(self._review_rubric(state, list(outcome.todos)))
+        status = getattr(attempt, "status", None)
+        if status is None or status == "disabled":
+            return context
+
+        metadata = getattr(attempt, "metadata", None)
+        context["planning_rubric"] = metadata() if callable(metadata) else metadata
+        feedback = getattr(attempt, "feedback", None)
+        if status == "needs_revision" and feedback:
+            context["planning_rubric_feedback"] = feedback
+            context["plan_just_modified"] = False
+            context.pop("generate_plan_response", None)
+        elif status in {"satisfied", "max_iterations_reached"}:
+            context.pop("planning_rubric_feedback", None)
+        return context
+
+    # -- packaging --------------------------------------------------------
+
+    def planning_package(self, state: Mapping[str, Any]) -> Command:
+        """Turn the finished turn into one candidate public outcome.
+
+        Provenance is aggregated from server-owned worker records only, and it
+        goes to ``validate_output`` rather than to ``finalize``: Planning
+        writes the public answer itself, so it can introduce a citation no
+        worker retrieved, and the synthesis has to be revalidated before
+        publication.
+        """
+        results = list(state.get("worker_results") or [])
+        outcome = build_planning_outcome(content=_last_ai_text(state), results=results)
+        return Command(
+            update={
+                "agent_outcome": outcome,
+                "final_agent_id": PLANNING_AGENT_ID,
+                "execution_phase": "validating",
+            },
+            goto="validate_output",
+        )
+
+
+# ----------------------------------------------------------------------
+# node helpers
+# ----------------------------------------------------------------------
+
+
+def _control_message(call: Mapping[str, Any], code: str) -> ToolMessage:
+    """Deterministic paired feedback for one rejected control call.
+
+    The text is a stable code, not prose: the model has to be able to tell the
+    same rejection apart from a different one across turns and locales.
+    """
+    tool_call_id = str(call.get("id") or "")
+    return ToolMessage(
+        content=code,
+        tool_call_id=tool_call_id,
+        name=str(call.get("name") or DISPATCH_CONTROL_TOOL_NAME),
+        status="error",
+        id=planning_control_message_id(tool_call_id),
+    )
+
+
+def _bounded_parent_scope(state: Mapping[str, Any]) -> dict[str, Any]:
+    """The parent facts a worker is allowed to see.
+
+    ``messages`` is deliberately absent. A worker given the public transcript
+    could answer the user directly instead of doing the delegated work, and it
+    would also carry every other worker's output into its context.
+    """
+    return {
+        "conversation_id": state.get("conversation_id"),
+        "user_id": state.get("user_id"),
+        "device_id": state.get("device_id"),
+        "persona": state.get("persona"),
+        "attachments": list(state.get("attachments") or []),
+        "custom_agents": dict(state.get("custom_agents") or {}),
+        "model_request": state.get("model_request"),
+        "context": dict(state.get("context") or {}),
+        "turn_identity": state.get("turn_identity"),
+        "task_plan_id": state.get("task_plan_id"),
+        "todos": list(state.get("todos") or []),
+    }
+
+
+def _dispatch_objective(dispatch: PlanningDispatch) -> str:
+    """A label for the wave, assembled from server-owned task objectives."""
+    return "; ".join(task.objective for task in dispatch.tasks)
+
+
+def _last_tool_calls(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    for message in reversed(state.get("messages") or []):
+        tool_calls = getattr(message, "tool_calls", None)
+        if tool_calls:
+            return [dict(call) for call in tool_calls]
+    return []
+
+
+def _last_ai_text(state: Mapping[str, Any]) -> str:
+    """The last thing the Planning model actually said."""
+    for message in reversed(state.get("messages") or []):
+        if getattr(message, "type", None) != "ai":
+            continue
+        if getattr(message, "tool_calls", None):
+            continue
+        content = getattr(message, "content", "")
+        text = content if isinstance(content, str) else ""
+        if text.strip():
+            return text
+    return ""
+
+
+def _stream_writer() -> Callable[[dict[str, Any]], None] | None:
+    """The live custom-event writer, when there is a run to write into."""
+    try:
+        from langgraph.config import get_stream_writer
+
+        return get_stream_writer()
+    except (RuntimeError, ImportError):  # pragma: no cover - outside a run
+        return None
+
+
+async def _maybe_await(value: Any) -> Any:
+    if hasattr(value, "__await__"):
+        return await value
+    return value
+
+
+def _as_todo_outcome(value: Any) -> TodoActionOutcome:
+    if isinstance(value, TodoActionOutcome):
+        return value
+    if value is None:
+        return TodoActionOutcome()
+    if isinstance(value, Mapping):
+        return TodoActionOutcome(**value)
+    raise TypeError(f"todo applier returned an unsupported outcome: {type(value).__name__}")
