@@ -25,6 +25,7 @@ from app.models.skill_setting import SkillSetting
 from app.models.task_plan import TaskPlan
 from app.models.tool_approval import DecisionType, ToolApproval
 from app.models.tool_approval_setting import ToolApprovalSetting
+from app.models.tool_execution_receipt import ReceiptStatus, ToolExecutionReceipt
 from app.models.tool_result_blob import ToolResultBlob
 from app.models.user import User
 from app.models.user_memory import UserMemory
@@ -52,6 +53,8 @@ __all__ = [
     "ModelProvider",
     "ToolApproval",
     "ToolApprovalSetting",
+    "ToolExecutionReceipt",
+    "ReceiptStatus",
     "ToolResultBlob",
     "UserMemory",
     "DecisionType",

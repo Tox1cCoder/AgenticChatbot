@@ -18,7 +18,7 @@
 - Worker identity is `(dispatch_id, task_id)`; collection order uses server-owned `position`.
 - `GraphBubbleUp` and `GraphInterrupt` cross every generic exception boundary unchanged.
 - Compile RAG once per workflow construction. Authenticated tools, credentials, messages, evidence allocators, and state remain invocation-scoped.
-- Grounding is mandatory. Regenerate once after the first invalid answer; return a validated abstention after the second.
+- Grounding is mandatory and reports rather than rewrites. Validation records findings; it never regenerates an answer or substitutes an abstention, because a draft that can be replaced wholesale cannot be streamed. The reader is protected at the citation marker instead. (Amended 2026-09-03; supersedes the regenerate-once-then-abstain constraint, which predates the 2026-08-27 streaming decision in `553eebb`.)
 - Pending checkpoint interrupts—not parent messages or node-name allowlists—are authoritative.
 - Planning uses injected `StreamWriter` events. Do not checkpoint callbacks, queues, weak references, or sink tokens.
 - Models cannot provide or read mutation execution keys. Claim external exactly-once behavior only for providers supporting idempotency.
@@ -199,10 +199,11 @@ git commit -m "refactor: define canonical planning dispatch state"
 - [ ] **Step 1: Write failing RAG and worker-scope tests**
 
 ```python
-async def test_invalid_grounding_regenerates_once_then_abstains(rag_graph) -> None:
+async def test_invalid_grounding_is_recorded_without_a_second_generation(rag_graph) -> None:
     result = await rag_graph.ainvoke(_request(), config=_config(), context=_context())
-    assert result.grounding.regeneration_count == 1
-    assert result.abstained is True
+    assert result.grounding.regeneration_count == 0
+    assert result.grounding.outcome == "accepted_with_findings"
+    assert result.abstained is False
 
 
 async def test_public_and_worker_rag_share_compiled_graph(workflow) -> None:
@@ -239,22 +240,18 @@ graph.add_node("rag_model", self._model_node)
 graph.add_node("rag_tools", ToolNode(self._tools, handle_tool_errors=False))
 graph.add_node("collect_rag_outputs", self._collect_outputs)
 graph.add_node("validate_grounding", self._validate)
-graph.add_node("regenerate_grounded", self._regenerate)
 graph.add_node("package_rag_result", self._package)
 graph.add_edge(START, "rag_model")
 graph.add_conditional_edges("rag_model", self._after_model,
                             {"tools": "rag_tools", "validate": "validate_grounding"})
 graph.add_edge("rag_tools", "collect_rag_outputs")
 graph.add_edge("collect_rag_outputs", "rag_model")
-graph.add_conditional_edges("validate_grounding", self._after_validation,
-                            {"result": "package_rag_result",
-                             "regenerate": "regenerate_grounded"})
-graph.add_edge("regenerate_grounded", "validate_grounding")
+graph.add_edge("validate_grounding", "package_rag_result")
 graph.add_edge("package_rag_result", END)
 self._compiled = graph.compile(checkpointer=True)
 ```
 
-The first invalid grounding result takes the regeneration edge once; the next invalid result becomes an explicit abstention and is packaged. Populate result evidence, artifacts, and images from server-produced tool records.
+Every result passes through `validate_grounding`, and there is no path around it. Validation records what it found and packages the same answer: an unresolvable citation is neutralized where it renders, and a coverage shortfall is a recorded finding. Populate result evidence, artifacts, and images from server-produced tool records.
 
 - [ ] **Step 4: Build the canonical specialist worker request**
 
@@ -923,7 +920,7 @@ Record commands, exit codes, and test counts in the execution log. Commit only d
 - [ ] Invalid dispatches start zero workers; turn limits are 8 tasks, 4 concurrent, and 2 waves.
 - [ ] Worker objective, HITL policy, custom-agent snapshot, attachments, model request, and restricted tools reach one worker path.
 - [ ] LangGraph control-flow exceptions are never normalized as failures.
-- [ ] Top-level/worker RAG share one graph, preserve provenance, regenerate once, then abstain.
+- [ ] Top-level/worker RAG share one graph, preserve provenance, and validate every result without regenerating or abstaining.
 - [ ] Pending interrupts drive non-stream, stream, state, and resume without message/node heuristics.
 - [ ] Parallel interrupts retain distinct IDs and provenance.
 - [ ] Receipts prevent completed mutation replay and expose unsupported crash gaps.
@@ -937,6 +934,10 @@ Record commands, exit codes, and test counts in the execution log. Commit only d
 | Date | Task | Result | Evidence |
 |---|---|---|---|
 | 2026-08-28 | Plan rewrite | Complete | Approved root-fix design translated into atomic Tasks 1-8; implementation has not started. |
+| 2026-09-03 | Task 1 | Complete | `a45cf03`. Worker identity is `(dispatch_id, task_id)`; `WorkerTaskProposal`/`DispatchSubagentsInput`/`WorkerTask`/`PlanningDispatch` added; `validate_dispatch_call` validates whole proposals and rejects rather than truncates; `planning_worker_max_dispatch_waves=2`. 67 focused tests pass, ruff clean. |
+| 2026-09-03 | Plan amendment | Complete | Grounding constraint, Task 2 Step 1/3, and checklist item 6 amended to record-only validation. The regenerate-once-then-abstain rule predated the 2026-08-27 streaming decision (`553eebb`) and is guarded against by `test_stranded_enforcement_machinery_has_no_production_caller`. Confirmed with Thai before amending. |
+| 2026-09-03 | Task 2 | Complete | One `RagExecutionGraph` compiled once per workflow (`compile_count == 1`), model-driven tool loop (`rag_model -> rag_tools -> collect_rag_outputs -> rag_model`), invocation-scoped evidence allocator on the run config. `PlanningWorkerRuntime.run(task, state, writer)` replaces `PlanningOrchestrator`; `build_worker_request` is the single place objective/HITL policy/custom agents/attachments/model request/tool scope are assembled. `WorkerToolScopeMiddleware` refuses out-of-scope calls *before* approval (composed last so its `after_model` runs first). `GraphBubbleUp` re-raised ahead of every normalization. |
+| 2026-09-03 | Task 3 | Complete (integration tests unexecuted) | `tool_execution_receipts` model/repository/service + migration `b8c9d0e1f2a3` (down_revision `a7b8c9d0e1f2`, single head). `execution_key` = SHA-256 of thread/dispatch/task/tool-call with a `` separator; `provider_idempotency` deliberately excluded from identity. Receipts hook into `ToolExecutionMiddleware.awrap_tool_call` — after authorization and approval, before invocation. Every repository transition is a compare-and-set; reservation relies on the unique index rather than read-then-write. 16 service tests pass. **The 8 PostgreSQL tests SKIP here (no `TEST_DATABASE_URL`) and the migration is NOT applied to the live DB — `alembic check` reports "Target database is not up to date" for that reason.** |
 
 ## Execution Handoff
 

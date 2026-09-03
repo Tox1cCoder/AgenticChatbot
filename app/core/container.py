@@ -52,6 +52,7 @@ from app.repositories.model_usage import ModelUsageRepository
 from app.repositories.task_plan import TaskPlanRepository
 from app.repositories.tool_approval import ToolApprovalRepository
 from app.repositories.tool_approval_setting import ToolApprovalSettingRepository
+from app.repositories.tool_execution_receipt import ToolExecutionReceiptRepository
 from app.repositories.tool_result_blob import ToolResultBlobRepository
 from app.repositories.user import UserRepository
 from app.repositories.user_memory import UserMemoryRepository
@@ -462,6 +463,15 @@ class Container(containers.DeclarativeContainer):
         session_factory=db.provided.session,
     )
 
+    # Durable mutation receipts. Async transport is required: reserving a
+    # receipt happens inside a graph node, and blocking the event loop there
+    # would stall every other in-flight stream.
+    tool_execution_receipt_repository = providers.Factory(
+        ToolExecutionReceiptRepository,
+        session_factory=db.provided.session,
+        async_session_factory=db.provided.async_session,
+    )
+
     history_provider = providers.Singleton(
         ConversationHistoryProvider,
         message_repository=message_repository,
@@ -574,6 +584,7 @@ class Container(containers.DeclarativeContainer):
             history_provider=container.history_provider(),
             model_usage_recorder=container.model_usage_recorder(),
             chat_image_service=container.chat_image_service(),
+            tool_execution_receipt_repository=container.tool_execution_receipt_repository(),
         )
         rag_agent = getattr(workflow_runtime, "rag_agent", None)
         if rag_agent is not None:

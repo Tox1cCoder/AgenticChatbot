@@ -520,7 +520,7 @@ The server accepts either a fully-formed URL (`REDIS_URL`) or a hostname + conve
 
 ## Database Migrations
 
-Migrations are Alembic-managed (single head, currently `a7b8c9d0e1f2`). They are applied **automatically** at application startup via `app.database.migrations.upgrade_database` inside the lifespan hook, so manual migration is only required for dev or out-of-process tooling:
+Migrations are Alembic-managed (single head, currently `b8c9d0e1f2a3`). They are applied **automatically** at application startup via `app.database.migrations.upgrade_database` inside the lifespan hook, so manual migration is only required for dev or out-of-process tooling:
 
 ```bash
 alembic upgrade head
