@@ -24,6 +24,8 @@ from typing import Any
 
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
+from langchain_core.messages import HumanMessage
+from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
@@ -32,13 +34,16 @@ from app.ai.workflow.contracts import (
     OutcomeProvenance,
     ResponseOutcome,
     WorkerResult,
+    WorkerTask,
     WorkflowError,
 )
 from app.ai.workflow.inventory import CUSTOM_AGENT_NODE, CUSTOM_AGENT_PREFIX
 from app.ai.workflow.middleware import (
+    TOP_LEVEL_DISPATCH_ID,
     SpecialistToolScope,
     ToolApprovalMiddleware,
     ToolExecutionMiddleware,
+    WorkerToolScopeMiddleware,
     build_specialist_middleware,
 )
 
@@ -55,11 +60,18 @@ __all__ = [
     "SpecialistRequest",
     "SpecialistRuntimeContext",
     "ToolCallLimitExceededError",
+    "UnavailableSpecialist",
+    "build_worker_request",
     "make_specialist_wrapper",
     "make_subgraph_specialist_wrapper",
     "make_tool_stage_wrapper",
     "resolve_node_for_agent_id",
 ]
+
+
+class UnavailableSpecialist(KeyError):
+    """No definition exists for the requested agent in this request's scope."""
+
 
 # Turn-scoped context flag telling the pre-v2 ``_finalize_agent_response`` path
 # that the parent finalizer owns the terminal public message.
@@ -422,6 +434,61 @@ class SpecialistRequest:
     extras: dict[str, Any] = field(default_factory=dict)
 
 
+def build_worker_request(task: WorkerTask, state: dict[str, Any]) -> SpecialistRequest:
+    """The one way a dispatched task becomes a specialist invocation.
+
+    The objective travels as the worker's ``HumanMessage``, not as part of a
+    system instruction: a worker that reads its objective from its own prompt
+    cannot distinguish the task from its standing rules, and a plan that says
+    "ignore your instructions" would then be indistinguishable from one.
+
+    History is deliberately empty. A worker is given a bounded parent context
+    and its own objective; replaying the public conversation would let it
+    answer the user directly instead of doing the delegated work.
+    """
+    context = state.get("context") or {}
+    identity = state.get("turn_identity")
+    return SpecialistRequest(
+        agent_id=task.agent_id,
+        conversation_id=state.get("conversation_id"),
+        user_id=state.get("user_id"),
+        device_id=state.get("device_id"),
+        persona=state.get("persona"),
+        model_request=task.model_request or state.get("model_request"),
+        messages=[HumanMessage(content=task.objective)],
+        history=[],
+        state={"attachments": state.get("attachments") or [], "context": context},
+        hitl_policy=_hitl_policy(context),
+        attachments=list(state.get("attachments") or []),
+        extras={
+            "worker": True,
+            "dispatch_id": task.dispatch_id,
+            "task_id": task.task_id,
+            "position": task.position,
+            "parent_context": task.parent_context,
+            "allowed_tool_ids": task.allowed_tool_ids,
+            "hitl_policy": _hitl_policy(context),
+            "custom_agents": state.get("custom_agents") or {},
+            # Receipt identity. Runtime-owned, so a mutation this worker makes
+            # is keyed to this turn and this task and nothing else.
+            "thread_id": getattr(identity, "checkpoint_thread_id", None),
+            "turn_id": getattr(identity, "turn_id", None),
+        },
+    )
+
+
+def _hitl_policy(context: Any) -> dict[str, Any]:
+    """The request's approval policy. A worker inherits it, never a default.
+
+    Falling back to a permissive default would make a delegated mutation
+    unapproved on exactly the path the user cannot see.
+    """
+    if not isinstance(context, dict):
+        return {}
+    policy = context.get("hitl_policy")
+    return dict(policy) if isinstance(policy, dict) else {}
+
+
 @dataclass(frozen=True)
 class SpecialistRuntimeContext:
     """Typed runtime context handed to a compiled specialist subgraph."""
@@ -451,6 +518,7 @@ class SpecialistFactory:
         agent_builder: Callable[..., Any] | None = None,
         usage_recorder: Any = None,
         settings: Any = None,
+        receipt_service: Any = None,
     ) -> None:
         self._definitions = dict(definitions)
         self._runtime_model_resolver = runtime_model_resolver
@@ -458,6 +526,7 @@ class SpecialistFactory:
         self._agent_builder = agent_builder or _default_agent_builder
         self._usage_recorder = usage_recorder
         self._settings = settings
+        self._receipt_service = receipt_service
 
     # -- registry --------------------------------------------------------
 
@@ -469,7 +538,7 @@ class SpecialistFactory:
         if definition is None and agent_id.startswith(CUSTOM_AGENT_PREFIX):
             definition = self._definitions.get(CUSTOM_AGENT_NODE)
         if definition is None:
-            raise KeyError(f"no specialist definition for {agent_id!r}")
+            raise UnavailableSpecialist(f"no specialist definition for {agent_id!r}")
         return definition
 
     # -- public invocation -----------------------------------------------
@@ -488,19 +557,21 @@ class SpecialistFactory:
         produced = self._produced_messages(request, result)
         return self._to_outcome(definition, request, produced, tool_execution)
 
-    async def invoke_worker(self, request: SpecialistRequest, *, task_id: str) -> WorkerResult:
+    async def invoke_worker(self, request: SpecialistRequest, *, task: WorkerTask) -> WorkerResult:
         """Run a specialist as a Planning worker.
 
         A worker returns a typed private result. It never appends a public
         assistant message and never performs a parent-level handoff.
+
+        The ``except`` order below is the contract. ``GraphBubbleUp`` is
+        re-raised first and unwrapped: an approval interrupt travelling out of
+        a worker is control flow, and normalizing it into a failed result would
+        answer the turn without the human who was asked. Everything after it is
+        a genuine failure, narrowed before the generic case so a limit or a
+        timeout keeps its own code.
         """
         if request.agent_id == PLANNING_AGENT_ID:
-            return WorkerResult(
-                task_id=task_id,
-                agent_id=request.agent_id,
-                status="failed",
-                error_code="recursive_planning",
-            )
+            return _failed_worker(task, "recursive_planning")
 
         try:
             definition = self.definition_for(request.agent_id)
@@ -510,36 +581,28 @@ class SpecialistFactory:
                 context=self._runtime_context(request),
                 config=self._run_config(request),
             )
+        except GraphBubbleUp:
+            raise
         except (ModelCallLimitExceededError, ToolCallLimitExceededError):
-            return WorkerResult(
-                task_id=task_id,
-                agent_id=request.agent_id,
-                status="failed",
-                error_code="agent_execution_limit",
-            )
+            return _failed_worker(task, "agent_execution_limit")
         except TimeoutError:
-            return WorkerResult(
-                task_id=task_id,
-                agent_id=request.agent_id,
-                status="failed",
-                error_code="worker_timeout",
-            )
+            return _failed_worker(task, "worker_timeout")
+        except UnavailableSpecialist:
+            return _failed_worker(task, "agent_unavailable")
         except Exception as exc:  # noqa: BLE001 - normalized into a typed result
-            logger.warning("Worker %s failed for task %s: %s", request.agent_id, task_id, exc)
-            return WorkerResult(
-                task_id=task_id,
-                agent_id=request.agent_id,
-                status="failed",
-                error_code="tool_execution_failed",
-            )
+            logger.warning("Worker %s failed for task %s: %s", request.agent_id, task.task_id, exc)
+            return _failed_worker(task, "tool_execution_failed")
 
         produced = self._produced_messages(request, result)
         return WorkerResult(
-            task_id=task_id,
+            dispatch_id=task.dispatch_id,
+            task_id=task.task_id,
+            position=task.position,
             agent_id=request.agent_id,
             status="completed",
             content=_final_text(produced),
             artifacts=tuple(tool_execution.artifacts),
+            images=tuple(tool_execution.images),
         )
 
     # -- construction ----------------------------------------------------
@@ -552,6 +615,10 @@ class SpecialistFactory:
         system_prompt = await _resolve(definition.system_prompt_factory, request)
         tools = await _resolve(definition.tool_factory, request) or []
 
+        worker_scope = _worker_tool_scope(request)
+        if worker_scope is not None:
+            tools = worker_scope.filter_tools(tools)
+
         scope = SpecialistToolScope(
             agent=definition.agent,
             agent_key=_tool_state_key(definition),
@@ -560,6 +627,13 @@ class SpecialistFactory:
             device_id=request.device_id,
             rich_response_capable=rich_response_capable_from_context(request.state.get("context")),
             internal_tools=request.extras.get("internal_tools"),
+            receipt_service=self._receipt_service,
+            thread_id=_extra_str(request, "thread_id"),
+            turn_id=_extra_str(request, "turn_id"),
+            # A top-level call's task is the active specialist, so it can never
+            # collide on an execution key with a delegated one.
+            dispatch_id=_extra_str(request, "dispatch_id") or TOP_LEVEL_DISPATCH_ID,
+            task_id=_extra_str(request, "task_id") or request.agent_id,
         )
         # Seed the scope with the tools bound at build time. A resumed run
         # re-enters after the model call, so the refresh in the execution
@@ -583,6 +657,7 @@ class SpecialistFactory:
             max_tool_calls=self._limit("specialist_max_tool_calls", 16),
             tool_execution=tool_execution,
             approval=ToolApprovalMiddleware(scope=scope, hitl_policy=request.hitl_policy or {}),
+            worker_tool_scope=worker_scope,
             preflight=_preflight_for(definition, request),
         )
 
@@ -651,6 +726,39 @@ class SpecialistFactory:
                 private_messages=tuple(produced),
             ),
         )
+
+
+def _extra_str(request: SpecialistRequest, key: str) -> str | None:
+    """One runtime-supplied identity field, or nothing."""
+    value = request.extras.get(key)
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+def _worker_tool_scope(request: SpecialistRequest) -> WorkerToolScopeMiddleware | None:
+    """The scope guard for a worker invocation, or nothing for a public turn.
+
+    A worker with an empty allowed set still gets a guard: "no tools" is a
+    decision the dispatch made, not an absence of configuration.
+    """
+    if not request.extras.get("worker"):
+        return None
+    return WorkerToolScopeMiddleware(
+        allowed_tool_ids=tuple(request.extras.get("allowed_tool_ids") or ())
+    )
+
+
+def _failed_worker(task: WorkerTask, error_code: str) -> WorkerResult:
+    """A failed worker keeps full identity, so no dispatched task is orphaned."""
+    return WorkerResult(
+        dispatch_id=task.dispatch_id,
+        task_id=task.task_id,
+        position=task.position,
+        agent_id=task.agent_id,
+        status="failed",
+        content="",
+        error_code=error_code,
+    )
 
 
 def _preflight_for(definition: SpecialistDefinition, request: SpecialistRequest):

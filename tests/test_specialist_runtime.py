@@ -14,7 +14,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.ai.schemas import AgentType
-from app.ai.workflow.contracts import ResponseOutcome, WorkerResult
+from app.ai.workflow.contracts import ResponseOutcome, WorkerResult, WorkerTask
 from app.ai.workflow.specialists import (
     SpecialistDefinition,
     SpecialistFactory,
@@ -201,9 +201,22 @@ async def test_unknown_specialist_is_rejected():
         await factory.invoke(_request(agent_id="nope_agent"))
 
 
+def _worker_task(task_id: str = "t1", agent_id: str = "chat_agent", **overrides) -> WorkerTask:
+    """The server-owned identity a dispatched worker carries."""
+    payload = {
+        "dispatch_id": "d1",
+        "task_id": task_id,
+        "position": 0,
+        "objective": f"do {task_id}",
+        "agent_id": agent_id,
+    }
+    payload.update(overrides)
+    return WorkerTask(**payload)
+
+
 async def test_worker_mode_never_appends_a_public_message():
     factory = _factory()
-    result = await factory.invoke_worker(_request(), task_id="t1")
+    result = await factory.invoke_worker(_request(), task=_worker_task())
 
     assert isinstance(result, WorkerResult)
     assert result.task_id == "t1"
@@ -219,7 +232,7 @@ async def test_worker_failure_becomes_a_typed_failed_result():
         return RecordingAgent(raises=RuntimeError("tool exploded"))
 
     factory._agent_builder = build_agent
-    result = await factory.invoke_worker(_request(), task_id="t1")
+    result = await factory.invoke_worker(_request(), task=_worker_task())
 
     assert result.status == "failed"
     assert result.error_code == "tool_execution_failed"
@@ -241,7 +254,7 @@ async def test_worker_execution_limit_maps_to_the_typed_code():
         )
 
     factory._agent_builder = build_agent
-    result = await factory.invoke_worker(_request(), task_id="t1")
+    result = await factory.invoke_worker(_request(), task=_worker_task())
 
     assert result.status == "failed"
     assert result.error_code == "agent_execution_limit"
@@ -254,7 +267,9 @@ async def test_recursive_planning_worker_is_rejected():
             "planning_agent": _definition("planning_agent", agent_type=AgentType.PLANNING),
         }
     )
-    result = await factory.invoke_worker(_request(agent_id="planning_agent"), task_id="t1")
+    result = await factory.invoke_worker(
+        _request(agent_id="planning_agent"), task=_worker_task(agent_id="planning_agent")
+    )
 
     assert result.status == "failed"
     assert result.error_code == "recursive_planning"

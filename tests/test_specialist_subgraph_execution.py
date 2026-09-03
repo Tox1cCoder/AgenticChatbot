@@ -17,7 +17,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 
 from app.ai.schemas import AgentType
-from app.ai.workflow.contracts import ResponseOutcome
+from app.ai.workflow.contracts import ResponseOutcome, WorkerTask
 from app.ai.workflow.specialists import (
     SpecialistDefinition,
     SpecialistFactory,
@@ -207,6 +207,19 @@ async def test_model_call_limit_raises_the_typed_framework_error():
         await factory.invoke(_request())
 
 
+def _worker_task(task_id: str = "t1", agent_id: str = "chat_agent", **overrides) -> WorkerTask:
+    """The server-owned identity a dispatched worker carries."""
+    payload = {
+        "dispatch_id": "d1",
+        "task_id": task_id,
+        "position": 0,
+        "objective": f"do {task_id}",
+        "agent_id": agent_id,
+    }
+    payload.update(overrides)
+    return WorkerTask(**payload)
+
+
 async def test_execution_limit_becomes_a_typed_worker_failure():
     @tool
     def spin() -> str:
@@ -225,7 +238,7 @@ async def test_execution_limit_becomes_a_typed_worker_failure():
         settings=SimpleNamespace(specialist_max_model_calls=2, specialist_max_tool_calls=10),
     )
 
-    result = await factory.invoke_worker(_request(), task_id="t1")
+    result = await factory.invoke_worker(_request(), task=_worker_task())
 
     assert result.status == "failed"
     assert result.error_code == "agent_execution_limit"

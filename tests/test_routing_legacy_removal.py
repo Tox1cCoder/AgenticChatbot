@@ -206,28 +206,34 @@ def test_the_finalizer_is_the_only_in_graph_response_builder():
     assert builder_source.count('graph.add_edge("finalize", END)') == 1
 
 
-def test_the_shared_rag_graph_and_planning_orchestrator_are_not_wired_yet():
-    """Recorded, not excused: these are components, not the running path.
+def test_the_shared_rag_graph_and_worker_runtime_are_constructed_once():
+    """The v2 RAG/Planning components are now the wired production objects.
 
-    ``RagExecutionGraphFactory`` and ``PlanningOrchestrator`` are importable
-    and unit-tested, but nothing in ``app`` constructs either one — the RAG and
-    Planning nodes still run their pre-v2 loops. Delete this test when the
-    cutover lands; do not weaken it.
+    Both entry points must hold the *same* compiled graph. This checks the
+    wiring structurally -- the worker runtime is handed ``self.rag_execution_
+    graph`` rather than anything it could build per invocation -- because a
+    factory is how the two paths drifted into two graphs with two grounding
+    policies. Runtime identity of the two attributes is asserted in
+    ``tests/test_planning_execution_graph.py``.
+
+    Replaces the record that these were importable but unwired. The remaining
+    step is the topology cutover, tracked by
+    ``test_the_two_rag_loops_are_still_separate_implementations``.
     """
     import pathlib
     import re
 
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    constructed = [
+    graph_source = (repo_root / "app" / "ai" / "graph.py").read_text(encoding="utf-8")
+
+    assert re.search(r"self\.rag_execution_graph = RagExecutionGraph\(", graph_source)
+    assert re.search(r"rag_execution_graph=self\.rag_execution_graph", graph_source)
+    assert "PlanningWorkerRuntime(" in graph_source
+
+    # No per-invocation RAG graph construction survives anywhere in the app.
+    factories = [
         path.relative_to(repo_root).as_posix()
         for path in sorted((repo_root / "app").rglob("*.py"))
-        if path.name not in {"rag_execution.py", "planning_execution.py"}
-        and re.search(
-            r"(RagExecutionGraphFactory|PlanningOrchestrator)\s*\(",
-            path.read_text(encoding="utf-8"),
-        )
+        if re.search(r"RagExecutionGraphFactory|rag_execution_factory", path.read_text("utf-8"))
     ]
-    assert constructed == [], (
-        f"the v2 RAG/Planning components are now constructed in {constructed} — "
-        "the cutover advanced, so update this record and the STILL_LIVE entries"
-    )
+    assert factories == [], f"a per-invocation RAG graph factory came back in {factories}"

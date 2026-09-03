@@ -33,6 +33,7 @@ from ..services.event_streaming.subagents import (
     resolve_subagent_event_sink,
     stream_with_subagent_events,
 )
+from ..services.tool_execution_receipt_service import ToolExecutionReceiptService
 from .agent_metadata import (
     attach_agent_metadata,
     normalize_handoff_metadata,
@@ -105,7 +106,9 @@ from .workflow.contracts import TurnIdentity
 from .workflow.custom_agents import CustomAgentsMixin
 from .workflow.graph_builder import SPECIALIST_NODE_NAMES, build_workflow_graph
 from .workflow.inventory import CUSTOM_AGENT_NODE
+from .workflow.planning_execution import PlanningLimits, PlanningWorkerRuntime
 from .workflow.planning_loop import PlanningLoopMixin
+from .workflow.rag_execution import ProductionRagRuntime, RagExecutionGraph
 from .workflow.rag_loop import RagLoopMixin
 from .workflow.routing import RoutingContextBuilder, RoutingService
 from .workflow.runtime_context import WorkflowRuntimeContext, build_runtime_inventory
@@ -219,6 +222,7 @@ class MultiAgentWorkflow(
         model_usage_recorder: "ModelUsageRecorder | None" = None,
         chat_image_service: Any | None = None,
         routing_service: Any | None = None,
+        tool_execution_receipt_repository: Any | None = None,
     ):
         self.qdrant_client = qdrant_client
         # Resolves stored image references back to base64 for the model when
@@ -287,7 +291,35 @@ class MultiAgentWorkflow(
         self._runtime_model_resolver = runtime_model_resolver
         self._model_usage_recorder = model_usage_recorder
 
-        self._specialist_factory = self._build_specialist_factory()
+        # Durable mutation receipts. Absent (no repository wired), mutations run
+        # exactly as before: the crash gap stays open and is not concealed.
+        self._receipt_service = (
+            ToolExecutionReceiptService(repository=tool_execution_receipt_repository)
+            if tool_execution_receipt_repository is not None
+            else None
+        )
+        self._specialist_factory = self._build_specialist_factory(self._receipt_service)
+
+        # One compiled RAG topology for the whole workflow. Both entry points --
+        # the top-level RAG specialist and a Planning RAG worker -- run this
+        # object, because two graphs were how one path could skip validation.
+        self.rag_execution_graph = RagExecutionGraph(
+            runtime=ProductionRagRuntime(
+                rag_agent=self.rag_agent,
+                agent_lookup=self._agent_for_rag_request,
+                settings=settings,
+            ),
+            grounded_answer_gate=self._grounded_answer_gate(),
+            settings=settings,
+        )
+        # The worker runtime holds the *same* graph object rather than a factory,
+        # so a worker cannot end up on a differently configured RAG path.
+        self.planning_worker_runtime = PlanningWorkerRuntime(
+            specialist_factory=self._specialist_factory,
+            rag_execution_graph=self.rag_execution_graph,
+            limits=PlanningLimits.from_settings(settings),
+        )
+
         self.graph = self._build_graph()
         self._cleanup_agents = [
             self.chat_agent,
@@ -298,6 +330,14 @@ class MultiAgentWorkflow(
             self.canvas_agent,
         ]
         self._initialized = False
+
+    def _agent_for_rag_request(self, request: Any) -> Any:
+        """The agent whose tool map a RAG tool round executes against.
+
+        Non-search tool calls resolve through the RAG agent's own map so a
+        deferred tool it loaded mid-turn stays callable in the same turn.
+        """
+        return self.rag_agent
 
     @property
     def model_usage_recorder(self) -> "ModelUsageRecorder | None":
@@ -1362,7 +1402,7 @@ class MultiAgentWorkflow(
     # Routing-v2 specialist subgraphs
     # ------------------------------------------------------------------
 
-    def _build_specialist_factory(self) -> SpecialistFactory:
+    def _build_specialist_factory(self, receipt_service: Any = None) -> SpecialistFactory:
         """Register the standard specialists as per-invocation subgraphs.
 
         Definitions come from the agent modules so each agent keeps its own
@@ -1382,6 +1422,7 @@ class MultiAgentWorkflow(
             model_factory=ModelFactory,
             usage_recorder=self._model_usage_recorder,
             settings=settings,
+            receipt_service=receipt_service,
         )
 
     async def _specialist_request_for(self, node_name: str, state: GraphState) -> SpecialistRequest:
@@ -1416,6 +1457,10 @@ class MultiAgentWorkflow(
         excluded_tool_names = invocation_kwargs.pop("excluded_tool_names", None)
         include_hand_off = invocation_kwargs.pop("include_hand_off", None)
 
+        # A top-level mutation is receipt-backed too. Its dispatch is
+        # "top-level" and its task is the active specialist, so it can never
+        # collide on an execution key with a delegated call.
+        turn_identity = state.get("turn_identity")
         extras: dict[str, Any] = {
             "has_images": has_images,
             "disable_tools": disable_tools,
@@ -1423,6 +1468,9 @@ class MultiAgentWorkflow(
             "excluded_tool_names": excluded_tool_names,
             "include_hand_off": include_hand_off,
             "system_prompt_kwargs": invocation_kwargs,
+            "thread_id": getattr(turn_identity, "checkpoint_thread_id", None),
+            "turn_id": getattr(turn_identity, "turn_id", None),
+            "task_id": active_agent_id,
         }
         if node_name == "canvas_agent":
             previous_artifact = await self._get_active_canvas_snapshot(conversation_id, user_id)
@@ -2637,6 +2685,7 @@ def create_workflow(
     history_provider: ConversationHistoryProvider | None = None,
     model_usage_recorder: "ModelUsageRecorder | None" = None,
     chat_image_service: Any | None = None,
+    tool_execution_receipt_repository: Any | None = None,
 ) -> MultiAgentWorkflow:
     """
     Create multi-agent workflow with required shared dependencies.
@@ -2650,4 +2699,5 @@ def create_workflow(
         history_provider=history_provider,
         model_usage_recorder=model_usage_recorder,
         chat_image_service=chat_image_service,
+        tool_execution_receipt_repository=tool_execution_receipt_repository,
     )

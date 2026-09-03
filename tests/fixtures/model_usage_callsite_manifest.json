@@ -199,13 +199,13 @@
   },
   {
     "file": "app/ai/workflow/planning_execution.py",
-    "function": "PlanningOrchestrator._run_rag_worker",
-    "call_chain": "run.ainvoke",
+    "function": "PlanningWorkerRuntime._run_rag_worker",
+    "call_chain": "self.rag_execution_graph.ainvoke",
     "disposition": "workflow_stream"
   },
   {
     "file": "app/ai/workflow/rag_execution.py",
-    "function": "_RagExecutionRun.ainvoke",
+    "function": "RagExecutionGraph.ainvoke",
     "call_chain": "self._compiled.ainvoke",
     "disposition": "workflow_stream"
   },

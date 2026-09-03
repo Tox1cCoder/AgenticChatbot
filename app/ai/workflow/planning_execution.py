@@ -27,6 +27,9 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
+from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
+from langgraph.errors import GraphBubbleUp
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from typing_extensions import NotRequired, TypedDict
 
@@ -40,6 +43,7 @@ from app.ai.workflow.contracts import (
     WorkerTask,
 )
 from app.ai.workflow.inventory import RoutingInventory
+from app.ai.workflow.specialists import UnavailableSpecialist
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +53,13 @@ __all__ = [
     "PLANNING_AGENT_ID",
     "InvalidPlanningDispatch",
     "PlanningLimits",
-    "PlanningOrchestrator",
     "PlanningState",
+    "PlanningWorkerRuntime",
+    "build_planning_outcome",
     "collect_worker_results",
+    "failed_worker",
     "planning_control_message_id",
+    "render_worker_results",
     "validate_dispatch_call",
 ]
 
@@ -284,76 +291,121 @@ def collect_worker_results(
     return sorted(mine, key=lambda result: result.position)
 
 
-class PlanningOrchestrator:
-    """Runs one Planning turn's workers and synthesizes their results."""
+class PlanningWorkerRuntime:
+    """The one path a dispatched task takes to a typed private result.
+
+    RAG workers and standard specialists diverge only in *which* runtime runs
+    them; everything that decides authority — the objective, the bounded parent
+    context, the approval policy, the custom-agent snapshot, the attachments,
+    the model request, and the restricted tool set — is assembled once in
+    ``build_worker_request`` so neither path can quietly get more than the
+    dispatch granted.
+    """
 
     def __init__(
         self,
         *,
         specialist_factory: Any,
-        rag_execution_factory: Any,
+        rag_execution_graph: Any,
         limits: PlanningLimits,
     ) -> None:
-        self._specialist_factory = specialist_factory
-        self._rag_execution_factory = rag_execution_factory
+        self.specialist_factory = specialist_factory
+        self.rag_execution_graph = rag_execution_graph
         self._limits = limits
 
-    async def run_worker(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Execute one dispatched task and return only its typed result."""
-        task: WorkerTask = payload["task"]
-        runtime_request: dict[str, Any] = payload.get("runtime_request") or {}
+    async def run(
+        self,
+        task: WorkerTask,
+        state: Mapping[str, Any],
+        writer: Callable[[dict[str, Any]], None] | None = None,
+    ) -> WorkerResult:
+        """Execute one dispatched task.
+
+        The ``except`` order is the contract. ``GraphBubbleUp`` is re-raised
+        first: a worker that paused for approval has not failed, and turning
+        that pause into a failed result would answer the turn without the human
+        who was asked. Everything after it is a genuine failure, narrowed
+        before the generic case so a limit or a timeout keeps its own code.
+        """
+        _emit(
+            writer,
+            {
+                "type": "planning_worker",
+                "phase": "start",
+                "dispatch_id": task.dispatch_id,
+                "task_id": task.task_id,
+                "agent_id": task.agent_id,
+            },
+        )
 
         if task.agent_id == PLANNING_AGENT_ID:
-            return {"worker_results": [self._failed(task, "recursive_planning")]}
+            return self._finish(writer, failed_worker(task, "recursive_planning"))
 
         try:
             if task.agent_id == RAG_AGENT_ID:
-                result = await self._run_rag_worker(task, runtime_request)
+                result = await self._run_rag_worker(task, state)
             else:
-                result = await self._run_specialist_worker(task, runtime_request)
+                result = await self._run_specialist_worker(task, state)
+        except GraphBubbleUp:
+            raise
+        except (ModelCallLimitExceededError, ToolCallLimitExceededError):
+            return self._finish(writer, failed_worker(task, "agent_execution_limit"))
         except TimeoutError:
-            return {"worker_results": [self._failed(task, "worker_timeout")]}
+            return self._finish(writer, failed_worker(task, "worker_timeout"))
+        except UnavailableSpecialist:
+            return self._finish(writer, failed_worker(task, "agent_unavailable"))
         except Exception as exc:  # noqa: BLE001 - normalized into a typed result
             logger.warning("Planning worker %s failed: %s", task.task_id, exc)
-            return {"worker_results": [self._failed(task, "tool_execution_failed")]}
+            return self._finish(writer, failed_worker(task, "tool_execution_failed"))
 
-        return {"worker_results": [result]}
+        return self._finish(writer, result)
+
+    @staticmethod
+    def _finish(
+        writer: Callable[[dict[str, Any]], None] | None, result: WorkerResult
+    ) -> WorkerResult:
+        """Report the outcome without leaking the objective or the content."""
+        _emit(
+            writer,
+            {
+                "type": "planning_worker",
+                "phase": "end",
+                "dispatch_id": result.dispatch_id,
+                "task_id": result.task_id,
+                "agent_id": result.agent_id,
+                "status": result.status,
+                "error_code": result.error_code,
+            },
+        )
+        return result
 
     async def _run_specialist_worker(
-        self, task: WorkerTask, runtime_request: dict[str, Any]
+        self, task: WorkerTask, state: Mapping[str, Any]
     ) -> WorkerResult:
-        from app.ai.workflow.specialists import SpecialistRequest
+        from app.ai.workflow.specialists import build_worker_request
 
-        request = SpecialistRequest(
-            agent_id=task.agent_id,
-            conversation_id=runtime_request.get("conversation_id"),
-            user_id=runtime_request.get("user_id"),
-            device_id=runtime_request.get("device_id"),
-            persona=runtime_request.get("persona"),
-            model_request=task.model_request or runtime_request.get("model_request"),
-            messages=[],
-            history=[],
-            state={},
-            extras={"objective": task.objective, "allowed_tool_ids": task.allowed_tool_ids},
-        )
-        return await self._specialist_factory.invoke_worker(request, task_id=task.task_id)
+        request = build_worker_request(task, dict(state))
+        return await self.specialist_factory.invoke_worker(request, task=task)
 
-    async def _run_rag_worker(
-        self, task: WorkerTask, runtime_request: dict[str, Any]
-    ) -> WorkerResult:
-        """RAG workers use the same graph and grounding policy as top-level RAG."""
+    async def _run_rag_worker(self, task: WorkerTask, state: Mapping[str, Any]) -> WorkerResult:
+        """RAG workers use the same compiled graph and gate as top-level RAG."""
         from app.ai.workflow.rag_execution import RagExecutionRequest
+        from app.ai.workflow.specialists import build_worker_request
 
-        run = self._rag_execution_factory.build()
-        result = await run.ainvoke(
+        request = build_worker_request(task, dict(state))
+        result = await self.rag_execution_graph.ainvoke(
             RagExecutionRequest(
                 objective=task.objective,
-                conversation_id=runtime_request.get("conversation_id"),
-                user_id=runtime_request.get("user_id"),
-                device_id=runtime_request.get("device_id"),
-                model_request=task.model_request or runtime_request.get("model_request"),
+                conversation_id=request.conversation_id,
+                user_id=request.user_id,
+                device_id=request.device_id,
+                persona=request.persona,
+                model_request=request.model_request,
                 allowed_tool_ids=task.allowed_tool_ids,
+                hitl_policy=request.hitl_policy or {},
+                attachments=list(request.attachments),
                 mode="worker",
+                dispatch_id=task.dispatch_id,
                 task_id=task.task_id,
             )
         )
@@ -369,79 +421,84 @@ class PlanningOrchestrator:
             images=tuple(getattr(result, "images", ()) or ()),
         )
 
-    @staticmethod
-    def _failed(task: WorkerTask, error_code: str) -> WorkerResult:
-        """A failed worker keeps its full identity so nothing is orphaned."""
-        return WorkerResult(
-            dispatch_id=task.dispatch_id,
-            task_id=task.task_id,
-            position=task.position,
-            agent_id=task.agent_id,
-            status="failed",
-            content="",
-            error_code=error_code,
+
+def failed_worker(task: WorkerTask, error_code: str) -> WorkerResult:
+    """A failed worker keeps full identity, so no dispatched task is orphaned."""
+    return WorkerResult(
+        dispatch_id=task.dispatch_id,
+        task_id=task.task_id,
+        position=task.position,
+        agent_id=task.agent_id,
+        status="failed",
+        content="",
+        error_code=error_code,
+    )
+
+
+def _emit(writer: Callable[[dict[str, Any]], None] | None, event: dict[str, Any]) -> None:
+    """Emit one typed custom event, if the node was given a writer.
+
+    A writer failure must not fail the work it was describing.
+    """
+    if writer is None:
+        return
+    try:
+        writer(event)
+    except Exception as exc:  # noqa: BLE001 - telemetry never fails the turn
+        logger.debug("Dropped planning worker event: %s", exc)
+
+
+def render_worker_results(
+    objective: str, results: Sequence[WorkerResult], limits: PlanningLimits
+) -> str:
+    """Render results as clearly delimited untrusted data.
+
+    Worker output is a document to read, not an instruction to obey; the
+    delimiters are what make that distinction visible to the model.
+    """
+    blocks = [f"Objective: {objective[: limits.objective_max_chars]}"]
+    for result in results:
+        blocks.append(
+            f"{_UNTRUSTED_OPEN} task={result.task_id} agent={result.agent_id} "
+            f"status={result.status}\n"
+            f"{result.content[: limits.parent_context_max_chars]}\n"
+            f"{_UNTRUSTED_CLOSE}"
         )
+    payload = "\n\n".join(blocks)
+    return payload[: limits.parent_context_max_chars]
 
-    # -- synthesis -------------------------------------------------------
 
-    async def synthesize(
-        self,
-        *,
-        objective: str,
-        results: Sequence[WorkerResult],
-        synthesize: Callable[[str], Any],
-    ) -> ResponseOutcome:
-        """Combine ordered worker results into one public outcome.
+def build_planning_outcome(*, content: str, results: Sequence[WorkerResult]) -> ResponseOutcome:
+    """Aggregate server-owned worker provenance into one public outcome.
 
-        Evidence keeps its server-owned provenance through synthesis, and a
-        synthesis that carries any declares the grounding policy so the public
-        validator revalidates it. A synthesis is exactly where an otherwise
-        grounded worker result can be distorted.
-        """
-        payload = self._synthesis_payload(objective, results)
-        content = synthesize(payload)
-        if hasattr(content, "__await__"):
-            content = await content
+    Evidence keeps its server-owned provenance through synthesis, and a
+    synthesis that carries any declares the grounding policy so the public
+    validator revalidates it. A synthesis is exactly where an otherwise
+    grounded worker result can be distorted.
+    """
+    evidence = tuple(record for result in results for record in (result.evidence or ()))
+    artifacts = tuple(artifact for result in results for artifact in (result.artifacts or ()))
+    images = tuple(image for result in results for image in (result.images or ()))
 
-        evidence = tuple(record for result in results for record in (result.evidence or ()))
-        artifacts = tuple(artifact for result in results for artifact in (result.artifacts or ()))
-        images = tuple(image for result in results for image in (result.images or ()))
-        policies: tuple[str, ...] = ("public_content",)
-        if evidence:
-            policies = (*policies, "rag_grounding")
-        if artifacts:
-            policies = (*policies, "artifact_provenance")
+    policies: tuple[str, ...] = ("public_content",)
+    if evidence:
+        policies = (*policies, "rag_grounding")
+    if artifacts:
+        policies = (*policies, "artifact_provenance")
 
-        return ResponseOutcome(
+    return ResponseOutcome(
+        agent_id=PLANNING_AGENT_ID,
+        response=AgentResponse(
+            agent_type=AgentType.PLANNING,
             agent_id=PLANNING_AGENT_ID,
-            response=AgentResponse(
-                agent_type=AgentType.PLANNING,
-                agent_id=PLANNING_AGENT_ID,
-                message=AgentMessage(role=MessageRole.ASSISTANT, content=str(content)),
-                metadata={},
-                tool_artifacts=list(artifacts) or None,
-            ),
-            provenance=OutcomeProvenance(
-                output_policy_ids=policies,
-                evidence=evidence,
-                artifacts=artifacts,
-                images=images,
-            ),
-        )
-
-    def _synthesis_payload(self, objective: str, results: Sequence[WorkerResult]) -> str:
-        """Render results as clearly delimited untrusted data.
-
-        Worker output is a document to read, not an instruction to obey; the
-        delimiters are what make that distinction visible to the model.
-        """
-        blocks = [f"Objective: {objective[: self._limits.objective_max_chars]}"]
-        for result in results:
-            blocks.append(
-                f"{_UNTRUSTED_OPEN} task={result.task_id} agent={result.agent_id} "
-                f"status={result.status}\n"
-                f"{result.content[: self._limits.parent_context_max_chars]}\n"
-                f"{_UNTRUSTED_CLOSE}"
-            )
-        payload = "\n\n".join(blocks)
-        return payload[: self._limits.parent_context_max_chars]
+            message=AgentMessage(role=MessageRole.ASSISTANT, content=str(content)),
+            metadata={"images": list(images)} if images else {},
+            tool_artifacts=list(artifacts) or None,
+        ),
+        provenance=OutcomeProvenance(
+            output_policy_ids=policies,
+            evidence=evidence,
+            artifacts=artifacts,
+            images=images,
+        ),
+    )

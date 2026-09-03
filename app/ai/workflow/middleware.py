@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
+from uuid import UUID
 
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -22,11 +23,13 @@ from langchain.agents.middleware import (
 )
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import interrupt
+from pydantic import ValidationError
 
 from app.ai.context_overflow import is_context_overflow_error
 from app.ai.hitl_config import (
     build_tool_interrupt_payload,
     calls_requiring_approval,
+    resolve_call_identity,
 )
 from app.ai.tool_context import tool_execution_context
 from app.ai.tool_execution import (
@@ -36,6 +39,11 @@ from app.ai.tool_execution import (
 )
 from app.ai.utils import apply_hitl_decisions, normalize_tool_call
 from app.core.runtime_modeling import ResolvedRuntimeModelConfig
+from app.services.tool_execution_receipt_service import (
+    MutationExecutionScope,
+    MutationOutcomeUnknown,
+    NormalizedToolResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +54,37 @@ __all__ = [
     "ToolApprovalMiddleware",
     "ToolExecutionMiddleware",
     "UsageRecordingMiddleware",
+    "WorkerToolScopeMiddleware",
     "build_specialist_middleware",
+    "tool_identities",
 ]
 
 PreflightCallable = Callable[[Any, ResolvedRuntimeModelConfig], Awaitable[Any]]
 ToolFactory = Callable[[], Awaitable[list[Any]]]
+
+#: Dispatch identity for a call made by the public specialist rather than by a
+#: Planning worker. Its task is the active specialist, so a top-level call and
+#: a delegated one can never collide on the same execution key.
+TOP_LEVEL_DISPATCH_ID = "top-level"
+
+#: What the model is told when a mutation's outcome cannot be determined. It is
+#: deliberately not "failed": the effect may have happened.
+MUTATION_OUTCOME_UNKNOWN_TEXT = (
+    "The outcome of this operation could not be confirmed. It may or may not have "
+    "taken effect. Do not retry it; report the uncertainty instead."
+)
+
+
+def _provider_idempotency(tool_call: dict[str, Any], bound: dict[str, Any]) -> bool:
+    """Whether this tool's provider deduplicates on a key we supply.
+
+    Read from the bound tool's own metadata, never from the call arguments. A
+    tool that does not declare it is treated as non-idempotent, which exposes
+    the crash gap rather than papering over it.
+    """
+    tool = bound.get(str(tool_call.get("name") or ""))
+    metadata = getattr(tool, "metadata", None)
+    return bool(isinstance(metadata, dict) and metadata.get("provider_idempotency"))
 
 
 class SpecialistToolScope:
@@ -71,6 +105,11 @@ class SpecialistToolScope:
         device_id: str | None,
         rich_response_capable: bool = True,
         internal_tools: list[Any] | None = None,
+        receipt_service: Any = None,
+        thread_id: str | None = None,
+        turn_id: str | None = None,
+        dispatch_id: str = TOP_LEVEL_DISPATCH_ID,
+        task_id: str | None = None,
     ) -> None:
         self.agent = agent
         self.agent_key = agent_key
@@ -79,8 +118,48 @@ class SpecialistToolScope:
         self.device_id = device_id
         self.rich_response_capable = rich_response_capable
         self.internal_tools = internal_tools
+        # Mutation-receipt identity. All of it comes from runtime and config
+        # metadata: a model can neither supply nor read an execution key,
+        # because a key it could choose is a key it could reuse to replay
+        # someone else's effect -- or vary to force a duplicate.
+        self.receipt_service = receipt_service
+        self.thread_id = thread_id
+        self.turn_id = turn_id
+        self.dispatch_id = dispatch_id or TOP_LEVEL_DISPATCH_ID
+        self.task_id = task_id or agent_key
         self._tool_map: dict[str, Any] | None = None
         self._bound: dict[str, Any] = {}
+
+    def mutation_scope(self, tool_call: dict[str, Any], identity: Any) -> Any:
+        """The receipt identity for one call, or nothing when it needs none.
+
+        Returns ``None`` for a read, for a turn with no receipt service, and
+        for a scope missing an owner: a receipt keyed on a partial identity
+        would collide across turns, which is worse than no receipt at all.
+        """
+        if self.receipt_service is None or not getattr(identity, "mutation", False):
+            return None
+        if not (self.thread_id and self.turn_id and self.conversation_id and self.user_id):
+            logger.warning(
+                "Mutation %s ran without a receipt: incomplete execution scope",
+                identity.name,
+            )
+            return None
+        try:
+            return MutationExecutionScope(
+                thread_id=self.thread_id,
+                dispatch_id=self.dispatch_id,
+                task_id=self.task_id,
+                tool_call_id=str(tool_call.get("id") or ""),
+                tool_id=str(identity.qualified_tool_id or identity.name),
+                user_id=UUID(str(self.user_id)),
+                conversation_id=UUID(str(self.conversation_id)),
+                turn_id=self.turn_id,
+                provider_idempotency=_provider_idempotency(tool_call, self._bound),
+            )
+        except (ValueError, ValidationError) as exc:
+            logger.warning("Mutation %s ran without a receipt: %s", identity.name, exc)
+            return None
 
     def offer(self, tools: Sequence[Any]) -> None:
         """Record the tool objects this invocation actually bound to the model.
@@ -304,6 +383,50 @@ class ToolExecutionMiddleware(AgentMiddleware):
             # carry on with the wrong agent.
             return await handler(request)
 
+        # Receipts sit here, after authorization and approval and before the
+        # provider call. A receipt for a call the user was never allowed to
+        # make would make the refusal unretryable.
+        identity = resolve_call_identity(call, tool_map=tool_map, mcp_manager=await _mcp_manager())
+        mutation_scope = self._scope.mutation_scope(call, identity)
+        if mutation_scope is None:
+            return await self._execute(call, tool_map)
+
+        async def invoke(**_: Any) -> NormalizedToolResult:
+            message = await self._execute(call, tool_map)
+            if message.status == "error":
+                # A recorded failure means the provider never accepted the
+                # call, so a later replay is free to try again.
+                raise _MutationRejected(str(message.content or ""))
+            return NormalizedToolResult(content=str(message.content or ""))
+
+        try:
+            result = await self._scope.receipt_service.execute_mutation(mutation_scope, invoke)
+        except MutationOutcomeUnknown:
+            return ToolMessage(
+                content=MUTATION_OUTCOME_UNKNOWN_TEXT,
+                tool_call_id=str(call.get("id") or ""),
+                name=str(call.get("name") or "tool"),
+                status="error",
+            )
+        except _MutationRejected as exc:
+            return ToolMessage(
+                content=str(exc),
+                tool_call_id=str(call.get("id") or ""),
+                name=str(call.get("name") or "tool"),
+                status="error",
+            )
+
+        # ``model_visible_payload`` is what strips the provider receipt: it is a
+        # provider-side handle for reconciliation, not part of the answer.
+        return ToolMessage(
+            content=str(result.model_visible_payload().get("content") or ""),
+            tool_call_id=str(call.get("id") or ""),
+            name=str(call.get("name") or "tool"),
+            status="success",
+        )
+
+    async def _execute(self, call: dict[str, Any], tool_map: dict[str, Any]) -> ToolMessage:
+        """Run one call through the product's execution pipeline."""
         with self._scope.execution_context():
             outputs, artifacts, images = await execute_tool_calls(
                 tool_calls=[call],
@@ -327,6 +450,14 @@ class ToolExecutionMiddleware(AgentMiddleware):
         )
 
 
+class _MutationRejected(RuntimeError):
+    """The provider refused the mutation, carrying the text the model sees.
+
+    Raised so the receipt records a failure -- which a later replay is allowed
+    to retry -- while the model still receives the provider's own feedback.
+    """
+
+
 def _returns_control_command(tool: Any) -> bool:
     """Whether this tool's result is a control decision rather than a value."""
     metadata = getattr(tool, "metadata", None)
@@ -337,6 +468,78 @@ def _is_error(artifacts: list[dict[str, Any]]) -> bool:
     return any(
         isinstance(artifact, dict) and artifact.get("status") == "error" for artifact in artifacts
     )
+
+
+def tool_identities(tool: Any) -> frozenset[str]:
+    """Every name this tool object can legitimately be addressed by.
+
+    A dispatch's allowed set is resolved from live tool definitions, which may
+    name a tool by its bare name or by a qualified id. Matching on both is what
+    keeps a legitimate call from being refused as out of scope.
+    """
+    candidates = (
+        getattr(tool, "name", None),
+        getattr(tool, "tool_id", None),
+        (getattr(tool, "metadata", None) or {}).get("qualified_name")
+        if isinstance(getattr(tool, "metadata", None), dict)
+        else None,
+    )
+    return frozenset(str(candidate) for candidate in candidates if candidate)
+
+
+class WorkerToolScopeMiddleware(AgentMiddleware):
+    """Confine a Planning worker to the tools its dispatch authorized.
+
+    Two layers, because either alone leaves a hole. Filtering the bound tool
+    set means the model is never offered a tool outside its scope; refusing an
+    out-of-scope call means a tool loaded mid-turn — by ``tool_search``, say —
+    cannot widen the scope after binding.
+
+    Refusal happens in ``aafter_model``, and this middleware is composed
+    *after* the approval gate precisely so it runs *before* it: LangChain walks
+    ``after_model`` hooks in reverse list order. An out-of-scope call must never
+    reach a human as an approval request, because approving it would not make
+    it authorized.
+    """
+
+    def __init__(self, *, allowed_tool_ids: Sequence[str]) -> None:
+        super().__init__()
+        self._allowed = frozenset(str(tool_id) for tool_id in allowed_tool_ids or ())
+        self.refused_tool_names: list[str] = []
+
+    def permits(self, tool: Any) -> bool:
+        return bool(tool_identities(tool) & self._allowed)
+
+    def filter_tools(self, tools: Sequence[Any]) -> list[Any]:
+        return [tool for tool in tools if self.permits(tool)]
+
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+        allowed = self.filter_tools(list(getattr(request, "tools", None) or []))
+        return await handler(request.override(tools=allowed))
+
+    async def aafter_model(self, state: Any, runtime: Any = None) -> dict[str, Any] | None:
+        messages = state.get("messages") or []
+        last_ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
+        if last_ai is None or not last_ai.tool_calls:
+            return None
+
+        refusals = [
+            ToolMessage(
+                content="tool_not_authorized_for_this_worker",
+                tool_call_id=call_id,
+                name=name,
+                status="error",
+            )
+            for call in (normalize_tool_call(call) for call in last_ai.tool_calls)
+            if (name := str(call.get("name") or "")) not in self._allowed
+            and (call_id := str(call.get("id") or ""))
+        ]
+        if not refusals:
+            return None
+
+        self.refused_tool_names.extend(str(message.name or "") for message in refusals)
+        logger.info("Worker refused %d out-of-scope tool call(s)", len(refusals))
+        return {"messages": refusals}
 
 
 class ToolApprovalMiddleware(AgentMiddleware):
@@ -434,6 +637,7 @@ def build_specialist_middleware(
     max_tool_calls: int,
     tool_execution: ToolExecutionMiddleware,
     approval: ToolApprovalMiddleware | None = None,
+    worker_tool_scope: WorkerToolScopeMiddleware | None = None,
     preflight: PreflightCallable | None = None,
     compact_messages: Callable[[list[Any]], list[Any]] | None = None,
 ) -> list[AgentMiddleware]:
@@ -446,6 +650,10 @@ def build_specialist_middleware(
 
     Approval runs after the model and before the tool node dispatches, so a
     gated call is decided on before its implementation can run.
+
+    ``after_model`` hooks run in reverse list order, so the worker tool scope
+    is appended last in order to run *first* — an unauthorized call is refused
+    before it can be presented to a human for approval.
     """
     runtime_model = RuntimeModelMiddleware(
         runtime_model_resolver=runtime_model_resolver,
@@ -481,6 +689,9 @@ def build_specialist_middleware(
 
     if approval is not None and _policy_is_active(hitl_policy):
         stack.append(approval)
+
+    if worker_tool_scope is not None:
+        stack.append(worker_tool_scope)
 
     return stack
 
