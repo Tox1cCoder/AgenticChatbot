@@ -24,16 +24,20 @@ __all__ = [
     "EXECUTION_PHASES",
     "WORKFLOW_ERROR_CODES",
     "AgentTransition",
+    "DispatchSubagentsInput",
     "ExecutionPhase",
     "InvalidWorkflowStateUpdate",
     "OutcomeProvenance",
     "PendingTransition",
+    "PlanningDispatch",
     "ResponseOutcome",
     "RoutingDecision",
     "TransitionSource",
     "TurnIdentity",
     "WorkerResult",
     "WorkerStatus",
+    "WorkerTask",
+    "WorkerTaskProposal",
     "WorkflowError",
     "WorkflowErrorCode",
     "WorkflowRoutingException",
@@ -167,22 +171,98 @@ class ResponseOutcome(BaseModel):
     provenance: OutcomeProvenance = Field(default_factory=OutcomeProvenance)
 
 
+class WorkerTaskProposal(BaseModel):
+    """One task exactly as the Planning model is allowed to propose it.
+
+    The model owns *what* to do and *who* should do it. It owns nothing else:
+    there is no field here for tool scope, dispatch identity, position, or
+    parent context, so a proposal can never widen its own authority. Bounds
+    are rejections rather than truncations — a shortened objective is
+    different work than the one that was asked for.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    task_id: str = Field(min_length=1, max_length=160)
+    objective: str = Field(min_length=1, max_length=4000)
+    agent_id: str = Field(min_length=1, max_length=160)
+    related_todo_ids: tuple[str, ...] = ()
+
+
+class DispatchSubagentsInput(BaseModel):
+    """The model-facing control schema for one dispatch call.
+
+    This type is bound to the Planning model as a schema only. It is never
+    executed by the common tool pipeline, so nothing here reaches a provider
+    or a credential.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tasks: tuple[WorkerTaskProposal, ...] = Field(min_length=1)
+    rationale: str | None = Field(default=None, max_length=1000)
+
+
+class WorkerTask(BaseModel):
+    """One validated, server-owned unit of delegated work.
+
+    ``position`` is the proposal's original index and is what collection
+    orders by: completion order is an accident of latency and would make the
+    same plan synthesize differently on different runs.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    dispatch_id: str = Field(min_length=1, max_length=64)
+    task_id: str = Field(min_length=1, max_length=160)
+    position: int = Field(ge=0)
+    objective: str = Field(min_length=1, max_length=4000)
+    agent_id: str = Field(min_length=1, max_length=160)
+    parent_context: dict[str, JsonValue] = Field(default_factory=dict)
+    allowed_tool_ids: tuple[str, ...] = ()
+    model_request: dict[str, JsonValue] | None = None
+    related_todo_ids: tuple[str, ...] = ()
+
+
 class WorkerResult(BaseModel):
     """Private result of one Planning worker task.
 
+    Identity is ``(dispatch_id, task_id)``, not ``task_id`` alone: the same
+    task ID legitimately reappears in a later dispatch wave, and keying on the
+    ID alone would reject that as a collision.
+
     There is no ``awaiting_approval`` status: a worker that needs human
-    approval interrupts the Planning graph instead of fabricating a result.
+    approval interrupts the graph instead of fabricating a result.
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    dispatch_id: str = Field(min_length=1, max_length=64)
     task_id: str = Field(min_length=1, max_length=160)
+    position: int = Field(ge=0)
     agent_id: str = Field(min_length=1, max_length=160)
     status: WorkerStatus
     content: str = ""
     artifacts: tuple[dict[str, JsonValue], ...] = ()
     evidence: tuple[dict[str, JsonValue], ...] = ()
+    images: tuple[dict[str, JsonValue], ...] = ()
     error_code: str | None = None
+
+
+class PlanningDispatch(BaseModel):
+    """One accepted fan-out: a validated wave paired to its originating call.
+
+    ``tool_call_id`` is retained so collection can answer the exact call the
+    model made. An unpaired dispatch would leave the model with a tool call
+    that never received a result.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    dispatch_id: str = Field(min_length=1, max_length=64)
+    tool_call_id: str = Field(min_length=1, max_length=160)
+    wave: int = Field(ge=1)
+    tasks: tuple[WorkerTask, ...] = Field(min_length=1)
 
 
 class WorkflowError(BaseModel):

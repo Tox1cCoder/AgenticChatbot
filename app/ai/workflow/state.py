@@ -25,6 +25,7 @@ from app.ai.workflow.contracts import (
     ExecutionPhase,
     InvalidWorkflowStateUpdate,
     PendingTransition,
+    PlanningDispatch,
     ResponseOutcome,
     RoutingDecision,
     TurnIdentity,
@@ -67,19 +68,23 @@ def append_worker_results(
     existing: list[WorkerResult] | WorkerResult | None,
     update: list[WorkerResult] | WorkerResult | None,
 ) -> list[WorkerResult]:
-    """Append worker results, rejecting duplicate task IDs.
+    """Append worker results, rejecting duplicate ``(dispatch_id, task_id)``.
 
-    A duplicate task ID means two branches claimed the same dispatched task;
-    silently overwriting one would hide a lost result.
+    Keying on ``task_id`` alone would reject a legitimate re-use of the same
+    task ID in a later dispatch wave; keying on the pair still catches the
+    real fault, which is two branches claiming the same dispatched task.
+    Silently overwriting one would hide a lost result.
     """
     merged = _as_list(existing)
-    seen = {result.task_id for result in merged}
+    seen = {(result.dispatch_id, result.task_id) for result in merged}
     for result in _as_list(update):
-        if result.task_id in seen:
+        identity = (result.dispatch_id, result.task_id)
+        if identity in seen:
             raise InvalidWorkflowStateUpdate(
-                f"duplicate worker result for task_id={result.task_id!r}"
+                "duplicate worker result for "
+                f"dispatch_id={result.dispatch_id!r} task_id={result.task_id!r}"
             )
-        seen.add(result.task_id)
+        seen.add(identity)
         merged.append(result)
     return merged
 
@@ -171,6 +176,16 @@ class WorkflowState(TypedDict):
     planning_call_count: NotRequired[int | None]
     planning_phase: NotRequired[str | None]
     plan_lifecycle: NotRequired[Any]
+
+    # --- planning dispatch control plane ---------------------------------
+    # Dispatch bookkeeping is checkpointed so a resumed turn knows which wave
+    # it is in and which call is still awaiting a paired result. Recomputing
+    # any of this from messages after a restart is how a replay duplicates a
+    # worker that already ran.
+    planning_dispatch: NotRequired[PlanningDispatch | None]
+    planning_dispatch_waves: NotRequired[int]
+    planning_dispatched_task_count: NotRequired[int]
+    planning_control_call_id: NotRequired[str | None]
 
     # --- execution scratch space -----------------------------------------
     context: NotRequired[GraphContext]

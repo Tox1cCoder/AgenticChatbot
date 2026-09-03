@@ -1195,6 +1195,12 @@ class Settings(BaseSettings):
         le=32,
         description="Maximum Planning workers executing concurrently",
     )
+    planning_worker_max_dispatch_waves: int = Field(
+        default=2,
+        gt=0,
+        le=8,
+        description="Maximum dispatch waves Planning may run in one turn",
+    )
     planning_worker_objective_max_chars: int = Field(
         default=4000,
         gt=0,

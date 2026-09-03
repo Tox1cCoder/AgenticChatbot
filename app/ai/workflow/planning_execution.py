@@ -1,13 +1,19 @@
 """Planning as an orchestrator over isolated workers.
 
-Planning owns delegation and synthesis. Independent tasks fan out through
-LangGraph ``Send``; each worker runs in its own per-invocation subgraph and
-returns a typed private result.
+Planning owns delegation and synthesis. Independent tasks fan out as real
+outer-graph topology; each worker runs one specialist path and returns a typed
+private result.
 
 Three things a worker deliberately cannot do: publish a public assistant
 message, perform a parent-level handoff, or recurse into Planning. All three
 would take a decision that belongs to the orchestrator and hide it inside a
 branch.
+
+Dispatch validation here is all-or-nothing. A proposal is checked in full
+before a single task is constructed, so an invalid ninth task cannot leave
+eight workers already running. Nothing is truncated: an oversized objective is
+rejected and reported back to the model, because a shortened objective is
+different work than the one that was asked for.
 
 Worker objectives and results are delimited as untrusted data. A worker result
 is content the orchestrator reads, never instructions it follows.
@@ -15,31 +21,45 @@ is content the orchestrator reads, never instructions it follows.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from langgraph.types import Send
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from typing_extensions import NotRequired, TypedDict
 
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from app.ai.workflow.contracts import OutcomeProvenance, ResponseOutcome, WorkerResult
+from app.ai.workflow.contracts import (
+    DispatchSubagentsInput,
+    OutcomeProvenance,
+    PlanningDispatch,
+    ResponseOutcome,
+    WorkerResult,
+    WorkerTask,
+)
+from app.ai.workflow.inventory import RoutingInventory
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "DISPATCH_CONTROL_TOOL_NAME",
+    "HANDOFF_TOOL_NAME",
     "PLANNING_AGENT_ID",
+    "InvalidPlanningDispatch",
     "PlanningLimits",
     "PlanningOrchestrator",
     "PlanningState",
-    "WorkerTask",
     "collect_worker_results",
-    "dispatch_workers",
+    "planning_control_message_id",
+    "validate_dispatch_call",
 ]
 
 PLANNING_AGENT_ID = "planning_agent"
 RAG_AGENT_ID = "rag_agent"
+DISPATCH_CONTROL_TOOL_NAME = "dispatch_subagents"
+HANDOFF_TOOL_NAME = "hand_off"
 
 _UNTRUSTED_OPEN = "BEGIN UNTRUSTED WORKER RESULT"
 _UNTRUSTED_CLOSE = "END UNTRUSTED WORKER RESULT"
@@ -52,6 +72,7 @@ class PlanningLimits(BaseModel):
 
     max_tasks: int = Field(gt=0, le=64)
     max_concurrency: int = Field(gt=0, le=32)
+    max_dispatch_waves: int = Field(default=2, gt=0, le=8)
     objective_max_chars: int = Field(gt=0, le=64_000)
     parent_context_max_chars: int = Field(gt=0, le=200_000)
 
@@ -60,6 +81,7 @@ class PlanningLimits(BaseModel):
         return cls(
             max_tasks=int(getattr(settings, "planning_worker_max_tasks", 8)),
             max_concurrency=int(getattr(settings, "planning_worker_max_concurrency", 4)),
+            max_dispatch_waves=int(getattr(settings, "planning_worker_max_dispatch_waves", 2)),
             objective_max_chars=int(getattr(settings, "planning_worker_objective_max_chars", 4000)),
             parent_context_max_chars=int(
                 getattr(settings, "planning_parent_context_max_chars", 12000)
@@ -67,17 +89,23 @@ class PlanningLimits(BaseModel):
         )
 
 
-class WorkerTask(BaseModel):
-    """One independent unit of delegated work."""
+class InvalidPlanningDispatch(ValueError):
+    """One rejected dispatch proposal, paired to the call that made it.
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    ``tool_call_id`` travels with the error so the Planning model node can
+    answer the exact call. An unpaired rejection would leave the model with a
+    tool call that never received a result.
+    """
 
-    task_id: str = Field(min_length=1, max_length=160)
-    objective: str
-    agent_id: str = Field(min_length=1, max_length=160)
-    allowed_tool_ids: tuple[str, ...] = ()
-    model_request: dict[str, Any] | None = None
-    related_todo_ids: tuple[str, ...] = ()
+    def __init__(self, code: str, tool_call_id: str) -> None:
+        super().__init__(code)
+        self.code = code
+        self.tool_call_id = tool_call_id
+
+
+def planning_control_message_id(tool_call_id: str) -> str:
+    """Deterministic ID for the control ``ToolMessage`` answering one call."""
+    return f"planning-control:{tool_call_id}"
 
 
 class PlanningState(TypedDict):
@@ -90,50 +118,170 @@ class PlanningState(TypedDict):
     planning_result: NotRequired[Any]
 
 
-def dispatch_workers(state: PlanningState) -> list[Send]:
-    """Fan independent tasks out to per-invocation worker subgraphs.
+def _dispatch_identity(tool_call_id: str, wave: int) -> str:
+    """Derive the dispatch ID from the call and wave, not from a counter.
 
-    Bounding happens here rather than inside the worker so an over-long plan is
-    truncated once, visibly, instead of each worker discovering its own limit.
+    Deriving it makes the same call in the same wave produce the same ID on
+    replay, which is what lets a resumed turn recognize results it already
+    has instead of scheduling the work twice.
     """
-    limits = state["limits"]
-    tasks = list(state["worker_tasks"])
+    raw = f"{tool_call_id}:{wave}".encode()
+    return hashlib.sha256(raw).hexdigest()[:32]
+
+
+def _sibling_tool_call_names(state: Mapping[str, Any]) -> tuple[str, ...]:
+    """Names of every tool call on the message that produced this dispatch."""
+    messages = state.get("messages") or []
+    for message in reversed(messages):
+        tool_calls = getattr(message, "tool_calls", None)
+        if not tool_calls:
+            continue
+        names: list[str] = []
+        for call in tool_calls:
+            name = call.get("name") if isinstance(call, Mapping) else getattr(call, "name", None)
+            if name:
+                names.append(str(name))
+        return tuple(names)
+    return ()
+
+
+def _build_parent_context(
+    state: Mapping[str, Any], limits: PlanningLimits, tool_call_id: str
+) -> dict[str, Any]:
+    """Project the bounded parent scope a worker is allowed to see.
+
+    The objective is deliberately absent: it belongs to one task and travels
+    on that task. Everything here is plan-level context shared by the wave.
+    """
+    todos = state.get("todos")
+    projected_todos: list[dict[str, Any]] = []
+    if isinstance(todos, list):
+        for todo in todos:
+            if not isinstance(todo, Mapping):
+                continue
+            projected_todos.append(
+                {
+                    "id": str(todo.get("id") or ""),
+                    "status": str(todo.get("status") or ""),
+                    "content": str(todo.get("content") or ""),
+                }
+            )
+
+    context: dict[str, Any] = {
+        "task_plan_id": state.get("task_plan_id"),
+        "plan_summary": _plan_summary(projected_todos),
+        "todos": projected_todos,
+    }
+
+    encoded = json.dumps(context, ensure_ascii=False, default=str)
+    if len(encoded) > limits.parent_context_max_chars:
+        raise InvalidPlanningDispatch("parent_context_too_long", tool_call_id)
+    return context
+
+
+def _plan_summary(todos: Sequence[Mapping[str, Any]]) -> str:
+    if not todos:
+        return ""
+    open_count = sum(1 for todo in todos if todo.get("status") != "completed")
+    return f"{len(todos)} plan items, {open_count} not completed"
+
+
+def validate_dispatch_call(
+    *,
+    tool_call: Mapping[str, Any],
+    state: Mapping[str, Any],
+    inventory: RoutingInventory,
+    limits: PlanningLimits,
+    resolve_allowed_tools: Callable[[str, Mapping[str, Any]], tuple[str, ...]],
+) -> PlanningDispatch:
+    """Validate the entire proposal before returning server-owned tasks.
+
+    Raises :class:`InvalidPlanningDispatch` and constructs nothing on any
+    failure. Every ``Send`` the caller later builds comes from the returned
+    dispatch, so there is no window in which some tasks are scheduled and
+    others are still being checked.
+    """
+    tool_call_id = str(tool_call.get("id") or "")
+    if not tool_call_id:
+        raise InvalidPlanningDispatch("missing_tool_call_id", "unknown")
+
+    # A dispatch and a handoff in one message are two different decisions
+    # about who continues the turn. Running both would fan out work and then
+    # abandon it mid-flight.
+    sibling_names = _sibling_tool_call_names(state)
+    if HANDOFF_TOOL_NAME in sibling_names:
+        raise InvalidPlanningDispatch("dispatch_with_handoff", tool_call_id)
+
+    wave = int(state.get("planning_dispatch_waves") or 0) + 1
+    if wave > limits.max_dispatch_waves:
+        raise InvalidPlanningDispatch("dispatch_wave_limit", tool_call_id)
+
+    try:
+        proposal = DispatchSubagentsInput.model_validate(tool_call.get("args") or {})
+    except ValidationError as exc:
+        logger.info("Planning dispatch %s rejected as invalid input: %s", tool_call_id, exc)
+        raise InvalidPlanningDispatch("invalid_dispatch_input", tool_call_id) from exc
 
     seen: set[str] = set()
-    for task in tasks:
+    for task in proposal.tasks:
         if task.task_id in seen:
-            raise ValueError(f"duplicate worker task id: {task.task_id!r}")
+            raise InvalidPlanningDispatch("duplicate_task_id", tool_call_id)
         seen.add(task.task_id)
 
-    bounded = tasks[: limits.max_tasks]
-    if len(tasks) > len(bounded):
-        logger.info("Planning dispatch bounded to %d of %d tasks", len(bounded), len(tasks))
+    already_dispatched = int(state.get("planning_dispatched_task_count") or 0)
+    if already_dispatched + len(proposal.tasks) > limits.max_tasks:
+        raise InvalidPlanningDispatch("dispatch_task_limit", tool_call_id)
 
-    return [
-        Send(
-            "worker",
-            {
-                "task": task.model_copy(
-                    update={"objective": task.objective[: limits.objective_max_chars]}
-                ),
-                "runtime_request": state["runtime_request"],
-            },
+    for task in proposal.tasks:
+        if task.agent_id == PLANNING_AGENT_ID:
+            raise InvalidPlanningDispatch("recursive_planning", tool_call_id)
+        descriptor = inventory.get(task.agent_id)
+        if descriptor is None:
+            raise InvalidPlanningDispatch("unknown_agent", tool_call_id)
+        if not inventory.is_routable(task.agent_id):
+            raise InvalidPlanningDispatch("agent_unavailable", tool_call_id)
+        if len(task.objective) > limits.objective_max_chars:
+            raise InvalidPlanningDispatch("objective_too_long", tool_call_id)
+
+    parent_context = _build_parent_context(state, limits, tool_call_id)
+    dispatch_id = _dispatch_identity(tool_call_id, wave)
+    model_request = state.get("model_request")
+
+    tasks = tuple(
+        WorkerTask(
+            dispatch_id=dispatch_id,
+            task_id=proposed.task_id,
+            position=position,
+            objective=proposed.objective,
+            agent_id=proposed.agent_id,
+            parent_context=parent_context,
+            allowed_tool_ids=tuple(resolve_allowed_tools(proposed.agent_id, state)),
+            model_request=model_request if isinstance(model_request, dict) else None,
+            related_todo_ids=proposed.related_todo_ids,
         )
-        for task in bounded
-    ]
+        for position, proposed in enumerate(proposal.tasks)
+    )
+
+    return PlanningDispatch(
+        dispatch_id=dispatch_id,
+        tool_call_id=tool_call_id,
+        wave=wave,
+        tasks=tasks,
+    )
 
 
 def collect_worker_results(
-    tasks: Sequence[WorkerTask], results: Sequence[WorkerResult]
+    dispatch: PlanningDispatch, results: Sequence[WorkerResult]
 ) -> list[WorkerResult]:
-    """Order results by original task position, not completion order.
+    """Order this dispatch's results by server-owned ``position``.
 
     Synthesis reads the plan in the order it was written; completion order is
     an accident of latency and would make the same plan synthesize differently
-    on different runs.
+    on different runs. Results from another wave are not this dispatch's to
+    collect.
     """
-    by_task_id = {result.task_id: result for result in results}
-    return [by_task_id[task.task_id] for task in tasks if task.task_id in by_task_id]
+    mine = [result for result in results if result.dispatch_id == dispatch.dispatch_id]
+    return sorted(mine, key=lambda result: result.position)
 
 
 class PlanningOrchestrator:
@@ -210,18 +358,24 @@ class PlanningOrchestrator:
             )
         )
         return WorkerResult(
+            dispatch_id=task.dispatch_id,
             task_id=task.task_id,
+            position=task.position,
             agent_id=task.agent_id,
             status="completed",
             content=str(getattr(result, "content", "")),
             evidence=tuple(getattr(result, "evidence", ()) or ()),
             artifacts=tuple(getattr(result, "artifacts", ()) or ()),
+            images=tuple(getattr(result, "images", ()) or ()),
         )
 
     @staticmethod
     def _failed(task: WorkerTask, error_code: str) -> WorkerResult:
+        """A failed worker keeps its full identity so nothing is orphaned."""
         return WorkerResult(
+            dispatch_id=task.dispatch_id,
             task_id=task.task_id,
+            position=task.position,
             agent_id=task.agent_id,
             status="failed",
             content="",
@@ -251,6 +405,7 @@ class PlanningOrchestrator:
 
         evidence = tuple(record for result in results for record in (result.evidence or ()))
         artifacts = tuple(artifact for result in results for artifact in (result.artifacts or ()))
+        images = tuple(image for result in results for image in (result.images or ()))
         policies: tuple[str, ...] = ("public_content",)
         if evidence:
             policies = (*policies, "rag_grounding")
@@ -270,6 +425,7 @@ class PlanningOrchestrator:
                 output_policy_ids=policies,
                 evidence=evidence,
                 artifacts=artifacts,
+                images=images,
             ),
         )
 

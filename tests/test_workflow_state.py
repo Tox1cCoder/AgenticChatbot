@@ -45,16 +45,40 @@ def test_transition_reducer_accepts_none_and_single_values():
     assert append_transitions([first], None) == [first]
 
 
-def test_worker_result_reducer_rejects_duplicate_task_ids():
-    first = WorkerResult(task_id="t1", agent_id="search_agent", status="completed", content="a")
-    duplicate = WorkerResult(task_id="t1", agent_id="chat_agent", status="completed", content="b")
+def _worker_result(dispatch_id: str, task_id: str, position: int = 0, **overrides) -> WorkerResult:
+    payload = {
+        "dispatch_id": dispatch_id,
+        "task_id": task_id,
+        "position": position,
+        "agent_id": "search_agent",
+        "status": "completed",
+        "content": "a",
+    }
+    payload.update(overrides)
+    return WorkerResult(**payload)
+
+
+def test_worker_result_identity_is_dispatch_and_task():
+    """The same task_id in two waves is two results, not a collision."""
+    first = _worker_result("d1", "t1")
+    second = first.model_copy(update={"dispatch_id": "d2", "content": "two"})
+
+    assert append_worker_results([], [first, second]) == [first, second]
+
+    with pytest.raises(InvalidWorkflowStateUpdate, match="d1.*t1"):
+        append_worker_results([first], [first])
+
+
+def test_worker_result_reducer_rejects_duplicate_dispatch_task_pairs():
+    first = _worker_result("d1", "t1")
+    duplicate = _worker_result("d1", "t1", agent_id="chat_agent", content="b")
     with pytest.raises(InvalidWorkflowStateUpdate):
         append_worker_results([first], [duplicate])
 
 
 def test_worker_result_reducer_preserves_dispatch_order():
-    first = WorkerResult(task_id="t1", agent_id="search_agent", status="completed", content="a")
-    second = WorkerResult(task_id="t2", agent_id="rag_agent", status="failed", content="")
+    first = _worker_result("d1", "t1", 0)
+    second = _worker_result("d1", "t2", 1, agent_id="rag_agent", status="failed", content="")
     assert append_worker_results([first], [second]) == [first, second]
 
 
@@ -78,6 +102,18 @@ def test_graph_state_declares_v2_routing_identity_fields():
         "worker_results",
         "execution_phase",
         "workflow_error",
+    ):
+        assert field in annotations, field
+
+
+def test_graph_state_declares_planning_dispatch_checkpoint_fields():
+    """Dispatch bookkeeping is checkpointed state, not node-local memory."""
+    annotations = WorkflowState.__annotations__
+    for field in (
+        "planning_dispatch",
+        "planning_dispatch_waves",
+        "planning_dispatched_task_count",
+        "planning_control_call_id",
     ):
         assert field in annotations, field
 

@@ -10,10 +10,12 @@ from app.ai.workflow.contracts import (
     AgentTransition,
     OutcomeProvenance,
     PendingTransition,
+    PlanningDispatch,
     ResponseOutcome,
     RoutingDecision,
     TurnIdentity,
     WorkerResult,
+    WorkerTask,
     WorkflowError,
 )
 from app.core.config import Settings
@@ -31,7 +33,9 @@ _CHECKPOINT_ALLOWED_TYPES = (
     PendingTransition,
     OutcomeProvenance,
     ResponseOutcome,
+    WorkerTask,
     WorkerResult,
+    PlanningDispatch,
     WorkflowError,
 )
 

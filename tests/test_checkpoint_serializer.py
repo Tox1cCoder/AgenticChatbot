@@ -10,10 +10,12 @@ from app.ai.workflow.contracts import (
     AgentTransition,
     OutcomeProvenance,
     PendingTransition,
+    PlanningDispatch,
     ResponseOutcome,
     RoutingDecision,
     TurnIdentity,
     WorkerResult,
+    WorkerTask,
     WorkflowError,
 )
 
@@ -28,7 +30,9 @@ _CHECKPOINT_TYPES = (
     PendingTransition,
     OutcomeProvenance,
     ResponseOutcome,
+    WorkerTask,
     WorkerResult,
+    PlanningDispatch,
     WorkflowError,
 )
 
@@ -129,10 +133,12 @@ def _routed_checkpoint_state() -> dict[str, object]:
         AgentTransition,
         OutcomeProvenance,
         PendingTransition,
+        PlanningDispatch,
         ResponseOutcome,
         RoutingDecision,
         TurnIdentity,
         WorkerResult,
+        WorkerTask,
         WorkflowError,
     )
 
@@ -177,9 +183,29 @@ def _routed_checkpoint_state() -> dict[str, object]:
                 ),
             ),
         ),
+        "planning_dispatch": PlanningDispatch(
+            dispatch_id="dispatch-1",
+            tool_call_id="call-dispatch-1",
+            wave=1,
+            tasks=(
+                WorkerTask(
+                    dispatch_id="dispatch-1",
+                    task_id="t1",
+                    position=0,
+                    objective="retrieve the policy",
+                    agent_id="rag_agent",
+                    allowed_tool_ids=("rag::search",),
+                ),
+            ),
+        ),
         "worker_results": [
             WorkerResult(
-                task_id="t1", agent_id="rag_agent", status="failed", error_code="worker_timeout"
+                dispatch_id="dispatch-1",
+                task_id="t1",
+                position=0,
+                agent_id="rag_agent",
+                status="failed",
+                error_code="worker_timeout",
             )
         ],
         "workflow_error": WorkflowError(
@@ -195,10 +221,12 @@ def test_checkpoint_serializer_round_trips_v2_contract_types():
     from app.ai.workflow.contracts import (
         AgentTransition,
         PendingTransition,
+        PlanningDispatch,
         ResponseOutcome,
         RoutingDecision,
         TurnIdentity,
         WorkerResult,
+        WorkerTask,
         WorkflowError,
     )
 
@@ -213,6 +241,8 @@ def test_checkpoint_serializer_round_trips_v2_contract_types():
     assert isinstance(restored["pending_transition"], PendingTransition)
     assert isinstance(restored["agent_outcome"], ResponseOutcome)
     assert isinstance(restored["worker_results"][0], WorkerResult)
+    assert isinstance(restored["planning_dispatch"], PlanningDispatch)
+    assert isinstance(restored["planning_dispatch"].tasks[0], WorkerTask)
     assert isinstance(restored["workflow_error"], WorkflowError)
 
 
