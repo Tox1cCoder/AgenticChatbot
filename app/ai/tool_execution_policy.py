@@ -64,14 +64,19 @@ class ToolExecutionPolicyValidationError(ValueError):
     """
 
 
-# Code-owned allowlist for `disable_outer_timeout`. This is intentionally not
-# deployment-configurable: only `dispatch_subagents`'s own inner worker/tool
-# calls carry real budgets, so it is the one tool allowed to opt out of the
-# generic interactive outer timeout. See "Deployment Configuration" and
-# "Metadata Trust" in the plan contracts.
-_DISABLE_OUTER_TIMEOUT_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
-    {("internal", "internal::dispatch_subagents")}
-)
+# Code-owned allowlist for `disable_outer_timeout`, deliberately empty.
+#
+# It held exactly one identity, `internal::dispatch_subagents`, because that
+# tool ran a whole fan-out inside a single interactive call and its inner
+# worker/provider operations carried the real budgets. In routing-v2 there is
+# no such call: `dispatch_subagents` is bound to the Planning model as a schema
+# only, fan-out is parent-graph topology, and `TOOL_STAGE_NODES` is empty, so
+# nothing routes it through this resolver at all.
+#
+# The check below stays rather than the entry, so any future attempt to grant
+# the exemption — from deployment config or from application metadata — fails
+# closed instead of inheriting an allowance nothing reviews any more.
+_DISABLE_OUTER_TIMEOUT_ALLOWLIST: frozenset[tuple[str, str]] = frozenset()
 
 # `resolve_tool_execution_policy`'s `invocation_kind` values. A generic
 # background execution mode is explicitly out of scope for this plan (see
@@ -459,9 +464,10 @@ def resolve_tool_execution_policy(
                 "disable_outer_timeout requires trusted application metadata"
             )
         if identity_key not in _DISABLE_OUTER_TIMEOUT_ALLOWLIST:
+            permitted = sorted(_DISABLE_OUTER_TIMEOUT_ALLOWLIST)
             raise ToolExecutionPolicyValidationError(
-                "disable_outer_timeout is only permitted for "
-                f"{sorted(_DISABLE_OUTER_TIMEOUT_ALLOWLIST)}; got {identity_key!r}"
+                f"disable_outer_timeout is permitted for {permitted or 'no identity'}; "
+                f"got {identity_key!r}"
             )
 
     if effective["max_attempts"] > 1 and not (effective["retry_safe"] or effective["idempotent"]):

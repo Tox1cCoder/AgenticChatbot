@@ -55,8 +55,13 @@ def _limits(**overrides) -> PlanningLimits:
     return PlanningLimits(**payload)
 
 
+#: A custom agent this user once attached and has since detached. It is still
+#: a real descriptor, so "unknown agent" would be the wrong rejection.
+DETACHED_CUSTOM_AGENT_ID = "custom_agent:detached"
+
+
 def _inventory() -> RoutingInventory:
-    return RoutingInventory.from_descriptors(
+    base = [
         AgentDescriptor(
             agent_id=agent_id,
             display_name=agent_id,
@@ -66,7 +71,18 @@ def _inventory() -> RoutingInventory:
             kind="base",
         )
         for agent_id in ("chat_agent", "search_agent", "rag_agent", "planning_agent")
+    ]
+    base.append(
+        AgentDescriptor(
+            agent_id=DETACHED_CUSTOM_AGENT_ID,
+            display_name="Detached Analyst",
+            capability_description="",
+            enabled=True,
+            attached=False,
+            kind="custom",
+        )
     )
+    return RoutingInventory.from_descriptors(base)
 
 
 def _dispatch_call(*task_ids: str, call_id: str = "call-dispatch-1") -> dict:
@@ -383,27 +399,115 @@ async def test_collection_reads_results_in_position_order():
     assert paired.content.index("w1") < paired.content.index("w2") < paired.content.index("w3")
 
 
-async def test_an_invalid_dispatch_starts_zero_workers_and_pairs_one_error():
+def _proposed(task_id: str, *, objective: str | None = None, agent_id: str = "chat_agent") -> dict:
+    return {
+        "task_id": task_id,
+        "objective": objective if objective is not None else f"do {task_id}",
+        "agent_id": agent_id,
+    }
+
+
+def _raw_dispatch_call(tasks: list[dict], call_id: str = "call-dispatch-1") -> dict:
+    return {"name": "dispatch_subagents", "id": call_id, "args": {"tasks": tasks}}
+
+
+_HANDOFF_CALL = {
+    "name": "hand_off",
+    "id": "call-handoff-1",
+    "args": {"to_agent_id": "search_agent", "reason": "changed my mind"},
+}
+
+#: Every way one dispatch proposal can be refused, and the exact code the model
+#: is told. The objective bound is the *deployment* limit rather than the
+#: schema's 4000-character ceiling: the ceiling is pydantic's and is already
+#: enforced before this code runs, while the limit is what an operator tunes.
+_INVALID_DISPATCHES: dict[str, tuple[tuple[dict, ...], str, dict]] = {
+    "ninth_task": (
+        (_raw_dispatch_call([_proposed(f"w{i}") for i in range(9)]),),
+        "dispatch_task_limit",
+        {},
+    ),
+    "duplicate_id": (
+        (_raw_dispatch_call([_proposed("w1"), _proposed("w1")]),),
+        "duplicate_task_id",
+        {},
+    ),
+    "oversized_objective": (
+        (_raw_dispatch_call([_proposed("w1", objective="x" * 200)]),),
+        "objective_too_long",
+        {"objective_max_chars": 100},
+    ),
+    "recursive_planning": (
+        (_raw_dispatch_call([_proposed("w1", agent_id="planning_agent")]),),
+        "recursive_planning",
+        {},
+    ),
+    "detached_custom_agent": (
+        (_raw_dispatch_call([_proposed("w1", agent_id=DETACHED_CUSTOM_AGENT_ID)]),),
+        "agent_unavailable",
+        {},
+    ),
+    "dispatch_plus_handoff": (
+        (_raw_dispatch_call([_proposed("w1")]), _HANDOFF_CALL),
+        "dispatch_with_handoff",
+        {},
+    ),
+}
+
+
+@pytest.mark.parametrize("invalid", sorted(_INVALID_DISPATCHES))
+async def test_invalid_dispatch_starts_no_workers(invalid):
+    """Validation is all-or-nothing: nothing partially runs and one error pairs.
+
+    An invalid ninth task must not leave eight workers already executing, and
+    the refusal must come back on the dispatch call's own ``tool_call_id`` —
+    an unpaired tool call is a malformed message history to the next provider
+    turn.
+    """
+    tool_calls, expected_code, limit_overrides = _INVALID_DISPATCHES[invalid]
     runtime = RecordingWorkerRuntime()
     model = ScriptedPlanningModel(
         [
-            _model_response(tool_calls=(_dispatch_call("w1", "w1"),)),
+            _model_response(tool_calls=tool_calls),
             _model_response(content="recovered without delegating"),
         ]
     )
-    graph = _planning_graph(_factory(model, runtime))
+    factory = _factory(model, runtime, limits=_limits(**limit_overrides))
+    graph = _planning_graph(factory)
 
     state = await graph.ainvoke(_turn(), config=_config())
 
     assert runtime.side_effects == []
     assert state.get("worker_results", []) == []
+    assert state.get("planning_dispatched_task_count", 0) == 0
+
     errors = [
         message
         for message in state["messages"]
         if isinstance(message, ToolMessage) and message.tool_call_id == "call-dispatch-1"
     ]
     assert len(errors) == 1
-    assert "duplicate_task_id" in errors[0].content
+    assert expected_code in errors[0].content
+
+
+async def test_a_rejected_dispatch_does_not_consume_a_wave():
+    """A refusal is not an attempt. Otherwise one malformed proposal would
+    silently cost the model half its delegation budget."""
+    runtime = RecordingWorkerRuntime()
+    model = ScriptedPlanningModel(
+        [
+            _model_response(tool_calls=(_raw_dispatch_call([_proposed("w1"), _proposed("w1")]),)),
+            _model_response(tool_calls=(_dispatch_call("a1", call_id="c2"),)),
+            _model_response(tool_calls=(_dispatch_call("b1", call_id="c3"),)),
+            _model_response(content="done delegating"),
+        ]
+    )
+    graph = _planning_graph(_factory(model, runtime))
+
+    state = await graph.ainvoke(_turn(), config=_config())
+
+    assert runtime.side_effects == ["a1", "b1"]
+    assert state["planning_dispatch_waves"] == 2
 
 
 async def test_a_third_wave_is_refused_and_reported():
@@ -536,33 +640,9 @@ async def test_an_exclusive_handoff_goes_to_the_transition_resolver():
     assert pending.tool_call_id == "call-handoff-1"
 
 
-async def test_a_dispatch_mixed_with_a_handoff_starts_no_workers():
-    runtime = RecordingWorkerRuntime()
-    model = ScriptedPlanningModel(
-        [
-            _model_response(
-                tool_calls=(
-                    _dispatch_call("w1"),
-                    {
-                        "name": "hand_off",
-                        "id": "call-handoff-1",
-                        "args": {"to_agent_id": "search_agent", "reason": "changed my mind"},
-                    },
-                )
-            ),
-            _model_response(content="picked one decision"),
-        ]
-    )
-    graph = _planning_graph(_factory(model, runtime))
-
-    state = await graph.ainvoke(_turn(), config=_config())
-
-    assert runtime.side_effects == []
-    assert any(
-        "dispatch_with_handoff" in str(message.content)
-        for message in state["messages"]
-        if isinstance(message, ToolMessage)
-    )
+# A dispatch mixed with a handoff is one of the cases in
+# ``test_invalid_dispatch_starts_no_workers`` above; it is a rejected proposal
+# like any other, not a separate kind of failure.
 
 
 # ----------------------------------------------------------------------
@@ -570,8 +650,13 @@ async def test_a_dispatch_mixed_with_a_handoff_starts_no_workers():
 # ----------------------------------------------------------------------
 
 
-async def test_the_outer_invocation_bounds_live_workers():
-    """``max_concurrency`` is the parent's to enforce, not each worker's."""
+@pytest.mark.parametrize("bound", [2, 4])
+async def test_the_outer_invocation_bounds_live_workers(bound):
+    """``max_concurrency`` is the parent's to enforce, not each worker's.
+
+    ``4`` is the production default and ``2`` proves the bound is read rather
+    than coincidental — eight tasks against a bound of 8 would pass either way.
+    """
     import asyncio
 
     class ConcurrencyProbe:
@@ -604,7 +689,7 @@ async def test_the_outer_invocation_bounds_live_workers():
             _model_response(content="done"),
         ]
     )
-    factory = _factory(model, probe, limits=_limits(max_concurrency=2))
+    factory = _factory(model, probe, limits=_limits(max_concurrency=bound))
     graph = _planning_graph(factory)
 
     config = _config()
@@ -612,7 +697,7 @@ async def test_the_outer_invocation_bounds_live_workers():
     await graph.ainvoke(_turn(), config=config)
 
     assert len(probe.side_effects) == 8
-    assert probe.peak <= 2, f"{probe.peak} workers ran at once against a bound of 2"
+    assert probe.peak <= bound, f"{probe.peak} workers ran at once against a bound of {bound}"
 
 
 # ----------------------------------------------------------------------

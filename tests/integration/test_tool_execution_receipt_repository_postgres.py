@@ -35,6 +35,9 @@ from app.models.user import User
 from app.repositories.tool_execution_receipt import ToolExecutionReceiptRepository
 from app.services.tool_execution_receipt_service import (
     MutationExecutionScope,
+    MutationOutcomeUnknown,
+    NormalizedToolResult,
+    ToolExecutionReceiptService,
     execution_key,
 )
 
@@ -277,3 +280,109 @@ async def test_a_bounded_result_is_stored_and_read_back(seeded: Seeded) -> None:
     record = await repository.areserve(scope=scope, key=key)
 
     assert len(record.result["content"]) == 4000
+
+
+# ----------------------------------------------------------------------
+# the crash gap: an effect that happened, and a process that did not survive
+# ----------------------------------------------------------------------
+
+
+async def test_a_lost_process_after_a_non_idempotent_effect_reports_outcome_unknown(
+    seeded: Seeded,
+) -> None:
+    """The gap receipts exist for, end to end against the real row.
+
+    A reservation with no terminal transition is exactly what a process killed
+    between the provider call and the checkpoint write leaves behind. The
+    provider already did the thing, so calling it again would duplicate a real
+    effect and reporting failure would deny one. Neither is honest, so the row
+    becomes ``outcome_unknown`` and the caller is told that word.
+    """
+    repository, owner_id, conversation_id, _, _, session_factory = seeded
+    scope = _scope(owner_id, conversation_id)
+    key = execution_key(scope)
+
+    # Phase 1: reserve, the provider succeeds, then the process is lost before
+    # anything records it. Only the reservation survives.
+    await repository.areserve(scope=scope, key=key)
+    assert _row(session_factory, key).status == ReceiptStatus.RESERVED
+
+    # Phase 2: the turn resumes on a new service over a new repository handle.
+    invocations: list[str] = []
+
+    async def _invoke() -> NormalizedToolResult:
+        invocations.append(key)
+        return NormalizedToolResult(content="sent again")
+
+    service = ToolExecutionReceiptService(repository=repository)
+    with pytest.raises(MutationOutcomeUnknown) as raised:
+        await service.execute_mutation(scope, _invoke)
+
+    assert raised.value.execution_key == key
+    assert invocations == [], "a non-idempotent provider must not be called a second time"
+    assert _row(session_factory, key).status == ReceiptStatus.OUTCOME_UNKNOWN
+
+    unresolved = await repository.alist_unresolved(user_id=owner_id)
+    assert [row.execution_key for row in unresolved] == [key]
+
+
+async def test_an_adjudicated_unknown_outcome_is_never_retried_later(seeded: Seeded) -> None:
+    """Once nobody can say, a later attempt must not quietly decide to try."""
+    repository, owner_id, conversation_id, _, _, session_factory = seeded
+    scope = _scope(owner_id, conversation_id)
+    key = execution_key(scope)
+
+    await repository.areserve(scope=scope, key=key)
+    await repository.amark_outcome_unknown(key=key)
+
+    invocations: list[str] = []
+
+    async def _invoke() -> NormalizedToolResult:  # pragma: no cover - must not run
+        invocations.append(key)
+        return NormalizedToolResult(content="sent again")
+
+    service = ToolExecutionReceiptService(repository=repository)
+    with pytest.raises(MutationOutcomeUnknown):
+        await service.execute_mutation(scope, _invoke)
+
+    assert invocations == []
+    assert _row(session_factory, key).status == ReceiptStatus.OUTCOME_UNKNOWN
+
+
+async def test_a_provider_idempotent_retry_uses_the_same_execution_key(seeded: Seeded) -> None:
+    """A deduplicating provider turns the same gap into a safe retry.
+
+    The key it is offered must be the row's own key: a fresh one per attempt
+    would defeat the provider's deduplication while looking like it worked.
+    """
+    repository, owner_id, conversation_id, _, _, session_factory = seeded
+    scope = _scope(owner_id, conversation_id, provider_idempotency=True)
+    key = execution_key(scope)
+
+    await repository.areserve(scope=scope, key=key)
+
+    offered: list[str] = []
+
+    async def _invoke(*, idempotency_key: str) -> NormalizedToolResult:
+        offered.append(idempotency_key)
+        return NormalizedToolResult(content="sent once", provider_receipt_id="provider-1")
+
+    service = ToolExecutionReceiptService(repository=repository)
+    result = await service.execute_mutation(scope, _invoke)
+
+    assert offered == [key]
+    assert result.content == "sent once"
+    row = _row(session_factory, key)
+    assert row.status == ReceiptStatus.COMPLETED
+    assert row.provider_receipt_id == "provider-1"
+
+
+async def test_provider_idempotency_does_not_change_which_row_a_call_maps_to(
+    seeded: Seeded,
+) -> None:
+    """Otherwise discovering a provider deduplicates would orphan its receipt."""
+    repository, owner_id, conversation_id, _, _, _ = seeded
+    scope = _scope(owner_id, conversation_id)
+    assert execution_key(scope) == execution_key(
+        scope.model_copy(update={"provider_idempotency": True})
+    )

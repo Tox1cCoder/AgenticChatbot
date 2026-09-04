@@ -979,8 +979,15 @@ def test_config_cannot_disable_dispatch_outer_timeout(monkeypatch):
         )
 
 
-def test_only_dispatch_subagents_can_disable_outer_timeout(monkeypatch):
-    accepted_tool = SimpleNamespace(
+def test_no_identity_can_disable_the_outer_timeout(monkeypatch):
+    """The allowlist is empty, including for the tool it was written for.
+
+    `dispatch_subagents` held the only entry because it ran a whole fan-out
+    inside one interactive call. Fan-out is parent-graph topology now and the
+    schema is never executed, so the exemption has no reachable use and
+    granting it would only widen what a future wiring bug could obtain.
+    """
+    dispatch_tool = SimpleNamespace(
         name="dispatch_subagents",
         metadata={
             "tool_origin": "internal",
@@ -988,10 +995,12 @@ def test_only_dispatch_subagents_can_disable_outer_timeout(monkeypatch):
             "application_execution_policy": {"disable_outer_timeout": True},
         },
     )
-    policy = resolve_tool_execution_policy(
-        accepted_tool, exposed_tool_name="dispatch_subagents", invocation_kind="native_async"
-    )
-    assert policy.outer_timeout_disabled is True
+    with pytest.raises(ToolExecutionPolicyValidationError, match="no identity"):
+        resolve_tool_execution_policy(
+            dispatch_tool,
+            exposed_tool_name="dispatch_subagents",
+            invocation_kind="native_async",
+        )
 
     rejected_internal_tool = SimpleNamespace(
         name="some_other_tool",

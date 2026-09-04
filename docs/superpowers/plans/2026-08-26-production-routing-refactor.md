@@ -661,11 +661,11 @@ Expected: both searches return no matches and all focused tests pass.
 - Consumes: complete production graph, PostgreSQL checkpointer, durable receipts, HITL repository, and message persistence.
 - Produces: release-blocking end-to-end coverage and cutover runbook.
 
-- [ ] **Step 1: Complete the restart/resume production scenario**
+- [x] **Step 1: Complete the restart/resume production scenario**
 
 Workflow A dispatches `w1` and approval-gated `w2`; verify `w1` completion and one durable interrupt. Discard A, construct workflow B, approve the exact ID on the same thread, and verify side effects exactly `w1, w2`, two unique result/receipt identities, and one routing call.
 
-- [ ] **Step 2: Add atomic limit and two-wave scenarios**
+- [x] **Step 2: Add atomic limit and two-wave scenarios**
 
 ```python
 @pytest.mark.parametrize("invalid", ["ninth_task", "duplicate_id", "oversized_objective",
@@ -685,15 +685,15 @@ async def test_third_dispatch_wave_is_rejected(workflow) -> None:
 
 Assert no more than four live workers, eight total tasks across waves, and position-ordered collection.
 
-- [ ] **Step 3: Add multi-interrupt and receipt crash-gap scenarios**
+- [x] **Step 3: Add multi-interrupt and receipt crash-gap scenarios**
 
 Pause two workers; resolve one exact ID; restart; resolve the other. Verify separate provenance. Simulate external non-idempotent success followed by process loss before checkpoint persistence: status becomes `outcome_unknown` and provider invocation is not repeated. For a provider-idempotent adapter, assert retry uses the same execution key.
 
-- [ ] **Step 4: Update operational documentation**
+- [x] **Step 4: Update operational documentation**
 
 Document exact topology/limits, migration order, `outcome_unknown` reconciliation, canary metrics, new-checkpoint verification, and rollback by deploying the prior artifact. State that rollback is not a runtime switch and v1 interrupts do not resume in v2.
 
-- [ ] **Step 5: Run production scenarios and commit**
+- [x] **Step 5: Run production scenarios and commit**
 
 ```powershell
 $env:LANGSMITH_TRACING='false'
@@ -915,17 +915,17 @@ Record commands, exit codes, and test counts in the execution log. Commit only d
 
 ## Final Acceptance Checklist
 
-- [ ] Parent-level Planning nodes own fan-out; no executable/nested dispatch remains.
-- [ ] Memory and PostgreSQL replay tests produce `w1, w2`, never `w1, w1, w2`.
-- [ ] Invalid dispatches start zero workers; turn limits are 8 tasks, 4 concurrent, and 2 waves.
+- [x] Parent-level Planning nodes own fan-out; no executable/nested dispatch remains.
+- [x] Memory and PostgreSQL replay tests produce `w1, w2`, never `w1, w1, w2`.
+- [x] Invalid dispatches start zero workers; turn limits are 8 tasks, 4 concurrent, and 2 waves.
 - [ ] Worker objective, HITL policy, custom-agent snapshot, attachments, model request, and restricted tools reach one worker path.
-- [ ] LangGraph control-flow exceptions are never normalized as failures.
+- [x] LangGraph control-flow exceptions are never normalized as failures.
 - [ ] Top-level/worker RAG share one graph, preserve provenance, and validate every result without regenerating or abstaining.
-- [ ] Pending interrupts drive non-stream, stream, state, and resume without message/node heuristics.
-- [ ] Parallel interrupts retain distinct IDs and provenance.
-- [ ] Receipts prevent completed mutation replay and expose unsupported crash gaps.
+- [x] Pending interrupts drive non-stream, stream, state, and resume without message/node heuristics.
+- [x] Parallel interrupts retain distinct IDs and provenance.
+- [x] Receipts prevent completed mutation replay and expose unsupported crash gaps.
 - [ ] Worker events are task-correlated and cannot leak internal answer text.
-- [ ] Legacy loops, dispatcher, isolated worker, refusal, sink registry, stale recovery, and policy exemption are deleted.
+- [x] Legacy loops, dispatcher, isolated worker, refusal, sink registry, stale recovery, and policy exemption are deleted.
 - [ ] Only `finalize` reaches `END`; validation/persistence precede public deltas.
 - [ ] Focused, PostgreSQL, non-live, lint, migration, removal, and live gates pass.
 
@@ -951,6 +951,10 @@ Record commands, exit codes, and test counts in the execution log. Commit only d
 | 2026-09-04 | Task 6 defects found by verification | Fixed | (1) **Task 4 shipped a `PlanningRubricAttempt(source="planning_actions")` that its own `Literal` rejects** — the type still said `planning_tools`, so the rubric raised `ValidationError` on both the disabled and grader-error branches. Renamed the member to the node that actually applies plan mutations. (2) **A custom worker's display name was about to be lost**: `WorkerResult` carries `agent_id`, so the trace would have shown `custom_agent:<uuid>` instead of "Data Analyst" — worst exactly when a worker failed. The dispatch now resolves the name server-side and the projection prefers it. |
 | 2026-09-04 | Image previews moved to the graph channel | Recorded | The weak sink registry carried image previews, not Planning events, by the time Task 6 reached it — deleting it outright would have removed preview streaming. Previews now ride the custom channel, which a resumed run has without the token-rebinding dance the old design needed. **Probed: that channel does not backpressure its writer** (a node emitted 2000 frames in 17ms while a sleeping consumer held one), so the sink's soft cap was not made obsolete and was restored at the emitter as `image_preview_max_partials_per_image`. Only partials are droppable. |
 | 2026-09-04 | Task 6 test fallout | Repaired | The deletion broke 113 tests across 14 modules. `test_worker_approval_gated_tools.py` was rewritten to assert the opposite of what it used to: a gated worker call now pauses and can be approved or rejected individually, which is what its own docstring said steps 2 and 3 would enable. Modules covering both live and deleted code were pruned to their surviving tests rather than deleted (`test_graph_planning_subagents.py`, `test_rag_tool_loop_finalization.py`, four smaller ones). `test_worker_rag_grounding.py` was replaced with a module asserting there is now one grounding path rather than three call sites agreeing. |
+| 2026-09-04 | Task 7 | Complete | The restart scenario now approves by **exact interrupt ID** via `pending_interrupt_payload` and its workers perform a real durable mutation, so the scenario proves what an operator cares about: `side_effects` shows the graph did not replay a node, and the receipt rows show the *provider* was not called twice. Added a two-paused-worker partial-approval scenario across two process boundaries (decide one, restart, decide the other) asserting the undecided worker stays pending and per-worker `device_id` provenance is not merged. Falsified both by collapsing `execution_key` to the dispatch: `provider_calls` dropped to `['w1']` and both scenarios failed. Six-case parametrized invalid-dispatch test (`ninth_task`, `duplicate_id`, `oversized_objective`, `recursive_planning`, `detached_custom_agent`, `dispatch_plus_handoff`), plus a new assertion that a **rejected dispatch consumes no wave**. Concurrency bound parametrized over 2 and 4. Four durable crash-gap tests. Both operations docs rewritten. 189 focused tests; full suite **4777 passed** with only the pre-existing `test_model_usage_repository_postgres.py` failures (which fail worse in isolation: 5 + 1 error). |
+| 2026-09-04 | Task 6 omission found during Task 7 | Fixed | Task 6 Step 3 required removing "the `dispatch_subagents` timeout/policy exemption" and Step 1 required failing "if the common tool pipeline or execution-policy allowlist can resolve it". Neither was done, and the Final Acceptance Checklist item covering it would have been ticked over a live grant. `_DISABLE_OUTER_TIMEOUT_ALLOWLIST` is now **empty** and `_FULL_MODEL_HANDOFF_TOOLS` is deleted — both were standing permissions for a call that no longer exists. The *check* was kept and only the entry removed, so a tool still claiming `disable_outer_timeout` is refused during policy resolution and never invoked. `test_dispatch_subagents_policy_stays_unbounded_through_unified_path` asserted the opposite and was rewritten as `test_a_tool_claiming_the_outer_timeout_exemption_fails_closed`. |
+| 2026-09-04 | Task 7 deviations from the file list | Recorded | Step 2's limit scenarios went into `tests/test_planning_worker_fanout.py`, not `test_workflow_concurrency.py`: the dispatch harness lives there, and that module is about the conversation *turn lock*, not worker concurrency — duplicating a 200-line harness to match a filename would be worse. The receipt crash-gap scenarios went into `tests/integration/test_tool_execution_receipt_repository_postgres.py`, which already has the seeded owner fixtures and is in Step 5's own run list. `test_workflow_checkpoint_v2.py` and `test_message_service_event_streaming.py` needed no change — both already cover their half (v1 thread rejection; resume-stream lifecycle) — and were run as regression instead. |
+| 2026-09-04 | Most workflow metrics are defined but never called | Recorded, not fixed | `RoutingMetricsRecorder` is process-wide (`get_routing_metrics_recorder()`) but is wired into **`RoutingService` only**. `worker_completed`, `grounding_outcome`, `transition_accepted`, `transition_rejected`, `agent_execution_limit`, `finalization_completed`, `finalization_failed`, and `terminal_error` have **no production caller**. The rollout runbook was telling operators to watch `grounding.abstained`, `finalization.failed.*`, and `transition.rejected.*` during a canary — counters that will sit at zero no matter what happens, which reads exactly like health. The doc now names which counters are live and which are not. Wiring them is a production change in a task scoped to tests and docs, so it is left as a decision rather than absorbed; each call site is a one-line import of the existing shared recorder. |
 
 ## Execution Handoff
 

@@ -63,7 +63,6 @@ TOOL_LOADING_TOOLS = {"tool_search"}
 _RETRY_COMPATIBILITY_ALLOWLIST = frozenset({("internal", "internal::tool_search")})
 _WIDGET_ARTIFACT_TOOLS = {"widget_create", "widget_update"}
 _WIDGET_SESSION_BOUND_TOOLS = {"widget_create", "session_list_widgets"}
-_FULL_MODEL_HANDOFF_TOOLS = {"dispatch_subagents"}
 _TYPED_WEB_IMAGE_TOOLS = frozenset({"tavily_search", "brave_image_search"})
 
 # Render-type values that should never produce a public tool_render candidate.
@@ -807,11 +806,14 @@ def _apply_offload_to_outputs_and_artifacts(
     }
 
     for output in outputs:
-        # The Planning supervisor must receive complete worker answers from
-        # dispatch_subagents; replacing that ToolMessage with a blob preview
-        # would hide the result it needs to reconcile todos. Skill terminal
-        # errors carry the same flag: their content must reach the model uncut.
-        if output.get("name") in _FULL_MODEL_HANDOFF_TOOLS or output.get("preserve_full_content"):
+        # Skill terminal errors carry this flag: their content must reach the
+        # model uncut, because a blob preview would hide the reason it failed.
+        #
+        # Worker answers used to be exempted here by tool name. They no longer
+        # pass through this function at all -- `planning_collect` builds the
+        # paired ToolMessage itself from typed results, so there is no name to
+        # exempt.
+        if output.get("preserve_full_content"):
             continue
         tool_call_id = output.get("tool_call_id")
         public_text, blob_info = apply_tool_output_offload(

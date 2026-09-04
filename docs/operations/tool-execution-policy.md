@@ -117,21 +117,77 @@ retry configuration fails closed during policy resolution. After changing
 rules, verify `policy_config_keys`, resolved deadlines, and `auto_retry_allowed`
 in canary artifacts before expanding the change.
 
-## The one unbounded exception
+## Mutating calls and durable receipts
 
-`internal::dispatch_subagents` is the only code-allowlisted identity permitted
-to set `disable_outer_timeout=true`. Its inner worker and provider operations
-already enforce their own budgets, and the outer call must remain available to
-collect their results. The resolver requires all three controls: the exact
-internal identity, trusted application metadata, and membership in the
-code-owned allowlist. Deployment configuration and remote metadata cannot grant
-this exception, even when they name the same identity.
+Ordinary retries are a policy decision. A *mutation* is not: repeating one can
+charge a card twice or send a second message, and no timeout setting can undo
+that. Mutating tool calls therefore run through
+`ToolExecutionReceiptService`, which is inserted **after** authorization and
+approval and **before** the provider call — a receipt for a call the user was
+never allowed to make would make the refusal unretryable.
 
-This exception is not a generic long-running mode. Interactive tools that cannot
-finish inside a bounded policy must either return an existing provider-owned
-task handle immediately or remain disabled. A generic job store, polling API,
-progress stream, retention policy, and remote cancellation protocol are outside
-this feature. The approved follow-up design is documented in
+The state machine per execution key:
+
+| Row state | What happens on the next attempt |
+|---|---|
+| no row | reserve, invoke, complete in the same breath as the effect |
+| `completed` | return the recorded result; the provider is not called |
+| `failed` | the provider never accepted it, so invoking again is safe |
+| `reserved` + provider deduplicates | retry under the **same** execution key |
+| `reserved` + provider does not | becomes `outcome_unknown`; the caller gets `MutationOutcomeUnknown` |
+| `outcome_unknown` | never retried, by this turn or any later one |
+
+The execution key is derived from `(thread_id, dispatch_id, task_id,
+tool_call_id)`. **A model can neither supply nor read it**: a key the model
+could choose is a key it could reuse to replay someone else's effect, or vary
+to force a duplicate. `provider_idempotency` describes a provider capability
+and is deliberately not part of the identity, so learning that a provider
+deduplicates does not move a call to a different row.
+
+The key is offered to the provider only when the resolved adapter declares it
+honours one (`idempotency_key` in its signature, or `**kwargs`). A provider
+that silently ignores the key would accept a duplicate while looking
+deduplicated.
+
+`max_attempts > 1` and receipts are complementary, not redundant.
+`max_attempts` governs retries *within* one process while the reservation is
+still held; receipts govern what happens after that process is gone. Raising
+`max_attempts` on a mutating tool without `retry_safe=true` or
+`idempotent=true` still fails closed during policy resolution.
+
+Reconciling `outcome_unknown` rows is an operator task with no code path:
+see "Reconciling `outcome_unknown`" in
+[`routing-v2-rollout.md`](routing-v2-rollout.md).
+
+## There is no unbounded exception any more
+
+`_DISABLE_OUTER_TIMEOUT_ALLOWLIST` is **empty**. Every interactive tool call is
+bounded, with no identity exempt.
+
+It previously held one entry, `internal::dispatch_subagents`, because that tool
+ran an entire fan-out inside a single interactive call: its inner worker and
+provider operations carried the real budgets, and the outer call had to stay
+open to collect their results. In routing-v2 there is no such call.
+`dispatch_subagents` is bound to the Planning model as a *schema only* — the
+server reads the proposal, validates it in full, and fans out as parent-graph
+topology — and its function body raises `DispatchControlSchemaExecuted` so that
+a wiring bug which routed it through the common tool pipeline fails loudly
+instead of quietly executing. `TOOL_STAGE_NODES` is empty, so no parent-level
+tool stage resolves a policy for it at all.
+
+The **check** was kept and only the entry removed. A tool that still claims
+`disable_outer_timeout` — from deployment config or from trusted application
+metadata — is now refused during policy resolution and never invoked. Failing
+closed is deliberate: an unbounded interactive call nobody reviewed is worse
+than a timeout. `tests/test_routing_legacy_removal.py` asserts the allowlist
+stays empty so the grant cannot creep back.
+
+An unbounded mode was never generic. Interactive tools that
+cannot finish inside a bounded policy must either return an existing
+provider-owned task handle immediately or remain disabled. A generic job store,
+polling API, progress stream, retention policy, and remote cancellation
+protocol are outside this feature. The approved follow-up design is documented
+in
 [`docs/superpowers/specs/2026-07-16-background-tool-execution-design.md`](../superpowers/specs/2026-07-16-background-tool-execution-design.md).
 
 ## Verification
@@ -139,7 +195,17 @@ this feature. The approved follow-up design is documented in
 Run the focused policy and runtime tests after configuration or code changes:
 
 ```powershell
-.venv\Scripts\python.exe -m pytest tests/test_tool_execution_policy.py tests/test_tool_error_policy.py tests/test_tool_execution_recovery.py tests/test_tool_execution_rendering.py tests/test_client_invocation_isolation.py tests/test_skills_tool.py tests/test_planning_subagents.py tests/test_mcp_adapter_utils.py tests/client_backend/test_runtime_bridge.py -q
+.venv\Scripts\python.exe -m pytest tests/test_tool_execution_policy.py tests/test_tool_error_policy.py tests/test_tool_execution_recovery.py tests/test_tool_execution_rendering.py tests/test_client_invocation_isolation.py tests/test_skills_tool.py tests/test_tool_execution_receipt_service.py tests/test_mcp_adapter_utils.py tests/client_backend/test_runtime_bridge.py -q
+```
+
+The durable half needs a dedicated PostgreSQL database, because the atomicity
+the design rests on is a database guarantee — a read-then-write repository or a
+missing unique index passes every fake-backed test and duplicates real effects
+in production:
+
+```powershell
+$env:TEST_DATABASE_URL='postgresql+psycopg://<user>:<password>@localhost:5432/chatbot_test'
+.venv\Scripts\python.exe -m pytest tests/integration/test_tool_execution_receipt_repository_postgres.py -q
 ```
 
 Then run the full suite and compilation checks before deployment.

@@ -542,10 +542,20 @@ async def test_execute_tool_calls_times_out_slow_tool(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.asyncio
-async def test_dispatch_subagents_policy_stays_unbounded_through_unified_path(monkeypatch):
+async def test_a_tool_claiming_the_outer_timeout_exemption_fails_closed(monkeypatch):
+    """This used to assert the opposite, and the reason it did is gone.
+
+    ``dispatch_subagents`` ran a whole fan-out inside one interactive call, so
+    it was allowlisted to opt out of the outer timeout. Fan-out is parent-graph
+    topology now and the schema is never executed, so the allowlist is empty —
+    and a tool that still claims the exemption must be *refused*, not quietly
+    run unbounded. Failing closed is the point: an unbounded interactive call
+    that nobody reviewed is worse than a timeout.
+    """
     monkeypatch.setattr(settings, "tool_execution_timeout", 0.02)
     monkeypatch.setattr(settings, "tool_execution_cancellation_grace_seconds", 0.01)
+
+    invoked = False
 
     class _DispatchSubagentsTool:
         name = "dispatch_subagents"
@@ -555,20 +565,20 @@ async def test_dispatch_subagents_policy_stays_unbounded_through_unified_path(mo
             "application_execution_policy": {"disable_outer_timeout": True},
         }
 
-        async def ainvoke(self, args):
-            await asyncio.sleep(0.08)
+        async def ainvoke(self, args):  # pragma: no cover - must not run
+            nonlocal invoked
+            invoked = True
             return "done"
 
-    result, error_detail, error_content, diagnostics = await invoke_tool_with_policy(
+    result, error_detail, error_content, _diagnostics = await invoke_tool_with_policy(
         _DispatchSubagentsTool(),
         {},
         tool_name="dispatch_subagents",
     )
 
-    assert result == "done"
-    assert error_detail is None
-    assert error_content is None
-    assert diagnostics["attempts"] == 1
+    assert result is None
+    assert invoked is False, "policy resolution must reject before the tool runs"
+    assert error_detail is not None
 
 
 @pytest.mark.asyncio

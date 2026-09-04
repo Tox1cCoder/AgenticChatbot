@@ -278,9 +278,9 @@ def test_the_shared_rag_graph_and_worker_runtime_are_constructed_once():
     policies. Runtime identity of the two attributes is asserted in
     ``tests/test_planning_execution_graph.py``.
 
-    Replaces the record that these were importable but unwired. The remaining
-    step is the topology cutover, tracked by
-    ``test_the_two_rag_loops_are_still_separate_implementations``.
+    Replaces the record that these were importable but unwired. The topology
+    cutover has since landed: ``TOOL_STAGE_NODES`` is empty and ``rag_agent``
+    is an ordinary subgraph specialist.
     """
     import pathlib
     import re
@@ -299,3 +299,37 @@ def test_the_shared_rag_graph_and_worker_runtime_are_constructed_once():
         if re.search(r"RagExecutionGraphFactory|rag_execution_factory", path.read_text("utf-8"))
     ]
     assert factories == [], f"a per-invocation RAG graph factory came back in {factories}"
+
+
+def test_the_dispatch_policy_exemption_cannot_be_resolved():
+    """The tool pipeline can no longer grant ``dispatch_subagents`` anything.
+
+    Two grants outlived the fan-out they were written for: a code-owned
+    allowlist letting it opt out of the interactive outer timeout, and an
+    offload exemption keeping its ToolMessage uncut. Neither is reachable —
+    the schema is never executed, and ``planning_collect`` builds the paired
+    message itself from typed results — so both were standing permissions
+    nothing reviews any more.
+    """
+    from app.ai.tool_execution_policy import _DISABLE_OUTER_TIMEOUT_ALLOWLIST
+
+    assert not _DISABLE_OUTER_TIMEOUT_ALLOWLIST, (
+        f"the outer-timeout exemption came back for {sorted(_DISABLE_OUTER_TIMEOUT_ALLOWLIST)}"
+    )
+
+    pipeline = (REPO_ROOT / "app" / "ai" / "tool_execution.py").read_text(encoding="utf-8")
+    assert "_FULL_MODEL_HANDOFF_TOOLS" not in pipeline
+
+
+def test_dispatch_subagents_is_never_executable():
+    """It is a schema the model fills in, not a tool the server runs."""
+    from app.ai.workflow.planning_execution import (
+        DispatchControlSchemaExecuted,
+        build_dispatch_control_tool,
+    )
+
+    tool = build_dispatch_control_tool()
+
+    assert tool.metadata["non_executable"] is True
+    with pytest.raises(DispatchControlSchemaExecuted):
+        tool.func(tasks=[])
