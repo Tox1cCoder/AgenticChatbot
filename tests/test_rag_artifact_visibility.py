@@ -30,5 +30,3 @@ def _make_workflow():
     workflow._get_conversation_history = AsyncMock(return_value=[])
     workflow._get_state_attachments = lambda _state: []
     return workflow
-
-

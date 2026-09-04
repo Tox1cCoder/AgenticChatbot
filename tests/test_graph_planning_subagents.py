@@ -368,9 +368,3 @@ def test_delegated_agent_messages_passthrough_when_no_active_handoff():
 def test_worker_loop_uses_tool_error_limit_from_settings(monkeypatch):
     monkeypatch.setattr(settings, "tool_execution_consecutive_errors_limit", 4, raising=False)
     assert settings.tool_execution_consecutive_errors_limit == 4
-
-
-
-
-
-

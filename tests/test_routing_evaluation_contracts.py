@@ -295,9 +295,7 @@ def test_a_silent_chat_substitution_is_counted_only_where_chat_is_unacceptable()
     pairs = [
         _pair("c1", "en", "rag_agent", "chat_agent"),
         _pair("c2", "en", "chat_agent", "chat_agent"),
-        _pair(
-            "c3", "en", "search_agent", "chat_agent", acceptable=("search_agent", "chat_agent")
-        ),
+        _pair("c3", "en", "search_agent", "chat_agent", acceptable=("search_agent", "chat_agent")),
     ]
     cases = [case for case, _ in pairs]
     predictions = [prediction for _, prediction in pairs]

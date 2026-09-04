@@ -102,9 +102,7 @@ def per_label_f1(
     return scores
 
 
-def macro_f1(
-    cases: Sequence[RoutingEvalCase], predictions: Iterable[RoutingPrediction]
-) -> float:
+def macro_f1(cases: Sequence[RoutingEvalCase], predictions: Iterable[RoutingPrediction]) -> float:
     """Unweighted mean F1 over every true label present in the dataset."""
     scores = per_label_f1(cases, predictions)
     if not scores:

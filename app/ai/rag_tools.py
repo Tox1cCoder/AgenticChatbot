@@ -19,7 +19,10 @@ def create_search_documents_tool():
         reason: str | None = None,
     ) -> str:
         """Explore documents with scan, read, search, grep, list, or image actions."""
-        # Stub: actual execution in graph._rag_tools_node
+        # A schema, not an implementation: the RAG subgraph's own ``rag_tools``
+        # node executes the call against retrieval. This body exists only so the
+        # model has something to bind to, and returning the action keeps a
+        # misrouted call legible instead of silently empty.
         return f"Tool call recorded: {action}"
 
     return search_documents

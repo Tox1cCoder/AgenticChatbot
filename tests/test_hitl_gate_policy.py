@@ -101,5 +101,3 @@ def test_gate_master_off_never_gates():
     )
 
     assert gated == set()
-
-

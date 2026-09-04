@@ -44,7 +44,3 @@ def test_workflow_marks_image_response_metadata_once():
     workflow._mark_response_has_images(response, True)
 
     assert response.metadata == {"has_images": True}
-
-
-
-

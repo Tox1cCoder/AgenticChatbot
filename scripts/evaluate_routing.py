@@ -17,7 +17,7 @@ Usage::
     .\\.venv\\Scripts\\python.exe scripts/evaluate_routing.py \\
         --dataset eval/routing/golden_v1.jsonl \\
         --user-id <uuid of a user with router credentials> \\
-        --out eval/routing/report.json
+        --output eval/routing/report.json
 """
 
 from __future__ import annotations
@@ -59,7 +59,13 @@ from app.observability.routing import RoutingMetricsRecorder  # noqa: E402
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", default="eval/routing/golden_v1.jsonl")
-    parser.add_argument("--out", required=True, help="where to write the JSON report")
+    parser.add_argument(
+        "--output",
+        "--out",
+        dest="output",
+        required=True,
+        help="where to write the JSON report",
+    )
     parser.add_argument(
         "--user-id",
         required=True,
@@ -159,9 +165,7 @@ async def _run(args: argparse.Namespace) -> int:
         async with semaphore:
             builder = await builder_pool.get()
             try:
-                return await _predict(
-                    service, builder, case, inventory, user_id=args.user_id
-                )
+                return await _predict(service, builder, case, inventory, user_id=args.user_id)
             finally:
                 builder_pool.put_nowait(builder)
 
@@ -178,7 +182,7 @@ async def _run(args: argparse.Namespace) -> int:
         generated_at=datetime.now(timezone.utc),
     )
 
-    out = Path(args.out)
+    out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
         json.dumps(json.loads(report.model_dump_json()), indent=2, sort_keys=True) + "\n",

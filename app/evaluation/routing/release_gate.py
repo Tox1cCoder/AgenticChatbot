@@ -89,9 +89,7 @@ def check_routing_release(
     reasons: set[str] = set()
 
     reasons |= _review_reasons(report, review)
-    reasons |= _tuple_reasons(
-        report, expected_provider, expected_model, expected_inventory_version
-    )
+    reasons |= _tuple_reasons(report, expected_provider, expected_model, expected_inventory_version)
     reasons |= _freshness_reasons(report, moment)
     reasons |= _composition_reasons(report, cases)
     reasons |= _threshold_reasons(report)

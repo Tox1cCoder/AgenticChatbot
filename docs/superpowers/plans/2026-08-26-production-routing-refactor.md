@@ -841,7 +841,7 @@ git commit -m "test: add multilingual routing release gate"
 - Consumes: Tasks 1-8.
 - Produces: evidence required to call the root problem fixed.
 
-- [ ] **Step 1: Verify schema and graph shape**
+- [x] **Step 1: Verify schema and graph shape**
 
 ```powershell
 .\.venv\Scripts\python.exe -m alembic heads
@@ -852,28 +852,28 @@ $env:LANGSMITH_TRACING='false'
 
 Expected: one Alembic head, no drift, required Planning nodes present, forbidden nodes absent, and only `finalize -> END` terminates.
 
-- [ ] **Step 2: Run formatting and lint**
+- [~] **Step 2: Run formatting and lint** *(`ruff check` clean; `ruff format --check` has 115 pre-existing files)*
 
 ```powershell
 .\.venv\Scripts\python.exe -m ruff format --check app tests
 .\.venv\Scripts\python.exe -m ruff check app tests
 ```
 
-- [ ] **Step 3: Run the focused routing/Planning/RAG/HITL/streaming gate**
+- [x] **Step 3: Run the focused routing/Planning/RAG/HITL/streaming gate**
 
 ```powershell
 $env:LANGSMITH_TRACING='false'
 .\.venv\Scripts\python.exe -m pytest -q tests/test_workflow_contracts.py tests/test_workflow_state.py tests/test_checkpoint_serializer.py tests/test_production_workflow_graph.py tests/test_planning_execution_graph.py tests/test_planning_worker_fanout.py tests/test_worker_approval_gated_tools.py tests/test_rag_execution_graph.py tests/test_worker_rag_grounding.py tests/test_rag_grounding.py tests/test_hitl_interrupt_payload_recovery.py tests/test_interrupt_resume_addressing.py tests/test_graph_stream_projection.py tests/test_message_service_event_streaming.py tests/test_workflow_end_to_end.py tests/test_workflow_concurrency.py tests/test_workflow_checkpoint_v2.py tests/test_routing_legacy_removal.py
 ```
 
-- [ ] **Step 4: Run PostgreSQL integration gates**
+- [x] **Step 4: Run PostgreSQL integration gates**
 
 ```powershell
 $env:LANGSMITH_TRACING='false'
 .\.venv\Scripts\python.exe -m pytest -q tests/integration/test_planning_worker_resume_postgres.py tests/integration/test_tool_execution_receipt_repository_postgres.py tests/test_checkpoint_retention_v2_threads.py
 ```
 
-- [ ] **Step 5: Run the full non-live suite**
+- [~] **Step 5: Run the full non-live suite** *(4842 passed; the only failures are the pre-existing `test_model_usage_repository_postgres.py` isolation defects)*
 
 ```powershell
 $env:LANGSMITH_TRACING='false'
@@ -882,7 +882,7 @@ $env:LANGSMITH_TRACING='false'
 
 Expected: all pass. A Windows native `pyarrow` diagnostic is non-failing only when pytest exits zero; otherwise rerun in Linux CI/container and do not accept the gate until it passes there.
 
-- [ ] **Step 6: Search for legacy and secret leakage**
+- [x] **Step 6: Search for legacy and secret leakage**
 
 ```powershell
 rg -n "planning_tools|rag_tools|PlanningSubagentDispatcher|create_dispatch_subagents_tool|_run_agent_in_isolated_context|_refuse_worker_approval_gated_calls|_fan_out_graph|_has_approval_interrupt|_APPROVAL_INTERRUPT_NODES|event_sink_token|WeakValueDictionary|_recover_terminal_response" app
@@ -893,7 +893,7 @@ git status --short
 
 Expected: no matches and no whitespace errors.
 
-- [ ] **Step 7: Run the tuple-matched live routing release gate**
+- [ ] **Step 7: Run the tuple-matched live routing release gate** *(blocked: needs an approved dataset review and live provider calls)*
 
 ```powershell
 .\.venv\Scripts\python.exe scripts/evaluate_routing.py --dataset eval/routing/golden_v1.jsonl --output .artifacts/routing-eval-v1.json
@@ -902,7 +902,7 @@ Expected: no matches and no whitespace errors.
 
 Expected: macro-F1 at least 0.90; each language at least 0.85; no language over 0.05 below English; first-attempt structured success at least 0.99; after-retry success at least 0.999; zero silent chat substitutions, finalizer bypasses, and unknown published evidence IDs. Do not commit `.artifacts` containing request text.
 
-- [ ] **Step 8: Review final diff and record evidence**
+- [x] **Step 8: Review final diff and record evidence**
 
 ```powershell
 git status --short
@@ -918,15 +918,15 @@ Record commands, exit codes, and test counts in the execution log. Commit only d
 - [x] Parent-level Planning nodes own fan-out; no executable/nested dispatch remains.
 - [x] Memory and PostgreSQL replay tests produce `w1, w2`, never `w1, w1, w2`.
 - [x] Invalid dispatches start zero workers; turn limits are 8 tasks, 4 concurrent, and 2 waves.
-- [ ] Worker objective, HITL policy, custom-agent snapshot, attachments, model request, and restricted tools reach one worker path.
+- [x] Worker objective, HITL policy, custom-agent snapshot, attachments, model request, and restricted tools reach one worker path.
 - [x] LangGraph control-flow exceptions are never normalized as failures.
-- [ ] Top-level/worker RAG share one graph, preserve provenance, and validate every result without regenerating or abstaining.
+- [x] Top-level/worker RAG share one graph, preserve provenance, and validate every result without regenerating or abstaining.
 - [x] Pending interrupts drive non-stream, stream, state, and resume without message/node heuristics.
 - [x] Parallel interrupts retain distinct IDs and provenance.
 - [x] Receipts prevent completed mutation replay and expose unsupported crash gaps.
-- [ ] Worker events are task-correlated and cannot leak internal answer text.
+- [x] Worker events are task-correlated and cannot leak internal answer text.
 - [x] Legacy loops, dispatcher, isolated worker, refusal, sink registry, stale recovery, and policy exemption are deleted.
-- [ ] Only `finalize` reaches `END`; validation/persistence precede public deltas.
+- [x] Only `finalize` reaches `END`; validation/persistence precede public deltas.
 - [ ] Focused, PostgreSQL, non-live, lint, migration, removal, and live gates pass.
 
 ## Execution Log
@@ -959,6 +959,10 @@ Record commands, exit codes, and test counts in the execution log. Commit only d
 | 2026-09-04 | Task 8 design decisions the plan left open | Recorded | (1) **`accuracy_by_language` is acceptable-set, `macro_f1` is canonical.** The report schema has one accuracy field and the plan asks for both notions, so they are split by field and stated in both module docstrings. Macro-F1 counts every case once under `primary_agent_id`; scoring a hit under an acceptable alternative too would let a dataset raise its own score by widening acceptable sets. (2) **`category` is a closed `Literal` plus `REQUIRED_CATEGORIES`.** Iterating only the categories a dataset contains made the ≥10 rule vacuous for an omitted category — caught by a test that then failed, and fixed in the gate rather than the test. (3) **`check_routing_release` takes `cases`, defaulting to empty.** The report cannot carry language/category counts, and a caller who omits the dataset now fails composition instead of silently skipping it. |
 | 2026-09-04 | Task 8 deviations from the file list | Recorded | Added `app/evaluation/routing/harness.py`, which is not in the plan's list: both CLIs need the same evaluation inventory, and if each built its own the gate's `inventory_version_mismatch` check would be comparing a value to itself. It also holds the history/document stubs that make a run reproducible — a context builder reading the live database would score differently tomorrow for reasons unrelated to the router. The dataset generator is deliberately **not** in the repo: a generator in-tree invites regeneration, which silently invalidates the review bound to the content hash. |
 | 2026-09-04 | Task 8 remaining blocker | Blocked on a human | `eval/routing/golden_v1.review.json` ships with `approved: false` and `reviewing_team: "unreviewed"`, bound to dataset sha256 `e3407b4e…`. A reviewer other than the dataset generator must verify the labels and set `approved: true`; `scripts/check_routing_release.py` exits 1 until then. Editing any case changes the hash and re-blocks the gate, which is the intended behaviour — `test_the_shipped_review_is_bound_to_the_shipped_dataset` fails the suite if the two drift. Task 9's release gate cannot pass until this approval and a live evaluation run both exist. |
+| 2026-09-04 | Task 9 Steps 1, 3, 4, 6, 8 | Pass | Step 1: one head `c9d0e1f2a3b4`, `alembic check` reports "No new upgrade operations detected", 64 graph-shape/removal tests pass. Step 3: **369 passed** across the 18 focused modules. Step 4: **27 passed** against PostgreSQL. Step 6: no receipt keys reach `app/services/event_streaming` or `tool_result_rendering.py`; the legacy-token search is clean once scoped — the only hits are `app/ai/planning_tools.py` and `app/ai/rag_tools.py` (module names supplying `write_todos`/`search_documents`) and the `rag_tools` node *inside* the RAG subgraph, which is exactly where a tool stage is allowed to be. The plan's bare `rg` expectation of "no matches" was over-broad; `REMOVED_RUNTIME_TOKENS` already scopes these correctly. |
+| 2026-09-04 | Task 9 defects found by verification | Fixed | (1) **`git diff --check` was not clean.** Five modules pruned in Task 6 kept a trailing blank line at EOF (`test_graph_image_context`, `test_graph_planning_rubric`, `test_graph_planning_subagents`, `test_hitl_gate_policy`, `test_rag_artifact_visibility`). Trimmed; 14 tests still pass. Worth noting how it was nearly missed: RTK swallows `git diff --check` output entirely, leaving only exit code 2 — `rtk proxy git diff --check` shows the lines. (2) **A stale comment pointed at deleted code**: `rag_tools.py` said "actual execution in graph._rag_tools_node", a function removed in Task 6. Rewritten to name the subgraph node that does execute it. (3) `ruff format` applied to the four new evaluation files. |
+| 2026-09-04 | Task 9 Step 2 and Step 5 | Pass with pre-existing exceptions | `ruff check app tests scripts` is **clean**. `ruff format --check app tests` would reformat **115 of 814 files** — repo-wide and pre-existing (`app/ai/tool_execution.py` is unformatted at HEAD, before this work touched it). Only the files this plan created were formatted; a bulk format would rewrite unrelated files and collide with the other session working in this checkout. Step 5: **4842 passed, 15 skipped**, with 4 failures + 1 error, all in `test_model_usage_repository_postgres.py` — the isolation defects already recorded, which fail *worse* in isolation (5 + 1) and are untouched by this plan. |
+| 2026-09-04 | Task 9 Step 7 | Blocked | The live routing release gate cannot run. Two independent blockers: `eval/routing/golden_v1.review.json` is unapproved and I authored the labels, so I cannot be the reviewer; and the evaluation makes live provider calls against a user's configured credentials, which is Thai's to authorize and spend. `scripts/check_routing_release.py` correctly exits 1 today. The final checklist item ("...and live gates pass") stays unticked for the same reason — the other twelve are now verified. |
 
 ## Execution Handoff
 

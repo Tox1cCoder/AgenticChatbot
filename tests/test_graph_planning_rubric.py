@@ -24,7 +24,3 @@ def test_attach_planning_state_metadata_includes_planning_rubric():
     enriched = MultiAgentWorkflow._attach_planning_state_metadata(response, state)
 
     assert enriched.metadata["planning_rubric"]["status"] == "satisfied"
-
-
-
-
