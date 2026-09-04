@@ -243,7 +243,134 @@ class V3ProtocolTranslator:
             yield from self._translate_lifecycle(data, namespace)
         elif method == "updates":
             yield from self._translate_updates(data, namespace)
-        # tasks / checkpoints / custom channels are not consumed today.
+        elif method == "custom":
+            yield from self._translate_custom(data, namespace)
+        # tasks / checkpoints channels are not consumed today.
+
+    def _translate_custom(self, data: Any, namespace: list[str]) -> Iterable[V3StreamEvent]:
+        """Project a Planning node's typed event onto the public subagent stream.
+
+        Fields are allowlisted rather than passed through. The writer is called
+        from inside worker execution, where the objective, the worker's answer,
+        an execution key and a provider receipt are all in scope -- publishing
+        the payload wholesale would put private work in the user-visible trace
+        the first time someone added a field.
+        """
+        if not isinstance(data, dict):
+            return
+
+        event_type = data.get("type")
+        if event_type == "planning_worker":
+            yield from self._translate_worker_event(data, namespace)
+        elif event_type == "planning_worker_tool":
+            yield from self._translate_worker_tool_event(data, namespace)
+        elif event_type == "planning_dispatch":
+            yield from self._translate_dispatch_event(data, namespace)
+        # Any other producer on this shared channel is not ours to publish.
+
+    def _worker_ref(self, data: dict, status: str) -> SubagentRef | None:
+        dispatch_id = str(data.get("dispatch_id") or "")
+        task_id = str(data.get("task_id") or "")
+        if not dispatch_id or not task_id:
+            return None
+        return SubagentRef(
+            # ``(dispatch_id, task_id)`` is worker identity everywhere else, so
+            # the stream uses the same pair rather than inventing one.
+            id=f"{dispatch_id}:{task_id}",
+            name=str(data.get("agent_id") or "worker"),
+            path=[dispatch_id, task_id],
+            status=status,
+        )
+
+    def _translate_worker_event(self, data: dict, namespace: list[str]) -> Iterable[V3StreamEvent]:
+        phase = data.get("phase")
+        if phase == "start":
+            ref = self._worker_ref(data, "running")
+            event_type = "subagent_start"
+        elif phase == "interrupt":
+            ref = self._worker_ref(data, "requires_approval")
+            event_type = "subagent_end"
+        elif phase == "end":
+            status = str(data.get("status") or "completed")
+            ref = self._worker_ref(data, "failed" if status == "failed" else "completed")
+            event_type = "subagent_end"
+        else:
+            return
+
+        if ref is None:
+            return
+
+        payload = {
+            "dispatch_id": str(data.get("dispatch_id") or ""),
+            "task_id": str(data.get("task_id") or ""),
+        }
+        error_code = data.get("error_code")
+        if error_code:
+            payload["error_code"] = str(error_code)
+
+        yield make_event(
+            event_type,
+            sequence=self._next(),
+            namespace=namespace,
+            subagent=ref,
+            data=payload,
+        )
+
+    def _translate_worker_tool_event(
+        self, data: dict, namespace: list[str]
+    ) -> Iterable[V3StreamEvent]:
+        phase = data.get("phase")
+        if phase not in ("start", "end"):
+            return
+        ref = self._worker_ref(data, "running")
+        if ref is None:
+            return
+
+        payload = {
+            "dispatch_id": str(data.get("dispatch_id") or ""),
+            "task_id": str(data.get("task_id") or ""),
+        }
+        error_code = data.get("error_code")
+        if error_code:
+            payload["error_code"] = str(error_code)
+
+        yield make_event(
+            "subagent_tool_execution_start" if phase == "start" else "subagent_tool_execution_end",
+            sequence=self._next(),
+            namespace=namespace,
+            subagent=ref,
+            tool_call_id=str(data.get("tool_call_id") or "") or None,
+            tool_name=str(data.get("tool_name") or "") or None,
+            data=payload,
+        )
+
+    def _translate_dispatch_event(
+        self, data: dict, namespace: list[str]
+    ) -> Iterable[V3StreamEvent]:
+        phase = data.get("phase")
+        if phase not in ("validated", "collected"):
+            return
+        dispatch_id = str(data.get("dispatch_id") or "")
+        if not dispatch_id:
+            return
+
+        ref = SubagentRef(
+            id=dispatch_id,
+            name="planning_dispatch",
+            path=[dispatch_id],
+            status="running" if phase == "validated" else "completed",
+        )
+        yield make_event(
+            "subagent_start" if phase == "validated" else "subagent_end",
+            sequence=self._next(),
+            namespace=namespace,
+            subagent=ref,
+            data={
+                "dispatch_id": dispatch_id,
+                "wave": int(data.get("wave") or 0),
+                "task_count": int(data.get("task_count") or 0),
+            },
+        )
 
     def _translate_messages(self, data: Any, namespace: list[str]) -> Iterable[V3StreamEvent]:
         message_event, metadata = _message_event_and_metadata(data)
@@ -549,6 +676,39 @@ class V3ProtocolTranslator:
 # ---------------------------------------------------------------------------
 
 
+def _custom_channel_transformer() -> Any:
+    """A v3 transformer whose only job is to subscribe to the custom channel.
+
+    ``astream_events(version="v3")`` asks the graph for exactly the union of
+    ``required_stream_modes`` across its transformers, and none of the four
+    native ones wants ``custom``. Without this, every ``get_stream_writer()``
+    call in the Planning nodes is discarded before it reaches the iterator --
+    verified against LangGraph 1.2.9, where adding it changed the observed
+    methods from ``{values}`` to ``{values, custom}``.
+
+    It captures nothing itself; the events it enables are read off the main
+    iterator by :meth:`V3ProtocolTranslator._translate_custom`.
+    """
+    from langgraph.pregel.main import StreamTransformer
+
+    class CustomChannelTransformer(StreamTransformer):
+        required_stream_modes = ("custom",)
+
+        def init(self) -> dict[str, Any]:
+            return {}
+
+        def process(self, event: Any) -> bool:
+            return True
+
+    return CustomChannelTransformer
+
+
+try:
+    _CustomChannelTransformer: Any = _custom_channel_transformer()
+except Exception:  # pragma: no cover - older langgraph without the mux
+    _CustomChannelTransformer = None
+
+
 async def _open_v3_stream(graph: Any, state: Any, *, config: dict[str, Any] | None) -> Any:
     """Open the experimental v3 stream, awaiting the v3 awaitable contract.
 
@@ -556,7 +716,9 @@ async def _open_v3_stream(graph: Any, state: Any, *, config: dict[str, Any] | No
     graph does not implement the v3 protocol — the caller treats that as a
     signal to use the tuple fallback.
     """
-    stream = graph.astream_events(state, config=config, version="v3")
+    stream = graph.astream_events(
+        state, config=config, version="v3", transformers=[_CustomChannelTransformer]
+    )
     if inspect.isawaitable(stream):
         stream = await stream
     return stream
@@ -582,7 +744,7 @@ async def _iter_tuple_fallback(
     async for chunk in graph.astream(
         state,
         config=config,
-        stream_mode=["messages", "updates"],
+        stream_mode=["messages", "updates", "custom"],
     ):
         if not isinstance(chunk, tuple) or len(chunk) != 2:
             continue

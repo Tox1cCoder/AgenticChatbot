@@ -154,8 +154,35 @@ def _build_workflow(*, store: _RecordingStore, checkpoint_values: dict):
     workflow._get_conversation_history = _empty_history
     workflow.agents = {"image_generator_agent": object()}
 
+    state_reads = {"count": 0}
+
     async def _aget_state(_config):
-        return SimpleNamespace(next=("image_generator_agent",), values=checkpoint_values)
+        """The paused checkpoint, then the resolved one.
+
+        A real snapshot keeps reporting the interrupt after it is answered and
+        marks the task with a ``result``; the second read here models that, so
+        the post-resume check sees a turn that is no longer waiting rather than
+        re-emitting the approval it just consumed.
+        """
+        state_reads["count"] += 1
+        answered = state_reads["count"] > 1
+        item = SimpleNamespace(
+            id="int-1",
+            value={"action_requests": [{"name": "generate_image", "tool_call_id": "call-1"}]},
+        )
+        return SimpleNamespace(
+            next=() if answered else ("image_generator_agent",),
+            tasks=(
+                SimpleNamespace(
+                    name="image_generator_agent",
+                    id="task-1",
+                    interrupts=(item,),
+                    result={"response": "done"} if answered else None,
+                ),
+            ),
+            interrupts=(item,),
+            values=checkpoint_values,
+        )
 
     async def _astream(state, config=None, stream_mode=None):
         """Run the resumed image node, then emit the narrative deltas.

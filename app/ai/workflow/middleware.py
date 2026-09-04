@@ -75,6 +75,16 @@ MUTATION_OUTCOME_UNKNOWN_TEXT = (
 )
 
 
+def _stream_writer() -> Callable[[dict[str, Any]], None] | None:
+    """The live custom-event writer, when there is a run to write into."""
+    try:
+        from langgraph.config import get_stream_writer
+
+        return get_stream_writer()
+    except (RuntimeError, ImportError):  # pragma: no cover - outside a run
+        return None
+
+
 def _provider_idempotency(tool_call: dict[str, Any], bound: dict[str, Any]) -> bool:
     """Whether this tool's provider deduplicates on a key we supply.
 
@@ -129,6 +139,36 @@ class SpecialistToolScope:
         self.task_id = task_id or agent_key
         self._tool_map: dict[str, Any] | None = None
         self._bound: dict[str, Any] = {}
+
+    def worker_event(self, phase: str, tool_call: dict[str, Any], **extra: Any) -> None:
+        """Announce one worker tool call on the graph's custom channel.
+
+        Only a delegated call is announced. A top-level specialist's tools
+        already surface through the ordinary tool-execution events, and
+        emitting both would show the same call twice.
+
+        The payload names the call, never its arguments or result: a worker's
+        tool arguments can carry document content and credentials.
+        """
+        if self.dispatch_id == TOP_LEVEL_DISPATCH_ID:
+            return
+        writer = _stream_writer()
+        if writer is None:
+            return
+        event = {
+            "type": "planning_worker_tool",
+            "phase": phase,
+            "dispatch_id": self.dispatch_id,
+            "task_id": self.task_id,
+            "agent_id": self.agent_key,
+            "tool_call_id": str(tool_call.get("id") or ""),
+            "tool_name": str(tool_call.get("name") or ""),
+            **extra,
+        }
+        try:
+            writer(event)
+        except Exception as exc:  # noqa: BLE001 - telemetry never fails a turn
+            logger.debug("Dropped worker tool event: %s", exc)
 
     def mutation_scope(self, tool_call: dict[str, Any], identity: Any) -> Any:
         """The receipt identity for one call, or nothing when it needs none.
@@ -427,6 +467,7 @@ class ToolExecutionMiddleware(AgentMiddleware):
 
     async def _execute(self, call: dict[str, Any], tool_map: dict[str, Any]) -> ToolMessage:
         """Run one call through the product's execution pipeline."""
+        self._scope.worker_event("start", call)
         with self._scope.execution_context():
             outputs, artifacts, images = await execute_tool_calls(
                 tool_calls=[call],
@@ -442,11 +483,13 @@ class ToolExecutionMiddleware(AgentMiddleware):
         self.images.extend(images)
 
         output = outputs[0] if outputs else {}
+        status = "error" if _is_error(artifacts) else "success"
+        self._scope.worker_event("end", call, status=status)
         return ToolMessage(
             content=str(output.get("content") or ""),
             tool_call_id=str(output.get("tool_call_id") or call.get("id") or ""),
             name=str(output.get("name") or call.get("name") or "tool"),
-            status="error" if _is_error(artifacts) else "success",
+            status=status,
         )
 
 

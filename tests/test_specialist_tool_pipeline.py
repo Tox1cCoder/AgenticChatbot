@@ -359,14 +359,27 @@ async def test_a_gated_specialist_tool_pauses_the_whole_turn():
 
 
 async def test_resume_is_recognised_as_an_approval_interrupt():
-    """The service refuses to resume a node it does not consider an approval stop."""
-    from app.ai.graph import _has_approval_interrupt
+    """A real paused checkpoint normalizes to a pending-interrupt payload.
+
+    This runs against a genuine compiled graph rather than a stub, so it is the
+    end-to-end check that the recovery path reads what LangGraph actually
+    writes -- previously a node-name allowlist, now the interrupts themselves.
+    """
+    from app.ai.hitl_config import pending_interrupt_payload
 
     executed: list[str] = []
     graph, config, _ = await _run_gated_turn(executed)
     snapshot = await graph.aget_state(config)
 
-    assert _has_approval_interrupt(snapshot.next)
+    payload = pending_interrupt_payload(snapshot)
+
+    assert payload is not None
+    assert payload.interrupt_ids
+    assert [request["tool_call_id"] for request in payload.action_requests] == ["call-1"]
+    assert (
+        payload.metadata_by_tool_call_id["call-1"]["tool_provenance"]["call-1"]["server_name"]
+        == "files"
+    )
 
 
 @pytest.mark.parametrize(
@@ -398,9 +411,7 @@ async def test_a_handoff_still_leaves_the_subgraph_as_a_parent_command():
 
     from app.ai.hand_off_tool import create_hand_off_tool
 
-    hand_off = create_hand_off_tool(
-        source_agent_id="chat_agent", allowed_targets=["search_agent"]
-    )
+    hand_off = create_hand_off_tool(source_agent_id="chat_agent", allowed_targets=["search_agent"])
     model = ScriptedChatModel(
         responses=[
             AIMessage(

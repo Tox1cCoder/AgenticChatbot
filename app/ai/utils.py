@@ -540,8 +540,8 @@ def build_interrupt_resume_payload(decisions: Sequence[Any]) -> list[dict[str, A
     return payload
 
 
-def address_decisions_to_interrupts(decisions: list[dict], interrupts) -> Any:
-    """Address resume decisions to the interrupt each one answers.
+def address_decisions_to_interrupts(decisions: list[dict], payload: Any) -> Any:
+    """Address resume decisions to the exact interrupt each one answers.
 
     LangGraph takes a bare resume value only while one interrupt is pending.
     With two — which is what workers pausing in parallel produces — it requires
@@ -549,41 +549,52 @@ def address_decisions_to_interrupts(decisions: list[dict], interrupts) -> Any:
     interrupt ids, but every pending interrupt names the tool calls it is
     asking about, so the mapping is derivable here.
 
-    A decision that matches no pending interrupt, or an interrupt left without
-    one, is an error rather than a guess: sending a decision to the wrong
-    interrupt approves a different tool call, and resuming an interrupt with no
-    answer replays it as a rejection nobody made.
+    **An omitted interrupt is left pending, not rejected.** Probed against
+    LangGraph 1.2.9: resuming a subset runs exactly the answered tasks, once,
+    and the rest stay waiting for their own resume. That is what lets a human
+    approve one worker now and the other later.
+
+    What is refused, because each would apply a decision to the wrong call: an
+    id nothing is asking about, two decisions for one call, and a decision for
+    an interrupt that has already been answered.
     """
-    pending = list(interrupts or [])
-    if len(pending) < 2:
-        return decisions
+    from app.ai.hitl_config import PendingInterruptPayload, interrupt_owner_by_tool_call
 
-    owner_by_call: dict[str, str] = {}
-    for item in pending:
-        value = getattr(item, "value", None)
-        requests = value.get("action_requests") if isinstance(value, dict) else None
-        for request in requests or ():
-            call_id = request.get("tool_call_id") or request.get("id")
-            if call_id:
-                owner_by_call[str(call_id)] = str(item.id)
+    if not isinstance(payload, PendingInterruptPayload):
+        # Legacy call shape: a bare list of interrupts. One pending interrupt
+        # still accepts a bare resume value.
+        pending = list(payload or [])
+        if len(pending) < 2:
+            return decisions
+        raise TypeError(
+            "address_decisions_to_interrupts requires a PendingInterruptPayload "
+            "once more than one interrupt is pending"
+        )
 
-    addressed: dict[str, list[dict]] = {str(item.id): [] for item in pending}
+    if not decisions:
+        raise ValueError("no decisions supplied; nothing to resume")
+
+    owner_by_call = interrupt_owner_by_tool_call(payload)
+    addressed: dict[str, list[dict]] = {}
+    seen_calls: set[str] = set()
+
     for decision in decisions:
         call_id = str(decision.get("tool_call_id") or decision.get("task_id") or "")
         owner = owner_by_call.get(call_id)
         if owner is None:
             raise ValueError(
                 f"decision for {call_id!r} matches no pending interrupt; "
-                "resuming it would answer a different tool call"
+                "it may already have been answered, and resuming it would "
+                "answer a different tool call"
             )
-        addressed[owner].append(decision)
+        if call_id in seen_calls:
+            raise ValueError(
+                f"two decisions for tool call {call_id!r}; "
+                "approve and reject cannot both be applied"
+            )
+        seen_calls.add(call_id)
+        addressed.setdefault(owner, []).append(decision)
 
-    unanswered = sorted(key for key, value in addressed.items() if not value)
-    if unanswered:
-        raise ValueError(
-            f"no decision for pending interrupt(s) {unanswered}; "
-            "resuming without one replays them as a rejection"
-        )
     return addressed
 
 

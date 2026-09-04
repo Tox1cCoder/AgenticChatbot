@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from langgraph.types import Interrupt as LangGraphInterrupt
+from pydantic import BaseModel, ConfigDict, JsonValue
 
 from app.ai.schemas import InterruptResponse, ToolInterruptRequest
 from app.core.config import settings
@@ -372,6 +373,141 @@ def _extract_action_requests(
         request = _build_tool_interrupt_request(task, idx, default_prefix, allowed_map)
         action_requests.append(request)
     return action_requests
+
+
+class PendingInterruptPayload(BaseModel):
+    """Every interrupt a checkpoint is *currently* waiting on.
+
+    Built from ``snapshot.tasks`` alone. It consults neither the parent message
+    list nor a node-name allowlist: a Planning worker's tool call lives in its
+    own private messages and its node name is not something a recovery path
+    should have to know in advance.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    action_requests: tuple[dict[str, JsonValue], ...] = ()
+    interrupt_ids: tuple[str, ...] = ()
+    #: Provenance per tool call rather than one merged dict. Two workers pausing
+    #: in parallel carry different device provenance, and merging them let the
+    #: second silently overwrite the first.
+    metadata_by_tool_call_id: dict[str, dict[str, JsonValue]] = {}
+
+    def to_interrupt_payload(self) -> dict[str, Any]:
+        """Render in the shape :func:`build_interrupt_response` reads.
+
+        ``tool_provenance`` is rebuilt from the per-call map rather than by
+        merging each interrupt's ``metadata`` dict. A shallow merge replaces the
+        whole ``tool_provenance`` sub-dict, so with two workers paused the
+        second one's entry was the only provenance that survived -- and the
+        first call then rendered with no device or server attribution at all.
+
+        ``device_id`` is promoted only when every pending call agrees on one.
+        Two devices cannot be represented by a single top-level value, and the
+        per-call entries carry the truth either way.
+        """
+        provenance: dict[str, Any] = {}
+        device_ids: set[str] = set()
+
+        for call_id, metadata in self.metadata_by_tool_call_id.items():
+            entry = metadata.get("tool_provenance")
+            if isinstance(entry, dict):
+                # Already keyed by call id by ``build_tool_interrupt_payload``.
+                for provenance_call_id, value in entry.items():
+                    if isinstance(value, dict):
+                        provenance[str(provenance_call_id)] = dict(value)
+            device_id = metadata.get("device_id")
+            if isinstance(device_id, str) and device_id:
+                device_ids.add(device_id)
+                provenance.setdefault(call_id, {}).setdefault("device_id", device_id)
+
+        payload_metadata: dict[str, Any] = {}
+        if len(device_ids) == 1:
+            payload_metadata["device_id"] = next(iter(device_ids))
+        if provenance:
+            payload_metadata["tool_provenance"] = provenance
+
+        payload: dict[str, Any] = {
+            "action_requests": [dict(request) for request in self.action_requests],
+            "interrupt_ids": list(self.interrupt_ids),
+        }
+        if self.interrupt_ids:
+            payload["interrupt_id"] = self.interrupt_ids[0]
+        if payload_metadata:
+            payload["metadata"] = payload_metadata
+        return payload
+
+
+def _live_interrupts(snapshot: Any) -> list[Any]:
+    """Interrupts belonging to tasks that have not produced a result yet.
+
+    ``task.result is None`` is the whole test, and it is not cosmetic: after a
+    partial resume LangGraph keeps reporting the answered interrupt on both
+    ``snapshot.interrupts`` and its task (verified against 1.2.9). Filtering on
+    truthiness instead would re-present a task that legitimately returned ``{}``.
+    """
+    tasks = list(getattr(snapshot, "tasks", None) or ())
+    if tasks:
+        return [
+            item
+            for task in tasks
+            if getattr(task, "result", None) is None
+            for item in (getattr(task, "interrupts", None) or ())
+        ]
+    return list(getattr(snapshot, "interrupts", None) or ())
+
+
+def pending_interrupt_payload(snapshot: Any) -> PendingInterruptPayload | None:
+    """Normalize every live pending interrupt without consulting parent messages.
+
+    Returns ``None`` when the turn is not waiting on a human — including a turn
+    whose only interrupts have already been answered.
+    """
+    action_requests: list[dict[str, Any]] = []
+    interrupt_ids: list[str] = []
+    metadata_by_tool_call_id: dict[str, dict[str, Any]] = {}
+
+    for item in _live_interrupts(snapshot):
+        value = getattr(item, "value", None)
+        if not isinstance(value, dict):
+            continue
+        requests = value.get("action_requests")
+        if not isinstance(requests, list) or not requests:
+            continue
+
+        interrupt_id = str(getattr(item, "id", "") or "")
+        if interrupt_id and interrupt_id not in interrupt_ids:
+            interrupt_ids.append(interrupt_id)
+
+        item_metadata = value.get("metadata")
+        item_metadata = dict(item_metadata) if isinstance(item_metadata, dict) else {}
+        if interrupt_id:
+            item_metadata.setdefault("interrupt_id", interrupt_id)
+
+        for request in requests:
+            if not isinstance(request, dict):
+                continue
+            action_requests.append(dict(request))
+            call_id = str(request.get("tool_call_id") or request.get("id") or "")
+            if call_id:
+                metadata_by_tool_call_id[call_id] = dict(item_metadata)
+
+    if not action_requests:
+        return None
+
+    return PendingInterruptPayload(
+        action_requests=tuple(action_requests),
+        interrupt_ids=tuple(interrupt_ids),
+        metadata_by_tool_call_id=metadata_by_tool_call_id,
+    )
+
+
+def interrupt_owner_by_tool_call(payload: PendingInterruptPayload) -> dict[str, str]:
+    """Which interrupt is asking about each pending tool call."""
+    return {
+        call_id: str(metadata.get("interrupt_id") or "")
+        for call_id, metadata in payload.metadata_by_tool_call_id.items()
+    }
 
 
 def build_interrupt_response(

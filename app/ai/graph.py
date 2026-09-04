@@ -54,6 +54,7 @@ from .custom_agent_runtime import is_custom_runtime_id
 from .history import ConversationHistoryProvider
 from .hitl_config import (
     build_interrupt_response,
+    pending_interrupt_payload,
 )
 from .image_context import (
     build_multimodal_content,
@@ -104,7 +105,7 @@ from .utils import (
 )
 from .workflow.contracts import TurnIdentity
 from .workflow.custom_agents import CustomAgentsMixin
-from .workflow.graph_builder import SPECIALIST_NODE_NAMES, build_workflow_graph
+from .workflow.graph_builder import build_workflow_graph
 from .workflow.inventory import CUSTOM_AGENT_NODE
 from .workflow.planning_execution import (
     PLANNING_AGENT_ID,
@@ -133,27 +134,10 @@ if TYPE_CHECKING:
 
 _apply_decisions = apply_hitl_decisions
 
-# Where a turn can be waiting for a human. A standard specialist gates inside
-# its own subgraph, so LangGraph reports the specialist node itself; Planning
-# and RAG gate inside their tool-loop nodes. Resume validates against this set,
-# so a node missing here is a turn that can pause but never continue.
-_APPROVAL_INTERRUPT_NODES = frozenset({*SPECIALIST_NODE_NAMES, "planning_tools", "rag_tools"})
-
-
-def _pending_interrupts(snapshot: Any) -> list[Any]:
-    """Every interrupt this checkpoint is waiting on, across all pending tasks."""
-    interrupts = list(getattr(snapshot, "interrupts", None) or ())
-    if interrupts:
-        return interrupts
-    return [
-        item
-        for task in getattr(snapshot, "tasks", None) or ()
-        for item in (getattr(task, "interrupts", None) or ())
-    ]
-
-
-def _has_approval_interrupt(next_nodes: Any) -> bool:
-    return bool(set(next_nodes or ()) & _APPROVAL_INTERRUPT_NODES)
+# A pause is whatever the checkpoint says is pending. There is deliberately no
+# node-name allowlist here any more: it never listed ``planning_worker``, so a
+# Planning worker waiting on a human read as a crashed turn, and every node
+# added later would have had to remember to join the set.
 
 
 def apply_accumulated_thinking(response: Any, accumulated_thinking: str) -> None:
@@ -895,25 +879,27 @@ class MultiAgentWorkflow(
         thread_id: str | None,
         fallback_conversation_id: str | None = None,
     ) -> AgentResponse | None:
+        """The response for a turn waiting on a human, or nothing.
+
+        The pending interrupts decide this, not the parent message list. A
+        Planning worker's gated tool call lives in the worker's own private
+        messages and never reaches the parent's, so requiring a parent
+        ``AIMessage`` with tool calls here meant a paused worker produced no
+        approval request at all.
+        """
         if not state_snapshot or not thread_id:
+            return None
+
+        payload = pending_interrupt_payload(state_snapshot)
+        if payload is None:
             return None
 
         values = getattr(state_snapshot, "values", {})
         state_view = GraphStateView(values)
-        messages = state_view.messages()
-        if not messages:
-            return None
-
-        last_message = messages[-1]
-        if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
-            return None
-
         conversation_id = state_view.conversation_id() or fallback_conversation_id or ""
-        interrupt_payload = self._get_interrupt_payload_from_state(
-            values,
-            last_message.tool_calls,
+        interrupt_response = build_interrupt_response(
+            payload.to_interrupt_payload(), thread_id, conversation_id
         )
-        interrupt_response = build_interrupt_response(interrupt_payload, thread_id, conversation_id)
 
         active_agent_id = state_view.active_agent_id() or "search_agent"
 
@@ -2548,14 +2534,13 @@ class MultiAgentWorkflow(
 
         # Check for further interrupts
         final_snapshot = await self.graph.aget_state(config)
-        if _has_approval_interrupt(final_snapshot.next):
-            interrupt_response = self._build_interrupt_agent_response(
-                final_snapshot,
-                thread_id,
-                final_snapshot.values.get("conversation_id"),
-            )
-            if interrupt_response:
-                return interrupt_response
+        interrupt_response = self._build_interrupt_agent_response(
+            final_snapshot,
+            thread_id,
+            final_snapshot.values.get("conversation_id"),
+        )
+        if interrupt_response:
+            return interrupt_response
 
         response = self._recover_terminal_response(result)
         if not response:
@@ -2580,13 +2565,12 @@ class MultiAgentWorkflow(
         config = self._build_graph_config(thread_id)
         state_snapshot = await self.graph.aget_state(config)
 
-        if not state_snapshot.next or len(state_snapshot.next) == 0:
-            raise ValueError("Workflow is not in interrupted state")
-        if not _has_approval_interrupt(state_snapshot.next):
-            raise ValueError(f"Unexpected interrupt state: next nodes are {state_snapshot.next}")
+        pending = pending_interrupt_payload(state_snapshot)
+        if pending is None:
+            raise ValueError("Workflow is not waiting on a human decision")
 
         resume_data = address_decisions_to_interrupts(
-            build_interrupt_resume_payload(decisions), _pending_interrupts(state_snapshot)
+            build_interrupt_resume_payload(decisions), pending
         )
 
         active_agent_id = state_snapshot.values.get("active_agent_id", "search_agent")
@@ -2797,18 +2781,15 @@ class MultiAgentWorkflow(
     ):
         """The interrupt event for a paused turn, or nothing if it is not paused.
 
-        A pause is only an approval stop when the last message is still holding
-        tool calls; anything else pending is a run that failed to reach the
-        finalizer, which is an error rather than a question for the user.
+        A pause is whatever the checkpoint is still waiting on. Anything else
+        pending is a run that failed to reach the finalizer, which is an error
+        rather than a question for the user.
         """
-        messages = snapshot.values.get("messages") or []
-        last_message = messages[-1] if messages else None
-        if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
+        pending = pending_interrupt_payload(snapshot)
+        if pending is None:
             return None
 
-        payload = self._interrupt_payload_from_pending_interrupts(
-            snapshot
-        ) or self._get_interrupt_payload_from_state(snapshot.values, last_message.tool_calls)
+        payload = pending.to_interrupt_payload()
         return make_event(
             "interrupt",
             sequence=0,
@@ -2827,22 +2808,16 @@ class MultiAgentWorkflow(
         config = self._build_graph_config(thread_id)
         snapshot = await self.graph.aget_state(config)
 
-        pending_tool_calls = None
-        messages = snapshot.values.get("messages", [])
-        if messages:
-            last_message = messages[-1]
-            if (
-                isinstance(last_message, AIMessage)
-                and hasattr(last_message, "tool_calls")
-                and last_message.tool_calls
-            ):
-                pending_tool_calls = last_message.tool_calls
+        pending = pending_interrupt_payload(snapshot)
 
         return {
-            "interrupted": bool(snapshot.next),
+            # "Interrupted" means waiting on a human, not merely having a next
+            # node -- a turn mid-execution also has one.
+            "interrupted": pending is not None,
             "next": snapshot.next,
             "values": snapshot.values,
-            "pending_tool_calls": pending_tool_calls,
+            "pending_tool_calls": list(pending.action_requests) if pending else None,
+            "pending_interrupt_ids": list(pending.interrupt_ids) if pending else [],
             "active_agent_id": snapshot.values.get("active_agent_id"),
         }
 

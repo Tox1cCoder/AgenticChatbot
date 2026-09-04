@@ -411,6 +411,19 @@ class PlanningWorkerRuntime:
             else:
                 result = await self._run_specialist_worker(task, state)
         except GraphBubbleUp:
+            # Control flow, not a failure. The event says the worker is waiting
+            # on a human so the trace does not simply stop mid-worker; the
+            # pause itself must still reach the parent untouched.
+            _emit(
+                writer,
+                {
+                    "type": "planning_worker",
+                    "phase": "interrupt",
+                    "dispatch_id": task.dispatch_id,
+                    "task_id": task.task_id,
+                    "agent_id": task.agent_id,
+                },
+            )
             raise
         except (ModelCallLimitExceededError, ToolCallLimitExceededError):
             return self._finish(writer, failed_worker(task, "agent_execution_limit"))
@@ -829,6 +842,17 @@ class PlanningNodeFactory:
             logger.warning("planning_dispatch ran with no validated dispatch in state")
             return []
 
+        _emit(
+            _stream_writer(),
+            {
+                "type": "planning_dispatch",
+                "phase": "validated",
+                "dispatch_id": dispatch.dispatch_id,
+                "wave": dispatch.wave,
+                "task_count": len(dispatch.tasks),
+            },
+        )
+
         scope = _bounded_parent_scope(state)
         return [
             Send("planning_worker", {"worker_task": task, "worker_parent_state": scope})
@@ -876,6 +900,16 @@ class PlanningNodeFactory:
             return Command(goto="planning_model")
 
         ordered = collect_worker_results(dispatch, state.get("worker_results") or [])
+        _emit(
+            _stream_writer(),
+            {
+                "type": "planning_dispatch",
+                "phase": "collected",
+                "dispatch_id": dispatch.dispatch_id,
+                "wave": dispatch.wave,
+                "task_count": len(ordered),
+            },
+        )
         return Command(
             update={
                 "messages": [

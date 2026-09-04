@@ -6,6 +6,15 @@ requires ``Command(resume={interrupt_id: value})`` and raises otherwise. The
 client does not know interrupt ids and should not have to: every pending
 interrupt carries the tool-call ids it is asking about, so the server can
 address the decisions itself.
+
+**Corrected 2026-09-04.** This file previously asserted that an unanswered
+interrupt must be refused, on the grounds that "resuming without a decision for
+every pending interrupt makes LangGraph replay that node with no answer, which
+reads as a rejection nobody made". That was never probed and is false. Against
+LangGraph 1.2.9: resuming a subset runs exactly the answered tasks, once, and
+leaves the others pending with their interrupts intact. Partial approval is a
+legitimate flow — approve one worker now, the other after looking at it — and
+refusing it removed a capability rather than preventing a bug.
 """
 
 from __future__ import annotations
@@ -14,6 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.ai.hitl_config import pending_interrupt_payload
 from app.ai.utils import address_decisions_to_interrupts, build_interrupt_resume_payload
 
 
@@ -37,44 +47,97 @@ def _interrupt(interrupt_id: str, *tool_call_ids: str) -> SimpleNamespace:
     )
 
 
-def test_a_single_interrupt_still_resumes_with_a_flat_payload():
-    """One pending interrupt is the common case and must not change shape."""
+def _payload(*interrupts, resolved: tuple[str, ...] = ()):
+    """Normalize interrupts the way the production recovery path does."""
+    tasks = tuple(
+        SimpleNamespace(
+            name="planning_worker",
+            id=f"task-{item.id}",
+            interrupts=(item,),
+            result={"done": True} if item.id in resolved else None,
+        )
+        for item in interrupts
+    )
+    snapshot = SimpleNamespace(
+        tasks=tasks,
+        interrupts=interrupts,
+        values={},
+        next=tuple(task.name for task in tasks),
+    )
+    return pending_interrupt_payload(snapshot)
+
+
+def test_a_single_interrupt_resumes_addressed_to_its_own_id():
+    """One pending interrupt is the common case; it is still addressed."""
     decisions = [_decision("call-1"), _decision("call-2")]
 
-    addressed = address_decisions_to_interrupts(decisions, [_interrupt("i1", "call-1", "call-2")])
+    addressed = address_decisions_to_interrupts(
+        decisions, _payload(_interrupt("i1", "call-1", "call-2"))
+    )
 
-    assert addressed == decisions
+    assert addressed == {"i1": decisions}
 
 
 def test_each_decision_reaches_the_interrupt_that_asked_for_it():
     decisions = [_decision("call-a"), _decision("call-b", "reject")]
-    interrupts = [_interrupt("i1", "call-a"), _interrupt("i2", "call-b")]
+    payload = _payload(_interrupt("i1", "call-a"), _interrupt("i2", "call-b"))
 
-    addressed = address_decisions_to_interrupts(decisions, interrupts)
+    addressed = address_decisions_to_interrupts(decisions, payload)
 
     assert addressed == {"i1": [decisions[0]], "i2": [decisions[1]]}
 
 
 def test_a_decision_for_an_unknown_call_is_refused_rather_than_guessed():
     """Sending it to the wrong interrupt would approve something else."""
-    interrupts = [_interrupt("i1", "call-a"), _interrupt("i2", "call-b")]
+    payload = _payload(_interrupt("i1", "call-a"), _interrupt("i2", "call-b"))
 
     with pytest.raises(ValueError, match="call-zzz"):
-        address_decisions_to_interrupts([_decision("call-zzz")], interrupts)
+        address_decisions_to_interrupts([_decision("call-zzz")], payload)
 
 
-def test_an_unanswered_interrupt_is_refused_rather_than_left_hanging():
-    """Resuming without a decision for every pending interrupt makes LangGraph
-    replay that node with no answer, which reads as a rejection nobody made."""
-    interrupts = [_interrupt("i1", "call-a"), _interrupt("i2", "call-b")]
+def test_an_unanswered_interrupt_is_left_pending():
+    """Probed: the answered worker runs once; the other keeps waiting.
 
-    with pytest.raises(ValueError, match="i2"):
-        address_decisions_to_interrupts([_decision("call-a")], interrupts)
+    The resume map carries only the interrupt that was decided. LangGraph does
+    not treat the omission as an answer.
+    """
+    payload = _payload(_interrupt("i1", "call-a"), _interrupt("i2", "call-b"))
+
+    addressed = address_decisions_to_interrupts([_decision("call-a")], payload)
+
+    assert set(addressed) == {"i1"}
 
 
-def test_no_pending_interrupts_leaves_the_payload_alone():
+def test_a_decision_for_an_already_answered_interrupt_is_refused():
+    """A resolved interrupt is not pending, so nothing is asking about it."""
+    payload = _payload(_interrupt("i1", "call-a"), _interrupt("i2", "call-b"), resolved=("i1",))
+
+    with pytest.raises(ValueError, match="call-a"):
+        address_decisions_to_interrupts([_decision("call-a")], payload)
+
+
+def test_two_decisions_for_one_call_are_refused():
+    payload = _payload(_interrupt("i1", "call-a"))
+
+    with pytest.raises(ValueError, match="call-a"):
+        address_decisions_to_interrupts(
+            [_decision("call-a"), _decision("call-a", "reject")], payload
+        )
+
+
+def test_a_legacy_single_interrupt_list_still_resumes_flat():
+    """Callers that have not moved to the payload keep working while one pauses."""
     decisions = [_decision("call-1")]
+    assert address_decisions_to_interrupts(decisions, [_interrupt("i1", "call-1")]) == decisions
     assert address_decisions_to_interrupts(decisions, []) == decisions
+
+
+def test_a_legacy_list_of_two_interrupts_is_refused_not_mis_addressed():
+    """The bare-list shape cannot express per-interrupt addressing."""
+    with pytest.raises(TypeError):
+        address_decisions_to_interrupts(
+            [_decision("call-a")], [_interrupt("i1", "call-a"), _interrupt("i2", "call-b")]
+        )
 
 
 def test_the_payload_builder_is_unchanged_by_addressing():
