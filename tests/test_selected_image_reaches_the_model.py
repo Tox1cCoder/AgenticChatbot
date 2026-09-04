@@ -6,41 +6,20 @@ import json
 
 import pytest
 
-from app.ai import web_research_tool
+from app.ai import web_tools
 from app.ai.prompts import build_rich_response_guidance
 from app.ai.research_budget import reset_research_budget
 from app.ai.rich_image_selection import apply_rich_image_selection
 from app.ai.selected_image_sink import selected_image_sink
 from app.ai.tool_context import clear_tool_context, tool_execution_context
 from app.ai.tool_execution import _attach_rich_candidates_to_artifact
-from app.ai.web_research_tool import create_web_research_tool
+from app.ai.web_tools import create_image_search_tool
 from app.ai.workflow.tool_loop import ToolLoopMixin
 from app.core.rich_response import sanitize_public_rich_item
 
 CONVERSATION_ID = "77777777-7777-7777-7777-777777777777"
 ORIGINAL_IMAGE_URL = "https://origin.example/t1-team.webp?private=1"
 THUMBNAIL_URL = "https://imgs.search.brave.com/t1-team-thumbnail.webp"
-
-
-class _Tavily:
-    async def ainvoke(self, args: dict) -> str:
-        return json.dumps(
-            {
-                "results": [
-                    {
-                        "index": 1,
-                        "title": "T1 completed 2026 LCK roster",
-                        "url": "https://sheepesports.example/t1",
-                        "content": "T1 finalized its 2026 LCK roster.",
-                        "score": 0.9,
-                    }
-                ],
-                "total_results": 1,
-                "provider": "tavily",
-                "operation": "search",
-                "query": args["query"],
-            }
-        )
 
 
 class _Brave:
@@ -78,26 +57,24 @@ def _clean(monkeypatch):
     clear_tool_context()
     reset_research_budget(CONVERSATION_ID)
     monkeypatch.setattr(
-        web_research_tool.settings,
+        web_tools.settings,
         "remote_image_enrichment_enabled",
         True,
         raising=False,
     )
+    monkeypatch.setattr(web_tools.settings, "inline_rich_response_enabled", True, raising=False)
     yield
     clear_tool_context()
     reset_research_budget(CONVERSATION_ID)
 
 
 async def _provider_selected_candidates() -> list[dict]:
-    tool = create_web_research_tool(
-        tavily_tool=_Tavily(),
-        brave_tool=_Brave(confidence="high"),
-    )
+    tool = create_image_search_tool(brave_tool=_Brave(confidence="high"))
     with (
         tool_execution_context(conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"),
         selected_image_sink() as sink,
     ):
-        await tool.ainvoke({"query": "T1 roster 2026", "image_query": "T1 team photo"})
+        await tool.ainvoke({"query": "T1 team photo"})
     return list(sink)
 
 
@@ -113,7 +90,7 @@ async def test_a_provider_selected_image_becomes_a_marker_the_model_can_copy():
         result_text="{}",
         render=None,
         tool_call_id="call-1",
-        tool_name="web_research",
+        tool_name="image_search",
         selected_images=selected,
     )
     context: dict = {}

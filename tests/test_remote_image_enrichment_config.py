@@ -30,6 +30,10 @@ _ACTIVE_REMOTE_IMAGE_CONTRACT_FILES = (
     _ROOT / "app" / "ai" / "deferred_tool_binding.py",
     _ROOT / "app" / "ai" / "tool_execution.py",
     _ROOT / "app" / "core" / "config.py",
+    # The model-facing image contract moved here when image_search split off
+    # from the combined research tool, so this is now the likeliest place for
+    # retired verifier language to creep back in.
+    _ROOT / "app" / "ai" / "web_tools.py",
 )
 _STALE_ASSURANCES = (
     "visual " + "verifier",

@@ -204,6 +204,52 @@ Metric labels are allowlisted enums plus bounded provider/model/inventory
 identifiers. Request, conversation, user, custom-agent-instance, message, and
 evidence IDs are **never** labels — look for them in access-controlled traces.
 
+### Focused web evidence
+
+Ordinary agents reach the web through three product tools — `web_search`,
+`web_open`, `image_search` — and never through `tavily_search`,
+`tavily_extract`, or `brave_image_search`, which `RAW_WEB_TOOL_NAMES` removes
+from binding and from discovery. These are **log fields, not metrics**: nothing
+increments a counter yet, so do not build a dashboard panel expecting one.
+
+`app.ai.web_tools` writes one `web_tool_call` line per call at INFO:
+
+| Field | Read it for |
+|---|---|
+| `operation` | `web_search`, `web_open`, `image_search` |
+| `outcome` | `completed`, `reused`, `no_match`, `skipped`, `invalid_request`, `provider_error`, `repeated_query_rejected`, `repeated_subject_rejected` |
+| `freshness` | The **normalized** intent (`timeless`/`recent`/`as_of`) after the server anchored the query — not what the model typed |
+| `provider_chars` / `model_chars` | The pair the whole change exists to move. The provider payload may stay large; the model's view of it must not. A converging ratio means a bound is being hit, not that pages got shorter |
+| `results` / `deduplicated` / `omitted` | Search results kept, dropped as the same canonical URL, and dropped by the character cap. A rising `omitted` means `web_search_result_max_chars` is the binding constraint |
+| `urls` / `failed` / `excerpts` | `web_open` pages requested, pages the provider could not read, passages returned |
+| `selected` | Images offered to the rich-item inventory — 0 is normal and not a failure |
+
+`app.ai.tool_result_read_tool` writes one `focused_tool_result_read` line per
+call: `outcome` (`matched`/`no_match`), `blob_chars`, `model_chars`,
+`excerpts`, `omitted`, `truncated`. There is no `next_offset` and no paging
+loop; a turn that reads one blob twice is reading it for two different
+objectives, which is legitimate.
+
+Two rejection outcomes are the loop guards, and both are real refusals rather
+than advice:
+
+- `repeated_query_rejected` — the turn's search budget is spent or the query
+  near-duplicates one already made. Rising share means the model is rephrasing
+  instead of opening the sources it already has.
+- `repeated_subject_rejected` — the same visual subject was already searched
+  this turn. The first call's picture is already in the inventory.
+
+`read_tool_result` has **no** equivalent guard: its description asks the model
+not to repeat an objective, and nothing enforces it. A turn calling it
+repeatedly with one objective is a real gap, visible only by reading the log
+lines.
+
+Every field above is an enum or a count. Query text, objectives, extraction
+questions, result titles, and URLs are **never** written to these lines and must
+never become metric labels: the line is emitted on every call, so one
+user-derived field would put user content into ordinary operational logs and
+into an unbounded label space. `tests/test_web_tools.py` asserts this directly.
+
 ### Verify the checkpoint namespace
 
 New turns must write `routing-v2:` threads:
@@ -333,6 +379,14 @@ both what was deleted and what is still live.
 3. **`min_citation_coverage = 0.5`** remains a carried default, never selected
    from evaluation results. Grounding is mandatory, so this threshold decides
    real abstentions.
+4. **Focused web evidence emits log lines, not metrics.** The fields above are
+   the only signal, and the seven evidence bounds in `app/core/config.py`
+   (`web_search_*`, `web_open_*`, `tool_result_focus_*`) are carried defaults,
+   never selected from evaluation results. Nothing has been run against a live
+   provider, so do not describe the retrieval quality of `web_open` or
+   `read_tool_result` as validated.
+5. **`read_tool_result` cannot refuse a repeated objective.** Its description
+   asks the model not to, and no code checks.
 Closed since the last revision of this document: RAG and Planning no longer run
 pre-v2 loops; `_tool_node`/`_approval_node` are deleted; the
 `disable_outer_timeout` allowlist is empty, so every interactive tool call is

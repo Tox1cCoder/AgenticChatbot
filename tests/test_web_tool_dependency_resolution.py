@@ -1,4 +1,10 @@
-"""Production MCP resolution for ``web_research`` dependencies."""
+"""Production MCP resolution for the product web tools' dependencies.
+
+Every one of them resolves its provider lazily from the MCP registry when
+nothing was injected, and none of them touches the registry at all under
+client-only scope. Migrated from the combined research tool's coverage: the
+tools changed, the boundary did not.
+"""
 
 from __future__ import annotations
 
@@ -6,11 +12,15 @@ import json
 
 import pytest
 
-from app.ai import web_research_tool
+from app.ai import web_tools
 from app.ai.research_budget import reset_research_budget
 from app.ai.selected_image_sink import selected_image_sink
 from app.ai.tool_context import clear_tool_context, tool_execution_context
-from app.ai.web_research_tool import create_web_research_tool
+from app.ai.web_tools import (
+    create_image_search_tool,
+    create_web_open_tool,
+    create_web_search_tool,
+)
 
 CONVERSATION_ID = "33333333-3333-3333-3333-333333333333"
 
@@ -26,10 +36,24 @@ TAVILY_PAYLOAD = json.dumps(
             }
         ],
         "total_results": 1,
-        "answer": "T1 is a South Korean esports organization.",
         "provider": "tavily",
         "operation": "search",
         "query": "T1 roster 2026",
+    }
+)
+
+EXTRACT_PAYLOAD = json.dumps(
+    {
+        "provider": "tavily",
+        "operation": "extract",
+        "urls": ["https://sheepesports.example/t1"],
+        "results": [
+            {
+                "url": "https://sheepesports.example/t1",
+                "raw_content": "The roster was finalized on 2 January 2026.",
+            }
+        ],
+        "failed_results": [],
     }
 )
 
@@ -62,8 +86,9 @@ def _clean(monkeypatch):
     clear_tool_context()
     reset_research_budget(CONVERSATION_ID)
     monkeypatch.setattr(
-        web_research_tool.settings, "remote_image_enrichment_enabled", True, raising=False
+        web_tools.settings, "remote_image_enrichment_enabled", True, raising=False
     )
+    monkeypatch.setattr(web_tools.settings, "inline_rich_response_enabled", True, raising=False)
     yield
     clear_tool_context()
     reset_research_budget(CONVERSATION_ID)
@@ -109,48 +134,60 @@ def _brave_payload() -> str:
 
 
 @pytest.mark.asyncio
-async def test_tavily_resolves_from_mcp_when_it_was_not_injected(monkeypatch):
+async def test_web_search_resolves_tavily_from_mcp_when_it_was_not_injected(monkeypatch):
     tavily = _NamedTool("tavily_search", TAVILY_PAYLOAD)
     manager = _FakeManager({"tavily": [_NamedTool("tavily_extract"), tavily]})
     _patch_manager(monkeypatch, manager)
 
-    payload, _ = await _run(create_web_research_tool(), query="T1 roster 2026")
+    payload, _ = await _run(
+        create_web_search_tool(), query="T1 roster 2026", objective="Find the roster"
+    )
 
-    assert sorted(manager.requested) == ["brave_image_search", "tavily"]
+    assert manager.requested == ["tavily"]
     assert len(tavily.calls) == 1
-    assert payload["answer"].startswith("T1 is a South Korean")
+    assert payload["results"][0]["url"] == "https://sheepesports.example/t1"
     assert "status" not in payload
 
 
 @pytest.mark.asyncio
-async def test_an_unresolvable_tavily_still_reports_a_provider_error(monkeypatch):
-    _patch_manager(monkeypatch, _FakeManager({}))
+async def test_web_open_resolves_the_extractor_from_mcp(monkeypatch):
+    extract = _NamedTool("tavily_extract", EXTRACT_PAYLOAD)
+    manager = _FakeManager({"tavily": [_NamedTool("tavily_search"), extract]})
+    _patch_manager(monkeypatch, manager)
 
-    payload, _ = await _run(create_web_research_tool(), query="T1 roster 2026")
+    payload, _ = await _run(
+        create_web_open_tool(),
+        urls=["https://sheepesports.example/t1"],
+        question="When was the roster finalized?",
+    )
 
-    assert payload["status"] == "error"
-    assert payload["error_type"] == "provider_error"
+    assert manager.requested == ["tavily"]
+    assert len(extract.calls) == 1
+    assert "2 January 2026" in " ".join(item["text"] for item in payload["excerpts"])
 
 
 @pytest.mark.asyncio
-async def test_brave_resolves_when_it_was_not_injected(monkeypatch):
+async def test_image_search_resolves_brave_from_mcp(monkeypatch):
     brave = _NamedTool("brave_image_search", _brave_payload())
-    manager = _FakeManager(
-        {
-            "tavily": [_NamedTool("tavily_search", TAVILY_PAYLOAD)],
-            "brave_image_search": [brave],
-        }
-    )
+    manager = _FakeManager({"brave_image_search": [brave]})
     _patch_manager(monkeypatch, manager)
 
-    _, sink = await _run(
-        create_web_research_tool(),
-        query="T1 roster 2026",
-        image_query="T1 League of Legends team photo",
-    )
+    _, sink = await _run(create_image_search_tool(), query="T1 League of Legends team photo")
 
     assert brave.calls == [{"query": "T1 League of Legends team photo"}]
     assert sink
+
+
+@pytest.mark.asyncio
+async def test_an_unresolvable_provider_still_reports_a_provider_error(monkeypatch):
+    _patch_manager(monkeypatch, _FakeManager({}))
+
+    payload, _ = await _run(
+        create_web_search_tool(), query="T1 roster 2026", objective="Find the roster"
+    )
+
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "provider_error"
 
 
 @pytest.mark.asyncio
@@ -162,75 +199,58 @@ async def test_injected_dependencies_are_never_overridden_by_resolution(monkeypa
     injected = _NamedTool("tavily_search", TAVILY_PAYLOAD)
 
     payload, _ = await _run(
-        create_web_research_tool(
-            tavily_tool=injected,
-            brave_tool=_NamedTool("brave_image_search", json.dumps({"images": []})),
-        ),
+        create_web_search_tool(tavily_tool=injected),
         query="T1 roster 2026",
+        objective="Find the roster",
     )
 
     assert manager.requested == []
     assert len(injected.calls) == 1
-    assert payload["answer"].startswith("T1 is a South Korean")
+    assert payload["results"][0]["title"] == "T1 roster"
 
 
+@pytest.mark.parametrize("device_id", ["device-a", None])
 @pytest.mark.asyncio
-async def test_client_only_direct_invocation_never_calls_server_dependencies(monkeypatch):
+async def test_client_only_direct_invocation_never_calls_server_dependencies(
+    monkeypatch, device_id
+):
     manager = _FakeManager({"tavily": [_NamedTool("tavily_search", TAVILY_PAYLOAD)]})
     _patch_manager(monkeypatch, manager)
     tavily = _NamedTool("tavily_search", TAVILY_PAYLOAD)
+    extract = _NamedTool("tavily_extract", EXTRACT_PAYLOAD)
     brave = _NamedTool("brave_image_search", _brave_payload())
-    tool = create_web_research_tool(tavily_tool=tavily, brave_tool=brave)
+
+    invocations = (
+        (
+            create_web_search_tool(tavily_tool=tavily),
+            {"query": "T1 roster", "objective": "Find the roster"},
+        ),
+        (
+            create_web_open_tool(extract_tool=extract),
+            {"urls": ["https://sheepesports.example/t1"], "question": "When was it finalized?"},
+        ),
+        (create_image_search_tool(brave_tool=brave), {"query": "T1 team photo"}),
+    )
 
     with (
         tool_execution_context(
             conversation_id=CONVERSATION_ID,
             user_id="u1",
             agent_key="search",
-            device_id="device-a",
+            device_id=device_id,
             tool_scope="client_only",
         ),
         selected_image_sink() as sink,
     ):
-        payload = json.loads(
-            await tool.ainvoke({"query": "T1 roster 2026", "image_query": "T1 team photo"})
-        )
+        for tool, args in invocations:
+            payload = json.loads(await tool.ainvoke(args))
+            assert payload["status"] == "error"
+            assert payload["error_type"] == "permission_error"
+            assert payload["retryable"] is False
 
-    assert payload["status"] == "error"
-    assert payload["error_type"] == "permission_error"
-    assert payload["retryable"] is False
     assert manager.requested == []
     assert tavily.calls == []
-    assert brave.calls == []
-    assert sink == []
-
-
-@pytest.mark.asyncio
-async def test_client_only_without_device_never_calls_server_dependencies(monkeypatch):
-    manager = _FakeManager({"tavily": [_NamedTool("tavily_search", TAVILY_PAYLOAD)]})
-    _patch_manager(monkeypatch, manager)
-    tavily = _NamedTool("tavily_search", TAVILY_PAYLOAD)
-    brave = _NamedTool("brave_image_search", _brave_payload())
-    tool = create_web_research_tool(tavily_tool=tavily, brave_tool=brave)
-
-    with (
-        tool_execution_context(
-            conversation_id=CONVERSATION_ID,
-            user_id="u1",
-            agent_key="search",
-            tool_scope="client_only",
-        ),
-        selected_image_sink() as sink,
-    ):
-        payload = json.loads(
-            await tool.ainvoke({"query": "T1 roster 2026", "image_query": "T1 team photo"})
-        )
-
-    assert payload["status"] == "error"
-    assert payload["error_type"] == "permission_error"
-    assert payload["retryable"] is False
-    assert manager.requested == []
-    assert tavily.calls == []
+    assert extract.calls == []
     assert brave.calls == []
     assert sink == []
 
@@ -249,15 +269,17 @@ class _McpShapedTool:
 
 
 @pytest.mark.asyncio
-async def test_mcp_content_blocks_are_unwrapped_into_the_research_payload(monkeypatch):
+async def test_mcp_content_blocks_are_unwrapped_into_the_search_payload(monkeypatch):
     tavily = _McpShapedTool("tavily_search", TAVILY_PAYLOAD)
     _patch_manager(monkeypatch, _FakeManager({"tavily": [tavily]}))
 
-    payload, _ = await _run(create_web_research_tool(), query="T1 roster 2026")
+    payload, _ = await _run(
+        create_web_search_tool(), query="T1 roster 2026", objective="Find the roster"
+    )
 
-    assert payload["answer"].startswith("T1 is a South Korean")
     assert payload["results"][0]["url"] == "https://sheepesports.example/t1"
-    assert payload["research"] == {"reused": False, "searches_used": 1}
+    assert payload["reused"] is False
+    assert payload["searches_used"] == 1
 
 
 @pytest.mark.asyncio

@@ -1,11 +1,11 @@
-"""Brave Image Search reachability (Task 6: route agents through web_research).
+"""Brave Image Search reachability.
 
-Brave is no longer pinned for any agent — pinning the raw provider tool
-would let the model bypass the web_research tool's turn budget and visual
-verifier. It stays reachable via ``tool_search`` for any agent, and chat/search
-additionally get ``web_research`` bound directly (see
-test_web_research_binding.py). An operator can still opt a raw tool into the
-pinned set manually via ``mcp_tool_search_pinned_tools``.
+Brave is pinned for no agent, and since the product tools landed it is not
+reachable through ordinary discovery either: ``image_search`` owns the turn
+budget and the deterministic selection, and a model that could call the raw
+tool would bypass both. Chat and search get ``image_search`` bound directly
+(see test_web_tool_binding.py). The only way back to the raw tool is the
+server-side ``allow_raw_web_tools`` opt-in.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ class _FakeManager:
 
 def test_no_agent_pins_brave_image_search(monkeypatch):
     """Brave is not a system-required pin for any agent, chat and search
-    included — the pin removal in Task 6 is the intended change."""
+    included."""
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "mcp_tool_search_pinned_tools", [], raising=False)
@@ -41,8 +41,7 @@ def test_no_agent_pins_brave_image_search(monkeypatch):
 
 
 def test_chat_binding_does_not_auto_expose_brave(monkeypatch):
-    """Brave is not auto-bound just because the raw tool is available; it
-    stays reachable only through tool_search discovery or web_research."""
+    """Brave is not auto-bound just because the raw tool is available."""
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "mcp_tool_search_pinned_tools", [], raising=False)
@@ -58,9 +57,14 @@ def test_chat_binding_does_not_auto_expose_brave(monkeypatch):
     assert "brave_image_search" not in {tool.name for tool in tools}
 
 
-def test_user_configured_brave_pin_still_binds(monkeypatch):
-    """Only the system-required default pin was removed: an operator can still
-    opt Brave into the pinned set explicitly via mcp_tool_search_pinned_tools."""
+def test_a_configured_brave_pin_resolves_but_no_longer_binds(monkeypatch):
+    """Pin resolution and binding are different questions now.
+
+    ``get_pinned_tools`` still honours the operator's configuration, but
+    ``build_deferred_tool_list`` drops the raw provider afterwards. A pin was
+    the one path that bound a tool without discovery, so leaving it open would
+    have reopened the bypass the denylist exists to close. The authorized way
+    back is ``allow_raw_web_tools``, which only server code can pass."""
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "mcp_tool_search_pinned_tools", [_BRAVE_SPEC], raising=False)
@@ -70,5 +74,21 @@ def test_user_configured_brave_pin_still_binds(monkeypatch):
     all_tools = [SimpleNamespace(name="brave_image_search")]
 
     pinned = get_pinned_tools(manager, all_tools, agent_key="chat")
-
     assert "brave_image_search" in {tool.name for tool in pinned}
+
+    bound = build_deferred_tool_list(
+        conversation_id="conversation-1",
+        agent_key="chat",
+        mcp_manager=manager,
+        all_mcp_tools=all_tools,
+    )
+    assert "brave_image_search" not in {tool.name for tool in bound}
+
+    authorized = build_deferred_tool_list(
+        conversation_id="conversation-1",
+        agent_key="chat",
+        mcp_manager=manager,
+        all_mcp_tools=all_tools,
+        allow_raw_web_tools=True,
+    )
+    assert "brave_image_search" in {tool.name for tool in authorized}

@@ -1,6 +1,6 @@
 """The deferred binding layer's own policy: what it pins and what it hides.
 
-Agent-level binding lives in test_web_research_binding.py; this file owns the
+Agent-level binding lives in test_web_tool_binding.py; this file owns the
 two decisions this module makes on every agent's behalf — the required pins and
 the raw-provider denylist merged into ordinary discovery.
 """

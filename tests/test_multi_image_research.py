@@ -6,8 +6,8 @@ mechanism: the model asks for one subject per call and stops when the answer is
 served. What it must never do is take a deeper slice of a single query, which
 returns the same subject twice.
 
-The second call reuses the turn's research text, so a second picture costs one
-image request and no extra web search.
+Since ``image_search`` split off from text search, a second picture costs one
+image request and cannot cost a web search at all.
 """
 
 from __future__ import annotations
@@ -16,11 +16,11 @@ import json
 
 import pytest
 
-from app.ai import web_research_tool
+from app.ai import web_tools
 from app.ai.research_budget import reset_research_budget
 from app.ai.selected_image_sink import selected_image_sink
 from app.ai.tool_context import clear_tool_context, tool_execution_context
-from app.ai.web_research_tool import create_web_research_tool
+from app.ai.web_tools import create_image_search_tool
 
 CONVERSATION_ID = "44444444-4444-4444-4444-444444444444"
 
@@ -94,8 +94,9 @@ def _clean(monkeypatch):
     clear_tool_context()
     reset_research_budget(CONVERSATION_ID)
     monkeypatch.setattr(
-        web_research_tool.settings, "remote_image_enrichment_enabled", True, raising=False
+        web_tools.settings, "remote_image_enrichment_enabled", True, raising=False
     )
+    monkeypatch.setattr(web_tools.settings, "inline_rich_response_enabled", True, raising=False)
     yield
     clear_tool_context()
     reset_research_budget(CONVERSATION_ID)
@@ -103,17 +104,14 @@ def _clean(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_two_distinct_subjects_yield_two_distinct_images():
-    tavily, brave = _Tavily(), _Brave()
-    tool = create_web_research_tool(tavily_tool=tavily, brave_tool=brave)
+    tool = create_image_search_tool(brave_tool=_Brave())
 
     with (
         tool_execution_context(conversation_id=CONVERSATION_ID, user_id="u1", agent_key="chat"),
         selected_image_sink() as sink,
     ):
-        await tool.ainvoke({"query": "pokemon unite", "image_query": "Pokemon Unite logo"})
-        await tool.ainvoke(
-            {"query": "pokemon unite", "image_query": "Pokemon Unite gameplay screenshot"}
-        )
+        await tool.ainvoke({"query": "Pokemon Unite logo"})
+        await tool.ainvoke({"query": "Pokemon Unite gameplay screenshot"})
 
     assert [item["payload"]["url"] for item in sink] == [
         "https://imgs.search.brave.com/logo-thumb.webp",
@@ -122,35 +120,33 @@ async def test_two_distinct_subjects_yield_two_distinct_images():
 
 
 @pytest.mark.asyncio
-async def test_a_second_picture_does_not_buy_a_second_web_search():
-    """The same factual query reuses the turn's research text, so asking for
-    another subject costs one image request and nothing else."""
+async def test_a_second_picture_cannot_buy_a_web_search():
+    """Pictures and text no longer share a call, so a second subject costs one
+    image request and cannot reach the text provider at all."""
     tavily, brave = _Tavily(), _Brave()
-    tool = create_web_research_tool(tavily_tool=tavily, brave_tool=brave)
+    tool = create_image_search_tool(brave_tool=brave, tavily_tool=tavily)
 
     with (
         tool_execution_context(conversation_id=CONVERSATION_ID, user_id="u1", agent_key="chat"),
         selected_image_sink(),
     ):
-        await tool.ainvoke({"query": "pokemon unite", "image_query": "Pokemon Unite logo"})
-        await tool.ainvoke(
-            {"query": "pokemon unite", "image_query": "Pokemon Unite gameplay screenshot"}
-        )
+        await tool.ainvoke({"query": "Pokemon Unite logo"})
+        await tool.ainvoke({"query": "Pokemon Unite gameplay screenshot"})
 
-    assert len(tavily.calls) == 1
+    assert tavily.calls == []
     assert len(brave.calls) == 2
 
 
 @pytest.mark.asyncio
 async def test_asking_twice_for_the_same_subject_searches_once():
-    tavily, brave = _Tavily(), _Brave()
-    tool = create_web_research_tool(tavily_tool=tavily, brave_tool=brave)
+    brave = _Brave()
+    tool = create_image_search_tool(brave_tool=brave)
 
     with (
         tool_execution_context(conversation_id=CONVERSATION_ID, user_id="u1", agent_key="chat"),
         selected_image_sink(),
     ):
-        await tool.ainvoke({"query": "pokemon unite", "image_query": "Pokemon Unite logo"})
-        await tool.ainvoke({"query": "pokemon unite", "image_query": "Pokemon Unite logo"})
+        await tool.ainvoke({"query": "Pokemon Unite logo"})
+        await tool.ainvoke({"query": "Pokemon Unite logo"})
 
     assert len(brave.calls) == 1

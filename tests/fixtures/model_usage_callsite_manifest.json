@@ -192,8 +192,8 @@
     "disposition": "non_provider_tool_dispatch"
   },
   {
-    "file": "app/ai/web_research_tool.py",
-    "function": "_run_search",
+    "file": "app/ai/web_tools.py",
+    "function": "_call_provider",
     "call_chain": "tool.ainvoke",
     "disposition": "non_provider_tool_dispatch"
   },

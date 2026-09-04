@@ -848,3 +848,102 @@ def test_the_descriptions_never_name_a_raw_provider_tool():
 
     assert "tavily" not in text
     assert "brave" not in text
+
+
+# --------------------------------------------------------------------------
+# Rollout observations
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_observation_line_reports_the_char_pair_the_change_exists_to_move(caplog):
+    """The provider payload may stay large; the model's view of it must not.
+    That pair is the only number that shows whether the boundary is holding."""
+    tool = create_web_search_tool(
+        tavily_tool=_FakeTool("tavily_search", _search_payload()), clock=_clock
+    )
+
+    with caplog.at_level("INFO", logger="app.ai.web_tools"):
+        await _run(tool, query="aurora release", objective="Find the release date")
+
+    line = next(record.getMessage() for record in caplog.records if "web_tool_call" in
+                record.getMessage())
+    assert "operation=web_search" in line
+    assert "outcome=completed" in line
+    assert "freshness=timeless" in line
+    provider_chars = int(line.split("provider_chars=")[1].split()[0])
+    model_chars = int(line.split("model_chars=")[1].split()[0])
+    assert provider_chars > model_chars > 0
+
+
+@pytest.mark.asyncio
+async def test_the_observation_line_never_carries_user_derived_text(caplog):
+    """It is written on every call. One unredacted field would put user content
+    into ordinary operational logs, and into an unbounded label space if the
+    field were ever promoted to a metric."""
+    secret_query = "zzsecretsubjectzz release notes"
+    secret_objective = "zzsecretobjectivezz"
+    tool = create_web_search_tool(
+        tavily_tool=_FakeTool("tavily_search", _search_payload()), clock=_clock
+    )
+
+    with caplog.at_level("INFO", logger="app.ai.web_tools"):
+        await _run(tool, query=secret_query, objective=secret_objective)
+
+    for record in caplog.records:
+        message = record.getMessage()
+        assert "zzsecretsubjectzz" not in message
+        assert "zzsecretobjectivezz" not in message
+        assert "vendor.example" not in message
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_query_is_reported_as_a_rejection(caplog, monkeypatch):
+    monkeypatch.setattr(
+        web_tools.settings, "research_max_search_calls_per_turn", 1, raising=False
+    )
+    tool = create_web_search_tool(
+        tavily_tool=_FakeTool("tavily_search", _search_payload()), clock=_clock
+    )
+
+    await _run(tool, query="aurora release date", objective="Find the release date")
+    with caplog.at_level("INFO", logger="app.ai.web_tools"):
+        await _run(tool, query="quite unrelated ornithology digest", objective="Find birds")
+
+    assert any(
+        "outcome=repeated_query_rejected" in record.getMessage() for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_image_subject_is_reported_as_a_rejection(caplog):
+    tool = create_image_search_tool(
+        brave_tool=_FakeTool("brave_image_search", _brave_payload())
+    )
+
+    await _run(tool, query="T1 team photo")
+    with caplog.at_level("INFO", logger="app.ai.web_tools"):
+        await _run(tool, query="T1 team photo")
+
+    assert any(
+        "outcome=repeated_subject_rejected" in record.getMessage() for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_web_open_reports_urls_failures_and_excerpt_counts(caplog):
+    tool = create_web_open_tool(extract_tool=_FakeTool("tavily_extract", _extract_payload()))
+
+    with caplog.at_level("INFO", logger="app.ai.web_tools"):
+        await _run(
+            tool,
+            urls=["https://example.com/a"],
+            question="Which release date is stated?",
+        )
+
+    line = next(record.getMessage() for record in caplog.records if "web_tool_call" in
+                record.getMessage())
+    assert "operation=web_open" in line
+    assert "urls=1" in line
+    assert "failed=1" in line
+    assert "excerpts=" in line

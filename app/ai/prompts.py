@@ -36,7 +36,7 @@ Media and visuals:"""
 # rich items" states the dead end before the way out of it.
 _PLACEMENT_BULLETS = """
 - Place rich items with `<!--rich:<id>-->`, copying an ID exactly from this turn's "AVAILABLE RICH ITEMS" list. Never invent an ID or an image URL, or build one from a title or topic. A turn that called nothing has no rich items and no list — answer without a marker, or go get one.
-- One call, one subject, one figure. Call `image_search` again with a different `query` for each further subject the answer needs, and let the answer decide how many that is — introducing a thing often wants its identity art and a shot of it in use; a how-to usually wants the one screen being described. Place each near the text it supports, and keep the prose useful without them."""
+- Place each rich item next to the text it supports, one marker per item, and keep the prose useful without them. Never place the same ID twice."""
 
 RICH_PLACEMENT_SNIPPET = _MEDIA_HEADER + _PLACEMENT_BULLETS
 
@@ -47,6 +47,7 @@ IMAGE_SEARCH_MEDIA_SNIPPET = """
 - `image_search` is the only path an image can take to the answer. Reaching for it is how you show something — not a step reserved for when you need sources, and not something a `web_search` does for you.
 - Set `query` to the thing the reader has to look at — usually a part, screen or panel rather than the product containing it — and write it as a search, following the tool's own guidance. A picture of the right subject is worth more than a picture of the right topic.
 - Call it only when a visual can support the answer. Never add media as decoration.
+- One call, one subject, one figure. Call it again with a different `query` for each further subject the answer needs, and let the answer decide how many that is — introducing a thing often wants its identity art and a shot of it in use; a how-to usually wants the one screen being described.
 - Only images selected by provider-native discovery reach you; many calls yield none, which is normal. Never claim an image that is not listed, and never tell the user you are unable to show images — you can. Say you found no suitable one."""
 
 # The block for agents that bind ``image_search``: how a visual is acquired

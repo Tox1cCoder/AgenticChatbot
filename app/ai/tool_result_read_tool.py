@@ -109,12 +109,26 @@ def create_read_tool_result_tool(
         text, failure = await _load_text(resolved_repository, resolved_service, identity)
         if failure is not None:
             return json.dumps(failure)
-        return select_focused_excerpts(
+        focused = select_focused_excerpts(
             text or "",
             objective=objective,
             max_excerpts=_clamp(max_excerpts, settings.tool_result_focus_max_excerpts),
             max_chars=_clamp(max_chars, settings.tool_result_focus_max_chars),
-        ).model_dump_json()
+        )
+        serialized = focused.model_dump_json()
+        # Counts and one enum only. The objective is user-derived text and is
+        # never logged, so this line stays safe to emit on every call.
+        logger.info(
+            "focused_tool_result_read outcome=%s blob_chars=%d model_chars=%d "
+            "excerpts=%d omitted=%d truncated=%s",
+            "matched" if focused.excerpts else "no_match",
+            len(text or ""),
+            len(serialized),
+            len(focused.excerpts),
+            focused.omitted_candidates,
+            focused.truncated,
+        )
+        return serialized
 
     return StructuredTool.from_function(
         coroutine=_read,

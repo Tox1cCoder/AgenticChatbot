@@ -18,13 +18,13 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.ai import web_research_tool
+from app.ai import web_tools
 from app.ai.image_discovery_flow import select_brave_candidates
 from app.ai.research_budget import reset_research_budget
 from app.ai.selected_image_sink import selected_image_sink
 from app.ai.tool_context import clear_tool_context, tool_execution_context
 from app.ai.tool_execution import build_image_candidates_from_tool_result
-from app.ai.web_research_tool import create_web_research_tool
+from app.ai.web_tools import create_image_search_tool
 
 CONVERSATION_ID = "33333333-3333-3333-3333-333333333333"
 
@@ -198,64 +198,53 @@ class _Tool:
         return self.payload
 
 
-TAVILY_PAYLOAD = json.dumps(
-    {
-        "results": [{"index": 1, "title": "Story", "url": "https://x.example", "content": "x"}],
-        "total_results": 1,
-        "provider": "tavily",
-        "operation": "search",
-        "query": "stadium renovation",
-    }
-)
-
-
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     clear_tool_context()
     reset_research_budget(CONVERSATION_ID)
     monkeypatch.setattr(
-        web_research_tool.settings, "remote_image_enrichment_enabled", True, raising=False
+        web_tools.settings, "remote_image_enrichment_enabled", True, raising=False
     )
+    monkeypatch.setattr(web_tools.settings, "inline_rich_response_enabled", True, raising=False)
     yield
     clear_tool_context()
     reset_research_budget(CONVERSATION_ID)
 
 
-async def _research(**call_args: object) -> list[dict]:
+async def _discover(**call_args: object) -> list[dict]:
     brave = _Tool(
         _payload(
             _image(1, page_fetched=_iso(120)),
             _image(2, page_fetched=_iso(1)),
         )
     )
-    tool = create_web_research_tool(tavily_tool=_Tool(TAVILY_PAYLOAD), brave_tool=brave)
+    tool = create_image_search_tool(brave_tool=brave)
     with (
         tool_execution_context(conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"),
         selected_image_sink() as sink,
     ):
-        await tool.ainvoke(
-            {"query": "stadium renovation", "image_query": "stadium photo", **call_args}
-        )
+        await tool.ainvoke({"query": "stadium photo", **call_args})
     return list(sink)
 
 
 @pytest.mark.asyncio
-async def test_web_research_forwards_its_recency_scope_to_image_discovery():
-    """The recency window the model declared for the facts is the same window
-    the picture beside those facts has to satisfy."""
-    selected = await _research(time_range="week")
+async def test_image_search_applies_its_declared_recency_window():
+    """The picture beside a recency-scoped answer has to satisfy the same
+    window. ``image_search`` now declares that window itself rather than
+    inheriting it from a factual search it no longer shares a call with."""
+    selected = await _discover(time_range="week")
 
     assert _urls(selected) == ["https://imgs.search.brave.com/thumb-2.webp"]
 
 
 @pytest.mark.asyncio
-async def test_a_news_topic_alone_declares_no_window():
-    """``topic`` states what kind of source to search, not how recent the answer
-    must be. Inventing a window from it guessed at the user's intent, and a
-    guessed cutoff silently discards images nobody asked to exclude."""
+async def test_no_declared_window_drops_nothing():
+    """Absent an explicit window there is no window at all: ``page_fetched`` is
+    a crawl time, not a subject date, and a guessed cutoff silently discards
+    images nobody asked to exclude."""
     # rank 1 was crawled 120 days ago and rank 2 yesterday. With no window the
     # stale one is simply the best result and wins; a declared window is what
     # drops it, as the sibling test above shows.
-    selected = await _research(topic="news")
+    selected = await _discover()
 
     assert _urls(selected) == ["https://imgs.search.brave.com/thumb-1.webp"]

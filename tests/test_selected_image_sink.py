@@ -79,7 +79,7 @@ def test_selected_images_are_attached_to_the_artifact():
         result_text="{}",
         render=None,
         tool_call_id="call-1",
-        tool_name="web_research",
+        tool_name="image_search",
         selected_images=[{"id": "image:selected:a", "type": "image"}],
     )
 

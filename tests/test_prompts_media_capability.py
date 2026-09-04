@@ -24,13 +24,13 @@ def test_snippet_defined_once_and_compact():
     """The bound guards against unbounded growth, not against content.
 
     It was 1700 while the snippet was purely mechanical. It has since taken on
-    four load-bearing behaviours: web_research is the sole path an image can
-    take, the recency qualifier that is the only way to ask Brave for a current
-    picture, the form word that decides whether "what is X" returns identity art
-    or an in-use shot, and one figure per call.
+    four load-bearing behaviours: image_search is the sole path an image can
+    take, the recency qualifier that is the only way to ask the provider for a
+    current picture, the form word that decides whether "what is X" returns
+    identity art or an in-use shot, and one figure per call.
 
-    The topic/time_range and image_intent bullets have since moved out to the
-    web_research description, which is where argument mechanics belong: both
+    The time_range and intent bullets have since moved out to the image_search
+    description, which is where argument mechanics belong: both
     texts sit in context on every call, and the description is what the model
     reads while choosing arguments. The prompt keeps what is behavioural —
     when a visual is worth having, which form to ask for, and how to place it.
@@ -51,14 +51,21 @@ def test_snippet_uses_available_ids_only_and_forbids_invention():
     assert "never invent" in snippet
 
 
-def test_media_guidance_describes_automatic_visual_enrichment_without_taxonomy():
+def test_media_guidance_describes_visual_acquisition_without_taxonomy():
     snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
 
-    assert "considers a provider-native image" in snippet
-    assert "every call" in snippet
-    assert "skip_images" in snippet
+    assert "image_search" in snippet
+    assert "only path an image can take" in snippet
     assert "product, device" not in snippet
     assert "code, math" not in snippet
+
+
+def test_media_guidance_says_a_web_search_does_not_fetch_a_picture():
+    """Splitting the tools created a new way to be wrong: assuming a text
+    search already looked for an image, and never calling for one."""
+    snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
+
+    assert "not something a `web_search` does for you" in snippet
 
 
 def test_media_guidance_describes_provider_native_selection_without_false_assurance():
@@ -71,22 +78,21 @@ def test_media_guidance_describes_provider_native_selection_without_false_assura
     assert "verified " + "image" not in snippet
 
 
-def test_media_guidance_scopes_tavily_controls_to_recency_and_finance():
+def test_freshness_controls_live_in_the_search_tool_description():
     """Argument mechanics live in the tool description, not the system prompt.
 
     Both texts sit in context on every call, and the description is what the
     model reads while choosing arguments — so duplicating them into the prompt
     bought nothing but length.
     """
-    from app.ai.web_research_tool import _DESCRIPTION
+    from app.ai.web_tools import WEB_SEARCH_DESCRIPTION
 
-    description = _DESCRIPTION.lower()
+    description = WEB_SEARCH_DESCRIPTION.lower()
 
-    assert "current events" in description
-    assert "topic='news'" in description
-    assert "time_range" in description
-    assert "topic='finance'" in description
-    assert "general factual research" in description
+    assert "freshness='recent'" in description
+    assert "freshness='as_of'" in description
+    assert "never guess" in description
+    assert "objective" in description
 
 
 def test_snippet_has_no_hardcoded_visual_topic_list():
@@ -109,9 +115,9 @@ def _query_guidance() -> str:
     description rather than the system prompt — see
     test_snippet_defined_once_and_compact.
     """
-    from app.ai.web_research_tool import _DESCRIPTION
+    from app.ai.web_tools import IMAGE_SEARCH_DESCRIPTION
 
-    return _DESCRIPTION.lower()
+    return IMAGE_SEARCH_DESCRIPTION.lower()
 
 
 def test_image_query_guidance_ties_the_form_word_to_what_was_asked():
@@ -162,24 +168,24 @@ def test_image_query_guidance_covers_subjects_whose_look_changes():
     the only way to ask for a current picture."""
     guidance = _query_guidance()
 
-    assert "image_query" in guidance
+    assert "query" in guidance
     assert "year" in guidance
     assert "current" in guidance
 
 
-def test_research_tool_leads_with_both_of_the_jobs_it_does():
+def test_the_image_tool_opens_by_saying_it_is_the_only_path():
     """A model deciding whether to call a tool reads its description first. The
     description opened by promising sources to synthesize, so a question the
     model could already answer ("pokemon unite là gì") resolved to "no sources
     needed" and the only image path in the product was never entered. The
     picture job has to be in the opening line, not the third paragraph.
     """
-    from app.ai.web_research_tool import _DESCRIPTION
+    from app.ai.web_tools import IMAGE_SEARCH_DESCRIPTION
 
-    opening = _DESCRIPTION.split("\n\n")[0].lower()
+    opening = IMAGE_SEARCH_DESCRIPTION.split("\n\n")[0].lower()
 
-    assert "image" in opening
-    assert "already know" in opening
+    assert "only way an image reaches your answer" in opening
+    assert "not only when you need sources" in opening
 
 
 def test_media_guidance_names_the_tool_before_saying_there_is_no_inventory():
@@ -189,7 +195,7 @@ def test_media_guidance_names_the_tool_before_saying_there_is_no_inventory():
     reads as a capability limit."""
     snippet = prompts.MEDIA_CAPABILITY_SNIPPET
 
-    assert snippet.index("web_research") < snippet.index("no rich items")
+    assert snippet.index("image_search") < snippet.index("no rich items")
 
 
 def test_media_guidance_never_tells_the_model_not_to_ask_for_pictures():
@@ -201,35 +207,35 @@ def test_media_guidance_never_tells_the_model_not_to_ask_for_pictures():
     assert "you never ask" not in snippet
 
 
-def test_web_research_tool_description_covers_the_same_recency_lever():
+def test_image_tool_description_covers_the_same_recency_lever():
     """The tool description is read at call time and is where the argument is
     actually chosen."""
-    from app.ai.web_research_tool import _DESCRIPTION
+    from app.ai.web_tools import IMAGE_SEARCH_DESCRIPTION
 
-    description = _DESCRIPTION.lower()
+    description = IMAGE_SEARCH_DESCRIPTION.lower()
 
     assert "year" in description
     assert "current" in description
+    assert "time_range" in description
 
 
-def test_rag_prompts_omit_research_controls_they_cannot_use():
-    """``web_research`` is internal and bound only for the chat and search agents,
-    and internal tools never surface through ``tool_search`` — so naming it in a
-    RAG prompt advertises a tool that agent can never call."""
+def test_rag_prompts_omit_web_tools_they_cannot_use():
+    """The product web tools are internal and bound only for the chat and
+    search agents, and internal tools never surface through ``tool_search`` — so
+    naming one in a RAG prompt advertises a tool that agent can never call."""
     for prompt in (prompts.RAG_SYSTEM_PROMPT, prompts.AGENTIC_RAG_SYSTEM_PROMPT):
-        assert "web_research" not in prompt
-        assert "skip_images" not in prompt
-        assert "image_intent" not in prompt
+        for tool_name in ("web_research", "image_search", "web_search", "web_open"):
+            assert tool_name not in prompt
 
 
-def test_research_capable_prompts_keep_research_controls():
+def test_web_capable_prompts_name_the_image_tool():
     for prompt in (
         prompts.CHAT_SYSTEM_PROMPT,
         prompts.SEARCH_SYSTEM_PROMPT,
         prompts.SEARCH_WITH_RESULTS_SYSTEM_PROMPT,
     ):
-        assert "web_research" in prompt
-        assert "skip_images" in prompt
+        assert "image_search" in prompt
+        assert "web_research" not in prompt
 
 
 def test_placement_mechanics_reach_every_answer_prompt():

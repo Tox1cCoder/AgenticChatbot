@@ -114,9 +114,11 @@ IMAGE_SEARCH_DESCRIPTION = (
     "instances — a roster, a set of logos, colour options. Otherwise leave it "
     "unset: the default places up to two images beside the prose they support. "
     "Never state how many images you want; the layout decides.\n\n"
-    "Selected images appear in your available rich items. Not every call "
-    "produces one, and a complete answer never depends on an image. A gallery "
-    "arrives as ONE grid item with one marker."
+    "Only images chosen by provider-native discovery reach you, and they arrive "
+    "in your available rich items. Not every call produces one, and a complete "
+    "answer never depends on an image — say you found no suitable one rather "
+    "than claiming you cannot show images. A gallery arrives as ONE grid item "
+    "with one marker."
 )
 
 
@@ -216,6 +218,7 @@ def create_web_search_tool(
                 configured_max_results=int(settings.web_search_max_results),
             )
         except (WebQueryError, ValidationError) as exc:
+            log_web_tool_call("web_search", outcome="invalid_request")
             return _error_payload(
                 str(exc),
                 retryable=False,
@@ -236,15 +239,27 @@ def create_web_search_tool(
         if settings.research_budget_enabled and not budget.reserve_search(
             normalized.query, scope=scope
         ):
+            log_web_tool_call(
+                "web_search",
+                outcome="repeated_query_rejected",
+                freshness=normalized.freshness,
+                searches_used=budget.search_calls,
+            )
             return _budget_spent_payload(budget)
 
         try:
             raw = await _call_provider(tavily_tool, "tavily", "tavily_search", args)
         except WebProviderError as exc:
             logger.warning("Web search provider failed: %s", exc)
+            log_web_tool_call(
+                "web_search", outcome="provider_error", freshness=normalized.freshness
+            )
             return _error_payload(str(exc), retryable=exc.retryable)
         except Exception as exc:
             logger.warning("Web search failed: %s", exc)
+            log_web_tool_call(
+                "web_search", outcome="provider_error", freshness=normalized.freshness
+            )
             return _error_payload(str(exc))
         budget.record_search(normalized.query, raw, scope=scope)
         return _project_search(normalized, raw, reused=False, budget=budget)
@@ -271,6 +286,7 @@ def create_web_open_tool(
             return denied
         focus = str(question or "").strip()
         if len(focus) < 3:
+            log_web_tool_call("web_open", outcome="invalid_request")
             return _error_payload(
                 "web_open requires the exact question to extract.",
                 retryable=False,
@@ -280,6 +296,7 @@ def create_web_open_tool(
         requested = [str(url).strip() for url in urls if str(url or "").strip()]
         requested = requested[: max(1, int(settings.web_open_max_urls))]
         if not requested:
+            log_web_tool_call("web_open", outcome="invalid_request")
             return _error_payload(
                 "web_open requires at least one URL.",
                 retryable=False,
@@ -297,9 +314,11 @@ def create_web_open_tool(
             raw = await _call_provider(extract_tool, "tavily", "tavily_extract", args)
         except WebProviderError as exc:
             logger.warning("Web open provider failed: %s", exc)
+            log_web_tool_call("web_open", outcome="provider_error", urls=len(requested))
             return _error_payload(str(exc), retryable=exc.retryable)
         except Exception as exc:
             logger.warning("Web open failed: %s", exc)
+            log_web_tool_call("web_open", outcome="provider_error", urls=len(requested))
             return _error_payload(str(exc))
         return _project_extract(raw, question=focus, requested=requested)
 
@@ -338,11 +357,13 @@ def create_image_search_tool(
         context = get_tool_context()
         if not _image_path_open(context.rich_response_capable):
             record_discovery_outcome("skipped")
+            log_web_tool_call("image_search", outcome="skipped")
             return _image_payload(subject, 0, "Image discovery is unavailable for this request.")
 
         budget = get_research_budget(context.conversation_id)
         if not budget.reserve_image_search(subject):
             record_discovery_outcome("skipped")
+            log_web_tool_call("image_search", outcome="repeated_subject_rejected")
             return _image_payload(
                 subject,
                 0,
@@ -360,6 +381,11 @@ def create_image_search_tool(
         budget.record_image_search(selected)
         if selected:
             offer_selected_images(selected)
+        log_web_tool_call(
+            "image_search",
+            outcome="selected" if selected else "no_match",
+            selected=len(selected),
+        )
         return _image_payload(
             subject,
             len(selected),
@@ -395,6 +421,43 @@ def _internal_tool(
             "qualified_tool_id": f"internal::{name}",
             "tool_scope": str(tool_scope or "default"),
         },
+    )
+
+
+def log_web_tool_call(
+    operation: str,
+    *,
+    outcome: str,
+    freshness: str | None = None,
+    provider_chars: int = 0,
+    model_chars: int = 0,
+    **counts: int,
+) -> None:
+    """Record one bounded observation of a web operation.
+
+    Only enums and counts. Everything derived from user text — the query, the
+    objective, the extraction question, a result title — stays out: this line is
+    written on every call, so a single unredacted field would put user content
+    into ordinary operational logs and, if promoted to a metric label, into an
+    unbounded label space.
+
+    ``provider_chars`` against ``model_chars`` is the number the whole change
+    exists to move: the provider payload may stay large, the model's view of it
+    must not.
+    """
+
+    fields = {
+        "operation": operation,
+        "outcome": outcome,
+        "provider_chars": int(provider_chars),
+        "model_chars": int(model_chars),
+        **{key: int(value) for key, value in counts.items()},
+    }
+    if freshness:
+        fields["freshness"] = freshness
+    logger.info(
+        "web_tool_call %s",
+        " ".join(f"{key}={value}" for key, value in fields.items()),
     )
 
 
@@ -542,7 +605,18 @@ def _project_search(
         "reused": reused,
         "searches_used": budget.search_calls,
     }
-    return _fit(envelope, int(settings.web_search_result_max_chars))
+    serialized = _fit(envelope, int(settings.web_search_result_max_chars))
+    log_web_tool_call(
+        "web_search",
+        outcome="reused" if reused else "completed",
+        freshness=normalized.freshness,
+        provider_chars=len(raw),
+        model_chars=len(serialized),
+        results=envelope["total_results"],
+        deduplicated=len(payload.get("results") or []) - len(results),
+        omitted=envelope["omitted_results"],
+    )
+    return serialized
 
 
 def _fit(envelope: dict[str, Any], budget_chars: int) -> str:
@@ -601,7 +675,18 @@ def _project_extract(raw: str, *, question: str, requested: list[str]) -> str:
             "note": focused.note,
         }
     )
-    return json.dumps(envelope, ensure_ascii=False)
+    serialized = json.dumps(envelope, ensure_ascii=False)
+    log_web_tool_call(
+        "web_open",
+        outcome="completed",
+        provider_chars=len(raw),
+        model_chars=len(serialized),
+        urls=len(requested),
+        failed=len(envelope["failed"]),
+        excerpts=len(envelope["excerpts"]),
+        omitted=focused.omitted_candidates,
+    )
+    return serialized
 
 
 def _failure_records(failures: Any) -> list[dict[str, str]]:
@@ -701,4 +786,5 @@ __all__ = [
     "create_image_search_tool",
     "create_web_open_tool",
     "create_web_search_tool",
+    "log_web_tool_call",
 ]
