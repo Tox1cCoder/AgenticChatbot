@@ -2,11 +2,8 @@
 
 from types import SimpleNamespace
 
-import pytest
-
 from app.ai import graph as graph_module
 from app.ai.hitl_config import calls_requiring_approval
-from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from app.ai.workflow import tool_loop as tool_loop_module
 
 
@@ -106,64 +103,3 @@ def test_gate_master_off_never_gates():
     assert gated == set()
 
 
-@pytest.mark.asyncio
-async def test_generic_worker_refuses_a_gated_tool_from_the_parent_policy(monkeypatch):
-    """The worker consults the parent's policy and refuses, rather than pausing.
-
-    A worker cannot ask for approval — it runs inside ``asyncio.gather``, so an
-    ``interrupt()`` would cancel its siblings. It used to fabricate an
-    ``awaiting_approval`` result, which the design forbids and which has no
-    resume. It now refuses the gated call and keeps going.
-    """
-    server_tool = SimpleNamespace(name="search", metadata={})
-    tool_map = {"search": server_tool}
-    manager = _FakeManager({id(server_tool): "tavily"})
-    wf = _workflow_stub(tool_map, manager, monkeypatch)
-
-    class _FakeAgent:
-        agent_config_key = "chat"
-
-        async def invoke_model_with_history(self, **_kwargs):
-            return AgentResponse(
-                agent_type=AgentType.CHAT,
-                agent_id="chat_agent",
-                message=AgentMessage(
-                    role=MessageRole.ASSISTANT,
-                    content="",
-                    tool_calls=[{"name": "search", "args": {}, "id": "call-1"}],
-                ),
-                metadata={},
-            )
-
-    wf.agents = {"chat_agent": _FakeAgent()}
-    parent_state = {
-        "conversation_id": "c1",
-        "user_id": "u1",
-        "device_id": None,
-        "context": {
-            "hitl_policy": {
-                "master_enabled": True,
-                "client_rules": {
-                    "client_mcp": {"servers": {}, "tools": {}},
-                    "client_skill": {"servers": {}, "tools": {}},
-                },
-                "global_tools": ["search"],
-            }
-        },
-    }
-
-    response = await wf._run_agent_in_isolated_context(
-        agent_name="chat_agent",
-        task_prompt="use search",
-        parent_state=parent_state,
-    )
-    metadata = response.metadata or {}
-    assert metadata.get("requires_approval") is not True
-    assert metadata.get("pause_reason") != "awaiting_approval"
-    refused = [
-        artifact
-        for artifact in (response.tool_artifacts or [])
-        if artifact.get("tool_call_id") == "call-1"
-    ]
-    assert refused, "the gated call produced no refusal the model can read"
-    assert "approval" in str(refused[0].get("output") or "").lower()

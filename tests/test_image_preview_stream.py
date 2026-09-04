@@ -27,7 +27,6 @@ from app.services.event_streaming.graph_public_projection import (
     StreamProjectionContext,
 )
 from app.services.event_streaming.internal_sse import legacy_event_from_v3
-from app.services.event_streaming.subagents import SubagentEventSink
 
 # ---------------------------------------------------------------------------
 # Publisher policy
@@ -227,19 +226,25 @@ def test_persist_final_emits_v2_reference_event_by_reference():
     assert "QUJDRA" not in json.dumps(emitted)
 
 
+class _PreviewCollector:
+    """Stand-in for the deleted event sink, in its only remaining role: a test
+    collector. Production previews now go straight to the graph's custom
+    channel, so nothing but these tests ever needed the queue."""
+
+    def __init__(self) -> None:
+        self.events: list = []
+
+    def emit_event(self, event) -> None:
+        self.events.append(event)
+
+    async def drain(self) -> list:
+        drained, self.events = self.events, []
+        return drained
+
+
 # ---------------------------------------------------------------------------
 # Sink → projector
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_sink_emit_event_enqueues_resequenced_event():
-    sink = SubagentEventSink()
-    sink.emit_event(make_event("image_preview", sequence=0, data={"image_index": 0}))
-    events = await sink.drain()
-    assert len(events) == 1
-    assert events[0].type == "image_preview"
-    assert events[0].sequence == 1
 
 
 def test_projector_maps_image_preview_despite_token_suppression():
@@ -433,36 +438,50 @@ async def test_ai_sdk_v6_drops_preview_without_payload():
 
 
 @pytest.mark.asyncio
-async def test_graph_binds_emitter_to_registered_sink(monkeypatch):
+async def test_graph_binds_emitter_to_the_runs_custom_channel(monkeypatch):
+    """The emitter writes to the run, not to a registry entry keyed by state."""
     from app.ai.graph import MultiAgentWorkflow
     from app.core.config import settings
-    from app.services.event_streaming.subagents import register_subagent_event_sink
 
     monkeypatch.setattr(settings, "enable_image_streaming", True)
-    sink = SubagentEventSink()
-    token = register_subagent_event_sink(sink)
-    state = {"context": {"subagent_event_sink_token": token}}
+    written: list[dict] = []
+    monkeypatch.setattr("app.ai.graph._graph_stream_writer", lambda: written.append)
 
-    emitter = MultiAgentWorkflow._build_image_preview_emitter(None, state)
+    emitter = MultiAgentWorkflow._build_image_preview_emitter(None, {})
     assert emitter is not None
 
     emitter({"item_id": "image-preview-0", "image_index": 0})
-    events = await sink.drain()
-    assert len(events) == 1
-    assert events[0].type == "image_preview"
-    assert events[0].agent == "image_generator_agent"
-    assert events[0].data == {"item_id": "image-preview-0", "image_index": 0}
+
+    assert len(written) == 1
+    assert written[0]["type"] == "image_preview"
+    assert written[0]["item_id"] == "image-preview-0"
+
+    # Agent attribution is the projection's job now, not the emitter's.
+    from app.services.event_streaming.langchain_v3 import V3ProtocolTranslator
+
+    [projected] = V3ProtocolTranslator().translate(
+        {
+            "type": "event",
+            "method": "custom",
+            "params": {"namespace": [], "timestamp": 0, "data": written[0]},
+        }
+    )
+    assert projected.type == "image_preview"
+    assert projected.agent == "image_generator_agent"
+    assert projected.data == {"item_id": "image-preview-0", "image_index": 0}
 
 
-def test_graph_emitter_disabled_by_flag_or_missing_sink(monkeypatch):
+def test_graph_emitter_disabled_by_flag_or_outside_a_run(monkeypatch):
     from app.ai.graph import MultiAgentWorkflow
     from app.core.config import settings
 
+    monkeypatch.setattr("app.ai.graph._graph_stream_writer", lambda: (lambda _e: None))
     monkeypatch.setattr(settings, "enable_image_streaming", False)
-    assert MultiAgentWorkflow._build_image_preview_emitter(None, {"context": {}}) is None
+    assert MultiAgentWorkflow._build_image_preview_emitter(None, {}) is None
 
+    # Enabled, but there is no run to write into.
     monkeypatch.setattr(settings, "enable_image_streaming", True)
-    assert MultiAgentWorkflow._build_image_preview_emitter(None, {"context": {}}) is None
+    monkeypatch.setattr("app.ai.graph._graph_stream_writer", lambda: None)
     assert MultiAgentWorkflow._build_image_preview_emitter(None, {}) is None
 
 

@@ -47,7 +47,7 @@ def _node_from_metadata(metadata: dict[str, Any] | None) -> str | None:
 def _subagent_ref_from_metadata(metadata: dict[str, Any]) -> SubagentRef | None:
     """Identify a planning-subagent worker model run from its merged metadata.
 
-    ``_run_agent_in_isolated_context`` stamps every worker model call with
+    The Planning worker runtime stamps every worker model call with
     ``purpose=planning_subagent`` + ``subagent_task_id``/``subagent_agent``,
     which LangGraph merges into the messages-channel metadata.
     """
@@ -266,7 +266,31 @@ class V3ProtocolTranslator:
             yield from self._translate_worker_tool_event(data, namespace)
         elif event_type == "planning_dispatch":
             yield from self._translate_dispatch_event(data, namespace)
+        elif event_type == "image_preview":
+            yield from self._translate_image_preview(data, namespace)
         # Any other producer on this shared channel is not ours to publish.
+
+    def _translate_image_preview(
+        self, data: dict, namespace: list[str]
+    ) -> Iterable[V3StreamEvent]:
+        """Republish an early image preview emitted from inside the graph.
+
+        Previews used to travel on a side queue reached through a weak token in
+        checkpoint state, because there was no in-graph channel for them. There
+        is one now, and it survives a resume without the token being rebound.
+        """
+        payload = dict(data)
+        payload.pop("type", None)
+        if not payload:
+            return
+        yield make_event(
+            "image_preview",
+            sequence=self._next(),
+            agent="image_generator_agent",
+            node="image_generator_agent",
+            namespace=namespace,
+            data=payload,
+        )
 
     def _worker_ref(self, data: dict, status: str) -> SubagentRef | None:
         dispatch_id = str(data.get("dispatch_id") or "")
@@ -277,7 +301,9 @@ class V3ProtocolTranslator:
             # ``(dispatch_id, task_id)`` is worker identity everywhere else, so
             # the stream uses the same pair rather than inventing one.
             id=f"{dispatch_id}:{task_id}",
-            name=str(data.get("agent_id") or "worker"),
+            # A custom agent's runtime id is ``custom_agent:<uuid>``; the
+            # dispatch resolved its display name server-side.
+            name=str(data.get("agent_name") or data.get("agent_id") or "worker"),
             path=[dispatch_id, task_id],
             status=status,
         )
@@ -734,6 +760,10 @@ async def _aclose_quietly(stream: Any) -> None:
         await aclose()
 
 
+#: Stateless apart from its sequence counter, which the fallback overrides.
+_FALLBACK_TRANSLATOR = V3ProtocolTranslator()
+
+
 async def _iter_tuple_fallback(
     graph: Any,
     state: Any,
@@ -770,6 +800,11 @@ async def _iter_tuple_fallback(
                     node=str(node),
                     data={"kind": "updates_tuple", "node_state": node_state},
                 )
+        elif mode == "custom":
+            # Same projection the v3 path uses, so a runnable on the fallback
+            # still surfaces worker lifecycle and image previews.
+            for event in _FALLBACK_TRANSLATOR._translate_custom(payload, []):
+                yield event
 
 
 async def iter_v3_events_from_graph(

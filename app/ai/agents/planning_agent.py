@@ -917,7 +917,7 @@ class PlanningAgent(BaseAgent):
         candidate_todos: list[dict[str, Any]],
         existing_todos: list[dict[str, Any]] | None,
         plan_modified: bool,
-        source: str = "planning_tools",
+        source: str = "planning_actions",
         start_iteration: int = 0,
         user_id: str | None = None,
         model_request: dict[str, Any] | None = None,
@@ -959,7 +959,7 @@ class PlanningAgent(BaseAgent):
             candidate_todos=candidate_todos,
             existing_todos=existing_todos,
             plan_modified=plan_modified,
-            lifecycle="planning_tools",
+            lifecycle="planning_actions",
         )
         evaluation = await self._grade_planning_todos(
             llm=llm,

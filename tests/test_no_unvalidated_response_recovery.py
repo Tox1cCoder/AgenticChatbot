@@ -42,7 +42,7 @@ def test_the_finalizers_response_is_returned_unchanged():
     response = _finalized()
     state = {"response": response, "active_agent_id": "chat_agent", "messages": []}
 
-    recovered = _workflow()._recover_terminal_response(state)
+    recovered = _workflow()._finalized_response(state)
 
     assert recovered is response
     assert recovered.metadata["validation"]["passed"] is True
@@ -54,7 +54,7 @@ def test_a_response_still_carrying_tool_calls_is_not_publishable():
     response.message.tool_calls = [{"id": "c1", "name": "lookup", "args": {}}]
     state = {"response": response, "messages": []}
 
-    assert _workflow()._recover_terminal_response(state) is None
+    assert _workflow()._finalized_response(state) is None
 
 
 # ----------------------------------------------------------------------
@@ -73,7 +73,7 @@ def test_assistant_text_in_messages_is_never_promoted_to_an_answer():
         ],
     }
 
-    assert _workflow()._recover_terminal_response(state) is None
+    assert _workflow()._finalized_response(state) is None
 
 
 def test_recovery_takes_no_text_but_the_finalized_response():
@@ -82,7 +82,7 @@ def test_recovery_takes_no_text_but_the_finalized_response():
 
     from app.ai.graph import MultiAgentWorkflow
 
-    parameters = inspect.signature(MultiAgentWorkflow._recover_terminal_response).parameters
+    parameters = inspect.signature(MultiAgentWorkflow._finalized_response).parameters
     assert list(parameters) == ["self", "state"]
 
 
@@ -94,12 +94,12 @@ def test_accumulated_text_does_not_backfill_an_empty_finalized_response():
     """
     state = {"response": _finalized(content=""), "messages": []}
 
-    assert _workflow()._recover_terminal_response(state) is None
+    assert _workflow()._finalized_response(state) is None
 
 
 def test_a_turn_with_no_response_recovers_nothing():
-    assert _workflow()._recover_terminal_response({"messages": []}) is None
-    assert _workflow()._recover_terminal_response(None) is None
+    assert _workflow()._finalized_response({"messages": []}) is None
+    assert _workflow()._finalized_response(None) is None
 
 
 def test_recovery_does_not_fabricate_an_agent_identity():
@@ -109,4 +109,4 @@ def test_recovery_does_not_fabricate_an_agent_identity():
         "messages": [AIMessage(content="orphan text", id="private-1")],
     }
 
-    assert _workflow()._recover_terminal_response(state) is None
+    assert _workflow()._finalized_response(state) is None

@@ -71,11 +71,29 @@ from app.schemas.workflow import (
     WorkflowResponseMessage,
 )
 from app.services.event_streaming.events import make_event
-from app.services.event_streaming.subagents import SubagentEventSink
 from app.services.message_service import MessageService
 from app.utils.exception_handler import register_exception_handlers
 
 from .conftest import async_double
+
+
+class _PreviewCollector:
+    """Stand-in for the deleted event sink, in its only remaining role.
+
+    Production previews go straight to the graph's custom channel now; the
+    queue only ever existed because there was no in-graph channel to use, and
+    nothing outside these tests needs one.
+    """
+
+    def __init__(self) -> None:
+        self.events: list = []
+
+    def emit_event(self, event) -> None:
+        self.events.append(event)
+
+    async def drain(self) -> list:
+        drained, self.events = self.events, []
+        return drained
 
 # ---------------------------------------------------------------------------
 # Deterministic fake image payloads
@@ -317,7 +335,7 @@ class _HarnessImageStorage:
 async def _stream_image_generation_events(image_url: str):
     """Mirror graph image generation for BOTH the main and resume paths.
 
-    Binds a real preview emitter to a real ``SubagentEventSink`` and drives the
+    Binds a real preview emitter to a collector and drives the
     REAL per-run ``MediaDeliveryService`` (T002), exactly as
     ``graph.execute_request_stream`` and (after T005) the resume path do.
     Partials go through the REAL ``ImagePreviewPublisher`` policy; the FINAL is
@@ -325,7 +343,7 @@ async def _stream_image_generation_events(image_url: str):
     (T003), regardless of the inline preview cap. Then narrative text + a
     terminal ``complete`` carrying the same protected image reference.
     """
-    sink = SubagentEventSink()
+    sink = _PreviewCollector()
 
     def _emit(payload: dict) -> None:
         sink.emit_event(make_event("image_preview", sequence=0, data=payload))
@@ -384,7 +402,7 @@ async def _resume_image_event_source(**_kwargs):
     """Fake ai_service.resume_interrupted_execution_stream mirroring the graph
     resume path AFTER T005: the resume path now installs the SAME request-scoped
     media sink as a fresh run (``graph.resume_with_decisions_stream`` rebinds a
-    live ``SubagentEventSink`` under the checkpointed token and merges it via
+    run's own custom event channel, which needs no token and merges via
     ``stream_with_subagent_events``). An image generated after HITL resume
     therefore surfaces the same early preview / final-by-reference as a fresh
     run (FR-IMG-008 resume parity).

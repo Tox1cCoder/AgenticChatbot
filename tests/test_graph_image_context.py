@@ -1,4 +1,3 @@
-import inspect
 
 from langchain_core.messages import HumanMessage
 
@@ -47,14 +46,5 @@ def test_workflow_marks_image_response_metadata_once():
     assert response.metadata == {"has_images": True}
 
 
-def test_planning_node_applies_current_turn_attachments():
-    source = inspect.getsource(MultiAgentWorkflow._planning_node)
-
-    assert "_apply_current_turn_attachments(" in source
 
 
-def test_isolated_worker_path_applies_parent_attachments():
-    source = inspect.getsource(MultiAgentWorkflow._run_agent_in_isolated_context)
-
-    assert "_apply_current_turn_attachments(parent_state, [worker_message])" in source
-    assert "attachments=self._get_state_attachments(parent_state)" in source

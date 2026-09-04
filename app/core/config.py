@@ -1040,14 +1040,6 @@ class Settings(BaseSettings):
             "per request. Bounds storage reads and injected base64. 0 = unlimited."
         ),
     )
-    subagent_event_queue_maxsize: int = Field(
-        default=512,
-        description=(
-            "Soft cap on queued subagent stream events. When saturated, transient "
-            "frames (image previews, message deltas) are dropped to bound memory "
-            "under a slow client; lifecycle events are never dropped."
-        ),
-    )
     parse_artifacts_storage_path: str = Field(
         default="app/storage/parse_artifacts",
         description="Directory where parse artifact JSON files are stored.",
@@ -1212,6 +1204,15 @@ class Settings(BaseSettings):
         gt=0,
         le=200_000,
         description="Character bound on the parent context passed to Planning synthesis",
+    )
+    image_preview_max_partials_per_image: int = Field(
+        default=512,
+        description=(
+            "Soft cap on in-progress image preview frames written per image. "
+            "Partial frames carry base64 and the graph's event channel does not "
+            "backpressure its writer, so an unbounded run would buffer them all "
+            "for a slow client. Finals and lifecycle frames are never dropped."
+        ),
     )
     react_agent_recursion_limit: int = Field(
         default=105,
@@ -1947,7 +1948,7 @@ class Settings(BaseSettings):
         "model_usage_health_failure_window_seconds",
         "model_usage_failure_store_ttl_seconds",
         "chat_image_max_bytes",
-        "subagent_event_queue_maxsize",
+        "image_preview_max_partials_per_image",
         "rich_image_candidate_max_count",
         "rich_image_min_width_px",
         "rich_image_min_height_px",

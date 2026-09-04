@@ -75,7 +75,7 @@ __all__ = [
 ]
 
 #: The exact set of parent-graph nodes Planning owns, in registration order.
-#: ``planning_tools`` is deliberately absent: fan-out is topology, not a tool.
+#: A tool stage is deliberately absent: fan-out is topology, not a tool.
 PLANNING_NODE_NAMES: tuple[str, ...] = (
     "planning_model",
     "planning_dispatch",
@@ -391,6 +391,7 @@ class PlanningWorkerRuntime:
         who was asked. Everything after it is a genuine failure, narrowed
         before the generic case so a limit or a timeout keeps its own code.
         """
+        agent_name = _worker_display_name(task.agent_id, state)
         _emit(
             writer,
             {
@@ -399,11 +400,12 @@ class PlanningWorkerRuntime:
                 "dispatch_id": task.dispatch_id,
                 "task_id": task.task_id,
                 "agent_id": task.agent_id,
+                "agent_name": agent_name,
             },
         )
 
         if task.agent_id == PLANNING_AGENT_ID:
-            return self._finish(writer, failed_worker(task, "recursive_planning"))
+            return self._finish(writer, failed_worker(task, "recursive_planning"), agent_name)
 
         try:
             if task.agent_id == RAG_AGENT_ID:
@@ -422,24 +424,27 @@ class PlanningWorkerRuntime:
                     "dispatch_id": task.dispatch_id,
                     "task_id": task.task_id,
                     "agent_id": task.agent_id,
+                    "agent_name": agent_name,
                 },
             )
             raise
         except (ModelCallLimitExceededError, ToolCallLimitExceededError):
-            return self._finish(writer, failed_worker(task, "agent_execution_limit"))
+            return self._finish(writer, failed_worker(task, "agent_execution_limit"), agent_name)
         except TimeoutError:
-            return self._finish(writer, failed_worker(task, "worker_timeout"))
+            return self._finish(writer, failed_worker(task, "worker_timeout"), agent_name)
         except UnavailableSpecialist:
-            return self._finish(writer, failed_worker(task, "agent_unavailable"))
+            return self._finish(writer, failed_worker(task, "agent_unavailable"), agent_name)
         except Exception as exc:  # noqa: BLE001 - normalized into a typed result
             logger.warning("Planning worker %s failed: %s", task.task_id, exc)
-            return self._finish(writer, failed_worker(task, "tool_execution_failed"))
+            return self._finish(writer, failed_worker(task, "tool_execution_failed"), agent_name)
 
-        return self._finish(writer, result)
+        return self._finish(writer, result, agent_name)
 
     @staticmethod
     def _finish(
-        writer: Callable[[dict[str, Any]], None] | None, result: WorkerResult
+        writer: Callable[[dict[str, Any]], None] | None,
+        result: WorkerResult,
+        agent_name: str | None = None,
     ) -> WorkerResult:
         """Report the outcome without leaking the objective or the content."""
         _emit(
@@ -450,6 +455,7 @@ class PlanningWorkerRuntime:
                 "dispatch_id": result.dispatch_id,
                 "task_id": result.task_id,
                 "agent_id": result.agent_id,
+                "agent_name": agent_name,
                 "status": result.status,
                 "error_code": result.error_code,
             },
@@ -497,6 +503,23 @@ class PlanningWorkerRuntime:
             artifacts=tuple(getattr(result, "artifacts", ()) or ()),
             images=tuple(getattr(result, "images", ()) or ()),
         )
+
+
+def _worker_display_name(agent_id: str, state: Mapping[str, Any]) -> str | None:
+    """What a human should see this worker called.
+
+    A custom agent's runtime id is ``custom_agent:<uuid>``, which is not a name.
+    Resolving it here keeps the trace readable for a failed worker too -- the
+    case where the id alone is least useful.
+    """
+    custom_agents = state.get("custom_agents")
+    if not isinstance(custom_agents, Mapping):
+        return None
+    entry = custom_agents.get(agent_id)
+    if not isinstance(entry, Mapping):
+        return None
+    name = entry.get("name")
+    return str(name) if name else None
 
 
 def failed_worker(task: WorkerTask, error_code: str) -> WorkerResult:

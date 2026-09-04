@@ -59,7 +59,7 @@ class PlanningRubricAttempt(BaseModel):
     status: PlanningRubricTerminalStatus
     grading_run_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     iterations: int = Field(..., ge=0)
-    source: Literal["generate_plan", "modify_plan", "planning_tools"]
+    source: Literal["generate_plan", "modify_plan", "planning_actions"]
     rubric: str
     rubric_source: Literal["caller", "generated", "fallback"] = "generated"
     rubric_rationale: str = ""

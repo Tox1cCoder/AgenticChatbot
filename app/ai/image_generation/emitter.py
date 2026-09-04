@@ -1,11 +1,15 @@
 """Per-request escape hatch for streaming image previews out of a graph node.
 
-``_image_generator_node`` installs an emitter (bound to the run's
-``SubagentEventSink``) around the agent invocation; the agent publishes
-previews through :class:`ImagePreviewPublisher` without knowing anything
-about graph state. ``ContextVar`` scoping keeps concurrent requests isolated
-and makes non-streaming contexts (direct ``invoke_model``, tests, resumed
-runs) a silent no-op.
+The specialist node installs an emitter (bound to the run's custom event
+writer) around the agent invocation; the agent publishes previews through
+:class:`ImagePreviewPublisher` without knowing anything about graph state.
+``ContextVar`` scoping keeps concurrent requests isolated and makes
+non-streaming contexts (direct ``invoke_model``, tests) a silent no-op.
+
+Previews used to travel on a side queue with its own soft cap, because a
+push queue merged into the stream needs its own bound. They now ride the
+graph's own pull-based stream, so a slow client backpressures the run
+instead of silently dropping frames.
 """
 
 from __future__ import annotations

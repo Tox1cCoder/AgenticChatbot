@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any, Optional
 from uuid import UUID
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import StateGraph
 from langgraph.graph.message import RemoveMessage
@@ -18,21 +17,16 @@ from ..core.response_constants import NO_RESPONSE_GENERATED
 from ..interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..interfaces.workflow_runtime_interface import IWorkflowRuntime
 from ..models.enums import PlanLifecycle
+from ..observability.rag import rag_metrics
 from ..observability.routing import get_routing_metrics_recorder
-from ..services.event_streaming.events import make_event
+from ..services.event_streaming.events import IMAGE_PREVIEW_STATUS_PARTIAL, make_event
 from ..services.event_streaming.graph_public_projection import (
     GraphPublicStreamProjector,
     StreamProjectionContext,
     flush_answer_text,
 )
 from ..services.event_streaming.langchain_v3 import iter_v3_events_from_graph
-from ..services.event_streaming.subagents import (
-    SubagentEventSink,
-    rebind_subagent_event_sink,
-    register_subagent_event_sink,
-    resolve_subagent_event_sink,
-    stream_with_subagent_events,
-)
+from ..services.rag_grounding import GroundedAnswerGate
 from ..services.tool_execution_receipt_service import ToolExecutionReceiptService
 from .agent_metadata import (
     attach_agent_metadata,
@@ -50,7 +44,6 @@ from .agents.planning_agent import PlanningAgent
 from .agents.rag_agent import RAGAgent
 from .agents.search_agent import SearchAgent, build_search_specialist_definition
 from .canvas_state import CANVAS_EDIT_DENIED_TOOL_NAMES, CanvasArtifactSnapshot
-from .custom_agent_runtime import is_custom_runtime_id
 from .history import ConversationHistoryProvider
 from .hitl_config import (
     build_interrupt_response,
@@ -69,11 +62,6 @@ from .image_generation import (
     use_media_delivery_service,
 )
 from .model_factory import ModelFactory
-from .rag_tool_actions import (
-    canonicalize_rag_tool_call,
-    execute_rag_search_tool_call,
-    fit_rag_tool_message_content,
-)
 from .research_budget import reset_research_budget
 from .schemas import (
     AgentMessage,
@@ -89,12 +77,6 @@ from .schemas import (
 )
 from .skills_tool import get_available_skill_summaries
 from .time_context import build_runtime_time_context_block
-from .tool_context import rich_response_capable_from_context, tool_execution_context
-from .tool_execution import (
-    build_rejected_tool_artifacts,
-    ensure_agent_tool_map,
-    execute_tool_calls,
-)
 from .utils import (
     address_decisions_to_interrupts,
     apply_hitl_decisions,
@@ -103,7 +85,7 @@ from .utils import (
     make_json_safe,
     normalize_tool_call,
 )
-from .workflow.contracts import TurnIdentity
+from .workflow.contracts import OutcomeProvenance, ResponseOutcome, TurnIdentity
 from .workflow.custom_agents import CustomAgentsMixin
 from .workflow.graph_builder import build_workflow_graph
 from .workflow.inventory import CUSTOM_AGENT_NODE
@@ -115,9 +97,11 @@ from .workflow.planning_execution import (
     TodoActionOutcome,
     build_dispatch_control_tool,
 )
-from .workflow.planning_loop import PlanningLoopMixin
-from .workflow.rag_execution import ProductionRagRuntime, RagExecutionGraph
-from .workflow.rag_loop import RagLoopMixin
+from .workflow.rag_execution import (
+    ProductionRagRuntime,
+    RagExecutionGraph,
+    RagExecutionRequest,
+)
 from .workflow.routing import RoutingContextBuilder, RoutingService
 from .workflow.runtime_context import WorkflowRuntimeContext, build_runtime_inventory
 from .workflow.specialists import SpecialistFactory, SpecialistRequest
@@ -130,7 +114,6 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from ..repositories.document import DocumentRepository
     from ..usage.recorder import ModelUsageRecorder
-    from .planning_subagents import SubagentModelOverride
 
 _apply_decisions = apply_hitl_decisions
 
@@ -138,6 +121,27 @@ _apply_decisions = apply_hitl_decisions
 # node-name allowlist here any more: it never listed ``planning_worker``, so a
 # Planning worker waiting on a human read as a crashed turn, and every node
 # added later would have had to remember to join the set.
+
+
+def _graph_stream_writer() -> Any:
+    """The live custom-event writer, when there is a run to write into."""
+    try:
+        from langgraph.config import get_stream_writer
+
+        return get_stream_writer()
+    except (RuntimeError, ImportError):  # pragma: no cover - outside a run
+        return None
+
+
+def _last_human_text(messages: list[Any]) -> str:
+    """The question this RAG turn is answering."""
+    for message in reversed(messages or ()):
+        if getattr(message, "type", None) != "human":
+            continue
+        content = getattr(message, "content", "")
+        if isinstance(content, str) and content.strip():
+            return content
+    return ""
 
 
 def apply_accumulated_thinking(response: Any, accumulated_thinking: str) -> None:
@@ -198,8 +202,6 @@ def _build_inline_rich_inventory_for_state(context: dict[str, Any] | None) -> st
 class MultiAgentWorkflow(
     ToolLoopMixin,
     CustomAgentsMixin,
-    RagLoopMixin,
-    PlanningLoopMixin,
     IWorkflowRuntime,
 ):
     def __init__(
@@ -1559,6 +1561,84 @@ class MultiAgentWorkflow(
             had_error=had_error,
         )
 
+    def _grounded_answer_gate(self) -> GroundedAnswerGate:
+        """The one grounding gate this workflow uses.
+
+        Planning grounds its own synthesis, so the gate has to be reachable
+        without a RAG agent in play. Its configuration never depended on one --
+        only the cached instance did.
+        """
+        gate = getattr(getattr(self, "rag_agent", None), "grounded_answer_gate", None)
+        if isinstance(gate, GroundedAnswerGate):
+            return gate
+        return GroundedAnswerGate(
+            getattr(settings, "min_citation_coverage", 0.5),
+            metrics=rag_metrics,
+        )
+
+    async def _review_planning_todos_with_rubric(
+        self,
+        *,
+        state: GraphState,
+        todos: list[dict[str, Any]],
+        source: str = "planning_actions",
+    ) -> Any:
+        """Grade a candidate plan, degrading to a typed fallback on any failure.
+
+        A grader outage must not block the plan: the attempt records why it
+        could not grade rather than silently reporting a pass.
+        """
+        from app.ai.planning_rubric import FALLBACK_PLANNING_RUBRIC, PlanningRubricAttempt
+
+        if not getattr(settings, "planning_rubric_enabled", True):
+            return PlanningRubricAttempt(
+                status="disabled",
+                iterations=0,
+                source=source,
+                rubric=FALLBACK_PLANNING_RUBRIC,
+                rubric_source="fallback",
+                evaluations=[],
+            )
+
+        context = GraphStateView(state).context_copy()
+        previous = context.get("planning_rubric")
+        previous_iterations = 0
+        if (
+            isinstance(previous, dict)
+            and previous.get("source") == source
+            and previous.get("status") == "needs_revision"
+        ):
+            try:
+                previous_iterations = int(previous.get("iterations") or 0)
+            except (TypeError, ValueError):
+                previous_iterations = 0
+        try:
+            # PlanningAgent owns the grader so provider/model behavior stays
+            # centralized; this is the only thing it is still kept for besides
+            # the Planning model and prompt.
+            return await self.planning_agent.review_todos_with_planning_rubric(
+                user_message=self._latest_user_text(state),
+                candidate_todos=todos,
+                existing_todos=state.get("all_tasks") or [],
+                plan_modified=bool(state.get("has_existing_plan")),
+                source=source,
+                start_iteration=previous_iterations,
+                user_id=state.get("user_id"),
+                model_request=state.get("model_request"),
+            )
+        except Exception as exc:  # noqa: BLE001 - a grader outage is not a plan failure
+            logger.warning("Planning rubric review failed: %s", exc)
+            return PlanningRubricAttempt(
+                status="grader_error",
+                iterations=previous_iterations,
+                source=source,
+                rubric=FALLBACK_PLANNING_RUBRIC,
+                rubric_source="fallback",
+                evaluations=[],
+                feedback=f"Planning rubric review failed: {exc}",
+                error=f"Planning rubric review failed: {exc}",
+            )
+
     async def _planning_review_rubric(self, state: GraphState, todos: list[dict[str, Any]]):
         """Grade a plan mutation against the planning rubric."""
         return await self._review_planning_todos_with_rubric(
@@ -1680,6 +1760,14 @@ class MultiAgentWorkflow(
         """
         request = await self._specialist_request_for(node_name, state)
 
+        if node_name == "rag_agent":
+            # RAG runs the shared compiled graph rather than a create_agent
+            # subgraph: the model drives retrieval and every answer passes
+            # through the same grounding gate a Planning RAG worker uses.
+            return self._enrich_specialist_outcome(
+                state, request, await self._invoke_rag_specialist(request, state)
+            )
+
         if node_name == CUSTOM_AGENT_NODE:
             custom_agent = self._build_custom_agent(state, request.agent_id)
             if custom_agent is None:
@@ -1702,6 +1790,63 @@ class MultiAgentWorkflow(
         self._persist_deferred_tool_snapshot_to_state(state, agent=agent)
 
         return self._enrich_specialist_outcome(state, request, outcome)
+
+    async def _invoke_rag_specialist(
+        self, request: SpecialistRequest, state: GraphState
+    ) -> ResponseOutcome:
+        """Run the shared RAG graph for a public turn and map its result.
+
+        The same object a Planning RAG worker runs, differing only in what the
+        result becomes: a ``ResponseOutcome`` here, a ``WorkerResult`` there.
+        Two graphs were how one path could quietly skip validation.
+        """
+        state_view = GraphStateView(state)
+        history = await self._get_conversation_history(
+            request.conversation_id, request.user_id, agent_key="rag", state=state
+        )
+
+        result = await self.rag_execution_graph.ainvoke(
+            RagExecutionRequest(
+                objective=_last_human_text(state_view.messages()),
+                conversation_id=request.conversation_id,
+                user_id=request.user_id,
+                device_id=request.device_id,
+                persona=request.persona,
+                model_request=request.model_request,
+                history=list(history or []),
+                hitl_policy=dict(request.hitl_policy or {}),
+                attachments=list(request.attachments),
+                mode="public",
+            )
+        )
+
+        evidence = tuple(result.evidence)
+        artifacts = tuple(result.artifacts)
+        images = tuple(result.images)
+        policies: tuple[str, ...] = ("public_content",)
+        if evidence:
+            policies = (*policies, "rag_grounding")
+
+        response = AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content=result.content),
+            metadata={
+                "grounded_answer": result.grounding.to_metadata(),
+                **({"images": list(images)} if images else {}),
+            },
+            tool_artifacts=list(artifacts) or None,
+        )
+        return ResponseOutcome(
+            agent_id="rag_agent",
+            response=response,
+            provenance=OutcomeProvenance(
+                output_policy_ids=policies,
+                evidence=evidence,
+                artifacts=artifacts,
+                images=images,
+            ),
+        )
 
     def _enrich_specialist_outcome(
         self, state: GraphState, request: SpecialistRequest, outcome: Any
@@ -1792,30 +1937,38 @@ class MultiAgentWorkflow(
         return _loader
 
     def _build_image_preview_emitter(self, state: GraphState):
-        """Bind an image-preview emitter to this run's live event sink.
+        """Bind an image-preview emitter to this run's custom event channel.
 
-        Returns None (previews disabled) when the run is not streaming — the
-        sink token only exists for ``execute_request_stream`` runs and weakly
-        resolves to None after resume.
+        Returns None when previews are disabled or there is no run to write
+        into. Previews used to travel on a side queue reached through a weak
+        token in checkpoint state; a resumed run resolved that token to a dead
+        sink and had to rebind one under it. The graph's own channel needs
+        neither, and it works identically on a resume.
+
+        The side queue also bounded memory by dropping bulky in-progress frames
+        once it saturated. That protection is still needed and is applied here
+        instead: the custom channel does **not** backpressure its writer -- a
+        node emitting 2000 frames finishes while a sleeping consumer holds one,
+        so without a cap a slow client buffers every partial. Only partials are
+        droppable; a final delivery and every lifecycle frame always go through.
         """
         if not settings.enable_image_streaming:
             return None
-        context = state.get("context") if isinstance(state, dict) else None
-        token = context.get("subagent_event_sink_token") if isinstance(context, dict) else None
-        sink = resolve_subagent_event_sink(token)
-        if sink is None:
+        writer = _graph_stream_writer()
+        if writer is None:
             return None
 
+        cap = int(getattr(settings, "image_preview_max_partials_per_image", 512) or 512)
+        written_partials: dict[Any, int] = {}
+
         def _emit(payload: dict[str, Any]) -> None:
-            sink.emit_event(
-                make_event(
-                    "image_preview",
-                    sequence=0,
-                    agent="image_generator_agent",
-                    node="image_generator_agent",
-                    data=payload,
-                )
-            )
+            if payload.get("status") == IMAGE_PREVIEW_STATUS_PARTIAL:
+                item_id = payload.get("item_id")
+                seen = written_partials.get(item_id, 0)
+                if seen >= cap:
+                    return
+                written_partials[item_id] = seen + 1
+            writer({"type": "image_preview", **payload})
 
         return _emit
 
@@ -1849,531 +2002,6 @@ class MultiAgentWorkflow(
             request_id=str(conversation_id) if conversation_id else None,
         )
 
-    async def _run_agent_in_isolated_context(
-        self,
-        *,
-        agent_name: str,
-        task_prompt: str,
-        parent_state: GraphState,
-        related_todo_ids: list[str] | None = None,
-        model_override: "SubagentModelOverride | None" = None,
-        task_id: str | None = None,
-    ) -> AgentResponse:
-        """Run a single graph-agent against an isolated child state.
-
-        Worker intermediate messages stay local to the child state — they
-        are NOT appended to the parent ``messages`` list. The worker
-        inherits the parent's scoped identifiers (``conversation_id``,
-        ``user_id``, ``device_id``), persona, and model overrides so
-        MCP/client tools and per-user model routing keep working.
-
-        ``model_override`` (Phase 10) overlays a task-local model assignment
-        onto the worker's ``model_request`` without mutating parent or
-        sibling worker routing.
-        """
-        from .planning_subagents import build_worker_model_request
-
-        if agent_name == "planning_agent":
-            raise ValueError(
-                "planning_agent is not a valid subagent target — recursive planning is forbidden."
-            )
-
-        agent = self.agents.get(agent_name)
-        if agent is None and is_custom_runtime_id(agent_name):
-            # Custom worker: resolve from the parent conversation's attached
-            # custom agents (live config). Rejected if not attached.
-            agent = self._build_custom_agent(parent_state, agent_name)
-        if agent is None:
-            raise ValueError(f"Unknown subagent target: {agent_name}")
-
-        conversation_id = parent_state.get("conversation_id")
-        user_id = parent_state.get("user_id")
-        device_id = parent_state.get("device_id")
-        persona = parent_state.get("persona")
-        agent_key = getattr(agent, "agent_config_key", None) or agent_name
-        # Deferred tool state is keyed by tool_state_key (custom agents use their
-        # runtime id). Keep agent_key for model routing only.
-        tool_state_key = getattr(agent, "tool_state_key", None) or agent_key
-        model_request = build_worker_model_request(
-            parent_model_request=parent_state.get("model_request"),
-            agent_key=agent_key,
-            override=model_override,
-        )
-        # ``purpose`` + ``subagent_task_id`` let the v3 stream translator
-        # attribute this worker's model deltas to its subagent row instead of
-        # leaking them into the main answer/thinking stream.
-        run_config = RunnableConfig(
-            tags=["internal", "planning_subagent", f"subagent:{agent_name}"],
-            metadata={
-                "internal": True,
-                "purpose": "planning_subagent",
-                "subagent": True,
-                "subagent_agent": agent_name,
-                "subagent_task_id": task_id or agent_name,
-            },
-        )
-
-        worker_message = HumanMessage(content=task_prompt)
-        worker_turn = self._apply_current_turn_attachments(parent_state, [worker_message])
-        worker_messages, worker_has_images = worker_turn
-
-        # RAG worker: drive the same search_documents loop used by the graph,
-        # but keep all intermediate context local to this worker.
-        if agent_name == "rag_agent":
-            max_agentic_images = getattr(settings, "agentic_rag_max_images", 6)
-            rag_context = dict(parent_state.get("context") or {})
-            rag_tool_messages: list[AIMessage | ToolMessage] = []
-            legacy_tool_context: list[str] = []
-            accumulated_artifacts: list[dict[str, Any]] = []
-            rag_tool_map: dict[str, Any] | None = None
-            rag_worker_iterations = 0
-            rag_worker_error_signature: dict[str, str] | None = None
-            rag_worker_error_count = 0
-            rag_worker_error_limit = max(
-                1,
-                int(getattr(settings, "tool_execution_consecutive_errors_limit", 3) or 3),
-            )
-            rag_worker_iteration_limit = max(
-                1, int(getattr(settings, "agentic_max_iterations", 50) or 50)
-            )
-
-            while True:
-                rag_worker_iterations += 1
-                if rag_worker_iterations > rag_worker_iteration_limit:
-                    return AgentResponse(
-                        agent_type=getattr(agent, "agent_type", AgentType.RAG),
-                        agent_id=agent_name,
-                        message=AgentMessage(
-                            role=MessageRole.ASSISTANT,
-                            content="Worker stopped after reaching its tool iteration limit.",
-                        ),
-                        metadata={"pause_reason": "worker_max_iterations"},
-                        tool_artifacts=list(accumulated_artifacts),
-                    )
-                agent_msg = AgentMessage(
-                    role=MessageRole.USER,
-                    content=task_prompt,
-                    metadata={
-                        "persona": persona,
-                        "history": [],
-                        "original_query": task_prompt,
-                        "rag_tool_messages": list(rag_tool_messages),
-                        "tool_context": list(legacy_tool_context),
-                        "agentic_images": list(rag_context.get("agentic_images") or []),
-                        "model_request": model_request,
-                        "user_id": user_id,
-                        "device_id": device_id,
-                        "run_config": run_config,
-                    },
-                    attachments=self._get_state_attachments(parent_state),
-                )
-                response = await agent.process_message(agent_msg, conversation_id)
-
-                if response.error:
-                    self._discard_evidence_token_counter(agent, response.metadata or {})
-                    if accumulated_artifacts:
-                        response.tool_artifacts = accumulated_artifacts
-                    return response
-
-                tool_calls = response.message.tool_calls or []
-                if not tool_calls:
-                    self._discard_evidence_token_counter(agent, response.metadata or {})
-                    if accumulated_artifacts:
-                        existing_artifacts = list(response.tool_artifacts or [])
-                        for artifact in accumulated_artifacts:
-                            if artifact not in existing_artifacts:
-                                existing_artifacts.append(artifact)
-                        response.tool_artifacts = existing_artifacts
-                    # This answer goes to Planning, which will synthesize it into
-                    # a public one. Grounding it here is what stops a worker's
-                    # unchecked citation from arriving wearing the same brackets
-                    # as a real one. The same gate as the top-level RAG node, on
-                    # the evidence this worker itself retrieved: worker context
-                    # is local, so a wider pool would let one worker authorize
-                    # another's citation.
-                    return await self._apply_grounded_answer_gate(
-                        {
-                            # ``rag_tool_messages`` carries this worker's own
-                            # tool calls, which is how the gate scopes evidence
-                            # to the calls that actually produced it.
-                            "messages": list(rag_tool_messages),
-                            "context": {"tool_artifacts": list(accumulated_artifacts)},
-                        },
-                        response,
-                    )
-
-                normalized_calls = [
-                    canonicalize_rag_tool_call(normalize_tool_call(tc)) for tc in tool_calls
-                ]
-                response_metadata = response.metadata or {}
-                request_budget = response_metadata.get("request_budget") or {}
-                raw_allowance = request_budget.get("evidence_token_allowance")
-                # Evidence packs fail closed on a missing allowance (zero
-                # tokens), but non-pack results must not: "absent" means the
-                # request budget never ran, so there is no authoritative
-                # remainder to enforce against.
-                allowance_authoritative = raw_allowance is not None
-                remaining_evidence_allowance = max(
-                    0,
-                    int(raw_allowance if allowance_authoritative else 0),
-                )
-                evidence_provider = str(response_metadata.get("provider") or "gemini")
-                evidence_model = str(response_metadata.get("model") or "gemini-2.5-flash")
-                evidence_token_counter = self._consume_evidence_token_counter(
-                    agent,
-                    response_metadata,
-                    provider=evidence_provider,
-                    model=evidence_model,
-                )
-                # A worker cannot ask for approval, so a gated call is refused
-                # rather than abandoning the turn. See
-                # ``_refuse_worker_approval_gated_calls``.
-                runnable_calls, approval_refusals = await self._refuse_worker_approval_gated_calls(
-                    parent_state, normalized_calls, agent=agent
-                )
-
-                # Every call the model made stays on the AIMessage, refused or
-                # not: a request without its paired result is an invalid history
-                # the next model call has to reconcile.
-                rag_tool_messages.append(
-                    AIMessage(
-                        content=response.message.content or "",
-                        tool_calls=[
-                            {
-                                "id": tool_call.get("id"),
-                                "name": tool_call.get("name"),
-                                "args": tool_call.get("args", {}),
-                            }
-                            for tool_call in normalized_calls
-                        ],
-                    )
-                )
-                if approval_refusals:
-                    accumulated_artifacts.extend(
-                        build_rejected_tool_artifacts(
-                            tool_calls=normalized_calls,
-                            rejected_feedback=approval_refusals,
-                        )
-                    )
-                    for tool_call in normalized_calls:
-                        feedback = approval_refusals.get(str(tool_call.get("id") or ""))
-                        if not feedback:
-                            continue
-                        rag_tool_messages.append(
-                            ToolMessage(
-                                content=feedback,
-                                tool_call_id=tool_call.get("id"),
-                                name=tool_call.get("name") or "unknown",
-                            )
-                        )
-                        legacy_tool_context.append(feedback)
-
-                rag_iteration_start = len(accumulated_artifacts)
-                for tool_call_data in runnable_calls:
-                    tool_name = tool_call_data.get("name")
-                    tool_id = tool_call_data.get("id")
-
-                    if tool_name == "search_documents":
-                        search = await execute_rag_search_tool_call(
-                            rag_agent=agent,
-                            tool_call=tool_call_data,
-                            conversation_id=conversation_id,
-                            user_id=user_id,
-                            context=rag_context,
-                            question=task_prompt,
-                            max_agentic_images=max_agentic_images,
-                            allowance=(
-                                remaining_evidence_allowance if allowance_authoritative else None
-                            ),
-                            remaining_allowance=remaining_evidence_allowance,
-                            evidence_token_counter=evidence_token_counter,
-                            evidence_provider=evidence_provider,
-                            evidence_model=evidence_model,
-                        )
-                        remaining_evidence_allowance = max(
-                            0,
-                            remaining_evidence_allowance - search.consumed_tokens,
-                        )
-                        accumulated_artifacts.append(search.artifact)
-                        rag_tool_messages.append(
-                            ToolMessage(
-                                content=search.public_text,
-                                tool_call_id=tool_id,
-                                name=tool_name,
-                            )
-                        )
-                        legacy_tool_context.append(search.public_text)
-                        continue
-
-                    if rag_tool_map is None:
-                        rag_tool_map = await ensure_agent_tool_map(
-                            agent,
-                            conversation_id=conversation_id,
-                            user_id=user_id,
-                            device_id=device_id,
-                        )
-                    with tool_execution_context(
-                        conversation_id,
-                        user_id,
-                        tool_state_key,
-                        device_id,
-                        rich_response_capable=rich_response_capable_from_context(
-                            parent_state.get("context")
-                        ),
-                    ):
-                        outputs, artifacts, _images = await execute_tool_calls(
-                            tool_calls=[tool_call_data],
-                            tool_map=rag_tool_map,
-                            capture_images=False,
-                            device_id=device_id,
-                            agent=agent,
-                            conversation_id=conversation_id,
-                            user_id=user_id,
-                        )
-                    accumulated_artifacts.extend(artifacts)
-                    for output in outputs:
-                        output_content, consumed_tokens, budget_omitted = (
-                            fit_rag_tool_message_content(
-                                content=output.get("content", ""),
-                                allowance=(
-                                    remaining_evidence_allowance
-                                    if allowance_authoritative
-                                    else None
-                                ),
-                                token_counter=evidence_token_counter,
-                                provider=evidence_provider,
-                                model=evidence_model,
-                                tool_call_id=output.get("tool_call_id") or tool_id,
-                                tool_name=tool_name,
-                            )
-                        )
-                        if budget_omitted:
-                            for artifact in artifacts:
-                                if artifact.get("tool_call_id") == (
-                                    output.get("tool_call_id") or tool_id
-                                ):
-                                    artifact["model_output_omitted"] = True
-                                    artifact["model_output_omitted_reason"] = "context_budget"
-                        rag_tool_messages.append(
-                            ToolMessage(
-                                content=output_content,
-                                tool_call_id=output.get("tool_call_id") or tool_id,
-                                name=tool_name,
-                            )
-                        )
-                        legacy_tool_context.append(output_content)
-                        remaining_evidence_allowance = max(
-                            0,
-                            remaining_evidence_allowance - consumed_tokens,
-                        )
-
-                rag_error_artifacts = [
-                    artifact
-                    for artifact in accumulated_artifacts[rag_iteration_start:]
-                    if isinstance(artifact, dict) and artifact.get("status") == "error"
-                ]
-                if rag_error_artifacts:
-                    signature = self._tool_error_signature(rag_error_artifacts[0])
-                    if signature == rag_worker_error_signature:
-                        rag_worker_error_count += 1
-                    else:
-                        rag_worker_error_signature = signature
-                        rag_worker_error_count = 1
-                    if rag_worker_error_count >= rag_worker_error_limit:
-                        return AgentResponse(
-                            agent_type=getattr(agent, "agent_type", AgentType.RAG),
-                            agent_id=agent_name,
-                            message=AgentMessage(
-                                role=MessageRole.ASSISTANT,
-                                content=(
-                                    "Worker stopped after repeated tool errors. Use the "
-                                    "available tool results to explain the blocker."
-                                ),
-                            ),
-                            metadata={
-                                "pause_reason": "consecutive_tool_errors",
-                                "tool_error_streak": {
-                                    "count": rag_worker_error_count,
-                                    "limit": rag_worker_error_limit,
-                                    "signature": signature,
-                                },
-                            },
-                            tool_artifacts=list(accumulated_artifacts),
-                        )
-                else:
-                    rag_worker_error_signature = None
-                    rag_worker_error_count = 0
-
-        # Generic agent worker: tool-loop until final response, approval, or error.
-
-        tool_map: dict[str, Any] | None = None
-        accumulated_worker_artifacts: list[dict[str, Any]] = []
-        worker_iterations = 0
-        worker_error_signature: dict[str, str] | None = None
-        worker_error_count = 0
-        worker_error_limit = max(
-            1,
-            int(getattr(settings, "tool_execution_consecutive_errors_limit", 3) or 3),
-        )
-        worker_iteration_limit = max(
-            1, int(getattr(settings, "react_agent_max_iterations", 50) or 50)
-        )
-
-        while True:
-            worker_iterations += 1
-            if worker_iterations > worker_iteration_limit:
-                return AgentResponse(
-                    agent_type=getattr(agent, "agent_type", AgentType.CHAT),
-                    agent_id=agent_name,
-                    message=AgentMessage(
-                        role=MessageRole.ASSISTANT,
-                        content="Worker stopped after reaching its tool iteration limit.",
-                    ),
-                    metadata={"pause_reason": "worker_max_iterations"},
-                    tool_artifacts=list(accumulated_worker_artifacts),
-                )
-            response = await agent.invoke_model_with_history(
-                messages=list(worker_messages),
-                conversation_history=[],
-                persona=persona,
-                conversation_id=conversation_id,
-                user_id=user_id,
-                device_id=device_id,
-                model_request=model_request,
-                run_config=run_config,
-                # Workers run isolated; graph-level hand_off cannot apply here, so
-                # bind it off to keep the worker from wasting tokens on no-op
-                # delegation calls.
-                include_hand_off=False,
-            )
-
-            if response.error:
-                return response
-
-            tool_calls = response.message.tool_calls or []
-            if not tool_calls:
-                if accumulated_worker_artifacts:
-                    existing = list(response.tool_artifacts or [])
-                    existing.extend(accumulated_worker_artifacts)
-                    response.tool_artifacts = existing
-                self._mark_response_has_images(response, worker_has_images)
-                return response
-
-            normalized_worker_calls = [normalize_tool_call(tc) for tc in tool_calls]
-            # Build the worker tool_map once (reused across loop iterations so a tool
-            # loaded via tool_search stays available) and feed it to the approval gate
-            # so provenance resolves without a second ensure_agent_tool_map call.
-            if tool_map is None:
-                tool_map = await ensure_agent_tool_map(
-                    agent,
-                    conversation_id=conversation_id,
-                    user_id=user_id,
-                    device_id=device_id,
-                )
-            # A worker cannot ask for approval, so a gated call is refused
-            # rather than abandoning the turn. See
-            # ``_refuse_worker_approval_gated_calls``.
-            (
-                runnable_worker_calls,
-                approval_refusals,
-            ) = await self._refuse_worker_approval_gated_calls(
-                parent_state, normalized_worker_calls, tool_map=tool_map
-            )
-
-            # Every call the model made stays on the AIMessage, refused or not:
-            # a request without its paired result is an invalid history the next
-            # model call has to reconcile.
-            ai_kwargs: dict[str, Any] = {"content": response.message.content or ""}
-            if tool_calls:
-                ai_kwargs["tool_calls"] = tool_calls
-            worker_messages.append(AIMessage(**ai_kwargs))
-
-            if approval_refusals:
-                accumulated_worker_artifacts.extend(
-                    build_rejected_tool_artifacts(
-                        tool_calls=normalized_worker_calls,
-                        rejected_feedback=approval_refusals,
-                    )
-                )
-                for tool_call in normalized_worker_calls:
-                    feedback = approval_refusals.get(str(tool_call.get("id") or ""))
-                    if not feedback:
-                        continue
-                    worker_messages.append(
-                        ToolMessage(
-                            content=feedback,
-                            tool_call_id=tool_call.get("id"),
-                            name=tool_call.get("name") or "unknown",
-                        )
-                    )
-
-            with tool_execution_context(
-                conversation_id,
-                user_id,
-                tool_state_key,
-                device_id,
-                rich_response_capable=rich_response_capable_from_context(
-                    parent_state.get("context")
-                ),
-            ):
-                outputs, artifacts, _images = await execute_tool_calls(
-                    tool_calls=runnable_worker_calls,
-                    tool_map=tool_map,
-                    capture_images=False,
-                    device_id=device_id,
-                    agent=agent,
-                    conversation_id=conversation_id,
-                    user_id=user_id,
-                )
-
-            for output in outputs:
-                worker_messages.append(
-                    ToolMessage(
-                        content=output.get("content", ""),
-                        tool_call_id=output.get("tool_call_id"),
-                        name=output.get("name") or "tool",
-                    )
-                )
-
-            accumulated_worker_artifacts.extend(artifacts)
-            response.tool_artifacts = list(accumulated_worker_artifacts)
-
-            error_artifacts = [
-                artifact
-                for artifact in artifacts
-                if isinstance(artifact, dict) and artifact.get("status") == "error"
-            ]
-            if error_artifacts:
-                signature = self._tool_error_signature(error_artifacts[0])
-                if signature == worker_error_signature:
-                    worker_error_count += 1
-                else:
-                    worker_error_signature = signature
-                    worker_error_count = 1
-                if worker_error_count >= worker_error_limit:
-                    return AgentResponse(
-                        agent_type=getattr(agent, "agent_type", AgentType.CHAT),
-                        agent_id=agent_name,
-                        message=AgentMessage(
-                            role=MessageRole.ASSISTANT,
-                            content=(
-                                "Worker stopped after repeated tool errors. Use the available "
-                                "tool results to explain the blocker."
-                            ),
-                        ),
-                        metadata={
-                            "pause_reason": "consecutive_tool_errors",
-                            "tool_error_streak": {
-                                "count": worker_error_count,
-                                "limit": worker_error_limit,
-                                "signature": signature,
-                            },
-                        },
-                        tool_artifacts=list(accumulated_worker_artifacts),
-                    )
-            else:
-                worker_error_signature = None
-                worker_error_count = 0
 
     @staticmethod
     def _latest_user_text(state: GraphState) -> str:
@@ -2426,11 +2054,16 @@ class MultiAgentWorkflow(
         self._attach_final_agent_metadata(state, response)
         return response
 
-    def _recover_terminal_response(
+    def _finalized_response(
         self,
         state: dict[str, Any] | None,
     ) -> AgentResponse | None:
         """Return the finalizer's validated response, or nothing.
+
+        Named for what it does. Its predecessor salvaged assistant-looking
+        text out of stream chunks and checkpoint messages -- a path around
+        ``validate_output`` publishing content no output policy had approved.
+        The salvage went in ``051092b``; the misleading name outlived it.
 
         This deliberately does not salvage. It used to scan accumulated stream
         chunks and checkpoint messages for assistant-looking text and publish
@@ -2484,7 +2117,7 @@ class MultiAgentWorkflow(
                     return interrupt_agent_response
 
         final_state = result if isinstance(result, dict) else None
-        agent_response = self._recover_terminal_response(final_state)
+        agent_response = self._finalized_response(final_state)
         if not agent_response and self.checkpointer and thread_id:
             final_snapshot = await self.graph.aget_state(config)
             final_state = (
@@ -2492,7 +2125,7 @@ class MultiAgentWorkflow(
                 if final_snapshot and hasattr(final_snapshot, "values")
                 else None
             )
-            agent_response = self._recover_terminal_response(final_state)
+            agent_response = self._finalized_response(final_state)
 
         final_agent_id = (
             final_state.get("active_agent_id") if isinstance(final_state, dict) else None
@@ -2542,10 +2175,10 @@ class MultiAgentWorkflow(
         if interrupt_response:
             return interrupt_response
 
-        response = self._recover_terminal_response(result)
+        response = self._finalized_response(result)
         if not response:
             final_state = (await self.graph.aget_state(config)).values
-            response = self._recover_terminal_response(final_state)
+            response = self._finalized_response(final_state)
 
         return response
 
@@ -2576,29 +2209,12 @@ class MultiAgentWorkflow(
         active_agent_id = state_snapshot.values.get("active_agent_id", "search_agent")
         conversation_id = state_snapshot.values.get("conversation_id")
 
-        # Resume parity: install the SAME request-scoped media sink as the main
-        # streaming path so an image generated AFTER a HITL resume still emits an
-        # early preview / final-by-reference. The checkpointed state already
-        # carries a ``subagent_event_sink_token`` from the original run, but its
-        # weakref died with that stream (resolves to None). Rebind this run's
-        # live sink under the persisted token so the resumed image node resolves
-        # it without mutating the checkpoint; if no token was persisted, fall
-        # back to injecting a fresh one through the resume state update.
-        subagent_event_sink = SubagentEventSink(maxsize=settings.subagent_event_queue_maxsize)
-        existing_context = state_snapshot.values.get("context")
-        persisted_token = (
-            existing_context.get("subagent_event_sink_token")
-            if isinstance(existing_context, dict)
-            else None
-        )
+        # Resume parity needs nothing installed any more. An image generated
+        # after a HITL resume emits its preview on the graph's own custom
+        # channel, which the resumed run has just as much as the original did.
+        # This used to rebind a live sink under a token the checkpoint still
+        # carried, because the weakref behind it died with the first stream.
         resume_state_update: dict[str, Any] | None = None
-        if isinstance(persisted_token, str) and persisted_token:
-            rebind_subagent_event_sink(persisted_token, subagent_event_sink)
-        else:
-            fresh_token = register_subagent_event_sink(subagent_event_sink)
-            merged_context = dict(existing_context) if isinstance(existing_context, dict) else {}
-            merged_context["subagent_event_sink_token"] = fresh_token
-            resume_state_update = {"context": merged_context}
 
         yield make_event(
             "agent_selected",
@@ -2623,13 +2239,10 @@ class MultiAgentWorkflow(
         chat_image_loader = self._build_chat_image_loader(state_snapshot.values.get("user_id"))
 
         try:
-            merged = stream_with_subagent_events(
-                iter_v3_events_from_graph(
-                    self.graph,
-                    Command(resume=resume_data, update=resume_state_update),
-                    config=config,
-                ),
-                subagent_event_sink,
+            merged = iter_v3_events_from_graph(
+                self.graph,
+                Command(resume=resume_data, update=resume_state_update),
+                config=config,
             )
             with use_chat_image_loader(chat_image_loader):
                 async for event in merged:
@@ -2646,17 +2259,6 @@ class MultiAgentWorkflow(
 
     async def execute_request_stream(self, request: WorkflowExecutionRequest):
         initial_state = self._build_initial_state_from_request(request)
-        # Custom subagents (dispatch_subagents) emit lifecycle events into this
-        # sink; it is drained between graph supersteps below. Only a weakref
-        # token enters graph state (state must stay msgpack-serializable for
-        # checkpointing); _build_planning_internal_tools resolves it back.
-        subagent_event_sink = SubagentEventSink(maxsize=settings.subagent_event_queue_maxsize)
-        if isinstance(initial_state, dict):
-            context = initial_state.setdefault("context", {})
-            if isinstance(context, dict):
-                context["subagent_event_sink_token"] = register_subagent_event_sink(
-                    subagent_event_sink
-                )
         conversation_id = request.conversation_id
         thread_id = self._resolve_thread_id(
             request.thread_id, conversation_id, request.turn_id or request.user_message_id
@@ -2699,10 +2301,7 @@ class MultiAgentWorkflow(
         chat_image_loader = self._build_chat_image_loader(user_id)
 
         try:
-            merged = stream_with_subagent_events(
-                iter_v3_events_from_graph(self.graph, initial_state, config=config),
-                subagent_event_sink,
-            )
+            merged = iter_v3_events_from_graph(self.graph, initial_state, config=config)
             with use_chat_image_loader(chat_image_loader):
                 async for event in merged:
                     for public_event in projector.map_event(event, ctx):
@@ -2754,7 +2353,7 @@ class MultiAgentWorkflow(
         # behind. Neither is a salvage path — both carry only what ``finalize``
         # already validated.
         for final_state in (getattr(snapshot, "values", None), ctx.last_state_values):
-            response = self._recover_terminal_response(final_state)
+            response = self._finalized_response(final_state)
             if response is not None:
                 break
         else:

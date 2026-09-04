@@ -120,21 +120,11 @@ class ScriptedWorkflow:
         self.states_seen: list[dict] = []
         self._on_invoke = on_invoke
 
-        async def _legacy_node(state):
-            # A pre-v2 node hands back a state dict carrying ``response``; the
-            # parent wrapper is what turns that into a server-owned outcome.
-            outcome = self._next(state.get("active_agent_id"), state)
-            return {**state, "response": outcome.response}
-
-        self._rag_node = _legacy_node
-        self._rag_tools_node = _legacy_node
-        self._should_call_tools = lambda _state: "end"
-        self._should_call_rag_tools = lambda _state: "end"
-        # Planning answers through its own nodes now, so it is scripted from the
+        # Planning answers through its own nodes, so it is scripted from the
         # same ``outcomes`` mapping as every other specialist rather than
-        # through ``invoke_specialist_subgraph``.
+        # through ``invoke_specialist_subgraph``. RAG is an ordinary subgraph
+        # specialist now -- there is no parent-level stage left to script.
         self.planning_node_factory = scripted_planning_node_factory(self._planning_model_turn)
-        self._should_continue_rag = lambda _state: "end"
 
     def _next(self, agent_id, state):
         self.visited.append(str(agent_id))
@@ -708,33 +698,31 @@ async def test_an_answer_citing_retrieved_evidence_publishes():
 
 
 async def test_a_real_rag_answer_with_citations_is_publishable():
-    """The live RAG path renders ``[E1]`` into its own answer text.
+    """The RAG path renders ``[E1]`` into its own answer text.
 
-    Now that a *claim* selects ``rag_grounding``, the pre-v2 wrapper has to
-    carry the evidence the runtime recorded — otherwise every legitimate
-    citation would be read as invented and every grounded answer would fail.
+    A *claim* selects ``rag_grounding``, so the outcome has to carry the
+    evidence the runtime retrieved -- otherwise every legitimate citation is
+    read as invented and every grounded answer fails validation.
     """
+
+    from app.ai.workflow.contracts import OutcomeProvenance, ResponseOutcome
 
     class GroundedRagWorkflow(ScriptedWorkflow):
         def __init__(self):
             super().__init__({})
 
-            async def _rag(state):
-                self._next(state.get("active_agent_id"), state)
-                context = dict(state.get("context") or {})
-                context["tool_artifacts"] = [
-                    {
-                        "tool_call_id": "search-1",
-                        "rag_evidence": {"records": [{"evidence_id": "E1"}]},
-                    }
-                ]
-                return {
-                    **state,
-                    "context": context,
-                    "response": _response("rag_agent", "Revenue rose [E1]."),
-                }
-
-            self._rag_node = _rag
+        async def invoke_specialist_subgraph(self, node_name, state):
+            self.visited.append(node_name)
+            # What the shared RAG graph returns: the answer plus the evidence
+            # the runtime actually retrieved, as server-owned provenance.
+            return ResponseOutcome(
+                agent_id="rag_agent",
+                response=_response("rag_agent", "Revenue rose [E1]."),
+                provenance=OutcomeProvenance(
+                    output_policy_ids=("public_content", "rag_grounding"),
+                    evidence=({"evidence_id": "E1"},),
+                ),
+            )
 
     final, _ = await _run_turn(GroundedRagWorkflow(), ScriptedRoutingService("rag_agent"))
 

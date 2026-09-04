@@ -1,33 +1,33 @@
-"""T005 resume parity at the GRAPH level (closes the deferred verification gap).
+"""Resume parity for streamed images, at the GRAPH level.
 
 Every other automated "resume" check in this repo re-points a fake
 ``ai_service.resume_interrupted_execution_stream`` and therefore never touches
-``MultiAgentWorkflow.resume_with_decisions_stream`` — the code that actually
-installs the request-scoped media sink after a HITL interrupt. The T005 review
-confirmed that wiring only by inspection and deferred runtime proof to a manual
-acceptance step.
+``MultiAgentWorkflow.resume_with_decisions_stream`` -- the code that actually
+runs after a HITL interrupt.
 
 These tests drive the REAL resume generator with:
 
-* a checkpointed ``subagent_event_sink_token`` whose original sink has died
-  (the exact post-resume condition the rebind exists for),
-* the REAL ``_image_generator_node`` (its own emitter/media bindings, not a
-  test reimplementation of them),
+* the REAL image specialist path (its own emitter/media bindings, not a test
+  reimplementation of them),
 * the REAL ``ImageGeneratorAgent._consume_image_stream`` over a deterministic
   fake provider,
 * the REAL ``MediaDeliveryService`` / ``ImagePreviewPublisher`` / storage seam,
-* the REAL ``stream_with_subagent_events`` merge and public projector.
+* the REAL custom-channel projection and public projector.
 
-Production changes that must make these fail:
-``resume_with_decisions_stream`` dropping ``rebind_subagent_event_sink`` (or its
-no-token ``Command(update=...)`` fallback), dropping the
-``stream_with_subagent_events`` merge, or ``_image_generator_node`` dropping
-``use_media_delivery_service``.
+Previews used to travel on a side queue reached through a weak token in
+checkpoint state; a resumed run resolved that token to a dead sink and the
+resume path had to rebind a live one under it. They now ride the graph's own
+custom channel, which a resumed run has for the same reason the original did --
+so there is nothing left to install, and the tests below assert the previews
+arrive rather than that the plumbing was installed.
+
+Production changes that must make these fail: the image node dropping
+``use_media_delivery_service`` or its preview emitter, the resume path dropping
+the graph stream, or the custom channel no longer being projected.
 """
 
 from __future__ import annotations
 
-import gc
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -44,10 +44,6 @@ from app.ai.image_generation.models import (
 )
 from app.ai.schemas import AgentMessage, AgentResponse, InterruptDecision
 from app.core.config import settings
-from app.services.event_streaming.subagents import (
-    register_subagent_event_sink,
-    resolve_subagent_event_sink,
-)
 
 _NARRATIVE = "Here is the cat you asked for."
 _PARTIAL_B64 = "UEFSVElBTA"  # "PARTIAL"
@@ -126,20 +122,6 @@ class _FakeImageSpecialistFactory:
         )
 
 
-def _dead_sink_token() -> str:
-    """Register a sink, drop it, and confirm the token resolves to None.
-
-    Reproduces the post-resume state: the checkpoint still carries the original
-    run's token but the sink it pointed at was garbage-collected with that
-    stream (the registry holds only a weak reference).
-    """
-    sink = graph_module.SubagentEventSink()
-    token = register_subagent_event_sink(sink)
-    del sink
-    gc.collect()
-    return token
-
-
 async def _empty_history(*_args, **_kwargs):
     return []
 
@@ -196,8 +178,24 @@ def _build_workflow(*, store: _RecordingStore, checkpoint_values: dict):
         if isinstance(update, dict):
             node_state.update(update)
 
-        outcome = await workflow.invoke_specialist_subgraph("image_generator_agent", node_state)
+        # Stand in for LangGraph's custom channel: install a writer around the
+        # node exactly as a real run does, then surface what it wrote as
+        # ``("custom", payload)`` tuples.
+        written: list[dict] = []
+        import app.ai.graph as _graph_module
+
+        monkeypatch_writer = _graph_module._graph_stream_writer
+        _graph_module._graph_stream_writer = lambda: written.append
+        try:
+            outcome = await workflow.invoke_specialist_subgraph(
+                "image_generator_agent", node_state
+            )
+        finally:
+            _graph_module._graph_stream_writer = monkeypatch_writer
         response = outcome.response
+
+        for payload in written:
+            yield ("custom", payload)
 
         chunk = SimpleNamespace(content=response.message.content, content_blocks=None)
         yield ("messages", (chunk, {"langgraph_node": "image_generator_agent"}))
@@ -230,10 +228,8 @@ async def _collect(workflow) -> list:
     return events
 
 
-def _checkpoint_values(token: str | None) -> dict:
+def _checkpoint_values() -> dict:
     context: dict = {}
-    if token is not None:
-        context["subagent_event_sink_token"] = token
     return {
         "messages": [HumanMessage(content="draw a cat")],
         "active_agent_id": "image_generator_agent",
@@ -249,12 +245,8 @@ async def test_resumed_graph_run_emits_early_image_reference(monkeypatch):
     reference BEFORE the narrative, exactly like a fresh run."""
     monkeypatch.setattr(settings, "enable_image_streaming", True)
 
-    token = _dead_sink_token()
-    assert resolve_subagent_event_sink(token) is None, (
-        "precondition: the checkpointed token must be dead before resume"
-    )
     store = _RecordingStore()
-    workflow = _build_workflow(store=store, checkpoint_values=_checkpoint_values(token))
+    workflow = _build_workflow(store=store, checkpoint_values=_checkpoint_values())
 
     events = await _collect(workflow)
     types = [event.type for event in events]
@@ -302,28 +294,6 @@ async def test_resumed_graph_run_emits_early_image_reference(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_resumed_graph_run_without_persisted_token_still_streams_image(
-    monkeypatch,
-):
-    """A checkpoint written before sink tokens were persisted must still get a
-    sink — the resume path injects a fresh token through ``Command(update=)``."""
-    monkeypatch.setattr(settings, "enable_image_streaming", True)
-
-    store = _RecordingStore()
-    workflow = _build_workflow(store=store, checkpoint_values=_checkpoint_values(None))
-
-    events = await _collect(workflow)
-    previews = [event for event in events if event.type == "image_preview"]
-    assert previews, (
-        "a resumed run whose checkpoint carries no sink token got no image "
-        f"preview; events={[event.type for event in events]}"
-    )
-    assert any(
-        (event.data or {}).get("delivery", {}).get("kind") == "reference" for event in previews
-    )
-
-
-@pytest.mark.asyncio
 async def test_resumed_image_is_persisted_even_with_image_streaming_disabled(
     monkeypatch,
 ):
@@ -332,8 +302,7 @@ async def test_resumed_image_is_persisted_even_with_image_streaming_disabled(
     monkeypatch.setattr(settings, "enable_image_streaming", False)
 
     store = _RecordingStore()
-    token = _dead_sink_token()
-    workflow = _build_workflow(store=store, checkpoint_values=_checkpoint_values(token))
+    workflow = _build_workflow(store=store, checkpoint_values=_checkpoint_values())
 
     events = await _collect(workflow)
 

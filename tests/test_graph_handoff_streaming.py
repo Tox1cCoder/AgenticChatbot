@@ -5,7 +5,7 @@ Covers:
   the stream emits a second ``agent_selected`` event with ``reason="handoff"``
   and the ``complete`` event carries the delegated agent's final answer
   (not the source agent's transfer narration).
-- ``_recover_terminal_response`` never promotes the handoff narration
+- ``_finalized_response`` never promotes the handoff narration
   ``AIMessage`` (which has a ``hand_off`` tool call) into the final
   assistant message — that prose is control-plane chatter, not a reply.
 """
@@ -131,7 +131,7 @@ async def test_planning_handoff_stream_returns_delegated_agent_answer():
     assert complete.data["response"].message.content == "Search Agent final answer."
 
 
-def test_recover_terminal_response_ignores_handoff_narration():
+def test_finalized_response_ignores_handoff_narration():
     """When the only AI content in state is a hand_off narration AIMessage
     (it carries a ``hand_off`` tool call), it must NOT become the recovered
     final assistant response — there is no real reply to deliver yet."""
@@ -159,4 +159,4 @@ def test_recover_terminal_response_ignores_handoff_narration():
         },
     }
 
-    assert workflow._recover_terminal_response(state) is None
+    assert workflow._finalized_response(state) is None

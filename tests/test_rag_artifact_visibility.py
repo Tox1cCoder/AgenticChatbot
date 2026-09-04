@@ -1,7 +1,4 @@
-import asyncio
 from unittest.mock import AsyncMock
-
-from langchain_core.messages import HumanMessage, ToolMessage
 
 from app.ai.graph import MultiAgentWorkflow
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
@@ -35,35 +32,3 @@ def _make_workflow():
     return workflow
 
 
-def test_rag_node_merges_existing_search_document_artifacts_into_response():
-    workflow = _make_workflow()
-    artifact = {
-        "tool_call_id": "chunk-call",
-        "tool": "search_documents",
-        "args": {"action": "search_chunks", "query": "revenue"},
-        "output": "SEARCH RESULTS:\n\n[1] report.pdf\nchunk evidence",
-        "error": None,
-        "status": "success",
-    }
-    state = {
-        "conversation_id": "conv-1",
-        "user_id": "user-1",
-        "context": {"tool_artifacts": [artifact]},
-        "messages": [
-            HumanMessage(content="What changed in revenue?"),
-            ToolMessage(
-                content="SEARCH RESULTS:\n\n[1] report.pdf\nchunk evidence",
-                tool_call_id="chunk-call",
-                name="search_documents",
-            ),
-        ],
-    }
-
-    asyncio.run(workflow._rag_node(state))
-
-    # Artifact visibility is independent of what grounding decides about the
-    # answer: the tool's own output stays attached either way. The answer text
-    # itself is now an abstention, because this fixture's artifact carries no
-    # structured evidence pack for a claim to cite.
-    assert state["response"].tool_artifacts == [artifact]
-    assert state["response"].metadata["grounded_answer"]["mode"] == "enforced"

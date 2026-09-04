@@ -23,6 +23,14 @@ from ...ai.utils import coerce_response_text, make_json_safe, normalize_tool_cal
 from ..rag_grounding import CitationStreamFilter
 from .events import V3StreamEvent, make_event
 
+# Planning nodes whose state carries user-visible progress. ``planning_package``
+# is where a Planning turn's answer is assembled, so it is what completion is
+# derived from. There is no parent-level tool stage to watch any more -- fan-out
+# is real topology.
+PLANNING_PROGRESS_NODES: frozenset[str] = frozenset(
+    {"planning_agent", "planning_model", "planning_actions", "planning_package"}
+)
+
 # Bound to MultiAgentWorkflow._tool_end_events_from_node_state — stays on the
 # workflow because it is a tool-loop helper shared with non-streaming code. It
 # yields legacy ``tool_end`` dicts; the projector converts them to canonical
@@ -508,9 +516,9 @@ class GraphPublicStreamProjector:
                 ctx.suppress_tokens = new_agent in INTERNAL_TOKEN_AGENTS
                 yield self._agent_selected_event(new_agent, cause=cause)
 
-        if node_name in ("planning_agent", "planning_tools") and isinstance(node_state, dict):
+        if node_name in PLANNING_PROGRESS_NODES and isinstance(node_state, dict):
             node_info: dict[str, Any] = {"node": node_name}
-            if node_name == "planning_agent" and "messages" in node_state:
+            if node_name in ("planning_agent", "planning_model") and "messages" in node_state:
                 messages = node_state.get("messages", [])
                 if messages:
                     last_msg = messages[-1] if isinstance(messages, list) else messages
@@ -529,7 +537,9 @@ class GraphPublicStreamProjector:
                                 normalize_tool_call(tc) for tc in last_msg.tool_calls
                             )
                         ]
-            if node_name == "planning_tools":
+            if node_name == "planning_actions":
+                # ``planning_actions`` is where write_todos is applied, so it
+                # is the node whose state carries a changed plan.
                 todos = node_state.get("todos", [])
                 if todos:
                     node_info["todos_count"] = len(todos)
@@ -589,8 +599,10 @@ class GraphPublicStreamProjector:
             ctx.suppress_tokens = active_agent_id in INTERNAL_TOKEN_AGENTS
             yield self._agent_selected_event(active_agent_id, cause=cause)
 
-        # Best-effort planning node_complete derived from the newly added messages.
-        if active_agent_id in ("planning_agent", "planning_tools"):
+        # Best-effort planning node_complete derived from the newly added
+        # messages. ``active_agent_id`` is the public agent id, never a node
+        # name, so there is only one value to match.
+        if active_agent_id == "planning_agent":
             planning_ai = next(
                 (
                     msg

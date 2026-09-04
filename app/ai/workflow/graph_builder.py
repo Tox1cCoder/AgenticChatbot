@@ -21,11 +21,7 @@ from langgraph.types import Command
 from app.ai.workflow.contracts import AgentTransition, WorkflowRoutingException
 from app.ai.workflow.finalization import make_finalize_node, make_validate_output_node
 from app.ai.workflow.planning_execution import PLANNING_NODE_NAMES
-from app.ai.workflow.specialists import (
-    make_specialist_wrapper,
-    make_subgraph_specialist_wrapper,
-    make_tool_stage_wrapper,
-)
+from app.ai.workflow.specialists import make_subgraph_specialist_wrapper
 from app.ai.workflow.state import WorkflowState
 
 logger = logging.getLogger(__name__)
@@ -59,20 +55,22 @@ SPECIALIST_NODE_NAMES: frozenset[str] = frozenset({*BASE_SPECIALIST_NODES, "cust
 
 TRANSITION_RESOLVER_NODE = "resolve_transition"
 
-# Specialists whose model/tool loop already runs inside a compiled
-# ``create_agent`` subgraph. RAG joins them in the Task 6 cutover.
+# Specialists whose whole model/tool loop runs inside a compiled subgraph.
+# ``rag_agent`` runs the shared ``RagExecutionGraph``; the rest run
+# ``create_agent``. Either way the parent sees one node returning one outcome.
 SUBGRAPH_SPECIALIST_NODES: tuple[str, ...] = (
     "chat_agent",
+    "rag_agent",
     "search_agent",
     "image_generator_agent",
     "canvas_agent",
     "custom_agent",
 )
 
-# Pre-v2 execution stages that still run as top-level nodes. Planning no longer
-# has one -- its fan-out is real topology as of Task 4 -- and RAG's moves inside
-# the shared compiled graph in Task 6.
-TOOL_STAGE_NODES: tuple[str, ...] = ("rag_tools",)
+# No parent-level tool stages remain. A tool call is one unit of work to the
+# checkpointer, so a loop running inside one re-ran every completed sibling on
+# resume -- which is why both Planning's and RAG's moved into topology.
+TOOL_STAGE_NODES: tuple[str, ...] = ()
 
 
 def make_route_node():
@@ -187,24 +185,13 @@ def build_workflow_graph(
         destinations=tuple(sorted({*SPECIALIST_NODE_NAMES, "finalize"})),
     )
 
-    # Standard specialists run their whole model/tool loop inside a compiled
-    # ``create_agent`` subgraph, so they have no parent-level tool stage. RAG
-    # and Planning keep theirs until Tasks 7 and 8 move them into subgraphs.
+    # Every specialist runs its whole model/tool loop inside a compiled
+    # subgraph, so none has a parent-level tool stage.
     subgraph_specialists = {
         node_name: make_subgraph_specialist_wrapper(
             node_name, _specialist_invoker(workflow, node_name)
         )
         for node_name in SUBGRAPH_SPECIALIST_NODES
-    }
-
-    specialist_callables = {
-        "rag_agent": workflow._rag_node,
-    }
-    stage_routers = {
-        "rag_agent": workflow._should_call_rag_tools,
-    }
-    stage_targets_by_node = {
-        "rag_agent": {"end": "validate_output", "rag_tools": "rag_tools"},
     }
 
     for node_name, wrapper in subgraph_specialists.items():
@@ -223,31 +210,6 @@ def build_workflow_graph(
         destinations=tuple(sorted({*SPECIALIST_NODE_NAMES, "finalize"})),
     )
 
-    # Declared destinations make the dynamic topology inspectable: the
-    # "only finalize reaches END" invariant is checkable on the compiled graph
-    # instead of living only in prose.
-    stage_destinations = tuple(sorted({*SPECIALIST_NODE_NAMES, "validate_output", "finalize"}))
-
-    for node_name, specialist in specialist_callables.items():
-        targets = stage_targets_by_node[node_name]
-        graph.add_node(
-            node_name,
-            make_specialist_wrapper(
-                node_name,
-                specialist,
-                stage_router=stage_routers[node_name],
-                stage_targets=targets,
-            ),
-            destinations=tuple(sorted({*targets.values(), "finalize"})),
-        )
-
-    graph.add_node(
-        "rag_tools",
-        make_tool_stage_wrapper(
-            "rag_tools", workflow._rag_tools_node, stage_router=workflow._should_continue_rag
-        ),
-        destinations=stage_destinations,
-    )
     # Planning is real parent-graph topology: six nodes registered from one
     # inspectable descriptor table, each returning a dynamic Command and
     # therefore carrying no static outgoing edge. There is no planning tool

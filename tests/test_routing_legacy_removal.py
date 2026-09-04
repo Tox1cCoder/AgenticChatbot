@@ -59,6 +59,28 @@ REMOVED_RUNTIME_TOKENS = (
     "HandoffOutcome",
     # An authorization hook production never supplied, so it allowed everything.
     "ToolAuthorizationMiddleware",
+    # The pre-v2 Planning fan-out: a dispatcher, its executable tool, and the
+    # compiled child graph it built inside a tool call. Fan-out is topology.
+    "PlanningSubagentDispatcher",
+    "create_dispatch_subagents_tool",
+    "_fan_out_graph",
+    # The 500-line isolated worker the dispatcher drove, and the refusal that
+    # existed only because a worker in an asyncio.gather could not interrupt.
+    "_run_agent_in_isolated_context",
+    "_refuse_worker_approval_gated_calls",
+    # Pause heuristics. A node-name allowlist never listed planning_worker, and
+    # a parent AIMessage is something a worker's tool call never reaches.
+    "_has_approval_interrupt",
+    "_APPROVAL_INTERRUPT_NODES",
+    # The weak sink registry: subagent events and image previews had no
+    # in-graph channel, so a token in checkpoint state pointed at a sink that
+    # died with its stream.
+    "event_sink_token",
+    "WeakValueDictionary",
+    "SubagentEventSink",
+    # Renamed to _finalized_response, which is what it does. The old name
+    # described salvage that was removed in 051092b.
+    "_recover_terminal_response",
 )
 
 
@@ -114,22 +136,33 @@ def test_only_the_finalizer_reaches_end():
 # Legacy modules still reachable in production. Each entry names what still
 # runs through it, so the remaining work is visible rather than implied.
 STILL_LIVE_LEGACY_MODULES = {
-    "app/ai/workflow/rag_loop.py": (
-        "the rag_agent node still runs the pre-v2 RAG loop — but it now owns "
-        "the one grounding gate every RAG answer passes through, including "
-        "Planning workers and the Planning synthesis"
-    ),
-    "app/ai/workflow/planning_loop.py": "the planning_agent node still runs the pre-v2 loop",
     "app/ai/workflow/tool_loop.py": (
-        "rag_tools and planning_tools still use its approval, artifact, and "
-        "tool-error helpers; its own tool and approval nodes are gone"
+        "specialist wrappers still use its approval, artifact, and tool-error "
+        "helpers; its own tool and approval nodes, and the worker refusal, are gone"
     ),
     "app/ai/agents/base_agent.py": (
         "specialist definitions delegate prompt and tool assembly to it; only its "
         "model/tool loop was superseded"
     ),
-    "app/ai/agents/router.py": "a thin RoutingService adapter the pre-v2 graph import still needs",
+    "app/ai/agents/router.py": "a thin RoutingService adapter the graph import still needs",
 }
+
+
+DELETED_LEGACY_MODULES = (
+    "app/ai/workflow/planning_loop.py",
+    "app/ai/workflow/rag_loop.py",
+    "app/ai/planning_subagents.py",
+    "app/services/event_streaming/subagents.py",
+)
+
+
+@pytest.mark.parametrize("relative_path", DELETED_LEGACY_MODULES)
+def test_superseded_module_stays_deleted(relative_path):
+    """Each of these had a production replacement before it was removed."""
+    assert not (REPO_ROOT / relative_path).exists(), (
+        f"{relative_path} came back; the cutover replaced it, so a reappearance "
+        "means two execution paths again"
+    )
 
 
 @pytest.mark.parametrize("relative_path", sorted(STILL_LIVE_LEGACY_MODULES))
@@ -145,41 +178,57 @@ def test_known_live_legacy_module_still_exists(relative_path):
     )
 
 
-def test_planning_has_cut_over_and_rag_has_not():
-    """Half the cutover has landed. This records exactly which half.
+def test_planning_and_rag_both_run_as_topology():
+    """No parent-level tool stage survives, for either specialist.
 
-    Planning is now six real parent nodes with no tool stage, so a paused
-    worker no longer replays its completed siblings. RAG still routes through
-    ``rag_agent`` -> ``rag_tools``, the pre-v2 loop, even though the shared
-    compiled graph exists and is wired: moving the *topology* is the remaining
-    step. Do not weaken this to "the graph compiles" — the point is that the
-    unfinished half stays visible.
+    A tool call is one unit of work to the checkpointer, so a loop running
+    inside one re-ran every completed sibling on resume. Planning is six real
+    nodes; RAG runs the shared compiled graph behind one node.
     """
     from unittest.mock import MagicMock
 
     from app.ai.graph import create_workflow
+    from app.ai.workflow.graph_builder import TOOL_STAGE_NODES
     from app.ai.workflow.planning_execution import PLANNING_NODE_NAMES
 
     workflow = create_workflow(qdrant_client=MagicMock(), embedding_service=MagicMock())
     nodes = set(workflow.graph.get_graph().nodes)
 
     assert set(PLANNING_NODE_NAMES) <= nodes
-    assert "planning_tools" not in nodes, (
-        "the planning tool stage came back — fan-out inside a tool call is the "
-        "replay bug Task 4 removed"
+    assert TOOL_STAGE_NODES == ()
+    for stage in ("planning_tools", "rag_tools"):
+        assert stage not in nodes, (
+            f"the {stage} parent stage came back — fan-out or a tool loop inside "
+            "a tool call is the replay bug the cutover removed"
+        )
+
+    # RAG is a specialist node like any other now.
+    assert "rag_agent" in nodes
+
+
+def test_the_rag_tool_loop_exists_only_inside_the_shared_graph():
+    """``rag_tools`` is a legitimate node name -- of the inner RAG graph.
+
+    The forbidden thing was the *parent* stage. This pins where the name is
+    still allowed so the distinction does not quietly erode.
+    """
+    import pathlib as _pathlib
+    import re
+
+    owners = sorted(
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in _pathlib.Path(REPO_ROOT / "app").rglob("*.py")
+        if re.search(r'"rag_tools"', path.read_text(encoding="utf-8"))
+    )
+    assert owners == ["app/ai/workflow/rag_execution.py"], (
+        f"'rag_tools' as a node name appeared outside the shared RAG graph: {owners}"
     )
 
-    assert "rag_tools" in nodes, (
-        "RAG cut over — remove this assertion, the rag_loop entry in "
-        "STILL_LIVE_LEGACY_MODULES, and "
-        "test_the_two_rag_loops_are_still_separate_implementations"
-    )
 
-
-def test_response_recovery_no_longer_fabricates_an_answer():
+def test_the_finalized_response_accessor_never_fabricates_an_answer():
     """The salvage path around the finalizer is gone.
 
-    ``_recover_terminal_response`` still exists as the adapter's accessor for
+    ``_finalized_response`` still exists as the adapter's accessor for
     the finalizer's response, but it no longer scans accumulated stream chunks
     or checkpoint messages for assistant-looking text, and it no longer takes
     a parameter to pass such text in through. A turn with no finalized response
@@ -193,7 +242,7 @@ def test_response_recovery_no_longer_fabricates_an_answer():
     recover = next(
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "_recover_terminal_response"
+        if isinstance(node, ast.FunctionDef) and node.name == "_finalized_response"
     )
 
     # No AgentResponse is constructed inside it any more — it only returns one
