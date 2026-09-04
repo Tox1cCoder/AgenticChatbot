@@ -135,6 +135,11 @@ def _build_workflow(*, store: _RecordingStore, checkpoint_values: dict):
     workflow.chat_agent = SimpleNamespace(_convert_history_to_langchain_messages=lambda history: [])
     workflow._get_conversation_history = _empty_history
     workflow.agents = {"image_generator_agent": object()}
+    # A resume hands the graph a runtime context built from the checkpointed
+    # values (the transition resolver reads the live inventory from it), so a
+    # bare `__new__` stub has to carry these too.
+    workflow.routing_service = object()
+    workflow.routing_context_builder = object()
 
     state_reads = {"count": 0}
 
@@ -166,8 +171,12 @@ def _build_workflow(*, store: _RecordingStore, checkpoint_values: dict):
             values=checkpoint_values,
         )
 
-    async def _astream(state, config=None, stream_mode=None):
+    async def _astream(state, config=None, stream_mode=None, context=None):
         """Run the resumed image node, then emit the narrative deltas.
+
+        ``context`` is accepted because the production caller now passes the
+        runtime context as a keyword -- a double that rejected it would make
+        the resume path raise where the real graph does not.
 
         ``state`` is the ``Command`` the resume generator built; the node input
         is the checkpointed state merged with any ``Command.update``, which is

@@ -91,6 +91,13 @@ async def test_auto_resume_returns_followup_planning_or_rag_interrupt(pending_no
         ainvoke=AsyncMock(return_value={}),
     )
     workflow._build_graph_config = lambda _thread_id: {}
+    # A resume now hands the graph a runtime context built from the
+    # checkpointed values, because the transition resolver reads the *live*
+    # inventory from it. This stub is a bare `__new__` instance, so give it the
+    # collaborators that build requires.
+    workflow.agents = {"chat_agent": object(), pending_node: object()}
+    workflow.routing_service = object()
+    workflow.routing_context_builder = object()
     expected = object()
     workflow._build_interrupt_agent_response = lambda _snapshot, _thread_id, _conversation_id: (
         expected

@@ -1087,15 +1087,31 @@ class MultiAgentWorkflow(
             return build_checkpoint_thread_id(conversation_id, turn_id)
         return None
 
-    @staticmethod
-    def _with_runtime_context(
-        config: dict[str, Any] | None,
-        runtime_context: "WorkflowRuntimeContext",
-    ) -> dict[str, Any]:
-        """Attach the per-invocation runtime context to a graph config."""
-        merged = dict(config or {})
-        merged["context"] = runtime_context
-        return merged
+    def _resume_runtime_context(self, values: dict[str, Any]) -> "WorkflowRuntimeContext":
+        """Rebuild the runtime context for a resumed turn, from its own state.
+
+        A resume re-enters whatever node was paused and may still reach the
+        transition resolver, which reads the *live* inventory from
+        ``runtime.context`` precisely so a custom agent detached mid-turn
+        cannot be handed off to. Without a context it silently falls back to the
+        inventory captured when the graph was compiled.
+
+        Read-only, unlike ``_prepare_turn_runtime_context``: the checkpointed
+        values belong to a turn already in flight and must not be mutated on
+        the way back in.
+        """
+        inventory = build_runtime_inventory(
+            base_agent_ids=list(self.agents.keys()),
+            custom_agents=GraphStateView(values).custom_agents(),
+            max_custom_agents=settings.router_context_max_custom_agents,
+        )
+        return WorkflowRuntimeContext(
+            routing_service=self.routing_service,
+            inventory=inventory,
+            routing_context_builder=self.routing_context_builder,
+            active_canvas=(values.get("context") or {}).get("active_canvas"),
+            runtime_time=build_runtime_time_context_block().strip() or None,
+        )
 
     @staticmethod
     def _set_continuation_signal(
@@ -2102,9 +2118,13 @@ class MultiAgentWorkflow(
         # Routing runs inside the graph's `route` node; the runtime context
         # carries the collaborators it needs without entering checkpoint state.
         runtime_context = await self._prepare_turn_runtime_context(initial_state)
-        config = self._with_runtime_context(config, runtime_context)
 
-        result = await self.graph.ainvoke(initial_state, config=config)
+        # `context=` is the only channel LangGraph reads. A context placed in
+        # `config` is silently dropped, which left `route` seeing
+        # runtime.context=None and failing every turn with `runtime_missing`.
+        result = await self.graph.ainvoke(
+            initial_state, config=config, context=runtime_context
+        )
 
         if self.checkpointer and thread_id:
             state_snapshot = await self.graph.aget_state(config)
@@ -2162,7 +2182,11 @@ class MultiAgentWorkflow(
         else:
             resume_data = user_input
 
-        result = await self.graph.ainvoke(Command(resume=resume_data), config=config)
+        result = await self.graph.ainvoke(
+            Command(resume=resume_data),
+            config=config,
+            context=self._resume_runtime_context(state_snapshot.values),
+        )
 
         # Check for further interrupts
         final_snapshot = await self.graph.aget_state(config)
@@ -2242,6 +2266,7 @@ class MultiAgentWorkflow(
                 self.graph,
                 Command(resume=resume_data, update=resume_state_update),
                 config=config,
+                context=self._resume_runtime_context(state_snapshot.values),
             )
             with use_chat_image_loader(chat_image_loader):
                 async for event in merged:
@@ -2283,7 +2308,6 @@ class MultiAgentWorkflow(
                 history_prefetch.cancel()
             yield make_event("error", sequence=0, data={"error": str(exc)})
             return
-        config = self._with_runtime_context(config, runtime_context)
 
         # Per-stream accumulator state for the canonical event mapper. Token
         # suppression for agents whose raw stream is internal (image
@@ -2300,7 +2324,9 @@ class MultiAgentWorkflow(
         chat_image_loader = self._build_chat_image_loader(user_id)
 
         try:
-            merged = iter_v3_events_from_graph(self.graph, initial_state, config=config)
+            merged = iter_v3_events_from_graph(
+                self.graph, initial_state, config=config, context=runtime_context
+            )
             with use_chat_image_loader(chat_image_loader):
                 async for event in merged:
                     for public_event in projector.map_event(event, ctx):

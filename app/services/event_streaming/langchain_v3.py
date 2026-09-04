@@ -733,15 +733,28 @@ except Exception:  # pragma: no cover - older langgraph without the mux
     _CustomChannelTransformer = None
 
 
-async def _open_v3_stream(graph: Any, state: Any, *, config: dict[str, Any] | None) -> Any:
+async def _open_v3_stream(
+    graph: Any, state: Any, *, config: dict[str, Any] | None, context: Any = None
+) -> Any:
     """Open the experimental v3 stream, awaiting the v3 awaitable contract.
 
     Raises ``NotImplementedError`` (or ``AttributeError``/``TypeError``) when the
     graph does not implement the v3 protocol — the caller treats that as a
     signal to use the tuple fallback.
+
+    ``context`` populates ``Runtime.context`` for every node in the run. It is
+    forwarded as a keyword because that is the *only* way LangGraph delivers
+    it: a context placed in ``config`` is silently dropped, and a node reading
+    ``runtime.context`` then sees ``None``. ``astream_events`` has no named
+    ``context`` parameter but forwards it through ``**kwargs`` (verified
+    against langgraph 1.2.9).
     """
     stream = graph.astream_events(
-        state, config=config, version="v3", transformers=[_CustomChannelTransformer]
+        state,
+        config=config,
+        version="v3",
+        transformers=[_CustomChannelTransformer],
+        **({"context": context} if context is not None else {}),
     )
     if inspect.isawaitable(stream):
         stream = await stream
@@ -767,12 +780,14 @@ async def _iter_tuple_fallback(
     state: Any,
     *,
     config: dict[str, Any] | None,
+    context: Any = None,
 ) -> AsyncGenerator[V3StreamEvent, None]:
     sequence = 0
     async for chunk in graph.astream(
         state,
         config=config,
         stream_mode=["messages", "updates", "custom"],
+        **({"context": context} if context is not None else {}),
     ):
         if not isinstance(chunk, tuple) or len(chunk) != 2:
             continue
@@ -810,6 +825,7 @@ async def iter_v3_events_from_graph(
     state: Any,
     *,
     config: dict[str, Any] | None = None,
+    context: Any = None,
 ) -> AsyncGenerator[V3StreamEvent, None]:
     """Yield canonical v3 events from a LangGraph graph.
 
@@ -822,7 +838,7 @@ async def iter_v3_events_from_graph(
     v3_stream = None
     if hasattr(graph, "astream_events"):
         try:
-            v3_stream = await _open_v3_stream(graph, state, config=config)
+            v3_stream = await _open_v3_stream(graph, state, config=config, context=context)
         except (NotImplementedError, AttributeError, TypeError, ValueError):
             # Graph does not implement the v3 protocol — fall back to tuples.
             v3_stream = None
@@ -848,5 +864,5 @@ async def iter_v3_events_from_graph(
                     yield event
             return
 
-    async for event in _iter_tuple_fallback(graph, state, config=config):
+    async for event in _iter_tuple_fallback(graph, state, config=config, context=context):
         yield event
