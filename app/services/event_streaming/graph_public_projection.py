@@ -129,6 +129,19 @@ def _is_internal_stream_chunk(metadata: Any) -> bool:
     return isinstance(nested_metadata, dict) and nested_metadata.get("internal") is True
 
 
+def _is_internal_node_metadata(metadata: Any) -> bool:
+    """Whether this chunk's node is one that may never answer the user.
+
+    Imported lazily to keep this module's import graph free of the workflow
+    package; the node set itself is derived from the graph, not copied.
+    """
+    if not isinstance(metadata, dict):
+        return False
+    from .langchain_v3 import _is_internal_node, _node_from_metadata
+
+    return _is_internal_node(_node_from_metadata(metadata))
+
+
 def _consume_stream_text_chunk(accumulated_content: str, text_chunk: Any) -> tuple[str, str | None]:
     """
     Return (new_accumulated_content, delta_to_emit) for a streaming text chunk.
@@ -382,6 +395,12 @@ class GraphPublicStreamProjector:
         if isinstance(message_chunk, ToolMessage):
             return
         if self._suppress_internal_stream_chunks and _is_internal_stream_chunk(metadata):
+            return
+        # Same structural backstop the v3 translator applies. It has to be
+        # repeated here because this path does not go through the translator:
+        # the tag above would cover the router, which is tagged, but not an
+        # untagged internal call like the planning rubric grader.
+        if _is_internal_node_metadata(metadata):
             return
 
         ctx.internal_content_only = False

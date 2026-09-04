@@ -188,3 +188,64 @@ async def test_the_route_node_marks_its_model_run_internal():
     assert "internal" in (run_config.get("tags") or []), (
         f"the routing model run must be tagged internal; got {run_config!r}"
     )
+
+
+# ----------------------------------------------------------------------
+# the tuple fallback path, which the v3 guard does not cover
+# ----------------------------------------------------------------------
+
+
+def _legacy_chunk_event(text: str, *, node: str | None, tags: list[str] | None = None) -> dict:
+    """A ``state_snapshot`` carrier as ``_iter_tuple_fallback`` builds it."""
+    from types import SimpleNamespace
+
+    metadata: dict = {}
+    if node is not None:
+        metadata["langgraph_node"] = node
+    if tags is not None:
+        metadata["tags"] = tags
+    return {
+        "kind": "messages_tuple",
+        "chunk": SimpleNamespace(content=text, content_blocks=None),
+        "metadata": metadata,
+    }
+
+
+def _public_text_from_legacy(payloads) -> str:
+    from app.services.event_streaming.events import make_event
+
+    projector = GraphPublicStreamProjector(
+        tool_end_events_from_node_state=lambda *_args, **_kwargs: [],
+        suppress_internal_stream_chunks=True,
+    )
+    ctx = StreamProjectionContext()
+    text = []
+    for index, payload in enumerate(payloads, start=1):
+        carrier = make_event("state_snapshot", sequence=index, data=payload)
+        for public in projector.map_event(carrier, ctx):
+            if public.type in {"message_delta", "content_delta"}:
+                text.append((public.data or {}).get("text") or "")
+    return "".join(text)
+
+
+def test_the_router_is_also_silent_on_the_tuple_fallback_path():
+    """The v3 guard lives in the translator, which the fallback does not use.
+
+    Production speaks v3, so this path serves doubles and older runnables --
+    which is exactly where a leak would hide from a v3-only test. The tag alone
+    would cover the router here; it would not cover the untagged rubric grader.
+    """
+    assert _public_text_from_legacy([_legacy_chunk_event(ROUTING_JSON, node="route")]) == ""
+
+
+def test_the_plan_grader_is_also_silent_on_the_tuple_fallback_path():
+    rubric = '{"status":"needs_revision","evaluations":[]}'
+    assert _public_text_from_legacy([_legacy_chunk_event(rubric, node="planning_actions")]) == ""
+
+
+def test_a_specialist_still_streams_on_the_tuple_fallback_path():
+    assert _public_text_from_legacy([_legacy_chunk_event("hello", node="chat_agent")]) == "hello"
+
+
+def test_an_unattributed_chunk_still_streams_on_the_tuple_fallback_path():
+    assert _public_text_from_legacy([_legacy_chunk_event("hello", node=None)]) == "hello"
