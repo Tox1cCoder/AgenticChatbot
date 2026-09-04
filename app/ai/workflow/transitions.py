@@ -21,6 +21,7 @@ from langgraph.types import Command
 from app.ai.hand_off_tool import HAND_OFF_TOOL_NAME
 from app.ai.workflow.contracts import AgentTransition, PendingTransition, WorkflowError
 from app.ai.workflow.inventory import RoutingInventory
+from app.observability.routing import get_routing_metrics_recorder
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +74,21 @@ class TransitionResolver:
         try:
             self._validate(pending, state, active_agent_id)
         except TransitionRejection as rejection:
+            get_routing_metrics_recorder().transition_rejected(reason=rejection.reason)
             return self._reject(pending, active_agent_id, rejection)
 
+        get_routing_metrics_recorder().transition_accepted(
+            from_agent_id=pending.from_agent_id,
+            to_agent_id=pending.to_agent_id,
+            depth=len(
+                [
+                    transition
+                    for transition in (state.get("agent_history") or [])
+                    if getattr(transition, "source", None) == "handoff"
+                ]
+            )
+            + 1,
+        )
         return Command(
             update={
                 "active_agent_id": pending.to_agent_id,

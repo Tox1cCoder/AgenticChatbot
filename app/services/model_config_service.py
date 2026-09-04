@@ -14,6 +14,7 @@ import asyncio
 import logging
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import replace
 from typing import Any
 from uuid import UUID
 
@@ -662,6 +663,17 @@ class ModelConfigService(IRuntimeModelResolver):
 
         Strict callers must fail closed rather than consume a substituted
         candidate; the caller decides what to tell the user.
+
+        ``provider_fallback`` and ``fallback_config`` are *not* the same signal
+        and must not be treated alike. The first records a substitution that
+        already happened, so a strict caller has to refuse it. The second only
+        records that a standby provider is available for an agent that chooses
+        to reach for one -- and a strict caller never does. Refusing on its
+        presence meant configuring a second provider forbade strict resolution
+        outright, so the more completely an account was set up the more
+        certainly every routed turn failed. The standby is stripped instead: a
+        caller that opted out of fallback is handed nothing it could fall back
+        to, which is a stronger guarantee than trusting it not to look.
         """
         if not allow_provider_fallback:
             if resolved.provider_fallback:
@@ -670,10 +682,7 @@ class ModelConfigService(IRuntimeModelResolver):
                     f"strict resolution refused a provider fallback for {resolved.agent_key}",
                 )
             if resolved.fallback_config is not None:
-                raise StrictRuntimeResolutionError(
-                    "fallback_candidate",
-                    f"strict resolution refused a fallback candidate for {resolved.agent_key}",
-                )
+                resolved = replace(resolved, fallback_config=None)
             if not (resolved.api_key or "").strip():
                 raise StrictRuntimeResolutionError(
                     "missing_credentials",

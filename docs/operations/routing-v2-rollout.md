@@ -2,16 +2,16 @@
 
 Operational procedure for deploying the routing-v2 workflow.
 
-**Read this first:** the Planning and RAG cutover is **complete**. Tasks 1–7 of
+**Read this first:** the Planning and RAG cutover is **complete**. Tasks 1–9 of
 `docs/superpowers/plans/2026-08-26-production-routing-refactor.md` are
 implemented and there is no legacy execution path left to fall back to — no
 feature flag, no compatibility alias, no old-checkpoint reader. Rollback is a
 redeploy of the previous artifact and nothing else.
 
 Two things are still true and change what this deployment can claim:
-**routing accuracy has never been measured against a live model** (Task 8), and
-**the final acceptance gate has not been run** (Task 9). See
-[Known gaps](#known-gaps).
+**routing accuracy has never been measured against a live model** — the release
+gate exists and refuses until a reviewer approves the dataset — and **the live
+acceptance gate has not been run**. See [Known gaps](#known-gaps).
 
 ## What changes at runtime
 
@@ -163,12 +163,23 @@ unmeasured, or build that program first.
 
 ## Canary
 
-### What is actually emitted
+### Scrape it here
 
-Be precise here, because a counter that is never incremented reads exactly like
-a healthy one. `RoutingMetricsRecorder` is process-wide
-(`get_routing_metrics_recorder()`), but it is wired into **`RoutingService`
-only**. These counters are live:
+```
+GET /metrics/routing        # Prometheus text exposition, unauthenticated
+```
+
+Every counter below is emitted by production code and reachable at that
+endpoint. Both halves of that sentence were false until `2026-09-04`: eight of
+the recorder's methods had no caller, and routing was the one observability
+surface with no endpoint at all — so the guidance in this section pointed at
+numbers that could neither move nor be read. If you are reading an older copy
+of this runbook, distrust its canary section specifically.
+
+Counter keys travel as the `name` label on `workflow_routing_counter`, so a
+provider or model id containing a dot cannot break a scrape.
+
+### What is emitted
 
 | Signal | Metric | What a spike means |
 |---|---|---|
@@ -178,14 +189,16 @@ only**. These counters are live:
 | Schema rejects | `routing.schema.invalid` vs `routing.schema.ok` | The structured-output contract is being violated outright |
 | Target races | `routing.target_race` | A custom agent was detached between inventory build and execution |
 | Route volume | `routing.completed.{agent}`, `routing.provider.{provider}.{model}`, `routing.inventory.{version}` | Distribution shift after a prompt or inventory change |
+| Turn failures | `finalization.failed.*` by code | **Any non-zero value is a turn that produced no answer.** The matching `workflow.error.<code>.{retriable,terminal}` says whether a client retry can help |
+| Handoffs | `transition.accepted.<from>.<to>` vs `transition.rejected.*` | `revisited_target` or `over_depth` spikes mean agents are ping-ponging |
+| Workers | `worker.<status>.<agent>`, `worker.evidence_total` | A rising `worker.failed.*` share means dispatched work is not completing; `agent_execution_limit` is broken out under `execution.limit.<agent>.<kind>` |
+| Grounding | `grounding.accepted` vs `grounding.accepted_with_findings` vs `grounding.clarification` | Grounding is **record-only** — nothing withholds an answer, so `grounding.abstained` does not exist. A rising `accepted_with_findings` share means validation is neutralising citations it cannot resolve; check retrieval |
+| Finalization | `finalization.completed`, `finalization.policy.<id>` | Which output contracts actually ran, per turn |
 
-`RoutingMetricsRecorder` also **defines** `worker_completed`,
-`grounding_outcome`, `transition_accepted`, `transition_rejected`,
-`agent_execution_limit`, `finalization_completed`, `finalization_failed`, and
-`terminal_error`. **No production code calls any of them.** Do not build a
-dashboard panel or an alert on `grounding.abstained`, `finalization.failed.*`,
-or `transition.rejected.*` — they will sit at zero regardless of what happens.
-Until they are wired, watch those behaviours in logs and traces instead.
+The failure log carries the same information per turn, including the cause:
+`Workflow turn failed: code=... retriable=... details={...}`. `details` is
+allowlist-sanitised, so it is safe to read and is the only field separating,
+say, a missing credential from a model without structured output.
 
 Metric labels are allowlisted enums plus bounded provider/model/inventory
 identifiers. Request, conversation, user, custom-agent-instance, message, and
@@ -317,13 +330,11 @@ both what was deleted and what is still live.
    multilingual release gate) is not built.
 2. **The final acceptance gate has not been run.** Task 9 requires live
    provider calls.
-3. **Most workflow metrics are defined but unwired** — see
-   [Canary](#what-is-actually-emitted). This is the gap most likely to be
-   mistaken for good news during a canary.
-4. **`min_citation_coverage = 0.5`** remains a carried default, never selected
+3. **`min_citation_coverage = 0.5`** remains a carried default, never selected
    from evaluation results. Grounding is mandatory, so this threshold decides
    real abstentions.
 Closed since the last revision of this document: RAG and Planning no longer run
-pre-v2 loops, `_tool_node`/`_approval_node` are deleted, and the
-`disable_outer_timeout` allowlist is empty — every interactive tool call is now
-bounded. See `docs/operations/tool-execution-policy.md`.
+pre-v2 loops; `_tool_node`/`_approval_node` are deleted; the
+`disable_outer_timeout` allowlist is empty, so every interactive tool call is
+bounded; and the workflow metrics are wired and scrapeable at
+`/metrics/routing`. See `docs/operations/tool-execution-policy.md`.

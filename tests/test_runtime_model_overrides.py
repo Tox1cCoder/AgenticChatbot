@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from app.core.runtime_modeling import ResolvedRuntimeModelConfig
 
 
@@ -606,3 +608,93 @@ def test_context_window_default_gemini_resolution_with_configured_provider():
     # Catalog-driven, so the source should reflect the snapshot's flag.
     assert resolved.context_window["source"] in {"provider_api", "registry"}
     assert resolved.context_window["context_window_tokens"] == 1_048_576
+
+
+# ----------------------------------------------------------------------
+# strict resolution and the standby candidate
+# ----------------------------------------------------------------------
+
+
+def test_strict_resolution_accepts_an_account_with_a_second_provider():
+    """A configured standby must not make an account unroutable.
+
+    This was a live outage. `_enforce_strict_resolution` refused whenever
+    `fallback_config` was set, but that field only says a standby provider is
+    *available* -- `provider_fallback` is the one that says a substitution
+    actually happened. So every account with credentials for two providers
+    failed every routed turn with `routing_provider_unavailable`, while
+    accounts with no model configuration at all worked fine.
+    """
+    from uuid import uuid4
+
+    service = _make_service(
+        provider_snapshots={"gemini": _gemini_snapshot(), "openai": _openai_snapshot()},
+        credentials_by_provider={
+            "gemini": {"api_key": "gemini-key", "key_source": "db"},
+            "openai": {"api_key": "openai-key", "key_source": "db"},
+        },
+    )
+
+    resolved = service.resolve_runtime_config(
+        uuid4(),
+        "router",
+        None,
+        require_capabilities=frozenset({"supports_structured_output"}),
+        allow_provider_fallback=False,
+    )
+
+    assert resolved.provider == "gemini"
+    assert resolved.provider_fallback is None
+    assert resolved.fallback_config is None, (
+        "a strict caller opted out of fallback and must be handed nothing to fall back to"
+    )
+
+
+def test_a_lenient_caller_still_receives_the_standby_candidate():
+    """Stripping is scoped to strict callers; chat/RAG still need the standby.
+
+    They reach for it on a provider error or a vision gap, so removing it
+    unconditionally would silently disable that recovery.
+    """
+    from uuid import uuid4
+
+    service = _make_service(
+        provider_snapshots={"gemini": _gemini_snapshot(), "openai": _openai_snapshot()},
+        credentials_by_provider={
+            "gemini": {"api_key": "gemini-key", "key_source": "db"},
+            "openai": {"api_key": "openai-key", "key_source": "db"},
+        },
+    )
+
+    resolved = service.resolve_runtime_config(uuid4(), "chat", None)
+
+    assert resolved.fallback_config is not None
+
+
+def test_strict_resolution_still_refuses_an_applied_substitution():
+    """The check that matters is kept: this one means it already happened."""
+    from unittest.mock import MagicMock
+
+    from app.core.runtime_modeling import ResolvedRuntimeModelConfig, StrictRuntimeResolutionError
+    from app.services.model_config_service import ModelConfigService
+
+    substituted = ResolvedRuntimeModelConfig(
+        agent_key="router",
+        provider="gemini",
+        model="gemini-3-flash-preview",
+        temperature=1.0,
+        api_key="key",
+        key_source="db",
+        source="fallback",
+        capabilities={"supports_structured_output": True},
+        provider_fallback={"from": "openai", "to": "gemini", "reason": "not_configured"},
+    )
+    service = ModelConfigService(repository=MagicMock(), provider_service=MagicMock())
+
+    with pytest.raises(StrictRuntimeResolutionError) as exc:
+        service._enforce_strict_resolution(
+            substituted,
+            require_capabilities=frozenset({"supports_structured_output"}),
+            allow_provider_fallback=False,
+        )
+    assert exc.value.reason == "provider_fallback"

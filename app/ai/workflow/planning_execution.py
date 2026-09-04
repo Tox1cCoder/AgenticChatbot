@@ -47,6 +47,7 @@ from app.ai.workflow.contracts import (
 )
 from app.ai.workflow.inventory import RoutingInventory
 from app.ai.workflow.specialists import UnavailableSpecialist
+from app.observability.routing import get_routing_metrics_recorder
 
 logger = logging.getLogger(__name__)
 
@@ -459,6 +460,13 @@ class PlanningWorkerRuntime:
                 "status": result.status,
                 "error_code": result.error_code,
             },
+        )
+        # `bounded_agent_label` collapses every custom agent to one bucket, so a
+        # per-instance id can never become a metric label.
+        get_routing_metrics_recorder().worker_completed(
+            agent_id=result.agent_id,
+            status=result.status,
+            evidence_count=len(result.evidence or ()),
         )
         return result
 

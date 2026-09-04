@@ -17,6 +17,7 @@ import json
 import logging
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from typing import Any
 from uuid import UUID
 
@@ -833,9 +834,12 @@ class RoutingService:
         if configured.provider_fallback:
             raise StrictRuntimeResolutionError("provider_fallback", "router refused a fallback")
         if configured.fallback_config is not None:
-            raise StrictRuntimeResolutionError(
-                "fallback_candidate", "router refused a fallback candidate"
-            )
+            # A standby candidate is not a substitution — it only means the
+            # account has a second provider configured. Refusing it made a
+            # well-configured account unroutable. Drop it instead, so the
+            # router cannot consume one even if this path later grows a line
+            # that tries to.
+            configured = replace(configured, fallback_config=None)
         if not configured.capabilities.get("supports_structured_output"):
             raise StrictRuntimeResolutionError(
                 "missing_capabilities", "router model lacks structured output"

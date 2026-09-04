@@ -31,6 +31,7 @@ from app.ai.workflow.contracts import (
     WorkerResult,
     WorkflowError,
 )
+from app.observability.routing import get_routing_metrics_recorder
 
 logger = logging.getLogger(__name__)
 
@@ -440,6 +441,7 @@ class PublicResponseFinalizer:
             },
         }
         metadata["provenance"] = _provenance_metadata(outcome.provenance)
+        get_routing_metrics_recorder().finalization_completed(policy_ids=tuple(policy_ids))
 
         attach_agent_metadata(
             metadata,
@@ -475,7 +477,19 @@ class PublicResponseFinalizer:
             request_id=_request_id(state),
             details={"reason": "unspecified"},
         )
-        logger.warning("Workflow turn failed: code=%s retriable=%s", error.code, error.retriable)
+        # `details` is already allowlist-sanitised (`sanitize_error_details`),
+        # so it is safe to log and is the only field that separates, say, a
+        # missing credential from a model without structured output. Omitting
+        # it left an operator with a code that covers four different causes.
+        logger.warning(
+            "Workflow turn failed: code=%s retriable=%s details=%s",
+            error.code,
+            error.retriable,
+            error.details or {},
+        )
+        metrics = get_routing_metrics_recorder()
+        metrics.finalization_failed(code=error.code)
+        metrics.terminal_error(code=error.code, retriable=error.retriable)
 
         # A failed turn publishes no assistant text and appends no message.
         return {

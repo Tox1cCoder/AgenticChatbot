@@ -50,6 +50,7 @@ from app.ai.workflow.middleware import (
     WorkerToolScopeMiddleware,
     build_specialist_middleware,
 )
+from app.observability.routing import get_routing_metrics_recorder
 
 PLANNING_AGENT_ID = "planning_agent"
 
@@ -305,6 +306,9 @@ def make_subgraph_specialist_wrapper(
         except (ModelCallLimitExceededError, ToolCallLimitExceededError) as exc:
             # Only the framework's own limit errors map to this code; every
             # other failure keeps its own typed mapping.
+            get_routing_metrics_recorder().agent_execution_limit(
+                agent_id=active_agent_id, limit_kind=type(exc).__name__
+            )
             return Command(
                 update={
                     "execution_phase": "failed",
@@ -594,7 +598,10 @@ class SpecialistFactory:
             )
         except GraphBubbleUp:
             raise
-        except (ModelCallLimitExceededError, ToolCallLimitExceededError):
+        except (ModelCallLimitExceededError, ToolCallLimitExceededError) as exc:
+            get_routing_metrics_recorder().agent_execution_limit(
+                agent_id=task.agent_id, limit_kind=type(exc).__name__
+            )
             return _failed_worker(task, "agent_execution_limit")
         except TimeoutError:
             return _failed_worker(task, "worker_timeout")

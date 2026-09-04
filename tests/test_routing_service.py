@@ -319,18 +319,75 @@ async def test_router_resolution_never_uses_provider_fallback(context, inventory
     assert resolver.last_allow_provider_fallback is False
 
 
-async def test_router_rejects_a_resolved_fallback_candidate(context, inventory):
+async def test_a_configured_standby_candidate_does_not_block_routing(context, inventory):
+    """This asserted the opposite, and the opposite was a production outage.
+
+    Two different fields were being read as the same thing.
+    ``provider_fallback`` records a substitution that *already happened* — the
+    router must refuse that, and the test above pins it. ``fallback_config``
+    only records that a standby provider is *available* if some agent chooses
+    to reach for one. The router never does: it uses ``configured.provider``
+    and ``configured.model``, and ``create_model_from_runtime`` does not read
+    the field at all.
+
+    Refusing on its mere presence meant that configuring a second provider
+    forbade routing entirely — so the more completely an account was set up,
+    the more certainly every turn failed with
+    ``routing_provider_unavailable``.
+    """
     resolver = FakeResolver()
     resolver.resolved.fallback_config = RuntimeFallbackConfig(
-        provider="gemini", model="m", temperature=1.0, api_key="k", key_source="env"
+        provider="openai", model="gpt-5-mini", temperature=1.0, api_key="k", key_source="db"
     )
-    service = _service(resolver=resolver)
+    resolver.resolved.capabilities = {"supports_structured_output": True}
+    model = FakeModel()
+    model.structured_result = RoutingDecision(
+        agent_id="search_agent", confidence=0.9, reason="needs the web"
+    )
+    service = _service(model=model, resolver=resolver)
 
-    with pytest.raises(WorkflowRoutingException) as exc:
-        await service.route(
-            context, inventory, user_id=USER_ID, model_request=None, request_id=REQUEST_ID
-        )
-    assert exc.value.error.code == "routing_provider_unavailable"
+    decision = await service.route(
+        context, inventory, user_id=USER_ID, model_request=None, request_id=REQUEST_ID
+    )
+
+    assert decision.agent_id == "search_agent"
+    assert resolver.last_allow_provider_fallback is False
+
+
+async def test_the_router_is_handed_no_standby_it_could_ever_consume(context, inventory):
+    """Neutralise the capability instead of refusing the request.
+
+    The router not reaching for a standby is currently true by construction,
+    which is a weak guarantee: one future edit in the strict path could start
+    consuming one. Stripping the field means there is nothing to consume, so
+    the guarantee holds without depending on nobody ever writing that line.
+    """
+    resolver = FakeResolver()
+    resolver.resolved.fallback_config = RuntimeFallbackConfig(
+        provider="openai", model="gpt-5-mini", temperature=1.0, api_key="k", key_source="db"
+    )
+    model = FakeModel()
+    model.structured_result = RoutingDecision(
+        agent_id="chat_agent", confidence=0.8, reason="general talk"
+    )
+    factory_configs: list = []
+
+    service = _service(model=model, resolver=resolver)
+    original = service._model_factory.create_model_from_runtime
+
+    def _capture(config, **kwargs):
+        factory_configs.append(config)
+        return original(config, **kwargs)
+
+    service._model_factory.create_model_from_runtime = _capture
+
+    await service.route(
+        context, inventory, user_id=USER_ID, model_request=None, request_id=REQUEST_ID
+    )
+
+    assert factory_configs, "the factory was never called"
+    assert factory_configs[0].fallback_config is None
+    assert factory_configs[0].provider == "gemini"
 
 
 async def test_router_requires_structured_output_capability(context, inventory):

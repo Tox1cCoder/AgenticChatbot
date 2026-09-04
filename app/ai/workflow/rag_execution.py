@@ -41,6 +41,7 @@ from langgraph.graph.message import add_messages
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import NotRequired, TypedDict
 
+from app.observability.routing import get_routing_metrics_recorder
 from app.services.rag_grounding import (
     EvidencePack,
     GroundedAnswer,
@@ -463,6 +464,10 @@ class RagExecutionGraph:
         answer = state.get("answer") or GroundedAnswer()
 
         outcome = _outcome_for(finalization, answer, evidence)
+        # Grounding is record-only, so this is the signal that tells an operator
+        # whether validation is finding problems at all. `abstained` never
+        # rises: nothing withholds an answer any more.
+        get_routing_metrics_recorder().grounding_outcome(outcome=outcome)
         content = _render(answer, evidence)
         report = RagGroundingReport(
             validated=True,

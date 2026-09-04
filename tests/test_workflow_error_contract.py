@@ -193,3 +193,39 @@ def test_service_response_error_stays_json_safe():
 
     response = WorkflowResponse(error=workflow_error_payload(_error(details={"attempts": 2})))
     assert json.loads(json.dumps(response.error)) == response.error
+
+
+# ----------------------------------------------------------------------
+# the operator-facing log
+# ----------------------------------------------------------------------
+
+
+def test_the_failure_log_names_the_cause_not_only_the_code(caplog):
+    """`code=routing_provider_unavailable` alone is not actionable.
+
+    That code covers a missing credential, an unsupported provider, a model
+    without structured output, and a refused substitution -- four different
+    operator responses. Details are already allowlist-sanitised precisely so
+    they can be surfaced, so omitting them threw away the only field that
+    distinguishes the cases and sent someone reading source instead.
+    """
+    import logging
+
+    from app.ai.workflow.finalization import PublicResponseFinalizer
+
+    error = _error(
+        code="routing_provider_unavailable",
+        retriable=True,
+        details={"reason": "missing_credentials"},
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.ai.workflow.finalization"):
+        PublicResponseFinalizer._finalize_failure(
+            PublicResponseFinalizer.__new__(PublicResponseFinalizer), {}, error
+        )
+
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "routing_provider_unavailable" in logged
+    assert "missing_credentials" in logged, (
+        f"the cause was dropped from the operator log; got: {logged!r}"
+    )

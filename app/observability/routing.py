@@ -40,6 +40,11 @@ BASE_AGENT_KIND_LABELS = frozenset(
 )
 
 
+def _escape_label(value: str) -> str:
+    """Escape a counter key for use as a Prometheus label value."""
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
 def bounded_agent_label(agent_id: str | None) -> str:
     """Collapse an agent ID into an allowlisted metric label."""
     if not isinstance(agent_id, str) or not agent_id:
@@ -129,6 +134,29 @@ class RoutingMetricsRecorder:
         self.counters[f"workflow.error.{code}.{'retriable' if retriable else 'terminal'}"] += 1
 
     # -- export ----------------------------------------------------------
+
+    def render(self) -> str:
+        """Prometheus text exposition for the counters this process holds.
+
+        Hand-rolled rather than ``prometheus_client`` because this recorder
+        encodes its dimensions in the *key* (``routing.failed.<code>``) rather
+        than in labels. Converting it to real label sets is a worthwhile change
+        and a separate one; without a rendering the counters are unreachable,
+        which is what left the runbook pointing at numbers nobody could read.
+
+        Keys become ``workflow_<sanitised key>`` so a scrape cannot break on a
+        provider or model id that contains a dot or a dash.
+        """
+        lines = ["# TYPE workflow_routing_counter gauge"]
+        for key in sorted(self.counters):
+            label = _escape_label(key)
+            lines.append(f'workflow_routing_counter{{name="{label}"}} {self.counters[key]}')
+
+        latencies = list(self.latencies_ms)
+        lines.append("# TYPE workflow_routing_latency_ms summary")
+        lines.append(f"workflow_routing_latency_ms_count {len(latencies)}")
+        lines.append(f"workflow_routing_latency_ms_sum {sum(latencies):.3f}")
+        return "\n".join(lines) + "\n"
 
     def export(self) -> dict[str, Any]:
         return {
