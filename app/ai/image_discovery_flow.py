@@ -157,6 +157,7 @@ def select_brave_candidates(
     image_query: str,
     image_intent: str | None = None,
     time_range: str | None = None,
+    max_images: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return only high-confidence Brave candidates, or medium as a fallback."""
     payload = _object_payload(raw)
@@ -178,13 +179,17 @@ def select_brave_candidates(
     # the provider already judged relevant, never across tiers.
     tier = _rank_by_subject(_stable_deduplicate(high or medium), image_query)
     if str(image_intent or "figure").lower() == "gallery" and len(tier) >= 2:
+        # A caller may narrow the grid but never widen it past the configured
+        # ceiling: the layout, not the model, owns how much a gallery can hold.
+        ceiling = max(2, int(settings.rich_image_gallery_max_items))
+        requested = ceiling if max_images is None else max(2, min(int(max_images), ceiling))
         return [
             _group_image_candidates(
                 tier,
                 tool_call_id=None,
                 query=image_query,
                 metric_provider="brave",
-                max_items=max(2, int(settings.rich_image_gallery_max_items)),
+                max_items=requested,
             )
         ]
     # One figure per call, deliberately not ``rich_auto_place_max_images``.
@@ -211,6 +216,7 @@ async def discover_images(
     image_query: str,
     image_intent: str | None = None,
     time_range: str | None = None,
+    max_images: int | None = None,
 ) -> list[dict[str, Any]]:
     """Discover and deterministically select Brave images without verification."""
     started = time.perf_counter()
@@ -231,6 +237,7 @@ async def discover_images(
         image_query=image_query,
         image_intent=image_intent,
         time_range=time_range,
+        max_images=max_images,
     )
     record_discovery_outcome("selected" if selected else "no_match", started=started)
     return selected

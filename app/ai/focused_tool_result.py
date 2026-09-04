@@ -121,11 +121,22 @@ def select_focused_excerpts(
     objective: str,
     max_excerpts: int,
     max_chars: int,
+    fallback_to_leading: bool = False,
 ) -> FocusedResult:
     """Return the passages of ``payload`` that best answer ``objective``.
 
     Bounded twice over: at most ``max_excerpts`` passages, and a serialized
     result no longer than ``max_chars``.
+
+    ``fallback_to_leading`` decides what "nothing matched" means. Term matching
+    is exact, so a question phrased as "which release date is stated" scores
+    zero against a passage that says "released on 14 March". Set it when
+    something upstream already ranked these passages for this same question —
+    a page extractor handed the query, say — because there the leading
+    passages are the provider's answer and dropping them all loses evidence
+    that was already retrieved. Leave it off for a stored blob nobody ranked:
+    there, returning arbitrary text in place of a match is noise dressed as
+    evidence.
     """
 
     objective = str(objective or "").strip()
@@ -144,11 +155,10 @@ def select_focused_excerpts(
     for candidate in candidates:
         candidate.score = _score(candidate, terms)
 
-    ranked = [
-        item
-        for item in sorted(candidates, key=lambda c: (-c.score, c.order))
-        if item.score > 0.0
-    ]
+    ordered = sorted(candidates, key=lambda c: (-c.score, c.order))
+    ranked = [item for item in ordered if item.score > 0.0]
+    if not ranked and fallback_to_leading:
+        ranked = sorted(candidates, key=lambda c: c.order)
     if not ranked:
         return _bounded(
             FocusedResult(

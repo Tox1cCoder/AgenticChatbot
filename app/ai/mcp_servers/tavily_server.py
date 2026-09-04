@@ -373,12 +373,17 @@ def tavily_extract(
     include_images: bool = False,
     extract_depth: str | None = None,
     format: str | None = None,
+    chunks_per_source: int | None = None,
 ) -> str:
     """Extract page content from one or more known URLs.
 
     Use this when the user provides URL(s), when search found a source but
     snippets are insufficient, or when detailed source-grounded page content is
     needed. Use `tavily_search` first when you still need to discover URLs.
+
+    ``chunks_per_source`` only applies alongside ``query``: it bounds how many
+    query-relevant passages the provider returns per page instead of the whole
+    body.
     """
     operation = "extract"
     max_urls = min(int(getattr(settings, "tavily_extract_max_urls", 5) or 5), 20)
@@ -410,7 +415,7 @@ def tavily_extract(
     }
     if query:
         params["query"] = query
-        params["chunks_per_source"] = 3
+        params["chunks_per_source"] = _clamp_int(chunks_per_source, default=3, minimum=1, maximum=5)
     try:
         response = client.extract(**params)
     except Exception as exc:
