@@ -723,7 +723,7 @@ git commit -m "test: lock down planning resume cutover"
 - Consumes: production `RoutingService`, exact provider/model/inventory tuple, and the human-reviewed dataset hash.
 - Produces: a versioned JSON report and a fail-closed release decision used by Task 9.
 
-- [ ] **Step 1: Write failing dataset/report/release tests**
+- [x] **Step 1: Write failing dataset/report/release tests**
 
 ```python
 def test_dataset_requires_primary_inside_acceptable_set() -> None:
@@ -745,7 +745,7 @@ def test_release_rejects_stale_or_mismatched_tuple(report, review) -> None:
 
 Cover missing review, unapproved review, dataset hash mismatch, fewer than 210 cases, fewer than 30 cases in any required language, fewer than 10 cases in a category, stale report, metric threshold failures, and any silent chat substitution/finalizer bypass/unknown evidence ID.
 
-- [ ] **Step 2: Run tests and confirm evaluation modules are absent**
+- [x] **Step 2: Run tests and confirm evaluation modules are absent**
 
 ```powershell
 $env:LANGSMITH_TRACING='false'
@@ -754,7 +754,7 @@ $env:LANGSMITH_TRACING='false'
 
 Expected: import failures for `app.evaluation.routing`.
 
-- [ ] **Step 3: Implement exact evaluation contracts and metrics**
+- [x] **Step 3: Implement exact evaluation contracts and metrics**
 
 ```python
 class RoutingPrediction(BaseModel):
@@ -812,15 +812,15 @@ class RoutingEvaluationReport(BaseModel):
 
 Compute acceptable-set accuracy separately from canonical-label precision/recall/F1 and confusion matrix. Count every case once under `primary_agent_id`; do not double-count acceptable alternatives.
 
-- [ ] **Step 4: Author and independently review the v1 dataset**
+- [~] **Step 4: Author and independently review the v1 dataset** *(authored; awaiting a reviewer who is not the author)*
 
 Create at least 210 JSONL cases: at least 30 each for English, Thai, Vietnamese, Chinese, Japanese, Arabic, and mixed-language input; every intent category appears at least 10 times. Include ambiguous follow-ups, canvas, document/RAG, planning, custom-agent, image, current-information/search, and general chat. The review manifest contains exactly `dataset_sha256`, `approved`, `reviewing_team`, `reviewed_at`, and `label_guideline_version`. A reviewer other than the dataset generator verifies labels and sets `approved=true`; the checker fails closed until that happens.
 
-- [ ] **Step 5: Implement evaluator and release checker CLIs**
+- [x] **Step 5: Implement evaluator and release checker CLIs**
 
 `evaluate_routing.py` loads the validated JSONL, invokes the production `RoutingService` without provider fallback, records first/second structured attempts, and writes `RoutingEvaluationReport`. `check_routing_release.py` verifies review approval/hash, exact provider/model/inventory tuple, report freshness, dataset composition, and these thresholds: macro-F1 `>= 0.90`; every language accuracy `>= 0.85`; each language no more than `0.05` below English; first-attempt structured success `>= 0.99`; after-retry success `>= 0.999`; and all three violation counters equal zero.
 
-- [ ] **Step 6: Run deterministic evaluation tests and commit**
+- [x] **Step 6: Run deterministic evaluation tests and commit**
 
 ```powershell
 $env:LANGSMITH_TRACING='false'
@@ -955,6 +955,10 @@ Record commands, exit codes, and test counts in the execution log. Commit only d
 | 2026-09-04 | Task 6 omission found during Task 7 | Fixed | Task 6 Step 3 required removing "the `dispatch_subagents` timeout/policy exemption" and Step 1 required failing "if the common tool pipeline or execution-policy allowlist can resolve it". Neither was done, and the Final Acceptance Checklist item covering it would have been ticked over a live grant. `_DISABLE_OUTER_TIMEOUT_ALLOWLIST` is now **empty** and `_FULL_MODEL_HANDOFF_TOOLS` is deleted — both were standing permissions for a call that no longer exists. The *check* was kept and only the entry removed, so a tool still claiming `disable_outer_timeout` is refused during policy resolution and never invoked. `test_dispatch_subagents_policy_stays_unbounded_through_unified_path` asserted the opposite and was rewritten as `test_a_tool_claiming_the_outer_timeout_exemption_fails_closed`. |
 | 2026-09-04 | Task 7 deviations from the file list | Recorded | Step 2's limit scenarios went into `tests/test_planning_worker_fanout.py`, not `test_workflow_concurrency.py`: the dispatch harness lives there, and that module is about the conversation *turn lock*, not worker concurrency — duplicating a 200-line harness to match a filename would be worse. The receipt crash-gap scenarios went into `tests/integration/test_tool_execution_receipt_repository_postgres.py`, which already has the seeded owner fixtures and is in Step 5's own run list. `test_workflow_checkpoint_v2.py` and `test_message_service_event_streaming.py` needed no change — both already cover their half (v1 thread rejection; resume-stream lifecycle) — and were run as regression instead. |
 | 2026-09-04 | Most workflow metrics are defined but never called | Recorded, not fixed | `RoutingMetricsRecorder` is process-wide (`get_routing_metrics_recorder()`) but is wired into **`RoutingService` only**. `worker_completed`, `grounding_outcome`, `transition_accepted`, `transition_rejected`, `agent_execution_limit`, `finalization_completed`, `finalization_failed`, and `terminal_error` have **no production caller**. The rollout runbook was telling operators to watch `grounding.abstained`, `finalization.failed.*`, and `transition.rejected.*` during a canary — counters that will sit at zero no matter what happens, which reads exactly like health. The doc now names which counters are live and which are not. Wiring them is a production change in a task scoped to tests and docs, so it is left as a decision rather than absorbed; each call site is a one-line import of the existing shared recorder. |
+| 2026-09-04 | Task 8 | Complete except the approval | Contracts, metrics, release gate, both CLIs, 210 cases, and 64 deterministic tests. `eval/routing/golden_v1.jsonl` holds 30 cases each for en/th/vi/zh/ja/ar/mixed across the eight categories (28/28/28/28/21/28/21/28), authored as real phrasings rather than translated templates; the mixed set is genuinely code-switched, which is where a router tuned on monolingual prompts falls back to chat. Verified end to end against a synthetic perfect report: **BLOCKED on `review_not_approved`**, and PASS only once a review manifest with `approved: true` is supplied. That refusal is the deliverable — I authored the labels, so I cannot be the reviewer who verifies them. |
+| 2026-09-04 | Task 8 design decisions the plan left open | Recorded | (1) **`accuracy_by_language` is acceptable-set, `macro_f1` is canonical.** The report schema has one accuracy field and the plan asks for both notions, so they are split by field and stated in both module docstrings. Macro-F1 counts every case once under `primary_agent_id`; scoring a hit under an acceptable alternative too would let a dataset raise its own score by widening acceptable sets. (2) **`category` is a closed `Literal` plus `REQUIRED_CATEGORIES`.** Iterating only the categories a dataset contains made the ≥10 rule vacuous for an omitted category — caught by a test that then failed, and fixed in the gate rather than the test. (3) **`check_routing_release` takes `cases`, defaulting to empty.** The report cannot carry language/category counts, and a caller who omits the dataset now fails composition instead of silently skipping it. |
+| 2026-09-04 | Task 8 deviations from the file list | Recorded | Added `app/evaluation/routing/harness.py`, which is not in the plan's list: both CLIs need the same evaluation inventory, and if each built its own the gate's `inventory_version_mismatch` check would be comparing a value to itself. It also holds the history/document stubs that make a run reproducible — a context builder reading the live database would score differently tomorrow for reasons unrelated to the router. The dataset generator is deliberately **not** in the repo: a generator in-tree invites regeneration, which silently invalidates the review bound to the content hash. |
+| 2026-09-04 | Task 8 remaining blocker | Blocked on a human | `eval/routing/golden_v1.review.json` ships with `approved: false` and `reviewing_team: "unreviewed"`, bound to dataset sha256 `e3407b4e…`. A reviewer other than the dataset generator must verify the labels and set `approved: true`; `scripts/check_routing_release.py` exits 1 until then. Editing any case changes the hash and re-blocks the gate, which is the intended behaviour — `test_the_shipped_review_is_bound_to_the_shipped_dataset` fails the suite if the two drift. Task 9's release gate cannot pass until this approval and a live evaluation run both exist. |
 
 ## Execution Handoff
 
