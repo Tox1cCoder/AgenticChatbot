@@ -504,3 +504,96 @@ def test_crawl_clamps_site_traversal_and_disables_external_by_default(monkeypatc
     assert client.crawl_calls[0]["allow_external"] is False
     assert payload["operation"] == "crawl"
     assert payload["results"][0]["raw_content"] == "A"
+
+
+def test_explicit_date_range_reaches_the_client(monkeypatch):
+    client = _FakeTavilyClient({"results": []})
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: client)
+
+    tavily_server.tavily_search(
+        "packaging guidance",
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+    )
+
+    assert client.calls[0]["start_date"] == "2024-01-01"
+    assert client.calls[0]["end_date"] == "2024-12-31"
+
+
+def test_one_sided_date_bounds_are_forwarded_alone(monkeypatch):
+    client = _FakeTavilyClient({"results": []})
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: client)
+
+    tavily_server.tavily_search("packaging guidance", end_date="2024-12-31")
+
+    assert client.calls[0]["end_date"] == "2024-12-31"
+    assert "start_date" not in client.calls[0]
+
+
+@pytest.mark.parametrize("bad", ["2024-13-01", "last tuesday", "2024/01/01"])
+def test_malformed_dates_return_a_bounded_invalid_request(bad, monkeypatch):
+    client = _FakeTavilyClient({"results": []})
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: client)
+
+    payload = json.loads(tavily_server.tavily_search("packaging guidance", start_date=bad))
+
+    assert "invalid_request" in payload["error"]
+    assert payload["retryable"] is False
+    assert len(payload["error"]) <= 200
+    assert client.calls == [], "a malformed range must never reach the provider"
+
+
+def test_reversed_date_range_returns_a_bounded_invalid_request(monkeypatch):
+    client = _FakeTavilyClient({"results": []})
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: client)
+
+    payload = json.loads(
+        tavily_server.tavily_search(
+            "packaging guidance",
+            start_date="2024-12-31",
+            end_date="2024-01-01",
+        )
+    )
+
+    assert "invalid_request" in payload["error"]
+    assert payload["retryable"] is False
+    assert client.calls == []
+
+
+def test_time_range_and_an_explicit_range_are_mutually_exclusive(monkeypatch):
+    """Two recency controls that disagree is an argument error, not a silent
+    precedence rule the model has to learn from behaviour."""
+    client = _FakeTavilyClient({"results": []})
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: client)
+
+    payload = json.loads(
+        tavily_server.tavily_search(
+            "packaging guidance",
+            time_range="week",
+            end_date="2024-12-31",
+        )
+    )
+
+    assert "invalid_request" in payload["error"]
+    assert client.calls == []
+
+
+def test_include_domains_are_forwarded_and_blanks_dropped(monkeypatch):
+    client = _FakeTavilyClient({"results": []})
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: client)
+
+    tavily_server.tavily_search(
+        "packaging guidance",
+        include_domains=["packaging.python.org", "  ", ""],
+    )
+
+    assert client.calls[0]["include_domains"] == ["packaging.python.org"]
+
+
+def test_absent_domains_are_not_sent_as_an_empty_filter(monkeypatch):
+    client = _FakeTavilyClient({"results": []})
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: client)
+
+    tavily_server.tavily_search("packaging guidance", include_domains=[])
+
+    assert "include_domains" not in client.calls[0]

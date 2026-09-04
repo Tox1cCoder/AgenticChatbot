@@ -1349,6 +1349,51 @@ class Settings(BaseSettings):
         ge=1,
         description="Maximum characters returned by one read_tool_result call.",
     )
+
+    # Focused web evidence. Every bound below caps what reaches model context:
+    # the provider payload is allowed to be large, the model's view of it is not.
+    web_search_max_results: int = Field(
+        default=8,
+        ge=1,
+        le=20,
+        description="Ceiling on results one web_search call may request from the provider.",
+    )
+    web_search_result_max_chars: int = Field(
+        default=24_000,
+        ge=2_000,
+        le=100_000,
+        description="Maximum characters of projected search results returned to the model.",
+    )
+    web_open_max_urls: int = Field(
+        default=4,
+        ge=1,
+        le=10,
+        description="Maximum URLs one web_open call may extract in a single request.",
+    )
+    web_open_max_excerpts: int = Field(
+        default=8,
+        ge=1,
+        le=20,
+        description="Maximum focused excerpts returned by one web_open call.",
+    )
+    web_open_max_chars: int = Field(
+        default=18_000,
+        ge=2_000,
+        le=80_000,
+        description="Maximum characters of extracted page evidence returned to the model.",
+    )
+    tool_result_focus_max_excerpts: int = Field(
+        default=8,
+        ge=1,
+        le=20,
+        description="Maximum focused excerpts returned by one read_tool_result call.",
+    )
+    tool_result_focus_max_chars: int = Field(
+        default=16_000,
+        ge=2_000,
+        le=80_000,
+        description="Maximum characters of focused excerpts returned by read_tool_result.",
+    )
     research_max_search_calls_per_turn: int = Field(
         default=2,
         ge=1,

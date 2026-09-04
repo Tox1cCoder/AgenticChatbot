@@ -9,6 +9,7 @@ project_root = current_dir.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 import contextlib  # noqa: E402
+from datetime import date  # noqa: E402
 from typing import Any  # noqa: E402
 from urllib.parse import urlsplit, urlunsplit  # noqa: E402
 
@@ -118,6 +119,42 @@ def _clean_string_list(values: list[str] | None) -> list[str] | None:
     return cleaned or None
 
 
+def resolve_tavily_date_range(
+    *,
+    start_date: str | None,
+    end_date: str | None,
+    time_range: str | None,
+) -> dict[str, str]:
+    """Validate an explicit ISO date range against the recency window.
+
+    ``time_range`` and an explicit range are two ways to say the same thing, so
+    sending both is an argument error rather than a precedence rule the model
+    would have to infer from results.
+    """
+    bounds: dict[str, str] = {}
+    for name, raw in (("start_date", start_date), ("end_date", end_date)):
+        if raw is None or not str(raw).strip():
+            continue
+        try:
+            bounds[name] = date.fromisoformat(str(raw).strip()).isoformat()
+        except ValueError as exc:
+            raise ValueError(
+                f"Tavily search invalid_request: {name} must be an ISO date (YYYY-MM-DD)."
+            ) from exc
+    if not bounds:
+        return bounds
+    if time_range is not None:
+        raise ValueError(
+            "Tavily search invalid_request: time_range and an explicit "
+            "start_date/end_date are mutually exclusive."
+        )
+    if bounds.get("start_date", "") > bounds.get("end_date", "9999-12-31"):
+        raise ValueError(
+            "Tavily search invalid_request: start_date must not be later than end_date."
+        )
+    return bounds
+
+
 #: Maximum accepted query length. Longer queries are an argument error rather
 #: than a silent truncation, so the model learns to split the research.
 TAVILY_QUERY_MAX_LENGTH: int = 400
@@ -170,6 +207,9 @@ def tavily_search(
     auto_parameters: bool | None = None,
     topic: str | None = None,
     time_range: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    include_domains: list[str] | None = None,
 ) -> str:
     """Search the web for current facts, news, recent information, or source discovery.
 
@@ -179,8 +219,10 @@ def tavily_search(
 
     Pass ``auto_parameters=True`` to let Tavily pick the search depth when the
     query intent is genuinely ambiguous; an explicit ``search_depth`` always
-    wins. If the user provides a specific URL or snippets are insufficient, use
-    ``tavily_extract`` after discovery.
+    wins. Bound the window with ISO ``start_date``/``end_date`` for an exact
+    range, or ``time_range`` for a rolling one — never both. If the user
+    provides a specific URL or snippets are insufficient, use ``tavily_extract``
+    after discovery.
     """
     operation = "search"
     try:
@@ -188,6 +230,11 @@ def tavily_search(
         resolved_topic = _optional_choice(topic, allowed=SUPPORTED_TOPICS, name="topic")
         resolved_time_range = _optional_choice(
             time_range, allowed=SUPPORTED_TIME_RANGES, name="time_range"
+        )
+        date_bounds = resolve_tavily_date_range(
+            start_date=start_date,
+            end_date=end_date,
+            time_range=resolved_time_range,
         )
     except ValueError as exc:
         return _error(str(exc), operation=operation)
@@ -218,6 +265,9 @@ def tavily_search(
         params["search_depth"] = resolved["search_depth"]
     if resolved_time_range is not None:
         params["time_range"] = resolved_time_range
+    params.update(date_bounds)
+    if cleaned_domains := _clean_string_list(include_domains):
+        params["include_domains"] = cleaned_domains
     try:
         client = _make_client()
     except Exception:
