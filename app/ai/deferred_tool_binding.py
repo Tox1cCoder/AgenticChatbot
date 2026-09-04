@@ -72,10 +72,43 @@ _WIDGET_PINNED_SPECS = (
     "widgets::widget_update",
     "widgets::widget_get_state",
 )
-# Research reaches Tavily and Brave through the in-process ``web_research``
-# tool, which owns the turn budget and provider-native image discovery. Pinning
-# the raw provider tools would let the model bypass both.
-_SEARCH_AGENT_PINNED_SPECS = ("time::get_current_time",)
+# The search agent has no required pins of its own. ``get_current_time`` used
+# to be one, to satisfy a prompt rule that made a time lookup mandatory before
+# every web search. The server now injects the current date into the prompt and
+# ``normalize_web_search`` anchors the query in Python, so the round trip only
+# cost a turn.
+_SEARCH_AGENT_PINNED_SPECS: tuple[str, ...] = ()
+
+#: Providers the product web tools own end to end. ``web_search``, ``web_open``
+#: and ``image_search`` carry the turn budget, the date anchoring, and the
+#: bounds on what reaches context; a model that can reach the raw tool bypasses
+#: all three. Unqualified names on purpose — ``excluded_tool_names`` compares
+#: bare tool names, so a ``server::tool`` spec here would match nothing.
+RAW_WEB_TOOL_NAMES = frozenset(
+    {
+        "tavily_search",
+        "tavily_extract",
+        "brave_image_search",
+    }
+)
+
+
+def ordinary_excluded_tool_names(
+    excluded_tool_names: set[str] | frozenset[str] | None = None,
+    *,
+    allow_raw_web_tools: bool = False,
+) -> set[str]:
+    """Merge the raw-provider denylist into a caller's exclusions.
+
+    ``allow_raw_web_tools`` is the authorized diagnostic opt-in. It is a
+    server-side keyword rather than a request field on purpose: nothing a model
+    or a client sends can set it.
+    """
+
+    excluded = set(excluded_tool_names or ())
+    if not allow_raw_web_tools:
+        excluded |= RAW_WEB_TOOL_NAMES
+    return excluded
 
 
 def _get_required_pinned_specs(agent_key: str | None) -> list[str]:
@@ -256,6 +289,7 @@ def build_deferred_tool_list(
     internal_tools: list[BaseTool] | None = None,
     allowlist: list[str] | None = None,
     excluded_tool_names: set[str] | frozenset[str] | None = None,
+    allow_raw_web_tools: bool = False,
 ) -> list[BaseTool]:
     """
     Build the complete tool list for an agent with deferred loading enabled.
@@ -273,13 +307,17 @@ def build_deferred_tool_list(
         all_mcp_tools: All available tools from MCP
         internal_tools: Non-MCP internal tools to include
         allowlist: Optional allowlist for filtering (applies to tool_search)
+        allow_raw_web_tools: Authorized diagnostic opt-in that keeps the raw
+            Tavily/Brave tools eligible. Off for every ordinary request.
 
     Returns:
         List of BaseTool objects to bind to the model
     """
     result_tools: list[BaseTool] = []
     seen_names: set[str] = set()
-    excluded = set(excluded_tool_names or ())
+    excluded = ordinary_excluded_tool_names(
+        excluded_tool_names, allow_raw_web_tools=allow_raw_web_tools
+    )
 
     # 1. Add internal tools first
     if internal_tools:

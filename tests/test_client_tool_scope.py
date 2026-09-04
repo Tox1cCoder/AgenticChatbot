@@ -5,7 +5,7 @@ import pytest
 
 from app.ai.agents.base_agent import BaseAgent
 from app.ai.schemas import AgentType
-from app.ai.tool_execution import execute_tool_calls
+from app.ai.tool_execution import SERVER_ONLY_WEB_TOOL_NAMES, execute_tool_calls
 
 
 class _BindingTestAgent(BaseAgent):
@@ -80,7 +80,7 @@ def test_client_scoped_binding_excludes_server_mcp_tools(monkeypatch):
     ]
 
 
-def test_client_scoped_real_deferred_binding_omits_web_research(monkeypatch):
+def test_client_scoped_real_deferred_binding_omits_the_product_web_tools(monkeypatch):
     agent = _BindingTestAgent(agent_config_key="search")
     agent.tools = []
     agent.mcp_manager = None
@@ -105,8 +105,8 @@ def test_client_scoped_real_deferred_binding_omits_web_research(monkeypatch):
     )
 
     assert "tool_search" in [tool.name for tool in client_tools]
-    assert "web_research" not in [tool.name for tool in client_tools]
-    assert "web_research" in [tool.name for tool in default_tools]
+    assert not SERVER_ONLY_WEB_TOOL_NAMES & {tool.name for tool in client_tools}
+    assert {tool.name for tool in default_tools} >= SERVER_ONLY_WEB_TOOL_NAMES
 
 
 def test_client_scope_without_a_device_fails_closed_at_binding(monkeypatch):
@@ -127,67 +127,37 @@ def test_client_scope_without_a_device_fails_closed_at_binding(monkeypatch):
         tool_scope="client_only",
     )
 
-    assert "web_research" not in [tool.name for tool in tools]
+    assert not SERVER_ONLY_WEB_TOOL_NAMES & {tool.name for tool in tools}
 
 
+class _StaleServerTool:
+    """A server web tool left in the execution map after the scope narrowed."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self.calls = 0
+
+    async def ainvoke(self, args):
+        self.calls += 1
+        return '{"results": [{"title": "server result"}]}'
+
+
+@pytest.mark.parametrize("tool_name", sorted(SERVER_ONLY_WEB_TOOL_NAMES))
+@pytest.mark.parametrize("device_id", ["device-a", None])
 @pytest.mark.asyncio
-async def test_client_scoped_execution_rejects_stale_web_research_entry():
-    class _StaleWebResearch:
-        name = "web_research"
-
-        def __init__(self):
-            self.calls = 0
-
-        async def ainvoke(self, args):
-            self.calls += 1
-            return '{"results": [{"title": "server result"}]}'
-
-    stale_tool = _StaleWebResearch()
+async def test_client_scoped_execution_rejects_a_stale_server_web_tool(tool_name, device_id):
+    stale_tool = _StaleServerTool(tool_name)
 
     outputs, artifacts, _ = await execute_tool_calls(
         tool_calls=[
             {
-                "id": "stale-research",
-                "name": "web_research",
+                "id": "stale-web",
+                "name": tool_name,
                 "args": {"query": "private device query"},
             }
         ],
-        tool_map={"web_research": stale_tool},
-        device_id="device-a",
-        tool_scope="client_only",
-    )
-
-    payload = json.loads(outputs[0]["content"])
-    assert stale_tool.calls == 0
-    assert payload["error_type"] == "permission"
-    assert payload["retryable"] is False
-    assert artifacts[0]["status"] == "error"
-
-
-@pytest.mark.asyncio
-async def test_client_scope_without_a_device_rejects_stale_web_research_entry():
-    class _StaleWebResearch:
-        name = "web_research"
-
-        def __init__(self):
-            self.calls = 0
-
-        async def ainvoke(self, args):
-            self.calls += 1
-            return '{"results": [{"title": "server result"}]}'
-
-    stale_tool = _StaleWebResearch()
-
-    outputs, artifacts, _ = await execute_tool_calls(
-        tool_calls=[
-            {
-                "id": "stale-research",
-                "name": "web_research",
-                "args": {"query": "private device query"},
-            }
-        ],
-        tool_map={"web_research": stale_tool},
-        device_id=None,
+        tool_map={tool_name: stale_tool},
+        device_id=device_id,
         tool_scope="client_only",
     )
 

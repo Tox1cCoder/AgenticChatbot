@@ -1,10 +1,21 @@
+"""What the chat and search agents actually bind for web work.
+
+Three product tools plus the result reader, and no raw provider under any
+name. The combined ``web_research`` tool these replace is gone; a test asserting
+its absence is what stops it being reintroduced as a convenience.
+"""
+
 from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from app.ai.agents.base_agent import BaseAgent
-from app.ai.deferred_tool_binding import _get_required_pinned_specs
+from app.ai.deferred_tool_binding import RAW_WEB_TOOL_NAMES, _get_required_pinned_specs
 from app.ai.schemas import AgentType
+
+PRODUCT_WEB_TOOLS = ("web_search", "web_open", "image_search")
 
 
 class _BindingTestAgent(BaseAgent):
@@ -31,11 +42,7 @@ def test_tavily_and_brave_are_no_longer_pinned():
         assert "brave_image_search::brave_image_search" not in specs
 
 
-def test_time_stays_pinned_for_the_search_agent():
-    assert "time::get_current_time" in _get_required_pinned_specs("search")
-
-
-def _bound_names(monkeypatch, agent_key: str) -> list[str]:
+def _bound_names(monkeypatch, agent_key: str, **context) -> list[str]:
     agent = _BindingTestAgent(agent_config_key=agent_key)
     agent.tools = []
     agent.mcp_manager = None
@@ -46,28 +53,79 @@ def _bound_names(monkeypatch, agent_key: str) -> list[str]:
     )
     monkeypatch.setattr(agent, "_get_client_runtime_tools", lambda **kwargs: [])
     monkeypatch.setattr(agent, "_get_skills_internal_tools", lambda **kwargs: [])
-    return [tool.name for tool in agent._get_tools_for_binding(conversation_id="c1")]
+    return [
+        tool.name for tool in agent._get_tools_for_binding(conversation_id="c1", **context)
+    ]
 
 
-def test_web_research_is_bound_for_chat_and_search(monkeypatch):
-    assert "web_research" in _bound_names(monkeypatch, "chat")
-    assert "web_research" in _bound_names(monkeypatch, "search")
+@pytest.mark.parametrize("agent_key", ["chat", "search"])
+@pytest.mark.parametrize("tool_name", PRODUCT_WEB_TOOLS)
+def test_each_product_tool_is_bound_for_chat_and_search(monkeypatch, agent_key, tool_name):
+    assert tool_name in _bound_names(monkeypatch, agent_key)
 
 
-def test_web_research_is_not_bound_for_other_agents(monkeypatch):
-    assert "web_research" not in _bound_names(monkeypatch, "rag")
+def test_the_result_reader_is_bound_alongside_them(monkeypatch):
+    assert "read_tool_result" in _bound_names(monkeypatch, "search")
 
 
-def test_bound_web_research_has_no_usage_recorder_dependency(monkeypatch):
-    """Provider-native selection makes the internal tool independent of billing."""
+def test_the_combined_research_tool_is_gone(monkeypatch):
+    assert "web_research" not in _bound_names(monkeypatch, "chat")
+    assert "web_research" not in _bound_names(monkeypatch, "search")
 
-    captured: dict = {}
 
-    def _capture(**kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(name="web_research", metadata={})
+def test_product_web_tools_are_not_bound_for_other_agents(monkeypatch):
+    names = _bound_names(monkeypatch, "rag")
 
-    monkeypatch.setattr("app.ai.agents.base_agent.create_web_research_tool", _capture)
+    assert not set(PRODUCT_WEB_TOOLS) & set(names)
+
+
+def test_product_web_tools_are_absent_in_client_only_scope(monkeypatch):
+    names = _bound_names(monkeypatch, "search", tool_scope="client_only", device_id="device-a")
+
+    assert not set(PRODUCT_WEB_TOOLS) & set(names)
+
+
+def test_no_raw_provider_survives_the_binding_filter(monkeypatch):
+    """The denylist is applied where every tool source has already merged, so a
+    raw tool arriving as a pin, a loaded deferred tool, or a client tool is
+    dropped the same way."""
+    agent = _BindingTestAgent(agent_config_key="search")
+    agent.tools = []
+    agent.mcp_manager = None
+    monkeypatch.setattr("app.ai.agents.base_agent.should_use_deferred_loading", lambda _key: False)
+    monkeypatch.setattr(agent, "_get_skills_internal_tools", lambda **kwargs: [])
+    monkeypatch.setattr(
+        agent,
+        "_get_client_runtime_tools",
+        lambda **kwargs: [SimpleNamespace(name=name) for name in RAW_WEB_TOOL_NAMES],
+    )
+    monkeypatch.setattr(
+        "app.ai.agents.base_agent.settings.enable_client_runtime_bridge", False, raising=False
+    )
+
+    names = {tool.name for tool in agent._get_tools_for_binding(conversation_id="c1")}
+
+    assert names.isdisjoint(RAW_WEB_TOOL_NAMES)
+
+
+def test_bound_product_tools_carry_only_the_scope_dependency(monkeypatch):
+    """Provider-native selection makes these tools independent of billing."""
+
+    captured: list[dict] = []
+
+    def _capture(name):
+        def _factory(**kwargs):
+            captured.append({"name": name, **kwargs})
+            return SimpleNamespace(name=name, metadata={})
+
+        return _factory
+
+    for name, attribute in (
+        ("web_search", "create_web_search_tool"),
+        ("web_open", "create_web_open_tool"),
+        ("image_search", "create_image_search_tool"),
+    ):
+        monkeypatch.setattr(f"app.ai.agents.base_agent.{attribute}", _capture(name))
     agent = _BindingTestAgent(agent_config_key="search", recorder=object())
     agent.tools = []
     agent.mcp_manager = None
@@ -81,24 +139,25 @@ def test_bound_web_research_has_no_usage_recorder_dependency(monkeypatch):
 
     agent._get_tools_for_binding(conversation_id="c1")
 
-    assert captured == {"tool_scope": "default"}
+    assert [entry["name"] for entry in captured] == list(PRODUCT_WEB_TOOLS)
+    assert all(set(entry) == {"name", "tool_scope"} for entry in captured)
+    assert all(entry["tool_scope"] == "default" for entry in captured)
 
 
-def test_media_guidance_describes_web_research_only():
-    """The model reaches images through web_research and nothing else.
+def test_media_guidance_describes_image_search_only():
+    """The model reaches images through image_search and nothing else.
 
     The guidance spans two texts that are both always in context: the system
     prompt says when a visual is worth having, the tool description says how to
-    drive the arguments. Neither may name the raw provider tool or Tavily's own
-    image flag.
+    drive the arguments. Neither may name the raw provider tool.
     """
     from app.ai.prompts import MEDIA_CAPABILITY_SNIPPET
-    from app.ai.web_research_tool import _DESCRIPTION
+    from app.ai.web_tools import IMAGE_SEARCH_DESCRIPTION
 
-    guidance = f"{MEDIA_CAPABILITY_SNIPPET}\n{_DESCRIPTION}"
+    guidance = f"{MEDIA_CAPABILITY_SNIPPET}\n{IMAGE_SEARCH_DESCRIPTION}"
 
-    assert "web_research" in MEDIA_CAPABILITY_SNIPPET
-    assert "image_query" in guidance
-    assert "image_intent" in _DESCRIPTION
+    assert "image_search" in MEDIA_CAPABILITY_SNIPPET
+    assert "web_research" not in guidance
+    assert "intent" in IMAGE_SEARCH_DESCRIPTION
     assert "brave_image_search" not in guidance
     assert "include_images" not in guidance

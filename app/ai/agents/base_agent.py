@@ -38,6 +38,7 @@ from ..client_runtime_tools import (
 from ..context_overflow import is_context_overflow_error, prepare_aggressive_context_retry
 from ..deferred_tool_binding import (
     build_deferred_tool_list,
+    ordinary_excluded_tool_names,
     should_use_deferred_loading,
 )
 from ..image_context import build_multimodal_content, has_image_parts
@@ -75,7 +76,11 @@ from ..utils import (
     extract_openai_reasoning_tokens,
     extract_public_thinking_summary,
 )
-from ..web_research_tool import create_web_research_tool
+from ..web_tools import (
+    create_image_search_tool,
+    create_web_open_tool,
+    create_web_search_tool,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -428,6 +433,7 @@ class BaseAgent(ABC):
         tool_scope: str | None = None,
         include_hand_off: bool | None = None,
         excluded_tool_names: set[str] | frozenset[str] | None = None,
+        allow_raw_web_tools: bool = False,
     ) -> list[BaseTool]:
         """
         Get the tools to bind to the model for this invocation.
@@ -450,6 +456,13 @@ class BaseAgent(ABC):
         """
         effective_scope = resolve_tool_scope(device_id=device_id, tool_scope=tool_scope)
         client_only_scope = effective_scope is ToolScope.CLIENT_ONLY
+        # The raw provider denylist joins the caller's exclusions once, here,
+        # so it covers deferred discovery, pinned tools, and the traditional
+        # bind-everything path alike. A tool hidden from one and not the others
+        # is not hidden.
+        excluded_tool_names = ordinary_excluded_tool_names(
+            excluded_tool_names, allow_raw_web_tools=allow_raw_web_tools
+        )
 
         # Keep always-on internal tools available even in deferred mode.
         skills_tools = self._get_skills_internal_tools(user_id=user_id, device_id=device_id)
@@ -469,11 +482,16 @@ class BaseAgent(ABC):
         if getattr(settings, "tool_result_offload_enabled", False):
             _add_internal(create_read_tool_result_tool())
 
-        # Research is server-orchestrated: one operation runs the text and image
-        # providers, spends the turn budget, and offers provider-selected images
-        # only through the rich-item inventory.
+        # Web work is server-owned and split three ways: discovery, focused
+        # page extraction, and image discovery. Each spends its own budget, and
+        # selected images reach the answer only through the rich-item inventory.
         if self.agent_config_key in {"chat", "search"} and not client_only_scope:
-            _add_internal(create_web_research_tool(tool_scope=effective_scope.value))
+            for factory in (
+                create_web_search_tool,
+                create_web_open_tool,
+                create_image_search_tool,
+            ):
+                _add_internal(factory(tool_scope=effective_scope.value))
 
         # Caller-provided internal tools include the graph-scoped ``hand_off``
         # tool. The graph owns its roster, so BaseAgent never supplies a static
@@ -516,6 +534,7 @@ class BaseAgent(ABC):
                 internal_tools=internal_tools,
                 allowlist=self._get_allowlist(),
                 excluded_tool_names=excluded_tool_names,
+                allow_raw_web_tools=allow_raw_web_tools,
             )
             if conversation_id and remote_tools:
                 from ..deferred_tool_state import get_deferred_tool_state

@@ -58,6 +58,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: The product web tools reach Tavily and Brave in-process, so none of them can
+#: run against a device-only catalog. Named here rather than probed for, because
+#: a stale entry silently reopens server access from a client-only request.
+SERVER_ONLY_WEB_TOOL_NAMES = frozenset({"web_search", "web_open", "image_search"})
+
 # Tool names that may load additional tools dynamically
 TOOL_LOADING_TOOLS = {"tool_search"}
 _RETRY_COMPATIBILITY_ALLOWLIST = frozenset({("internal", "internal::tool_search")})
@@ -2025,11 +2030,11 @@ async def execute_tool_calls(
             )
             continue
 
-        if client_only_scope and tool_name == "web_research":
+        if client_only_scope and tool_name in SERVER_ONLY_WEB_TOOL_NAMES:
             summary = ToolErrorSummary(
                 error_type=ToolErrorKind.PERMISSION.value,
                 failure_retryable=False,
-                message="Server research is unavailable in client-only tool scope.",
+                message="Server web access is unavailable in client-only tool scope.",
                 hint="Use a suitable tool from the active client device instead.",
                 attempts=1,
             )

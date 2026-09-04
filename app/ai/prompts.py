@@ -36,23 +36,23 @@ Media and visuals:"""
 # rich items" states the dead end before the way out of it.
 _PLACEMENT_BULLETS = """
 - Place rich items with `<!--rich:<id>-->`, copying an ID exactly from this turn's "AVAILABLE RICH ITEMS" list. Never invent an ID or an image URL, or build one from a title or topic. A turn that called nothing has no rich items and no list — answer without a marker, or go get one.
-- One call, one subject, one figure. Call again with the same `query` and a different `image_query` for each further subject the answer needs, and let the answer decide how many that is — introducing a thing often wants its identity art and a shot of it in use; a how-to usually wants the one screen being described. Place each near the text it supports, and keep the prose useful without them."""
+- One call, one subject, one figure. Call `image_search` again with a different `query` for each further subject the answer needs, and let the answer decide how many that is — introducing a thing often wants its identity art and a shot of it in use; a how-to usually wants the one screen being described. Place each near the text it supports, and keep the prose useful without them."""
 
 RICH_PLACEMENT_SNIPPET = _MEDIA_HEADER + _PLACEMENT_BULLETS
 
-# ``web_research`` is an internal tool bound only for the chat and search agents
-# (see BaseAgent._get_bound_tools) and internal tools are invisible to
+# ``image_search`` is an internal tool bound only for the chat and search agents
+# (see BaseAgent._get_tools_for_binding) and internal tools are invisible to
 # ``tool_search``, so an agent that never binds it must not be told to call it.
-WEB_RESEARCH_MEDIA_SNIPPET = """
-- `web_research` is the only path an image can take to the answer, and it considers a provider-native image on every call. Reaching for it is how you show something — not a step reserved for when you need sources.
-- Set `image_query` to the thing the reader has to look at — usually a part, screen or panel rather than the product containing it — and write it as a search, following the tool's own guidance. A picture of the right subject is worth more than a picture of the right topic.
-- Set `skip_images=true` only when a visual cannot support the answer. Never add media as decoration.
+IMAGE_SEARCH_MEDIA_SNIPPET = """
+- `image_search` is the only path an image can take to the answer. Reaching for it is how you show something — not a step reserved for when you need sources, and not something a `web_search` does for you.
+- Set `query` to the thing the reader has to look at — usually a part, screen or panel rather than the product containing it — and write it as a search, following the tool's own guidance. A picture of the right subject is worth more than a picture of the right topic.
+- Call it only when a visual can support the answer. Never add media as decoration.
 - Only images selected by provider-native discovery reach you; many calls yield none, which is normal. Never claim an image that is not listed, and never tell the user you are unable to show images — you can. Say you found no suitable one."""
 
-# The block for agents that bind ``web_research``: how a visual is acquired
-# first, then how it is placed. A RAG agent, which has no research tool, gets
+# The block for agents that bind ``image_search``: how a visual is acquired
+# first, then how it is placed. A RAG agent, which has no image tool, gets
 # RICH_PLACEMENT_SNIPPET alone.
-MEDIA_CAPABILITY_SNIPPET = _MEDIA_HEADER + WEB_RESEARCH_MEDIA_SNIPPET + _PLACEMENT_BULLETS
+MEDIA_CAPABILITY_SNIPPET = _MEDIA_HEADER + IMAGE_SEARCH_MEDIA_SNIPPET + _PLACEMENT_BULLETS
 
 # Kept separate from the mechanics above on purpose: this block answers "is a
 # visual worth having here", the media snippet answers "how do I place one".
@@ -62,7 +62,7 @@ VISUAL_STRATEGY_SNIPPET = """
 
 Show, don't only tell:
 - Before writing, ask what the reader needs to see. A visual earns its place when it does work prose cannot: what something looks like, how its parts fit together, how a quantity moves as conditions change, or how two things differ side by side.
-- Wanting to show something is reason enough to go and get it — research for a visual even when you already know the facts and need no sources, or open a document's own figures when the answer is grounded there. Answering straight from memory is the usual reason a good explanation ends up with nothing to look at.
+- Wanting to show something is reason enough to go and get it — search for a visual even when you already know the facts and need no sources, or open a document's own figures when the answer is grounded there. Answering straight from memory is the usual reason a good explanation ends up with nothing to look at.
 - A fetched image needs a concrete subject someone could photograph or draw. Abstract ideas and general scene-setting have none, so leave the image out rather than illustrate the topic at large.
 - Build a live widget when the subject has moving parts the reader could set or watch: parameters that drive an outcome, a process that unfolds, a system that reacts. When turning a knob would teach more than another paragraph, build it instead of writing the paragraph.
 - Stay in prose for a fact, a definition, a short list, a single computed number, a judgement call, or writing the user asked you to produce. Many good answers carry no visual at all; that is a normal answer, not a failure.
@@ -269,21 +269,23 @@ SEARCH_SYSTEM_PROMPT = (
 
 All questions should be answered comprehensively with details and thorough research. Don't provide superficial answers when depth is possible.
 
-Use search tools when the query requires:
+Use `web_search` when the query requires:
 - Current news, recent events, or real-time information
 - Facts you're uncertain about or that change frequently
 - Up-to-date statistics, prices, or data
 - Information beyond your training knowledge
 
-MANDATORY - Before any web/news search:
-Always call `get_current_time` before executing any web, news, or Tavily search. This anchors temporal context so your queries include the correct date and your results are interpreted relative to now. Do not skip this step even if the query seems timeless — the current date affects result ranking and relevance.
-- If the search tool is not loaded yet, use `tool_search` to load it, but do not execute the search yet
-- Once an actual web-search tool is available, call `get_current_time`, then call that search tool.
-- Do not make a web/news search your first actual web retrieval call in a turn; anchor time first.
-- For a specific URL or source page, discover and use an extraction tool rather than doing another broad search.
+Web work:
+- Express the user's goal as a concrete objective.
+- Use freshness="recent" for current/latest requests and freshness="as_of"
+  with an explicit date for historical cutoffs.
+- Search first. Open only the few URLs whose snippets cannot answer the question.
+- Every web_open call must include the exact question to extract.
+- Stop when independent sources support the answer; do not repeat an unchanged query.
+
+The current date is given to you in the runtime time context above, and the server anchors every search against it. Never look the date up before searching, and never write a year into a query from memory — state the freshness intent and let the server supply the year.
 - For site structure or URL discovery, discover and use a site mapping tool.
 - For bounded site or documentation research across multiple pages, discover and use a crawl tool with narrow depth and limit.
-- Image reference searches (e.g. "what does X look like") do not require a `get_current_time` call unless the user asks for current or recent images — the time-before-search rule applies to web/news search, not image search
 
 Tool discovery:
 - Call `tool_search` before invoking any MCP tool that is not already loaded. Do not guess MCP tool names.
@@ -291,7 +293,6 @@ Tool discovery:
 - If the user wants you to act on their device, files, or local environment, use the appropriate execution tool rather than only describing steps.
 
 Search strategy:
-- Call `get_current_time` first, then plan your search queries using the current date where relevant
 - If initial results are incomplete, refine your query or try a different angle
 - Don't repeat identical searches — explore different aspects instead
 - Verify important facts across multiple sources when possible
@@ -539,8 +540,8 @@ YOUR TASK:
 3. If they are INCOMPLETE: you may call additional tools to fill gaps (read each tool's description to choose appropriately)
 4. AVOID repeating the exact same tool call with identical arguments
 5. If a result is only tool discovery output, use the discovered tool instead of stopping at the search results
-6. If the only result so far is tool discovery or you just loaded a web-search tool, call `get_current_time` before your first actual web-search tool
-7. Never make a web/news search your first actual web retrieval call in a turn; anchor time first.
+6. If a search result's snippet does not carry the fact you need, open that URL with the exact question rather than searching again
+7. Stop when independent sources support the answer; do not repeat an unchanged query.
 
 CITATION FORMATTING (CRITICAL):
 Tool results contain 'title' and 'url' fields. Extract these and create clickable markdown links.
