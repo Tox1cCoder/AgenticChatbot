@@ -1,12 +1,12 @@
-# Tool Trace Parenting Implementation Plan
+# LangSmith API Migration and Tool Trace Parenting Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Keep every conversation-owned MCP/provider invocation beneath its active LangChain/LangSmith tool run instead of creating unrelated root traces.
+**Goal:** Remove LangSmith's January 2027 legacy query dependency and keep every conversation-owned MCP/provider invocation beneath its active LangChain/LangSmith tool run instead of creating unrelated root traces.
 
-**Architecture:** Carry the active `RunnableConfig` from `ToolCallRequest.runtime.config` through the product execution pipeline and into every nested `ainvoke`. The product web/image tools created by the focused-web plan accept injected `ToolRuntime` and forward its config to child tools. This plan fixes trace ancestry; bounded payloads stay at the product-tool boundary so the generic executor does not silently alter arbitrary tool results.
+**Architecture:** First migrate the repository's RAG evaluation reads from the legacy `Client.get_test_results()` → `Client.list_runs()` path to the async SmithDB-backed `Client.runs.query()` API and raise the LangSmith SDK floor. Then carry the active `RunnableConfig` from `ToolCallRequest.runtime.config` through the product execution pipeline and into every nested `ainvoke`. The product web/image tools created by the focused-web plan accept injected `ToolRuntime` and forward its config to child tools; bounded payloads stay at that boundary.
 
-**Tech Stack:** Python 3.10+, LangChain `RunnableConfig`, LangChain middleware and callbacks, LangGraph `ToolRuntime`, pytest/pytest-asyncio, LangSmith tracing.
+**Tech Stack:** Python 3.10+, LangSmith Python SDK >=0.10.15, SmithDB v2 run queries, LangChain `RunnableConfig`, LangChain middleware and callbacks, LangGraph `ToolRuntime`, pytest/pytest-asyncio.
 
 ## Global Constraints
 
@@ -16,11 +16,19 @@
 - Direct administrative provider tests may remain roots only when explicitly tagged diagnostic.
 - Do not change model-visible tool output in this plan.
 - Keep every new parameter optional outside framework middleware so legacy tests and non-graph callers remain compatible.
+- Do not call `Client.list_runs()`, `Client.get_test_results()`, or `POST /api/v1/runs/query`; these sunset in LangSmith Cloud on 2027-01-31.
+- Do not enable OpenTelemetry as a response to the legacy banner. Trace ingestion (`/runs/multipart`) is not one of the endpoint families named in this deprecation.
+- SmithDB `runs.query()` returns only the last 24 hours by default; every experiment query must pass the experiment project's `start_time` as `min_start_time`.
 
 ---
 
 ## File Structure
 
+- Create `app/evaluation/rag/langsmith_queries.py`: query experiment root runs through SmithDB and aggregate feedback.
+- Modify `scripts/evaluate_rag.py`: await the new metrics query instead of calling `get_test_results()`.
+- Modify `pyproject.toml` and `environment.yml`: require a SmithDB-capable LangSmith SDK.
+- Create `tests/test_langsmith_smithdb_migration.py`: lock down v2 query arguments and forbid legacy methods.
+- Modify `tests/test_rag_evaluation_cli.py`: exercise async comparison metrics without network access.
 - Modify `app/ai/tool_execution.py`: thread `RunnableConfig` through generic tool invocation and retry layers.
 - Modify `app/ai/workflow/middleware.py`: take the active config from `ToolCallRequest.runtime.config` and hand it to the executor.
 - Modify `app/ai/web_tools.py`: inject `ToolRuntime` and forward the parent config to Tavily and image discovery.
@@ -30,7 +38,200 @@
 - Modify `tests/test_web_tools.py`: verify Tavily and Brave receive the same config.
 - Create `tests/test_tool_trace_parenting.py`: callback-level integration test proving nested calls have a parent run.
 
-### Task 1: Carry RunnableConfig Through the Generic Tool Pipeline
+## Research Finding: What the LangSmith Banner Means
+
+The banner's exact 2027-01-31 date matches LangSmith's SmithDB migration, not
+trace ingestion. LangSmith marks the v1 runs query/retrieve endpoints, legacy
+dataset experiment-run endpoint, sharing/public-read endpoints, and annotation
+queue run endpoints with `Deprecation: true` and that sunset date. The
+repository has one matching call site: `scripts/evaluate_rag.py` calls
+`Client.get_test_results()`, and LangSmith 0.10.9 implements that method by
+calling `Client.list_runs()`, which uses `POST /api/v1/runs/query`.
+
+The current environment pins `langsmith==0.10.9`; the official SmithDB guide
+requires Python SDK `langsmith>=0.10.15`. Ordinary trace writes through the
+LangChain callback integration use the ingestion API and do not themselves
+explain this warning.
+
+Primary references:
+
+- [SmithDB SDK migration overview](https://docs.langchain.com/langsmith/smithdb-sdk-migration)
+- [Run query migration: `list_runs` to `runs.query`](https://docs.langchain.com/langsmith/smithdb-sdk-migration-query-runs)
+- [Experiment-run migration](https://docs.langchain.com/langsmith/smithdb-sdk-migration-experiments)
+- [LangSmith deprecation policy](https://docs.langchain.com/langsmith/endpoint-deprecation)
+- [Cloud changelog entry naming the 2027-01-31 endpoint sunset](https://docs.langchain.com/langsmith/changelog)
+
+### Task 1: Migrate RAG Evaluation Reads to SmithDB
+
+**Files:**
+- Create: `app/evaluation/rag/langsmith_queries.py`
+- Modify: `scripts/evaluate_rag.py:145-250`
+- Modify: `pyproject.toml:47-57`
+- Modify: `environment.yml:195-205`
+- Create: `tests/test_langsmith_smithdb_migration.py`
+- Modify: `tests/test_rag_evaluation_cli.py:105-135`
+
+**Interfaces:**
+- Consumes: `Client.aread_project(project_name=..., include_stats=True)` and `Client.runs.query(project_ids=..., is_root=True, min_start_time=..., selects=...)`.
+- Produces: `async def experiment_metrics(client: Any, experiment_name: str) -> dict[str, float]` and `async def comparison_metrics(client: Any, candidate_name: str, baseline_name: str) -> tuple[dict[str, float], dict[str, float]]`.
+
+- [ ] **Step 1: Write failing SDK-floor and query-contract tests**
+
+Create a fake async runs resource that records the v2 query:
+
+```python
+class FakeRuns:
+    def __init__(self, rows):
+        self.rows = rows
+        self.calls = []
+
+    def query(self, **kwargs):
+        self.calls.append(kwargs)
+
+        async def iterate():
+            for row in self.rows:
+                yield row
+
+        return iterate()
+
+
+@pytest.mark.asyncio
+async def test_experiment_metrics_use_smithdb_v2_with_full_time_window():
+    started = datetime(2025, 1, 2, tzinfo=timezone.utc)
+    project = SimpleNamespace(
+        id=uuid4(),
+        start_time=started,
+        feedback_stats={"groundedness": {"avg": 0.8}},
+        session_feedback_stats={"abstention_recall": {"avg": 0.7}},
+    )
+    runs = FakeRuns([
+        SimpleNamespace(feedback_stats={"document_recall_at_5": {"avg": 1.0}}),
+        SimpleNamespace(feedback_stats={"document_recall_at_5": {"avg": 0.5}}),
+    ])
+    client = FakeClient(project=project, runs=runs)
+
+    metrics = await experiment_metrics(client, "baseline")
+
+    assert metrics == {
+        "document_recall_at_5": 0.75,
+        "groundedness": 0.8,
+        "abstention_recall": 0.7,
+    }
+    assert runs.calls == [{
+        "project_ids": [str(project.id)],
+        "is_root": True,
+        "min_start_time": started,
+        "selects": ["ID", "FEEDBACK_STATS"],
+    }]
+```
+
+Add a dependency test using `importlib.metadata.version` and
+`packaging.version.Version` that requires `langsmith>=0.10.15`. Add a source
+inventory test that scans production Python files under `app/` and `scripts/`
+and fails on `.list_runs(`, `.get_test_results(`, `.get_experiment_results(`,
+or literal `/api/v1/runs/query`.
+
+- [ ] **Step 2: Run the tests and verify the expected failures**
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests/test_langsmith_smithdb_migration.py tests/test_rag_evaluation_cli.py
+```
+
+Expected: the new module is missing, the installed SDK floor test reports
+0.10.9, and the inventory test identifies `get_test_results()`.
+
+- [ ] **Step 3: Raise the SDK floor with a narrow environment pin**
+
+Set:
+
+```toml
+"langsmith>=0.10.15,<1.0.0",
+```
+
+in `pyproject.toml`, and update the reproducible environment from
+`langsmith==0.10.9` to `langsmith==0.10.18`, the latest 0.10 patch available at
+plan authoring time. Rebuild the environment before running the green test;
+do not depend on the current virtual environment silently satisfying the new
+metadata.
+
+- [ ] **Step 4: Implement the async SmithDB metrics query**
+
+```python
+async def experiment_metrics(client: Any, experiment_name: str) -> dict[str, float]:
+    project = await client.aread_project(
+        project_name=experiment_name,
+        include_stats=True,
+    )
+    totals: dict[str, list[float]] = {}
+    async for run in client.runs.query(
+        project_ids=[str(project.id)],
+        is_root=True,
+        min_start_time=project.start_time,
+        selects=["ID", "FEEDBACK_STATS"],
+    ):
+        for key, stats in (run.feedback_stats or {}).items():
+            if isinstance(stats, dict) and stats.get("avg") is not None:
+                totals.setdefault(key, []).append(float(stats["avg"]))
+
+    metrics = {key: sum(values) / len(values) for key, values in totals.items()}
+    for source in (project.feedback_stats or {}, project.session_feedback_stats or {}):
+        for key, stats in source.items():
+            if isinstance(stats, dict) and stats.get("avg") is not None:
+                metrics[key] = float(stats["avg"])
+    if not metrics:
+        raise ValueError(
+            f"baseline experiment has no deterministic feedback: {experiment_name}"
+        )
+    return metrics
+
+
+async def comparison_metrics(
+    client: Any,
+    candidate_name: str,
+    baseline_name: str,
+) -> tuple[dict[str, float], dict[str, float]]:
+    candidate, baseline = await asyncio.gather(
+        experiment_metrics(client, candidate_name),
+        experiment_metrics(client, baseline_name),
+    )
+    return candidate, baseline
+```
+
+In `scripts/evaluate_rag.py`, replace both synchronous calls with one
+`asyncio.run(comparison_metrics(...))`. Keep `list_examples`, `evaluate`, and
+`read_project`/`aread_project`: the SmithDB migration guide does not deprecate
+those dataset-write/project-lookup paths.
+
+- [ ] **Step 5: Run focused tests and the complete offline evaluation**
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests/test_langsmith_smithdb_migration.py tests/test_rag_evaluation_cli.py tests/test_rag_evaluation_metrics.py
+.\.venv\Scripts\python.exe scripts/evaluate_rag.py --offline
+.\.venv\Scripts\python.exe -m ruff check app/evaluation/rag/langsmith_queries.py scripts/evaluate_rag.py tests/test_langsmith_smithdb_migration.py tests/test_rag_evaluation_cli.py
+```
+
+Expected: all tests pass, the offline evaluation exits zero, and the inventory
+test finds no legacy query methods/endpoints.
+
+- [ ] **Step 6: Run an authenticated deprecation canary**
+
+In a non-production LangSmith project, run one online RAG evaluation and one
+baseline comparison with a dedicated API key. Confirm egress/debug logs contain
+`POST /api/v2/runs/query` and no `POST /api/v1/runs/query`. Check that responses
+do not carry `Deprecation: true` or `Sunset: 2027-01-31`. Because the UI warning
+is workspace-wide and may use a lookback window, a banner that remains after
+this canary means another service/API key is still calling one of the endpoint
+families listed in the changelog; identify that caller rather than changing
+trace ingestion.
+
+- [ ] **Step 7: Commit Task 1**
+
+```powershell
+git add app/evaluation/rag/langsmith_queries.py scripts/evaluate_rag.py pyproject.toml environment.yml tests/test_langsmith_smithdb_migration.py tests/test_rag_evaluation_cli.py
+git commit -m "fix: migrate LangSmith evaluation reads to SmithDB"
+```
+
+### Task 2: Carry RunnableConfig Through the Generic Tool Pipeline
 
 **Files:**
 - Modify: `app/ai/tool_execution.py:1371-1635`
@@ -133,20 +334,35 @@ async def _execute(
     *,
     runnable_config: RunnableConfig | None,
 ) -> ToolMessage:
-    # existing worker start/context logic stays in the same order
-    outputs, artifacts, images = await execute_tool_calls(
-        tool_calls=[call],
-        tool_map=tool_map,
-        capture_images=True,
-        device_id=self._scope.device_id,
-        agent=self._scope.agent,
-        conversation_id=self._scope.conversation_id,
-        user_id=self._scope.user_id,
-        runnable_config=runnable_config,
+    self._scope.worker_event("start", call)
+    with self._scope.execution_context():
+        outputs, artifacts, images = await execute_tool_calls(
+            tool_calls=[call],
+            tool_map=tool_map,
+            capture_images=True,
+            device_id=self._scope.device_id,
+            agent=self._scope.agent,
+            conversation_id=self._scope.conversation_id,
+            user_id=self._scope.user_id,
+            runnable_config=runnable_config,
+        )
+
+    self.artifacts.extend(artifacts)
+    self.images.extend(images)
+    output = outputs[0] if outputs else {}
+    status = "error" if _is_error(artifacts) else "success"
+    self._scope.worker_event("end", call, status=status)
+    return ToolMessage(
+        content=str(output.get("content") or ""),
+        tool_call_id=str(output.get("tool_call_id") or call.get("id") or ""),
+        name=str(output.get("name") or call.get("name") or "tool"),
+        status=status,
     )
 ```
 
-Pass the same config through the mutation-receipt callback; receipt handling must still wrap the actual invocation.
+Derive `runnable_config` once at the top of `awrap_tool_call`. Pass it to
+`_execute` both in the non-mutation branch and inside the receipt callback's
+`invoke` closure; receipt handling must still wrap the actual invocation.
 
 - [ ] **Step 5: Run focused tests**
 
@@ -158,14 +374,14 @@ Run:
 
 Expected: all pass; config reaches the initial call and every retry.
 
-- [ ] **Step 6: Commit Task 1**
+- [ ] **Step 6: Commit Task 2**
 
 ```powershell
 git add app/ai/tool_execution.py app/ai/workflow/middleware.py tests/test_tool_execution_control_flow.py tests/test_specialist_middleware.py
 git commit -m "fix: propagate tracing config through tool execution"
 ```
 
-### Task 2: Parent Product Web and Image Provider Calls
+### Task 3: Parent Product Web and Image Provider Calls
 
 **Files:**
 - Modify: `app/ai/web_tools.py`
@@ -220,7 +436,12 @@ from langchain_core.runnables import RunnableConfig
 async def _search(
     query: str,
     objective: str,
-    # remaining public WebSearchRequest fields stay here
+    freshness: Freshness = "timeless",
+    start_date: date | None = None,
+    end_date: date | None = None,
+    locale: str | None = None,
+    include_domains: list[str] | None = None,
+    max_results: int = 5,
     runtime: ToolRuntime | None = None,
 ) -> str:
     runnable_config = runtime.config if runtime is not None else None
@@ -248,21 +469,21 @@ Run:
 
 Expected: all pass; provider calls receive the parent config and cancellation tests remain green.
 
-- [ ] **Step 6: Commit Task 2**
+- [ ] **Step 6: Commit Task 3**
 
 ```powershell
 git add app/ai/web_tools.py app/ai/image_discovery_flow.py tests/test_web_tools.py
 git commit -m "fix: parent nested web provider traces"
 ```
 
-### Task 3: Prove Trace Ancestry at the Callback Boundary
+### Task 4: Prove Trace Ancestry at the Callback Boundary
 
 **Files:**
 - Create: `tests/test_tool_trace_parenting.py`
 - Modify: `docs/operations/routing-v2-rollout.md`
 
 **Interfaces:**
-- Consumes: the config-aware execution pipeline from Tasks 1-2.
+- Consumes: the config-aware execution pipeline from Tasks 2-3.
 - Produces: a deterministic regression test and a live LangSmith verification procedure.
 
 - [ ] **Step 1: Add a callback ancestry integration test**
@@ -311,7 +532,7 @@ Run:
 .\.venv\Scripts\python.exe -m pytest -q tests/test_tool_trace_parenting.py
 ```
 
-Expected: PASS after Tasks 1-2.
+Expected: PASS after Tasks 2-3.
 
 - [ ] **Step 3: Document live trace verification**
 
@@ -331,13 +552,13 @@ Add this canary check to the rollout guide:
 Run:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q tests/test_tool_trace_parenting.py tests/test_tool_execution_control_flow.py tests/test_tool_execution_recovery.py tests/test_specialist_middleware.py tests/test_specialist_tool_pipeline.py tests/test_web_tools.py tests/test_ai_sdk_v6_stream_contract.py tests/test_internal_sse_stream_contract.py
+.\.venv\Scripts\python.exe -m pytest -q tests/test_langsmith_smithdb_migration.py tests/test_rag_evaluation_cli.py tests/test_tool_trace_parenting.py tests/test_tool_execution_control_flow.py tests/test_tool_execution_recovery.py tests/test_specialist_middleware.py tests/test_specialist_tool_pipeline.py tests/test_web_tools.py tests/test_ai_sdk_v6_stream_contract.py tests/test_internal_sse_stream_contract.py
 .\.venv\Scripts\python.exe -m ruff check app/ai/tool_execution.py app/ai/workflow/middleware.py app/ai/web_tools.py app/ai/image_discovery_flow.py tests/test_tool_trace_parenting.py tests/test_tool_execution_control_flow.py tests/test_specialist_middleware.py tests/test_web_tools.py
 ```
 
 Expected: all tests pass and Ruff reports no errors.
 
-- [ ] **Step 5: Commit Task 3**
+- [ ] **Step 5: Commit Task 4**
 
 ```powershell
 git add tests/test_tool_trace_parenting.py docs/operations/routing-v2-rollout.md
@@ -346,6 +567,10 @@ git commit -m "test: lock down child tool trace ancestry"
 
 ## Acceptance Checklist
 
+- [ ] Runtime and environment dependency declarations satisfy `langsmith>=0.10.15`.
+- [ ] Production Python contains no legacy run-query method or `/api/v1/runs/query` literal.
+- [ ] RAG comparison metrics use `runs.query()` with project UUID, root filter, explicit selects, and the project's full time window.
+- [ ] An authenticated RAG evaluation canary emits no deprecated response header or v1 run-query request.
 - [ ] `ToolCallRequest.runtime.config` reaches the raw tool on every attempt.
 - [ ] Nested Tavily and Brave invocations receive the same config.
 - [ ] Existing cancellation, timeout, retry, receipt, artifact, and image tests pass.
@@ -355,6 +580,8 @@ git commit -m "test: lock down child tool trace ancestry"
 
 ## Execution Handoff
 
-Execute this plan after the focused-web plan so it targets the durable product
-tool boundaries. It remains independent of generation lifecycle persistence and
-can merge before the Continue/Stop plan.
+Task 1 can execute immediately and independently because it touches only the
+evaluation/read side of LangSmith. Execute Tasks 2-4 after the focused-web plan
+so trace parenting targets the durable product-tool boundaries. The plan remains
+independent of generation lifecycle persistence and can merge before the
+Continue/Stop plan.
