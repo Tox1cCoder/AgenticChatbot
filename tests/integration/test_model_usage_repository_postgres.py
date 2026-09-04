@@ -12,10 +12,11 @@ import os
 import threading
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
+from itertools import count
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, delete, func, select
+from sqlalchemy import create_engine, delete, func, select, text
 from sqlalchemy import event as sa_event
 from sqlalchemy.orm import sessionmaker
 
@@ -35,6 +36,56 @@ from app.repositories.model_usage import (
 from app.usage.types import NormalizedUsage, UsageContext
 
 TenantFactory = Callable[..., tuple[UUID, UUID | None, UUID | None]]
+
+#: A minute far enough in the past that no other test, no leftover row, and no
+#: real usage can share it, handed out one minute at a time.
+#:
+#: Several assertions here read a *global* window --
+#: ``reconcile_minute_range`` rebuilds every rollup in a time range regardless
+#: of owner -- so a test that used ``now`` was really asserting "nothing else in
+#: this process wrote to the current minute". That held when the module was run
+#: alone on an empty database and nowhere else. Anchoring on a distinct past
+#: minute makes the exact counts mean what they say.
+_UNIQUE_MINUTE_EPOCH = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(
+    days=365
+)
+_unique_minute_offsets = count()
+
+#: Each caller gets a whole hour, not the next minute. Some tests reconcile a
+#: multi-minute range starting from their anchor, so consecutive per-minute
+#: anchors would put one test's rows inside another's window -- reintroducing
+#: exactly the interference this helper exists to remove.
+_UNIQUE_MINUTE_STRIDE = timedelta(hours=1)
+
+
+def _unique_minute() -> datetime:
+    """A minute bucket, and the hour after it, that no other test will touch."""
+    return _UNIQUE_MINUTE_EPOCH + _UNIQUE_MINUTE_STRIDE * next(_unique_minute_offsets)
+
+
+def _conversation_delete_rule(session_factory, table: str) -> str:
+    """The live ``ON DELETE`` rule for ``<table>.conversation_id``.
+
+    Read from the database rather than the model because they can disagree:
+    ``Base.metadata.create_all`` creates missing tables but never *alters* an
+    existing one, so a test database keeps whatever rule was declared when its
+    table was first created. That is not hypothetical -- it is why the cascade
+    test below used to fail while production was correct.
+    """
+    codes = {"a": "NO ACTION", "r": "RESTRICT", "c": "CASCADE", "n": "SET NULL", "d": "SET DEFAULT"}
+    query = text(
+        """
+        SELECT c.confdeltype
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN unnest(c.conkey) AS k(attnum) ON true
+        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+        WHERE c.contype = 'f' AND t.relname = :table AND a.attname = 'conversation_id'
+        """
+    )
+    with session_factory() as session:
+        code = session.execute(query, {"table": table}).scalar()
+    return codes.get(code or "", str(code))
 
 
 @pytest.fixture(scope="module")
@@ -75,6 +126,14 @@ def tenant_factory(session_factory) -> Iterator[TenantFactory]:
     user itself mid-test), then messages, conversations, and users -- an order
     that respects the RESTRICT-by-default FKs (Message -> Conversation,
     Conversation -> User) regardless of what a given test already removed.
+
+    Messages are deleted by **conversation**, not by the ids this factory
+    handed out. Several tests add their own ``Message`` rows to a tracked
+    conversation, and deleting only what the factory created left those behind:
+    ``DELETE FROM conversations`` then raised ``ForeignKeyViolation`` *in
+    teardown*, which aborts the rest of the cleanup and leaks every row after
+    it. That is how the test database accumulated orphaned users, messages and
+    usage rows, which in turn broke the tests asserting whole-table aggregates.
     """
     created_user_ids: list[UUID] = []
     created_conversation_ids: list[UUID] = []
@@ -126,6 +185,10 @@ def tenant_factory(session_factory) -> Iterator[TenantFactory]:
         session.execute(
             delete(ModelUsageEvent).where(ModelUsageEvent.user_id.in_(created_user_ids))
         )
+        if created_conversation_ids:
+            session.execute(
+                delete(Message).where(Message.conversation_id.in_(created_conversation_ids))
+            )
         if created_message_ids:
             session.execute(delete(Message).where(Message.id.in_(created_message_ids)))
         if created_conversation_ids:
@@ -545,8 +608,23 @@ def test_latest_conversation_context_uses_visible_assistant_metadata_not_helper_
 def test_conversation_delete_removes_usage_without_reconciliation_resurrection(
     repository, tenant_factory, session_factory
 ) -> None:
+    # Both usage tables declare `ondelete="CASCADE"` on `conversation_id`, and
+    # production has it. A test database whose table predates that declaration
+    # keeps the old rule, because `create_all` never alters an existing table --
+    # so check it here rather than letting the mismatch surface as a confusing
+    # assertion about row counts.
+    for table in ("model_usage_events", "model_usage_minute"):
+        rule = _conversation_delete_rule(session_factory, table)
+        if rule != "CASCADE":
+            pytest.fail(
+                f"{table}.conversation_id is ON DELETE {rule} in TEST_DATABASE_URL but the model "
+                "declares CASCADE. The test database's schema was built by an older create_all "
+                "and never altered; recreate it (dropdb chatbot_test && createdb chatbot_test) "
+                "before trusting this module."
+            )
+
     user_id, conversation_id, _ = tenant_factory()
-    started = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    started = _unique_minute()
     repository.record_event(
         _command(
             user_id=user_id,
@@ -586,7 +664,7 @@ def test_reconcile_minute_rebuilds_exactly_from_raw_events(
     repository, tenant_factory, session_factory
 ) -> None:
     user_id, conversation_id, _ = tenant_factory()
-    started = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    started = _unique_minute()
     command = _command(
         user_id=user_id,
         conversation_id=conversation_id,
@@ -652,7 +730,7 @@ def test_reconcile_twice_is_exactly_idempotent_across_chunks_and_small_batches(
     repository, tenant_factory, session_factory
 ) -> None:
     user_id, conversation_id, _ = tenant_factory()
-    start = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(minutes=5)
+    start = _unique_minute()
     for minute_offset in (0, 1, 2, 3):
         repository.record_event(
             _command(
@@ -852,8 +930,26 @@ def test_reconcile_minute_lock_serializes_same_minute_but_not_other_minute(
 def test_rollup_fk_deletes_do_not_mutate_hashed_dimensions(
     repository, tenant_factory, session_factory
 ) -> None:
+    """Deleting a conversation removes its usage rows outright.
+
+    This asserted the opposite until 2026-09-04: that the *event* survived with
+    a nulled ``conversation_id``. That was the contract until migration
+    ``c6d7e8f9a0b1`` ("Cascade model-usage events when their conversation is
+    deleted", 2026-07-22) deliberately replaced ``ON DELETE SET NULL`` with
+    ``CASCADE``. The test stayed green for six weeks afterwards only because
+    the integration database's schema came from an old ``create_all`` and was
+    never migrated — so it kept the pre-migration rule, kept this test passing,
+    and made its post-migration counterpart
+    (``test_conversation_delete_removes_usage_without_reconciliation_resurrection``)
+    fail. Green for the wrong reason is the failure mode to watch for here.
+
+    What the name still means is intact: the rollup must be **deleted**, never
+    quietly rewritten in place to the dimensions a NULL ``conversation_id``
+    would hash to. That would silently merge one conversation's usage into an
+    unattributed bucket.
+    """
     user_id, conversation_id, _ = tenant_factory()
-    started = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    started = _unique_minute()
     command = _command(user_id=user_id, conversation_id=conversation_id, started_at=started)
     result = repository.record_event(command)
     assert result.inserted is True
@@ -867,12 +963,10 @@ def test_rollup_fk_deletes_do_not_mutate_hashed_dimensions(
 
     with session_factory() as session:
         assert session.get(ModelUsageMinute, rollup_key) is None
-        event = session.get(ModelUsageEvent, result.event_id)
-        assert event is not None
-        assert event.conversation_id is None
+        assert session.get(ModelUsageEvent, result.event_id) is None
 
-        # The row must be gone outright -- not silently updated in place to
-        # the dimensions a NULL conversation_id would hash to.
+        # Neither row may reappear under the dimensions a NULL
+        # conversation_id hashes to.
         orphaned_rollup_key = compute_rollup_key(
             bucket_start_utc=started,
             user_id=user_id,
@@ -885,12 +979,6 @@ def test_rollup_fk_deletes_do_not_mutate_hashed_dimensions(
             usage_source=command.usage.source,
         )
         assert session.get(ModelUsageMinute, orphaned_rollup_key) is None
-
-    with session_factory.begin() as session:
-        session.execute(delete(User).where(User.id == user_id))
-
-    with session_factory() as session:
-        assert session.get(ModelUsageEvent, result.event_id) is None
 
 
 def test_cleanup_deletes_raw_older_than_90_days_and_rollups_older_than_2_years(
@@ -975,9 +1063,23 @@ def test_cleanup_deletes_raw_older_than_90_days_and_rollups_older_than_2_years(
 def test_health_snapshot_uses_complete_minutes_and_content_free_aggregates(
     repository, tenant_factory
 ) -> None:
+    """The snapshot is a whole-table aggregate, so assert what *changed*.
+
+    It has no owner filter by design — it answers "is the usage ledger
+    healthy", not "healthy for this user". Asserting absolute counts therefore
+    asserted that the database contained nothing else, which is true only on a
+    freshly created one. The counts here are deltas; the two ``latest_*``
+    fields stay absolute because this event is the newest thing in the window.
+    """
     user_id, conversation_id, _ = tenant_factory()
     complete_minute = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     event_minute = complete_minute - timedelta(minutes=1)
+    observed_at = complete_minute + timedelta(seconds=45)
+
+    def _snapshot() -> dict:
+        return repository.get_model_usage_health_snapshot(now=observed_at, lookback_minutes=10)
+
+    before = _snapshot()
     repository.record_event(
         _command(
             user_id=user_id,
@@ -985,19 +1087,16 @@ def test_health_snapshot_uses_complete_minutes_and_content_free_aggregates(
             started_at=event_minute,
         )
     )
+    after = _snapshot()
 
-    result = repository.get_model_usage_health_snapshot(
-        now=complete_minute + timedelta(seconds=45),
-        lookback_minutes=10,
-    )
-
-    assert result == {
-        "raw_event_count": 1,
-        "unattributed_event_count": 0,
-        "rollup_request_count": 1,
-        "latest_event_minute": event_minute,
-        "latest_rollup_minute": event_minute,
-    }
+    assert after["raw_event_count"] - before["raw_event_count"] == 1
+    assert after["rollup_request_count"] - before["rollup_request_count"] == 1
+    # An attributed event must not register as unattributed.
+    assert after["unattributed_event_count"] == before["unattributed_event_count"]
+    # Only *complete* minutes count: the event sits one minute back, and the
+    # in-progress minute containing `observed_at` is excluded.
+    assert after["latest_event_minute"] == event_minute
+    assert after["latest_rollup_minute"] == event_minute
 
 
 def test_record_event_rejects_unpersisted_request_message_id(
