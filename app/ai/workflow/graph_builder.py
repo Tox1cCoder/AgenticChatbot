@@ -100,6 +100,13 @@ def make_route_node():
                 user_id=state.get("user_id"),
                 model_request=state.get("model_request"),
                 request_id=request_id,
+                # The router runs inside the graph, so its model call streams
+                # like any other -- and it returns a `RoutingDecision`. Without
+                # this the raw control-plane JSON was published as the
+                # assistant's reply. The stream layer also refuses text from
+                # any non-answer node, so the leak cannot come back if this
+                # annotation is ever dropped.
+                run_config={"tags": ["internal"], "metadata": {"internal": True}},
             )
             target_node = inventory.resolve_node(decision.agent_id)
         except WorkflowRoutingException as exc:

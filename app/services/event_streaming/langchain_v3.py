@@ -71,6 +71,39 @@ def _is_internal_run(metadata: dict[str, Any]) -> bool:
     return isinstance(tags, (list, tuple)) and "internal" in tags
 
 
+def _public_answer_nodes() -> frozenset[str]:
+    """The only graph nodes whose model output may reach the user.
+
+    Imported lazily: `graph_builder` pulls in the whole workflow package, and
+    this module is also used by lightweight consumers that should not.
+    """
+    from app.ai.workflow.graph_builder import SPECIALIST_NODE_NAMES
+
+    return frozenset(SPECIALIST_NODE_NAMES)
+
+
+#: Resolved once. Derived from the graph's own node set rather than copied, so
+#: adding a specialist cannot silently leave it muted.
+PUBLIC_ANSWER_NODES: frozenset[str] = _public_answer_nodes()
+
+
+def _is_internal_node(node: str | None) -> bool:
+    """Whether a delta from ``node`` must stay private.
+
+    The router runs inside the graph, and its model returns a
+    ``RoutingDecision`` -- users were shown that JSON as the assistant's reply.
+    `planning_actions` had the same latent leak from its rubric grader. Both
+    should carry an ``internal`` tag, and now do, but relying on every future
+    author to remember one is how this reached production: the tag mechanism
+    was already built and already enabled, and simply had no caller here.
+
+    An *unattributed* delta stays public on purpose. This module also serves
+    scripted doubles and older runnables that emit no node, and muting those
+    would break legitimate output to close a hole they cannot open.
+    """
+    return node is not None and node not in PUBLIC_ANSWER_NODES
+
+
 def _text_from_block(block: dict[str, Any]) -> str:
     for key in ("text", "content", "reasoning"):
         value = block.get(key)
@@ -417,6 +450,9 @@ class V3ProtocolTranslator:
                 return
             if settings.suppress_internal_stream_chunks and _is_internal_run(metadata):
                 return
+        # Structural backstop, applied whether or not the run was tagged.
+        if _is_internal_node(node):
+            return
 
         if event_name == "content-block-delta":
             delta = message_event.get("delta") or {}
