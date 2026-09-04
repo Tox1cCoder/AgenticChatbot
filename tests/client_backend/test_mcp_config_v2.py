@@ -196,9 +196,7 @@ def test_mcp_config_store_resolves_bundled_server_from_application_root(tmp_path
 
     assert servers["time"].source == "bundled"
     assert servers["time"].command == sys.executable
-    assert servers["time"].args == [
-        str((app_root / "app/ai/mcp_servers/time_server.py").resolve())
-    ]
+    assert servers["time"].args == [str((app_root / "app/ai/mcp_servers/time_server.py").resolve())]
     assert servers["time"].cwd == str(app_root.resolve())
 
 
@@ -221,9 +219,7 @@ def test_mcp_config_store_isolates_same_user_device_mutations(tmp_path):
 
     assert {server.name for server in first.list_effective_servers()} == {"time", "custom"}
     assert {server.name for server in second.list_effective_servers()} == {"time"}
-    first_time = next(
-        server for server in first.list_effective_servers() if server.name == "time"
-    )
+    first_time = next(server for server in first.list_effective_servers() if server.name == "time")
     second_time = next(
         server for server in second.list_effective_servers() if server.name == "time"
     )
@@ -254,12 +250,11 @@ def test_mcp_config_store_delete_disables_bundled_and_removes_custom(tmp_path):
 
     assert store.delete_server("time") == "disabled_bundled"
     assert store.delete_server("custom") == "deleted_custom"
-    assert next(
-        server for server in store.list_effective_servers() if server.name == "time"
-    ).enabled is False
-    assert "custom" not in {
-        server.name for server in store.list_effective_servers()
-    }
+    assert (
+        next(server for server in store.list_effective_servers() if server.name == "time").enabled
+        is False
+    )
+    assert "custom" not in {server.name for server in store.list_effective_servers()}
     assert store.secret_store.get_for_server("custom").env == {}
 
 
@@ -288,9 +283,7 @@ def test_mcp_config_store_rolls_back_credentials_when_profile_write_fails(
             headers={},
         )
 
-    assert store.secret_store.get_for_server("custom").env == {
-        "API_TOKEN": "original"
-    }
+    assert store.secret_store.get_for_server("custom").env == {"API_TOKEN": "original"}
 
 
 def test_mcp_migration_preserves_custom_server_and_encrypts_credentials(tmp_path):
@@ -337,9 +330,7 @@ def test_mcp_migration_preserves_custom_server_and_encrypts_credentials(tmp_path
     profile = store.load_profile()
     assert profile.bundled_overrides["time"].enabled is False
     assert "notion" in profile.custom_servers
-    assert store.secret_store.get_for_server("notion").env == {
-        "NOTION_TOKEN": "migration-secret"
-    }
+    assert store.secret_store.get_for_server("notion").env == {"NOTION_TOKEN": "migration-secret"}
     assert "migration-secret" not in result.receipt_path.read_text(encoding="utf-8")
     assert legacy_path.is_file()
 
@@ -437,9 +428,7 @@ def test_prepare_store_migrates_legacy_before_first_profile_load(tmp_path):
     assert prepared is store
     assert result.status == "migrated"
     assert "custom" in prepared.load_profile().custom_servers
-    assert prepared.secret_store.get_for_server("custom").env == {
-        "API_TOKEN": "secret"
-    }
+    assert prepared.secret_store.get_for_server("custom").env == {"API_TOKEN": "secret"}
 
 
 @pytest.mark.asyncio
@@ -474,9 +463,7 @@ async def test_v2_manager_discovers_real_bundled_time_server(tmp_path):
     try:
         await manager.initialize()
         assert manager.servers["time"].is_running()
-        assert {tool.name for tool in manager.get_tools_by_server("time")} == {
-            "get_current_time"
-        }
+        assert {tool.name for tool in manager.get_tools_by_server("time")} == {"get_current_time"}
     finally:
         await manager.shutdown()
 

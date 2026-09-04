@@ -188,9 +188,7 @@ def _fit_results(
     return best
 
 
-def _content_share(
-    results: list[Any], *, shell: dict[str, Any], budget: int, kept: int
-) -> int:
+def _content_share(results: list[Any], *, shell: dict[str, Any], budget: int, kept: int) -> int:
     scaffold = dict(shell)
     scaffold["results"] = [_shrink_result(entry, 0) for entry in results[:kept]]
     return (budget - len(_dump(scaffold))) // kept

@@ -177,9 +177,7 @@ class RichImageMetrics:
     def record_discovery_outcome(self, *, outcome: str, duration_seconds: float) -> None:
         label = _bounded(outcome, _DISCOVERY_OUTCOMES)
         self.discovery_outcomes.labels(outcome=label).inc()
-        self.discovery_duration.labels(outcome=label).observe(
-            max(0.0, float(duration_seconds))
-        )
+        self.discovery_duration.labels(outcome=label).observe(max(0.0, float(duration_seconds)))
 
     def render(self) -> bytes:
         return generate_latest(self.registry)

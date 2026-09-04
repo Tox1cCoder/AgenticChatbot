@@ -70,15 +70,11 @@ def _legacy_servers(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     camel = payload.get("mcpServers")
     if isinstance(snake, dict):
         merged.update(
-            (str(name), dict(value))
-            for name, value in snake.items()
-            if isinstance(value, dict)
+            (str(name), dict(value)) for name, value in snake.items() if isinstance(value, dict)
         )
     if isinstance(camel, dict):
         merged.update(
-            (str(name), dict(value))
-            for name, value in camel.items()
-            if isinstance(value, dict)
+            (str(name), dict(value)) for name, value in camel.items() if isinstance(value, dict)
         )
     return merged
 
@@ -145,9 +141,7 @@ def migrate_legacy_mcp_profile(
         if transport == "http":
             transport = "streamable_http"
         env = {str(key): str(value) for key, value in (raw.get("env") or {}).items()}
-        headers = {
-            str(key): str(value) for key, value in (raw.get("headers") or {}).items()
-        }
+        headers = {str(key): str(value) for key, value in (raw.get("headers") or {}).items()}
         definition: dict[str, Any] = {
             "transport": transport,
             "enabled": bool(raw.get("enabled", True)),
@@ -195,9 +189,7 @@ def migrate_legacy_mcp_profile(
         customServers=custom,
     )
     secret_snapshot = (
-        store.secret_store.path.read_bytes()
-        if store.secret_store.path.is_file()
-        else None
+        store.secret_store.path.read_bytes() if store.secret_store.path.is_file() else None
     )
     try:
         for name, (env, headers) in credentials.items():

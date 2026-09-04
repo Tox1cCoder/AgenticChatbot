@@ -14,9 +14,7 @@ def _load_config() -> dict:
 
 def test_enabled_server_mcp_is_exactly_the_global_default_set():
     servers = _load_config()["servers"]
-    enabled = {
-        name for name, spec in servers.items() if spec.get("enabledByDefault")
-    }
+    enabled = {name for name, spec in servers.items() if spec.get("enabledByDefault")}
     assert enabled == GLOBAL_DEFAULT_SERVERS
 
 

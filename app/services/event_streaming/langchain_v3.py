@@ -270,9 +270,7 @@ class V3ProtocolTranslator:
             yield from self._translate_image_preview(data, namespace)
         # Any other producer on this shared channel is not ours to publish.
 
-    def _translate_image_preview(
-        self, data: dict, namespace: list[str]
-    ) -> Iterable[V3StreamEvent]:
+    def _translate_image_preview(self, data: dict, namespace: list[str]) -> Iterable[V3StreamEvent]:
         """Republish an early image preview emitted from inside the graph.
 
         Previews used to travel on a side queue reached through a weak token in

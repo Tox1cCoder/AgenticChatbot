@@ -100,8 +100,7 @@ def test_tavily_error_payload_bounds_and_redacts_untrusted_details():
     payload = json.loads(
         tavily_server._error(
             "request failed api_key=supersecret at "
-            "https://private.example/path?token=supersecret "
-            + ("x" * 600),
+            "https://private.example/path?token=supersecret " + ("x" * 600),
             operation="search",
         )
     )
@@ -251,9 +250,7 @@ def test_malformed_result_url_does_not_discard_later_valid_results():
         },
     )
 
-    assert [(item["title"], item["index"]) for item in payload["results"]] == [
-        ("Valid", 2)
-    ]
+    assert [(item["title"], item["index"]) for item in payload["results"]] == [("Valid", 2)]
 
 
 class _RaisingClient:

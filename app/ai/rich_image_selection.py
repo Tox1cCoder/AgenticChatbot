@@ -46,14 +46,10 @@ def apply_rich_image_selection(context: MutableMapping[str, Any]) -> None:
             policy=_configured_policy(),
         )
     except Exception:
-        logger.exception(
-            "Rich image selection failed; continuing without discovered images"
-        )
+        logger.exception("Rich image selection failed; continuing without discovered images")
         context["rich_item_candidates"] = [
             item for item in candidates if not is_image_candidate(item)
         ]
     finally:
         with suppress(Exception):
-            rich_image_metrics.record_selection_duration(
-                time.perf_counter() - started_at
-            )
+            rich_image_metrics.record_selection_duration(time.perf_counter() - started_at)

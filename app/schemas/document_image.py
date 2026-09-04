@@ -59,9 +59,7 @@ class ImageCaptionSections(BaseModel):
     legend: str = Field(default="", description="Legend entries, if any.")
     values: str = Field(default="", description="Key data points or values shown.")
     trends: str = Field(default="", description="Described trends or patterns.")
-    relationships: str = Field(
-        default="", description="Relationships between depicted elements."
-    )
+    relationships: str = Field(default="", description="Relationships between depicted elements.")
     section_context: str = Field(
         default="",
         description="One sentence tying the image to its surrounding document section.",

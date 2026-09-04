@@ -176,9 +176,7 @@ def test_rag_search_delegates_to_typed_retriever_and_adapts_public_dict_contract
     ("conversation_id", "user_id"),
     [(None, None), ("conv-1", None), (None, "user-1")],
 )
-def test_rag_search_fails_closed_when_either_server_scope_value_is_absent(
-    conversation_id, user_id
-):
+def test_rag_search_fails_closed_when_either_server_scope_value_is_absent(conversation_id, user_id):
     qdrant = _fake_qdrant()
     embedding = _fake_embedding()
     agent = _build_minimal_rag_agent(qdrant, embedding)
@@ -647,9 +645,7 @@ def test_native_image_search_authorizes_document_image_through_parent_document()
                         password_hash="test",
                     ),
                     Conversation(id=conversation_id, owner_id=owner_id, title="mine"),
-                    Conversation(
-                        id=other_conversation_id, owner_id=other_owner_id, title="theirs"
-                    ),
+                    Conversation(id=other_conversation_id, owner_id=other_owner_id, title="theirs"),
                 ]
             )
             session.add_all(

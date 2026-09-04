@@ -142,9 +142,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--golden-dataset", default=str(DEFAULT_GOLDEN_DATASET))
     parser.add_argument("--base-url", default="http://localhost:8000")
-    parser.add_argument(
-        "--metrics-url", default=None, help="Defaults to '<base-url>/metrics/rag'."
-    )
+    parser.add_argument("--metrics-url", default=None, help="Defaults to '<base-url>/metrics/rag'.")
     parser.add_argument("--conversation-id", default=None)
     parser.add_argument("--auth-token", default=None)
     parser.add_argument("--email", default=None)
@@ -559,9 +557,7 @@ def _run_failures(
             requested=False, reason="failure injection not requested (pass --failure-injection)"
         )
     if injector is None:
-        return _empty_failures(
-            requested=True, reason="no --failure-injector-hook configured"
-        )
+        return _empty_failures(requested=True, reason="no --failure-injector-hook configured")
     results = []
     for kind in _FAILURE_KINDS:
         outcome = dict(injector(kind))

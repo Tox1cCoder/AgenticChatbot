@@ -67,9 +67,7 @@ def _drop_stale(
             rich_image_metrics.record_crawl_date(known=crawled is not None)
         if crawled is not None and crawled < cutoff:
             with suppress(Exception):
-                rich_image_metrics.record_candidate(
-                    provider="brave", outcome="rejected_stale"
-                )
+                rich_image_metrics.record_candidate(provider="brave", outcome="rejected_stale")
             continue
         fresh.append(candidate)
     return fresh
@@ -113,9 +111,7 @@ def _subject_overlap(candidate: Mapping[str, Any], query_tokens: frozenset[str])
     return len(query_tokens & normalize_query_tokens(text)) / len(query_tokens)
 
 
-def _rank_by_subject(
-    candidates: list[dict[str, Any]], image_query: str
-) -> list[dict[str, Any]]:
+def _rank_by_subject(candidates: list[dict[str, Any]], image_query: str) -> list[dict[str, Any]]:
     """Order one confidence tier by how well each caption answers the query.
 
     Twelve results are fetched and one is shown, so this choice is most of the
@@ -199,19 +195,13 @@ def select_brave_candidates(
     return tier[:1]
 
 
-def record_discovery_outcome(
-    outcome: str, *, started: float | None = None
-) -> list[dict[str, Any]]:
+def record_discovery_outcome(outcome: str, *, started: float | None = None) -> list[dict[str, Any]]:
     """Best-effort terminal telemetry for a discovery attempt."""
     elapsed = 0.0 if started is None else time.perf_counter() - started
     with suppress(Exception):
-        rich_image_metrics.record_discovery_outcome(
-            outcome=outcome, duration_seconds=elapsed
-        )
+        rich_image_metrics.record_discovery_outcome(outcome=outcome, duration_seconds=elapsed)
     if outcome in _OPERATIONAL_FAILURES:
-        logger.warning(
-            "Image discovery produced no image (%s) after %.2fs", outcome, elapsed
-        )
+        logger.warning("Image discovery produced no image (%s) after %.2fs", outcome, elapsed)
     return []
 
 

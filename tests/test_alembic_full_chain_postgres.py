@@ -326,9 +326,7 @@ def _assert_head_schema(scratch_url: URL) -> None:
                 index["name"]: index for index in schema.get_indexes("document_index_generations")
             }
             assert generation_indexes["uq_document_index_generation_active"]["unique"] is True
-            chunk_indexes = {
-                index["name"] for index in schema.get_indexes("document_chunks")
-            }
+            chunk_indexes = {index["name"] for index in schema.get_indexes("document_chunks")}
             assert "idx_document_chunks_content_simple_fts" in chunk_indexes
 
             settings_columns = {

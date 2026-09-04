@@ -78,9 +78,7 @@ def test_tool_records_do_not_mutate_foreign_schemas(tmp_path):
 
 
 def test_parse_server_url_payload_normalizes_http_transport():
-    name, config = mcp_api._parse_server_url_payload(
-        {"url": "https://example.com/mcp"}
-    )
+    name, config = mcp_api._parse_server_url_payload({"url": "https://example.com/mcp"})
 
     assert name == "mcp"
     assert config["transport"] == "streamable_http"
@@ -124,12 +122,8 @@ async def test_device_scoped_api_mutation_does_not_cross_same_user_devices(
         _session("device-a"),
     )
 
-    assert "private" in {
-        server.name for server in stores["device-a"].list_effective_servers()
-    }
-    assert "private" not in {
-        server.name for server in stores["device-b"].list_effective_servers()
-    }
+    assert "private" in {server.name for server in stores["device-a"].list_effective_servers()}
+    assert "private" not in {server.name for server in stores["device-b"].list_effective_servers()}
     assert stores["device-b"].secret_store.get_for_server("private").env == {}
 
 
@@ -187,12 +181,8 @@ async def test_api_update_preserves_omitted_credentials_and_redacts_server_info(
         _session("device-a"),
     )
 
-    assert store.secret_store.get_for_server("private").env == {
-        "API_TOKEN": "never-return-this"
-    }
-    server = next(
-        item for item in store.list_effective_servers() if item.name == "private"
-    )
+    assert store.secret_store.get_for_server("private").env == {"API_TOKEN": "never-return-this"}
+    server = next(item for item in store.list_effective_servers() if item.name == "private")
     response = mcp_api._server_info(
         server,
         SimpleNamespace(servers={}),

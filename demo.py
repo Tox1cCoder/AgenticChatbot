@@ -9129,8 +9129,7 @@ def _render_existing_skill_notice(existing: dict[str, Any] | None) -> bool:
         )
         return False
     st.info(
-        f"'{existing.get('name')}' is already installed. Installing this archive "
-        "replaces it.",
+        f"'{existing.get('name')}' is already installed. Installing this archive replaces it.",
         icon=":material/update:",
     )
     return True

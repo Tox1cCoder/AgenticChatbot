@@ -228,12 +228,10 @@ def _build_service(
     from app.services.document_index_service import DocumentIndexService
 
     repository = chunk_repo or MagicMock()
-    repository.create_generation_chunks.side_effect = (
-        lambda _document_id, generation_id, _rows: [
-            setattr(chunk, "index_generation_id", generation_id) or chunk
-            for chunk in repository.replace_document_chunks.return_value
-        ]
-    )
+    repository.create_generation_chunks.side_effect = lambda _document_id, generation_id, _rows: [
+        setattr(chunk, "index_generation_id", generation_id) or chunk
+        for chunk in repository.replace_document_chunks.return_value
+    ]
     qdrant = _generation_aware_qdrant(qdrant_client or MagicMock())
     return DocumentIndexService(
         chunk_repository=repository,
@@ -568,10 +566,7 @@ def test_collection_bootstrap_creates_filter_indexes_before_first_upsert():
         parse_artifact_id=None,
     )
 
-    fields = [
-        call.kwargs["field_name"]
-        for call in qdrant.create_payload_index.call_args_list
-    ]
+    fields = [call.kwargs["field_name"] for call in qdrant.create_payload_index.call_args_list]
     assert fields == [
         "user_id",
         "conversation_id",
@@ -581,14 +576,10 @@ def test_collection_bootstrap_creates_filter_indexes_before_first_upsert():
         "is_active",
     ]
     first_upsert = next(
-        index
-        for index, call in enumerate(qdrant.mock_calls)
-        if call[0] == "upsert"
+        index for index, call in enumerate(qdrant.mock_calls) if call[0] == "upsert"
     )
     last_index = max(
-        index
-        for index, call in enumerate(qdrant.mock_calls)
-        if call[0] == "create_payload_index"
+        index for index, call in enumerate(qdrant.mock_calls) if call[0] == "create_payload_index"
     )
     assert last_index < first_upsert
 
@@ -628,7 +619,8 @@ def test_tenant_payload_index_falls_back_only_for_explicit_unsupported_version()
     service.ensure_collection()
 
     user_calls = [
-        call for call in qdrant.create_payload_index.call_args_list
+        call
+        for call in qdrant.create_payload_index.call_args_list
         if call.kwargs["field_name"] == "user_id"
     ]
     assert len(user_calls) == 2
@@ -798,8 +790,7 @@ def test_index_document_leaves_image_chunk_id_null_when_no_chunk_covers_its_page
     )
 
     assert image_repo.updates == [], (
-        "an image whose page no persisted chunk covers must not be linked "
-        "to an unrelated chunk"
+        "an image whose page no persisted chunk covers must not be linked to an unrelated chunk"
     )
 
 

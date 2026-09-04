@@ -49,6 +49,7 @@ def _catalog_version(tools: list[dict[str, Any]]) -> str:
     digest = hashlib.sha256(json.dumps(canonical, sort_keys=True).encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
 
+
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 
 
@@ -149,20 +150,13 @@ def _resolve_manager_tool(
                 tool
                 for tool in matches
                 if tool["qualifiedId"] == normalized_id
-                and (
-                    not normalized_server
-                    or tool["serverName"] == normalized_server
-                )
+                and (not normalized_server or tool["serverName"] == normalized_server)
             ),
             None,
         )
     if normalized_server:
         return next(
-            (
-                tool
-                for tool in matches
-                if tool["serverName"] == normalized_server
-            ),
+            (tool for tool in matches if tool["serverName"] == normalized_server),
             None,
         )
     if not matches:
@@ -224,10 +218,7 @@ def _custom_definition(
     if transport == "http":
         transport = "streamable_http"
     env = {str(key): str(value) for key, value in (payload.get("env") or {}).items()}
-    headers = {
-        str(key): str(value)
-        for key, value in (payload.get("headers") or {}).items()
-    }
+    headers = {str(key): str(value) for key, value in (payload.get("headers") or {}).items()}
     common = {
         "transport": transport,
         "enabled": bool(payload.get("enabled", True)),
@@ -540,9 +531,7 @@ async def execute_mcp_tool(
         manager,
         tool_name,
         server_name=payload.get("serverName") or payload.get("server_name"),
-        qualified_tool_id=(
-            payload.get("qualifiedToolId") or payload.get("qualified_tool_id")
-        ),
+        qualified_tool_id=(payload.get("qualifiedToolId") or payload.get("qualified_tool_id")),
     )
     if tool is None:
         raise HTTPException(

@@ -325,9 +325,10 @@ def _split_large_table(
         selected_formatter = None
         degraded = False
         for formatter_index, formatter in enumerate(formatters):
-            if units and token_strategy.count(
-                "\n".join([*prefix, formatter(units[:1])])
-            ) <= max_tokens:
+            if (
+                units
+                and token_strategy.count("\n".join([*prefix, formatter(units[:1])])) <= max_tokens
+            ):
                 selected_formatter = formatter
                 degraded = formatter_index > 0
                 break
@@ -339,9 +340,7 @@ def _split_large_table(
             # fragments, then emit explicitly degraded row fragments.
             context_text = "\n".join(prefix)
             context_pieces = [
-                _TablePiece(text, degraded=True)
-                for text in bounded_plain(context_text)
-                if text
+                _TablePiece(text, degraded=True) for text in bounded_plain(context_text) if text
             ]
             selected_context = []
             for formatter in formatters:
@@ -365,9 +364,7 @@ def _split_large_table(
             best = 0
             while low <= high:
                 middle = (low + high) // 2
-                candidate = "\n".join(
-                    [*selected_context, selected_formatter(remaining[:middle])]
-                )
+                candidate = "\n".join([*selected_context, selected_formatter(remaining[:middle])])
                 if token_strategy.count(candidate) <= max_tokens:
                     best = middle
                     low = middle + 1
@@ -380,9 +377,7 @@ def _split_large_table(
                 ]
             row_pieces.append(
                 _TablePiece(
-                    "\n".join(
-                        [*selected_context, selected_formatter(remaining[:best])]
-                    ),
+                    "\n".join([*selected_context, selected_formatter(remaining[:best])]),
                     degraded=degraded,
                 )
             )
@@ -409,15 +404,11 @@ def _split_large_table(
         else:
             context_text = "\n".join(prefix)
             pieces.extend(
-                _TablePiece(text, degraded=True)
-                for text in bounded_plain(context_text)
-                if text
+                _TablePiece(text, degraded=True) for text in bounded_plain(context_text) if text
             )
             suffix_text = "\n".join(suffix)
             pieces.extend(
-                _TablePiece(text, degraded=True)
-                for text in bounded_plain(suffix_text)
-                if text
+                _TablePiece(text, degraded=True) for text in bounded_plain(suffix_text) if text
             )
     return pieces
 

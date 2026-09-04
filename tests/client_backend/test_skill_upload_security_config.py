@@ -208,11 +208,7 @@ def test_create_app_uses_configured_origins_and_never_wildcard(isolated_settings
     get_client_settings.cache_clear()
 
     app = create_app()
-    cors = [
-        middleware
-        for middleware in app.user_middleware
-        if middleware.cls is CORSMiddleware
-    ]
+    cors = [middleware for middleware in app.user_middleware if middleware.cls is CORSMiddleware]
 
     assert len(cors) == 1
     options = cors[0].kwargs

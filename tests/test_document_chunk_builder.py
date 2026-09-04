@@ -412,10 +412,11 @@ def test_long_block_overlap_provenance_keeps_each_current_split_piece():
         max_tokens=5,
     )
 
-    assert [
-        chunk.block_provenance[-1]["metadata"]["split_piece_index"]
-        for chunk in chunks
-    ] == [0, 1, 2]
+    assert [chunk.block_provenance[-1]["metadata"]["split_piece_index"] for chunk in chunks] == [
+        0,
+        1,
+        2,
+    ]
 
 
 def test_overlap_does_not_cross_heading_or_table_boundary():
@@ -589,9 +590,7 @@ def test_oversized_table_row_is_split_under_hard_limit_with_repeated_context():
             _block(
                 block_id="table",
                 kind="table",
-                text="\n".join(
-                    [caption, header, "|---|---|", f"| APAC | {' '.join(row_terms)} |"]
-                ),
+                text="\n".join([caption, header, "|---|---|", f"| APAC | {' '.join(row_terms)} |"]),
                 page=4,
                 section_path=["Results"],
                 metadata={"is_table": True},
@@ -639,9 +638,7 @@ def test_table_context_larger_than_cap_uses_explicit_bounded_degradation():
                 block_id="huge-header-table",
                 kind="table",
                 text=(
-                    "| enormous repeated header context that exceeds limit |\n"
-                    "|---|\n"
-                    "| row-value |"
+                    "| enormous repeated header context that exceeds limit |\n|---|\n| row-value |"
                 ),
                 metadata={"is_table": True},
             )

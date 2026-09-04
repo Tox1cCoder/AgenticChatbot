@@ -215,9 +215,7 @@ def test_graph_forwards_presented_image_ids_as_transient_response_state(monkeypa
 
     workflow._merge_tool_artifacts(state, response)
 
-    assert response.metadata["_presented_rich_image_ids"] == [
-        "image:tool:c1:0"
-    ]
+    assert response.metadata["_presented_rich_image_ids"] == ["image:tool:c1:0"]
 
 
 def test_media_guidance_names_web_research_with_disambiguated_query():

@@ -40,9 +40,7 @@ def upgrade() -> None:
         sa.Column("activated_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("retired_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("failed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.ForeignKeyConstraint(
-            ["document_id"], ["documents.id"], ondelete="CASCADE"
-        ),
+        sa.ForeignKeyConstraint(["document_id"], ["documents.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index(
@@ -122,9 +120,7 @@ def upgrade() -> None:
         "document_chunks",
         ["index_generation_id"],
     )
-    op.drop_constraint(
-        "uq_document_chunk_document_index", "document_chunks", type_="unique"
-    )
+    op.drop_constraint("uq_document_chunk_document_index", "document_chunks", type_="unique")
     op.create_unique_constraint(
         "uq_document_chunk_generation_index",
         "document_chunks",
@@ -140,9 +136,7 @@ def downgrade() -> None:
             "WHERE c.index_generation_id = g.id AND g.status <> 'active'"
         )
     )
-    op.drop_constraint(
-        "uq_document_chunk_generation_index", "document_chunks", type_="unique"
-    )
+    op.drop_constraint("uq_document_chunk_generation_index", "document_chunks", type_="unique")
     op.create_unique_constraint(
         "uq_document_chunk_document_index",
         "document_chunks",

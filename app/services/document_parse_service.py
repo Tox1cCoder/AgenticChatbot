@@ -326,9 +326,7 @@ class DocumentParseService:
             backend_used = "excel"
 
         elif ext in self.MINERU_EXTENSIONS:
-            blocks, images_data = await self._process_with_mineru(
-                file_path, document_id, filename
-            )
+            blocks, images_data = await self._process_with_mineru(file_path, document_id, filename)
             backend_raw = str(getattr(self.settings, "mineru_backend", "pipeline") or "pipeline")
             backend_used = f"mineru/{backend_raw.strip().lower()}"
 

@@ -121,7 +121,7 @@ def test_no_emitter_without_a_run_to_write_into(monkeypatch):
 
 def test_no_emitter_when_streaming_is_disabled(monkeypatch):
     monkeypatch.setattr(settings, "enable_image_streaming", False)
-    monkeypatch.setattr("app.ai.graph._graph_stream_writer", lambda: (lambda _e: None))
+    monkeypatch.setattr("app.ai.graph._graph_stream_writer", lambda: lambda _e: None)
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
 
     assert workflow._build_image_preview_emitter({}) is None

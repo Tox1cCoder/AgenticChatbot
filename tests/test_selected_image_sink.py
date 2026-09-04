@@ -83,6 +83,4 @@ def test_selected_images_are_attached_to_the_artifact():
         selected_images=[{"id": "image:selected:a", "type": "image"}],
     )
 
-    assert artifact["_rich_item_candidates"] == [
-        {"id": "image:selected:a", "type": "image"}
-    ]
+    assert artifact["_rich_item_candidates"] == [{"id": "image:selected:a", "type": "image"}]

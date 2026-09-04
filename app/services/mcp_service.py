@@ -262,9 +262,7 @@ class MCPService:
             "scope": scope,
         }
 
-    async def get_tool_info(
-        self, tool_name: str, server_name: str | None = None
-    ) -> dict[str, Any]:
+    async def get_tool_info(self, tool_name: str, server_name: str | None = None) -> dict[str, Any]:
         """
         Get detailed information about a specific tool
 
@@ -334,9 +332,7 @@ class MCPService:
                 # Continue anyway - let the tool handle invalid args
 
         # Execute tool
-        result = await self.mcp_manager.execute_tool(
-            tool_name, arguments, server_name=server_name
-        )
+        result = await self.mcp_manager.execute_tool(tool_name, arguments, server_name=server_name)
 
         if not result["success"]:
             logger.warning("Tool execution failed: %s - %s", tool_name, result["error"])

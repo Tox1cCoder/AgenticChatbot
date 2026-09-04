@@ -145,9 +145,7 @@ def test_rejects_declared_compression_ratio_bomb(tmp_path):
         handle.writestr("SKILL.md", b"A" * (1024 * 1024))
 
     with pytest.raises(SkillArchiveError) as exc_info:
-        SkillArchiveValidator(_limits(max_compression_ratio=200)).extract(
-            archive, tmp_path / "out"
-        )
+        SkillArchiveValidator(_limits(max_compression_ratio=200)).extract(archive, tmp_path / "out")
 
     assert exc_info.value.code == "SKILL_ARCHIVE_TOO_LARGE"
     assert not (tmp_path / "out").exists()

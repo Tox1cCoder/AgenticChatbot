@@ -211,9 +211,7 @@ def _resolver_sessions(monkeypatch, *, user_id, device_id, catalog):
 
 
 @pytest.mark.asyncio
-async def test_uploaded_skill_reaches_only_originating_device_chat(
-    sidecar_profile, monkeypatch
-):
+async def test_uploaded_skill_reaches_only_originating_device_chat(sidecar_profile, monkeypatch):
     archive = _fixture_zip(FIXTURE_BUNDLE)
 
     upload = await sidecar_profile.uploads.stage(

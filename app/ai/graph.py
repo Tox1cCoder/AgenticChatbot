@@ -2002,7 +2002,6 @@ class MultiAgentWorkflow(
             request_id=str(conversation_id) if conversation_id else None,
         )
 
-
     @staticmethod
     def _latest_user_text(state: GraphState) -> str:
         for message in reversed(state.get("messages", []) or []):

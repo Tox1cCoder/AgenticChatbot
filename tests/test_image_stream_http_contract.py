@@ -95,6 +95,7 @@ class _PreviewCollector:
         drained, self.events = self.events, []
         return drained
 
+
 # ---------------------------------------------------------------------------
 # Deterministic fake image payloads
 # ---------------------------------------------------------------------------

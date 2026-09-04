@@ -112,16 +112,12 @@ class ResearchBudget:
                     threshold=self.near_duplicate_threshold,
                 ):
                     return False
-            if self.search_calls + len(self._in_flight) >= max(
-                1, int(self.max_search_calls)
-            ):
+            if self.search_calls + len(self._in_flight) >= max(1, int(self.max_search_calls)):
                 return False
             self._in_flight.append((tokens, scope))
             return True
 
-    def record_search(
-        self, query: str, result_text: str, *, scope: SearchScope = ()
-    ) -> None:
+    def record_search(self, query: str, result_text: str, *, scope: SearchScope = ()) -> None:
         """Append a completed result and release the reservation it used.
 
         A failed search never reaches this method, so its reservation is never
@@ -197,9 +193,7 @@ def get_research_budget(conversation_id: str | None) -> ResearchBudget:
             budget = ResearchBudget(
                 max_search_calls=max(1, int(settings.research_max_search_calls_per_turn)),
                 near_duplicate_threshold=float(settings.research_near_duplicate_threshold),
-                max_image_searches=max(
-                    1, int(settings.research_max_image_searches_per_turn)
-                ),
+                max_image_searches=max(1, int(settings.research_max_image_searches_per_turn)),
             )
             _budgets[key] = budget
         _budgets.move_to_end(key)

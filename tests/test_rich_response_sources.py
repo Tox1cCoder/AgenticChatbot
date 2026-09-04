@@ -144,7 +144,9 @@ def test_candidate_provenance_keeps_source_title_and_query():
 def test_normalized_search_response_never_leaks_result_images():
     normalized = tavily_server._normalize_search_response(
         query="q",
-        response={"results": [{"url": "https://e.com/a", "title": "A", "images": ["https://e.com/i.jpg"]}]},
+        response={
+            "results": [{"url": "https://e.com/a", "title": "A", "images": ["https://e.com/i.jpg"]}]
+        },
     )
     assert "images" not in normalized
 
@@ -298,9 +300,7 @@ def test_brave_thumbnails_of_same_original_image_are_deduplicated() -> None:
 
     assert len(selected) == 1
     assert selected[0]["type"] == "image"
-    assert selected[0]["payload"]["url"] == (
-        "https://thumbs.example/variant-0.jpg"
-    )
+    assert selected[0]["payload"]["url"] == ("https://thumbs.example/variant-0.jpg")
 
 
 def test_brave_originals_are_deduplicated_before_group_cell_cap() -> None:
@@ -408,16 +408,16 @@ def test_remote_candidates_reject_insecure_duplicate_and_known_tiny_images(monke
 @pytest.mark.parametrize(
     "width,height,expected",
     [
-        (2000, 200, False),   # wide hero strip, ratio 10.0
-        (300, 1600, False),   # ratio 0.1875, strictly below the minimum
-        (300, 1500, True),    # lower boundary (ratio 0.2) is accepted
-        (1000, 200, True),    # upper boundary (ratio 5.0) is accepted
-        (1200, 800, True),    # ordinary photo
-        (800, 2600, True),    # tall infographic, ratio ~0.31
-        (2200, 500, True),    # panorama, ratio 4.4
-        (None, 800, True),    # unknown dimensions never reject
+        (2000, 200, False),  # wide hero strip, ratio 10.0
+        (300, 1600, False),  # ratio 0.1875, strictly below the minimum
+        (300, 1500, True),  # lower boundary (ratio 0.2) is accepted
+        (1000, 200, True),  # upper boundary (ratio 5.0) is accepted
+        (1200, 800, True),  # ordinary photo
+        (800, 2600, True),  # tall infographic, ratio ~0.31
+        (2200, 500, True),  # panorama, ratio 4.4
+        (None, 800, True),  # unknown dimensions never reject
         (1200, None, True),
-        (0, 0, True),         # nonsense dimensions are not a rejection signal
+        (0, 0, True),  # nonsense dimensions are not a rejection signal
     ],
 )
 def test_aspect_ratio_gate(width, height, expected):
@@ -851,7 +851,7 @@ class _SingleImageSearchTool:
                         "url": "https://img.test/photo-1.png",
                         "description": "Airfoil cross section",
                     }
-                ]
+                ],
             }
         )
 
@@ -920,9 +920,7 @@ async def test_execute_tool_calls_attaches_rich_candidates_to_artifact():
     from app.ai.tool_execution import execute_tool_calls
 
     outputs, artifacts, _images = await execute_tool_calls(
-        tool_calls=[
-            {"id": "call_99", "name": "brave_image_search", "args": {"query": "wings"}}
-        ],
+        tool_calls=[{"id": "call_99", "name": "brave_image_search", "args": {"query": "wings"}}],
         tool_map={"brave_image_search": _SingleImageSearchTool()},
     )
     candidates = artifacts[0].get("_rich_item_candidates", [])
@@ -960,9 +958,7 @@ async def test_typed_web_provider_raw_images_do_not_enter_legacy_gallery(
         tool_map={tool_name: _ManyWebImagesTool(provider=provider)},
     )
 
-    assert len(artifacts[0]["_rich_item_candidates"]) <= (
-        settings.rich_image_candidate_max_count
-    )
+    assert len(artifacts[0]["_rich_item_candidates"]) <= (settings.rich_image_candidate_max_count)
     assert images == []
 
 

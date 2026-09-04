@@ -165,9 +165,7 @@ def test_chunk_hydration_rejects_retired_generations(rag_scope_db):
         session.add_all([active_chunk, retired_chunk])
 
     repository = DocumentChunkRepository(rag_scope_db.factory)
-    assert [row.id for row in repository.get_by_document_ordered(document_id)] == [
-        active_chunk.id
-    ]
+    assert [row.id for row in repository.get_by_document_ordered(document_id)] == [active_chunk.id]
     assert repository.get_by_ids([retired_chunk.id]) == []
     assert repository.get_by_qdrant_point_ids([str(retired_chunk.id)]) == []
 

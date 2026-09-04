@@ -190,11 +190,15 @@ def test_balances_subquestion_and_document_coverage_before_score_fill() -> None:
 def test_tight_budget_prefers_complete_cross_document_coverage_before_truncation() -> None:
     small_two = _candidate(2, document=2, content="brief fact two")
     small_three = _candidate(3, document=3, content="brief fact three")
-    fair_budget = _assembler().assemble(
-        "question",
-        [small_two, small_three],
-        max_tokens=500,
-    ).token_count
+    fair_budget = (
+        _assembler()
+        .assemble(
+            "question",
+            [small_two, small_three],
+            max_tokens=500,
+        )
+        .token_count
+    )
     oversized_first = _candidate(
         1,
         document=1,
@@ -220,11 +224,15 @@ def test_tight_budget_interleaves_document_coverage_with_many_subquestions() -> 
         _candidate(4, document=2),
         _candidate(5, document=3),
     ]
-    three_record_budget = _assembler().assemble(
-        "question",
-        candidates[:3],
-        max_tokens=500,
-    ).token_count
+    three_record_budget = (
+        _assembler()
+        .assemble(
+            "question",
+            candidates[:3],
+            max_tokens=500,
+        )
+        .token_count
+    )
 
     pack = _assembler().assemble(
         "question",
@@ -248,11 +256,15 @@ def test_three_record_budget_jointly_covers_subquestions_and_documents() -> None
         _candidate(4, document=2, metadata={"subquestions": ["q2"]}),
         _candidate(5, document=3, metadata={"subquestions": ["q3"]}),
     ]
-    three_record_budget = _assembler().assemble(
-        "question",
-        [candidates[0], candidates[3], candidates[4]],
-        max_tokens=500,
-    ).token_count
+    three_record_budget = (
+        _assembler()
+        .assemble(
+            "question",
+            [candidates[0], candidates[3], candidates[4]],
+            max_tokens=500,
+        )
+        .token_count
+    )
 
     pack = _assembler().assemble(
         "question",
@@ -327,8 +339,7 @@ async def test_assembly_fit_checks_are_local_and_final_count_is_one_native_call(
         model="gemini-2.5-flash",
     )
     candidates = [
-        _candidate(index, document=index, content="candidate words " * 20)
-        for index in range(1, 11)
+        _candidate(index, document=index, content="candidate words " * 20) for index in range(1, 11)
     ]
 
     local_pack = assembler.assemble("question", candidates, max_tokens=4_000)

@@ -29,18 +29,6 @@ def _make_workflow():
     return MultiAgentWorkflow.__new__(MultiAgentWorkflow)
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 def test_process_message_agentic_disables_tools_when_force_final_response_flag_set():
     """RAG must disable tool binding when graph forwards rag_force_final_response."""
     agent = object.__new__(RAGAgent)
@@ -114,20 +102,6 @@ def test_process_message_agentic_disables_tools_when_force_final_response_flag_s
     assert response.message.content == "final answer"
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 @pytest.mark.asyncio
 async def test_rag_agent_preserves_current_assistant_tool_group_without_synthetic_human_text():
     agent = object.__new__(RAGAgent)
@@ -195,12 +169,6 @@ async def test_rag_agent_preserves_current_assistant_tool_group_without_syntheti
     assert isinstance(emitted[-2], AIMessage)
     assert isinstance(emitted[-1], ToolMessage)
     assert all("Previous Tool Results" not in str(item.content) for item in emitted)
-
-
-
-
-
-
 
 
 @pytest.mark.asyncio
@@ -396,22 +364,6 @@ def _grounded_workflow(*, final_text: str, regenerated_answer=None):
     workflow._get_conversation_history = history
     workflow._get_state_attachments = lambda _state: []
     return workflow, calls
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 @pytest.mark.asyncio

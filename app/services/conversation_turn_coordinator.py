@@ -180,9 +180,7 @@ class ConversationTurnCoordinator:
         return self._active.get(str(conversation_id), 0)
 
     @contextlib.asynccontextmanager
-    async def hold(
-        self, conversation_id: str | None, *, request_id: str
-    ) -> AsyncIterator[None]:
+    async def hold(self, conversation_id: str | None, *, request_id: str) -> AsyncIterator[None]:
         """Hold the conversation's turn lock for the body of the turn.
 
         A turn with no conversation takes no lock: it shares no history with

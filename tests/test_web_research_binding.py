@@ -39,9 +39,7 @@ def _bound_names(monkeypatch, agent_key: str) -> list[str]:
     agent = _BindingTestAgent(agent_config_key=agent_key)
     agent.tools = []
     agent.mcp_manager = None
-    monkeypatch.setattr(
-        "app.ai.agents.base_agent.should_use_deferred_loading", lambda _key: True
-    )
+    monkeypatch.setattr("app.ai.agents.base_agent.should_use_deferred_loading", lambda _key: True)
     monkeypatch.setattr(
         "app.ai.agents.base_agent.build_deferred_tool_list",
         lambda **kwargs: list(kwargs.get("internal_tools") or []),
@@ -73,9 +71,7 @@ def test_bound_web_research_has_no_usage_recorder_dependency(monkeypatch):
     agent = _BindingTestAgent(agent_config_key="search", recorder=object())
     agent.tools = []
     agent.mcp_manager = None
-    monkeypatch.setattr(
-        "app.ai.agents.base_agent.should_use_deferred_loading", lambda _key: True
-    )
+    monkeypatch.setattr("app.ai.agents.base_agent.should_use_deferred_loading", lambda _key: True)
     monkeypatch.setattr(
         "app.ai.agents.base_agent.build_deferred_tool_list",
         lambda **kwargs: list(kwargs.get("internal_tools") or []),

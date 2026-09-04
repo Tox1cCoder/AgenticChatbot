@@ -18,9 +18,7 @@ from app.core.container import get_container
 def test_offload_service_resolution_reuses_the_process_container(monkeypatch):
     from app.ai import tool_execution
 
-    monkeypatch.setattr(
-        tool_execution.settings, "tool_result_offload_enabled", True, raising=False
-    )
+    monkeypatch.setattr(tool_execution.settings, "tool_result_offload_enabled", True, raising=False)
 
     first = tool_execution._resolve_offload_service()
 

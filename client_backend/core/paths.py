@@ -201,11 +201,7 @@ def get_device_profile_subdir(
     safe_user_id = _validate_profile_component(user_id, "user_id")
     safe_device_id = _validate_profile_component(device_identifier, "device_identifier")
     safe_subdir = _validate_profile_component(subdir, "subdir")
-    path = (
-        get_profile_subdir(safe_user_id, "devices")
-        / safe_device_id
-        / safe_subdir
-    )
+    path = get_profile_subdir(safe_user_id, "devices") / safe_device_id / safe_subdir
     path.mkdir(parents=True, exist_ok=True)
     return path
 

@@ -232,9 +232,7 @@ def selected_image_file_parts_from_rich_items(
         elif item_type == "image_group":
             raw_cells = payload.get("items")
             sources = (
-                [c for c in raw_cells if isinstance(c, dict)]
-                if isinstance(raw_cells, list)
-                else []
+                [c for c in raw_cells if isinstance(c, dict)] if isinstance(raw_cells, list) else []
             )
         else:
             # Unknown/never-rendered types are skipped so a future item type

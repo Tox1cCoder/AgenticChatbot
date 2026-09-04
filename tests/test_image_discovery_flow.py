@@ -130,7 +130,7 @@ def test_later_high_confidence_candidate_wins_past_builder_cap(monkeypatch):
 
     monkeypatch.setattr(settings, "rich_image_candidate_max_count", 8)
     selected = select_brave_candidates(
-        _payload([*( ("medium", rank) for rank in range(1, 9)), ("high", 9)]),
+        _payload([*(("medium", rank) for rank in range(1, 9)), ("high", 9)]),
         image_query="T1 team photo",
     )
 
@@ -143,9 +143,7 @@ def test_figure_deduplicates_originals_before_choosing(monkeypatch):
     Here rank 1 and rank 2 share an original, so rank 1 is the one offered."""
     monkeypatch.setattr(image_discovery_flow.settings, "rich_auto_place_max_images", 2)
     payload = json.loads(_payload([("high", 1), ("high", 2), ("high", 3)]))
-    payload["images"][1]["original_image_url"] = payload["images"][0][
-        "original_image_url"
-    ]
+    payload["images"][1]["original_image_url"] = payload["images"][0]["original_image_url"]
 
     selected = select_brave_candidates(
         json.dumps(payload),
@@ -240,15 +238,11 @@ def test_a_query_sharing_nothing_with_any_title_keeps_provider_order():
 
 @pytest.mark.parametrize("confidence", ["low", "", "unknown"])
 def test_low_missing_and_unknown_confidence_are_rejected(confidence):
-    assert select_brave_candidates(
-        _payload([(confidence, 1)]), image_query="T1 team photo"
-    ) == []
+    assert select_brave_candidates(_payload([(confidence, 1)]), image_query="T1 team photo") == []
 
 
 def test_offensive_response_selects_nothing():
-    assert select_brave_candidates(
-        _payload([("high", 1)], offensive=True), image_query="art"
-    ) == []
+    assert select_brave_candidates(_payload([("high", 1)], offensive=True), image_query="art") == []
 
 
 def test_thumbnail_dimensions_do_not_trigger_source_minimum_rejection():

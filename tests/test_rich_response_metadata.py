@@ -74,9 +74,7 @@ def test_build_bot_metadata_strips_original_image_url_from_public_provenance():
         },
     }
     response = WorkflowResponse(
-        message=WorkflowResponseMessage(
-            content="See this.\n\n<!--rich:image:tool:c1:0-->"
-        ),
+        message=WorkflowResponseMessage(content="See this.\n\n<!--rich:image:tool:c1:0-->"),
         metadata={"_rich_item_candidates": [candidate]},
     )
 

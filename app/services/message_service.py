@@ -942,9 +942,7 @@ class MessageService(IMessageService):
         # Same turn lock as the streaming path: this entrypoint runs the same
         # snapshot-generate-persist sequence, so leaving it unlocked would let
         # a non-streamed turn race a streamed one in the same conversation.
-        async with self._hold_turn(
-            message_create_data.conversation_id, request_id=str(uuid4())
-        ):
+        async with self._hold_turn(message_create_data.conversation_id, request_id=str(uuid4())):
             return await self._create_message_holding_turn(message_create_data, user_id)
 
     async def _create_message_holding_turn(

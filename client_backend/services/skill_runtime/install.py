@@ -395,9 +395,7 @@ class SkillBundleInstaller:
         backup = install_root / f"{backup_basis}.backup-{uuid.uuid4().hex}"
         for path in (target, stage, backup):
             if not is_under_root(path, install_root):
-                raise SkillRuntimeError(
-                    UNSAFE_BUNDLE_PATH, "install path escapes the skills root"
-                )
+                raise SkillRuntimeError(UNSAFE_BUNDLE_PATH, "install path escapes the skills root")
 
         runtime_cleanup_deferred = False
         try:

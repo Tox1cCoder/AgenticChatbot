@@ -102,11 +102,7 @@ def _capture_canonical_ai_sdk_events(image_url: str):
         )
     assert resp.status_code == 200, resp.text
     raw = _parse_sse(resp.text)
-    upstream_events = [
-        p
-        for p in raw
-        if isinstance(p, dict) and p.get("type") != "heartbeat"
-    ]
+    upstream_events = [p for p in raw if isinstance(p, dict) and p.get("type") != "heartbeat"]
     return upstream_events, raw
 
 
@@ -137,11 +133,7 @@ def _capture_canonical_internal_events(image_url: str):
         )
     assert resp.status_code == 200, resp.text
     raw = _parse_sse(resp.text)
-    upstream_events = [
-        p
-        for p in raw
-        if isinstance(p, dict) and p.get("type") != "heartbeat"
-    ]
+    upstream_events = [p for p in raw if isinstance(p, dict) and p.get("type") != "heartbeat"]
     return upstream_events, raw
 
 

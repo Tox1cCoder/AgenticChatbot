@@ -113,13 +113,9 @@ class LocalMCPManager:
         configs = [
             config
             for config in self.store.list_effective_servers()
-            if config.enabled
-            and (server_names is None or config.name in server_names)
+            if config.enabled and (server_names is None or config.name in server_names)
         ]
-        self.servers = {
-            config.name: MCPServerRuntime(config)
-            for config in configs
-        }
+        self.servers = {config.name: MCPServerRuntime(config) for config in configs}
         server_config = self._build_server_config(configs)
         logger.info(
             "Initializing MCP manager for user=%s device=%s with %d enabled servers",
@@ -266,9 +262,7 @@ class LocalMCPManager:
         if runtime is None:
             raise ValueError(f"MCP server not found: {server_name}")
         if not runtime.is_running():
-            raise RuntimeError(
-                runtime.error_message or f"MCP server {server_name} is not running"
-            )
+            raise RuntimeError(runtime.error_message or f"MCP server {server_name} is not running")
 
         try:
             return await self._call_tool_once(

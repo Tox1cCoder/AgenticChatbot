@@ -428,8 +428,7 @@ def test_ai_sdk_rich_history_uses_image_rich_item_without_file_part():
 
 def test_ai_sdk_history_fails_closed_on_malformed_private_image_metadata():
     unsafe_output = (
-        '{"images":[{"original_image_url":'
-        '"https://private-origin.example/full.jpg?token=secret"'
+        '{"images":[{"original_image_url":"https://private-origin.example/full.jpg?token=secret"'
     )
     assistant_msg = SimpleNamespace(
         id=uuid4(),

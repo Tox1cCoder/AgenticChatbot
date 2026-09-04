@@ -19,9 +19,7 @@ import httpx
 from PIL import Image, UnidentifiedImageError
 
 WEB_IMAGE_URL_PREFIX = "/web-images/"
-ALLOWED_WEB_IMAGE_MIME_TYPES = frozenset(
-    {"image/png", "image/jpeg", "image/webp", "image/gif"}
-)
+ALLOWED_WEB_IMAGE_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/webp", "image/gif"})
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _MIME_BY_FORMAT = {
     "PNG": "image/png",
@@ -225,19 +223,22 @@ class WebImageService:
             pool=self.connect_timeout_seconds,
         )
         try:
-            async with httpx.AsyncClient(
-                transport=transport,
-                timeout=timeout,
-                follow_redirects=False,
-                trust_env=False,
-            ) as client, client.stream(
-                "GET",
-                url,
-                headers={
-                    "Accept": "image/png,image/jpeg,image/webp,image/gif",
-                    "User-Agent": "sample-chatbot-image-fetch/1.0",
-                },
-            ) as response:
+            async with (
+                httpx.AsyncClient(
+                    transport=transport,
+                    timeout=timeout,
+                    follow_redirects=False,
+                    trust_env=False,
+                ) as client,
+                client.stream(
+                    "GET",
+                    url,
+                    headers={
+                        "Accept": "image/png,image/jpeg,image/webp,image/gif",
+                        "User-Agent": "sample-chatbot-image-fetch/1.0",
+                    },
+                ) as response,
+            ):
                 if response.status_code in _REDIRECT_STATUSES:
                     location = response.headers.get("Location")
                     if not location:

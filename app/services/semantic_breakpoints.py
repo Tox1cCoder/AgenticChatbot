@@ -33,9 +33,7 @@ def cosine(left: Sequence[float], right: Sequence[float]) -> float:
     right_norm = math.sqrt(sum(value * value for value in right))
     if left_norm == 0.0 or right_norm == 0.0:
         return 1.0
-    return sum(a * b for a, b in zip(left, right, strict=True)) / (
-        left_norm * right_norm
-    )
+    return sum(a * b for a, b in zip(left, right, strict=True)) / (left_norm * right_norm)
 
 
 def percentile(values: Sequence[float], rank: float) -> float:
@@ -73,9 +71,7 @@ class EmbeddingSemanticBoundaryDetector:
             return frozenset()
         vectors = self.embedding_service.embed_documents([block.text for block in blocks])
         if len(vectors) != len(blocks):
-            raise ValueError(
-                "semantic embedding count does not match normalized block count"
-            )
+            raise ValueError("semantic embedding count does not match normalized block count")
         distances = [1.0 - cosine(left, right) for left, right in pairwise(vectors)]
         # Zero distance represents no semantic change and is ineligible both
         # for percentile selection and for emitting a breakpoint. Including a

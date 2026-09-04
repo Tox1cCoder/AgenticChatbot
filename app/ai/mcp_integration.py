@@ -52,6 +52,7 @@ def compute_catalog_version(descriptors: list[dict[str, Any]]) -> str:
     digest = hashlib.sha256(json.dumps(canonical, sort_keys=True).encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
 
+
 if TYPE_CHECKING:
     pass
 
@@ -555,9 +556,7 @@ class MCPManager:
         # Notify registry of configuration change
         self._notify_registry_change()
 
-    async def list_tool_descriptors(
-        self, server_name: str | None = None
-    ) -> list[dict[str, Any]]:
+    async def list_tool_descriptors(self, server_name: str | None = None) -> list[dict[str, Any]]:
         """Return sanitized tool descriptors, scoped to one server when given.
 
         A scoped request loads ONLY that server's tools (via ``get_server_tools``)

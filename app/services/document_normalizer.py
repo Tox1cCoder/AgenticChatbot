@@ -146,9 +146,7 @@ class DocumentNormalizer:
                 img_path = str(entry.get("img_path", "") or "")
                 caption = self._as_list(entry.get("image_caption"))
                 footnote = self._as_list(entry.get("image_footnote"))
-                metadata.update(
-                    {"img_path": img_path, "caption": caption, "footnote": footnote}
-                )
+                metadata.update({"img_path": img_path, "caption": caption, "footnote": footnote})
                 matched_image = self._match_image(img_path, parser_page_idx, image_entries)
                 if matched_image:
                     metadata.update(matched_image)

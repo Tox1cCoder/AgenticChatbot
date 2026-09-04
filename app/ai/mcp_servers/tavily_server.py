@@ -54,9 +54,7 @@ def _sanitize_error_message(message: Any) -> str:
 
     cleaned = str(message or "Tavily request failed.")[:2000]
     cleaned = _ERROR_URL_RE.sub("[redacted-url]", cleaned)
-    cleaned = _ERROR_SECRET_RE.sub(
-        lambda match: f"{match.group(1)}=[redacted]", cleaned
-    )
+    cleaned = _ERROR_SECRET_RE.sub(lambda match: f"{match.group(1)}=[redacted]", cleaned)
     return cleaned.strip()[:_ERROR_MESSAGE_MAX_LENGTH]
 
 
@@ -444,9 +442,7 @@ def tavily_map(
         response = client.map(**params)
     except Exception as exc:
         error_code, retryable = _classify_tavily_error(exc)
-        return _error(
-            f"Tavily map {error_code}.", operation=operation, retryable=retryable
-        )
+        return _error(f"Tavily map {error_code}.", operation=operation, retryable=retryable)
     return _json(_normalize_site_response(operation=operation, response=response))
 
 

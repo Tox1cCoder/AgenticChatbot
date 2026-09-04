@@ -212,9 +212,7 @@ def test_retired_points_cannot_starve_active_generation_from_dense_limit():
         )
         allowed = set(generation_match.any)
         filtered = [
-            point
-            for point in provider_points
-            if point.payload["index_generation"] in allowed
+            point for point in provider_points if point.payload["index_generation"] in allowed
         ]
         return SimpleNamespace(points=filtered[: kwargs["limit"]])
 
@@ -339,9 +337,7 @@ def test_retrieval_candidate_carries_production_block_provenance() -> None:
         final_limit=1,
     )
 
-    assert results[0].metadata["block_provenance"] == [
-        {"kind": "equation", "block_index": 3}
-    ]
+    assert results[0].metadata["block_provenance"] == [{"kind": "equation", "block_index": 3}]
 
 
 def test_dense_only_rollback_path_remains_typed_and_authorized():
@@ -377,8 +373,7 @@ def test_active_generation_fingerprint_sorts_uuid_strings_before_hashing():
         UUID("00000000-0000-0000-0000-000000000001"),
     ]
     expected = hashlib.sha256(
-        b"00000000-0000-0000-0000-000000000001\n"
-        b"00000000-0000-0000-0000-000000000002"
+        b"00000000-0000-0000-0000-000000000001\n00000000-0000-0000-0000-000000000002"
     ).hexdigest()
 
     assert active_generation_fingerprint(generation_ids) == expected
@@ -400,8 +395,7 @@ def test_search_records_active_generation_fingerprint_and_experiment_inputs():
 
     assert retriever.last_trace == {
         "active_generation_fingerprint": hashlib.sha256(
-            b"00000000-0000-0000-0000-000000000001\n"
-            b"00000000-0000-0000-0000-000000000002"
+            b"00000000-0000-0000-0000-000000000001\n00000000-0000-0000-0000-000000000002"
         ).hexdigest(),
         "dense_candidate_limit": 11,
         "lexical_candidate_limit": 13,
@@ -421,14 +415,10 @@ def test_server_resolved_fingerprint_is_used_without_requerying_generations():
         RetrievalScope(user_id=str(uuid4()), conversation_id=uuid4()),
         final_limit=5,
         generation_fingerprint="server-owned-fingerprint",
-        active_generation_ids=[
-            UUID("00000000-0000-0000-0000-000000000001")
-        ],
+        active_generation_ids=[UUID("00000000-0000-0000-0000-000000000001")],
     )
 
-    assert retriever.last_trace["active_generation_fingerprint"] == (
-        "server-owned-fingerprint"
-    )
+    assert retriever.last_trace["active_generation_fingerprint"] == ("server-owned-fingerprint")
     repository.get_active_generation_ids_for_scope.assert_not_called()
 
 
@@ -887,9 +877,7 @@ def test_sql_hydration_failure_still_records_duration_and_failure_metric():
     from app.services.rag_retrieval import RetrievalScope
 
     chunk_id = uuid4()
-    retriever, _, _, repository = _retriever(
-        hybrid_enabled=False, points=[_point(chunk_id, 0.5)]
-    )
+    retriever, _, _, repository = _retriever(hybrid_enabled=False, points=[_point(chunk_id, 0.5)])
     repository.get_active_by_ids_for_scope.side_effect = RuntimeError("db is down")
     fake_metrics = _FakeStageMetrics()
     retriever.metrics = fake_metrics

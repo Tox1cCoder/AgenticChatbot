@@ -79,6 +79,7 @@ RETRYABLE_CODES = frozenset(
     {SKILL_INSTALL_LOCKED, "SKILL_STORAGE_INSUFFICIENT", SKILL_SETUP_FAILED}
 )
 
+
 def status_for(code: str) -> int:
     """Return the documented status for ``code``, defaulting to 400."""
     return SKILL_ERROR_STATUS.get(code, status.HTTP_400_BAD_REQUEST)

@@ -26,9 +26,7 @@ def test_relative_reference_resolved_to_data_uri(monkeypatch):
         return "data:image/png;base64,QUJD"
 
     monkeypatch.setattr(demo, "_fetch_protected_image_data_uri", fake_fetch)
-    out = demo._normalize_image_for_gallery(
-        {"url": "/chat-images/abc", "name": "shot"}, "img"
-    )
+    out = demo._normalize_image_for_gallery({"url": "/chat-images/abc", "name": "shot"}, "img")
     assert out == {"src": "data:image/png;base64,QUJD", "name": "shot"}
     assert seen == {"url": "/chat-images/abc", "token": "tok"}
 
@@ -66,9 +64,7 @@ def test_protected_fetch_rejects_non_image_content_type(monkeypatch):
 
 def test_b64_data_field_supported(monkeypatch):
     _patch_st(monkeypatch)
-    out = demo._normalize_image_for_gallery(
-        {"b64_data": "QUJD", "mime_type": "image/webp"}, "img"
-    )
+    out = demo._normalize_image_for_gallery({"b64_data": "QUJD", "mime_type": "image/webp"}, "img")
     assert out == {"src": "data:image/webp;base64,QUJD", "name": "img"}
 
 

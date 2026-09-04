@@ -45,18 +45,6 @@ def _ok(content: str = "ok") -> AgentResponse:
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 def _planning_tool_state(
     *,
     planning_call_count: int,
@@ -83,14 +71,6 @@ def _planning_tool_state(
         ],
         "context": {},
     }
-
-
-
-
-
-
-
-
 
 
 def test_finalized_response_ignores_empty_tool_call_response():
@@ -162,33 +142,9 @@ def test_attach_planning_state_metadata_includes_subagent_activity():
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Sequential tool execution regression (deferred tool search)
 # ---------------------------------------------------------------------------
-
-
-
-
-
-
 
 
 @pytest.mark.asyncio
@@ -241,27 +197,9 @@ async def test_execute_tool_calls_remains_sequential_for_dependent_tools(monkeyp
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Phase 10 — Per-subagent model assignment
 # ---------------------------------------------------------------------------
-
-
-
-
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -305,8 +243,6 @@ def test_delegated_agent_messages_strip_handoff_control_messages():
     delegated = workflow._messages_for_active_agent(state, "search_agent", messages)
 
     assert delegated == [messages[0]]
-
-
 
 
 def test_apply_hand_off_records_control_metadata():
@@ -361,8 +297,6 @@ def test_delegated_agent_messages_passthrough_when_no_active_handoff():
     delegated = workflow._messages_for_active_agent(state, "search_agent", messages)
 
     assert delegated == messages[2:]
-
-
 
 
 def test_worker_loop_uses_tool_error_limit_from_settings(monkeypatch):

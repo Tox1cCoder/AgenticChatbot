@@ -576,7 +576,6 @@ class _OverflowlessFailingModel:
         raise RuntimeError("provider unavailable")
 
 
-
 def _gemini_runtime_with_limit(max_input_tokens: int) -> ResolvedRuntimeModelConfig:
     return ResolvedRuntimeModelConfig(
         agent_key="chat",

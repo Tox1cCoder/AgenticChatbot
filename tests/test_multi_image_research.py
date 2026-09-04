@@ -106,9 +106,10 @@ async def test_two_distinct_subjects_yield_two_distinct_images():
     tavily, brave = _Tavily(), _Brave()
     tool = create_web_research_tool(tavily_tool=tavily, brave_tool=brave)
 
-    with tool_execution_context(
-        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="chat"
-    ), selected_image_sink() as sink:
+    with (
+        tool_execution_context(conversation_id=CONVERSATION_ID, user_id="u1", agent_key="chat"),
+        selected_image_sink() as sink,
+    ):
         await tool.ainvoke({"query": "pokemon unite", "image_query": "Pokemon Unite logo"})
         await tool.ainvoke(
             {"query": "pokemon unite", "image_query": "Pokemon Unite gameplay screenshot"}
@@ -127,9 +128,10 @@ async def test_a_second_picture_does_not_buy_a_second_web_search():
     tavily, brave = _Tavily(), _Brave()
     tool = create_web_research_tool(tavily_tool=tavily, brave_tool=brave)
 
-    with tool_execution_context(
-        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="chat"
-    ), selected_image_sink():
+    with (
+        tool_execution_context(conversation_id=CONVERSATION_ID, user_id="u1", agent_key="chat"),
+        selected_image_sink(),
+    ):
         await tool.ainvoke({"query": "pokemon unite", "image_query": "Pokemon Unite logo"})
         await tool.ainvoke(
             {"query": "pokemon unite", "image_query": "Pokemon Unite gameplay screenshot"}
@@ -144,9 +146,10 @@ async def test_asking_twice_for_the_same_subject_searches_once():
     tavily, brave = _Tavily(), _Brave()
     tool = create_web_research_tool(tavily_tool=tavily, brave_tool=brave)
 
-    with tool_execution_context(
-        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="chat"
-    ), selected_image_sink():
+    with (
+        tool_execution_context(conversation_id=CONVERSATION_ID, user_id="u1", agent_key="chat"),
+        selected_image_sink(),
+    ):
         await tool.ainvoke({"query": "pokemon unite", "image_query": "Pokemon Unite logo"})
         await tool.ainvoke({"query": "pokemon unite", "image_query": "Pokemon Unite logo"})
 

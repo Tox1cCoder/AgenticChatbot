@@ -43,11 +43,7 @@ class MCPSecretStore:
             )
         else:
             directory = (
-                Path(profile_root)
-                / scope.user_id
-                / "devices"
-                / scope.device_identifier
-                / "mcp"
+                Path(profile_root) / scope.user_id / "devices" / scope.device_identifier / "mcp"
             )
             directory.mkdir(parents=True, exist_ok=True)
         self.path = directory / "credentials.json"
@@ -56,9 +52,7 @@ class MCPSecretStore:
         values = self._read().get(self._validate_server_name(server_name), {})
         return MCPServerCredentials(
             env={str(key): str(value) for key, value in (values.get("env") or {}).items()},
-            headers={
-                str(key): str(value) for key, value in (values.get("headers") or {}).items()
-            },
+            headers={str(key): str(value) for key, value in (values.get("headers") or {}).items()},
         )
 
     def list_for_server(self, server_name: str) -> dict[str, list[str]]:
@@ -134,9 +128,7 @@ class MCPSecretStore:
 
     def _write(self, bindings: dict[str, dict[str, dict[str, str]]]) -> None:
         payload = {"version": _STORAGE_VERSION, "servers": bindings}
-        envelope = encrypt_local_secret(
-            json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        )
+        envelope = encrypt_local_secret(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
         temporary = self.path.with_name(f".{self.path.name}.{uuid4().hex}.tmp")
         try:
             temporary.write_text(json.dumps(envelope), encoding="utf-8")

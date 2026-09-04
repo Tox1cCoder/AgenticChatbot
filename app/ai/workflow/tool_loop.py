@@ -187,7 +187,6 @@ class ToolLoopMixin:
             normalized_calls, policy=policy, tool_map=tool_map, mcp_manager=mcp_manager
         )
 
-
     async def _prepare_interrupt_payload(
         self,
         state: GraphState,

@@ -120,9 +120,7 @@ def _validate_image_url(url: str | None) -> None:
     _validate_url_scheme(url)
 
 
-def _validate_image_mime_and_urls(
-    mime_type: str, url: str | None, source_url: str | None
-) -> None:
+def _validate_image_mime_and_urls(mime_type: str, url: str | None, source_url: str | None) -> None:
     """Shared mime-type/URL validation for ``ImagePayload`` and
     ``ImageGroupCell``. Both models accept the same image mime categories and
     validate ``url``/``source_url`` the same way; keep that logic in one
@@ -298,9 +296,7 @@ RichItem = Annotated[
 ]
 
 _RICH_ITEM_ADAPTER = TypeAdapter(RichItem)
-_PUBLIC_RICH_PROVENANCE_OMIT_KEYS = frozenset(
-    {"original_image_url", "original_image_digests"}
-)
+_PUBLIC_RICH_PROVENANCE_OMIT_KEYS = frozenset({"original_image_url", "original_image_digests"})
 _PRIVATE_IMAGE_URL_KEY = "original_image_url"
 _PRIVATE_IMAGE_REDACTION = "[private image metadata redacted]"
 
@@ -358,10 +354,7 @@ def sanitize_public_image_fields(
             )
         return sanitized
     if isinstance(value, list):
-        return [
-            sanitize_public_image_fields(item, _private_urls=private_urls)
-            for item in value
-        ]
+        return [sanitize_public_image_fields(item, _private_urls=private_urls) for item in value]
     if not isinstance(value, str):
         return value
     if _PRIVATE_IMAGE_URL_KEY in value:

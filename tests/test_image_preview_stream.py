@@ -159,9 +159,7 @@ def test_resume_repersist_reuses_ownership_row_across_runs(tmp_path):
     a fresh instance whose per-instance idempotency cache is empty, so dedup has
     to hold at the storage row level (cross-run idempotency, FR-IMG-008)."""
     repo = _InMemoryChatImageRepo()
-    storage = ChatImageStorageService(
-        repo, storage_root=str(tmp_path / "imgs"), max_bytes=10_000
-    )
+    storage = ChatImageStorageService(repo, storage_root=str(tmp_path / "imgs"), max_bytes=10_000)
     conversation_id = uuid4()
     user_id = uuid4()
     run_id = str(conversation_id)
@@ -202,7 +200,9 @@ def test_persist_final_emits_v2_reference_event_by_reference():
         # publish one small partial first so the final reference seq follows it
         service.publish_partial(image_index=0, mime="image/png", data_b64="QUJD", seq=1)
         descriptor = service.persist_final(
-            image_index=0, mime="image/png", data_b64="QUJDRA"  # oversized for the inline cap
+            image_index=0,
+            mime="image/png",
+            data_b64="QUJDRA",  # oversized for the inline cap
         )
 
     assert descriptor is not None
@@ -475,7 +475,7 @@ def test_graph_emitter_disabled_by_flag_or_outside_a_run(monkeypatch):
     from app.ai.graph import MultiAgentWorkflow
     from app.core.config import settings
 
-    monkeypatch.setattr("app.ai.graph._graph_stream_writer", lambda: (lambda _e: None))
+    monkeypatch.setattr("app.ai.graph._graph_stream_writer", lambda: lambda _e: None)
     monkeypatch.setattr(settings, "enable_image_streaming", False)
     assert MultiAgentWorkflow._build_image_preview_emitter(None, {}) is None
 
@@ -543,9 +543,7 @@ async def test_ai_sdk_v6_terminal_file_part_preserves_protected_reference_CHARAC
             data={
                 "message": {
                     "id": "m-1",
-                    "message_metadata": {
-                        "images": [{"url": protected_url, "mime": "image/png"}]
-                    },
+                    "message_metadata": {"images": [{"url": protected_url, "mime": "image/png"}]},
                 }
             },
         )

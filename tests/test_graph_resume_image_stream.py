@@ -187,9 +187,7 @@ def _build_workflow(*, store: _RecordingStore, checkpoint_values: dict):
         monkeypatch_writer = _graph_module._graph_stream_writer
         _graph_module._graph_stream_writer = lambda: written.append
         try:
-            outcome = await workflow.invoke_specialist_subgraph(
-                "image_generator_agent", node_state
-            )
+            outcome = await workflow.invoke_specialist_subgraph("image_generator_agent", node_state)
         finally:
             _graph_module._graph_stream_writer = monkeypatch_writer
         response = outcome.response

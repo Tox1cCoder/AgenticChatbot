@@ -131,9 +131,7 @@ async def test_trace_shaped_parallel_search_selects_brave_without_legacy_gallery
     ToolLoopMixin._lift_rich_candidates(context, artifacts)
 
     assert legacy_images == []
-    assert context["rich_item_candidates"][0]["id"] == (
-        "imagegroup:tool:call-brave"
-    )
+    assert context["rich_item_candidates"][0]["id"] == ("imagegroup:tool:call-brave")
 
     answer = (
         "The T1 roster combined Faker with Zeus, Oner, Gumayusi, and Keria "
@@ -216,9 +214,7 @@ async def test_brave_selection_persists_one_protected_visual_and_projects_once(m
     image = stored_metadata["rich_items"][0]
     protected_url = f"/web-images/{reference_id}"
     assert image["payload"]["url"] == protected_url
-    assert image["payload"]["source_url"] == (
-        "https://publisher.example/sagrada-familia"
-    )
+    assert image["payload"]["source_url"] == ("https://publisher.example/sagrada-familia")
     web_images.fetch.assert_not_called()
 
     persisted = attach_image_parts_to_message(

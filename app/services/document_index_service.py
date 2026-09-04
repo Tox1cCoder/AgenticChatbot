@@ -177,9 +177,7 @@ class DocumentIndexService:
             raise ValueError("document indexing requires at least one chunk")
         self.ensure_collection()
         if not self._payload_indexes_ready:
-            raise RuntimeError(
-                "Qdrant payload indexes are unavailable; refusing document upsert"
-            )
+            raise RuntimeError("Qdrant payload indexes are unavailable; refusing document upsert")
         document_id = self._coerce_uuid(document.id)
         generation = self.generation_repository.create(
             document_id=document_id,
@@ -228,9 +226,7 @@ class DocumentIndexService:
                 try:
                     self.generation_repository.activate(generation.id)
                 except Exception as activation_error:
-                    confirmed = self._confirm_active_generation(
-                        document_id, generation.id
-                    )
+                    confirmed = self._confirm_active_generation(document_id, generation.id)
                     if confirmed is True:
                         logger.warning(
                             "Generation %s activation commit was confirmed after error: %s",
@@ -239,9 +235,7 @@ class DocumentIndexService:
                         )
                     elif confirmed is False:
                         try:
-                            self._set_generation_active(
-                                document_id, generation.id, False
-                            )
+                            self._set_generation_active(document_id, generation.id, False)
                         except Exception:
                             logger.exception(
                                 "Failed to restore generation %s Qdrant payloads",
@@ -267,9 +261,7 @@ class DocumentIndexService:
                             getattr(chunk, "id", None),
                         )
                 try:
-                    self.generation_repository.mark_failed(
-                        generation.id, self._failure_code(exc)
-                    )
+                    self.generation_repository.mark_failed(generation.id, self._failure_code(exc))
                 except Exception:
                     logger.exception("Failed to mark generation %s failed", generation.id)
             raise
@@ -336,15 +328,11 @@ class DocumentIndexService:
             and any(token in message for token in ("unknown", "unsupported", "extra"))
         )
 
-    def _confirm_active_generation(
-        self, document_id: UUID, generation_id: UUID
-    ) -> bool | None:
+    def _confirm_active_generation(self, document_id: UUID, generation_id: UUID) -> bool | None:
         try:
             active = self.generation_repository.get_active(document_id)
         except Exception:
-            logger.exception(
-                "Could not confirm activation state for generation %s", generation_id
-            )
+            logger.exception("Could not confirm activation state for generation %s", generation_id)
             return None
         return active is not None and active.id == generation_id
 
@@ -353,9 +341,7 @@ class DocumentIndexService:
         self._delete_points_for_document(document_id)
         self.chunk_repository.delete_by_document(document_id)
 
-    def reindex_document(
-        self, document_id: UUID, *, activate: bool = True
-    ) -> list[DocumentChunk]:
+    def reindex_document(self, document_id: UUID, *, activate: bool = True) -> list[DocumentChunk]:
         document_id = self._coerce_uuid(document_id)
         chunks = self.chunk_repository.get_by_document_ordered(document_id)
         if not chunks:
@@ -721,9 +707,7 @@ class DocumentIndexService:
         if not image_rows:
             return []
         if self.document_image_repository is None:
-            raise ValueError(
-                "document_image_repository is required to index image_rows"
-            )
+            raise ValueError("document_image_repository is required to index image_rows")
         if not self.multimodal_image_embeddings_enabled:
             return []
 
@@ -770,9 +754,7 @@ class DocumentIndexService:
         if not image_rows:
             return
         if self.document_image_repository is None:
-            raise ValueError(
-                "document_image_repository is required to index image_rows"
-            )
+            raise ValueError("document_image_repository is required to index image_rows")
         for image in image_rows:
             matched_chunk_id = self._chunk_id_for_image_page(
                 getattr(image, "page_number", None), persisted_chunks
@@ -933,7 +915,7 @@ class DocumentIndexService:
                         FieldCondition(
                             key="index_generation",
                             match=MatchValue(value=str(generation_id)),
-                        )
+                        ),
                     ]
                 )
             ),
@@ -986,11 +968,7 @@ class DocumentIndexService:
 
         document_filter = FilterSelector(
             filter=Filter(
-                must=[
-                    FieldCondition(
-                        key="document_id", match=MatchValue(value=str(document_id))
-                    )
-                ]
+                must=[FieldCondition(key="document_id", match=MatchValue(value=str(document_id)))]
             )
         )
         self.qdrant_client.set_payload(
@@ -1000,15 +978,11 @@ class DocumentIndexService:
             wait=True,
         )
 
-    def purge_retired_generations(
-        self, document_id: UUID, older_than: datetime
-    ) -> list[UUID]:
+    def purge_retired_generations(self, document_id: UUID, older_than: datetime) -> list[UUID]:
         """Delete retired SQL/Qdrant generations after a caller-chosen rollback window."""
         document_id = self._coerce_uuid(document_id)
         purged: list[UUID] = []
-        for generation in self.generation_repository.purgeable_before(
-            document_id, older_than
-        ):
+        for generation in self.generation_repository.purgeable_before(document_id, older_than):
             self.qdrant_client.delete(
                 collection_name=self.collection_name,
                 points_selector=FilterSelector(

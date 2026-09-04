@@ -26,12 +26,8 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     op.add_column("web_image_references", sa.Column("content", sa.LargeBinary(), nullable=True))
-    op.add_column(
-        "web_image_references", sa.Column("cached_width", sa.Integer(), nullable=True)
-    )
-    op.add_column(
-        "web_image_references", sa.Column("cached_height", sa.Integer(), nullable=True)
-    )
+    op.add_column("web_image_references", sa.Column("cached_width", sa.Integer(), nullable=True))
+    op.add_column("web_image_references", sa.Column("cached_height", sa.Integer(), nullable=True))
 
 
 def downgrade() -> None:

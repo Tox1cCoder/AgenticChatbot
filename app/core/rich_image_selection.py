@@ -24,9 +24,7 @@ _BASE64_DATA_PATTERN = re.compile(
 _IMAGE_PAYLOAD_KEYS = frozenset(
     {"url", "data", "mime_type", "source_url", "description", "width", "height", "caption"}
 )
-_GROUP_CELL_KEYS = frozenset(
-    {"url", "mime_type", "source_url", "description", "width", "height"}
-)
+_GROUP_CELL_KEYS = frozenset({"url", "mime_type", "source_url", "description", "width", "height"})
 _JUNK_IMAGE_URL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"favicon", re.IGNORECASE),
     re.compile(r"sprite", re.IGNORECASE),
@@ -158,9 +156,7 @@ def _payload_is_eligible(
     if require_remote_url and has_url:
         if image_url_scheme(url) != "https" or is_junk_image_url(url):
             return False
-    elif (require_remote_url and not has_data) or (
-        has_url and not _is_allowed_image_url(url)
-    ):
+    elif (require_remote_url and not has_data) or (has_url and not _is_allowed_image_url(url)):
         return False
     if not require_remote_url:
         return True
@@ -228,15 +224,10 @@ def _rank_key(
     provenance = _mapping(candidate.get("provenance"))
     raw_result_rank = provenance.get("result_rank")
     result_rank = (
-        raw_result_rank
-        if isinstance(raw_result_rank, int) and raw_result_rank >= 0
-        else 1_000_000
+        raw_result_rank if isinstance(raw_result_rank, int) and raw_result_rank >= 0 else 1_000_000
     )
     provider = str(provenance.get("provider") or "").strip().lower()
-    if (
-        str(candidate.get("source") or "") == "image_search"
-        and provider.startswith("brave")
-    ):
+    if str(candidate.get("source") or "") == "image_search" and provider.startswith("brave"):
         return (
             99 if intent is None else intent,
             result_rank,
@@ -275,9 +266,7 @@ def _normalize_candidate(
     policy: ImageSelectionPolicy,
     seen_locators: set[str],
 ) -> dict[str, Any] | None:
-    require_remote_url = (
-        str(candidate.get("source") or "") in _REMOTE_DISCOVERY_SOURCES
-    )
+    require_remote_url = str(candidate.get("source") or "") in _REMOTE_DISCOVERY_SOURCES
     provenance = _mapping(candidate.get("provenance"))
     payload = _mapping(candidate.get("payload"))
     if candidate.get("type") != "image_group":

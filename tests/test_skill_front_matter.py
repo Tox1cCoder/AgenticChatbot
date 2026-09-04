@@ -44,7 +44,7 @@ def test_duplicate_declarations_collapse():
 
 
 def test_quoted_names_are_unwrapped():
-    assert parse_declared_secrets('"TOKEN", \'OTHER\'') == ["TOKEN", "OTHER"]
+    assert parse_declared_secrets("\"TOKEN\", 'OTHER'") == ["TOKEN", "OTHER"]
 
 
 def test_declaration_count_is_capped():

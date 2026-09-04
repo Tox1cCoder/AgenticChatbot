@@ -291,9 +291,7 @@ def test_start_skill_install_omits_replace_hash_for_a_new_install(demo_module, m
         ("cancel_skill_installation", ("op?x=1",), "/skills/installations/op%3Fx%3D1"),
     ],
 )
-def test_operation_helpers_url_encode_identifiers(
-    demo_module, monkeypatch, helper, args, expected
-):
+def test_operation_helpers_url_encode_identifiers(demo_module, monkeypatch, helper, args, expected):
     session = _RecordingSession(_Response(200, {"success": True, "data": {}}))
     monkeypatch.setattr(demo_module, "get_http_session", lambda: session)
 
@@ -370,8 +368,9 @@ def test_every_declared_session_key_is_cleared(demo_module):
 
     demo_module._clear_skill_installation_session_state()
 
-    assert not [key for key in demo_module.SKILL_INSTALL_SESSION_KEYS
-                if key in demo_module.st.session_state]
+    assert not [
+        key for key in demo_module.SKILL_INSTALL_SESSION_KEYS if key in demo_module.st.session_state
+    ]
 
 
 def test_json_requests_still_bump_the_cache_version(demo_module, monkeypatch):

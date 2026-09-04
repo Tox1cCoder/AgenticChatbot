@@ -90,9 +90,7 @@ def test_store_is_idempotent_per_user_and_content(tmp_path):
     """Re-storing identical content for the same user reuses the existing
     ownership row instead of inserting a duplicate (resume re-persist parity)."""
     repo = _Repo()
-    svc = ChatImageStorageService(
-        repo, storage_root=str(tmp_path / "chat_images"), max_bytes=1024
-    )
+    svc = ChatImageStorageService(repo, storage_root=str(tmp_path / "chat_images"), max_bytes=1024)
     raw = b"\x89PNG\r\n\x1a\n" + b"z" * 32
     b64 = base64.b64encode(raw).decode()
     conv, user = uuid4(), uuid4()
@@ -109,9 +107,7 @@ def test_store_separate_users_keep_distinct_rows(tmp_path):
     """Dedup is scoped to the owner: two users storing identical content each
     keep their own ownership row."""
     repo = _Repo()
-    svc = ChatImageStorageService(
-        repo, storage_root=str(tmp_path / "chat_images"), max_bytes=1024
-    )
+    svc = ChatImageStorageService(repo, storage_root=str(tmp_path / "chat_images"), max_bytes=1024)
     raw = b"\x89PNG\r\n\x1a\n" + b"q" * 32
     b64 = base64.b64encode(raw).decode()
     conv = uuid4()

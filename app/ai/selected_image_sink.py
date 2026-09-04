@@ -12,9 +12,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
-_sink: ContextVar[list[dict[str, Any]] | None] = ContextVar(
-    "selected_image_sink", default=None
-)
+_sink: ContextVar[list[dict[str, Any]] | None] = ContextVar("selected_image_sink", default=None)
 
 
 @contextmanager

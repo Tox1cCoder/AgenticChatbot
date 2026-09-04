@@ -115,9 +115,7 @@ def test_a_distinct_image_subject_gets_its_own_search():
     """One image search per turn meant every picture in an answer came from one
     query, so an answer needing an official logo *and* a gameplay shot could
     only ever get two renderings of whichever one was asked for."""
-    budget = ResearchBudget(
-        max_search_calls=2, near_duplicate_threshold=0.75, max_image_searches=3
-    )
+    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75, max_image_searches=3)
 
     assert budget.reserve_image_search("Pokemon Unite logo") is True
     budget.record_image_search([{"id": "image:logo"}])
@@ -130,18 +128,14 @@ def test_a_distinct_image_subject_gets_its_own_search():
 
 def test_a_repeated_image_subject_is_refused():
     """Asking twice for the same subject is how duplicates come back."""
-    budget = ResearchBudget(
-        max_search_calls=2, near_duplicate_threshold=0.75, max_image_searches=3
-    )
+    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75, max_image_searches=3)
 
     assert budget.reserve_image_search("Pokemon Unite gameplay") is True
     assert budget.reserve_image_search("Pokemon Unite gameplay") is False
 
 
 def test_the_image_search_cap_bounds_the_turn():
-    budget = ResearchBudget(
-        max_search_calls=2, near_duplicate_threshold=0.75, max_image_searches=2
-    )
+    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75, max_image_searches=2)
 
     assert budget.reserve_image_search("first subject") is True
     assert budget.reserve_image_search("second subject") is True
@@ -152,9 +146,7 @@ def test_the_image_search_cap_bounds_the_turn():
 def test_a_failed_image_search_does_not_buy_a_retry():
     """Matching reserve_search: a reservation is consumed on claim, so a
     provider failure cannot be retried into the same slot."""
-    budget = ResearchBudget(
-        max_search_calls=2, near_duplicate_threshold=0.75, max_image_searches=1
-    )
+    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75, max_image_searches=1)
 
     assert budget.reserve_image_search("subject") is True
     assert budget.reserve_image_search("different subject") is False

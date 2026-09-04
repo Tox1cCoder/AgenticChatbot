@@ -68,9 +68,7 @@ def _service(storage, *, preview_enabled=False, preview_cap=100):
         storage=storage,
         conversation_id=uuid4(),
         user_id=uuid4(),
-        preview_publisher=ImagePreviewPublisher(
-            enabled=preview_enabled, max_b64_chars=preview_cap
-        ),
+        preview_publisher=ImagePreviewPublisher(enabled=preview_enabled, max_b64_chars=preview_cap),
     )
 
 
@@ -130,12 +128,8 @@ def test_persist_final_stores_distinct_items_separately():
     storage = _RecordingStorage()
     service = _service(storage)
 
-    service.persist_final(
-        image_index=0, mime="image/png", data_b64=base64.b64encode(b"a").decode()
-    )
-    service.persist_final(
-        image_index=1, mime="image/png", data_b64=base64.b64encode(b"b").decode()
-    )
+    service.persist_final(image_index=0, mime="image/png", data_b64=base64.b64encode(b"a").decode())
+    service.persist_final(image_index=1, mime="image/png", data_b64=base64.b64encode(b"b").decode())
 
     assert len(storage.calls) == 2
 
@@ -176,8 +170,7 @@ def test_publish_partial_delegates_to_preview_publisher():
     with use_image_preview_emitter(emitted.append):
         service = _service(None, preview_enabled=True, preview_cap=100)
         assert (
-            service.publish_partial(image_index=0, mime="image/png", data_b64="QUJD", seq=2)
-            is True
+            service.publish_partial(image_index=0, mime="image/png", data_b64="QUJD", seq=2) is True
         )
     assert emitted == [
         {

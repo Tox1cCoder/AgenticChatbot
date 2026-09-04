@@ -77,9 +77,10 @@ def _patch_manager(monkeypatch, manager: _FakeManager) -> None:
 
 
 async def _run(tool, **kwargs):
-    with tool_execution_context(
-        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
-    ), selected_image_sink() as sink:
+    with (
+        tool_execution_context(conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"),
+        selected_image_sink() as sink,
+    ):
         raw = await tool.ainvoke(kwargs)
     return json.loads(raw), sink
 
@@ -181,17 +182,18 @@ async def test_client_only_direct_invocation_never_calls_server_dependencies(mon
     brave = _NamedTool("brave_image_search", _brave_payload())
     tool = create_web_research_tool(tavily_tool=tavily, brave_tool=brave)
 
-    with tool_execution_context(
-        conversation_id=CONVERSATION_ID,
-        user_id="u1",
-        agent_key="search",
-        device_id="device-a",
-        tool_scope="client_only",
-    ), selected_image_sink() as sink:
+    with (
+        tool_execution_context(
+            conversation_id=CONVERSATION_ID,
+            user_id="u1",
+            agent_key="search",
+            device_id="device-a",
+            tool_scope="client_only",
+        ),
+        selected_image_sink() as sink,
+    ):
         payload = json.loads(
-            await tool.ainvoke(
-                {"query": "T1 roster 2026", "image_query": "T1 team photo"}
-            )
+            await tool.ainvoke({"query": "T1 roster 2026", "image_query": "T1 team photo"})
         )
 
     assert payload["status"] == "error"
@@ -211,16 +213,17 @@ async def test_client_only_without_device_never_calls_server_dependencies(monkey
     brave = _NamedTool("brave_image_search", _brave_payload())
     tool = create_web_research_tool(tavily_tool=tavily, brave_tool=brave)
 
-    with tool_execution_context(
-        conversation_id=CONVERSATION_ID,
-        user_id="u1",
-        agent_key="search",
-        tool_scope="client_only",
-    ), selected_image_sink() as sink:
+    with (
+        tool_execution_context(
+            conversation_id=CONVERSATION_ID,
+            user_id="u1",
+            agent_key="search",
+            tool_scope="client_only",
+        ),
+        selected_image_sink() as sink,
+    ):
         payload = json.loads(
-            await tool.ainvoke(
-                {"query": "T1 roster 2026", "image_query": "T1 team photo"}
-            )
+            await tool.ainvoke({"query": "T1 roster 2026", "image_query": "T1 team photo"})
         )
 
     assert payload["status"] == "error"

@@ -91,9 +91,9 @@ class DocumentImageRepository:
                 .filter(DocumentImage.document_id == doc_uuid)
             )
             query = query.filter(Document.conversation_id == conv_uuid)
-            query = query.join(
-                Conversation, Document.conversation_id == Conversation.id
-            ).filter(Conversation.owner_id == user_id)
+            query = query.join(Conversation, Document.conversation_id == Conversation.id).filter(
+                Conversation.owner_id == user_id
+            )
             return query.order_by(asc(DocumentImage.page_number)).all()
 
     def get_by_id_for_scope(

@@ -296,9 +296,7 @@ def _run_one_dimension(
         except Exception as error:
             batch_cell = _empty_indexing_cell(str(error))
     else:
-        batch_cell = _empty_indexing_cell(
-            "not requested (pass --include-provider-batch)"
-        )
+        batch_cell = _empty_indexing_cell("not requested (pass --include-provider-batch)")
 
     return {
         "measured": True,

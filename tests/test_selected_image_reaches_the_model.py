@@ -93,12 +93,11 @@ async def _provider_selected_candidates() -> list[dict]:
         tavily_tool=_Tavily(),
         brave_tool=_Brave(confidence="high"),
     )
-    with tool_execution_context(
-        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
-    ), selected_image_sink() as sink:
-        await tool.ainvoke(
-            {"query": "T1 roster 2026", "image_query": "T1 team photo"}
-        )
+    with (
+        tool_execution_context(conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"),
+        selected_image_sink() as sink,
+    ):
+        await tool.ainvoke({"query": "T1 roster 2026", "image_query": "T1 team photo"})
     return list(sink)
 
 
@@ -124,9 +123,7 @@ async def test_a_provider_selected_image_becomes_a_marker_the_model_can_copy():
     candidates = context.get("rich_item_candidates") or []
     assert candidates[0]["source"] == "image_search"
 
-    guidance = build_rich_response_guidance(
-        candidates=candidates, enabled=True, capability=True
-    )
+    guidance = build_rich_response_guidance(candidates=candidates, enabled=True, capability=True)
     assert f"<!--rich:{candidates[0]['id']}-->" in guidance
     assert "AVAILABLE RICH ITEMS" in guidance
 

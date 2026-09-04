@@ -220,6 +220,7 @@ def _may_fallback_anchor(origin: str, best_score: float) -> bool:
         return True
     return origin in _EVIDENCE_FALLBACK_ORIGINS and best_score > 0.0
 
+
 #: Minimum post-stopword token count for a block to accept a fallback anchor, so
 #: the image never lands under a bare heading or a two-word line.
 _FALLBACK_MIN_BLOCK_TOKENS = 8
@@ -378,9 +379,7 @@ def _descriptive_signal_text(candidate: dict[str, Any]) -> str:
     alt_text = candidate.get("alt_text")
     if alt_text == GENERIC_IMAGE_ALT_TEXT:
         alt_text = None
-    return " ".join(
-        str(part) for part in (candidate.get("title"), alt_text, description) if part
-    )
+    return " ".join(str(part) for part in (candidate.get("title"), alt_text, description) if part)
 
 
 def _image_anchor_entries(
@@ -437,9 +436,7 @@ def _image_anchor_entries(
         else:
             origin, anchorable = "web_search_source_bound", bool(query)
         entries.append(
-            ImageAnchorEntry(
-                item_id=item_id, query=query, origin=origin, anchorable=anchorable
-            )
+            ImageAnchorEntry(item_id=item_id, query=query, origin=origin, anchorable=anchorable)
         )
     return entries
 
@@ -509,10 +506,7 @@ def _finalize_article_content(response: Any, content: str) -> str:
         )
     cleaned_content = content
     for reference in parse_inline_rich_references(content):
-        if (
-            reference.startswith(("image:", "imagegroup:"))
-            and reference not in allowed_image_ids
-        ):
+        if reference.startswith(("image:", "imagegroup:")) and reference not in allowed_image_ids:
             cleaned_content = remove_inline_rich_reference(cleaned_content, reference)
     if cleaned_content != content:
         message = getattr(response, "message", None)

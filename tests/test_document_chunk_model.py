@@ -58,8 +58,7 @@ def test_document_chunk_table_has_unique_generation_index_tuple():
             uniques.append(tuple(col.name for col in constraint.columns))
 
     assert ("document_id", "index_generation_id", "chunk_index") in uniques, (
-        "Expected UNIQUE(document_id, index_generation_id, chunk_index). "
-        f"Found: {uniques}"
+        f"Expected UNIQUE(document_id, index_generation_id, chunk_index). Found: {uniques}"
     )
 
 

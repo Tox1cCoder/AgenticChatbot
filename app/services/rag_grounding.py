@@ -47,9 +47,7 @@ _MODEL_SOURCE_SPAN = re.compile(r"\[\s*sources?\s*:[^\]]*\]", re.IGNORECASE)
 # Same span, but including the immediately adjacent horizontal whitespace so a
 # targeted excision can close the gap it leaves without reflowing anything
 # else in the document (round-1 finding 3).
-_MODEL_SOURCE_SPAN_WITH_GAP = re.compile(
-    r"[ \t]*\[\s*sources?\s*:[^\]]*\][ \t]*", re.IGNORECASE
-)
+_MODEL_SOURCE_SPAN_WITH_GAP = re.compile(r"[ \t]*\[\s*sources?\s*:[^\]]*\][ \t]*", re.IGNORECASE)
 _SOURCES_APPENDIX = re.compile(
     r"^\s*(sources?|references?|citations?|documents?\s+consulted)\b\s*:",
     re.IGNORECASE,
@@ -186,12 +184,8 @@ class GroundedAnswerGate:
         # evidence to have used — with evidence present, zero claims over
         # non-empty raw text means the parser found prose it never examined
         # (round-1 finding 1), not a legitimate non-answer (finding 2).
-        unstructured = (
-            not answer.claims and bool(evidence.records) and answer.raw_text is not None
-        )
-        coverage = (
-            0.0 if unstructured else (covered / len(answer.claims) if answer.claims else 1.0)
-        )
+        unstructured = not answer.claims and bool(evidence.records) and answer.raw_text is not None
+        coverage = 0.0 if unstructured else (covered / len(answer.claims) if answer.claims else 1.0)
         below_minimum = not unstructured and coverage < self.min_coverage
         reasons = tuple(
             code

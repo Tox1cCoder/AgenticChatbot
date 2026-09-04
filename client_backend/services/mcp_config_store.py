@@ -70,16 +70,10 @@ class MCPConfigStore:
             else self.application_root / "app" / "ai" / "mcp_config.json"
         )
         if profile_root is None:
-            directory = get_device_profile_subdir(
-                scope.user_id, scope.device_identifier, "mcp"
-            )
+            directory = get_device_profile_subdir(scope.user_id, scope.device_identifier, "mcp")
         else:
             directory = (
-                Path(profile_root)
-                / scope.user_id
-                / "devices"
-                / scope.device_identifier
-                / "mcp"
+                Path(profile_root) / scope.user_id / "devices" / scope.device_identifier / "mcp"
             )
             directory.mkdir(parents=True, exist_ok=True)
         self.profile_path = directory / "config.v2.json"
@@ -95,9 +89,7 @@ class MCPConfigStore:
             profile = MCPProfileDocument(schemaVersion=2)
             self._write_profile(profile)
             return profile
-        return MCPProfileDocument.model_validate_json(
-            self.profile_path.read_text(encoding="utf-8")
-        )
+        return MCPProfileDocument.model_validate_json(self.profile_path.read_text(encoding="utf-8"))
 
     def list_effective_servers(self) -> list[EffectiveMCPServer]:
         registry = self.load_registry()
@@ -114,11 +106,7 @@ class MCPConfigStore:
                 if str(command).lower() in {"python", "python3"}:
                     command = sys.executable
                 args = [self._resolve_bundled_value(value) for value in args]
-                cwd = (
-                    self._resolve_bundled_value(cwd)
-                    if cwd
-                    else str(self.application_root)
-                )
+                cwd = self._resolve_bundled_value(cwd) if cwd else str(self.application_root)
             effective.append(
                 EffectiveMCPServer(
                     name=name,
@@ -143,14 +131,9 @@ class MCPConfigStore:
                     enabled=definition.enabled,
                     description=definition.description,
                     command=payload.get("command"),
-                    args=[
-                        self._resolve_custom_value(value)
-                        for value in payload.get("args") or []
-                    ],
+                    args=[self._resolve_custom_value(value) for value in payload.get("args") or []],
                     cwd=(
-                        self._resolve_custom_value(payload["cwd"])
-                        if payload.get("cwd")
-                        else None
+                        self._resolve_custom_value(payload["cwd"]) if payload.get("cwd") else None
                     ),
                     env=credentials.env,
                     url=payload.get("url"),
@@ -213,9 +196,7 @@ class MCPConfigStore:
             if name in registry.servers:
                 overrides = dict(profile.bundled_overrides)
                 overrides[name] = BundledOverride(enabled=enabled)
-                self._write_profile(
-                    profile.model_copy(update={"bundled_overrides": overrides})
-                )
+                self._write_profile(profile.model_copy(update={"bundled_overrides": overrides}))
                 return
             custom = profile.custom_servers.get(name)
             if custom is None:
@@ -236,9 +217,7 @@ class MCPConfigStore:
             if name in registry.servers:
                 overrides = dict(profile.bundled_overrides)
                 overrides[name] = BundledOverride(enabled=False)
-                self._write_profile(
-                    profile.model_copy(update={"bundled_overrides": overrides})
-                )
+                self._write_profile(profile.model_copy(update={"bundled_overrides": overrides}))
                 return "disabled_bundled"
 
             if name not in profile.custom_servers:
@@ -254,9 +233,7 @@ class MCPConfigStore:
         return str(path if path.is_absolute() else (self.application_root / path).resolve())
 
     def _resolve_custom_value(self, value: str) -> str:
-        if value.startswith(("-", "@")) or re.match(
-            r"^[A-Za-z][A-Za-z0-9+.-]*://", value
-        ):
+        if value.startswith(("-", "@")) or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value):
             return value
         path = Path(value)
         if path.is_absolute():
@@ -267,9 +244,7 @@ class MCPConfigStore:
 
     def _write_profile(self, profile: MCPProfileDocument) -> None:
         validated = MCPProfileDocument.model_validate(profile.model_dump(by_alias=True))
-        temporary = self.profile_path.with_name(
-            f".{self.profile_path.name}.{uuid4().hex}.tmp"
-        )
+        temporary = self.profile_path.with_name(f".{self.profile_path.name}.{uuid4().hex}.tmp")
         try:
             temporary.write_text(
                 json.dumps(validated.model_dump(by_alias=True), indent=2),

@@ -197,9 +197,7 @@ def _process_document(
             }
 
         # Poll until completion
-        status = _poll_document_status(
-            requests, base_url, document_id, timeout_s, auth_headers
-        )
+        status = _poll_document_status(requests, base_url, document_id, timeout_s, auth_headers)
         elapsed_s = time.time() - start_time
 
         return {
@@ -252,9 +250,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Bearer token (takes precedence over --email/--password)",
     )
-    parser.add_argument(
-        "--conversation-id", required=True, help="Conversation UUID (required)"
-    )
+    parser.add_argument("--conversation-id", required=True, help="Conversation UUID (required)")
     parser.add_argument(
         "--corpus-dir", required=True, help="Directory of files to benchmark (required)"
     )

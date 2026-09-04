@@ -176,9 +176,7 @@ def create_web_research_tool(
             )
 
         image_task: asyncio.Task[list[dict[str, Any]]] | None = None
-        if wants_image and _reserve_image_path(
-            budget, context.rich_response_capable, visual_query
-        ):
+        if wants_image and _reserve_image_path(budget, context.rich_response_capable, visual_query):
             image_task = asyncio.create_task(
                 _discover_selected(
                     brave_tool=brave_tool,
@@ -226,9 +224,7 @@ def create_web_research_tool(
     )
 
 
-def _reserve_image_path(
-    budget: Any, rich_response_capable: bool, visual_query: str
-) -> bool:
+def _reserve_image_path(budget: Any, rich_response_capable: bool, visual_query: str) -> bool:
     if not settings.remote_image_enrichment_enabled:
         return False
     if not settings.inline_rich_response_enabled:
@@ -372,9 +368,7 @@ def _raise_for_provider_error(result_text: str) -> str:
     except (TypeError, ValueError, json.JSONDecodeError):
         return result_text
     if isinstance(payload, dict) and payload.get("error"):
-        raise ResearchProviderError(
-            str(payload["error"]), retryable=bool(payload.get("retryable"))
-        )
+        raise ResearchProviderError(str(payload["error"]), retryable=bool(payload.get("retryable")))
     return result_text
 
 

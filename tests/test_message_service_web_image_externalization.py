@@ -118,10 +118,7 @@ async def test_registration_failure_drops_only_image_and_exact_marker(caplog):
     web_images.register.side_effect = RuntimeError("database secret")
     service = _service(web_images)
     metadata = _metadata()
-    body = (
-        f"Before\n\n<!--rich:{IMAGE_ID}-->\n\n"
-        "<!--rich:widget:w-1-->\n\nAfter"
-    )
+    body = f"Before\n\n<!--rich:{IMAGE_ID}-->\n\n<!--rich:widget:w-1-->\n\nAfter"
 
     content, externalized = await service._externalize_remote_rich_images(
         body,

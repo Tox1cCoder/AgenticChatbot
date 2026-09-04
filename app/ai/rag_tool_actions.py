@@ -368,17 +368,13 @@ async def execute_search_documents_action(
     start_chunk = _bounded_int(
         tool_args.get("start_chunk"), default=0, minimum=0, maximum=1_000_000
     )
-    max_chunks = _bounded_int(
-        tool_args.get("max_chunks"), default=8, minimum=1, maximum=20
-    )
+    max_chunks = _bounded_int(tool_args.get("max_chunks"), default=8, minimum=1, maximum=20)
 
     if action in _RAG_ACTION_TOOL_NAMES and (not user_id or not conversation_id):
         return (
             compact_rag_tool_error(
                 error_type=ToolErrorKind.VALIDATION.value,
-                message=(
-                    "search_documents requires authenticated user and conversation context."
-                ),
+                message=("search_documents requires authenticated user and conversation context."),
                 hint="Retry within the authenticated conversation that owns the documents.",
             ),
             action,
@@ -556,8 +552,7 @@ async def execute_search_documents_action(
                 documents = listing_page["documents"]
                 next_page = (
                     listing_page["page"] + 1
-                    if listing_page["page"] * listing_page["page_size"]
-                    < listing_page["total"]
+                    if listing_page["page"] * listing_page["page_size"] < listing_page["total"]
                     else None
                 )
                 evidence["pagination"] = {

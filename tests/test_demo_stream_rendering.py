@@ -24,9 +24,7 @@ def test_escape_markdown_currency_escapes_price_ranges_and_lists():
 
     raw = "Budget: $150–$160; options: $5, $10, and $20."
 
-    assert escape_markdown_currency(raw) == (
-        r"Budget: \$150–\$160; options: \$5, \$10, and \$20."
-    )
+    assert escape_markdown_currency(raw) == (r"Budget: \$150–\$160; options: \$5, \$10, and \$20.")
 
 
 def test_escape_markdown_currency_preserves_protected_markdown_and_latex():

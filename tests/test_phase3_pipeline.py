@@ -518,9 +518,7 @@ def test_index_task_persists_images_before_calling_index_document(tmp_path, monk
             {"stored_path": "images/chart.png", "page_number": 0, "mime_type": "image/png"}
         ]
     )
-    mock_proc_service._attach_prepared_images_to_blocks.side_effect = (
-        lambda blocks, _images: blocks
-    )
+    mock_proc_service._attach_prepared_images_to_blocks.side_effect = lambda blocks, _images: blocks
 
     def _record_persist(_prepared_images, _document_id):
         call_order.append("persist_images")

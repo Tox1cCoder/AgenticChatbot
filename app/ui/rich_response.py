@@ -64,8 +64,7 @@ def build_inline_image_html(
         else "min-height:120px;"
     )
     wrapper_style = (
-        f"position:relative;display:inline-block;width:min({display_width}px, 100%);"
-        f"{aspect_style}"
+        f"position:relative;display:inline-block;width:min({display_width}px, 100%);{aspect_style}"
     )
     img_style = (
         f"max-width:min({int(max_width_px)}px, 100%);width:auto;height:auto;"
@@ -132,7 +131,7 @@ def build_inline_image_group_html(
                 'style="margin:8px 0;width:min(480px, 100%);">'
                 '<div data-role="cell" data-state="failed" style="min-width:0;">'
                 '<div data-role="cell-fallback" style="display:block;padding:12px;'
-                'border-radius:8px;background:#f1f5f9;color:#64748b;font-size:12px;'
+                "border-radius:8px;background:#f1f5f9;color:#64748b;font-size:12px;"
                 'text-align:center;">Visual unavailable</div></div></figure>'
             )
         return build_inline_image_html(
@@ -193,7 +192,7 @@ def build_inline_image_group_html(
     return (
         f'<figure data-state="loaded" aria-label="{group_alt}" '
         f'style="margin:8px 0;display:flex;flex-wrap:wrap;gap:8px;'
-        f'align-items:flex-start;'
+        f"align-items:flex-start;"
         f'width:min({int(max_width_px) * 2}px, 100%);">{row}</figure>'
     )
 
@@ -206,10 +205,7 @@ def _source_link_html(source_url: str | None) -> str:
         return ""
     escaped_url = _html.escape(source_url.strip(), quote=True)
     escaped_label = _html.escape(f"Source: {parsed.hostname}")
-    return (
-        f'<a href="{escaped_url}" target="_blank" rel="noopener noreferrer">'
-        f"{escaped_label}</a>"
-    )
+    return f'<a href="{escaped_url}" target="_blank" rel="noopener noreferrer">{escaped_label}</a>'
 
 
 # ---------------------------------------------------------------------------

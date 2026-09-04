@@ -64,9 +64,7 @@ def test_a_terminal_error_records_whether_retrying_helps(recorder):
 
     _finalizer()._finalize_failure(
         {},
-        WorkflowError(
-            code="response_validation_failed", retriable=False, request_id="request-1"
-        ),
+        WorkflowError(code="response_validation_failed", retriable=False, request_id="request-1"),
     )
 
     assert recorder.counters["workflow.error.response_validation_failed.terminal"] == 1

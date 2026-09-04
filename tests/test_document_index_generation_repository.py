@@ -598,9 +598,7 @@ def test_sql_chunk_build_failure_marks_new_generation_failed():
 
 def test_successful_activation_reconciles_all_document_payloads():
     document_id, old_generation_id = uuid4(), uuid4()
-    service, _generations, _chunks, qdrant = _index_service(
-        document_id, old_generation_id
-    )
+    service, _generations, _chunks, qdrant = _index_service(document_id, old_generation_id)
 
     service.index_document(
         document=SimpleNamespace(id=document_id, conversation_id=uuid4(), user_id=uuid4()),
@@ -657,9 +655,7 @@ def test_reconciliation_cleanup_failure_does_not_hide_active_generation():
 
 def test_document_wide_reconciliation_deactivates_unobserved_concurrent_generation():
     document_id, old_generation_id = uuid4(), uuid4()
-    service, _generations, _chunks, qdrant = _index_service(
-        document_id, old_generation_id
-    )
+    service, _generations, _chunks, qdrant = _index_service(document_id, old_generation_id)
     rogue_generation_id, rogue_point_id = uuid4(), uuid4()
     qdrant.points[str(rogue_point_id)] = SimpleNamespace(
         id=str(rogue_point_id),
@@ -680,8 +676,7 @@ def test_document_wide_reconciliation_deactivates_unobserved_concurrent_generati
     authoritative = str(persisted[0].index_generation_id)
     assert qdrant.points[str(rogue_point_id)].payload["is_active"] is False
     assert all(
-        point.payload["is_active"]
-        == (point.payload["index_generation"] == authoritative)
+        point.payload["is_active"] == (point.payload["index_generation"] == authoritative)
         for point in qdrant.points.values()
     )
 
@@ -706,9 +701,7 @@ def test_unknown_sql_activation_outcome_does_not_demote_generation_or_chunks():
 
 def test_reconciliation_retries_when_active_generation_changes_mid_cleanup():
     document_id, generation_a_id = uuid4(), uuid4()
-    service, generations, _chunks, qdrant = _index_service(
-        document_id, generation_a_id
-    )
+    service, generations, _chunks, qdrant = _index_service(document_id, generation_a_id)
     generation_b_id = uuid4()
     generations.rows[generation_b_id] = SimpleNamespace(
         id=generation_b_id,
@@ -738,8 +731,7 @@ def test_reconciliation_retries_when_active_generation_changes_mid_cleanup():
 
     assert reconciled == generation_b_id
     assert all(
-        point.payload["is_active"]
-        == (point.payload["index_generation"] == str(generation_b_id))
+        point.payload["is_active"] == (point.payload["index_generation"] == str(generation_b_id))
         for point in qdrant.points.values()
     )
 
@@ -774,9 +766,7 @@ def test_purge_removes_failed_generation_artifacts_without_touching_active():
         chunk_repository=chunk_repository,
         generation_repository=generation_repository,
         qdrant_client=qdrant,
-        embedding_service=SimpleNamespace(
-            provider="gemini", model_name="gemini", dimension=8
-        ),
+        embedding_service=SimpleNamespace(provider="gemini", model_name="gemini", dimension=8),
         collection_name="documents",
         embedding_dimension=8,
     )

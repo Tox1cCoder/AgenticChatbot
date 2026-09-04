@@ -384,9 +384,7 @@ def test_locked_installation_is_a_423(api_env):
 def test_polling_a_running_operation(api_env):
     api_env.installations.operation = _operation(state="running", phase="preparingRuntime")
 
-    response = api_env.client.get(
-        "/skills/installations/operationa", headers=api_env.auth_headers
-    )
+    response = api_env.client.get("/skills/installations/operationa", headers=api_env.auth_headers)
 
     assert response.status_code == 200
     data = response.json()["data"]
@@ -408,9 +406,7 @@ def test_polling_a_failed_operation_is_http_200(api_env):
         },
     )
 
-    response = api_env.client.get(
-        "/skills/installations/operationa", headers=api_env.auth_headers
-    )
+    response = api_env.client.get("/skills/installations/operationa", headers=api_env.auth_headers)
 
     assert response.status_code == 200
     body = response.json()
@@ -439,9 +435,7 @@ def test_polling_a_succeeded_operation_returns_the_catalog(api_env):
         ),
     )
 
-    response = api_env.client.get(
-        "/skills/installations/operationa", headers=api_env.auth_headers
-    )
+    response = api_env.client.get("/skills/installations/operationa", headers=api_env.auth_headers)
 
     data = response.json()["data"]
     assert data["result"]["action"] == "installed"
@@ -457,9 +451,7 @@ def test_unknown_operation_is_a_404(api_env):
         status_code=404,
     )
 
-    response = api_env.client.get(
-        "/skills/installations/nope", headers=api_env.auth_headers
-    )
+    response = api_env.client.get("/skills/installations/nope", headers=api_env.auth_headers)
 
     assert response.status_code == 404
     assert response.json()["code"] == "SKILL_OPERATION_NOT_FOUND"

@@ -30,9 +30,7 @@ _RICH_MARKER_LINE_RE = re.compile(
 # block is matched last so a closed block always wins; it exists because the
 # live stream renders partial text, where a code fence is still open and
 # CommonMark already treats the remainder as code.
-_FENCED_CODE_PATTERN = (
-    r"(?:^[ ]{0,3}(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^[ ]{0,3}(?P=fence)[ \t]*$)"
-)
+_FENCED_CODE_PATTERN = r"(?:^[ ]{0,3}(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^[ ]{0,3}(?P=fence)[ \t]*$)"
 _INLINE_CODE_PATTERN = r"(?:(?P<inline_ticks>`+).*?(?P=inline_ticks))"
 _UNCLOSED_FENCED_CODE_PATTERN = r"(?:^[ ]{0,3}(?P<open_fence>`{3,}|~{3,})[^\n]*\n.*\Z)"
 _DISPLAY_MATH_PATTERN = r"(?:\$\$.*?\$\$)"

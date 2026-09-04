@@ -93,9 +93,7 @@ async def test_deleting_a_conversation_removes_every_turn_thread_it_owns():
     manager = FakeCheckpointManager()
     service = _service(
         checkpoint_manager=manager,
-        conversations=FakeConversationRepository(
-            [SimpleNamespace(id=conversation_id)]
-        ),
+        conversations=FakeConversationRepository([SimpleNamespace(id=conversation_id)]),
         messages=FakeMessageRepository({conversation_id: ["message-1", "message-2"]}),
     )
 

@@ -277,9 +277,7 @@ async def test_fetch_records_bounded_success_and_failure_metrics():
     content = _png_bytes()
     success_service, _ = _service(
         metrics=metrics,
-        responses=[
-            httpx.Response(200, headers={"Content-Type": "image/png"}, content=content)
-        ],
+        responses=[httpx.Response(200, headers={"Content-Type": "image/png"}, content=content)],
     )
 
     await success_service.fetch(_record("https://img.example/image.png"))
@@ -327,9 +325,7 @@ async def test_metrics_failure_cannot_break_a_valid_image_fetch():
     content = _png_bytes()
     service, _ = _service(
         metrics=metrics,
-        responses=[
-            httpx.Response(200, headers={"Content-Type": "image/png"}, content=content)
-        ],
+        responses=[httpx.Response(200, headers={"Content-Type": "image/png"}, content=content)],
     )
 
     result = await service.fetch(_record("https://img.example/image.png"))

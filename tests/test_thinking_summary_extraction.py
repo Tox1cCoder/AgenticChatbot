@@ -12,12 +12,7 @@ def test_extracts_gemini_thinking_block() -> None:
 
 
 def test_ignores_signature_only_thinking_block() -> None:
-    assert (
-        extract_public_thinking_summary(
-            [{"type": "thinking", "signature": "encrypted"}]
-        )
-        is None
-    )
+    assert extract_public_thinking_summary([{"type": "thinking", "signature": "encrypted"}]) is None
 
 
 def test_extracts_openai_summary_without_answer_text() -> None:

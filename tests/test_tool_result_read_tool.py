@@ -50,9 +50,7 @@ async def _invoke(tool, **kwargs) -> dict:
 @pytest.mark.asyncio
 async def test_returns_a_bounded_slice_and_next_offset():
     repository = FakeRepository(record={"id": BLOB_ID})
-    tool = create_read_tool_result_tool(
-        repository=repository, service=FakeService("0123456789")
-    )
+    tool = create_read_tool_result_tool(repository=repository, service=FakeService("0123456789"))
 
     payload = await _invoke(tool, blob_id=BLOB_ID, offset=0, limit=4)
 
@@ -125,9 +123,7 @@ async def test_missing_tool_context_is_not_found():
 
 
 def test_tool_identity_is_internal():
-    tool = create_read_tool_result_tool(
-        repository=FakeRepository(), service=FakeService("x")
-    )
+    tool = create_read_tool_result_tool(repository=FakeRepository(), service=FakeService("x"))
 
     assert tool.name == "read_tool_result"
     assert tool.metadata["tool_origin"] == "internal"

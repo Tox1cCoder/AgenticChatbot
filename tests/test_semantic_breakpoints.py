@@ -109,9 +109,9 @@ def test_default_percentile_ignores_zero_distance_population():
 
     blocks = [_block(f"block-{index}", str(index)) for index in range(12)]
 
-    assert EmbeddingSemanticBoundaryDetector(
-        embedding_service=Embeddings()
-    ).break_before(blocks) == frozenset({"block-1"})
+    assert EmbeddingSemanticBoundaryDetector(embedding_service=Embeddings()).break_before(
+        blocks
+    ) == frozenset({"block-1"})
 
 
 def test_semantic_config_defaults_to_disabled():

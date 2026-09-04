@@ -109,7 +109,7 @@ def _representative_brave_payload() -> dict:
                 "thumbnail": {"src": "https://img.test/thumb-only.jpg"},
                 "properties": {"width": 400, "height": 300},
             },
-        ]
+        ],
     }
 
 

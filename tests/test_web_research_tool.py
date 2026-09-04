@@ -94,9 +94,10 @@ def _tool(tavily: _FakeTool | None, brave: _FakeTool | None):
 
 
 async def _run(tool, **kwargs):
-    with tool_execution_context(
-        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
-    ), selected_image_sink() as sink:
+    with (
+        tool_execution_context(conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"),
+        selected_image_sink() as sink,
+    ):
         raw = await tool.ainvoke(kwargs)
     return json.loads(raw), sink
 
@@ -484,9 +485,10 @@ async def test_cancelling_research_cancels_and_awaits_the_image_task():
             finally:
                 image_finished.set()
 
-    with tool_execution_context(
-        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
-    ), selected_image_sink():
+    with (
+        tool_execution_context(conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"),
+        selected_image_sink(),
+    ):
         research_task = asyncio.create_task(
             _tool(_BlockingTavily(), _BlockingBrave()).ainvoke(
                 {"query": "T1 roster 2026", "image_query": "T1 team photo"}
@@ -551,15 +553,16 @@ async def test_a_request_without_the_rich_capability_skips_the_image_path():
     brave = _FakeTool("brave_image_search", _brave_payload())
     tool = _tool(_FakeTool("tavily_search", TAVILY_PAYLOAD), brave)
 
-    with tool_execution_context(
-        conversation_id=CONVERSATION_ID,
-        user_id="u1",
-        agent_key="search",
-        rich_response_capable=False,
-    ), selected_image_sink() as sink:
-        raw = await tool.ainvoke(
-            {"query": "T1 roster 2026", "image_query": "T1 team photo"}
-        )
+    with (
+        tool_execution_context(
+            conversation_id=CONVERSATION_ID,
+            user_id="u1",
+            agent_key="search",
+            rich_response_capable=False,
+        ),
+        selected_image_sink() as sink,
+    ):
+        raw = await tool.ainvoke({"query": "T1 roster 2026", "image_query": "T1 team photo"})
 
     assert brave.calls == []
     assert sink == []

@@ -402,9 +402,7 @@ def _reuse_stored_ref(entry: dict[str, Any]) -> dict[str, Any] | None:
     if not image_id or not url:
         return None
     merged = {
-        key: value
-        for key, value in entry.items()
-        if key not in ("data", "b64_data", "stored_ref")
+        key: value for key, value in entry.items() if key not in ("data", "b64_data", "stored_ref")
     }
     merged["image_id"] = image_id
     merged["url"] = url

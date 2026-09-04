@@ -25,9 +25,7 @@ def postgres_lexical_expressions(query_text: str):
     language = literal_column("'simple'")
     vector = func.to_tsvector(language, DocumentChunk.content)
     tsquery = func.plainto_tsquery(language, query_text)
-    return vector.op("@@")(tsquery), func.ts_rank_cd(vector, tsquery).label(
-        "lexical_score"
-    )
+    return vector.op("@@")(tsquery), func.ts_rank_cd(vector, tsquery).label("lexical_score")
 
 
 class DocumentChunkRepository:
@@ -217,9 +215,9 @@ class DocumentChunkRepository:
                 .filter(DocumentChunk.document_id == document_id)
             )
             query = query.filter(Document.conversation_id == conversation_id)
-            query = query.join(
-                Conversation, Document.conversation_id == Conversation.id
-            ).filter(Conversation.owner_id == user_id)
+            query = query.join(Conversation, Document.conversation_id == Conversation.id).filter(
+                Conversation.owner_id == user_id
+            )
             return self._active(query).order_by(DocumentChunk.chunk_index.asc()).all()
 
     def get_window_for_scope(
@@ -245,9 +243,9 @@ class DocumentChunkRepository:
                 .filter(DocumentChunk.document_id == document_id)
             )
             query = query.filter(Document.conversation_id == conversation_id)
-            query = query.join(
-                Conversation, Document.conversation_id == Conversation.id
-            ).filter(Conversation.owner_id == user_id)
+            query = query.join(Conversation, Document.conversation_id == Conversation.id).filter(
+                Conversation.owner_id == user_id
+            )
             return (
                 self._active(query)
                 .order_by(DocumentChunk.chunk_index.asc())
@@ -274,9 +272,9 @@ class DocumentChunkRepository:
                 .filter(DocumentChunk.document_id == document_id)
             )
             query = query.filter(Document.conversation_id == conversation_id)
-            query = query.join(
-                Conversation, Document.conversation_id == Conversation.id
-            ).filter(Conversation.owner_id == user_id)
+            query = query.join(Conversation, Document.conversation_id == Conversation.id).filter(
+                Conversation.owner_id == user_id
+            )
             return (
                 self._active(query)
                 .order_by(DocumentChunk.chunk_index.asc())
@@ -317,9 +315,9 @@ class DocumentChunkRepository:
                 .filter(DocumentChunk.id.in_(ids))
             )
             query = query.filter(Document.conversation_id == conversation_id)
-            query = query.join(
-                Conversation, Document.conversation_id == Conversation.id
-            ).filter(Conversation.owner_id == user_id)
+            query = query.join(Conversation, Document.conversation_id == Conversation.id).filter(
+                Conversation.owner_id == user_id
+            )
             return self._active(query).all()
 
     def get_active_by_ids_for_scope(
@@ -391,9 +389,7 @@ class DocumentChunkRepository:
             adjacent_max = int(seed.chunk_index) + bounded_limit
             adjacency = DocumentChunk.chunk_index.between(adjacent_min, adjacent_max)
             query = query.filter(
-                adjacency
-                if parent_id is None
-                else (adjacency | (DocumentChunk.id == parent_id))
+                adjacency if parent_id is None else (adjacency | (DocumentChunk.id == parent_id))
             )
             rows = query.all()
             return sorted(
@@ -471,9 +467,7 @@ class DocumentChunkRepository:
                 rows = (
                     base.add_columns(score)
                     .filter(
-                        and_(
-                            *(func.lower(DocumentChunk.content).contains(term) for term in terms)
-                        )
+                        and_(*(func.lower(DocumentChunk.content).contains(term) for term in terms))
                     )
                     .order_by(DocumentChunk.id.asc())
                     .limit(bounded_limit)

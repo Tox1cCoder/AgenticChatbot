@@ -311,8 +311,7 @@ class RequestBudgetService:
             hard_input_tokens=int(config.available_input_tokens * config.hard_ratio),
             evidence_token_allowance=max(
                 0,
-                int(config.available_input_tokens * config.hard_ratio)
-                - int(count.input_tokens),
+                int(config.available_input_tokens * config.hard_ratio) - int(count.input_tokens),
             ),
             **kwargs,
         )

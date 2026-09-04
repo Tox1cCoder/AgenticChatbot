@@ -209,11 +209,7 @@ def test_unknown_image_marker_is_removed_when_auto_place_is_disabled(monkeypatch
 def test_marker_integrity_keeps_selected_images_and_unknown_widgets(monkeypatch):
     monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
     monkeypatch.setattr(settings, "rich_auto_place_enabled", False)
-    content = (
-        "Answer\n\n"
-        "<!--rich:image:selected-->\n\n"
-        "<!--rich:widget:external-->"
-    )
+    content = "Answer\n\n<!--rich:image:selected-->\n\n<!--rich:widget:external-->"
     response = _make_response(
         content,
         candidates=[_image_candidate(item_id="image:selected")],
@@ -450,8 +446,7 @@ def test_generic_alt_text_image_is_not_auto_placed(monkeypatch):
     monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
     monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
     content = (
-        "Here are the latest match results and tool output for the entire "
-        "football league season."
+        "Here are the latest match results and tool output for the entire football league season."
     )
     candidate = {
         "id": "image:tool:c1:4",
@@ -659,9 +654,7 @@ def test_tool_image_falls_back_to_first_prose_block_with_no_query():
     deliberate image search — the tool call itself implies display."""
     content, outcomes = anchor_image_items_by_query(
         BODY,
-        entries=[
-            ImageAnchorEntry(item_id="image:tool:c1:0", query="", origin="tool_image")
-        ],
+        entries=[ImageAnchorEntry(item_id="image:tool:c1:0", query="", origin="tool_image")],
         min_score=0.34,
         max_images=2,
     )

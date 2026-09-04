@@ -229,9 +229,10 @@ async def _research(**call_args: object) -> list[dict]:
         )
     )
     tool = create_web_research_tool(tavily_tool=_Tool(TAVILY_PAYLOAD), brave_tool=brave)
-    with tool_execution_context(
-        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
-    ), selected_image_sink() as sink:
+    with (
+        tool_execution_context(conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"),
+        selected_image_sink() as sink,
+    ):
         await tool.ainvoke(
             {"query": "stadium renovation", "image_query": "stadium photo", **call_args}
         )

@@ -294,10 +294,7 @@ class EvidenceAssembler:
             )
             id_key = (candidate.modality, str(canonical_id)) if canonical_id else None
             content_hash = _content_hash(candidate.content)
-            if (
-                (id_key is not None and id_key in seen_ids)
-                or content_hash in seen_hashes
-            ):
+            if (id_key is not None and id_key in seen_ids) or content_hash in seen_hashes:
                 omitted += 1
                 continue
             if id_key is not None:

@@ -360,9 +360,7 @@ def test_run_benchmark_reports_unexecuted_when_corpus_sufficient_but_no_targets_
 
 def test_run_benchmark_executes_fully_when_every_dependency_is_injected():
     script = _script()
-    args = script.parse_args(
-        ["--documents", "5", "--allow-partial-corpus", "--failure-injection"]
-    )
+    args = script.parse_args(["--documents", "5", "--allow-partial-corpus", "--failure-injection"])
 
     def fake_ingest(corpus_entries, *, concurrency):
         return [

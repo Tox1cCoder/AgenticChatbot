@@ -155,9 +155,7 @@ def test_embed_query_prefixes_with_task_and_returns_single_vector(monkeypatch):
 
 
 def test_embed_query_uses_configured_query_task(monkeypatch):
-    service, client = _build_service(
-        monkeypatch, dimension=3072, query_task="question answering"
-    )
+    service, client = _build_service(monkeypatch, dimension=3072, query_task="question answering")
     client.models.embed_content.side_effect = [_make_response([0.0] * 3072)]
 
     service.embed_query("explain")

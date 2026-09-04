@@ -404,20 +404,14 @@ async def test_non_capable_stream_receives_only_v1_selected_image_file_part():
         if line.startswith("data: ") and line[6:] != "[DONE]"
     ]
     file_events = [payload for payload in payloads if payload.get("type") == "file"]
-    assert [payload["url"] for payload in file_events] == [
-        "https://img.test/selected.png"
-    ]
+    assert [payload["url"] for payload in file_events] == ["https://img.test/selected.png"]
     terminal = next(
         payload for payload in payloads if payload.get("type") == "data-assistant-message"
     )
     terminal_files = [
-        part
-        for part in terminal["data"]["message"]["parts"]
-        if part.get("type") == "file"
+        part for part in terminal["data"]["message"]["parts"] if part.get("type") == "file"
     ]
-    assert [part["url"] for part in terminal_files] == [
-        "https://img.test/selected.png"
-    ]
+    assert [part["url"] for part in terminal_files] == ["https://img.test/selected.png"]
 
 
 def _message_row(*, conversation_id, sender: int, content: str) -> SimpleNamespace:

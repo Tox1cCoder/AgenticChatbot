@@ -142,8 +142,7 @@ def test_canonical_dedicated_scoped_route_exists(monkeypatch):
     data = resp.json()["data"]
     servers = {_server_of(t) for t in data["tools"]}
     assert servers == {_BRAVE}, (
-        f"dedicated scoped route leaked other servers: "
-        f"{[t.get('name') for t in data['tools']]}"
+        f"dedicated scoped route leaked other servers: {[t.get('name') for t in data['tools']]}"
     )
     assert not any(_server_of(t) == _WIDGETS for t in data["tools"])
     assert data["scope"]["kind"] == "server"
@@ -178,9 +177,7 @@ class _FakeLocalManager:
     def __init__(self, catalog, *, known_servers=None):
         self._catalog = catalog
         names = (
-            known_servers
-            if known_servers is not None
-            else sorted({t.server_name for t in catalog})
+            known_servers if known_servers is not None else sorted({t.server_name for t in catalog})
         )
         # Mirrors LocalMCPManager.servers: only enabled servers are present.
         self.servers = dict.fromkeys(names, SimpleNamespace())
@@ -250,8 +247,7 @@ def test_sidecar_dedicated_scoped_route_exists(monkeypatch):
     data = resp.json()["data"]
     servers = {_server_of(t) for t in data["tools"]}
     assert servers == {_BRAVE}, (
-        f"sidecar dedicated route leaked other servers: "
-        f"{[t.get('name') for t in data['tools']]}"
+        f"sidecar dedicated route leaked other servers: {[t.get('name') for t in data['tools']]}"
     )
     assert data["scope"]["kind"] == "server"
     assert data["scope"]["serverName"] == _BRAVE

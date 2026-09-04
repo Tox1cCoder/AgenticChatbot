@@ -114,9 +114,7 @@ async def test_register_persists_supplied_bytes():
         upstream_url="https://cdn.example/a.jpg",
         expected_mime="image/jpeg",
         provider="brave",
-        cached=FetchedWebImage(
-            content=b"verified", media_type="image/jpeg", width=995, height=565
-        ),
+        cached=FetchedWebImage(content=b"verified", media_type="image/jpeg", width=995, height=565),
     )
 
     stored = repository.created[0]

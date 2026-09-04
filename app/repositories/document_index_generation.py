@@ -190,11 +190,7 @@ class DocumentIndexGenerationRepository:
         old_index_by_id = {row.id: row.chunk_index for row in old_chunks}
         if not old_index_by_id:
             return
-        images = (
-            db.query(DocumentImage)
-            .filter(DocumentImage.chunk_id.in_(old_index_by_id))
-            .all()
-        )
+        images = db.query(DocumentImage).filter(DocumentImage.chunk_id.in_(old_index_by_id)).all()
         for image in images:
             image.chunk_id = target_by_index.get(old_index_by_id[image.chunk_id])
 
@@ -223,9 +219,7 @@ class DocumentIndexGenerationRepository:
                 .all()
             )
 
-    def retired_before(
-        self, document_id: UUID, cutoff: datetime
-    ) -> list[DocumentIndexGeneration]:
+    def retired_before(self, document_id: UUID, cutoff: datetime) -> list[DocumentIndexGeneration]:
         """Backward-compatible alias for all safe-to-purge inactive generations."""
         return self.purgeable_before(document_id, cutoff)
 

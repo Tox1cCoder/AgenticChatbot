@@ -154,8 +154,7 @@ def test_generation_migration_builds_partial_index_and_backfills_before_not_null
     partial_index = next(
         call
         for call in calls
-        if call[0] == "create_index"
-        and call[1][0] == "uq_document_index_generation_active"
+        if call[0] == "create_index" and call[1][0] == "uq_document_index_generation_active"
     )
     assert partial_index[2]["unique"] is True
     assert str(partial_index[2]["postgresql_where"]) == "status = 'active'"

@@ -79,6 +79,7 @@ def _run_doctor(args: argparse.Namespace) -> int:
     _apply_env_overrides(args)
 
     from client_backend.core.config import get_client_settings, initialize_client_environment
+
     settings = get_client_settings()
     initialize_client_environment(settings)
 
@@ -197,15 +198,10 @@ def doctor_mcp_servers(
     async def run() -> int:
         initialize_client_environment(client_settings)
         manager = LocalMCPManager(
-            store=MCPConfigStore(
-                _resolve_mcp_scope(user_id, device_identifier)
-            )
+            store=MCPConfigStore(_resolve_mcp_scope(user_id, device_identifier))
         )
         try:
-            effective = {
-                server.name: server
-                for server in manager.store.list_effective_servers()
-            }
+            effective = {server.name: server for server in manager.store.list_effective_servers()}
             await manager.initialize(server_names=requested)
             failed = False
             for name in sorted(requested):

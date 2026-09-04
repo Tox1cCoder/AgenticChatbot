@@ -66,9 +66,7 @@ def _first_ranks(candidate_ids) -> dict[str, int]:
     return ranks
 
 
-def reciprocal_rank_fusion(
-    *, dense, lexical, k: int = 60
-) -> list[FusedRank]:
+def reciprocal_rank_fusion(*, dense, lexical, k: int = 60) -> list[FusedRank]:
     """Fuse source ranks without interpreting provider scores as probabilities."""
     bounded_k = max(1, int(k))
     dense_ranks = _first_ranks(dense)
@@ -163,9 +161,7 @@ class RAGRetriever:
             return []
 
         dense_limit = max(1, int(dense_candidate_limit or self.dense_candidate_limit))
-        lexical_limit = max(
-            1, int(lexical_candidate_limit or self.lexical_candidate_limit)
-        )
+        lexical_limit = max(1, int(lexical_candidate_limit or self.lexical_candidate_limit))
         output_limit = max(1, int(final_limit))
         if active_generation_ids is None:
             active_generation_ids = self.chunk_repository.get_active_generation_ids_for_scope(
@@ -252,9 +248,7 @@ class RAGRetriever:
                     chunk_index=getattr(chunk, "chunk_index", None),
                     metadata={
                         **dict(getattr(chunk, "chunk_metadata", None) or {}),
-                        "block_provenance": list(
-                            getattr(chunk, "block_provenance", None) or []
-                        ),
+                        "block_provenance": list(getattr(chunk, "block_provenance", None) or []),
                     },
                 )
             )
@@ -309,9 +303,7 @@ class RAGRetriever:
         lexical_ids: list[str] = []
         lexical_scores: dict[str, float] = {}
         if self.hybrid_enabled:
-            lexical_rows = self._timed_lexical_search(
-                query, scope, lexical_limit=lexical_limit
-            )
+            lexical_rows = self._timed_lexical_search(query, scope, lexical_limit=lexical_limit)
             for chunk, raw_score in lexical_rows:
                 candidate_key = str(chunk.id)
                 if candidate_key in lexical_scores:
@@ -398,9 +390,7 @@ class RAGRetriever:
                 limit=lexical_limit,
             )
         except Exception:
-            self._record_stage(
-                "lexical_retrieval", time.monotonic() - lexical_t0, modality="text"
-            )
+            self._record_stage("lexical_retrieval", time.monotonic() - lexical_t0, modality="text")
             self._record_stage_failure("lexical_retrieval", "dependency_exception")
             raise
         self._record_stage("lexical_retrieval", time.monotonic() - lexical_t0, modality="text")
@@ -420,9 +410,7 @@ class RAGRetriever:
             for row in cached.get("fused") or ()
         ]
         dense_scores = {str(k): float(v) for k, v in (cached.get("dense_scores") or {}).items()}
-        lexical_scores = {
-            str(k): float(v) for k, v in (cached.get("lexical_scores") or {}).items()
-        }
+        lexical_scores = {str(k): float(v) for k, v in (cached.get("lexical_scores") or {}).items()}
         return fused, dense_scores, lexical_scores
 
     def _retrieval_cache_key(
@@ -626,17 +614,14 @@ class RAGRetriever:
     ) -> tuple[list[Any], str]:
         """Search Qdrant, returning the points and the query-embedding cache result."""
         generation_values = sorted(
-            str(self._coerce_uuid(generation_id))
-            for generation_id in active_generation_ids
+            str(self._coerce_uuid(generation_id)) for generation_id in active_generation_ids
         )
         if not generation_values:
             return [], "n/a"
         query_embedding, query_cache_result = self._embed_query_cached(query, scope)
         search_filter = Filter(
             must=[
-                FieldCondition(
-                    key="user_id", match=MatchValue(value=str(scope.user_id))
-                ),
+                FieldCondition(key="user_id", match=MatchValue(value=str(scope.user_id))),
                 FieldCondition(
                     key="conversation_id",
                     match=MatchValue(value=str(scope.conversation_id)),

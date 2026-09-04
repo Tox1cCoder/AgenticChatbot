@@ -243,9 +243,7 @@ def inline_preview_wire_size(data: dict[str, Any]) -> int:
     return len(data.get("data_b64") or "")
 
 
-def apply_inline_preview_wire_budget(
-    data: dict[str, Any], *, budget: int
-) -> dict[str, Any]:
+def apply_inline_preview_wire_budget(data: dict[str, Any], *, budget: int) -> dict[str, Any]:
     """Second-defense inline budget at serialization time.
 
     Downgrade an oversized inline preview to a structured ``preview_skipped``

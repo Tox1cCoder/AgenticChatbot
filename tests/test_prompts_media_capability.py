@@ -115,7 +115,7 @@ def _query_guidance() -> str:
 
 
 def test_image_query_guidance_ties_the_form_word_to_what_was_asked():
-    """"What is X" was returning in-use screenshots because the form words on
+    """ "What is X" was returning in-use screenshots because the form words on
     offer were all depiction words (photo, diagram, map). A thing's identity
     image — its logo, key art, cover — is what answers "what is this", and the
     query has to name it. Keyed to the kind of question, not to the subject.
@@ -139,7 +139,7 @@ def test_image_query_guidance_asks_for_the_part_the_answer_is_about():
 
 
 def test_image_query_guidance_requires_resolving_what_the_user_referred_to():
-    """"my scooter", "this game", "it" cannot be searched. The named thing has
+    """ "my scooter", "this game", "it" cannot be searched. The named thing has
     to be recovered from the conversation before it becomes a query."""
     guidance = _query_guidance()
 
@@ -193,7 +193,7 @@ def test_media_guidance_names_the_tool_before_saying_there_is_no_inventory():
 
 
 def test_media_guidance_never_tells_the_model_not_to_ask_for_pictures():
-    """"you never ask for pictures" was meant as "there is no separate image
+    """ "you never ask for pictures" was meant as "there is no separate image
     tool". It reads as an instruction to stay passive about images."""
     snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
 

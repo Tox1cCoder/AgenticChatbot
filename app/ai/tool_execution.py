@@ -106,9 +106,7 @@ def _canonical_source_tool_name(tool: Any, *, exposed_tool_name: str) -> str:
         metadata = getattr(tool, "metadata", None)
         metadata = metadata if isinstance(metadata, dict) else {}
         return str(
-            metadata.get("source_tool_name")
-            or getattr(tool, "name", "")
-            or exposed_tool_name
+            metadata.get("source_tool_name") or getattr(tool, "name", "") or exposed_tool_name
         ).strip()
 
 
@@ -218,10 +216,7 @@ def build_image_candidates_from_tool_result(
         width = image.get("width")
         height = image.get("height")
         original_aspect_known = (
-            isinstance(width, int)
-            and width > 0
-            and isinstance(height, int)
-            and height > 0
+            isinstance(width, int) and width > 0 and isinstance(height, int) and height > 0
         )
         aspect_width = width if original_aspect_known else image.get("thumbnail_width")
         aspect_height = height if original_aspect_known else image.get("thumbnail_height")

@@ -108,9 +108,10 @@ async def _run(
         tavily_tool=_Tool(TAVILY_PAYLOAD),
         brave_tool=brave,
     )
-    with tool_execution_context(
-        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
-    ), selected_image_sink() as sink:
+    with (
+        tool_execution_context(conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"),
+        selected_image_sink() as sink,
+    ):
         raw = await tool.ainvoke(
             {
                 "query": "T1 roster 2026",
@@ -132,9 +133,7 @@ async def test_high_confidence_provider_result_is_selected():
 
 @pytest.mark.asyncio
 async def test_high_confidence_tier_prevents_medium_mixing():
-    _, selected, _ = await _run(
-        brave_payload=_brave_payload("medium", "high", "medium")
-    )
+    _, selected, _ = await _run(brave_payload=_brave_payload("medium", "high", "medium"))
 
     assert [item["payload"]["url"] for item in selected] == [
         "https://imgs.search.brave.com/thumb-2.webp"
@@ -143,9 +142,7 @@ async def test_high_confidence_tier_prevents_medium_mixing():
 
 @pytest.mark.asyncio
 async def test_medium_confidence_is_the_fallback_when_high_is_absent():
-    _, selected, _ = await _run(
-        brave_payload=_brave_payload("low", "medium", "medium")
-    )
+    _, selected, _ = await _run(brave_payload=_brave_payload("low", "medium", "medium"))
 
     # rank 1 is low-confidence and rejected outright, so the medium tier
     # supplies the single figure.
@@ -156,9 +153,7 @@ async def test_medium_confidence_is_the_fallback_when_high_is_absent():
 
 @pytest.mark.asyncio
 async def test_explicit_image_opt_out_skips_brave():
-    payload, selected, brave = await _run(
-        brave_payload=_brave_payload("high"), skip_images=True
-    )
+    payload, selected, brave = await _run(brave_payload=_brave_payload("high"), skip_images=True)
 
     assert brave.calls == []
     assert selected == []

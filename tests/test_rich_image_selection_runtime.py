@@ -118,9 +118,7 @@ def test_lift_selects_from_complete_parallel_tool_batch() -> None:
     ToolLoopMixin._lift_rich_candidates(context, artifacts)
 
     images = [
-        item
-        for item in context["rich_item_candidates"]
-        if item["type"] in {"image", "image_group"}
+        item for item in context["rich_item_candidates"] if item["type"] in {"image", "image_group"}
     ]
     assert images[0]["id"] == "imagegroup:brave:0"
     assert len(images) <= settings.rich_auto_place_max_images

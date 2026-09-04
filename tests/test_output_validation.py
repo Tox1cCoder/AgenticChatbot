@@ -225,15 +225,11 @@ def _claiming_outcome(*, content="an answer", artifacts=None, images=None):
     )
     if artifacts is not None:
         response.tool_artifacts = artifacts
-    return ResponseOutcome(
-        agent_id="chat_agent", response=response, provenance=OutcomeProvenance()
-    )
+    return ResponseOutcome(agent_id="chat_agent", response=response, provenance=OutcomeProvenance())
 
 
 def test_a_citation_selects_grounding_even_with_no_recorded_evidence():
-    assert "rag_grounding" in select_policies(
-        _claiming_outcome(content="Revenue rose [E1].")
-    )
+    assert "rag_grounding" in select_policies(_claiming_outcome(content="Revenue rose [E1]."))
 
 
 def test_a_published_artifact_selects_provenance_with_nothing_recorded():
@@ -243,9 +239,7 @@ def test_a_published_artifact_selects_provenance_with_nothing_recorded():
 
 
 def test_a_published_image_selects_delivery_with_nothing_recorded():
-    assert "image_delivery" in select_policies(
-        _claiming_outcome(images=[{"image_id": "i1"}])
-    )
+    assert "image_delivery" in select_policies(_claiming_outcome(images=[{"image_id": "i1"}]))
 
 
 def test_a_plain_answer_still_selects_only_the_content_policy():
@@ -255,9 +249,7 @@ def test_a_plain_answer_still_selects_only_the_content_policy():
 
 async def test_a_citation_with_nothing_retrieved_is_rejected():
     with pytest.raises(OutputValidationError) as exc:
-        await OutputValidator().validate(
-            _claiming_outcome(content="Revenue rose [E9]."), {}
-        )
+        await OutputValidator().validate(_claiming_outcome(content="Revenue rose [E9]."), {})
     assert exc.value.reason == "unknown_evidence_id"
 
 
@@ -271,7 +263,5 @@ async def test_an_artifact_the_runtime_never_recorded_is_rejected():
 
 async def test_an_image_the_runtime_never_recorded_is_rejected():
     with pytest.raises(OutputValidationError) as exc:
-        await OutputValidator().validate(
-            _claiming_outcome(images=[{"image_id": "forged"}]), {}
-        )
+        await OutputValidator().validate(_claiming_outcome(images=[{"image_id": "forged"}]), {})
     assert exc.value.reason == "unrecorded_image"
