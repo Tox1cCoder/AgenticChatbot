@@ -1,4 +1,9 @@
-"""Internal tool that reads an offloaded tool result the model was shown a preview of.
+"""Internal tool that retrieves evidence from an offloaded tool result.
+
+The model is shown a preview and a ``blob_id``; this tool answers one question
+against the stored text. It is deliberately not a pager: an offset cursor
+turned every large result into a read-again loop that spent the turn locating
+the answer instead of using it.
 
 Scoping is deliberately blunt: a blob is readable only from the conversation and
 user that produced it. Unknown id, wrong conversation, missing context, a
@@ -23,15 +28,16 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from ..core.config import settings
+from .focused_tool_result import select_focused_excerpts
 from .tool_context import get_tool_context
 
 logger = logging.getLogger(__name__)
 
-_DESCRIPTION = (
-    "Read the full text of a large tool result that was offloaded and shown to you "
-    "only as a preview. Pass the blob_id printed in the offload notice. Returns a "
-    "bounded slice plus next_offset; call again with that offset to continue. Use "
-    "this instead of re-running the tool whose result was truncated."
+READ_TOOL_RESULT_DESCRIPTION = (
+    "Retrieve the passages most relevant to a specific objective from a large "
+    "offloaded tool result. Pass the blob_id and a precise question or fact to "
+    "find. The response is bounded and source-addressed; do not call repeatedly "
+    "with the same objective."
 )
 
 _NOT_FOUND = {
@@ -50,18 +56,32 @@ _UNAVAILABLE = {
     "retryable": True,
     "hint": (
         "The offloaded result could not be loaded because its storage was "
-        "unreachable. Retry once, then continue without the full text."
+        "unreachable. Retry once, then answer from the preview alone."
     ),
 }
 
 
 class ReadToolResultInput(BaseModel):
     blob_id: str = Field(description="The blob_id printed in the offload notice.")
-    offset: int = Field(default=0, ge=0, description="Character offset to read from.")
-    limit: int | None = Field(
+    objective: str = Field(
+        min_length=3,
+        max_length=500,
+        description=(
+            "The exact fact or question to find in the stored result. Ranking is "
+            "driven by these words, so name the fact, not the topic."
+        ),
+    )
+    max_excerpts: int | None = Field(
         default=None,
         ge=1,
-        description="Characters to return. Clamped to the configured maximum.",
+        le=20,
+        description="Passages to return. Clamped to the configured maximum.",
+    )
+    max_chars: int | None = Field(
+        default=None,
+        ge=1000,
+        le=80_000,
+        description="Response size ceiling. Clamped to the configured maximum.",
     )
 
 
@@ -72,7 +92,12 @@ def create_read_tool_result_tool(
 ) -> StructuredTool:
     """Build the ``read_tool_result`` tool, resolving DI lazily when not injected."""
 
-    async def _read(blob_id: str, offset: int = 0, limit: int | None = None) -> str:
+    async def _read(
+        blob_id: str,
+        objective: str,
+        max_excerpts: int | None = None,
+        max_chars: int | None = None,
+    ) -> str:
         context = get_tool_context()
         identity = _scoped_identity(blob_id, context.user_id, context.conversation_id)
         if identity is None:
@@ -84,12 +109,17 @@ def create_read_tool_result_tool(
         text, failure = await _load_text(resolved_repository, resolved_service, identity)
         if failure is not None:
             return json.dumps(failure)
-        return _slice_payload(identity[0], text or "", offset=offset, limit=limit)
+        return select_focused_excerpts(
+            text or "",
+            objective=objective,
+            max_excerpts=_clamp(max_excerpts, settings.tool_result_focus_max_excerpts),
+            max_chars=_clamp(max_chars, settings.tool_result_focus_max_chars),
+        ).model_dump_json()
 
     return StructuredTool.from_function(
         coroutine=_read,
         name="read_tool_result",
-        description=_DESCRIPTION,
+        description=READ_TOOL_RESULT_DESCRIPTION,
         args_schema=ReadToolResultInput,
         metadata={
             "tool_origin": "internal",
@@ -131,22 +161,11 @@ async def _load_text(
         return None, _UNAVAILABLE
 
 
-def _slice_payload(blob_id: UUID, text: str, *, offset: int, limit: int | None) -> str:
-    cap = max(1, int(settings.tool_result_read_max_chars))
-    window = cap if limit is None else max(1, min(int(limit), cap))
-    chunk = text[offset : offset + window]
-    end = offset + len(chunk)
-    return json.dumps(
-        {
-            "blob_id": str(blob_id),
-            "offset": offset,
-            "returned_chars": len(chunk),
-            "total_chars": len(text),
-            "next_offset": end if end < len(text) else None,
-            "content": chunk,
-        },
-        ensure_ascii=False,
-    )
+def _clamp(requested: int | None, configured: int) -> int:
+    """A caller may ask for less than the configured ceiling, never for more."""
+
+    ceiling = max(1, int(configured))
+    return ceiling if requested is None else max(1, min(int(requested), ceiling))
 
 
 def _scoped_identity(

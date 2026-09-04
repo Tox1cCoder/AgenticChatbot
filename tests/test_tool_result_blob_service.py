@@ -51,6 +51,8 @@ def test_offload_stores_content_and_notice_carries_the_blob_id(tmp_path):
     assert f"blob_id={result['blob_id']}" in result["output"]
     assert "26 chars" in result["output"]
     assert "read_tool_result" in result["output"]
+    assert 'objective="the exact fact still needed"' in result["output"]
+    assert "offset" not in result["output"]
     assert result["size_bytes"] == 26
     record = repo.created[0]
     assert record["content"] == "abcdefghijklmnopqrstuvwxyz"
@@ -134,6 +136,7 @@ def test_offload_notice_reports_dropped_keys_and_shortened_fields(tmp_path):
     assert "Shortened: raw_content" in output
     assert "do not re-run the tool" in output
     assert "search" not in output, "the notice must read correctly for any tool"
+    assert "full text" not in output, "the notice must not invite an unbounded read"
 
 
 def test_read_text_prefers_db_content(tmp_path):

@@ -61,6 +61,16 @@ def test_tool_context_prompt_points_at_the_reader():
     assert "read_tool_result" in TOOL_CONTEXT_SUFFIX
 
 
+def test_tool_context_prompt_asks_for_an_objective_not_a_page():
+    """A bullet that says "read the rest" is an instruction to page. The reader
+    now answers a question, so the prompt has to ask one."""
+    from app.ai.prompts import TOOL_CONTEXT_SUFFIX
+
+    assert "objective" in TOOL_CONTEXT_SUFFIX
+    assert "read the rest" not in TOOL_CONTEXT_SUFFIX
+    assert "offset" not in TOOL_CONTEXT_SUFFIX
+
+
 def test_tool_context_prompt_offload_bullet_is_tool_neutral():
     """The offload bullet must read correctly for read_file, SQL tools, and
     client skills, not only for a search tool. It must also agree in register

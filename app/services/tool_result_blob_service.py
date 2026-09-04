@@ -94,12 +94,16 @@ class ToolResultBlobService:
 
 
 def _notice(blob_id: Any, total_chars: int, preview: ToolResultPreview) -> str:
-    """Describe what the preview omitted and how to read the rest.
+    """Describe what the preview omitted and how to retrieve it.
 
     Every loss is named, including the ones inside a kept result. A notice that
     listed two omitted arrays while silently stripping the page text out of each
     result told the model its omissions were trivial, which is worse than
     telling it nothing.
+
+    The retrieval sentence asks for an objective rather than offering a cursor:
+    the reader answers one question against the stored text, so a notice that
+    said "read the full text" would be describing a tool that no longer exists.
     """
 
     omissions = [f"{key} ({count} entries)" for key, count in preview.omitted_arrays]
@@ -115,6 +119,7 @@ def _notice(blob_id: Any, total_chars: int, preview: ToolResultPreview) -> str:
     return (
         f"[Output offloaded: {total_chars} chars stored as blob_id={blob_id}.{detail}"
         f"{shortened}"
-        f' Call read_tool_result(blob_id="{blob_id}") to read the full text —'
-        " do not re-run the tool.]"
+        f' Call read_tool_result(blob_id="{blob_id}",'
+        ' objective="the exact fact still needed") once if the preview does not'
+        " contain the needed evidence — do not re-run the tool.]"
     )

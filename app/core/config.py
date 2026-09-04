@@ -1344,12 +1344,6 @@ class Settings(BaseSettings):
             "dropped whole instead of shrinking every result into uselessness."
         ),
     )
-    tool_result_read_max_chars: int = Field(
-        default=8000,
-        ge=1,
-        description="Maximum characters returned by one read_tool_result call.",
-    )
-
     # Focused web evidence. Every bound below caps what reaches model context:
     # the provider payload is allowed to be large, the model's view of it is not.
     web_search_max_results: int = Field(

@@ -5,9 +5,10 @@ import re
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from app.ai.tool_context import clear_tool_context, tool_execution_context
-from app.ai.tool_result_read_tool import create_read_tool_result_tool
+from app.ai.tool_result_read_tool import ReadToolResultInput, create_read_tool_result_tool
 from app.services.tool_result_blob_service import ToolResultBlobService
 
 CONVERSATION_ID = str(uuid4())
@@ -40,51 +41,129 @@ def _clean_context():
     clear_tool_context()
 
 
-async def _invoke(tool, **kwargs) -> dict:
+async def _raw(tool, **kwargs) -> str:
     with tool_execution_context(
         conversation_id=CONVERSATION_ID, user_id=USER_ID, agent_key="search"
     ):
-        return json.loads(await tool.ainvoke(kwargs))
+        return await tool.ainvoke(kwargs)
+
+
+async def _invoke(tool, **kwargs) -> dict:
+    return json.loads(await _raw(tool, **kwargs))
+
+
+def _texts(payload: dict) -> str:
+    return " ".join(item["text"] for item in payload["excerpts"])
 
 
 @pytest.mark.asyncio
-async def test_returns_a_bounded_slice_and_next_offset():
+async def test_returns_the_passages_matching_the_objective():
+    payload_text = json.dumps(
+        {
+            "results": [
+                {"content": "Arctic tern migration spans pole to pole."},
+                {"content": "The migration deadline is 30 June 2026 for every tenant."},
+            ]
+        }
+    )
     repository = FakeRepository(record={"id": BLOB_ID})
-    tool = create_read_tool_result_tool(repository=repository, service=FakeService("0123456789"))
+    tool = create_read_tool_result_tool(repository=repository, service=FakeService(payload_text))
 
-    payload = await _invoke(tool, blob_id=BLOB_ID, offset=0, limit=4)
+    payload = await _invoke(tool, blob_id=BLOB_ID, objective="What is the migration deadline?")
 
-    assert payload["content"] == "0123"
-    assert payload["returned_chars"] == 4
-    assert payload["total_chars"] == 10
-    assert payload["next_offset"] == 4
+    assert "30 June 2026" in _texts(payload)
+    assert payload["objective"] == "What is the migration deadline?"
     assert repository.calls == [(BLOB_ID, USER_ID, CONVERSATION_ID)]
 
 
 @pytest.mark.asyncio
-async def test_final_slice_reports_no_next_offset():
+async def test_the_response_carries_no_offset_cursor():
+    """The reader answers a question; it does not hand back a place to resume
+    from. A cursor is what turned one large result into a paging loop."""
     tool = create_read_tool_result_tool(
-        repository=FakeRepository(record={"id": BLOB_ID}), service=FakeService("0123456789")
+        repository=FakeRepository(record={"id": BLOB_ID}),
+        service=FakeService("The migration deadline is 30 June 2026."),
     )
 
-    payload = await _invoke(tool, blob_id=BLOB_ID, offset=8, limit=50)
+    payload = await _invoke(tool, blob_id=BLOB_ID, objective="What is the migration deadline?")
 
-    assert payload["content"] == "89"
-    assert payload["next_offset"] is None
+    assert "next_offset" not in payload
+    assert "offset" not in payload
+    assert "returned_chars" not in payload
+
+
+def test_the_input_schema_has_no_offset_or_limit():
+    fields = set(ReadToolResultInput.model_fields)
+
+    assert "offset" not in fields
+    assert "limit" not in fields
+    assert fields == {"blob_id", "objective", "max_excerpts", "max_chars"}
+
+
+def test_an_objective_is_required_at_the_schema_boundary():
+    with pytest.raises(ValidationError):
+        ReadToolResultInput(blob_id=BLOB_ID)
+    with pytest.raises(ValidationError):
+        ReadToolResultInput(blob_id=BLOB_ID, objective="x")
 
 
 @pytest.mark.asyncio
-async def test_limit_above_the_cap_is_clamped(monkeypatch):
+async def test_the_result_reports_what_it_left_behind():
+    payload_text = json.dumps({f"k{index}": f"deadline detail {index}" for index in range(30)})
+    tool = create_read_tool_result_tool(
+        repository=FakeRepository(record={"id": BLOB_ID}), service=FakeService(payload_text)
+    )
+
+    payload = await _invoke(
+        tool, blob_id=BLOB_ID, objective="What is the deadline?", max_excerpts=2
+    )
+
+    assert len(payload["excerpts"]) == 2
+    assert payload["total_candidates"] == 30
+    assert payload["omitted_candidates"] == 28
+
+
+@pytest.mark.asyncio
+async def test_caller_limits_are_clamped_to_the_configured_maxima(monkeypatch):
     monkeypatch.setattr(
-        "app.ai.tool_result_read_tool.settings.tool_result_read_max_chars", 5, raising=False
+        "app.ai.tool_result_read_tool.settings.tool_result_focus_max_excerpts", 2, raising=False
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_result_read_tool.settings.tool_result_focus_max_chars", 900, raising=False
+    )
+    payload_text = json.dumps(
+        {f"k{index}": f"deadline paragraph {index}: " + ("evidence " * 80) for index in range(20)}
     )
     tool = create_read_tool_result_tool(
-        repository=FakeRepository(record={"id": BLOB_ID}), service=FakeService("a" * 100)
+        repository=FakeRepository(record={"id": BLOB_ID}), service=FakeService(payload_text)
     )
 
-    payload = await _invoke(tool, blob_id=BLOB_ID, limit=10_000)
+    raw = await _raw(
+        tool,
+        blob_id=BLOB_ID,
+        objective="What is the deadline?",
+        max_excerpts=20,
+        max_chars=80_000,
+    )
 
-    assert payload["returned_chars"] == 5
+    assert len(json.loads(raw)["excerpts"]) <= 2
+    assert len(raw) <= 900, "the returned string is what reaches model context"
+
+
+@pytest.mark.asyncio
+async def test_an_objective_nothing_matches_returns_a_bounded_explanation():
+    tool = create_read_tool_result_tool(
+        repository=FakeRepository(record={"id": BLOB_ID}),
+        service=FakeService(json.dumps({"content": "Arctic tern migration. " * 100})),
+    )
+
+    payload = await _invoke(
+        tool, blob_id=BLOB_ID, objective="quarterly revenue for the Osaka subsidiary"
+    )
+
+    assert payload["excerpts"] == []
+    assert payload["note"]
+    assert "Arctic tern" not in json.dumps(payload)
 
 
 @pytest.mark.asyncio
@@ -93,11 +172,11 @@ async def test_blob_outside_the_conversation_is_not_found():
         repository=FakeRepository(record=None), service=FakeService("secret")
     )
 
-    payload = await _invoke(tool, blob_id=BLOB_ID)
+    payload = await _invoke(tool, blob_id=BLOB_ID, objective="find the secret")
 
     assert payload["status"] == "error"
     assert payload["error_type"] == "not_found"
-    assert "secret" not in json.dumps(payload)
+    assert "secret" not in json.dumps(payload["hint"])
 
 
 @pytest.mark.asyncio
@@ -105,7 +184,7 @@ async def test_malformed_blob_id_is_not_found_without_touching_the_repository():
     repository = FakeRepository(record={"id": BLOB_ID})
     tool = create_read_tool_result_tool(repository=repository, service=FakeService("x"))
 
-    payload = await _invoke(tool, blob_id="not-a-uuid")
+    payload = await _invoke(tool, blob_id="not-a-uuid", objective="find the value")
 
     assert payload["error_type"] == "not_found"
     assert repository.calls == []
@@ -116,7 +195,9 @@ async def test_missing_tool_context_is_not_found():
     repository = FakeRepository(record={"id": BLOB_ID})
     tool = create_read_tool_result_tool(repository=repository, service=FakeService("x"))
 
-    payload = json.loads(await tool.ainvoke({"blob_id": BLOB_ID}))
+    payload = json.loads(
+        await tool.ainvoke({"blob_id": BLOB_ID, "objective": "find the value"})
+    )
 
     assert payload["error_type"] == "not_found"
     assert repository.calls == []
@@ -128,6 +209,16 @@ def test_tool_identity_is_internal():
     assert tool.name == "read_tool_result"
     assert tool.metadata["tool_origin"] == "internal"
     assert tool.metadata["qualified_tool_id"] == "internal::read_tool_result"
+
+
+def test_the_description_asks_for_an_objective_and_forbids_a_repeat_call():
+    tool = create_read_tool_result_tool(repository=FakeRepository(), service=FakeService("x"))
+    description = tool.description.lower()
+
+    assert "objective" in description
+    assert "do not call repeatedly" in description
+    assert "offset" not in description
+    assert "full text" not in description
 
 
 class _RaisingService:
@@ -156,7 +247,7 @@ async def test_unreadable_record_returns_the_documented_not_found(error):
         repository=FakeRepository(record={"id": BLOB_ID}), service=_RaisingService(error)
     )
 
-    payload = await _invoke(tool, blob_id=BLOB_ID)
+    payload = await _invoke(tool, blob_id=BLOB_ID, objective="find the value")
 
     assert payload["status"] == "error"
     assert payload["error_type"] == "not_found"
@@ -169,12 +260,12 @@ async def test_repository_fault_returns_a_retryable_error():
         repository=_RaisingRepository(), service=FakeService("secret")
     )
 
-    payload = await _invoke(tool, blob_id=BLOB_ID)
+    payload = await _invoke(tool, blob_id=BLOB_ID, objective="find the secret")
 
     assert payload["status"] == "error"
     assert payload["error_type"] == "unavailable"
     assert payload["retryable"] is True
-    assert "secret" not in json.dumps(payload)
+    assert "secret" not in json.dumps(payload["hint"])
 
 
 class StoringRepository:
@@ -224,7 +315,8 @@ def _offloaded_payload() -> str:
 @pytest.mark.asyncio
 async def test_notice_blob_id_resolves_through_the_real_service_and_repository(tmp_path):
     # The seam the whole feature depends on: the id the model is shown must parse
-    # and resolve back to the stored text through the production code paths.
+    # and resolve back to the stored text through the production code paths, and
+    # one call must reach evidence the preview dropped.
     repository = StoringRepository()
     blob_service = ToolResultBlobService(
         repository, storage_root=tmp_path, threshold_chars=1000, preview_chars=4000
@@ -243,20 +335,14 @@ async def test_notice_blob_id_resolves_through_the_real_service_and_repository(t
     assert "TAIL-8" not in offloaded["output"], "the tail must be missing from the preview"
 
     tool = create_read_tool_result_tool(repository=repository, service=blob_service)
-    chunks: list[str] = []
-    offset = 0
-    for _ in range(20):
-        payload = await _invoke(tool, blob_id=notice_ids[0], offset=offset)
-        assert payload["total_chars"] == len(output_text)
-        chunks.append(payload["content"])
-        if payload["next_offset"] is None:
-            break
-        offset = payload["next_offset"]
-    else:
-        pytest.fail("read_tool_result never reported the end of the blob")
+    payload = await _invoke(
+        tool,
+        blob_id=notice_ids[0],
+        objective="Find the TAIL-8 value",
+    )
 
-    assert "".join(chunks) == output_text
-    assert "TAIL-8" in "".join(chunks)
+    assert "TAIL-8" in _texts(payload)
+    assert "next_offset" not in payload
 
 
 @pytest.mark.asyncio
@@ -274,7 +360,9 @@ async def test_offloaded_blob_from_another_conversation_is_not_found(tmp_path):
     )
 
     tool = create_read_tool_result_tool(repository=repository, service=blob_service)
-    payload = await _invoke(tool, blob_id=offloaded["blob_id"])
+    payload = await _invoke(
+        tool, blob_id=offloaded["blob_id"], objective="Find the TAIL-8 value"
+    )
 
     assert payload["error_type"] == "not_found"
 
