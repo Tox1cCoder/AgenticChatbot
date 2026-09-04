@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import importlib
 import json
 import os
@@ -18,6 +19,7 @@ from app.evaluation.rag.corpus import (
     validate_golden_dataset,
     validate_reference_rows,
 )
+from app.evaluation.rag.langsmith_queries import comparison_metrics
 from app.evaluation.rag.metrics import (
     deterministic_evaluators,
     deterministic_summary_evaluators,
@@ -181,26 +183,6 @@ def run_online(
     return client, results
 
 
-def experiment_metrics(client: Any, experiment_name: str) -> dict[str, float]:
-    """Aggregate recorded deterministic feedback for an immutable experiment."""
-    frame = client.get_test_results(project_name=experiment_name)
-    metrics = {
-        column.removeprefix("feedback."): float(frame[column].mean())
-        for column in frame.columns
-        if column.startswith("feedback.")
-    }
-    project = client.read_project(project_name=experiment_name, include_stats=True)
-    for metric, statistics in (getattr(project, "feedback_stats", {}) or {}).items():
-        if isinstance(statistics, dict) and statistics.get("avg") is not None:
-            metrics[metric] = float(statistics["avg"])
-    for metric, statistics in (getattr(project, "session_feedback_stats", {}) or {}).items():
-        if isinstance(statistics, dict) and statistics.get("avg") is not None:
-            metrics[metric] = float(statistics["avg"])
-    if not metrics:
-        raise ValueError(f"baseline experiment has no deterministic feedback: {experiment_name}")
-    return metrics
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     if args.offline:
@@ -237,9 +219,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             candidate_name = getattr(results, "experiment_name", None)
             if not candidate_name:
                 raise ValueError("LangSmith did not return the candidate experiment name")
-            candidate_metrics = experiment_metrics(client=client, experiment_name=candidate_name)
-            baseline_metrics = experiment_metrics(
-                client=client, experiment_name=args.compare_baseline
+            candidate_metrics, baseline_metrics = asyncio.run(
+                comparison_metrics(client, candidate_name, args.compare_baseline)
             )
             verdicts = compare_release_gates(baseline_metrics, candidate_metrics, gates)
         except Exception as error:

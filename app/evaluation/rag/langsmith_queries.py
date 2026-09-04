@@ -1,0 +1,76 @@
+"""SmithDB-backed LangSmith reads for RAG experiment comparison.
+
+LangSmith marks the v1 run-query and run-retrieve endpoint families with
+``Deprecation: true`` and a 2027-01-31 sunset. ``Client.get_test_results()``
+reaches them through ``Client.list_runs()`` / ``POST /api/v1/runs/query``, so
+experiment feedback is aggregated here through the SmithDB v2 resource
+(``Client.runs.query()`` -> ``POST /api/v2/runs/query``) instead.
+
+Two properties of the v2 resource shape this module:
+
+* ``runs.query()`` returns only the last 24 hours unless ``min_start_time`` is
+  supplied, so every query passes the experiment project's own ``start_time``.
+  Omitting it silently truncates an older experiment to zero runs, which would
+  read as "no feedback" rather than as an error.
+* ``selects`` is an explicit allowlist. Only ``ID`` and ``FEEDBACK_STATS`` are
+  requested; run inputs and outputs stay on the server, so no prompt, document
+  body, or user/conversation identifier is transferred to compute a metric.
+
+Project- and session-level statistics come from ``aread_project`` and override
+the per-run averages, because summary evaluators record their score once on the
+experiment rather than on each root run.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Mapping
+from typing import Any
+
+ROOT_RUN_SELECTS = ["ID", "FEEDBACK_STATS"]
+
+
+def _averages(source: Mapping[str, Any] | None) -> dict[str, float]:
+    """Return only the feedback entries that carry a numeric average."""
+    return {
+        key: float(statistics["avg"])
+        for key, statistics in (source or {}).items()
+        if isinstance(statistics, Mapping) and statistics.get("avg") is not None
+    }
+
+
+async def experiment_metrics(client: Any, experiment_name: str) -> dict[str, float]:
+    """Aggregate recorded deterministic feedback for an immutable experiment."""
+    project = await client.aread_project(
+        project_name=experiment_name,
+        include_stats=True,
+    )
+    totals: dict[str, list[float]] = {}
+    async for run in client.runs.query(
+        project_ids=[str(project.id)],
+        is_root=True,
+        min_start_time=project.start_time,
+        selects=list(ROOT_RUN_SELECTS),
+    ):
+        for key, average in _averages(getattr(run, "feedback_stats", None)).items():
+            totals.setdefault(key, []).append(average)
+
+    metrics = {key: sum(values) / len(values) for key, values in totals.items()}
+    metrics.update(_averages(getattr(project, "feedback_stats", None)))
+    metrics.update(_averages(getattr(project, "session_feedback_stats", None)))
+    if not metrics:
+        raise ValueError(f"baseline experiment has no deterministic feedback: {experiment_name}")
+    return metrics
+
+
+async def comparison_metrics(
+    client: Any,
+    candidate_name: str,
+    baseline_name: str,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Read both sides of a release-gate comparison concurrently."""
+    candidate, baseline = await asyncio.gather(
+        experiment_metrics(client, candidate_name),
+        experiment_metrics(client, baseline_name),
+    )
+    return candidate, baseline

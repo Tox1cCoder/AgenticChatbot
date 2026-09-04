@@ -165,7 +165,7 @@ langgraph-cli==0.4.15
 langgraph-prebuilt==1.1.0
 langgraph-runtime-inmem==0.26.0
 langgraph-sdk==0.4.2
-langsmith==0.10.9
+langsmith==0.10.18
 lazy-loader==0.5
 loguru==0.7.3
 loro==1.10.3

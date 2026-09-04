@@ -51,7 +51,9 @@ dependencies = [
     "langgraph>=1.2.4,<2.0.0",
     "langgraph-checkpoint>=4.1.1,<5.0.0",
     "langgraph-checkpoint-postgres>=3.1.0,<4.0.0",
-    "langsmith>=0.8.11,<1.0.0",
+    # SmithDB `client.runs.query()` reads; the v1 run-query endpoints this
+    # replaces sunset on 2027-01-31 and the SmithDB guide's SDK floor is 0.10.15.
+    "langsmith>=0.10.15,<1.0.0",
     "langchain-google-genai>=4.2.4,<5.0.0",
     "langchain-openai>=1.2.2,<2.0.0",
     "langchain-mcp-adapters>=0.2.2,<1.0.0",

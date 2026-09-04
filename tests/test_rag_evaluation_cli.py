@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 
 
 def _script():
@@ -106,28 +107,73 @@ def test_online_runner_validates_remote_example_references_before_evaluation():
         raise AssertionError("stale remote label was accepted")
 
 
-def test_experiment_metrics_include_summary_evaluator_scores():
+def _reviewed_dataset(monkeypatch, script):
+    """Clear the pending-human-review guard so the comparison branch runs."""
+    monkeypatch.setattr(
+        script,
+        "load_golden_dataset",
+        lambda _path: [{"metadata": {"label_review_status": "reviewed"}}],
+    )
+
+
+def test_compare_baseline_awaits_the_smithdb_comparison_query(monkeypatch, capsys):
     script = _script()
+    monkeypatch.setenv("LANGSMITH_API_KEY", "configured")
+    _reviewed_dataset(monkeypatch, script)
+    client = object()
+    monkeypatch.setattr(
+        script,
+        "run_online",
+        lambda _args: (client, type("Results", (), {"experiment_name": "candidate"})()),
+    )
+    recorded: list[tuple[object, str, str]] = []
 
-    class Frame:
-        columns = ["feedback.document_recall_at_5"]
+    async def comparison_metrics(client_argument, candidate_name, baseline_name):
+        recorded.append((client_argument, candidate_name, baseline_name))
+        return (
+            {"document_recall_at_5": 0.9, "abstention_recall": 0.8},
+            {"document_recall_at_5": 0.9, "abstention_recall": 0.8},
+        )
 
-        def __getitem__(self, _):
-            return type("Series", (), {"mean": lambda self: 0.8})()
+    monkeypatch.setattr(script, "comparison_metrics", comparison_metrics)
 
-    class Project:
-        feedback_stats = {"abstention_precision": {"avg": 0.7}}
-        session_feedback_stats = {"abstention_recall": {"avg": 0.6}}
+    exit_code = script.main(["--compare-baseline", "baseline"])
 
-    class Client:
-        def get_test_results(self, **_):
-            return Frame()
+    assert exit_code == 0
+    assert recorded == [(client, "candidate", "baseline")]
+    verdicts = json.loads(capsys.readouterr().out.splitlines()[0])
+    assert {verdict["metric"] for verdict in verdicts} >= {"document_recall_at_5"}
 
-        def read_project(self, **_):
-            return Project()
 
-    assert script.experiment_metrics(Client(), "experiment") == {
-        "document_recall_at_5": 0.8,
-        "abstention_precision": 0.7,
-        "abstention_recall": 0.6,
-    }
+def test_compare_baseline_reports_a_failed_smithdb_query(monkeypatch):
+    script = _script()
+    monkeypatch.setenv("LANGSMITH_API_KEY", "configured")
+    _reviewed_dataset(monkeypatch, script)
+    monkeypatch.setattr(
+        script,
+        "run_online",
+        lambda _args: (object(), type("Results", (), {"experiment_name": "candidate"})()),
+    )
+
+    async def comparison_metrics(*_args):
+        raise ValueError("baseline experiment has no deterministic feedback: baseline")
+
+    monkeypatch.setattr(script, "comparison_metrics", comparison_metrics)
+
+    assert script.main(["--compare-baseline", "baseline"]) == 1
+
+
+def test_compare_baseline_requires_the_candidate_experiment_name(monkeypatch):
+    script = _script()
+    monkeypatch.setenv("LANGSMITH_API_KEY", "configured")
+    _reviewed_dataset(monkeypatch, script)
+    monkeypatch.setattr(
+        script, "run_online", lambda _args: (object(), type("Results", (), {})())
+    )
+
+    async def comparison_metrics(*_args):
+        raise AssertionError("comparison must not run without a candidate experiment name")
+
+    monkeypatch.setattr(script, "comparison_metrics", comparison_metrics)
+
+    assert script.main(["--compare-baseline", "baseline"]) == 1
