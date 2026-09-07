@@ -430,7 +430,7 @@ git commit -m "feat: coordinate generation lifecycle and distributed stop"
 
 ### Task 3: Add Per-Epoch Soft/Hard Execution Budgets
 
-> **Partly landed 2026-09-07.** Done and verified:
+> **Landed 2026-09-07.** Done and verified:
 >
 > - `app/ai/workflow/execution_budget.py` — the framework-free accountant (R1),
 >   with 23 tests. Per-epoch counters reset on Continue, turn totals do not.
@@ -450,24 +450,28 @@ git commit -m "feat: coordinate generation lifecycle and distributed stop"
 >   hard limit of 9, which would have let the framework raise on exactly the
 >   call the budget reserved.
 >
-> **Still outstanding in this task:**
+> Completed in a second pass:
 >
-> 1. **The RAG path has no budget** — the remaining third of R1. `rag_agent`
->    bypasses `create_agent` for the shared compiled graph, so it must call the
->    accountant at its own model and tool boundaries.
-> 2. **The hard-limit fallback.** `specialists.py` still turns
->    `ModelCallLimitExceededError` into `WorkflowError(code="agent_execution_limit")`
->    and routes to `finalize`. The accountant now records `hard_limit`, but
->    nothing yet builds the deterministic partial outcome from the evidence
->    already gathered, so this remains a public generic error.
-> 3. **Forced synthesis adds no instruction yet.** `FORCED_SYNTHESIS_INSTRUCTION`
->    is defined and unused: the reserved call is tool-free but is not yet told
->    why. Reconcile it with the existing `tool_budget_notice`
->    (`app/ai/graph.py:1193`) rather than appending a second, competing
->    "stop calling tools" sentence.
-> 4. `WorkflowState.execution_budget` is not populated. The snapshot currently
->    rides on `AgentResponse.metadata["execution_budget"]`; Task 4 reads it to
->    decide whether to pause.
+> - **RAG shares the accountant** — the last third of R1. The graph is compiled
+>   once and shared, so the counters live in graph state and each node returns
+>   what it advanced. Suppression rides the agent's existing
+>   `rag_force_final_response` flag, which already maps to `disable_tools`.
+> - **`WorkflowState.execution_budget` is populated**, from
+>   `AgentResponse.metadata["execution_budget"]`. The RAG outcome writes the
+>   same key, so the graph reads one place whichever path answered.
+> - **The reserved call is told why its tools are gone**, once — a provider
+>   fallback re-enters the chain, and a refused tool call already said it in
+>   band. There was nothing to reconcile with the older `tool_budget_notice`:
+>   `_mark_force_final_response` has no callers, so that path is dead.
+> - **A hard limit is a server-owned partial**, not `agent_execution_limit`. It
+>   carries the artifacts and images the pipeline recorded; the model's text
+>   does not survive the exception, so the message says that rather than
+>   inventing an answer. The metric still fires.
+>
+> One deliberate non-change: `invoke_worker` still maps a hard limit to
+> `_failed_worker(task, "agent_execution_limit")`. A delegated worker reports a
+> typed failure to its parent, which decides — changing that is Task 4's
+> question about what a worker returns, not this one's.
 
 **Files:**
 - Create: `app/ai/workflow/execution_budget.py`
@@ -495,19 +499,19 @@ class SoftExecutionBudgetMiddleware(AgentMiddleware):
     async def awrap_tool_call(self, request, handler): ...
 ```
 
-- [ ] **Step 1: Write failing middleware tests**
+- [x] **Step 1: Write failing middleware tests**
 
 Use a scripted model/tool. At one below the soft threshold, a normal tool call runs. At the threshold, the middleware returns a paired synthetic `ToolMessage` saying evidence collection ended, then makes exactly one final model request with `tools=[]` and a server-owned synthesis instruction. Assert no handoff tool remains either. Test model-call and tool-call thresholds separately.
 
 Assert counters reset when `execution_epoch` changes but cumulative turn quota metadata does not. Assert built-in hard-limit exceptions become `ExecutionBudgetState(exhausted_by="hard_limit")`, not `WorkflowError(code="agent_execution_limit")` exposed to the client.
 
-- [ ] **Step 2: Run and verify failures**
+- [x] **Step 2: Run and verify failures**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_execution_budget_middleware.py tests/test_specialist_middleware.py tests/test_workflow_contracts.py
 ```
 
-- [ ] **Step 3: Declare soft and hard settings**
+- [x] **Step 3: Declare soft and hard settings**
 
 ```python
 generation_soft_model_calls_per_epoch: int = Field(default=7, ge=1, le=50)
@@ -520,7 +524,7 @@ generation_stop_wait_seconds: float = Field(default=5.0, ge=0.1, le=30.0)
 
 Add cross-field validation: each hard threshold must exceed its soft threshold.
 
-- [ ] **Step 4: Implement forced synthesis**
+- [x] **Step 4: Implement forced synthesis**
 
 The middleware owns counters for one specialist invocation. Before a call would exceed soft tool budget, return a correctly paired `ToolMessage` for the requested call and set `forced_synthesis`. The next model request receives no tools and this appended system instruction:
 
@@ -534,7 +538,7 @@ Mark the resulting `ResponseOutcome` metadata with the bounded budget snapshot. 
 
 Retain LangChain's built-in run limit as a higher last-resort threshold. Catch its typed exception at the specialist boundary and create a deterministic server-owned fallback outcome from already collected evidence, marked `hard_limit`, so it still passes output validation.
 
-- [ ] **Step 5: Run and commit Task 3**
+- [x] **Step 5: Run and commit Task 3**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_execution_budget_middleware.py tests/test_specialist_middleware.py tests/test_workflow_contracts.py tests/test_specialist_subgraph_contract.py tests/test_graph_tool_budget.py tests/test_rag_tool_loop_finalization.py
