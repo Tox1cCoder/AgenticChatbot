@@ -342,6 +342,22 @@ git commit -m "feat: persist authoritative generation lifecycle"
 
 ### Task 2: Implement Idempotent Lifecycle Commands and Distributed Stop
 
+> **Landed 2026-09-07.** 39 service/bus tests plus 9 registry tests; full suite
+> 5069 passed. Deviations, all deliberate:
+>
+> - The registry re-key touched `app/services/message_service.py`, which Task 2's
+>   file list does not include. The parameter rename would otherwise have broken
+>   the one keyword call site and taken the suite red between commits; Task 5
+>   changes *which* id is passed.
+> - `await_stop_settled` was added beyond the listed interfaces. `request_stop`
+>   returns as soon as the transition is durable, so something has to own the
+>   bounded wait, and folding it into `request_stop` would have made the
+>   idempotent command block on a worker in another process.
+> - The four new settings are **absent from the environment template** — that
+>   file is guard-blocked for this tooling and needs Thai. No test enforces
+>   parity for the `generation_*` prefix, so nothing fails; they are simply
+>   undocumented until added. Task 8's rollout step should cover them.
+
 **Files:**
 - Create: `app/services/generation_control_service.py`
 - Create: `app/services/generation_control_bus.py`
@@ -364,7 +380,7 @@ class GenerationControlService:
     async def mark_completed(self, command: MarkCompleted) -> GenerationSnapshot: ...
 ```
 
-- [ ] **Step 1: Write the lifecycle table tests**
+- [x] **Step 1: Write the lifecycle table tests**
 
 Parameterize every legal/illegal transition from the approved lifecycle. Explicitly assert:
 
@@ -376,13 +392,13 @@ Parameterize every legal/illegal transition from the approved lifecycle. Explici
 - Continue is rejected for terminal rows and `outcome_unknown` block reason;
 - a Stop timeout leaves the durable state at `stop_requested`.
 
-- [ ] **Step 2: Run and verify failures**
+- [x] **Step 2: Run and verify failures**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_generation_control_service.py tests/test_generation_control_bus.py
 ```
 
-- [ ] **Step 3: Add the control bus**
+- [x] **Step 3: Add the control bus**
 
 Define a protocol plus two implementations:
 
@@ -395,15 +411,15 @@ class GenerationControlBus(Protocol):
 
 The Redis implementation publishes JSON containing only schema version, generation ID, and lifecycle version. Configure channel name and reconnect backoff in settings. `InMemoryGenerationControlBus` is deterministic for tests/dev.
 
-- [ ] **Step 4: Re-key the local registry**
+- [x] **Step 4: Re-key the local registry**
 
 Change `GenerationRegistry` to `generation_id` keys and add `task: asyncio.Task | None`. Preserve user/conversation/active-agent queries used by custom-agent mutation locks. Add `request_cancel(generation_id)` that sets the cooperative event and calls `task.cancel()` if active. Do not remove entries on HTTP wait timeout; remove only after the worker records a no-active-work status.
 
-- [ ] **Step 5: Wire service/repository/bus once in the container**
+- [x] **Step 5: Wire service/repository/bus once in the container**
 
 Register reusable providers in `app/core/container.py`. Do not instantiate an engine, Redis client, or subscriber inside request methods.
 
-- [ ] **Step 6: Run and commit Task 2**
+- [x] **Step 6: Run and commit Task 2**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_generation_control_service.py tests/test_generation_control_bus.py tests/test_custom_agents_message_service.py tests/test_custom_agents_service.py
