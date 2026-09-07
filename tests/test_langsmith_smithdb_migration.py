@@ -9,6 +9,7 @@ module reaches for a legacy query method again.
 from __future__ import annotations
 
 import ast
+import inspect
 import io
 import re
 import tokenize
@@ -16,9 +17,12 @@ from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
 import pytest
+from langsmith import AsyncClient, Client
+from langsmith._internal._beta_decorator import deprecated
 from langsmith._openapi_client.types.run import Run
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
@@ -27,13 +31,20 @@ from app.evaluation.rag.langsmith_queries import comparison_metrics, experiment_
 
 ROOT = Path(__file__).resolve().parents[1]
 SMITHDB_FLOOR = Version("0.10.15")
-LEGACY_QUERY_MARKERS = (
-    ".list_runs(",
-    ".get_test_results(",
-    ".get_experiment_results(",
+#: Raw v1 paths, for anyone who hand-rolls a request instead of using the SDK.
+#: Deliberately anchored to ``/api/v1/``: the replacement for the first of these
+#: is ``/api/v2/runs/query``, so an unanchored ``/runs/query`` would ban the fix
+#: along with the defect.
+LEGACY_ENDPOINT_LITERALS = (
     "/api/v1/runs/query",
+    "/api/v1/runs/",
+    "/api/v1/public/runs",
+    "/api/v1/annotation-queues/",
 )
+#: ``POST /api/v1/datasets/{dataset_id}/runs``, the legacy experiment-run write.
+LEGACY_DATASET_RUNS_PATH = re.compile(r"/api/v1/datasets/[^\s\"']*?/runs")
 PRODUCTION_ROOTS = ("app", "scripts")
+CLIENT_CLASSES = (Client, AsyncClient)
 DECLARATION_FILES = ("pyproject.toml", "environment.yml", "requirements.txt")
 PRE_SMITHDB_RELEASES = ("0.3.45", "0.8.11", "0.9.8", "0.10.9", "0.10.14")
 SMITHDB_RELEASES = ("0.10.15", "0.10.18", "0.11.2")
@@ -120,6 +131,7 @@ async def test_experiment_metrics_use_smithdb_v2_with_full_time_window():
             "is_root": True,
             "min_start_time": started,
             "selects": ["ID", "FEEDBACK_STATS"],
+            "page_size": 1_000,
         }
     ]
 
@@ -199,6 +211,38 @@ async def test_comparison_metrics_propagate_a_missing_baseline():
         await comparison_metrics(client, "candidate", "baseline")
 
 
+async def test_a_project_without_a_start_time_is_refused_before_it_is_queried():
+    """A missing lower bound silently means "the last 24 hours".
+
+    ``start_time`` is optional on the project schema, and ``min_start_time``
+    defaults to one day ago when absent. Passing it through unchecked turns an
+    older experiment into zero runs, which reads as "no deterministic feedback"
+    rather than as the truncation it is.
+    """
+    project = SimpleNamespace(
+        id=uuid4(),
+        start_time=None,
+        feedback_stats={"groundedness": {"avg": 0.8}},
+        session_feedback_stats=None,
+    )
+    runs = FakeRuns([_run(document_recall_at_5=1.0)])
+
+    with pytest.raises(ValueError, match="start_time"):
+        await experiment_metrics(FakeClient(project=project, runs=runs), "candidate")
+
+    assert runs.calls == []
+
+
+async def test_the_query_asks_for_the_largest_supported_page():
+    """The default page is 100 runs; a golden-dataset experiment is larger."""
+    project = _project(feedback={"groundedness": {"avg": 0.9}})
+    runs = FakeRuns([])
+
+    await experiment_metrics(FakeClient(project=project, runs=runs), "candidate")
+
+    assert runs.calls[0]["page_size"] == 1_000
+
+
 def test_installed_langsmith_supports_smithdb_queries():
     assert Version(version("langsmith")) >= SMITHDB_FLOOR
 
@@ -258,7 +302,99 @@ def _executable_source(source: str) -> str:
     return "".join(characters)
 
 
-def test_production_python_contains_no_legacy_langsmith_run_queries():
+def _deprecation_code_marks() -> tuple[Any, Any]:
+    """The code objects langsmith's own ``deprecated`` decorator produces.
+
+    Every decoration shares one code object, so identity against a probe is an
+    exact test for "the installed SDK marks this method deprecated" -- with no
+    hand-maintained list to fall behind the next SDK bump. That matters here:
+    the four markers this replaced named three of the seventeen methods the
+    installed SDK actually marks.
+    """
+
+    def _probe() -> None: ...
+
+    async def _aprobe() -> None: ...
+
+    return deprecated("probe")(_probe).__code__, deprecated("probe")(_aprobe).__code__
+
+
+def _deprecated_client_methods() -> dict[str, str]:
+    """Every deprecated client method, mapped to the SDK's own guidance."""
+    sync_mark, async_mark = _deprecation_code_marks()
+    found: dict[str, str] = {}
+    for client_class in CLIENT_CLASSES:
+        for name in dir(client_class):
+            if name.startswith("_"):
+                continue
+            attribute = getattr(client_class, name, None)
+            if getattr(attribute, "__code__", None) not in (sync_mark, async_mark):
+                continue
+            found[name] = next(
+                (
+                    cell.cell_contents
+                    for cell in (attribute.__closure__ or ())
+                    if isinstance(cell.cell_contents, str)
+                ),
+                "deprecated by the installed SDK",
+            )
+    return found
+
+
+def _methods_reaching_v1_behind_a_suppressed_warning() -> dict[str, str]:
+    """Supported methods that call a deprecated one with the warning silenced.
+
+    These are the dangerous ones. They are not themselves deprecated and they
+    emit nothing at runtime, so the only way to know is to read the SDK --
+    which is exactly how ``get_test_results()``, the call this migration
+    started from, looked clean while reaching ``POST /api/v1/runs/query``.
+    """
+    found: dict[str, str] = {}
+    for client_class in CLIENT_CLASSES:
+        for name in dir(client_class):
+            if name.startswith("_"):
+                continue
+            attribute = getattr(client_class, name, None)
+            if not callable(attribute):
+                continue
+            try:
+                source = inspect.getsource(attribute)
+            except (OSError, TypeError):
+                continue
+            if "suppress_deprecation_warning" in source:
+                found[name] = (
+                    "reaches a v1 endpoint behind a suppressed deprecation "
+                    "warning; call the v2 resource directly"
+                )
+    return found
+
+
+def banned_client_methods() -> dict[str, str]:
+    return {
+        **_deprecated_client_methods(),
+        **_methods_reaching_v1_behind_a_suppressed_warning(),
+    }
+
+
+def test_the_ban_list_is_derived_from_the_installed_sdk():
+    """Guard the guard: an empty or stale inventory would pass everything."""
+    deprecated_methods = _deprecated_client_methods()
+
+    assert {"list_runs", "read_run", "get_experiment_results"} <= set(deprecated_methods)
+    assert all("2027" in message for message in deprecated_methods.values())
+    assert "get_test_results" in _methods_reaching_v1_behind_a_suppressed_warning()
+
+
+def test_production_python_calls_no_deprecated_or_v1_falling_back_client_method():
+    """Ban by method name, accepting that a name can belong to something else.
+
+    ``.evaluate_run(`` is also the LangSmith *evaluator* protocol method, so a
+    custom evaluator would trip this. That is the right way round to be wrong:
+    a false positive is one loud line naming the SDK's own guidance, and the
+    developer can see in a second that it is not a client call. A miss is what
+    this whole migration is cleaning up.
+    """
+    banned = banned_client_methods()
     offenders: list[str] = []
     for root in PRODUCTION_ROOTS:
         for path in sorted((ROOT / root).rglob("*.py")):
@@ -266,15 +402,35 @@ def test_production_python_contains_no_legacy_langsmith_run_queries():
                 continue
             code = _executable_source(path.read_text(encoding="utf-8"))
             offenders.extend(
-                f"{path.relative_to(ROOT).as_posix()}: {marker}"
-                for marker in LEGACY_QUERY_MARKERS
-                if marker in code
+                f"{path.relative_to(ROOT).as_posix()}: .{name}() -- {banned[name]}"
+                for name in sorted(banned)
+                if f".{name}(" in code
             )
 
     assert offenders == []
 
 
-def test_the_legacy_query_inventory_still_detects_a_real_call_site():
+def test_production_python_contains_no_legacy_langsmith_endpoint():
+    offenders: list[str] = []
+    for root in PRODUCTION_ROOTS:
+        for path in sorted((ROOT / root).rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            code = _executable_source(path.read_text(encoding="utf-8"))
+            offenders.extend(
+                f"{path.relative_to(ROOT).as_posix()}: {literal}"
+                for literal in LEGACY_ENDPOINT_LITERALS
+                if literal in code
+            )
+            if LEGACY_DATASET_RUNS_PATH.search(code):
+                offenders.append(
+                    f"{path.relative_to(ROOT).as_posix()}: legacy experiment-run path"
+                )
+
+    assert offenders == []
+
+
+def test_the_inventory_still_detects_a_real_call_site():
     """Guard the guard: blanking documentation must not blind the scan."""
     code = _executable_source(
         '"""Mentions .list_runs( and /api/v1/runs/query in prose."""\n'
@@ -285,10 +441,20 @@ def test_the_legacy_query_inventory_still_detects_a_real_call_site():
         '    return client.session.post("https://host/api/v1/runs/query")\n'
     )
 
-    assert [marker for marker in LEGACY_QUERY_MARKERS if marker in code] == [
-        ".list_runs(",
+    assert [name for name in banned_client_methods() if f".{name}(" in code] == ["list_runs"]
+    # The retrieve prefix is contained in the query path, so one hardcoded URL
+    # trips both. Overlap costs a duplicated offender line and nothing else.
+    assert {literal for literal in LEGACY_ENDPOINT_LITERALS if literal in code} == {
         "/api/v1/runs/query",
-    ]
+        "/api/v1/runs/",
+    }
+
+
+def test_the_v2_replacement_path_is_not_itself_banned():
+    """``/api/v2/runs/query`` is the fix; an unanchored literal would ban it."""
+    code = 'REPLACEMENT = "https://host/api/v2/runs/query"'
+
+    assert [literal for literal in LEGACY_ENDPOINT_LITERALS if literal in code] == []
 
 
 def test_the_run_double_carries_the_sdk_feedback_type_not_a_dictionary():
