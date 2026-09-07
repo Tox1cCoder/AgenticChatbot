@@ -529,6 +529,95 @@ async def test_web_open_honors_the_configured_character_cap(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_an_overlong_query_is_corrective_and_spends_no_search_slot(monkeypatch):
+    """A query the provider will refuse must not cost the turn its search.
+
+    The coroutine is called directly here because the schema now rejects this
+    query first; what is under test is the second boundary, for a caller that
+    reached the tool without it.
+    """
+    monkeypatch.setattr(web_tools.settings, "research_budget_enabled", True, raising=False)
+    search = _FakeTool("tavily_search", _search_payload())
+    tool = create_web_search_tool(tavily_tool=search, clock=_clock)
+
+    with tool_execution_context(
+        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
+    ):
+        rejected = json.loads(
+            await tool.coroutine(query="q" * 450, objective="Find the published documentation")
+        )
+        accepted = json.loads(
+            await tool.coroutine(
+                query="aurora release notes", objective="Find the published documentation"
+            )
+        )
+
+    assert rejected["error_type"] == "invalid_request"
+    assert rejected["retryable"] is False
+    assert [call["query"] for call in search.calls] == ["aurora release notes"]
+    assert accepted["searches_used"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cap", "url_length"),
+    [(3_000, 24), (2_000, 300)],
+    ids=["short_urls", "long_urls"],
+)
+async def test_web_open_never_exceeds_the_cap_once_the_envelope_is_counted(
+    monkeypatch, cap, url_length
+):
+    """The cap belongs to the string that reaches the model, not to a draft.
+
+    Budgeting the excerpts alone leaves the URLs, the failure records and the
+    envelope's own separators outside the accounting, so a configuration well
+    inside its declared range returns more than it promised.
+    """
+    monkeypatch.setattr(web_tools.settings, "web_open_max_chars", cap, raising=False)
+    monkeypatch.setattr(web_tools.settings, "web_open_max_excerpts", 8, raising=False)
+    urls = [
+        "https://example.com/" + str(index) * (url_length - len("https://example.com/"))
+        for index in range(4)
+    ]
+    provider = json.dumps(
+        {
+            "results": [
+                {
+                    "url": url,
+                    "title": "Release notes",
+                    "raw_content": f"release {index} " + chr(65 + index) * 1_100,
+                }
+                for index, url in enumerate(urls)
+            ],
+            "failed_results": [],
+        }
+    )
+    tool = create_web_open_tool(extract_tool=_FakeTool("tavily_extract", provider))
+
+    with tool_execution_context(
+        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
+    ):
+        raw = await tool.ainvoke({"urls": urls, "question": "Which release is stated?"})
+
+    assert len(raw) <= cap
+    assert json.loads(raw)["question"] == "Which release is stated?"
+
+
+@pytest.mark.asyncio
+async def test_web_open_still_returns_evidence_at_the_default_configuration():
+    """Bounding the envelope must not starve the excerpts it exists to carry."""
+    tool = create_web_open_tool(extract_tool=_FakeTool("tavily_extract", _extract_payload()))
+
+    payload, _ = await _run(
+        tool,
+        urls=["https://example.com/a"],
+        question="Which release date is stated?",
+    )
+
+    assert payload["excerpts"]
+
+
+@pytest.mark.asyncio
 async def test_web_open_reports_per_url_failures_without_provider_diagnostics():
     tool = create_web_open_tool(extract_tool=_FakeTool("tavily_extract", _extract_payload()))
 

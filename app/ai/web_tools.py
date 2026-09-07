@@ -50,8 +50,11 @@ _SNIPPET_MAX_CHARS = 1_200
 _MAX_FAILURE_RECORDS = 10
 #: Longest provider failure string echoed back, per URL.
 _FAILURE_REASON_MAX_CHARS = 200
-#: Floor for the excerpt budget once the web_open envelope is subtracted.
+#: Floor for the excerpt budget. Below this the URL echo is dropped to make
+#: room rather than the evidence being squeezed out by it.
 _MIN_EXCERPT_BUDGET = 1_000
+#: Shortest excerpt worth keeping once trimmed; a shorter fragment is dropped.
+_MIN_TRIMMED_EXCERPT_CHARS = 60
 
 WEB_SEARCH_DESCRIPTION = (
     "Search the web for sources. State the query as you would type it into a "
@@ -647,18 +650,25 @@ def _project_extract(raw: str, *, question: str, requested: list[str]) -> str:
 
     envelope: dict[str, Any] = {
         "question": question,
-        "requested_urls": requested,
+        "requested_urls": list(requested),
         "failed": _failure_records(failures),
+        "excerpts": [],
+        "total_candidates": 0,
+        "omitted_candidates": 0,
+        "truncated": False,
+        "note": "",
     }
     budget = max(1, int(settings.web_open_max_chars))
-    # The excerpt budget is what remains after the envelope, so the returned
-    # string honors the configured cap rather than the cap plus overhead.
-    overhead = len(json.dumps(envelope, ensure_ascii=False))
+    # The URL echo is the first thing to give up. The model chose these URLs a
+    # moment ago and still has them; the excerpts are the only part of this
+    # response it does not already hold, so long URLs must not crowd them out.
+    if budget - _serialized_length(envelope) < _MIN_EXCERPT_BUDGET:
+        _drop_url_echo(envelope)
     focused = select_focused_excerpts(
         json.dumps(results if isinstance(results, list) else [], ensure_ascii=False),
         objective=question,
         max_excerpts=max(1, int(settings.web_open_max_excerpts)),
-        max_chars=max(_MIN_EXCERPT_BUDGET, budget - overhead),
+        max_chars=max(1, budget - _serialized_length(envelope)),
         # The extractor was handed this same question and returned the chunks it
         # judged relevant. Exact term matching can still score every one of them
         # at zero — "which release date is stated" shares no token with
@@ -675,7 +685,7 @@ def _project_extract(raw: str, *, question: str, requested: list[str]) -> str:
             "note": focused.note,
         }
     )
-    serialized = json.dumps(envelope, ensure_ascii=False)
+    serialized = _fit_extract(envelope, budget)
     log_web_tool_call(
         "web_open",
         outcome="completed",
@@ -684,9 +694,75 @@ def _project_extract(raw: str, *, question: str, requested: list[str]) -> str:
         urls=len(requested),
         failed=len(envelope["failed"]),
         excerpts=len(envelope["excerpts"]),
-        omitted=focused.omitted_candidates,
+        omitted=int(envelope["omitted_candidates"]),
     )
     return serialized
+
+
+def _serialized_length(envelope: dict[str, Any]) -> int:
+    return len(json.dumps(envelope, ensure_ascii=False))
+
+
+def _drop_url_echo(envelope: dict[str, Any]) -> None:
+    """Replace the requested URLs with their count, once, and irreversibly."""
+
+    if envelope["requested_urls"]:
+        envelope["requested_url_count"] = len(envelope["requested_urls"])
+        envelope["requested_urls"] = []
+
+
+def _fit_extract(envelope: dict[str, Any], budget_chars: int) -> str:
+    """Trim until the exact string returned to the model honors the budget.
+
+    The inner selector bounds the excerpts it produces, but the model receives
+    this envelope: the URLs, the failure records, the key names and every
+    separator count too. Budgeting the excerpts alone is how a configuration
+    well inside its declared range returns more than it promised.
+
+    The ladder spends the least useful bytes first -- the URL echo the model
+    just sent, then a note that only accompanies an empty result, then excerpt
+    text, and last the per-URL failures, which are the smallest records here
+    and the only way the model learns a page was never read.
+    """
+
+    while True:
+        serialized = json.dumps(envelope, ensure_ascii=False)
+        excess = len(serialized) - budget_chars
+        if excess <= 0:
+            return serialized
+        envelope["truncated"] = True
+        if envelope["requested_urls"]:
+            _drop_url_echo(envelope)
+            continue
+        if envelope["note"]:
+            envelope["note"] = ""
+            continue
+        if _shrink_excerpts(envelope, excess):
+            continue
+        if envelope["failed"]:
+            envelope["failed"].pop()
+            envelope["omitted_failures"] = int(envelope.get("omitted_failures", 0)) + 1
+            continue
+        return serialized
+
+
+def _shrink_excerpts(envelope: dict[str, Any], excess: int) -> bool:
+    """Shorten the lowest-ranked excerpt, or drop it, and recount the omissions."""
+
+    excerpts = envelope["excerpts"]
+    if not excerpts:
+        return False
+    last = excerpts[-1]
+    text = str(last.get("text") or "")
+    keep = len(text) - excess
+    if keep < _MIN_TRIMMED_EXCERPT_CHARS:
+        excerpts.pop()
+    else:
+        last["text"] = text[:keep].rstrip()
+    envelope["omitted_candidates"] = max(
+        0, int(envelope["total_candidates"]) - len(excerpts)
+    )
+    return True
 
 
 def _failure_records(failures: Any) -> list[dict[str, str]]:
