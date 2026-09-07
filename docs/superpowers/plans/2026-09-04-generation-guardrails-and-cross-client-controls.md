@@ -549,6 +549,31 @@ git commit -m "feat: reserve tool-free synthesis at execution limits"
 
 ### Task 4: Pause after Validation and Resume without Re-routing
 
+> **Landed 2026-09-07.** 29 tests. Built from R2, which the original text did
+> not satisfy:
+>
+> - `carry_messages` keeps complete tool rounds and drops the epoch's own
+>   answer, any human message, and any half-round. A provider rejects an
+>   unanswered tool call, so a broken pair is dropped rather than repaired, and
+>   an offloaded result stays a `blob_id` reference.
+> - `SpecialistRequest.carried_messages` and `WorkflowState.carried_messages`
+>   deliver it; `_invocation_messages` places it between history and the
+>   question so a tool call is never separated from its result by a human
+>   message.
+> - `validate_output` routes a *validated* exhausted answer to
+>   `continuation_pause`, and refuses to offer one when the turn has no epochs
+>   left.
+> - The pause node resumes into the agent the turn already chose, and every
+>   refusal inside it goes to `finalize` rather than raising, because it sits on
+>   the only path a paused turn can leave by.
+>
+> **Not done here:** the graph-stream normalization in Step 4's last paragraph.
+> Nothing yet emits a typed internal continuation event, so the pause is
+> currently invisible to a client — the interrupt is raised but no adapter
+> distinguishes it from a tool-approval interrupt. That belongs with Task 6's
+> canonical events, and until it lands the pause cannot be exercised
+> end-to-end.
+
 **Files:**
 - Create: `app/ai/workflow/continuation.py`
 - Modify: `app/ai/workflow/finalization.py:324-360`
@@ -577,17 +602,17 @@ class ContinuationResume(BaseModel):
     expected_epoch: int
 ```
 
-- [ ] **Step 1: Write failing graph tests**
+- [x] **Step 1: Write failing graph tests**
 
 Assert normal outcomes still go `validate_output -> finalize -> END`. Exhausted outcomes go `validate_output -> continuation_pause`, and the checkpoint contains the same active agent/routing decision. `action="continue"` increments epoch and commands the existing active specialist directly; the route node is not called. `action="stop"` commands `finalize`. Invalid continuation ID/epoch does not execute the specialist.
 
-- [ ] **Step 2: Run and verify failures**
+- [x] **Step 2: Run and verify failures**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_workflow_continuation.py tests/test_production_workflow_graph.py tests/test_routing_v2_continuation_streaming.py
 ```
 
-- [ ] **Step 3: Add the continuation node**
+- [x] **Step 3: Add the continuation node**
 
 `make_continuation_pause_node()` calls `interrupt(payload.model_dump(mode="json"))`. On Continue it returns:
 
@@ -604,13 +629,13 @@ Command(
 
 Resolve runtime agent IDs through the existing inventory/node mapping rather than assuming every agent ID equals a graph node. On Stop, set `execution_phase="finalizing"` and go to `finalize` without appending the validated message again.
 
-- [ ] **Step 4: Route validated exhausted outcomes to pause**
+- [x] **Step 4: Route validated exhausted outcomes to pause**
 
 Extend `validate_output` destinations to `("continuation_pause", "finalize")`. It must first construct the same validated `AgentResponse`; only then branch on `execution_budget.exhausted_by`. Add `continuation_pause` to the graph, while preserving `finalize -> END` as the only terminal edge.
 
 Extend graph stream normalization to emit a typed internal continuation event instead of treating this payload as a tool-approval interrupt.
 
-- [ ] **Step 5: Run and commit Task 4**
+- [x] **Step 5: Run and commit Task 4**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_workflow_continuation.py tests/test_production_workflow_graph.py tests/test_routing_v2_continuation_streaming.py tests/test_output_validation.py tests/test_routing_service.py
