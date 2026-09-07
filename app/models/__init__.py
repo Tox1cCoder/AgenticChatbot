@@ -17,6 +17,12 @@ from app.models.enums import (
     MessageRoleType,
 )
 from app.models.feedback import Feedback
+from app.models.generation import (
+    Generation,
+    GenerationCommand,
+    GenerationCommandAction,
+    GenerationStatus,
+)
 from app.models.hitl_interrupt import HITLInterrupt, HITLInterruptStatus
 from app.models.message import Message
 from app.models.model_provider import ModelProvider
@@ -46,6 +52,10 @@ __all__ = [
     "Message",
     "ChatImage",
     "Feedback",
+    "Generation",
+    "GenerationCommand",
+    "GenerationCommandAction",
+    "GenerationStatus",
     "Document",
     "DocumentChunk",
     "DocumentImage",
