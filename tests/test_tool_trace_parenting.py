@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -48,6 +49,7 @@ from app.ai.web_tools import (
     create_web_open_tool,
     create_web_search_tool,
 )
+from app.ai.workflow.middleware import SpecialistToolScope, ToolExecutionMiddleware
 
 CONVERSATION_ID = "66666666-6666-6666-6666-666666666666"
 
@@ -186,12 +188,40 @@ async def test_ancestry_does_not_depend_on_langsmith_tracing_being_enabled():
     assert handler.only("provider_tool").parent_run_id == handler.only("product_tool").run_id
 
 
-async def test_ancestry_survives_the_synchronous_thread_hop():
-    """A tool with only ``invoke`` runs in a worker thread, not on the loop.
+async def test_a_traced_synchronous_product_parents_its_provider_exactly():
+    """A sync tool's body runs in a worker thread, and ancestry crosses it.
 
-    ``asyncio.to_thread`` copies the context, so a nested call made from inside
-    that thread still reports the ambient run as its parent rather than opening
-    a root of its own.
+    ``StructuredTool`` built from a plain function has no ``coroutine``, so
+    LangChain runs ``_run`` in an executor. Both runs exist here, so this is
+    the synchronous case stated exactly rather than as "has some parent".
+    """
+    provider = _TracedProvider(name="provider_tool")
+
+    def _product(query: str) -> str:
+        return provider.invoke({"query": query})
+
+    product = StructuredTool.from_function(
+        func=_product, name="product_tool", description="Calls one provider synchronously."
+    )
+    handler = _RecordingHandler()
+
+    with tracing_context(enabled=False):
+        await _in_a_traced_node(
+            handler,
+            tool_map={"product_tool": product},
+            call=_call("product_tool", query="q"),
+        )
+
+    assert handler.only("provider_tool").parent_run_id == handler.only("product_tool").run_id
+
+
+async def test_an_untraced_thread_hop_does_not_orphan_the_provider():
+    """The ``asyncio.to_thread`` branch of ``invoke_tool``, which few tools take.
+
+    A bare object with ``invoke`` and no ``ainvoke`` is not a ``Runnable``, so
+    it produces no run of its own and there is no product id to compare
+    against. What is assertable -- and what matters -- is that the provider
+    inherits the ambient run instead of opening a root.
     """
     provider = _TracedProvider(name="provider_tool")
 
@@ -210,7 +240,65 @@ async def test_ancestry_survives_the_synchronous_thread_hop():
             call=_call("sync_product", query="q"),
         )
 
+    assert handler.starts_named("product_tool") == []
     assert handler.only("provider_tool").parent_run_id is not None
+
+
+async def test_the_specialist_middleware_path_parents_the_provider_exactly():
+    """The production entry point, not a stand-in for it.
+
+    Every other test here calls ``execute_tool_calls`` from a traced node.
+    A real turn arrives through ``ToolExecutionMiddleware.awrap_tool_call``,
+    which resolves the tool map, takes the execution context and then calls the
+    same executor. Ancestry is decided in that path, so the regression belongs
+    on it.
+    """
+    provider = _TracedProvider(name="provider_tool")
+
+    async def _product(query: str) -> str:
+        return await provider.ainvoke({"query": query})
+
+    product = StructuredTool.from_function(
+        coroutine=_product, name="product_tool", description="Calls one provider."
+    )
+    scope = SpecialistToolScope(
+        agent=None,
+        agent_key="chat",
+        conversation_id=CONVERSATION_ID,
+        user_id="user-1",
+        device_id="device-1",
+    )
+    scope.offer([product])
+    middleware = ToolExecutionMiddleware(scope=scope, tool_factory=_no_tools)
+    request = SimpleNamespace(
+        tool_call={"id": "call-1", "name": "product_tool", "args": {"query": "q"}},
+        tool=SimpleNamespace(name="product_tool", metadata={}),
+        state={},
+        runtime=SimpleNamespace(context=None, config=None),
+    )
+    handler = _RecordingHandler()
+
+    async def _framework_handler(_request: Any) -> Any:
+        raise AssertionError("the product pipeline must run the tool, not the framework")
+
+    async def node(_value: Any, config: dict[str, Any]) -> Any:
+        # The real ToolRuntime carries the tools node's own config. Handing the
+        # double the genuine article is what makes this test able to fail if
+        # someone starts forwarding it into the executor.
+        request.runtime.config = config
+        return await middleware.awrap_tool_call(request, _framework_handler)
+
+    with tracing_context(enabled=False):
+        message = await RunnableLambda(node, name="tools").ainvoke(
+            "go", config={"callbacks": [handler]}
+        )
+
+    assert message.status == "success"
+    assert handler.only("provider_tool").parent_run_id == handler.only("product_tool").run_id
+
+
+async def _no_tools() -> list[Any]:
+    return []
 
 
 async def test_every_retry_attempt_reaches_the_provider_beneath_its_own_run():
