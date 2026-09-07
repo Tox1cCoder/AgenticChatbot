@@ -679,6 +679,7 @@ def build_specialist_middleware(
     max_model_calls: int,
     max_tool_calls: int,
     tool_execution: ToolExecutionMiddleware,
+    budget: AgentMiddleware | None = None,
     approval: ToolApprovalMiddleware | None = None,
     worker_tool_scope: WorkerToolScopeMiddleware | None = None,
     preflight: PreflightCallable | None = None,
@@ -690,6 +691,15 @@ def build_specialist_middleware(
     layer, so model calls run limits -> provider recovery -> budget -> usage
     recording -> live tool binding, which puts one usage record around each
     real provider attempt and offers the tool set as it stands at that moment.
+
+    ``budget`` sits immediately before ``tool_execution``, and that position is
+    the contract rather than a preference. It must be *before* for tool calls,
+    because ``ToolExecutionMiddleware.awrap_tool_call`` runs ordinary tools
+    itself and never calls the next handler -- an inner budget would never see
+    a tool call at all. It cannot suppress the tool list from here either:
+    ``tool_execution`` is the innermost model-call wrapper and re-offers the
+    live factory's tools, so suppression is the factory's job and the budget
+    only records that synthesis is forced.
 
     Approval runs after the model and before the tool node dispatches, so a
     gated call is decided on before its implementation can run.
@@ -728,6 +738,8 @@ def build_specialist_middleware(
             runtime_config_provider=lambda: runtime_model.runtime_config,
         )
     )
+    if budget is not None:
+        stack.append(budget)
     stack.append(tool_execution)
 
     if approval is not None and _policy_is_active(hitl_policy):

@@ -106,7 +106,12 @@ def _factory(model, tools=None, **overrides):
         "runtime_model_resolver": _resolver(),
         "model_factory": SimpleNamespace(create_model_from_runtime=lambda config, **kw: model),
         "usage_recorder": None,
-        "settings": SimpleNamespace(specialist_max_model_calls=4, specialist_max_tool_calls=4),
+        "settings": SimpleNamespace(
+            generation_hard_model_calls_per_epoch=4,
+            generation_soft_model_calls_per_epoch=3,
+            generation_hard_tool_calls_per_epoch=4,
+            generation_soft_tool_calls_per_epoch=3,
+        ),
     }
     payload.update(overrides)
     return SpecialistFactory(**payload)
@@ -200,7 +205,12 @@ async def test_model_call_limit_raises_the_typed_framework_error():
     factory = _factory(
         model,
         tools=[spin],
-        settings=SimpleNamespace(specialist_max_model_calls=2, specialist_max_tool_calls=10),
+        settings=SimpleNamespace(
+            generation_hard_model_calls_per_epoch=2,
+            generation_soft_model_calls_per_epoch=1,
+            generation_hard_tool_calls_per_epoch=10,
+            generation_soft_tool_calls_per_epoch=9,
+        ),
     )
 
     with pytest.raises(ModelCallLimitExceededError):
@@ -235,7 +245,12 @@ async def test_execution_limit_becomes_a_typed_worker_failure():
     factory = _factory(
         model,
         tools=[spin],
-        settings=SimpleNamespace(specialist_max_model_calls=2, specialist_max_tool_calls=10),
+        settings=SimpleNamespace(
+            generation_hard_model_calls_per_epoch=2,
+            generation_soft_model_calls_per_epoch=1,
+            generation_hard_tool_calls_per_epoch=10,
+            generation_soft_tool_calls_per_epoch=9,
+        ),
     )
 
     result = await factory.invoke_worker(_request(), task=_worker_task())
@@ -280,3 +295,115 @@ async def test_history_is_sent_but_not_returned_as_produced_output():
     assert outcome.response.message.content == "Answer."
     contents = [getattr(m, "content", "") for m in outcome.provenance.private_messages]
     assert "earlier reply" not in contents
+
+
+async def test_the_reserved_answer_call_is_made_with_no_tools(monkeypatch):
+    """R3, asserted after the whole assembled stack has run.
+
+    The budget middleware cannot strip ``request.tools`` -- the execution
+    middleware re-offers them after it -- so suppression happens in the tool
+    factory, which that same middleware re-consults on every model call.
+
+    The assertion is on the binding sequence rather than on the fake's
+    ``bound_tools``, because ``create_agent`` calls ``bind_tools`` only when the
+    tool list is non-empty and ``bind`` otherwise (``langchain/agents/factory``).
+    So ``bind`` on the third call *is* the tool-free answer call -- and a fake
+    whose ``bind_tools`` returns ``self`` would report the stale second binding
+    forever.
+    """
+
+    @tool
+    def lookup(query: str) -> str:
+        """Look something up."""
+        return "evidence"
+
+    model = scripted_model(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "lookup", "args": {"query": "a"}, "id": "c1"}],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "lookup", "args": {"query": "b"}, "id": "c2"}],
+            ),
+            AIMessage(content="final answer"),
+        ]
+    )
+    sequence: list[str] = []
+    bind_tools = type(model).bind_tools
+
+    def spy_bind_tools(self, tools, **kwargs):
+        sequence.append(f"bind_tools:{len(list(tools))}")
+        return bind_tools(self, tools, **kwargs)
+
+    def spy_bind(self, **kwargs):
+        sequence.append("bind")
+        return self
+
+    monkeypatch.setattr(type(model), "bind_tools", spy_bind_tools)
+    monkeypatch.setattr(type(model), "bind", spy_bind, raising=False)
+    factory = _factory(
+        model,
+        tools=[lookup],
+        settings=SimpleNamespace(
+            generation_soft_tool_calls_per_epoch=1,
+            generation_hard_tool_calls_per_epoch=3,
+            generation_soft_model_calls_per_epoch=5,
+            generation_hard_model_calls_per_epoch=6,
+        ),
+    )
+
+    outcome = await factory.invoke(_request())
+
+    assert sequence == ["bind_tools:1", "bind_tools:1", "bind"]
+    assert outcome.response.message.content == "final answer"
+
+
+async def test_the_outcome_reports_why_the_turn_stopped_gathering():
+    @tool
+    def lookup(query: str) -> str:
+        """Look something up."""
+        return "evidence"
+
+    model = scripted_model(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "lookup", "args": {"query": "a"}, "id": "c1"}],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "lookup", "args": {"query": "b"}, "id": "c2"}],
+            ),
+            AIMessage(content="partial answer"),
+        ]
+    )
+    factory = _factory(
+        model,
+        tools=[lookup],
+        settings=SimpleNamespace(
+            generation_soft_tool_calls_per_epoch=1,
+            generation_hard_tool_calls_per_epoch=3,
+            generation_soft_model_calls_per_epoch=5,
+            generation_hard_model_calls_per_epoch=6,
+        ),
+    )
+
+    outcome = await factory.invoke(_request())
+    budget = outcome.response.metadata["execution_budget"]
+
+    assert budget["exhausted_by"] == "tool_calls"
+    assert budget["forced_synthesis"] is True
+    assert budget["tool_calls"] == 1
+
+
+async def test_a_turn_within_its_budget_reports_no_exhaustion():
+    model = scripted_model([AIMessage(content="direct answer")])
+    factory = _factory(model)
+
+    outcome = await factory.invoke(_request())
+    budget = outcome.response.metadata["execution_budget"]
+
+    assert budget["exhausted_by"] is None
+    assert budget["forced_synthesis"] is False

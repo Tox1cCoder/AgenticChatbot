@@ -41,6 +41,22 @@ __all__ = [
 
 ExhaustionReason = Literal["model_calls", "tool_calls", "hard_limit"]
 
+#: Fallbacks for a settings object that does not declare a field. Kept here
+#: rather than importing ``Settings`` so this module stays free of app config;
+#: a test asserts they equal the declared defaults.
+DEFAULT_LIMITS: dict[str, int] = {
+    "generation_soft_model_calls_per_epoch": 7,
+    "generation_hard_model_calls_per_epoch": 9,
+    "generation_soft_tool_calls_per_epoch": 12,
+    "generation_hard_tool_calls_per_epoch": 16,
+    "generation_total_epochs_per_turn": 5,
+}
+
+
+def _setting(settings: Any, name: str) -> int:
+    value = getattr(settings, name, None)
+    return int(DEFAULT_LIMITS[name] if value is None else value)
+
 #: Appended to the reserved synthesis call. Server-owned: a model that could
 #: talk itself out of answering would defeat the reservation.
 FORCED_SYNTHESIS_INSTRUCTION = (
@@ -91,12 +107,22 @@ class ExecutionBudgetLimits(BaseModel):
 
     @classmethod
     def from_settings(cls, settings: Any) -> ExecutionBudgetLimits:
+        """Read the ladder, tolerating a settings object that lacks a field.
+
+        Partial settings doubles are the established pattern in this codebase
+        (``SpecialistFactory._limit`` reads them the same way), and a test that
+        cares about one limit should not have to declare five. The real
+        ``Settings`` always carries all of them, and its cross-field validator
+        is what guarantees each hard rung sits above its soft one --
+        ``test_the_defaults_match_the_settings_declaration`` pins these
+        fallbacks to it.
+        """
         return cls(
-            soft_model_calls=int(settings.generation_soft_model_calls_per_epoch),
-            hard_model_calls=int(settings.generation_hard_model_calls_per_epoch),
-            soft_tool_calls=int(settings.generation_soft_tool_calls_per_epoch),
-            hard_tool_calls=int(settings.generation_hard_tool_calls_per_epoch),
-            total_epochs_per_turn=int(settings.generation_total_epochs_per_turn),
+            soft_model_calls=_setting(settings, "generation_soft_model_calls_per_epoch"),
+            hard_model_calls=_setting(settings, "generation_hard_model_calls_per_epoch"),
+            soft_tool_calls=_setting(settings, "generation_soft_tool_calls_per_epoch"),
+            hard_tool_calls=_setting(settings, "generation_hard_tool_calls_per_epoch"),
+            total_epochs_per_turn=_setting(settings, "generation_total_epochs_per_turn"),
         )
 
 

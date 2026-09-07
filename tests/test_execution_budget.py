@@ -306,3 +306,19 @@ def test_the_state_is_json_safe_for_the_generation_row():
 
     assert stored["exhausted_by"] == "hard_limit"
     assert isinstance(stored["forced_synthesis"], bool)
+
+
+def test_the_defaults_match_the_settings_declaration():
+    """Two copies of a default is two ladders, and only one is validated."""
+    from app.ai.workflow.execution_budget import DEFAULT_LIMITS
+    from app.core.config import Settings
+
+    for name, fallback in DEFAULT_LIMITS.items():
+        assert Settings.model_fields[name].default == fallback
+
+
+def test_a_partial_settings_object_still_yields_a_valid_ladder():
+    limits = ExecutionBudgetLimits.from_settings(object())
+
+    assert limits.hard_model_calls > limits.soft_model_calls
+    assert limits.hard_tool_calls > limits.soft_tool_calls

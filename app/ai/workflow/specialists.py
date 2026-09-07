@@ -37,6 +37,12 @@ from app.ai.workflow.contracts import (
     WorkerTask,
     WorkflowError,
 )
+from app.ai.workflow.execution_budget import (
+    ExecutionBudgetAccountant,
+    ExecutionBudgetLimits,
+    ExecutionBudgetState,
+)
+from app.ai.workflow.execution_budget_middleware import SoftExecutionBudgetMiddleware
 from app.ai.workflow.inventory import (
     BASE_AGENT_NODE_OVERRIDES,
     CUSTOM_AGENT_NODE,
@@ -561,7 +567,7 @@ class SpecialistFactory:
     async def invoke(self, request: SpecialistRequest) -> ResponseOutcome:
         """Run a specialist for a public turn and return a server-owned outcome."""
         definition = self.definition_for(request.agent_id)
-        agent, tool_execution = await self._build(definition, request)
+        agent, tool_execution, accountant = await self._build(definition, request)
 
         result = await agent.ainvoke(
             {"messages": self._invocation_messages(request)},
@@ -570,7 +576,7 @@ class SpecialistFactory:
         )
         _reject_swallowed_interrupt(result, request.agent_id)
         produced = self._produced_messages(request, result)
-        return self._to_outcome(definition, request, produced, tool_execution)
+        return self._to_outcome(definition, request, produced, tool_execution, accountant)
 
     async def invoke_worker(self, request: SpecialistRequest, *, task: WorkerTask) -> WorkerResult:
         """Run a specialist as a Planning worker.
@@ -590,7 +596,10 @@ class SpecialistFactory:
 
         try:
             definition = self.definition_for(request.agent_id)
-            agent, tool_execution = await self._build(definition, request)
+            # A delegated worker gets the same budget as a top-level turn: it
+            # runs the same specialists through the same builder, so leaving it
+            # out would have been the R1 gap one level down.
+            agent, tool_execution, _accountant = await self._build(definition, request)
             result = await agent.ainvoke(
                 {"messages": self._invocation_messages(request)},
                 context=self._runtime_context(request),
@@ -629,7 +638,7 @@ class SpecialistFactory:
         self,
         definition: SpecialistDefinition,
         request: SpecialistRequest,
-    ) -> tuple[Any, ToolExecutionMiddleware]:
+    ) -> tuple[Any, ToolExecutionMiddleware, ExecutionBudgetAccountant]:
         system_prompt = await _resolve(definition.system_prompt_factory, request)
         tools = await _resolve(definition.tool_factory, request) or []
 
@@ -657,10 +666,22 @@ class SpecialistFactory:
         # re-enters after the model call, so the refresh in the execution
         # middleware never fires and this is the only offer it gets.
         scope.offer(tools)
-        tool_execution = ToolExecutionMiddleware(
-            scope=scope,
-            tool_factory=lambda: _resolve(definition.tool_factory, request),
-        )
+        accountant = _budget_accountant(self._settings, request)
+
+        async def _live_tools() -> list[Any]:
+            """The tool set for the next model call, or none once out of room.
+
+            This is where forced synthesis actually takes effect. The execution
+            middleware re-consults this factory on every model call, so
+            returning nothing here is what makes the reserved answer call
+            tool-free -- and it holds through provider retries and fallbacks,
+            which re-enter the same chain.
+            """
+            if accountant.state.forced_synthesis:
+                return []
+            return await _resolve(definition.tool_factory, request) or []
+
+        tool_execution = ToolExecutionMiddleware(scope=scope, tool_factory=_live_tools)
 
         middleware = build_specialist_middleware(
             runtime_model_resolver=self._runtime_model_resolver,
@@ -671,9 +692,13 @@ class SpecialistFactory:
             model_request=request.model_request,
             usage_recorder=self._usage_recorder,
             hitl_policy=request.hitl_policy,
-            max_model_calls=self._limit("specialist_max_model_calls", 8),
-            max_tool_calls=self._limit("specialist_max_tool_calls", 16),
+            # The framework ceilings are the hard rungs of one ladder with the
+            # soft budget. Reading them from anywhere else is how the framework
+            # comes to raise on the very call the budget reserved.
+            max_model_calls=accountant.limits.hard_model_calls,
+            max_tool_calls=accountant.limits.hard_tool_calls,
             tool_execution=tool_execution,
+            budget=SoftExecutionBudgetMiddleware(accountant=accountant),
             approval=ToolApprovalMiddleware(scope=scope, hitl_policy=request.hitl_policy or {}),
             worker_tool_scope=worker_scope,
             preflight=_preflight_for(definition, request),
@@ -688,7 +713,7 @@ class SpecialistFactory:
             middleware=middleware,
             context_schema=SpecialistRuntimeContext,
         )
-        return agent, tool_execution
+        return agent, tool_execution, accountant
 
     def _limit(self, name: str, default: int) -> int:
         return int(getattr(self._settings, name, default) or default)
@@ -724,14 +749,20 @@ class SpecialistFactory:
         request: SpecialistRequest,
         produced: list[Any],
         tool_execution: ToolExecutionMiddleware,
+        accountant: ExecutionBudgetAccountant | None = None,
     ) -> ResponseOutcome:
         artifacts = list(tool_execution.artifacts)
         images = list(tool_execution.images)
+        metadata: dict[str, Any] = {"images": images} if images else {}
+        if accountant is not None:
+            # Carried on the response so the graph can read why the turn
+            # stopped without reaching back into middleware that has gone.
+            metadata["execution_budget"] = accountant.state.model_dump(mode="json")
         response = AgentResponse(
             agent_type=definition.agent_type,
             agent_id=request.agent_id,
             message=AgentMessage(role=MessageRole.ASSISTANT, content=_final_text(produced)),
-            metadata={"images": images} if images else {},
+            metadata=metadata,
             tool_artifacts=artifacts or None,
         )
         return ResponseOutcome(
@@ -744,6 +775,27 @@ class SpecialistFactory:
                 private_messages=tuple(produced),
             ),
         )
+
+
+def _budget_accountant(
+    settings: Any, request: SpecialistRequest
+) -> ExecutionBudgetAccountant:
+    """Build this invocation's accountant, resuming a carried epoch if there is one.
+
+    A Continue may be served by a worker that never ran the previous epoch, so
+    the state arrives on the request rather than from process memory. An absent
+    one is a first epoch, not an empty quota.
+    """
+    carried = request.extras.get("execution_budget")
+    state: ExecutionBudgetState | None = None
+    if isinstance(carried, dict):
+        try:
+            state = ExecutionBudgetState.model_validate(carried)
+        except Exception:
+            logger.warning("Ignored an unreadable carried execution budget")
+    return ExecutionBudgetAccountant(
+        limits=ExecutionBudgetLimits.from_settings(settings), state=state
+    )
 
 
 def _extra_str(request: SpecialistRequest, key: str) -> str | None:
