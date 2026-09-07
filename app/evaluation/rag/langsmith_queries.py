@@ -30,13 +30,38 @@ from typing import Any
 ROOT_RUN_SELECTS = ["ID", "FEEDBACK_STATS"]
 
 
-def _averages(source: Mapping[str, Any] | None) -> dict[str, float]:
+def _average(statistics: Any) -> float | None:
+    """Read one entry's mean, whichever shape the SDK handed back.
+
+    ``Client.runs.query()`` returns SmithDB ``Run`` models whose
+    ``feedback_stats`` values are ``FeedbackStats`` instances, while
+    ``aread_project`` returns project statistics as plain dictionaries. Reading
+    only mappings drops every per-root-run metric silently: the comparison then
+    reports whatever the project summary happens to hold, or fails closed as
+    though the experiment recorded no feedback at all.
+    """
+    value = statistics.get("avg") if isinstance(statistics, Mapping) else getattr(
+        statistics, "avg", None
+    )
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _averages(source: Any) -> dict[str, float]:
     """Return only the feedback entries that carry a numeric average."""
-    return {
-        key: float(statistics["avg"])
-        for key, statistics in (source or {}).items()
-        if isinstance(statistics, Mapping) and statistics.get("avg") is not None
-    }
+    entries = source if isinstance(source, Mapping) else getattr(source, "__dict__", None)
+    if not isinstance(entries, Mapping):
+        return {}
+    averages: dict[str, float] = {}
+    for key, statistics in entries.items():
+        average = _average(statistics)
+        if average is not None:
+            averages[str(key)] = average
+    return averages
 
 
 async def experiment_metrics(client: Any, experiment_name: str) -> dict[str, float]:

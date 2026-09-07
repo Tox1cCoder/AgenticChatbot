@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from langsmith._openapi_client.types.run import Run
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
@@ -87,9 +88,13 @@ def _project(*, feedback=None, session_feedback=None, started=None):
 
 
 def _run(**feedback_stats):
-    return SimpleNamespace(
-        feedback_stats={key: {"avg": value} for key, value in feedback_stats.items()}
-    )
+    """A root run as the installed SDK actually returns it.
+
+    ``Run`` coerces each entry of ``feedback_stats`` into a ``FeedbackStats``
+    model, so an aggregator that only understands mappings reads a real
+    experiment as having no feedback at all. Dictionaries here would hide that.
+    """
+    return Run(feedback_stats={key: {"avg": value} for key, value in feedback_stats.items()})
 
 
 async def test_experiment_metrics_use_smithdb_v2_with_full_time_window():
@@ -132,8 +137,9 @@ async def test_experiment_metrics_ignore_feedback_entries_without_an_average():
     project = _project(feedback={"unscored": {"avg": None}, "groundedness": {"avg": 0.4}})
     runs = FakeRuns(
         [
-            SimpleNamespace(feedback_stats={"partial": {"n": 3}}),
-            SimpleNamespace(feedback_stats=None),
+            Run(feedback_stats={"partial": {"n": 3}}),
+            Run(feedback_stats=None),
+            SimpleNamespace(feedback_stats={"ignored_without_avg": {"n": 1}}),
             _run(document_recall_at_5=0.25),
         ]
     )
@@ -283,3 +289,11 @@ def test_the_legacy_query_inventory_still_detects_a_real_call_site():
         ".list_runs(",
         "/api/v1/runs/query",
     ]
+
+
+def test_the_run_double_carries_the_sdk_feedback_type_not_a_dictionary():
+    """Guard the guard: this fixture only proves anything while it stays typed."""
+    statistics = _run(document_recall_at_5=0.75).feedback_stats["document_recall_at_5"]
+
+    assert not isinstance(statistics, dict)
+    assert statistics.avg == 0.75
