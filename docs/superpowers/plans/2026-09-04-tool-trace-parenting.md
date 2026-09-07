@@ -370,12 +370,18 @@ parent = _start(handler, "product_tool")
 assert child.parent_run_id == parent.run_id
 ```
 
-Cover: the nested async path, the synchronous `invoke`/`to_thread` path, a
-retry that reaches the provider twice, and the blanket property that no tool
-run recorded during a conversation-owned call has a null parent. Wrap each in
-`langsmith.run_helpers.tracing_context(enabled=False)` so the assertion tests
-this pipeline's own context propagation rather than LangSmith's run-tree
-fallback.
+Cover: the nested async path, a traced synchronous product, the untraced
+`invoke`/`to_thread` path, a retry that reaches the provider twice, the real
+`ToolExecutionMiddleware.awrap_tool_call` entry point, and the blanket property
+that no tool run recorded during a conversation-owned call has a null parent.
+Wrap each in `langsmith.run_helpers.tracing_context(enabled=False)` so the
+assertion tests this pipeline's own context propagation rather than LangSmith's
+run-tree fallback.
+
+Be precise about what each case can assert. A bare object with `invoke` and no
+`ainvoke` is not a `Runnable` and produces no run, so there is no product id to
+compare against and "has some parent" is the strongest true statement — use a
+sync `StructuredTool` for the exact-ancestry claim.
 
 A non-null-parent assertion alone is not enough. The sibling topology that
 config forwarding produces also has a non-null parent — it is the wrong one.
@@ -384,6 +390,13 @@ Verify the guard by mutation: monkeypatch `web_tools._call_provider` to forward
 the node's config, and confirm the ancestry assertion fails. A trace test that
 cannot fail is worse than none, because it reports good news about a tree
 nobody is checking.
+
+Mutate the *nested* call, not `invoke_tool`. A `config` parameter on
+`invoke_tool` turns out to be inert — that is the outermost call of the tool
+the model asked for, so the caller's config and the ambient context name the
+same parent, and every ancestry test still passes with one added. The harm is
+one level down. This is why the parameter is kept out of the whole chain rather
+than only out of the place it would hurt.
 
 - [x] **Step 2: Run it and confirm it passes against unmodified production code**
 
@@ -520,7 +533,8 @@ git commit -m "docs: record live trace ancestry canary"
 - [ ] An authenticated RAG evaluation canary emits no deprecated response header or v1 run-query request. **(needs live credentials)**
 - [x] No production call site passes an upstream `RunnableConfig` into a nested tool invocation.
 - [x] Callback tests assert `provider.parent_run_id == product.run_id`, not merely a non-null parent.
-- [x] Nested Tavily and Brave invocations are children of their product tool, across the async path, the synchronous path, and a retry.
+- [x] Nested Tavily and Brave invocations are children of their product tool, across the async path, a traced synchronous product, and a retry. The untraced `invoke`-only path creates no product run, so there it is asserted only that the provider is not orphaned.
+- [x] A regression covers the production entry point, `ToolExecutionMiddleware.awrap_tool_call`, not only a `RunnableLambda` stand-in for it.
 - [x] Existing cancellation, timeout, retry, receipt, artifact, and image tests pass.
 - [ ] The live LangSmith canary contains no conversation-owned provider root runs. **(needs live credentials)**
 - [x] No model-visible output or public stream contract changed.

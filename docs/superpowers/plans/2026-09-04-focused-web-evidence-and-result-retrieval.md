@@ -490,8 +490,8 @@ git commit -m "chore: retire combined web research tool"
 ## Post-Review Amendments (2026-09-07)
 
 `output/audits/2026-09-07-three-plan-review.md` reviewed the landed change at
-`70054bd` and found seven defects, all since fixed. Two of them were defects in
-this plan, not deviations from it:
+`70054bd` and found seven defects. Two of them were defects in this plan, not
+deviations from it:
 
 - **String-leaf extraction (Task 2).** The plan specified candidates drawn from
   JSON *string* leaves and paragraphs. Every non-string scalar was therefore
@@ -516,6 +516,35 @@ One documentation claim was also narrower in the code than in the rollout
 guide: "one log line per call" skipped client-only denials and every
 `read_tool_result` refusal. Both paths now emit their own outcome, so the
 statement is true rather than aspirational.
+
+### Second pass (`2026-09-07-three-plan-recheck.md`, at `73b695f`)
+
+The recheck confirmed nine of the eleven items, and found that **two of the
+seven were fixed only for the reproductions they were reported with** — the
+kind of narrowing this section's earlier wording ("all since fixed") papered
+over. Both are now fixed for the general case:
+
+- **Deduplication compared claim tokens taken from the *normalized* stream.**
+  Normalizing exists to make wording comparable, and does it by discarding
+  punctuation — which is where a sign and a version separator live. So `10` and
+  `-10` were the same claim, `4.2` and `2.4` both became the pair `4`/`2`, and
+  month names were invisible to a digit test entirely: `14 March` and `14
+  April` deduplicated to one excerpt. Claim atoms are now read from the raw
+  text with signs, decimal and version separators and percent signs intact,
+  month names included, and compared in document order — because two passages
+  whose numbers are rearranged have not been shown to say the same thing, and
+  retention is the safe answer when equivalence cannot be established.
+- **Chunking dropped a one- or two-character split remainder.** The
+  `_MIN_CANDIDATE_CHARS` floor is right for a leaf that is short on its own and
+  wrong for the tail of a passage the splitter cut: 1,201 characters came back
+  as 1,200, with no omission recorded, and the lost character can be the last
+  digit of the fact. The floor now applies only to an unsplit leaf.
+
+Also corrected: the acceptance line claiming exact ancestry "across the
+synchronous path" was carried by a test using a bare object that creates no
+product run, so it could only assert *some* parent. That case is now split in
+two — a real traced synchronous product asserting exact ids, and the
+untraced-object case stating only what it can.
 
 ## Execution Handoff
 

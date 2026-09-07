@@ -22,6 +22,186 @@
 - Internal SSE and AI SDK consume the same service methods and lifecycle record.
 - Keep tool-approval interrupts distinct from `execution_budget_exhausted` control interrupts.
 
+## Design Revisions Required Before Implementation (2026-09-07)
+
+`output/audits/2026-09-07-three-plan-review.md` and its recheck found five
+contracts this plan asserts but does not specify. Each is confirmed against the
+current code at `73b695f`; the file:line evidence is quoted so an implementer
+can re-check rather than trust this list.
+
+### R1 (P1). Middleware alone does not reach RAG, Planning, or delegated workers
+
+Task 3 puts the soft budget in an `AgentMiddleware` and Task 4 reads
+`execution_budget` off the specialist outcome. That covers exactly the agents
+built through `create_agent`.
+
+- `SpecialistFactory.invoke_specialist_subgraph` short-circuits `rag_agent` to
+  `_invoke_rag_specialist`, which runs the shared compiled RAG graph rather
+  than a `create_agent` subgraph (`app/ai/graph.py:1779`). No `AgentMiddleware`
+  in the specialist stack ever executes for it.
+- Planning runs its own parent-graph nodes
+  (`app/ai/workflow/planning_execution.py`), and delegated workers are
+  dispatched from there.
+
+**Required contract.** Make the budget a *state* contract rather than a
+middleware artefact:
+
+- `ExecutionBudgetState` lives on `WorkflowState`, and one shared, framework-free
+  accountant (`app/ai/workflow/execution_budget.py`) owns increment, threshold
+  and forced-synthesis decisions. `SoftExecutionBudgetMiddleware` becomes a thin
+  adapter that calls it for `create_agent` specialists.
+- The RAG graph's own model/tool loop calls the same accountant at its own
+  model and tool boundaries and produces the same `exhausted_by` value.
+- Planning increments the same accountant per worker invocation, and a
+  delegated worker that exhausts its epoch returns a validated partial to its
+  parent rather than pausing the parent turn. Only the top-level turn pauses.
+
+**Required tests.** The forced-synthesis and hard-limit assertions in Task 3
+Step 1 must be parameterized over all three execution paths — specialist, RAG,
+and a delegated Planning worker — not written once against the middleware.
+
+### R2 (P1). Continue must rehydrate the evidence, not just reset the counters
+
+Task 4 Step 3's resume `Command` sets `execution_epoch + 1`,
+`execution_budget=None`, `execution_phase="executing"` and goes to the
+specialist node. Nothing there restores what epoch 1 collected.
+
+- The next invocation's messages are assembled as
+  `[*request.history, *request.messages]`
+  (`app/ai/workflow/specialists.py:_invocation_messages`), where `messages` is
+  the current-turn slice from graph state.
+- Everything the previous epoch produced — the assistant turns and the
+  `ToolMessage`s carrying the evidence — is sliced off into the outcome
+  (`_produced_messages`) and stored in `outcome.provenance.private_messages`.
+  It never re-enters the request.
+
+Left as written, epoch 2 sees the original question and no evidence. It will
+re-run the work epoch 1 already paid for, which is the opposite of what
+Continue is for, and it will do so with a budget that has just been reset.
+
+**Required contract.**
+
+- Define where the carried transcript lives and who writes it. Add
+  `carried_messages: list[BaseMessage]` (or a serialized equivalent) to
+  `WorkflowState`, written by the continuation pause node from
+  `outcome.provenance.private_messages` before it interrupts.
+- `_invocation_messages` becomes
+  `[*history, *carried_messages, *current_turn_messages]`, with carried
+  messages placed so tool-call/tool-result pairs stay adjacent and valid for
+  every provider. An orphaned `ToolMessage` is a provider error, not a
+  degraded prompt — assert pairing explicitly.
+- Specify the bound. The carried transcript is capped by the same offload rules
+  as any other context, and a carried tool result that was offloaded stays a
+  `blob_id` reference rather than being rehydrated inline.
+- Specify cleanup. The validated partial assistant message persisted at the
+  pause is not re-appended by epoch 2, and the reserved assistant message ID
+  for the continued answer is allocated at `prepare_continue`, not derived from
+  the paused one.
+
+**Required test.** Epoch 2 receives epoch 1's evidence and does not repeat a
+completed tool call. Assert on the messages actually handed to the model, not
+on the checkpoint — the earlier runtime probe passed the checkpoint assertion
+while sending the model only the original human question.
+
+### R3 (P2). Suppress tools at the request boundary, not in the middleware
+
+Task 3 Step 4 has the middleware make "the next model request with `tools=[]`".
+That does not survive the stack: `ToolExecutionMiddleware.awrap_model_call` is
+the innermost model-call wrapper in `build_specialist_middleware`
+(`app/ai/workflow/middleware.py:709-737` — it is appended after
+`UsageRecordingMiddleware`, and first-in-list is outermost), and it
+unconditionally re-offers the live factory's tools:
+
+```python
+tools = list(await self._tool_factory() or [])
+self._scope.offer(tools)
+return await handler(request.override(tools=tools))
+```
+
+Any earlier `tools=[]` is overwritten. Appending the budget middleware after
+`tool_execution` instead does not work either: `ToolExecutionMiddleware.awrap_tool_call`
+never calls `handler` for an ordinary tool, so an inner `awrap_tool_call` would
+never run.
+
+**Required contract.** Do not invent a new flag. The repository already has this
+exact seam and it works one level up, at the request:
+
+- `invocation_kwargs` carries `disable_tools`, which `_specialist_request_for`
+  pops into `request.extras` (`app/ai/graph.py:1714-1726`), and every agent's
+  `tool_factory` returns `[]` when it is set (`app/ai/agents/chat_agent.py:360`,
+  and the same three lines in `canvas_agent`, `custom_agent`,
+  `image_generator_agent`, `rag_agent`). Because suppression happens *inside*
+  the factory, the innermost re-offer yields nothing and every provider retry
+  and fallback re-reads it.
+- The existing tool-budget path already does this
+  (`app/ai/graph.py:1193` sets `disable_tools` plus a `tool_budget_notice`), so
+  forced synthesis should extend that mechanism rather than compete with it.
+  Reconcile the two notices into one instruction; two systems appending
+  different "stop calling tools" sentences to the same call is a prompt
+  conflict.
+- The budget middleware keeps only `awrap_tool_call` — pairing the synthetic
+  `ToolMessage` for the call it refuses — and must therefore stay *before*
+  `tool_execution` in the list.
+
+**Required test.** Assert the model's final call is made with no tools **after
+the full assembled stack has run**, not by inspecting the request the budget
+middleware returned. Include one provider-fallback retry in the scenario.
+
+### R4 (P2). Research accounting is process-local and turn-scoped
+
+Task 3 Step 1 requires cumulative turn quota metadata to survive an epoch
+change. It cannot today:
+
+- `app/ai/research_budget.py` keeps `_budgets: OrderedDict[str, ResearchBudget]`
+  at module scope under a `threading.Lock`, keyed by conversation id alone
+  (`_key`). Nothing is persisted.
+- A new turn resets it (`app/ai/graph.py:646`).
+
+So a Continue served by another worker sees no accounting at all, and a Continue
+served by this one shares a single conversation-keyed budget with any other
+turn in flight. The plan also releases the conversation lock while continuable,
+which permits exactly that overlap.
+
+**Required contract.**
+
+- Key research accounting by `logical_turn_id`, not conversation id, and persist
+  it on the generation row so any worker can rehydrate it.
+- State which quotas Continue replenishes and which it does not. The default
+  should be: per-epoch call caps reset, cross-epoch deduplication (the
+  "same query already made this turn" guard) does **not** — otherwise Continue
+  becomes a way to re-run the identical search the budget just refused.
+- Define the behavior when rehydration fails: fail the Continue rather than
+  proceeding with an empty budget, since an empty budget is indistinguishable
+  from a fresh turn and silently grants a full new quota.
+
+### R5 (P2). One last-command slot cannot fence a delayed retry
+
+Task 1 Step 3 stores "last command idempotency key/action/result JSON" — a
+single slot — and `StopGenerationRequest` (Task 6) carries no version or epoch.
+
+Sequence: Stop `S` completes against epoch 0; Continue `C` is accepted and
+overwrites the slot; a delayed retry of `S` arrives. Its key no longer matches
+anything, so it is treated as new and can cancel epoch 1.
+
+**Required contract.**
+
+- Add `execution_epoch` (or the lifecycle `version`) to `StopGenerationRequest`
+  and `ContinueGenerationRequest`, and reject a command whose fence is older
+  than the row's current value with a distinguishable
+  `stale_command` result rather than executing it.
+- Keep a durable command ledger — one row per `(generation_id,
+  idempotency_key)` recording action, fence and result — written in the same
+  transaction as the transition it authorizes. A replay returns the recorded
+  result; the single-slot design cannot.
+- Add "delayed old-command replay after a later Continue" to the Task 8 race
+  suite, alongside the existing Continue/Continue and Stop/Stop races.
+
+### Execution order after these revisions
+
+Tasks 1 and 2 are unaffected by R1-R4 and can proceed as written once R5's
+ledger is folded into Task 1's schema. R1-R3 change Task 3 and Task 4
+materially; do not start them from the current text.
+
 ---
 
 ## File Structure
@@ -45,7 +225,7 @@
 ### Task 1: Persist the Authoritative Generation Lifecycle
 
 **Files:**
-- Create: `app/models/generation.py`
+- Create: `app/models/generation.py` (lifecycle row + command ledger)
 - Create: `app/repositories/generation.py`
 - Create: `app/schemas/generation.py`
 - Create: `app/alembic/versions/d0e1f2a3b4c5_add_generation_controls.py`
@@ -96,7 +276,14 @@ Test owner-scoped lookup, unique `(logical_turn_id)`, version increments, and le
 
 - [ ] **Step 3: Define the row and indexes**
 
-Use `generations` with UUID PK, owner/conversation FKs, unique logical turn, indexed checkpoint thread, status enum, version, epoch, active agent, budget JSON, assistant message FK, continuation UUID, continuation availability/block reason, last command idempotency key/action/result JSON, terminal reason, and timezone-aware lifecycle timestamps. Add a unique partial index allowing one active lifecycle (`starting`, `running`, `finalizing_after_limit`, `continuing`, `stop_requested`) per conversation.
+Use `generations` with UUID PK, owner/conversation FKs, unique logical turn, indexed checkpoint thread, status enum, version, epoch, active agent, budget JSON, research accounting JSON (R4), assistant message FK, continuation UUID, continuation availability/block reason, terminal reason, and timezone-aware lifecycle timestamps.
+
+**Revised per R5:** the single "last command" slot is replaced by a
+`generation_commands` table — `(generation_id, idempotency_key)` unique, with
+action, the epoch/version fence the command was issued against, and the result
+JSON. One row per command, written in the same transaction as the transition it
+authorizes, so a delayed replay after a later Continue returns its own recorded
+result instead of executing against the wrong epoch. Add a unique partial index allowing one active lifecycle (`starting`, `running`, `finalizing_after_limit`, `continuing`, `stop_requested`) per conversation.
 
 The migration revision is `d0e1f2a3b4c5` with `down_revision = "c9d0e1f2a3b4"`. Before executing this task, run `alembic heads`; if another migration has landed, create a merge revision first rather than silently editing `down_revision` into a fork.
 
@@ -118,9 +305,16 @@ class GenerationRepository(RepositorySessionMixin):
         expected_version: int,
         values: dict[str, Any],
     ) -> GenerationSnapshot | None: ...
+    async def aclaim_command(
+        self,
+        *,
+        generation_id: UUID,
+        idempotency_key: str,
+        action: str,
+        fence: int,
+    ) -> CommandClaim: ...
     async def arecord_command_result(
-        self, *, generation_id: UUID, idempotency_key: str, action: str,
-        result: dict[str, Any]
+        self, *, generation_id: UUID, idempotency_key: str, result: dict[str, Any]
     ) -> None: ...
 ```
 
@@ -612,8 +806,19 @@ git commit -m "test: verify generation control parity and races"
 - [ ] Streamlit exposes both Continue and Stop according to the canonical status table.
 - [ ] Race tests show one epoch increment and no duplicate assistant message.
 - [ ] `finalize -> END` remains the graph's sole terminal edge.
+- [ ] Forced synthesis and hard-limit handling are asserted on the specialist, RAG, and delegated-worker paths (R1).
+- [ ] Epoch 2 receives epoch 1's evidence, asserted on the messages handed to the model (R2).
+- [ ] The final tool-free call is asserted after the full middleware stack, including one provider fallback (R3).
+- [ ] Research accounting is keyed by logical turn, persisted, and rehydrated; a failed rehydration fails the Continue (R4).
+- [ ] A delayed Stop replay after a later Continue is refused as stale, not executed (R5).
 
 ## Execution Handoff
+
+**Read "Design Revisions Required Before Implementation" first.** Tasks 3 and 4
+must not be started from their original text: the budget cannot live only in an
+`AgentMiddleware` (R1), Continue must rehydrate the evidence (R2), and tool
+suppression belongs at the request boundary where the repository already
+implements it (R3).
 
 Execute this plan after the focused-web and trace-parenting plans. Rebase it on
 the completed production routing refactor before Task 3, because Tasks 3-5
