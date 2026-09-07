@@ -4,9 +4,18 @@
 
 **Goal:** Remove LangSmith's January 2027 legacy query dependency and keep every conversation-owned MCP/provider invocation beneath its active LangChain/LangSmith tool run instead of creating unrelated root traces.
 
-**Architecture:** First migrate the repository's RAG evaluation reads from the legacy `Client.get_test_results()` → `Client.list_runs()` path to the async SmithDB-backed `Client.runs.query()` API and raise the LangSmith SDK floor. Then carry the active `RunnableConfig` from `ToolCallRequest.runtime.config` through the product execution pipeline and into every nested `ainvoke`. The product web/image tools created by the focused-web plan accept injected `ToolRuntime` and forward its config to child tools; bounded payloads stay at that boundary.
+**Architecture:** First migrate the repository's RAG evaluation reads from the legacy `Client.get_test_results()` → `Client.list_runs()` path to the async SmithDB-backed `Client.runs.query()` API and raise the LangSmith SDK floor. Then establish, as tested contract, that the ambient `contextvars` run context already parents every nested MCP/provider invocation beneath its product tool — and that explicitly forwarding an upstream `RunnableConfig` is what would break it.
 
-**Tech Stack:** Python 3.10+, LangSmith Python SDK >=0.10.15, SmithDB v2 run queries, LangChain `RunnableConfig`, LangChain middleware and callbacks, LangGraph `ToolRuntime`, pytest/pytest-asyncio.
+> **Revised 2026-09-07 after the three-plan review.** Tasks 2-4 originally
+> threaded `ToolCallRequest.runtime.config` through the pipeline and injected
+> `ToolRuntime` into the product tools. Both mechanisms were measured against
+> the production seam and rejected: injection never fires on this path because
+> `ToolExecutionMiddleware` bypasses the framework tool handler, and forwarding
+> the upstream config demotes each provider run from *child of its product tool*
+> to *sibling of it*. Task 2 records the measurements. Task 1 has landed and is
+> amended here for the SDK's feedback-statistics type.
+
+**Tech Stack:** Python 3.10+, LangSmith Python SDK >=0.10.15, SmithDB v2 run queries, `langchain_core` callback managers and `var_child_runnable_config` context propagation, LangChain middleware, pytest/pytest-asyncio.
 
 ## Global Constraints
 
@@ -15,7 +24,8 @@
 - A conversation-owned Tavily or Brave call must not appear as a root trace.
 - Direct administrative provider tests may remain roots only when explicitly tagged diagnostic.
 - Do not change model-visible tool output in this plan.
-- Keep every new parameter optional outside framework middleware so legacy tests and non-graph callers remain compatible.
+- Add no new parameter to the tool execution pipeline: the ancestry this plan protects comes from the ambient context, and a config parameter is the thing that overrides it.
+- Assert exact ancestry (`provider.parent_run_id == product.run_id`). A non-null parent is also true of the wrong, flattened topology.
 - Do not call `Client.list_runs()`, `Client.get_test_results()`, or `POST /api/v1/runs/query`; these sunset in LangSmith Cloud on 2027-01-31.
 - Do not enable OpenTelemetry as a response to the legacy banner. Trace ingestion (`/runs/multipart`) is not one of the endpoint families named in this deprecation.
 - SmithDB `runs.query()` returns only the last 24 hours by default; every experiment query must pass the experiment project's `start_time` as `min_start_time`.
@@ -29,14 +39,10 @@
 - Modify `pyproject.toml` and `environment.yml`: require a SmithDB-capable LangSmith SDK.
 - Create `tests/test_langsmith_smithdb_migration.py`: lock down v2 query arguments and forbid legacy methods.
 - Modify `tests/test_rag_evaluation_cli.py`: exercise async comparison metrics without network access.
-- Modify `app/ai/tool_execution.py`: thread `RunnableConfig` through generic tool invocation and retry layers.
-- Modify `app/ai/workflow/middleware.py`: take the active config from `ToolCallRequest.runtime.config` and hand it to the executor.
-- Modify `app/ai/web_tools.py`: inject `ToolRuntime` and forward the parent config to Tavily and image discovery.
-- Modify `app/ai/image_discovery_flow.py`: forward the config into Brave invocation.
-- Modify `tests/test_tool_execution_control_flow.py`: lock down generic nested callback ancestry and retry propagation.
-- Modify `tests/test_specialist_middleware.py`: verify middleware passes the runtime config without changing pipeline ordering.
-- Modify `tests/test_web_tools.py`: verify Tavily and Brave receive the same config.
-- Create `tests/test_tool_trace_parenting.py`: callback-level integration test proving nested calls have a parent run.
+- Modify `app/ai/tool_execution.py`: comment only, recording why `invoke_tool` takes no `config`.
+- Create `tests/test_tool_trace_parenting.py`: callback-level integration tests proving each nested provider run is a child of its product tool, across the async path, the synchronous path and a retry.
+- Modify `docs/operations/routing-v2-rollout.md`: the live LangSmith canary.
+- Unchanged: `app/ai/workflow/middleware.py`, `app/ai/web_tools.py`, `app/ai/image_discovery_flow.py`, `tests/test_web_tools.py`, `tests/test_specialist_middleware.py`.
 
 ## Research Finding: What the LangSmith Banner Means
 
@@ -125,6 +131,15 @@ async def test_experiment_metrics_use_smithdb_v2_with_full_time_window():
     }]
 ```
 
+> **Amended 2026-09-07.** The fake above returns `SimpleNamespace` rows with
+> plain dictionaries. The installed SDK does not: `Client.runs.query()` yields
+> SmithDB `Run` models whose `feedback_stats` values are `FeedbackStats`
+> instances, while `aread_project` returns project statistics as dictionaries.
+> An aggregator written against `isinstance(stats, Mapping)` therefore drops
+> every per-root-run metric in production while passing every test. Build the
+> run rows with `langsmith._openapi_client.types.run.Run`, and read each entry
+> through a helper that accepts a mapping key or an `avg` attribute.
+
 Add a dependency test using `importlib.metadata.version` and
 `packaging.version.Version` that requires `langsmith>=0.10.15`. Add a source
 inventory test that scans production Python files under `app/` and `scripts/`
@@ -169,15 +184,12 @@ async def experiment_metrics(client: Any, experiment_name: str) -> dict[str, flo
         min_start_time=project.start_time,
         selects=["ID", "FEEDBACK_STATS"],
     ):
-        for key, stats in (run.feedback_stats or {}).items():
-            if isinstance(stats, dict) and stats.get("avg") is not None:
-                totals.setdefault(key, []).append(float(stats["avg"]))
+        for key, average in _averages(getattr(run, "feedback_stats", None)).items():
+            totals.setdefault(key, []).append(average)
 
     metrics = {key: sum(values) / len(values) for key, values in totals.items()}
-    for source in (project.feedback_stats or {}, project.session_feedback_stats or {}):
-        for key, stats in source.items():
-            if isinstance(stats, dict) and stats.get("avg") is not None:
-                metrics[key] = float(stats["avg"])
+    metrics.update(_averages(getattr(project, "feedback_stats", None)))
+    metrics.update(_averages(getattr(project, "session_feedback_stats", None)))
     if not metrics:
         raise ValueError(
             f"baseline experiment has no deterministic feedback: {experiment_name}"
@@ -231,338 +243,187 @@ git add app/evaluation/rag/langsmith_queries.py scripts/evaluate_rag.py pyprojec
 git commit -m "fix: migrate LangSmith evaluation reads to SmithDB"
 ```
 
-### Task 2: Carry RunnableConfig Through the Generic Tool Pipeline
+### Task 2: Prove the Ambient Run Context Already Parents Every Nested Call
 
-**Files:**
-- Modify: `app/ai/tool_execution.py:1371-1635`
-- Modify: `app/ai/workflow/middleware.py:387-470`
-- Test: `tests/test_tool_execution_control_flow.py`
-- Test: `tests/test_specialist_middleware.py`
-
-**Interfaces:**
-- Consumes: `request.runtime.config: RunnableConfig` from LangChain `ToolCallRequest`.
-- Produces: `execute_tool_calls(..., runnable_config: RunnableConfig | None = None)` and matching optional keyword parameters on `invoke_tool`, `invoke_tool_attempt`, and `invoke_tool_with_policy`.
-
-- [ ] **Step 1: Write failing tests for config propagation**
-
-Add a config-aware fake tool and assert the exact callback object reaches every retry:
-
-```python
-class ConfigSpyTool:
-    name = "config_spy"
-    coroutine = True
-
-    def __init__(self):
-        self.configs = []
-
-    async def ainvoke(self, args, config=None):
-        self.configs.append(config)
-        return "ok"
-
-
-@pytest.mark.asyncio
-async def test_execute_tool_calls_forwards_runnable_config():
-    callback = object()
-    config = {"callbacks": [callback], "tags": ["conversation-tool"]}
-    tool = ConfigSpyTool()
-
-    outputs, _, _ = await execute_tool_calls(
-        tool_calls=[{"id": "call-1", "name": tool.name, "args": {}}],
-        tool_map={tool.name: tool},
-        runnable_config=config,
-    )
-
-    assert outputs[0]["content"] == "ok"
-    assert tool.configs == [config]
-```
-
-In `tests/test_specialist_middleware.py`, construct a `ToolCallRequest` double whose `runtime.config` is the same dictionary and monkeypatch `execute_tool_calls`; assert the captured `runnable_config is runtime.config`.
-
-- [ ] **Step 2: Run the focused tests and verify failure**
-
-Run:
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest -q tests/test_tool_execution_control_flow.py tests/test_specialist_middleware.py
-```
-
-Expected: the new tests fail because `execute_tool_calls` has no `runnable_config` parameter and middleware does not pass it.
-
-- [ ] **Step 3: Add optional config parameters without changing call ordering**
-
-Use `RunnableConfig` from `langchain_core.runnables` and thread it through the call chain:
-
-```python
-async def invoke_tool(
-    tool: Any,
-    tool_args: Any,
-    *,
-    runnable_config: RunnableConfig | None = None,
-) -> Any:
-    if getattr(tool, "coroutine", None):
-        return await tool.ainvoke(tool_args, config=runnable_config)
-    ainvoke = getattr(tool, "ainvoke", None)
-    if callable(ainvoke):
-        return await ainvoke(tool_args, config=runnable_config)
-    invoke = getattr(tool, "invoke", None)
-    if callable(invoke):
-        return await asyncio.to_thread(invoke, tool_args, config=runnable_config)
-    if callable(tool):
-        return await asyncio.to_thread(tool, tool_args)
-    raise TypeError("Tool has no invoke/ainvoke and is not callable")
-```
-
-Add the same optional keyword to `invoke_tool_attempt`, `invoke_tool_with_policy`, and `execute_tool_calls`, and pass it on every attempt, including an MCP reconnect retry. Do not pass config to a plain Python callable because that is not part of its interface.
-
-- [ ] **Step 4: Pass middleware runtime config into the executor**
-
-In `ToolExecutionMiddleware.awrap_tool_call`, derive the config defensively and pass it to `_execute`:
-
-```python
-runtime = getattr(request, "runtime", None)
-runnable_config = getattr(runtime, "config", None)
-return await self._execute(call, tool_map, runnable_config=runnable_config)
-```
-
-Update `_execute`:
-
-```python
-async def _execute(
-    self,
-    call: dict[str, Any],
-    tool_map: dict[str, Any],
-    *,
-    runnable_config: RunnableConfig | None,
-) -> ToolMessage:
-    self._scope.worker_event("start", call)
-    with self._scope.execution_context():
-        outputs, artifacts, images = await execute_tool_calls(
-            tool_calls=[call],
-            tool_map=tool_map,
-            capture_images=True,
-            device_id=self._scope.device_id,
-            agent=self._scope.agent,
-            conversation_id=self._scope.conversation_id,
-            user_id=self._scope.user_id,
-            runnable_config=runnable_config,
-        )
-
-    self.artifacts.extend(artifacts)
-    self.images.extend(images)
-    output = outputs[0] if outputs else {}
-    status = "error" if _is_error(artifacts) else "success"
-    self._scope.worker_event("end", call, status=status)
-    return ToolMessage(
-        content=str(output.get("content") or ""),
-        tool_call_id=str(output.get("tool_call_id") or call.get("id") or ""),
-        name=str(output.get("name") or call.get("name") or "tool"),
-        status=status,
-    )
-```
-
-Derive `runnable_config` once at the top of `awrap_tool_call`. Pass it to
-`_execute` both in the non-mutation branch and inside the receipt callback's
-`invoke` closure; receipt handling must still wrap the actual invocation.
-
-- [ ] **Step 5: Run focused tests**
-
-Run:
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest -q tests/test_tool_execution_control_flow.py tests/test_tool_execution_recovery.py tests/test_tool_execution_policy.py tests/test_specialist_middleware.py tests/test_specialist_tool_pipeline.py
-```
-
-Expected: all pass; config reaches the initial call and every retry.
-
-- [ ] **Step 6: Commit Task 2**
-
-```powershell
-git add app/ai/tool_execution.py app/ai/workflow/middleware.py tests/test_tool_execution_control_flow.py tests/test_specialist_middleware.py
-git commit -m "fix: propagate tracing config through tool execution"
-```
-
-### Task 3: Parent Product Web and Image Provider Calls
-
-**Files:**
-- Modify: `app/ai/web_tools.py`
-- Modify: `app/ai/image_discovery_flow.py:215-245`
-- Test: `tests/test_web_tools.py`
-
-**Interfaces:**
-- Consumes: LangGraph-injected `runtime: ToolRuntime` on the `web_search`, `web_open`, and `image_search` coroutines.
-- Produces: `_run_search(..., runnable_config: RunnableConfig | None)` and `discover_images(..., runnable_config: RunnableConfig | None = None)`.
-
-- [ ] **Step 1: Make the web fake tools record config**
-
-Change the test fake without weakening existing argument assertions:
-
-```python
-class _FakeTool:
-    def __init__(self, name, payload, delay=0):
-        self.name = name
-        self.payload = payload
-        self.delay = delay
-        self.calls = []
-        self.configs = []
-
-    async def ainvoke(self, args, config=None):
-        self.calls.append(dict(args))
-        self.configs.append(config)
-        if self.delay:
-            await asyncio.sleep(self.delay)
-        return self.payload
-```
-
-Add tests that invoke each product tool with `config={"tags": ["parent"]}` and assert Tavily search, Tavily extract, and Brave receive a config containing that tag.
-
-- [ ] **Step 2: Run the web tests and verify failure**
-
-Run:
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest -q tests/test_web_tools.py
-```
-
-Expected: the new config assertions fail because nested calls currently use `tool.ainvoke(args)`.
-
-- [ ] **Step 3: Inject ToolRuntime and forward config to both child tasks**
-
-Import `ToolRuntime` and annotate the injected argument so it is excluded from the public tool schema:
-
-```python
-from langchain.tools import ToolRuntime
-from langchain_core.runnables import RunnableConfig
-
-async def _search(
-    query: str,
-    objective: str,
-    freshness: Freshness = "timeless",
-    start_date: date | None = None,
-    end_date: date | None = None,
-    locale: str | None = None,
-    include_domains: list[str] | None = None,
-    max_results: int = 5,
-    runtime: ToolRuntime | None = None,
-) -> str:
-    runnable_config = runtime.config if runtime is not None else None
-```
-
-Apply the same injected argument to `_open` and `_image_search`. Pass `runnable_config` into provider helpers and `discover_images`. Invoke child tools with:
-
-```python
-await tool.ainvoke(args, config=runnable_config)
-```
-
-Keep `asyncio.create_task` usage; context propagation and the explicit config both preserve ancestry.
-
-- [ ] **Step 4: Preserve direct-test compatibility**
-
-The `runtime` argument must remain optional so direct helper tests and legacy invocations without graph injection still work. Assert none of the three public input schemas contains `runtime`.
-
-- [ ] **Step 5: Run composite and image regression tests**
-
-Run:
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest -q tests/test_web_tools.py tests/test_brave_image_search_server.py tests/test_image_preview_stream.py tests/test_rich_response_streaming.py
-```
-
-Expected: all pass; provider calls receive the parent config and cancellation tests remain green.
-
-- [ ] **Step 6: Commit Task 3**
-
-```powershell
-git add app/ai/web_tools.py app/ai/image_discovery_flow.py tests/test_web_tools.py
-git commit -m "fix: parent nested web provider traces"
-```
-
-### Task 4: Prove Trace Ancestry at the Callback Boundary
+> **Revised 2026-09-07 after the three-plan review.** The original Task 2
+> threaded `ToolCallRequest.runtime.config` through `execute_tool_calls` into
+> `tool.ainvoke(args, config=...)`. Measurement at the production seam shows
+> that mechanism is unnecessary and actively harmful, so the task is now to
+> establish the existing behavior as a tested contract instead of replacing it.
 
 **Files:**
 - Create: `tests/test_tool_trace_parenting.py`
-- Modify: `docs/operations/routing-v2-rollout.md`
+- Modify: `app/ai/tool_execution.py` (comment only, at `invoke_tool`)
 
-**Interfaces:**
-- Consumes: the config-aware execution pipeline from Tasks 2-3.
-- Produces: a deterministic regression test and a live LangSmith verification procedure.
+**What was measured, and how**
 
-- [ ] **Step 1: Add a callback ancestry integration test**
+Three probes against real `StructuredTool`s and a recording
+`BaseCallbackHandler`, with no network access:
 
-Use a real `StructuredTool` and a recording callback:
+1. A `RunnableLambda` node calling `execute_tool_calls`, whose tool calls a
+   nested tool with no `config` argument. Result: the product tool is a child
+   of the node run, and the nested provider tool is a child of the product
+   tool. Nothing is a root.
+2. The same shape inside a compiled LangGraph `StateGraph` node, which is how
+   `rag_execution.py`, `tool_loop.py` and `ToolExecutionMiddleware` actually
+   reach `execute_tool_calls`. Same result.
+3. The same shape with the upstream config forwarded explicitly, as the
+   original Task 2 and Task 3 proposed. Result: the provider becomes a
+   **sibling** of the product tool under the node, because the forwarded
+   config still carries the *parent's* callback manager. Forwarding replaces
+   the active child context rather than extending it.
+
+`asyncio.create_task` in `invoke_tool_attempt` and `asyncio.to_thread` in
+`invoke_tool` both copy the current `contextvars` context, so the run manager
+survives every hop the pipeline makes, including each retry attempt.
+
+The conclusion the original plan got backwards: ancestry is carried by
+`langchain_core`'s `var_child_runnable_config` contextvar, which every
+`Runnable` sets to its own child config while it executes. Passing no config is
+what makes a nested call inherit the caller. Passing the *upstream* config is
+what flattens it.
+
+**Interfaces:** unchanged. No production signature gains a `runnable_config`
+parameter, and `ToolExecutionMiddleware` keeps discarding `request.runtime`.
+
+- [ ] **Step 1: Write the ancestry regression at the production seam**
+
+`tests/test_tool_trace_parenting.py` drives `execute_tool_calls` from inside a
+LangChain run and asserts the exact topology, not merely a non-null parent:
 
 ```python
-class RecordingHandler(BaseCallbackHandler):
-    def __init__(self):
-        self.starts = []
-
-    def on_tool_start(self, serialized, input_str, *, run_id, parent_run_id=None, **kwargs):
-        self.starts.append((run_id, parent_run_id, serialized.get("name")))
-
-
-@pytest.mark.asyncio
-async def test_nested_tool_run_has_parent_callback_id():
-    @tool
-    async def child_lookup(query: str) -> str:
-        """Return one bounded lookup result."""
-        return "result"
-
-    handler = RecordingHandler()
-    parent = RunnableLambda(
-        lambda value: value,
-        name="conversation_parent",
-    )
-
-    async def invoke_child(value, config):
-        return await child_lookup.ainvoke({"query": value}, config=config)
-
-    chain = parent | RunnableLambda(invoke_child, name="tool_dispatch")
-    await chain.ainvoke("query", config={"callbacks": [handler]})
-
-    child = next(item for item in handler.starts if item[2] == "child_lookup")
-    assert child[1] is not None
+child = _start(handler, "provider_tool")
+parent = _start(handler, "product_tool")
+assert child.parent_run_id == parent.run_id
 ```
 
-Add a second test around `execute_tool_calls` using the same handler to prove the production seam, not only native LangChain composition.
+Cover: the nested async path, the synchronous `invoke`/`to_thread` path, a
+retry that reaches the provider twice, and the blanket property that no tool
+run recorded during a conversation-owned call has a null parent.
 
-- [ ] **Step 2: Run the new integration test**
+A non-null-parent assertion alone is not enough. The sibling topology that
+config forwarding produces also has a non-null parent — it is the wrong one.
 
-Run:
+- [ ] **Step 2: Run it and confirm it passes against unmodified production code**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_tool_trace_parenting.py
 ```
 
-Expected: PASS after Tasks 2-3.
+Expected: PASS with no production change. This is the point of the revision.
+A test that only passes after a change nobody needed would have locked in the
+regression.
 
-- [ ] **Step 3: Document live trace verification**
+- [ ] **Step 3: Record why `invoke_tool` takes no config**
 
-Add this canary check to the rollout guide:
+Add a comment at `invoke_tool` in `app/ai/tool_execution.py` stating that the
+absent `config` argument is deliberate and what breaks if one is added. The
+regression from Step 1 is the enforcement; the comment is what stops someone
+writing the change in the first place.
+
+- [ ] **Step 4: Commit Task 2**
+
+```powershell
+git add app/ai/tool_execution.py tests/test_tool_trace_parenting.py
+git commit -m "test: lock down nested tool trace ancestry"
+```
+
+### Task 3: Prove the Product Web and Image Tools Keep That Ancestry
+
+> **Revised 2026-09-07.** The original Task 3 injected `ToolRuntime` into the
+> three product tools and forwarded `runtime.config` into Tavily and Brave.
+> Both halves are wrong: `ToolExecutionMiddleware.awrap_tool_call` bypasses the
+> framework tool handler that performs runtime injection, so the argument would
+> arrive as `None`; and forwarding the config is the flattening measured in
+> Task 2. The plan's references to `_run_search`, to sibling child tasks and to
+> retained `asyncio.create_task` usage are also stale — the focused-web plan
+> replaced them with the `_call_provider` / `_discover` split, and `web_tools.py`
+> creates no tasks at all.
+
+**Files:**
+- Modify: `tests/test_tool_trace_parenting.py`
+- No production change to `app/ai/web_tools.py` or `app/ai/image_discovery_flow.py`
+
+**Interfaces:** unchanged. `_call_provider` and `_discover` keep calling
+`tool.ainvoke(args)` with no config, which is what parents them.
+
+- [ ] **Step 1: Assert the real product tools sit above their providers**
+
+Drive `create_web_search_tool`, `create_web_open_tool` and
+`create_image_search_tool` through `execute_tool_calls` with the Tavily and
+Brave fakes built as real `StructuredTool`s, so each provider call produces an
+observable run. Assert for all three:
+
+```python
+assert provider.parent_run_id == product.run_id
+```
+
+The existing `_FakeTool` in `tests/test_web_tools.py` is a bare object and
+creates no run, so it cannot answer this question. Leave it alone — it owns the
+argument mapping — and build the traced doubles here.
+
+- [ ] **Step 2: Assert no conversation-owned provider call is a root**
+
+Collect every recorded tool start from one turn that calls all three product
+tools and assert none has `parent_run_id is None`. This is the machine-checkable
+half of the live canary in Task 4.
+
+- [ ] **Step 3: Run the composite and image regressions**
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests/test_tool_trace_parenting.py tests/test_web_tools.py tests/test_brave_image_search_server.py tests/test_image_preview_stream.py tests/test_rich_response_streaming.py
+```
+
+Expected: all pass, with cancellation and image ordering unchanged.
+
+- [ ] **Step 4: Commit Task 3**
+
+```powershell
+git add tests/test_tool_trace_parenting.py
+git commit -m "test: pin web and image provider trace ancestry"
+```
+
+### Task 4: Document Live Verification and Run the Regression Set
+
+**Files:**
+- Modify: `docs/operations/routing-v2-rollout.md`
+
+**Interfaces:**
+- Consumes: the ancestry regressions from Tasks 2-3.
+- Produces: a live LangSmith verification procedure.
+
+- [ ] **Step 1: Document live trace verification**
+
+Add this canary to the rollout guide:
 
 ```markdown
 1. Start one chat turn that calls `web_search`, `web_open`, and `image_search`.
 2. Open the conversation trace in LangSmith.
-3. Verify Tavily and Brave runs have non-null parent IDs beneath their product tools.
-4. Query the same time window for root runs named `tavily_search`,
-   `tavily_extract`, or `brave_image_search`; expect zero conversation-owned roots.
+3. Verify each Tavily and Brave run sits directly beneath its product tool run,
+   not merely beneath the same node. A provider run that is a sibling of its
+   product tool means someone reintroduced explicit config forwarding.
+4. Query the same window for root runs named `tavily_search`, `tavily_extract`,
+   or `brave_image_search`; expect zero conversation-owned roots.
 5. Diagnostic roots are acceptable only with the `diagnostic` tag.
 ```
 
-- [ ] **Step 4: Run trace, streaming, and middleware regression suites**
+State plainly that offline tests cannot substitute for this: they prove the
+callback topology, not that the deployed workspace records it.
 
-Run:
+- [ ] **Step 2: Run trace, streaming, and middleware regression suites**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_langsmith_smithdb_migration.py tests/test_rag_evaluation_cli.py tests/test_tool_trace_parenting.py tests/test_tool_execution_control_flow.py tests/test_tool_execution_recovery.py tests/test_specialist_middleware.py tests/test_specialist_tool_pipeline.py tests/test_web_tools.py tests/test_ai_sdk_v6_stream_contract.py tests/test_internal_sse_stream_contract.py
-.\.venv\Scripts\python.exe -m ruff check app/ai/tool_execution.py app/ai/workflow/middleware.py app/ai/web_tools.py app/ai/image_discovery_flow.py tests/test_tool_trace_parenting.py tests/test_tool_execution_control_flow.py tests/test_specialist_middleware.py tests/test_web_tools.py
+.\.venv\Scripts\python.exe -m ruff check app/ai/tool_execution.py app/ai/web_tools.py app/ai/image_discovery_flow.py app/evaluation/rag/langsmith_queries.py tests/test_tool_trace_parenting.py
 ```
 
 Expected: all tests pass and Ruff reports no errors.
 
-- [ ] **Step 5: Commit Task 4**
+- [ ] **Step 3: Commit Task 4**
 
 ```powershell
-git add tests/test_tool_trace_parenting.py docs/operations/routing-v2-rollout.md
-git commit -m "test: lock down child tool trace ancestry"
+git add docs/operations/routing-v2-rollout.md
+git commit -m "docs: record live trace ancestry canary"
 ```
 
 ## Acceptance Checklist
@@ -570,18 +431,20 @@ git commit -m "test: lock down child tool trace ancestry"
 - [ ] Runtime and environment dependency declarations satisfy `langsmith>=0.10.15`.
 - [ ] Production Python contains no legacy run-query method or `/api/v1/runs/query` literal.
 - [ ] RAG comparison metrics use `runs.query()` with project UUID, root filter, explicit selects, and the project's full time window.
+- [ ] Feedback aggregation reads the SDK's `FeedbackStats` objects, and its tests use that type rather than dictionaries.
 - [ ] An authenticated RAG evaluation canary emits no deprecated response header or v1 run-query request.
-- [ ] `ToolCallRequest.runtime.config` reaches the raw tool on every attempt.
-- [ ] Nested Tavily and Brave invocations receive the same config.
+- [ ] No production call site passes an upstream `RunnableConfig` into a nested tool invocation.
+- [ ] Callback tests assert `provider.parent_run_id == product.run_id`, not merely a non-null parent.
+- [ ] Nested Tavily and Brave invocations are children of their product tool, across the async path, the synchronous path, and a retry.
 - [ ] Existing cancellation, timeout, retry, receipt, artifact, and image tests pass.
-- [ ] Callback tests observe a non-null parent for conversation-owned child tools.
 - [ ] The live LangSmith canary contains no conversation-owned provider root runs.
 - [ ] No model-visible output or public stream contract changed.
 
 ## Execution Handoff
 
-Task 1 can execute immediately and independently because it touches only the
-evaluation/read side of LangSmith. Execute Tasks 2-4 after the focused-web plan
-so trace parenting targets the durable product-tool boundaries. The plan remains
+Task 1 has landed (`f1d0772`), amended 2026-09-07 for the SDK feedback shape.
+Tasks 2-4 execute after the focused-web plan, and are test and documentation
+work only: the behavior they were written to create already exists, and the
+mechanism originally proposed would have removed it. The plan remains
 independent of generation lifecycle persistence and can merge before the
 Continue/Stop plan.
