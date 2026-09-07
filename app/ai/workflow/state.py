@@ -156,6 +156,10 @@ class WorkflowState(TypedDict):
     # specialist wrapper from the outcome; read to decide whether a validated
     # answer is a finished one or a continuable partial.
     execution_budget: NotRequired[dict[str, Any] | None]
+    # Complete tool rounds from an earlier epoch of this turn, written by the
+    # continuation pause. Plain replacement, not accumulation: each pause
+    # supersedes the last, and appending would resend evidence twice.
+    carried_messages: NotRequired[list[Any] | None]
     workflow_error: NotRequired[WorkflowError | None]
 
     # --- request scope ----------------------------------------------------

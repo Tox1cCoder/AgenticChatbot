@@ -462,6 +462,11 @@ class SpecialistRequest:
     model_request: dict[str, Any] | None
     messages: list[Any]
     history: list[Any] = field(default_factory=list)
+    # What an earlier epoch of this same turn already gathered. Empty for a
+    # first epoch. Carried explicitly rather than recovered from the checkpoint
+    # because the produced messages are sliced into the outcome's provenance
+    # and never return to the request on their own.
+    carried_messages: list[Any] = field(default_factory=list)
     state: dict[str, Any] = field(default_factory=dict)
     hitl_policy: dict[str, Any] | None = None
     attachments: list[Any] = field(default_factory=list)
@@ -754,7 +759,15 @@ class SpecialistFactory:
 
     @staticmethod
     def _invocation_messages(request: SpecialistRequest) -> list[Any]:
-        return [*request.history, *request.messages]
+        """History, then what this turn already learned, then what was asked.
+
+        The carried evidence sits before the question so the model reads it as
+        established context rather than as a fresh turn to react to. It is
+        pair-complete by construction (see ``continuation.carry_messages``);
+        putting it after the question would separate a tool call from its
+        result with a human message, which some providers reject.
+        """
+        return [*request.history, *request.carried_messages, *request.messages]
 
     @staticmethod
     def _produced_messages(request: SpecialistRequest, result: Any) -> list[Any]:

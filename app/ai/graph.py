@@ -1698,6 +1698,11 @@ class MultiAgentWorkflow(
             conversation_id, user_id, agent_key=history_key, state=state
         )
 
+        # An earlier epoch of this turn, if there was one. Without it a Continue
+        # re-runs the work it was meant to resume.
+        carried_messages = [
+            message for message in (state.get("carried_messages") or []) if message is not None
+        ]
         current_turn_messages = self._messages_for_active_agent(state, active_agent_id, messages)
         current_turn_messages, has_images = self._apply_current_turn_attachments(
             state, current_turn_messages
@@ -1751,6 +1756,7 @@ class MultiAgentWorkflow(
             model_request=state.get("model_request"),
             messages=current_turn_messages,
             history=self._convert_history_for_specialist(conversation_history),
+            carried_messages=carried_messages,
             state=dict(state) if isinstance(state, dict) else {},
             hitl_policy=state_view.context().get("hitl_policy"),
             attachments=state_view.attachments(),
