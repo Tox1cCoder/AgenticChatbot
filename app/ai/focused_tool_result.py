@@ -42,17 +42,26 @@ _TOKEN_RE = re.compile(r"[^\W_]+", flags=re.UNICODE)
 _PARAGRAPH_RE = re.compile(r"\n\s*\n")
 _NON_WORD_RE = re.compile(r"[\W_]+", flags=re.UNICODE)
 _URL_RE = re.compile(r"^\s*(?:https?|ftp|data|blob)://\S*\s*$", flags=re.IGNORECASE)
-_DIGIT_RE = re.compile(r"\d")
+#: One claim atom: a number with its sign, decimal and version separators kept,
+#: or a bare word. Numbers are read from the *raw* text rather than the
+#: normalized token stream, because normalizing is what erased the distinctions
+#: that matter -- it turns ``-10`` into ``10`` and both ``4.2`` and ``2.4`` into
+#: the pair ``4``/``2``.
+_CLAIM_ATOM_RE = re.compile(r"[+-]?\d+(?:[.,:/\-]\d+)*%?|[^\W\d_]+", flags=re.UNICODE)
 
-#: Tokens that carry a passage's claim rather than its subject. Two passages
-#: that differ on one of these are stating different facts however similar
-#: their wording, so they are compared before any similarity measure.
-_FACT_WORDS = frozenset(
+#: Words that carry a passage's claim rather than its subject: negations, and
+#: month names, which are dates written as words and so invisible to any
+#: digit test.
+_CLAIM_WORDS = frozenset(
     # fmt: off
     [
         "no", "not", "never", "none", "nor", "without", "cannot", "cant",
         "unavailable", "unsupported", "unchanged", "false", "denied",
         "excluded", "removed", "revoked", "rejected",
+        "january", "february", "march", "april", "may", "june", "july",
+        "august", "september", "october", "november", "december",
+        "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
+        "oct", "nov", "dec",
     ]
     # fmt: on
 )
@@ -116,7 +125,7 @@ class _Candidate:
         "text",
         "normalized",
         "tokens",
-        "facts",
+        "claims",
         "url",
         "title",
         "score",
@@ -136,11 +145,7 @@ class _Candidate:
         self.text = text
         self.normalized = _normalize(text)
         self.tokens = tuple(_TOKEN_RE.findall(self.normalized))
-        self.facts = frozenset(
-            token
-            for token in self.tokens
-            if token in _FACT_WORDS or _DIGIT_RE.search(token)
-        )
+        self.claims = _claim_atoms(text)
         self.url = url
         self.title = title
         self.score = 0.0
@@ -332,14 +337,21 @@ def _near_duplicate(candidate: _Candidate, other: _Candidate) -> bool:
     """Two passages repeat each other only if they also carry the same facts.
 
     Overlap alone equates "revenue was 100 million" with "revenue was 200
-    million", and "is enforced" with "is not enforced": the one or two tokens
-    that separate them are exactly the ones the objective asked about, and
-    dropping the second passage removes the only evidence that the sources
-    disagree. Numbers, dates, versions and negations are therefore compared
-    first; the similarity test then still catches a genuine restatement.
+    million", "10 percent" with "-10 percent", "version 4.2" with "version
+    2.4", "14 March" with "14 April", and "is enforced" with "is not
+    enforced": the one or two tokens that separate them are exactly the ones
+    the objective asked about, and dropping the second passage removes the only
+    evidence that the sources disagree.
+
+    So the claim atoms -- signed and decimal-preserving numbers, month names,
+    negations -- are compared first, in the order they appear. Order matters
+    because two passages whose numbers are the same but rearranged have not
+    been shown to say the same thing, and retention is the safe answer when
+    equivalence cannot be established. The similarity test then still catches a
+    genuine restatement, where the atoms line up exactly.
     """
 
-    if candidate.facts != other.facts:
+    if candidate.claims != other.claims:
         return False
     left, right = set(candidate.tokens), set(other.tokens)
     smaller = min(len(left), len(right))
@@ -470,6 +482,7 @@ def _chunks(path: str, raw: str) -> tuple[list[tuple[str, str]], int]:
     pieces: list[str] = []
     for block in _PARAGRAPH_RE.split(text):
         block = block.strip()
+        split_any = False
         while len(block) > _CANDIDATE_MAX_CHARS:
             # ``rfind`` answers -1 when the window holds no space at all, and
             # -1 is truthy: unspaced text — CJK, one machine-generated token —
@@ -481,11 +494,35 @@ def _chunks(path: str, raw: str) -> tuple[list[tuple[str, str]], int]:
                 cut = _CANDIDATE_MAX_CHARS
             pieces.append(block[:cut].strip())
             block = block[cut:].strip()
-        if len(block) >= _MIN_CANDIDATE_CHARS:
+            split_any = True
+        # The floor applies to a leaf that is short on its own -- two
+        # characters answer nothing. It must not apply to the tail of a passage
+        # the splitter cut, which can hold the final digit of the fact: that is
+        # how a 1,201-character leaf came back as 1,200 with no omission
+        # recorded. Merging it into the previous piece is not an option, since
+        # that piece is already exactly at the bound.
+        if block and (split_any or len(block) >= _MIN_CANDIDATE_CHARS):
             pieces.append(block)
 
     kept = pieces[:_MAX_CHUNKS_PER_LEAF]
     return [(f"{path}#{index}", piece) for index, piece in enumerate(kept)], len(pieces) - len(kept)
+
+
+def _claim_atoms(text: str) -> tuple[str, ...]:
+    """The parts of a passage that state its claim, in the order written.
+
+    Read from the raw text on purpose. ``_normalize`` exists to make wording
+    comparable and does so by discarding punctuation, which is exactly where a
+    sign and a version separator live.
+    """
+
+    folded = unicodedata.normalize("NFKC", str(text or "")).casefold()
+    atoms: list[str] = []
+    for match in _CLAIM_ATOM_RE.finditer(folded):
+        atom = match.group()
+        if atom[0].isdigit() or atom[0] in "+-" or atom in _CLAIM_WORDS:
+            atoms.append(atom)
+    return tuple(atoms)
 
 
 def _normalize(text: str) -> str:

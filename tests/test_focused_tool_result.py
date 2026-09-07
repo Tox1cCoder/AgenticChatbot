@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.ai.focused_tool_result import (
     _CANDIDATE_MAX_CHARS,
     FocusedResult,
@@ -355,3 +357,78 @@ def test_omitted_candidates_counts_what_the_budget_actually_dropped():
     assert result.total_candidates == 4
     assert result.omitted_candidates > 0
     assert result.omitted_candidates == result.total_candidates - len(result.excerpts)
+
+
+def test_an_opposite_sign_is_not_treated_as_the_same_number():
+    """Normalization strips the minus; the claim is the opposite of the other."""
+    payload = json.dumps(
+        {
+            "a": "The operating margin for the northern division was 10 percent.",
+            "b": "The operating margin for the northern division was -10 percent.",
+        }
+    )
+
+    result = _select(payload, "operating margin")
+
+    assert len(result.excerpts) == 2
+
+
+def test_a_reordered_version_is_not_treated_as_the_same_version():
+    payload = json.dumps(
+        {
+            "a": "The supported runtime for this connector is version 4.2 exactly.",
+            "b": "The supported runtime for this connector is version 2.4 exactly.",
+        }
+    )
+
+    result = _select(payload, "supported runtime version")
+
+    assert len(result.excerpts) == 2
+
+
+def test_two_different_months_are_not_treated_as_the_same_date():
+    payload = json.dumps(
+        {
+            "a": "The tenant migration window closes on 14 March 2026 for everyone.",
+            "b": "The tenant migration window closes on 14 April 2026 for everyone.",
+        }
+    )
+
+    result = _select(payload, "when does the migration window close")
+
+    assert len(result.excerpts) == 2
+
+
+def test_a_percentage_written_with_a_symbol_still_distinguishes_the_claim():
+    payload = json.dumps(
+        {
+            "a": "Retrieval coverage across the whole corpus reached 95% last quarter.",
+            "b": "Retrieval coverage across the whole corpus reached 59% last quarter.",
+        }
+    )
+
+    result = _select(payload, "retrieval coverage")
+
+    assert len(result.excerpts) == 2
+
+
+@pytest.mark.parametrize("length", [1_201, 1_202, 2_401, 2_402])
+def test_a_short_split_remainder_is_kept_rather_than_dropped(length):
+    """The end of a split passage can hold the final digit of the fact.
+
+    A fragment this short is not evidence standing alone, which is why it is
+    dropped when it *is* the whole leaf. As the tail of a passage the splitter
+    cut, dropping it silently loses characters and records no omission.
+    """
+    body = "A" * length
+
+    chunks, omitted = _chunks("$.token", body)
+
+    assert omitted == 0
+    assert "".join(text for _, text in chunks) == body
+    assert all(len(text) <= _CANDIDATE_MAX_CHARS for _, text in chunks)
+
+
+def test_a_leaf_too_short_to_be_evidence_is_still_dropped():
+    """The standalone case keeps its floor: two characters answer nothing."""
+    assert _chunks("$.tiny", "ok") == ([], 0)
