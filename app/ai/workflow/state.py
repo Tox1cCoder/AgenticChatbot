@@ -152,6 +152,10 @@ class WorkflowState(TypedDict):
     agent_outcome: NotRequired[ResponseOutcome | None]
     worker_results: NotRequired[Annotated[list[WorkerResult], append_worker_results]]
     execution_phase: NotRequired[ExecutionPhase]
+    # What this epoch spent, and what the turn has spent overall. Written by the
+    # specialist wrapper from the outcome; read to decide whether a validated
+    # answer is a finished one or a continuable partial.
+    execution_budget: NotRequired[dict[str, Any] | None]
     workflow_error: NotRequired[WorkflowError | None]
 
     # --- request scope ----------------------------------------------------

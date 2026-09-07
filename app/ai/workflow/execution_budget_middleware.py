@@ -33,9 +33,12 @@ from typing import Any
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
 from langchain.agents.middleware.types import AgentMiddleware
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import SystemMessage, ToolMessage
 
-from app.ai.workflow.execution_budget import ExecutionBudgetAccountant
+from app.ai.workflow.execution_budget import (
+    FORCED_SYNTHESIS_INSTRUCTION,
+    ExecutionBudgetAccountant,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +60,10 @@ class SoftExecutionBudgetMiddleware(AgentMiddleware):
     def __init__(self, *, accountant: ExecutionBudgetAccountant) -> None:
         super().__init__()
         self._accountant = accountant
+        # The instruction goes in once. A provider fallback re-enters this
+        # chain, and two copies of "stop calling tools" is prompt noise the
+        # model has to reconcile.
+        self._instructed = False
 
     @property
     def accountant(self) -> ExecutionBudgetAccountant:
@@ -78,6 +85,9 @@ class SoftExecutionBudgetMiddleware(AgentMiddleware):
             self._accountant.state.tool_calls,
             self._accountant.state.execution_epoch,
         )
+        # The refusal says it in band, paired with the call it answers, so the
+        # next model call needs no separate instruction.
+        self._instructed = True
         return ToolMessage(
             content=_REFUSAL_TEXT,
             tool_call_id=str(call.get("id") or ""),
@@ -86,7 +96,14 @@ class SoftExecutionBudgetMiddleware(AgentMiddleware):
         )
 
     async def awrap_model_call(self, request: Any, handler: Any) -> Any:
-        self._accountant.note_model_call()
+        decision = self._accountant.note_model_call()
+        if decision.tools_suppressed and not self._instructed:
+            # Tool-free is not self-explanatory: a model whose tools vanish
+            # without a reason tends to promise a search it can no longer make.
+            self._instructed = True
+            request = request.override(
+                messages=[*request.messages, SystemMessage(FORCED_SYNTHESIS_INSTRUCTION)]
+            )
         try:
             return await handler(request)
         except (ModelCallLimitExceededError, ToolCallLimitExceededError):

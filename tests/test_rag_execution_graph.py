@@ -98,10 +98,12 @@ class ScriptedRagRuntime:
         self.seen_evidence_ids: list[tuple[str, ...]] = []
         self.seen_scopes: list[object] = []
         self.regeneration_calls = 0
+        self.force_final_flags: list[bool] = []
 
-    async def model_turn(self, request, *, messages, evidence, scope=None):
+    async def model_turn(self, request, *, messages, evidence, scope=None, force_final=False):
         self.model_calls += 1
         self.seen_scopes.append(scope)
+        self.force_final_flags.append(bool(force_final))
         records = getattr(evidence, "records", ()) or ()
         self.seen_evidence_ids.append(tuple(record.evidence_id for record in records))
         # Index by this run's own turn count, not a cumulative counter, so the
@@ -500,3 +502,127 @@ async def test_worker_mode_result_is_private():
 
     assert result.mode == "worker"
     assert "public_messages" not in RagExecutionResult.model_fields
+
+
+# ----------------------------------------------------------------------
+# execution budget
+# ----------------------------------------------------------------------
+
+
+def _budget_settings(**overrides) -> SimpleNamespace:
+    values = {
+        "rag_evidence_max_tokens": 0,
+        "enable_citation_verification": True,
+        "rag_max_tool_iterations": 8,
+        "generation_soft_tool_calls_per_epoch": 1,
+        "generation_hard_tool_calls_per_epoch": 4,
+        "generation_soft_model_calls_per_epoch": 6,
+        "generation_hard_model_calls_per_epoch": 8,
+        "generation_total_epochs_per_turn": 3,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _two_retrievals_then_answer() -> list:
+    """The model asks twice; the budget only pays for one."""
+    return [
+        RagModelTurn(tool_calls=(_search_call("call-1"),)),
+        RagModelTurn(tool_calls=(_search_call("call-2"),)),
+        RagModelTurn(text="partial", answer=_answer("E1", text="partial")),
+    ]
+
+
+async def test_the_rag_loop_refuses_a_tool_call_past_the_soft_budget():
+    """R1. RAG bypasses create_agent, so no middleware could do this."""
+    runtime = ScriptedRagRuntime(
+        turns=_two_retrievals_then_answer(), evidence=_evidence_payload("E1")
+    )
+    graph = _graph(runtime, settings=_budget_settings())
+
+    await graph.ainvoke(_request())
+
+    assert [call["id"] for call in runtime.tool_calls_executed] == ["call-1"]
+
+
+async def test_the_refused_rag_call_is_still_answered():
+    """An unanswered tool call is a provider error on the next request."""
+    runtime = ScriptedRagRuntime(
+        turns=_two_retrievals_then_answer(), evidence=_evidence_payload("E1")
+    )
+    graph = _graph(runtime, settings=_budget_settings())
+
+    result = await graph.ainvoke(_request())
+
+    assert isinstance(result, RagExecutionResult)
+    assert result.execution_budget["exhausted_by"] == "tool_calls"
+
+
+async def test_the_rag_answer_call_is_told_that_gathering_has_ended():
+    """Suppression rides the agent's existing rag_force_final_response seam."""
+    runtime = ScriptedRagRuntime(
+        turns=_two_retrievals_then_answer(), evidence=_evidence_payload("E1")
+    )
+    graph = _graph(runtime, settings=_budget_settings())
+
+    await graph.ainvoke(_request())
+
+    assert runtime.force_final_flags[-1] is True
+    assert runtime.force_final_flags[0] is False
+
+
+async def test_a_rag_run_within_budget_is_never_forced():
+    runtime = ScriptedRagRuntime(
+        turns=_retrieve_then_answer("E1"), evidence=_evidence_payload("E1")
+    )
+    graph = _graph(runtime, settings=_budget_settings(
+            generation_soft_tool_calls_per_epoch=4,
+            generation_hard_tool_calls_per_epoch=6,
+        ))
+
+    result = await graph.ainvoke(_request())
+
+    assert result.execution_budget["exhausted_by"] is None
+    assert result.execution_budget["forced_synthesis"] is False
+    assert runtime.force_final_flags == [False, False]
+
+
+async def test_the_rag_budget_counts_what_the_run_actually_spent():
+    runtime = ScriptedRagRuntime(
+        turns=_retrieve_then_answer("E1"), evidence=_evidence_payload("E1")
+    )
+    graph = _graph(runtime, settings=_budget_settings(
+            generation_soft_tool_calls_per_epoch=4,
+            generation_hard_tool_calls_per_epoch=6,
+        ))
+
+    result = await graph.ainvoke(_request())
+
+    assert result.execution_budget["tool_calls"] == 1
+    assert result.execution_budget["model_calls"] == 2
+
+
+async def test_a_carried_budget_resumes_rather_than_restarting():
+    """R4. A Continue served here must not be handed a fresh quota."""
+    runtime = ScriptedRagRuntime(
+        turns=_retrieve_then_answer("E1"), evidence=_evidence_payload("E1")
+    )
+    graph = _graph(runtime, settings=_budget_settings(
+            generation_soft_tool_calls_per_epoch=4,
+            generation_hard_tool_calls_per_epoch=6,
+        ))
+
+    result = await graph.ainvoke(
+        _request(
+            execution_budget={
+                "execution_epoch": 1,
+                "turn_tool_calls": 5,
+                "turn_model_calls": 4,
+                "epochs_used": 2,
+            }
+        )
+    )
+
+    assert result.execution_budget["execution_epoch"] == 1
+    assert result.execution_budget["turn_tool_calls"] == 6
+    assert result.execution_budget["turn_model_calls"] == 6

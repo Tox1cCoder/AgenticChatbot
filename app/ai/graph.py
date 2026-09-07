@@ -1849,6 +1849,13 @@ class MultiAgentWorkflow(
             message=AgentMessage(role=MessageRole.ASSISTANT, content=result.content),
             metadata={
                 "grounded_answer": result.grounding.to_metadata(),
+                # Same key the create_agent specialists use, so the graph reads
+                # one place regardless of which execution path answered.
+                **(
+                    {"execution_budget": dict(result.execution_budget)}
+                    if result.execution_budget
+                    else {}
+                ),
                 **({"images": list(images)} if images else {}),
             },
             tool_artifacts=list(artifacts) or None,

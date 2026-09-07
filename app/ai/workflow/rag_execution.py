@@ -34,13 +34,18 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal
 
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langgraph.config import get_config
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import NotRequired, TypedDict
 
+from app.ai.workflow.execution_budget import (
+    ExecutionBudgetAccountant,
+    ExecutionBudgetLimits,
+    ExecutionBudgetState,
+)
 from app.observability.routing import get_routing_metrics_recorder
 from app.services.rag_grounding import (
     EvidencePack,
@@ -51,6 +56,14 @@ from app.services.rag_grounding import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Returned in place of a refused retrieval. Phrased as a state of the world:
+#: an error-shaped answer invites the model to retry the same call.
+_BUDGET_REFUSAL_TEXT = (
+    "Evidence gathering has ended for this execution epoch, so this retrieval "
+    "was not run. Answer now from the evidence already gathered, and say "
+    "plainly what remains unknown."
+)
 
 __all__ = [
     "EvidenceIdAllocator",
@@ -131,6 +144,10 @@ class RagExecutionRequest(BaseModel):
     mode: RagMode = "public"
     dispatch_id: str | None = None
     task_id: str | None = None
+    # Carried in rather than read from process memory: a Continue may be served
+    # by a worker that never ran the previous epoch, and an absent budget there
+    # would look exactly like a fresh turn with a full quota.
+    execution_budget: dict[str, Any] | None = None
 
 
 class RagModelTurn(BaseModel):
@@ -192,6 +209,7 @@ class RagExecutionResult(BaseModel):
     mode: RagMode = "public"
     dispatch_id: str | None = None
     task_id: str | None = None
+    execution_budget: dict[str, Any] = Field(default_factory=dict)
 
 
 @dataclass
@@ -243,6 +261,9 @@ class RagExecutionState(TypedDict):
     ambiguous_evidence_id_count: NotRequired[int]
     answer: NotRequired[GroundedAnswer | None]
     tool_iterations: NotRequired[int]
+    # Last write wins, which is what a linear loop wants: each node hands the
+    # next one the counters as they stand.
+    execution_budget: NotRequired[ExecutionBudgetState | None]
     finalization: NotRequired[Any]
     result: NotRequired[RagExecutionResult | None]
 
@@ -294,6 +315,25 @@ class RagExecutionGraph:
 
         self.compile_count += 1
         return graph.compile()
+
+    def _accountant(self, state: RagExecutionState) -> ExecutionBudgetAccountant:
+        """This run's accountant, rebuilt per node from the carried counters.
+
+        The graph is compiled once and shared by every caller, so per-run state
+        cannot live on ``self``. It lives in the graph state instead, and each
+        node returns the counters it advanced.
+        """
+        carried = state.get("execution_budget")
+        if carried is None:
+            raw = state["request"].execution_budget
+            if isinstance(raw, dict):
+                try:
+                    carried = ExecutionBudgetState.model_validate(raw)
+                except Exception:
+                    logger.warning("Ignored an unreadable carried RAG execution budget")
+        return ExecutionBudgetAccountant(
+            limits=ExecutionBudgetLimits.from_settings(self._settings), state=carried
+        )
 
     @property
     def max_tool_iterations(self) -> int:
@@ -372,11 +412,17 @@ class RagExecutionGraph:
     async def _rag_model(self, state: RagExecutionState) -> dict[str, Any]:
         """One model turn. Tool calls and a final answer are different things."""
         scope = self._scope()
+        accountant = self._accountant(state)
+        decision = accountant.note_model_call()
         turn = await self._runtime.model_turn(
             state["request"],
             messages=list(state.get("messages") or []),
             evidence=state.get("evidence"),
             scope=scope,
+            # The RAG agent already has this seam: it maps to ``disable_tools``
+            # on the model binding, so the reserved answer call cannot ask for
+            # another retrieval however the prompt reads.
+            force_final=decision.tools_suppressed,
         )
         turn = _as_model_turn(turn)
 
@@ -384,7 +430,7 @@ class RagExecutionGraph:
             content=turn.text,
             tool_calls=[dict(call) for call in turn.tool_calls] if turn.tool_calls else [],
         )
-        update: dict[str, Any] = {"messages": [message]}
+        update: dict[str, Any] = {"messages": [message], "execution_budget": accountant.state}
         if not turn.tool_calls:
             update["answer"] = turn.answer if turn.answer is not None else GroundedAnswer()
         return update
@@ -399,6 +445,12 @@ class RagExecutionGraph:
         last = messages[-1] if messages else None
         tool_calls = getattr(last, "tool_calls", None) or []
         if not tool_calls:
+            return "validate"
+        budget = state.get("execution_budget")
+        if budget is not None and budget.forced_synthesis:
+            # The answer call was already reserved and made tool-free. Anything
+            # it still asked for is not going to run, so validate what it said.
+            logger.info("RAG execution budget spent; validating the reserved answer")
             return "validate"
         if int(state.get("tool_iterations") or 0) >= self.max_tool_iterations:
             logger.info("RAG tool iterations exhausted; forcing grounding validation")
@@ -416,19 +468,43 @@ class RagExecutionGraph:
         last = messages[-1] if messages else None
         tool_calls = [dict(call) for call in (getattr(last, "tool_calls", None) or [])]
 
-        outcome = _as_tool_outcome(
-            await self._runtime.execute_tools(
-                state["request"],
-                tool_calls=tool_calls,
-                iteration=int(state.get("tool_iterations") or 0),
-                scope=self._scope(),
+        accountant = self._accountant(state)
+        affordable: list[dict[str, Any]] = []
+        refused: list[ToolMessage] = []
+        for call in tool_calls:
+            if accountant.note_tool_call().allowed:
+                affordable.append(call)
+            else:
+                # Paired, not dropped. A transcript with an unanswered tool call
+                # is rejected by the provider, so refusing without answering
+                # turns a budget stop into an error on the very next call.
+                refused.append(
+                    ToolMessage(
+                        content=_BUDGET_REFUSAL_TEXT,
+                        tool_call_id=str(call.get("id") or ""),
+                        name=str(call.get("name") or "tool"),
+                        status="success",
+                    )
+                )
+
+        outcome = (
+            _as_tool_outcome(
+                await self._runtime.execute_tools(
+                    state["request"],
+                    tool_calls=affordable,
+                    iteration=int(state.get("tool_iterations") or 0),
+                    scope=self._scope(),
+                )
             )
+            if affordable
+            else RagToolOutcome()
         )
         return {
-            "messages": list(outcome.tool_messages),
+            "messages": [*outcome.tool_messages, *refused],
             "evidence_payloads": [dict(payload) for payload in outcome.evidence_payloads],
             "artifacts": [dict(artifact) for artifact in outcome.artifacts],
             "images": [dict(image) for image in outcome.images],
+            "execution_budget": accountant.state,
         }
 
     async def _collect_outputs(self, state: RagExecutionState) -> dict[str, Any]:
@@ -501,8 +577,16 @@ class RagExecutionGraph:
             mode=request.mode,
             dispatch_id=request.dispatch_id,
             task_id=request.task_id,
+            execution_budget=_budget_snapshot(state.get("execution_budget")),
         )
         return {"result": result}
+
+
+def _budget_snapshot(state: Any) -> dict[str, Any]:
+    """The budget as the caller stores it, or an empty dict when unused."""
+    if isinstance(state, ExecutionBudgetState):
+        return state.model_dump(mode="json")
+    return {}
 
 
 def _as_model_turn(value: Any) -> RagModelTurn:
@@ -594,12 +678,18 @@ class ProductionRagRuntime:
         messages: Sequence[Any],
         evidence: Any,
         scope: RagInvocationScope | None = None,
+        force_final: bool = False,
     ) -> RagModelTurn:
         """One RAG model call.
 
         A response carrying tool calls is returned as tool calls only. Parsing
         it as an answer would ground a message the model must still pair with
         its own tool results.
+
+        ``force_final`` reaches the agent as ``rag_force_final_response``, which
+        is the flag it already maps to ``disable_tools`` on the model binding.
+        Reusing it rather than adding a second switch keeps one answer to "may
+        this call use tools".
         """
         from app.ai.schemas import AgentMessage, MessageRole
         from app.services.rag_grounding import parse_grounded_answer
@@ -615,6 +705,7 @@ class ProductionRagRuntime:
                 "model_request": request.model_request,
                 "user_id": request.user_id,
                 "device_id": request.device_id,
+                "rag_force_final_response": bool(force_final),
             },
             attachments=list(request.attachments),
         )

@@ -188,8 +188,15 @@ async def test_intermediate_tool_turn_is_private_not_the_public_answer():
     assert "ToolMessage" in private_types
 
 
-async def test_model_call_limit_raises_the_typed_framework_error():
-    from app.ai.workflow.specialists import ModelCallLimitExceededError
+async def test_a_hard_limit_becomes_a_server_owned_partial_not_an_error():
+    """The framework ceiling means the soft budget failed to reserve an answer.
+
+    Reporting ``agent_execution_limit`` to a client throws away everything the
+    turn gathered and says nothing it can act on. What is still recoverable at
+    this boundary is the artifacts and images the tool pipeline recorded plus
+    the counters -- not the model's text, which died with the exception -- so
+    the fallback says so plainly and stays continuable.
+    """
 
     @tool
     def spin() -> str:
@@ -213,8 +220,41 @@ async def test_model_call_limit_raises_the_typed_framework_error():
         ),
     )
 
-    with pytest.raises(ModelCallLimitExceededError):
-        await factory.invoke(_request())
+    outcome = await factory.invoke(_request())
+    budget = outcome.response.metadata["execution_budget"]
+
+    assert budget["exhausted_by"] == "hard_limit"
+    assert budget["forced_synthesis"] is True
+    assert outcome.response.message.content
+
+
+async def test_the_hard_limit_partial_carries_what_the_pipeline_recorded():
+    @tool
+    def spin() -> str:
+        """Always asks to be called again."""
+        return "again"
+
+    model = scripted_model(
+        [
+            AIMessage(content="", tool_calls=[{"id": f"c{i}", "name": "spin", "args": {}}])
+            for i in range(10)
+        ]
+    )
+    factory = _factory(
+        model,
+        tools=[spin],
+        settings=SimpleNamespace(
+            generation_hard_model_calls_per_epoch=2,
+            generation_soft_model_calls_per_epoch=1,
+            generation_hard_tool_calls_per_epoch=10,
+            generation_soft_tool_calls_per_epoch=9,
+        ),
+    )
+
+    outcome = await factory.invoke(_request())
+
+    assert outcome.agent_id == "chat_agent"
+    assert outcome.provenance.output_policy_ids
 
 
 def _worker_task(task_id: str = "t1", agent_id: str = "chat_agent", **overrides) -> WorkerTask:

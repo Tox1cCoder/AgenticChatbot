@@ -57,8 +57,27 @@ def _tool_request(name: str = "web_search", call_id: str = "call-1"):
     )
 
 
+class _ModelRequest:
+    """Minimal stand-in for ``ModelRequest``, faithful about ``override``.
+
+    ``override`` returns a *new* request rather than mutating: the middleware
+    chain relies on that, and a double that mutated in place would hide a
+    handler reading the pre-override value.
+    """
+
+    def __init__(self, messages=None, tools=None):
+        self.messages = list(messages or [])
+        self.tools = list(tools if tools is not None else [SimpleNamespace(name="web_search")])
+
+    def override(self, **changes):
+        return _ModelRequest(
+            messages=changes.get("messages", self.messages),
+            tools=changes.get("tools", self.tools),
+        )
+
+
 def _model_request():
-    return SimpleNamespace(messages=[], tools=[SimpleNamespace(name="web_search")])
+    return _ModelRequest()
 
 
 async def _ran(_request):
@@ -251,3 +270,79 @@ async def test_an_ordinary_provider_failure_is_not_a_budget_outcome():
         await middleware.awrap_model_call(_model_request(), handler)
 
     assert accountant.state.exhausted_by is None
+
+
+# ----------------------------------------------------------------------
+# the reserved call is told why
+# ----------------------------------------------------------------------
+
+
+async def test_the_reserved_call_is_told_that_gathering_has_ended():
+    """Tool-free is not self-explanatory.
+
+    A model whose tools vanish with no explanation tends to promise a search it
+    can no longer make. The instruction is server-owned for the same reason the
+    suppression is: a model that could talk itself out of answering would
+    defeat the reservation.
+    """
+    from app.ai.workflow.execution_budget import FORCED_SYNTHESIS_INSTRUCTION
+
+    accountant = _accountant(soft_model_calls=1)
+    middleware = _middleware(accountant)
+    seen: list = []
+
+    async def handler(request):
+        seen.append([str(getattr(m, "content", m)) for m in request.messages])
+        return await _answered(request)
+
+    await middleware.awrap_model_call(_model_request(), handler)
+
+    assert FORCED_SYNTHESIS_INSTRUCTION in seen[0]
+
+
+async def test_a_call_within_budget_is_told_nothing():
+    accountant = _accountant(soft_model_calls=3)
+    middleware = _middleware(accountant)
+    seen: list = []
+
+    async def handler(request):
+        seen.append(list(request.messages))
+        return await _answered(request)
+
+    await middleware.awrap_model_call(_model_request(), handler)
+
+    assert seen[0] == []
+
+
+async def test_the_instruction_is_added_once_not_on_every_retry():
+    """A provider fallback re-enters this chain; two copies is prompt noise."""
+    accountant = _accountant(soft_model_calls=1)
+    middleware = _middleware(accountant)
+    seen: list = []
+
+    async def handler(request):
+        seen.append(len(request.messages))
+        return await _answered(request)
+
+    await middleware.awrap_model_call(_model_request(), handler)
+    await middleware.awrap_model_call(_model_request(), handler)
+
+    assert seen == [1, 0]
+
+
+async def test_a_refused_tool_already_carries_the_instruction():
+    """No second copy: the paired ToolMessage said it in band."""
+    accountant = _accountant(soft_tool_calls=1)
+    middleware = _middleware(accountant)
+    await middleware.awrap_tool_call(_tool_request(), _ran)
+    refusal = await middleware.awrap_tool_call(_tool_request(call_id="call-2"), _ran)
+    seen: list = []
+
+    async def handler(request):
+        seen.append(len(request.messages))
+        return await _answered(request)
+
+    await middleware.awrap_model_call(_model_request(), handler)
+
+    assert "answer now" in str(refusal.content).lower()
+    assert seen == [0]

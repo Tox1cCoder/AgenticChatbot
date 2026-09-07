@@ -24,7 +24,7 @@ from typing import Any
 
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
@@ -61,6 +61,15 @@ from app.observability.routing import get_routing_metrics_recorder
 PLANNING_AGENT_ID = "planning_agent"
 
 logger = logging.getLogger(__name__)
+
+#: Stands in for the answer when the execution ceiling fires mid-loop. Written
+#: as a statement about the turn rather than an apology: the user's next move is
+#: to continue it, and a partial that pretends to be an answer is worse than one
+#: that says what happened.
+HARD_LIMIT_PARTIAL_TEXT = (
+    "I reached this turn's execution limit before finishing. Anything I "
+    "already gathered is kept, and continuing the turn resumes from there."
+)
 
 __all__ = [
     "FINALIZE_OWNS_TERMINAL_MESSAGE",
@@ -328,10 +337,14 @@ def make_subgraph_specialist_wrapper(
                 goto="finalize",
             )
 
-        return Command(
-            update={"agent_outcome": outcome, "execution_phase": "validating"},
-            goto="validate_output",
-        )
+        update: dict[str, Any] = {
+            "agent_outcome": outcome,
+            "execution_phase": "validating",
+        }
+        budget = _outcome_budget(outcome)
+        if budget is not None:
+            update["execution_budget"] = budget
+        return Command(update=update, goto="validate_output")
 
     wrapper.__name__ = f"{node_name}_subgraph_wrapper"
     return wrapper
@@ -569,11 +582,19 @@ class SpecialistFactory:
         definition = self.definition_for(request.agent_id)
         agent, tool_execution, accountant = await self._build(definition, request)
 
-        result = await agent.ainvoke(
-            {"messages": self._invocation_messages(request)},
-            context=self._runtime_context(request),
-            config=self._run_config(request),
-        )
+        try:
+            result = await agent.ainvoke(
+                {"messages": self._invocation_messages(request)},
+                context=self._runtime_context(request),
+                config=self._run_config(request),
+            )
+        except (ModelCallLimitExceededError, ToolCallLimitExceededError) as exc:
+            # The soft budget was supposed to reserve an answer one call
+            # earlier. It did not, so this is the last honest thing that can be
+            # said -- and saying it beats reporting agent_execution_limit, which
+            # discards the artifacts the pipeline already recorded and gives the
+            # user nothing to act on.
+            return self._hard_limit_outcome(definition, request, tool_execution, accountant, exc)
         _reject_swallowed_interrupt(result, request.agent_id)
         produced = self._produced_messages(request, result)
         return self._to_outcome(definition, request, produced, tool_execution, accountant)
@@ -743,6 +764,38 @@ class SpecialistFactory:
         sent = len(request.history) + len(request.messages)
         return messages[sent:] if len(messages) > sent else []
 
+    def _hard_limit_outcome(
+        self,
+        definition: SpecialistDefinition,
+        request: SpecialistRequest,
+        tool_execution: ToolExecutionMiddleware,
+        accountant: ExecutionBudgetAccountant,
+        exc: BaseException,
+    ) -> ResponseOutcome:
+        """A validated partial built from what survived the exception.
+
+        The model's own text did not: it was mid-loop when the ceiling fired.
+        What did survive is the artifact and image records the tool pipeline
+        wrote, and the counters, so the message is server-owned and says
+        exactly that rather than inventing an answer.
+        """
+        accountant.note_hard_limit()
+        get_routing_metrics_recorder().agent_execution_limit(
+            agent_id=request.agent_id, limit_kind=type(exc).__name__
+        )
+        logger.warning(
+            "Specialist %s hit the execution ceiling (%s); returning a server-owned partial",
+            request.agent_id,
+            type(exc).__name__,
+        )
+        return self._to_outcome(
+            definition,
+            request,
+            [AIMessage(content=HARD_LIMIT_PARTIAL_TEXT)],
+            tool_execution,
+            accountant,
+        )
+
     def _to_outcome(
         self,
         definition: SpecialistDefinition,
@@ -775,6 +828,20 @@ class SpecialistFactory:
                 private_messages=tuple(produced),
             ),
         )
+
+
+def _outcome_budget(outcome: Any) -> dict[str, Any] | None:
+    """The budget snapshot an outcome carries, wherever it produced one.
+
+    Specialists put it on the response metadata; the RAG graph returns it on
+    its result and ``_invoke_rag_specialist`` copies it to the same place. One
+    reader means the graph does not have to know which path answered.
+    """
+    metadata = getattr(getattr(outcome, "response", None), "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    budget = metadata.get("execution_budget")
+    return dict(budget) if isinstance(budget, dict) and budget else None
 
 
 def _budget_accountant(
