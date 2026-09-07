@@ -430,6 +430,45 @@ git commit -m "feat: coordinate generation lifecycle and distributed stop"
 
 ### Task 3: Add Per-Epoch Soft/Hard Execution Budgets
 
+> **Partly landed 2026-09-07.** Done and verified:
+>
+> - `app/ai/workflow/execution_budget.py` — the framework-free accountant (R1),
+>   with 23 tests. Per-epoch counters reset on Continue, turn totals do not.
+> - `app/ai/workflow/execution_budget_middleware.py` — the thin adapter, 12
+>   tests. It pairs a `ToolMessage` with every refused call and turns the
+>   framework's limit exception into an `exhausted_by="hard_limit"` outcome.
+> - Wired into `SpecialistFactory._build`, covering top-level specialists **and
+>   Planning's delegated workers** (`invoke_worker` uses the same builder).
+> - Suppression via the tool factory, per R3 — the execution middleware
+>   re-consults it on every model call, so it survives provider retries. Proven
+>   through a real `create_agent` subgraph: the binding sequence is
+>   `bind_tools, bind_tools, bind`, and `bind` is langchain's no-tools path.
+> - Settings, with a cross-field validator so a hard rung can never sit at or
+>   below its soft rung.
+> - The framework ceilings now read the same settings, so there is one ladder.
+>   Previously `specialist_max_model_calls` defaulted to 8 against a planned
+>   hard limit of 9, which would have let the framework raise on exactly the
+>   call the budget reserved.
+>
+> **Still outstanding in this task:**
+>
+> 1. **The RAG path has no budget** — the remaining third of R1. `rag_agent`
+>    bypasses `create_agent` for the shared compiled graph, so it must call the
+>    accountant at its own model and tool boundaries.
+> 2. **The hard-limit fallback.** `specialists.py` still turns
+>    `ModelCallLimitExceededError` into `WorkflowError(code="agent_execution_limit")`
+>    and routes to `finalize`. The accountant now records `hard_limit`, but
+>    nothing yet builds the deterministic partial outcome from the evidence
+>    already gathered, so this remains a public generic error.
+> 3. **Forced synthesis adds no instruction yet.** `FORCED_SYNTHESIS_INSTRUCTION`
+>    is defined and unused: the reserved call is tool-free but is not yet told
+>    why. Reconcile it with the existing `tool_budget_notice`
+>    (`app/ai/graph.py:1193`) rather than appending a second, competing
+>    "stop calling tools" sentence.
+> 4. `WorkflowState.execution_budget` is not populated. The snapshot currently
+>    rides on `AgentResponse.metadata["execution_budget"]`; Task 4 reads it to
+>    decide whether to pause.
+
 **Files:**
 - Create: `app/ai/workflow/execution_budget.py`
 - Modify: `app/ai/workflow/contracts.py`
