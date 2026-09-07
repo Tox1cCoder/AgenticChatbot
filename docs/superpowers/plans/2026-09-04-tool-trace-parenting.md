@@ -26,7 +26,7 @@
 - Do not change model-visible tool output in this plan.
 - Add no new parameter to the tool execution pipeline: the ancestry this plan protects comes from the ambient context, and a config parameter is the thing that overrides it.
 - Assert exact ancestry (`provider.parent_run_id == product.run_id`). A non-null parent is also true of the wrong, flattened topology.
-- Do not call `Client.list_runs()`, `Client.get_test_results()`, or `POST /api/v1/runs/query`; these sunset in LangSmith Cloud on 2027-01-31.
+- Do not call any client method the installed SDK marks deprecated, nor the supported helpers that reach v1 behind a suppressed warning (`get_test_results`, `read_thread`, `run_is_shared`), nor any raw `/api/v1/` runs, sharing, annotation-queue-run, or dataset experiment-run path. All sunset in LangSmith Cloud on 2027-01-31. The ban list is derived from the SDK, not written down.
 - Do not enable OpenTelemetry as a response to the legacy banner. Trace ingestion (`/runs/multipart`) is not one of the endpoint families named in this deprecation.
 - SmithDB `runs.query()` returns only the last 24 hours by default; every experiment query must pass the experiment project's `start_time` as `min_start_time`.
 
@@ -35,7 +35,7 @@
 ## File Structure
 
 - Create `app/evaluation/rag/langsmith_queries.py`: query experiment root runs through SmithDB and aggregate feedback.
-- Modify `scripts/evaluate_rag.py`: await the new metrics query instead of calling `get_test_results()`.
+- Modify `scripts/evaluate_rag.py`: await the new metrics query instead of calling `get_test_results()`. Its other client calls — `list_examples()`, `evaluate()` with a list of examples, `aread_project()` — are not on a sunset path.
 - Modify `pyproject.toml` and `environment.yml`: require a SmithDB-capable LangSmith SDK.
 - Create `tests/test_langsmith_smithdb_migration.py`: lock down v2 query arguments and forbid legacy methods.
 - Modify `tests/test_rag_evaluation_cli.py`: exercise async comparison metrics without network access.
@@ -58,6 +58,49 @@ The current environment pins `langsmith==0.10.9`; the official SmithDB guide
 requires Python SDK `langsmith>=0.10.15`. Ordinary trace writes through the
 LangChain callback integration use the ingestion API and do not themselves
 explain this warning.
+
+### Completed 2026-09-07: what "one matching call site" missed
+
+The paragraph above is right about the families and wrong about the scope of
+the guard. Audited against installed `langsmith==0.10.18`:
+
+- **Seventeen client methods carry the SDK's own deprecation marker**, each
+  naming its replacement and the Jan 31 2027 date: `list_runs`, `read_run`,
+  `read_thread`, `list_threads`, `get_run_url`, `share_run`, `unshare_run`,
+  `read_run_shared_link`, `read_shared_run`, `list_shared_runs`,
+  `evaluate_run`, `aevaluate_run`, `get_experiment_results` on `Client`, plus
+  four repeats on `AsyncClient`. The original guard listed four string markers
+  and so covered three of them.
+- **`get_test_results()` is no longer marked deprecated in 0.10.18** — it
+  branches on `client.info.instance_flags` and calls `list_runs()` inside
+  `suppress_deprecation_warning()` unless the workspace is SmithDB-only. It
+  therefore reaches `POST /api/v1/runs/query` while emitting nothing at all.
+  Two other methods do the same: `read_thread` and `run_is_shared`. This is the
+  dangerous shape, and it is why the guard now derives its ban list from the
+  SDK rather than from prose: a helper can look clean, warn about nothing, and
+  still be on the sunset path.
+- **The evaluation helpers are safe on the path this repository uses.**
+  `_load_traces_for_experiment()` also falls back to `list_runs()`, but it is
+  reached only from `evaluate_existing()` and comparative evaluation.
+  `scripts/evaluate_rag.py` calls `client.evaluate(target, data=examples, ...)`
+  with a list of examples, which does not touch it. `list_examples()` and
+  `aread_project()` are not deprecated.
+- **`client.runs` requires backend >= 0.16.0**, but `_check_backend_version`
+  only logs a warning — an older workspace degrades loudly, it does not raise.
+
+Two defects in the landed `runs.query()` call, both from the guide:
+
+- `min_start_time` defaults to **one day ago**, and `start_time` is optional on
+  the project schema. Passing it through unchecked turned an older experiment
+  into zero runs, reported as "no deterministic feedback" rather than as the
+  truncation it was. Now refused before the query is made.
+- `page_size` defaults to 100 (max 1000). The async iterator pages on its own,
+  so this was a round-trip count rather than a correctness bug: three requests
+  for the 210-case golden dataset, now one.
+
+Verified against the guide: `FEEDBACK_STATS` is a valid `selects` value,
+`async for` auto-paginates through `AsyncItemsCursorPostPagination`, and
+`project_ids` takes UUID strings.
 
 Primary references:
 
@@ -142,9 +185,16 @@ async def test_experiment_metrics_use_smithdb_v2_with_full_time_window():
 
 Add a dependency test using `importlib.metadata.version` and
 `packaging.version.Version` that requires `langsmith>=0.10.15`. Add a source
-inventory test that scans production Python files under `app/` and `scripts/`
-and fails on `.list_runs(`, `.get_test_results(`, `.get_experiment_results(`,
-or literal `/api/v1/runs/query`.
+inventory test that scans production Python files under `app/` and `scripts/`.
+
+**Amended 2026-09-07:** do not hardcode the markers. Derive the ban list from
+the installed SDK — `langsmith._internal._beta_decorator.deprecated` produces
+one shared code object per decoration, so identity against a probe names every
+deprecated method exactly, and the failure message can quote the SDK's own
+replacement guidance. Add to it the methods whose own source calls
+`suppress_deprecation_warning`, which are supported, silent, and still on v1.
+Keep a separate scan for raw `/api/v1/` path literals, anchored so it cannot
+also match the `/api/v2/runs/query` replacement.
 
 - [x] **Step 2: Run the tests and verify the expected failures**
 
@@ -222,8 +272,11 @@ those dataset-write/project-lookup paths.
 .\.venv\Scripts\python.exe -m ruff check app/evaluation/rag/langsmith_queries.py scripts/evaluate_rag.py tests/test_langsmith_smithdb_migration.py tests/test_rag_evaluation_cli.py
 ```
 
-Expected: all tests pass, the offline evaluation exits zero, and the inventory
-test finds no legacy query methods/endpoints.
+Expected: all tests pass and the inventory test finds no legacy query methods
+or endpoints. The offline evaluation exits **1**, not zero: the repository has
+no configured local RAG target, so `--offline` without `--target` is a refusal
+that `tests/test_rag_evaluation_cli.py` asserts. Pass `--target MODULE:FUNCTION`
+to actually run one.
 
 - [ ] **Step 6: Run an authenticated deprecation canary**
 
@@ -460,8 +513,9 @@ git commit -m "docs: record live trace ancestry canary"
 ## Acceptance Checklist
 
 - [x] Runtime and environment dependency declarations satisfy `langsmith>=0.10.15`.
-- [x] Production Python contains no legacy run-query method or `/api/v1/runs/query` literal.
-- [x] RAG comparison metrics use `runs.query()` with project UUID, root filter, explicit selects, and the project's full time window.
+- [x] Production Python calls no client method the installed SDK marks deprecated, and none of the supported helpers that reach v1 behind a suppressed warning. The ban list is derived from the SDK, so an SDK bump extends it.
+- [x] Production Python contains no legacy v1 endpoint literal, across all four sunset families (runs query/retrieve, dataset experiment-run, sharing/public-read, annotation-queue runs).
+- [x] RAG comparison metrics use `runs.query()` with project UUID, root filter, explicit selects, and the project's full time window — refusing a project with no `start_time` rather than silently reading the last 24 hours.
 - [x] Feedback aggregation reads the SDK's `FeedbackStats` objects, and its tests use that type rather than dictionaries.
 - [ ] An authenticated RAG evaluation canary emits no deprecated response header or v1 run-query request. **(needs live credentials)**
 - [x] No production call site passes an upstream `RunnableConfig` into a nested tool invocation.
