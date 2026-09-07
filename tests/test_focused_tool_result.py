@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import json
 
-from app.ai.focused_tool_result import FocusedResult, select_focused_excerpts
+from app.ai.focused_tool_result import (
+    _CANDIDATE_MAX_CHARS,
+    FocusedResult,
+    _chunks,
+    select_focused_excerpts,
+)
 
 
 def _select(payload: str, objective: str, *, max_excerpts: int = 8, max_chars: int = 16_000):
@@ -225,3 +230,128 @@ def test_selection_is_deterministic_across_repeated_calls():
     second = _select(_search_payload(), "Which release date is stated for Aurora 4.2?")
 
     assert first.model_dump_json() == second.model_dump_json()
+
+
+def test_two_sources_disagreeing_on_a_number_both_survive():
+    """Lexical similarity is not factual equivalence.
+
+    Two sources that state the same fact with different numbers are the whole
+    reason to read both. Collapsing them into one excerpt destroys the only
+    evidence that they disagree.
+    """
+    payload = json.dumps(
+        [
+            {
+                "url": f"https://{letter}.example",
+                "content": "The official annual revenue for the entire northern business "
+                f"division in fiscal year 2026 was {amount} million dollars.",
+            }
+            for letter, amount in (("a", 100), ("b", 200))
+        ]
+    )
+
+    result = _select(payload, "annual revenue 2026")
+
+    assert len(result.excerpts) == 2
+    combined = " ".join(item.text for item in result.excerpts)
+    assert "100 million" in combined
+    assert "200 million" in combined
+
+
+def test_a_negated_restatement_is_not_collapsed_into_its_opposite():
+    payload = json.dumps(
+        {
+            "a": "The migration deadline is enforced for every tenant on 30 June.",
+            "b": "The migration deadline is not enforced for every tenant on 30 June.",
+        }
+    )
+
+    result = _select(payload, "Is the migration deadline enforced?")
+
+    assert len(result.excerpts) == 2
+
+
+def test_two_dates_for_the_same_event_both_survive():
+    payload = json.dumps(
+        {
+            "a": "Aurora 4.2 was released on 14 March 2026 according to the vendor.",
+            "b": "Aurora 4.2 was released on 21 March 2026 according to the vendor.",
+        }
+    )
+
+    result = _select(payload, "Which release date is stated for Aurora 4.2?")
+
+    assert len(result.excerpts) == 2
+
+
+def test_a_leaf_without_spaces_is_chunked_within_the_bound_and_keeps_every_character():
+    """Unspaced text has no split point; it must still be bounded, not mangled."""
+    body = "\u754c" * 5_000
+
+    chunks, omitted = _chunks("$.content", body)
+
+    assert omitted == 0
+    assert all(len(text) <= _CANDIDATE_MAX_CHARS for _, text in chunks)
+    assert "".join(text for _, text in chunks) == body
+
+
+def test_an_unbroken_machine_generated_token_keeps_its_final_character():
+    body = "A" * 2_500 + "Z"
+
+    chunks, omitted = _chunks("$.token", body)
+
+    assert omitted == 0
+    assert "".join(text for _, text in chunks) == body
+    assert chunks[-1][1].endswith("Z")
+
+
+def test_numeric_json_facts_are_readable_through_their_key():
+    """A number is a fact. The reader replaced raw paging, which could see it."""
+    payload = json.dumps({"annual_revenue": 42_000_000, "year": 2026})
+
+    result = _select(payload, "annual revenue")
+
+    assert result.excerpts
+    assert result.excerpts[0].source_path == "$.annual_revenue"
+    assert "42000000" in result.excerpts[0].text
+
+
+def test_a_boolean_json_fact_is_readable_through_its_key():
+    payload = json.dumps({"audit_passed": False, "note": "unrelated prose about terns"})
+
+    result = _select(payload, "audit passed")
+
+    assert result.excerpts
+    assert "false" in result.excerpts[0].text.lower()
+
+
+def test_a_scalar_inside_a_list_is_addressed_and_labelled_by_its_key():
+    payload = json.dumps({"latencies_ms": [12, 4210]})
+
+    result = _select(payload, "latencies ms")
+
+    assert [item.source_path for item in result.excerpts] == [
+        "$.latencies_ms[0]",
+        "$.latencies_ms[1]",
+    ]
+
+
+def test_a_null_leaf_is_never_reported_as_a_fact():
+    payload = json.dumps({"published_date": None, "summary": "the deadline is 30 June 2026"})
+
+    result = _select(payload, "published date")
+
+    assert not any("published_date" in item.text for item in result.excerpts)
+
+
+def test_omitted_candidates_counts_what_the_budget_actually_dropped():
+    """Omissions are recorded after trimming, not before it."""
+    payload = json.dumps(
+        {f"k{index}": f"deadline detail {index} " + str(index) * 800 for index in range(4)}
+    )
+
+    result = _select(payload, "deadline", max_chars=1_000)
+
+    assert result.total_candidates == 4
+    assert result.omitted_candidates > 0
+    assert result.omitted_candidates == result.total_candidates - len(result.excerpts)

@@ -35,11 +35,27 @@ _MAX_CANDIDATES = 4_000
 _MIN_CANDIDATE_CHARS = 3
 #: Floor below which a trimmed excerpt is dropped instead of shortened further.
 _MIN_TRIMMED_CHARS = 60
+#: Guards the float branch of scalar-fact rendering; JSON has no infinity.
+_INF = float("inf")
 
 _TOKEN_RE = re.compile(r"[^\W_]+", flags=re.UNICODE)
 _PARAGRAPH_RE = re.compile(r"\n\s*\n")
 _NON_WORD_RE = re.compile(r"[\W_]+", flags=re.UNICODE)
 _URL_RE = re.compile(r"^\s*(?:https?|ftp|data|blob)://\S*\s*$", flags=re.IGNORECASE)
+_DIGIT_RE = re.compile(r"\d")
+
+#: Tokens that carry a passage's claim rather than its subject. Two passages
+#: that differ on one of these are stating different facts however similar
+#: their wording, so they are compared before any similarity measure.
+_FACT_WORDS = frozenset(
+    # fmt: off
+    [
+        "no", "not", "never", "none", "nor", "without", "cannot", "cant",
+        "unavailable", "unsupported", "unchanged", "false", "denied",
+        "excluded", "removed", "revoked", "rejected",
+    ]
+    # fmt: on
+)
 
 #: Keys whose value labels a source rather than states a fact. They are lifted
 #: onto every excerpt drawn from the same object, so scoring them as evidence
@@ -94,7 +110,17 @@ class FocusedResult(BaseModel):
 class _Candidate:
     """A scored passage. Mutable and internal; never leaves this module."""
 
-    __slots__ = ("order", "path", "text", "normalized", "tokens", "url", "title", "score")
+    __slots__ = (
+        "order",
+        "path",
+        "text",
+        "normalized",
+        "tokens",
+        "facts",
+        "url",
+        "title",
+        "score",
+    )
 
     def __init__(
         self,
@@ -110,6 +136,11 @@ class _Candidate:
         self.text = text
         self.normalized = _normalize(text)
         self.tokens = tuple(_TOKEN_RE.findall(self.normalized))
+        self.facts = frozenset(
+            token
+            for token in self.tokens
+            if token in _FACT_WORDS or _DIGIT_RE.search(token)
+        )
         self.url = url
         self.title = title
         self.score = 0.0
@@ -198,6 +229,7 @@ def _bounded(result: FocusedResult, char_limit: int) -> FocusedResult:
     """
 
     for _ in range(len(result.excerpts) * 2 + 8):
+        _recount(result)
         serialized = len(result.model_dump_json())
         if serialized <= char_limit:
             return result
@@ -215,7 +247,20 @@ def _bounded(result: FocusedResult, char_limit: int) -> FocusedResult:
             result.excerpts.pop()
             continue
         last.text = last.text[:keep].rstrip()
+    _recount(result)
     return result
+
+
+def _recount(result: FocusedResult) -> None:
+    """Report what this response actually left behind, not what ranking did.
+
+    The count has to be derived after trimming: an excerpt the budget dropped
+    is as absent as one ranking never selected, and these numbers are what the
+    operational log reports and what tells the model whether re-reading with a
+    sharper objective could find more.
+    """
+
+    result.omitted_candidates = max(0, result.total_candidates - len(result.excerpts))
 
 
 def _objective_terms(objective: str) -> tuple[str, ...]:
@@ -284,6 +329,18 @@ def _take_distinct(ranked: list[_Candidate], *, limit: int) -> list[_Candidate]:
 
 
 def _near_duplicate(candidate: _Candidate, other: _Candidate) -> bool:
+    """Two passages repeat each other only if they also carry the same facts.
+
+    Overlap alone equates "revenue was 100 million" with "revenue was 200
+    million", and "is enforced" with "is not enforced": the one or two tokens
+    that separate them are exactly the ones the objective asked about, and
+    dropping the second passage removes the only evidence that the sources
+    disagree. Numbers, dates, versions and negations are therefore compared
+    first; the similarity test then still catches a genuine restatement.
+    """
+
+    if candidate.facts != other.facts:
+        return False
     left, right = set(candidate.tokens), set(other.tokens)
     smaller = min(len(left), len(right))
     if smaller == 0:
@@ -325,9 +382,9 @@ def _paragraph_candidates(text: str) -> tuple[list[_Candidate], int]:
 def _walk_json(root: Any) -> tuple[list[_Candidate], int]:
     candidates: list[_Candidate] = []
     overflow = 0
-    stack: list[tuple[Any, str, str | None, str | None]] = [(root, "$", None, None)]
+    stack: list[tuple[Any, str, str | None, str | None, str]] = [(root, "$", None, None, "")]
     while stack:
-        node, path, url, title = stack.pop()
+        node, path, url, title, label = stack.pop()
         if isinstance(node, dict):
             url = _string_field(node, "url") or _string_field(node, "source_url") or url
             title = _string_field(node, "title") or title
@@ -336,15 +393,24 @@ def _walk_json(root: Any) -> tuple[list[_Candidate], int]:
             for key in reversed(list(node.keys())):
                 if key in _METADATA_KEYS and isinstance(node[key], str):
                     continue
-                stack.append((node[key], f"{path}.{key}", url, title))
+                stack.append((node[key], f"{path}.{key}", url, title, str(key)))
             continue
         if isinstance(node, list):
+            # The label does not advance: a list index names a position, not a
+            # fact, so ``$.latencies_ms[1]`` still reads as a latency.
             for index in reversed(range(len(node))):
-                stack.append((node[index], f"{path}[{index}]", url, title))
+                stack.append((node[index], f"{path}[{index}]", url, title, label))
             continue
-        if not isinstance(node, str) or _URL_RE.match(node):
-            continue
-        chunks, dropped = _chunks(path, node)
+        if isinstance(node, str):
+            if _URL_RE.match(node):
+                continue
+            text = node
+        else:
+            fact = _scalar_fact(label, node)
+            if fact is None:
+                continue
+            text = fact
+        chunks, dropped = _chunks(path, text)
         overflow += dropped
         for chunk_path, chunk in chunks:
             if len(candidates) >= _MAX_CANDIDATES:
@@ -356,6 +422,30 @@ def _walk_json(root: Any) -> tuple[list[_Candidate], int]:
                 )
             )
     return candidates, overflow
+
+
+def _scalar_fact(label: str, node: Any) -> str | None:
+    """Render a non-string scalar as a key-addressed fact, or skip it.
+
+    A number is evidence. The offset pager this reader replaced could see
+    ``"annual_revenue": 42000000`` because it returned raw text; a reader that
+    only walks string leaves cannot, and answers "no passage matched" to a
+    payload that holds the answer.
+
+    The key travels with the value because the value alone is unmatchable:
+    nothing in the objective "annual revenue" matches ``42000000``. Without a
+    key there is nothing to match against, so an unlabelled scalar — a bare
+    element of a top-level list — is skipped rather than returned as noise.
+    """
+
+    if node is None or isinstance(node, str) or not isinstance(node, (bool, int, float)):
+        return None
+    if isinstance(node, float) and (node != node or node in (_INF, -_INF)):
+        return None
+    name = str(label or "").strip()
+    if not name:
+        return None
+    return f"{name}: {json.dumps(node)}"
 
 
 def _string_field(node: dict[str, Any], key: str) -> str | None:
@@ -381,7 +471,14 @@ def _chunks(path: str, raw: str) -> tuple[list[tuple[str, str]], int]:
     for block in _PARAGRAPH_RE.split(text):
         block = block.strip()
         while len(block) > _CANDIDATE_MAX_CHARS:
-            cut = block.rfind(" ", 0, _CANDIDATE_MAX_CHARS) or _CANDIDATE_MAX_CHARS
+            # ``rfind`` answers -1 when the window holds no space at all, and
+            # -1 is truthy: unspaced text — CJK, one machine-generated token —
+            # used to cut at the last character, producing a chunk far over the
+            # bound and silently losing the tail. There is no word boundary to
+            # respect there, so the bound itself is the split.
+            cut = block.rfind(" ", 0, _CANDIDATE_MAX_CHARS)
+            if cut <= 0:
+                cut = _CANDIDATE_MAX_CHARS
             pieces.append(block[:cut].strip())
             block = block[cut:].strip()
         if len(block) >= _MIN_CANDIDATE_CHARS:
