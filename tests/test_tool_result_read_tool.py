@@ -107,6 +107,23 @@ def test_an_objective_is_required_at_the_schema_boundary():
         ReadToolResultInput(blob_id=BLOB_ID, objective="x")
 
 
+def test_a_blank_objective_is_rejected_rather_than_ranking_against_nothing():
+    """A length that counts spaces is not a stated objective.
+
+    Ranking against no terms returns the no-match explanation for a payload
+    that may well hold the answer, and it does so at full retrieval cost.
+    """
+    for blank in ("   ", "  	  ", " . "):
+        with pytest.raises(ValidationError):
+            ReadToolResultInput(blob_id=BLOB_ID, objective=blank)
+
+
+def test_a_stated_objective_keeps_its_words_but_loses_stray_whitespace():
+    parsed = ReadToolResultInput(blob_id=BLOB_ID, objective="  What is   the deadline? ")
+
+    assert parsed.objective == "What is the deadline?"
+
+
 @pytest.mark.asyncio
 async def test_the_result_reports_what_it_left_behind():
     payload_text = json.dumps({f"k{index}": f"deadline detail {index}" for index in range(30)})

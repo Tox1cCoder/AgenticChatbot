@@ -21,17 +21,21 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any
 from uuid import UUID
 
 from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..core.config import settings
 from .focused_tool_result import select_focused_excerpts
 from .tool_context import get_tool_context
 
 logger = logging.getLogger(__name__)
+
+#: Word characters, matching how the retriever itself tokenizes an objective.
+_TOKEN_RE = re.compile(r"[^\W_]+", flags=re.UNICODE)
 
 READ_TOOL_RESULT_DESCRIPTION = (
     "Retrieve the passages most relevant to a specific objective from a large "
@@ -83,6 +87,22 @@ class ReadToolResultInput(BaseModel):
         le=80_000,
         description="Response size ceiling. Clamped to the configured maximum.",
     )
+
+    @field_validator("objective")
+    @classmethod
+    def _require_a_stated_objective(cls, value: str) -> str:
+        """Reject an objective that is only whitespace or punctuation.
+
+        ``min_length`` counts spaces, so three of them pass a length the field
+        meant as "name the fact". Ranking against no terms answers "no passage
+        matched" for a payload that may hold the answer, and the model has no
+        way to tell that from a genuine miss.
+        """
+
+        collapsed = " ".join(str(value or "").split())
+        if len(collapsed) < 3 or not _TOKEN_RE.search(collapsed):
+            raise ValueError("objective must name the fact to find")
+        return collapsed
 
 
 def create_read_tool_result_tool(
