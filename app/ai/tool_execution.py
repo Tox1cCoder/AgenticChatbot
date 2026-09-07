@@ -1376,6 +1376,17 @@ async def invoke_tool(tool: Any, tool_args: Any) -> Any:
     Priority: coroutine attr → ainvoke → invoke (via asyncio.to_thread) → callable.
     Sync fallbacks are wrapped in ``asyncio.to_thread`` so MCP or other I/O-bound
     tools never block the running event loop.
+
+    No ``config`` is passed, and that is the whole reason tracing works. Every
+    ``Runnable`` sets ``var_child_runnable_config`` to its own child config
+    while it runs, and both hops taken here — ``asyncio.create_task`` in
+    ``invoke_tool_attempt`` and ``asyncio.to_thread`` below — copy the current
+    context, so a tool invoked with no config inherits the run that called it.
+    Handing it the caller's config instead replaces that child context with the
+    parent's, and the tool run comes out a *sibling* of its caller rather than
+    a child. With LangSmith tracing enabled the run-tree contextvar papers over
+    the mistake; with tracing off nothing does. ``tests/test_tool_trace_parenting.py``
+    pins the topology with tracing explicitly disabled.
     """
     if getattr(tool, "coroutine", None):
         return await tool.ainvoke(tool_args)
