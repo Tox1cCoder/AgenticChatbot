@@ -18,6 +18,7 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
+from app.ai.workflow.continuation import make_continuation_pause_node
 from app.ai.workflow.contracts import AgentTransition, WorkflowRoutingException
 from app.ai.workflow.finalization import make_finalize_node, make_validate_output_node
 from app.ai.workflow.planning_execution import PLANNING_NODE_NAMES
@@ -225,7 +226,20 @@ def build_workflow_graph(
     for node_name, node, destinations in workflow.planning_node_factory.descriptors():
         graph.add_node(node_name, node, destinations=destinations)
 
-    graph.add_node("validate_output", make_validate_output_node(), destinations=("finalize",))
+    graph.add_node(
+        "validate_output",
+        make_validate_output_node(),
+        destinations=("continuation_pause", "finalize"),
+    )
+    # A paused turn resumes into the specialist it already chose, or gives up
+    # and finalizes. It never reaches END itself: ``finalize -> END`` stays the
+    # graph's one terminal edge, which is what keeps a single place responsible
+    # for the public message.
+    graph.add_node(
+        "continuation_pause",
+        make_continuation_pause_node(),
+        destinations=tuple(sorted({*SPECIALIST_NODE_NAMES, "finalize"})),
+    )
     graph.add_node("finalize", make_finalize_node())
 
     graph.add_edge(START, "route")

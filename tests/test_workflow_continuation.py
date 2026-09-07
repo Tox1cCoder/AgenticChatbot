@@ -253,3 +253,237 @@ def test_a_first_epoch_carries_nothing_and_is_unchanged():
     messages = SpecialistFactory._invocation_messages(request)
 
     assert messages == [*request.history, *request.messages]
+
+
+# ----------------------------------------------------------------------
+# the pause node
+# ----------------------------------------------------------------------
+
+
+def _paused_state(**overrides) -> dict:
+    from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+    from app.ai.workflow.contracts import OutcomeProvenance, ResponseOutcome
+
+    produced = (*_tool_turn("c1"), AIMessage(content="partial answer"))
+    outcome = ResponseOutcome(
+        agent_id="chat_agent",
+        response=AgentResponse(
+            agent_type=AgentType.CHAT,
+            agent_id="chat_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content="partial answer"),
+            metadata={"execution_budget": {"exhausted_by": "tool_calls"}},
+        ),
+        provenance=OutcomeProvenance(
+            output_policy_ids=("public_content",), private_messages=produced
+        ),
+    )
+    state = {
+        "agent_outcome": outcome,
+        "active_agent_id": "chat_agent",
+        "execution_epoch": 0,
+        "execution_budget": {"exhausted_by": "tool_calls"},
+        "turn_identity": None,
+        "conversation_id": "conversation-1",
+        "user_id": "user-1",
+    }
+    state.update(overrides)
+    return state
+
+
+async def test_continuing_advances_the_epoch_and_returns_to_the_same_agent():
+    """No routing on resume: the turn already chose its agent."""
+    from app.ai.workflow.continuation import make_continuation_pause_node
+
+    node = make_continuation_pause_node(
+        interrupt_fn=lambda payload: {"action": "continue", "expected_epoch": 0}
+    )
+
+    command = await node(_paused_state())
+
+    assert command.goto == "chat_agent"
+    assert command.update["execution_epoch"] == 1
+    assert command.update["execution_phase"] == "executing"
+
+
+async def test_continuing_clears_the_spent_budget():
+    from app.ai.workflow.continuation import make_continuation_pause_node
+
+    node = make_continuation_pause_node(
+        interrupt_fn=lambda payload: {"action": "continue", "expected_epoch": 0}
+    )
+
+    command = await node(_paused_state())
+
+    assert command.update["execution_budget"] is None
+
+
+async def test_continuing_carries_the_evidence_forward():
+    """R2 at the seam that actually writes it."""
+    from app.ai.workflow.continuation import make_continuation_pause_node
+
+    node = make_continuation_pause_node(
+        interrupt_fn=lambda payload: {"action": "continue", "expected_epoch": 0}
+    )
+
+    command = await node(_paused_state())
+    carried = command.update["carried_messages"]
+
+    assert pairs_are_intact(carried) is True
+    assert any(isinstance(message, ToolMessage) for message in carried)
+
+
+async def test_stopping_finalizes_without_re_appending_the_answer():
+    """The partial was persisted at the pause; finalize must not repeat it."""
+    from app.ai.workflow.continuation import make_continuation_pause_node
+
+    node = make_continuation_pause_node(
+        interrupt_fn=lambda payload: {"action": "stop", "expected_epoch": 0}
+    )
+
+    command = await node(_paused_state())
+
+    assert command.goto == "finalize"
+    assert command.update["execution_phase"] == "finalizing"
+    assert "messages" not in command.update
+
+
+async def test_the_payload_offered_to_the_client_describes_this_pause():
+    from app.ai.workflow.continuation import make_continuation_pause_node
+
+    seen: list = []
+
+    def interrupt_fn(payload):
+        seen.append(payload)
+        return {"action": "stop", "expected_epoch": 0}
+
+    node = make_continuation_pause_node(interrupt_fn=interrupt_fn)
+    await node(_paused_state())
+
+    assert seen[0]["type"] == "execution_budget_exhausted"
+    assert seen[0]["validated_content"] == "partial answer"
+    assert seen[0]["active_agent_id"] == "chat_agent"
+
+
+async def test_a_resume_for_the_wrong_epoch_does_not_run_the_specialist():
+    """A stale Continue must not open an epoch against a moved turn."""
+    from app.ai.workflow.continuation import make_continuation_pause_node
+
+    node = make_continuation_pause_node(
+        interrupt_fn=lambda payload: {"action": "continue", "expected_epoch": 5}
+    )
+
+    command = await node(_paused_state())
+
+    assert command.goto == "finalize"
+    assert command.update["execution_phase"] == "finalizing"
+
+
+async def test_an_unreadable_resume_finalizes_rather_than_guessing():
+    from app.ai.workflow.continuation import make_continuation_pause_node
+
+    node = make_continuation_pause_node(interrupt_fn=lambda payload: "not a decision")
+
+    command = await node(_paused_state())
+
+    assert command.goto == "finalize"
+
+
+async def test_an_unresolvable_agent_finalizes_rather_than_jumping_blind():
+    from app.ai.workflow.continuation import make_continuation_pause_node
+
+    node = make_continuation_pause_node(
+        interrupt_fn=lambda payload: {"action": "continue", "expected_epoch": 0}
+    )
+
+    command = await node(_paused_state(active_agent_id=None))
+
+    assert command.goto == "finalize"
+
+
+# ----------------------------------------------------------------------
+# routing into the pause
+# ----------------------------------------------------------------------
+
+
+class _AcceptingValidator:
+    async def validate(self, outcome, state):
+        return outcome
+
+
+def _budget_settings(total_epochs: int = 5):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        generation_soft_model_calls_per_epoch=7,
+        generation_hard_model_calls_per_epoch=9,
+        generation_soft_tool_calls_per_epoch=12,
+        generation_hard_tool_calls_per_epoch=16,
+        generation_total_epochs_per_turn=total_epochs,
+    )
+
+
+async def test_an_ordinary_answer_still_goes_straight_to_finalize():
+    from app.ai.workflow.finalization import make_validate_output_node
+
+    node = make_validate_output_node(_AcceptingValidator(), settings=_budget_settings())
+
+    command = await node(_paused_state(execution_budget={"exhausted_by": None}))
+
+    assert command.goto == "finalize"
+
+
+async def test_an_exhausted_answer_pauses_for_a_decision():
+    from app.ai.workflow.finalization import make_validate_output_node
+
+    node = make_validate_output_node(_AcceptingValidator(), settings=_budget_settings())
+
+    command = await node(_paused_state())
+
+    assert command.goto == "continuation_pause"
+
+
+async def test_the_pause_only_follows_a_validated_outcome():
+    """Validation runs first, and its failure still ends at finalize.
+
+    Offering Continue on something that failed validation would be offering to
+    continue an answer the graph just refused.
+    """
+    from app.ai.workflow.finalization import (
+        OutputValidationError,
+        make_validate_output_node,
+    )
+
+    class _RejectingValidator:
+        async def validate(self, outcome, state):
+            raise OutputValidationError("nope")
+
+    node = make_validate_output_node(_RejectingValidator(), settings=_budget_settings())
+
+    command = await node(_paused_state())
+
+    assert command.goto == "finalize"
+    assert command.update["execution_phase"] == "failed"
+
+
+async def test_a_turn_with_no_epochs_left_is_not_offered_a_continue():
+    """Offering one that Continue would refuse is worse than not offering."""
+    from app.ai.workflow.finalization import make_validate_output_node
+
+    node = make_validate_output_node(_AcceptingValidator(), settings=_budget_settings(2))
+
+    command = await node(
+        _paused_state(execution_budget={"exhausted_by": "tool_calls", "epochs_used": 2})
+    )
+
+    assert command.goto == "finalize"
+
+
+async def test_a_hard_limit_is_continuable_too():
+    """It is still a partial answer with evidence behind it."""
+    from app.ai.workflow.finalization import make_validate_output_node
+
+    node = make_validate_output_node(_AcceptingValidator(), settings=_budget_settings())
+
+    command = await node(_paused_state(execution_budget={"exhausted_by": "hard_limit"}))
+
+    assert command.goto == "continuation_pause"

@@ -322,12 +322,22 @@ class WorkerOutputFinalizer:
         )
 
 
-def make_validate_output_node(validator: OutputValidator | None = None):
+def make_validate_output_node(
+    validator: OutputValidator | None = None,
+    *,
+    settings: Any | None = None,
+):
     """Build the mandatory validation node.
 
-    Success routes to ``finalize``; failure also routes to ``finalize`` with a
-    typed error, because a failed turn must still terminate through the one
-    finalization boundary.
+    Validation happens first, always, and its failure routes to ``finalize``
+    with a typed error, because a failed turn must still terminate through the
+    one finalization boundary.
+
+    A *validated* answer whose execution budget was exhausted routes to
+    ``continuation_pause`` instead. The order matters: pausing before
+    validation would offer the user a Continue on a draft the graph had not yet
+    checked. A turn with no epochs left is not offered one at all -- an offer
+    that Continue would refuse is worse than no offer.
     """
     validator = validator or OutputValidator()
 
@@ -351,12 +361,48 @@ def make_validate_output_node(validator: OutputValidator | None = None):
                 goto="finalize",
             )
 
+        if _is_continuable(state, settings):
+            return Command(
+                update={"agent_outcome": validated, "execution_phase": "paused"},
+                goto="continuation_pause",
+            )
         return Command(
             update={"agent_outcome": validated, "execution_phase": "finalizing"},
             goto="finalize",
         )
 
     return validate_output
+
+
+def _is_continuable(state: dict[str, Any], settings: Any | None) -> bool:
+    """Whether this validated answer is a partial the user could continue."""
+    budget = state.get("execution_budget")
+    if not isinstance(budget, dict) or not budget.get("exhausted_by"):
+        return False
+    try:
+        from app.ai.workflow.execution_budget import (
+            ExecutionBudgetAccountant,
+            ExecutionBudgetLimits,
+            ExecutionBudgetState,
+        )
+        from app.core.config import settings as global_settings
+
+        accountant = ExecutionBudgetAccountant(
+            limits=ExecutionBudgetLimits.from_settings(settings or global_settings),
+            state=ExecutionBudgetState.model_validate(budget),
+        )
+    except Exception:
+        # An unreadable budget is not a reason to strand the turn; finalizing
+        # keeps the validated answer the user can already see.
+        logger.warning("Unreadable execution budget; finalizing instead of pausing")
+        return False
+    if not accountant.can_begin_epoch:
+        logger.info(
+            "Turn exhausted its %s epoch(s); not offering a continuation",
+            accountant.limits.total_epochs_per_turn,
+        )
+        return False
+    return True
 
 
 class PublicResponseFinalizer:

@@ -33,6 +33,7 @@ __all__ = [
     "ContinuationPausePayload",
     "ContinuationResume",
     "carry_messages",
+    "make_continuation_pause_node",
     "pairs_are_intact",
 ]
 
@@ -143,3 +144,99 @@ def _requested_ids(messages: list[BaseMessage]) -> set[str]:
         if isinstance(message, AIMessage):
             ids |= _tool_call_ids(message)
     return ids
+
+
+def make_continuation_pause_node(*, interrupt_fn: Any = None) -> Any:
+    """Build the node that offers Continue on a validated partial answer.
+
+    Reached only from ``validate_output``, and only for an outcome whose budget
+    was exhausted. Everything it hands the client has therefore already passed
+    the same validation a finished answer passes.
+
+    Every refusal goes to ``finalize`` rather than raising. This node sits on
+    the only path a paused turn can leave by, so raising here would strand the
+    turn active with nothing running -- and ``finalize`` is the single terminal
+    boundary the whole graph is built around.
+
+    ``interrupt_fn`` is injected so the decision can be scripted in a test;
+    production passes LangGraph's own ``interrupt``.
+    """
+    from langgraph.types import Command, interrupt
+
+    resume_with = interrupt_fn or interrupt
+
+    async def continuation_pause(state: dict[str, Any], runtime: Any = None) -> Any:
+        from app.ai.workflow.specialists import resolve_node_for_agent_id
+
+        outcome = state.get("agent_outcome")
+        active_agent_id = state.get("active_agent_id")
+        epoch = int(state.get("execution_epoch") or 0)
+        payload = ContinuationPausePayload(
+            generation_id=str(state.get("generation_id") or ""),
+            logical_turn_id=str(state.get("logical_turn_id") or ""),
+            execution_epoch=epoch,
+            active_agent_id=str(active_agent_id or ""),
+            validated_content=_validated_content(outcome),
+            budget=dict(state.get("execution_budget") or {}),
+        )
+
+        decision = resume_with(payload.model_dump(mode="json"))
+        action, expected_epoch = _read_decision(decision)
+
+        if action != "continue":
+            return Command(update={"execution_phase": "finalizing"}, goto="finalize")
+        if expected_epoch != epoch:
+            # A Continue issued against an epoch this turn has left. Running it
+            # would open a second epoch on top of whatever already moved.
+            logger.warning(
+                "Refused a continuation for epoch %s; the turn is at epoch %s",
+                expected_epoch,
+                epoch,
+            )
+            return Command(update={"execution_phase": "finalizing"}, goto="finalize")
+
+        node = resolve_node_for_agent_id(active_agent_id)
+        if not node:
+            logger.error("Cannot continue: no graph node for agent %r", active_agent_id)
+            return Command(update={"execution_phase": "finalizing"}, goto="finalize")
+
+        return Command(
+            update={
+                "execution_epoch": epoch + 1,
+                "execution_budget": None,
+                "execution_phase": "executing",
+                "carried_messages": carry_messages(
+                    list(getattr(getattr(outcome, "provenance", None), "private_messages", ()))
+                ),
+            },
+            # Straight back to the agent the turn already chose. Routing again
+            # could land a continuation on a different specialist than the one
+            # whose evidence it is carrying.
+            goto=node,
+        )
+
+    return continuation_pause
+
+
+def _validated_content(outcome: Any) -> str:
+    message = getattr(getattr(outcome, "response", None), "message", None)
+    return str(getattr(message, "content", "") or "")
+
+
+def _read_decision(decision: Any) -> tuple[str, int]:
+    """Read a resume value, defaulting to stop for anything unrecognised.
+
+    Defaulting to stop is the safe direction: it keeps the validated partial
+    the user already has, where guessing "continue" would spend another epoch
+    on a decision nobody made.
+    """
+    if isinstance(decision, ContinuationResume):
+        return decision.action, decision.expected_epoch
+    if isinstance(decision, dict):
+        action = str(decision.get("action") or "stop")
+        try:
+            return action, int(decision.get("expected_epoch") or 0)
+        except (TypeError, ValueError):
+            return action, -1
+    logger.warning("Unreadable continuation resume value of type %s", type(decision).__name__)
+    return "stop", -1
