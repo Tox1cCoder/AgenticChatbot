@@ -13,7 +13,9 @@ from zoneinfo import ZoneInfo
 import pytest
 from pydantic import ValidationError
 
+from app.ai.mcp_servers.tavily_server import TAVILY_QUERY_MAX_LENGTH
 from app.ai.web_query_contract import (
+    WEB_QUERY_MAX_CHARS,
     WebQueryError,
     WebSearchRequest,
     normalize_web_search,
@@ -325,3 +327,39 @@ def test_tavily_args_never_request_raw_page_content():
     )
 
     assert tavily_search_args(normalized)["include_raw_content"] is False
+
+
+def test_the_public_query_bound_is_the_one_the_provider_actually_accepts():
+    """Two boundaries for one value is a rejection the model cannot see coming.
+
+    A query the schema advertises as valid, refused later by the provider
+    wrapper, surfaces as a provider error after the turn's search slot has
+    already been reserved -- so the corrected retry is refused for budget.
+    """
+    assert WEB_QUERY_MAX_CHARS == TAVILY_QUERY_MAX_LENGTH
+    schema = WebSearchRequest.model_json_schema()["properties"]["query"]
+    assert schema["maxLength"] == TAVILY_QUERY_MAX_LENGTH
+
+
+def test_a_query_longer_than_the_provider_accepts_is_rejected_at_the_schema():
+    with pytest.raises(ValidationError):
+        WebSearchRequest(
+            query="q" * (WEB_QUERY_MAX_CHARS + 1),
+            objective="Find the published documentation",
+        )
+
+
+def test_normalization_rejects_an_overlong_query_from_a_caller_without_the_schema():
+    request = WebSearchRequest.model_construct(
+        query="q" * (WEB_QUERY_MAX_CHARS + 1),
+        objective="Find the published documentation",
+        freshness="timeless",
+        start_date=None,
+        end_date=None,
+        locale=None,
+        include_domains=[],
+        max_results=5,
+    )
+
+    with pytest.raises(WebQueryError, match="characters"):
+        _normalize(request)

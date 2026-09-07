@@ -35,6 +35,14 @@ _YEAR_RE = re.compile(r"\b(1[89]\d{2}|20\d{2}|21\d{2})\b")
 _WHITESPACE_RE = re.compile(r"\s+")
 _MAX_DOMAINS = 10
 
+#: Longest query the search provider accepts. Declared here because this is
+#: the public boundary the model is shown: a schema that advertises more than
+#: the provider takes turns a fixable argument error into a provider failure
+#: reported after the turn's search slot has already been spent. The provider
+#: wrapper keeps its own copy -- it runs in a separate MCP process and cannot
+#: import this module -- and ``test_web_query_contract`` asserts they agree.
+WEB_QUERY_MAX_CHARS = 400
+
 
 class WebQueryError(ValueError):
     """A web-search intent the server refuses to normalize.
@@ -49,8 +57,11 @@ class WebSearchRequest(BaseModel):
 
     query: str = Field(
         min_length=3,
-        max_length=500,
-        description="The search query, written as you would type it into a search engine.",
+        max_length=WEB_QUERY_MAX_CHARS,
+        description=(
+            "The search query, written as you would type it into a search engine. "
+            "Split research too long for this bound into focused subqueries."
+        ),
     )
     objective: str = Field(
         min_length=3,
@@ -119,6 +130,11 @@ def normalize_web_search(
         raise WebQueryError("objective must state the fact the search has to produce")
     if len(query) < 3:
         raise WebQueryError("query must not be blank")
+    if len(query) > WEB_QUERY_MAX_CHARS:
+        raise WebQueryError(
+            f"query exceeds {WEB_QUERY_MAX_CHARS} characters; split complex research "
+            "into focused subqueries"
+        )
 
     start_date = request.start_date
     end_date = request.end_date
@@ -227,6 +243,7 @@ def _bare_host(raw: str) -> str:
 
 
 __all__ = [
+    "WEB_QUERY_MAX_CHARS",
     "Freshness",
     "NormalizedWebSearch",
     "WebQueryError",
