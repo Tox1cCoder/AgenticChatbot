@@ -402,3 +402,40 @@ def test_di_resolution_reuses_the_process_container():
     assert first_service is second_service
     assert first_service is get_container().tool_result_blob_service()
     assert type(first_repository) is type(second_repository)
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_still_writes_its_observation_line(caplog):
+    """Every call gets a line, including the ones that never reach the blob."""
+    tool = create_read_tool_result_tool(
+        repository=FakeRepository(record=None), service=FakeService("")
+    )
+
+    with caplog.at_level("INFO", logger="app.ai.tool_result_read_tool"):
+        payload = await _invoke(tool, blob_id=BLOB_ID, objective="What is the deadline?")
+
+    assert payload["error_type"] == "not_found"
+    assert any(
+        "focused_tool_result_read outcome=not_found" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_storage_fault_is_observed_as_unavailable(caplog):
+    class _BrokenRepository:
+        def get_for_user_and_conversation(self, *_args):
+            raise RuntimeError("storage unreachable")
+
+    tool = create_read_tool_result_tool(
+        repository=_BrokenRepository(), service=FakeService("")
+    )
+
+    with caplog.at_level("INFO", logger="app.ai.tool_result_read_tool"):
+        payload = await _invoke(tool, blob_id=BLOB_ID, objective="What is the deadline?")
+
+    assert payload["error_type"] == "unavailable"
+    assert any(
+        "focused_tool_result_read outcome=unavailable" in record.getMessage()
+        for record in caplog.records
+    )

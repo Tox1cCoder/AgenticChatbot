@@ -202,7 +202,7 @@ def create_web_search_tool(
         include_domains: list[str] | None = None,
         max_results: int = 5,
     ) -> str:
-        denied = _denied_in_client_only(tool_scope)
+        denied = _denied_in_client_only("web_search", tool_scope)
         if denied is not None:
             return denied
         try:
@@ -284,7 +284,7 @@ def create_web_open_tool(
     """Build ``web_open``. The extractor is injected in tests."""
 
     async def _open(urls: list[Any], question: str) -> str:
-        denied = _denied_in_client_only(tool_scope)
+        denied = _denied_in_client_only("web_open", tool_scope)
         if denied is not None:
             return denied
         focus = str(question or "").strip()
@@ -353,7 +353,7 @@ def create_image_search_tool(
         max_images: int | None = None,
         time_range: str | None = None,
     ) -> str:
-        denied = _denied_in_client_only(tool_scope)
+        denied = _denied_in_client_only("image_search", tool_scope)
         if denied is not None:
             return denied
         subject = str(query or "").strip()
@@ -817,13 +817,17 @@ def _budget_spent_payload(budget: Any) -> str:
     )
 
 
-def _denied_in_client_only(tool_scope: str | None) -> str | None:
+def _denied_in_client_only(operation: str, tool_scope: str | None) -> str | None:
     context = get_tool_context()
     bound_scope = str(getattr(tool_scope, "value", tool_scope) or "default")
     if bound_scope == "client_only" or is_client_only_scope(
         device_id=context.device_id,
         tool_scope=context.tool_scope,
     ):
+        # Logged like any other outcome: a denial is the one result an operator
+        # most wants to find in the log, and a silent return here is what made
+        # "one line per call" untrue.
+        log_web_tool_call(operation, outcome="permission_denied")
         return _error_payload(
             "Server web access is unavailable in client-only tool scope.",
             retryable=False,

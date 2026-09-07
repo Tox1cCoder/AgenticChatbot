@@ -407,6 +407,33 @@ async def test_cancelling_web_search_propagates_without_leaking_a_task():
 
 
 @pytest.mark.asyncio
+async def test_a_client_only_denial_still_writes_its_observation_line(caplog):
+    """One line per call means every call, refusals included.
+
+    A denial that logs nothing is indistinguishable in the log from a call
+    that never happened, which is the opposite of what an operator reading
+    for permission problems needs.
+    """
+    tool = create_web_search_tool(
+        tavily_tool=_FakeTool("tavily_search", _search_payload()), clock=_clock
+    )
+
+    with caplog.at_level("INFO", logger="app.ai.web_tools"), tool_execution_context(
+        conversation_id=CONVERSATION_ID,
+        user_id="u1",
+        agent_key="search",
+        device_id="device-a",
+        tool_scope="client_only",
+    ):
+        await tool.ainvoke({"query": "aurora release", "objective": "Find the date"})
+
+    assert any(
+        "operation=web_search outcome=permission_denied" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
 async def test_web_search_is_refused_in_client_only_scope():
     tavily = _FakeTool("tavily_search", _search_payload())
     tool = create_web_search_tool(tavily_tool=tavily, clock=_clock)

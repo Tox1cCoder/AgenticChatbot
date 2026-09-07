@@ -121,14 +121,14 @@ def create_read_tool_result_tool(
         context = get_tool_context()
         identity = _scoped_identity(blob_id, context.user_id, context.conversation_id)
         if identity is None:
-            return json.dumps(_NOT_FOUND)
+            return _refused(_NOT_FOUND)
         resolved_repository, resolved_service = _resolve(repository, service)
         if resolved_repository is None or resolved_service is None:
-            return json.dumps(_NOT_FOUND)
+            return _refused(_NOT_FOUND)
 
         text, failure = await _load_text(resolved_repository, resolved_service, identity)
         if failure is not None:
-            return json.dumps(failure)
+            return _refused(failure)
         focused = select_focused_excerpts(
             text or "",
             objective=objective,
@@ -136,17 +136,13 @@ def create_read_tool_result_tool(
             max_chars=_clamp(max_chars, settings.tool_result_focus_max_chars),
         )
         serialized = focused.model_dump_json()
-        # Counts and one enum only. The objective is user-derived text and is
-        # never logged, so this line stays safe to emit on every call.
-        logger.info(
-            "focused_tool_result_read outcome=%s blob_chars=%d model_chars=%d "
-            "excerpts=%d omitted=%d truncated=%s",
+        _observe(
             "matched" if focused.excerpts else "no_match",
-            len(text or ""),
-            len(serialized),
-            len(focused.excerpts),
-            focused.omitted_candidates,
-            focused.truncated,
+            blob_chars=len(text or ""),
+            model_chars=len(serialized),
+            excerpts=len(focused.excerpts),
+            omitted=focused.omitted_candidates,
+            truncated=focused.truncated,
         )
         return serialized
 
@@ -160,6 +156,43 @@ def create_read_tool_result_tool(
             "qualified_tool_id": "internal::read_tool_result",
         },
     )
+
+
+def _observe(
+    outcome: str,
+    *,
+    blob_chars: int = 0,
+    model_chars: int = 0,
+    excerpts: int = 0,
+    omitted: int = 0,
+    truncated: bool = False,
+) -> None:
+    """One line per call, whatever the outcome.
+
+    Counts and one enum only. The objective is user-derived text and is never
+    written here, so this stays safe to emit unconditionally -- which is the
+    point: a refusal that logs nothing is indistinguishable from a call that
+    never happened.
+    """
+
+    logger.info(
+        "focused_tool_result_read outcome=%s blob_chars=%d model_chars=%d "
+        "excerpts=%d omitted=%d truncated=%s",
+        outcome,
+        blob_chars,
+        model_chars,
+        excerpts,
+        omitted,
+        truncated,
+    )
+
+
+def _refused(payload: dict[str, Any]) -> str:
+    """Serialize a refusal and record it under its own outcome."""
+
+    serialized = json.dumps(payload)
+    _observe(str(payload["error_type"]), model_chars=len(serialized))
+    return serialized
 
 
 async def _load_text(
