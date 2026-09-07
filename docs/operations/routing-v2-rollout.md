@@ -217,7 +217,7 @@ increments a counter yet, so do not build a dashboard panel expecting one.
 | Field | Read it for |
 |---|---|
 | `operation` | `web_search`, `web_open`, `image_search` |
-| `outcome` | `completed`, `reused`, `no_match`, `skipped`, `invalid_request`, `provider_error`, `repeated_query_rejected`, `repeated_subject_rejected` |
+| `outcome` | `completed`, `reused`, `no_match`, `skipped`, `invalid_request`, `provider_error`, `permission_denied`, `repeated_query_rejected`, `repeated_subject_rejected` |
 | `freshness` | The **normalized** intent (`timeless`/`recent`/`as_of`) after the server anchored the query — not what the model typed |
 | `provider_chars` / `model_chars` | The pair the whole change exists to move. The provider payload may stay large; the model's view of it must not. A converging ratio means a bound is being hit, not that pages got shorter |
 | `results` / `deduplicated` / `omitted` | Search results kept, dropped as the same canonical URL, and dropped by the character cap. A rising `omitted` means `web_search_result_max_chars` is the binding constraint |
@@ -225,8 +225,11 @@ increments a counter yet, so do not build a dashboard panel expecting one.
 | `selected` | Images offered to the rich-item inventory — 0 is normal and not a failure |
 
 `app.ai.tool_result_read_tool` writes one `focused_tool_result_read` line per
-call: `outcome` (`matched`/`no_match`), `blob_chars`, `model_chars`,
-`excerpts`, `omitted`, `truncated`. There is no `next_offset` and no paging
+call: `outcome` (`matched`, `no_match`, `not_found`, `unavailable`),
+`blob_chars`, `model_chars`, `excerpts`, `omitted`, `truncated`. Refusals are
+logged too, so a denial is distinguishable from a call that never happened.
+`omitted` counts what this response actually left behind, including excerpts
+the character budget dropped, not only what ranking rejected. There is no `next_offset` and no paging
 loop; a turn that reads one blob twice is reading it for two different
 objectives, which is legitimate.
 
@@ -249,6 +252,38 @@ questions, result titles, and URLs are **never** written to these lines and must
 never become metric labels: the line is emitted on every call, so one
 user-derived field would put user content into ordinary operational logs and
 into an unbounded label space. `tests/test_web_tools.py` asserts this directly.
+
+### Verify provider trace ancestry
+
+A conversation-owned Tavily or Brave call must appear beneath the product tool
+that made it. It is a child, not a sibling and not a root:
+
+1. Start one chat turn that calls `web_search`, `web_open`, and `image_search`.
+2. Open the conversation trace in LangSmith.
+3. Check each `tavily_search`, `tavily_extract`, and `brave_image_search` run
+   sits **directly beneath its product tool run**. A provider run that is a
+   sibling of its product tool — same parent, one level too high — means
+   someone started passing an explicit `config` to a nested `ainvoke`.
+4. Query the same window for root runs with those three names. Expect zero
+   conversation-owned roots. Diagnostic roots are acceptable only when tagged
+   `diagnostic`.
+5. **Exclude local test traffic from that window.** The test suite inherits
+   `LANGSMITH_TRACING=true` and the workspace API key from the environment
+   file, so it writes into the same project as real turns. An unfiltered query
+   mixes the two.
+
+Nothing here is proven by the offline suite. `tests/test_tool_trace_parenting.py`
+pins the callback topology — with tracing explicitly disabled, so it tests this
+pipeline's own context propagation rather than LangSmith's run-tree fallback —
+but it cannot show that the deployed workspace records what it observes.
+
+Why ancestry works at all, since the product bypasses the framework tool node:
+`langchain_core` sets `var_child_runnable_config` to each `Runnable`'s own child
+config while it runs, and the pipeline's two hops (`asyncio.create_task` in
+`invoke_tool_attempt`, `asyncio.to_thread` in `invoke_tool`) copy the context.
+A nested call made with **no** config inherits its caller. One made with the
+caller's own config does not — and with tracing enabled LangSmith's run tree
+hides that, so the breakage only shows up where nobody is watching.
 
 ### Verify the checkpoint namespace
 
@@ -387,6 +422,11 @@ both what was deleted and what is still live.
    `read_tool_result` as validated.
 5. **`read_tool_result` cannot refuse a repeated objective.** Its description
    asks the model not to, and no code checks.
+6. **Provider trace ancestry is verified offline only.** `tests/test_tool_trace_parenting.py`
+   pins the callback topology, and the canary in "Verify provider trace
+   ancestry" has not been run against a live workspace. Note also that the test
+   suite inherits `LANGSMITH_TRACING=true` from the environment file, so local
+   runs write into the same LangSmith project as real turns.
 Closed since the last revision of this document: RAG and Planning no longer run
 pre-v2 loops; `_tool_node`/`_approval_node` are deleted; the
 `disable_outer_timeout` allowlist is empty, so every interactive tool call is

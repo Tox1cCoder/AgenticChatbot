@@ -81,7 +81,7 @@ Primary references:
 - Consumes: `Client.aread_project(project_name=..., include_stats=True)` and `Client.runs.query(project_ids=..., is_root=True, min_start_time=..., selects=...)`.
 - Produces: `async def experiment_metrics(client: Any, experiment_name: str) -> dict[str, float]` and `async def comparison_metrics(client: Any, candidate_name: str, baseline_name: str) -> tuple[dict[str, float], dict[str, float]]`.
 
-- [ ] **Step 1: Write failing SDK-floor and query-contract tests**
+- [x] **Step 1: Write failing SDK-floor and query-contract tests**
 
 Create a fake async runs resource that records the v2 query:
 
@@ -146,7 +146,7 @@ inventory test that scans production Python files under `app/` and `scripts/`
 and fails on `.list_runs(`, `.get_test_results(`, `.get_experiment_results(`,
 or literal `/api/v1/runs/query`.
 
-- [ ] **Step 2: Run the tests and verify the expected failures**
+- [x] **Step 2: Run the tests and verify the expected failures**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_langsmith_smithdb_migration.py tests/test_rag_evaluation_cli.py
@@ -155,7 +155,7 @@ or literal `/api/v1/runs/query`.
 Expected: the new module is missing, the installed SDK floor test reports
 0.10.9, and the inventory test identifies `get_test_results()`.
 
-- [ ] **Step 3: Raise the SDK floor with a narrow environment pin**
+- [x] **Step 3: Raise the SDK floor with a narrow environment pin**
 
 Set:
 
@@ -169,7 +169,7 @@ plan authoring time. Rebuild the environment before running the green test;
 do not depend on the current virtual environment silently satisfying the new
 metadata.
 
-- [ ] **Step 4: Implement the async SmithDB metrics query**
+- [x] **Step 4: Implement the async SmithDB metrics query**
 
 ```python
 async def experiment_metrics(client: Any, experiment_name: str) -> dict[str, float]:
@@ -214,7 +214,7 @@ In `scripts/evaluate_rag.py`, replace both synchronous calls with one
 `read_project`/`aread_project`: the SmithDB migration guide does not deprecate
 those dataset-write/project-lookup paths.
 
-- [ ] **Step 5: Run focused tests and the complete offline evaluation**
+- [x] **Step 5: Run focused tests and the complete offline evaluation**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_langsmith_smithdb_migration.py tests/test_rag_evaluation_cli.py tests/test_rag_evaluation_metrics.py
@@ -236,7 +236,7 @@ this canary means another service/API key is still calling one of the endpoint
 families listed in the changelog; identify that caller rather than changing
 trace ingestion.
 
-- [ ] **Step 7: Commit Task 1**
+- [x] **Step 7: Commit Task 1**
 
 ```powershell
 git add app/evaluation/rag/langsmith_queries.py scripts/evaluate_rag.py pyproject.toml environment.yml tests/test_langsmith_smithdb_migration.py tests/test_rag_evaluation_cli.py
@@ -268,10 +268,20 @@ Three probes against real `StructuredTool`s and a recording
    `rag_execution.py`, `tool_loop.py` and `ToolExecutionMiddleware` actually
    reach `execute_tool_calls`. Same result.
 3. The same shape with the upstream config forwarded explicitly, as the
-   original Task 2 and Task 3 proposed. Result: the provider becomes a
-   **sibling** of the product tool under the node, because the forwarded
-   config still carries the *parent's* callback manager. Forwarding replaces
-   the active child context rather than extending it.
+   original Task 2 and Task 3 proposed, run twice: once with LangSmith tracing
+   disabled and once with it enabled.
+
+   - Tracing **off**: the provider becomes a **sibling** of the product tool
+     under the node. The forwarded config still carries the *parent's*
+     callback manager, so forwarding replaces the active child context rather
+     than extending it.
+   - Tracing **on**: ancestry stays correct. `langsmith`'s current-run-tree
+     contextvar supplies the parent and the mistake is invisible.
+
+   This condition matters and the review's own reproduction did not name it.
+   Forwarding is not merely unnecessary; it is a defect that only manifests
+   where tracing is off — local development, CI, and any degraded run — which
+   is exactly where nobody is looking at a trace tree.
 
 `asyncio.create_task` in `invoke_tool_attempt` and `asyncio.to_thread` in
 `invoke_tool` both copy the current `contextvars` context, so the run manager
@@ -281,12 +291,22 @@ The conclusion the original plan got backwards: ancestry is carried by
 `langchain_core`'s `var_child_runnable_config` contextvar, which every
 `Runnable` sets to its own child config while it executes. Passing no config is
 what makes a nested call inherit the caller. Passing the *upstream* config is
-what flattens it.
+what flattens it, whenever nothing else happens to be holding a run tree.
+
+Two operational facts fell out of the measurement and belong in the record:
+
+- The test suite runs with `LANGSMITH_TRACING=true` and a live API key from the
+  environment file, so every local run emits traces to the `sample-chatbot`
+  project. That pollutes the Task 4 canary's search for conversation-owned
+  provider roots, and it is why the ancestry tests pin `tracing_context(enabled=False)`
+  rather than trusting the ambient state.
+- Because of the above, a trace-topology test written without that guard passes
+  or fails depending on the developer's environment file.
 
 **Interfaces:** unchanged. No production signature gains a `runnable_config`
 parameter, and `ToolExecutionMiddleware` keeps discarding `request.runtime`.
 
-- [ ] **Step 1: Write the ancestry regression at the production seam**
+- [x] **Step 1: Write the ancestry regression at the production seam**
 
 `tests/test_tool_trace_parenting.py` drives `execute_tool_calls` from inside a
 LangChain run and asserts the exact topology, not merely a non-null parent:
@@ -299,12 +319,20 @@ assert child.parent_run_id == parent.run_id
 
 Cover: the nested async path, the synchronous `invoke`/`to_thread` path, a
 retry that reaches the provider twice, and the blanket property that no tool
-run recorded during a conversation-owned call has a null parent.
+run recorded during a conversation-owned call has a null parent. Wrap each in
+`langsmith.run_helpers.tracing_context(enabled=False)` so the assertion tests
+this pipeline's own context propagation rather than LangSmith's run-tree
+fallback.
 
 A non-null-parent assertion alone is not enough. The sibling topology that
 config forwarding produces also has a non-null parent — it is the wrong one.
 
-- [ ] **Step 2: Run it and confirm it passes against unmodified production code**
+Verify the guard by mutation: monkeypatch `web_tools._call_provider` to forward
+the node's config, and confirm the ancestry assertion fails. A trace test that
+cannot fail is worse than none, because it reports good news about a tree
+nobody is checking.
+
+- [x] **Step 2: Run it and confirm it passes against unmodified production code**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_tool_trace_parenting.py
@@ -314,14 +342,14 @@ Expected: PASS with no production change. This is the point of the revision.
 A test that only passes after a change nobody needed would have locked in the
 regression.
 
-- [ ] **Step 3: Record why `invoke_tool` takes no config**
+- [x] **Step 3: Record why `invoke_tool` takes no config**
 
 Add a comment at `invoke_tool` in `app/ai/tool_execution.py` stating that the
 absent `config` argument is deliberate and what breaks if one is added. The
 regression from Step 1 is the enforcement; the comment is what stops someone
 writing the change in the first place.
 
-- [ ] **Step 4: Commit Task 2**
+- [x] **Step 4: Commit Task 2**
 
 ```powershell
 git add app/ai/tool_execution.py tests/test_tool_trace_parenting.py
@@ -347,7 +375,7 @@ git commit -m "test: lock down nested tool trace ancestry"
 **Interfaces:** unchanged. `_call_provider` and `_discover` keep calling
 `tool.ainvoke(args)` with no config, which is what parents them.
 
-- [ ] **Step 1: Assert the real product tools sit above their providers**
+- [x] **Step 1: Assert the real product tools sit above their providers**
 
 Drive `create_web_search_tool`, `create_web_open_tool` and
 `create_image_search_tool` through `execute_tool_calls` with the Tavily and
@@ -362,13 +390,13 @@ The existing `_FakeTool` in `tests/test_web_tools.py` is a bare object and
 creates no run, so it cannot answer this question. Leave it alone — it owns the
 argument mapping — and build the traced doubles here.
 
-- [ ] **Step 2: Assert no conversation-owned provider call is a root**
+- [x] **Step 2: Assert no conversation-owned provider call is a root**
 
 Collect every recorded tool start from one turn that calls all three product
 tools and assert none has `parent_run_id is None`. This is the machine-checkable
 half of the live canary in Task 4.
 
-- [ ] **Step 3: Run the composite and image regressions**
+- [x] **Step 3: Run the composite and image regressions**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_tool_trace_parenting.py tests/test_web_tools.py tests/test_brave_image_search_server.py tests/test_image_preview_stream.py tests/test_rich_response_streaming.py
@@ -376,7 +404,7 @@ half of the live canary in Task 4.
 
 Expected: all pass, with cancellation and image ordering unchanged.
 
-- [ ] **Step 4: Commit Task 3**
+- [x] **Step 4: Commit Task 3**
 
 ```powershell
 git add tests/test_tool_trace_parenting.py
@@ -392,7 +420,7 @@ git commit -m "test: pin web and image provider trace ancestry"
 - Consumes: the ancestry regressions from Tasks 2-3.
 - Produces: a live LangSmith verification procedure.
 
-- [ ] **Step 1: Document live trace verification**
+- [x] **Step 1: Document live trace verification**
 
 Add this canary to the rollout guide:
 
@@ -405,12 +433,15 @@ Add this canary to the rollout guide:
 4. Query the same window for root runs named `tavily_search`, `tavily_extract`,
    or `brave_image_search`; expect zero conversation-owned roots.
 5. Diagnostic roots are acceptable only with the `diagnostic` tag.
+6. Exclude runs produced by local test execution. The suite inherits
+   `LANGSMITH_TRACING=true` from the environment file and writes into the same
+   project, so an unfiltered window mixes test traces with real turns.
 ```
 
 State plainly that offline tests cannot substitute for this: they prove the
 callback topology, not that the deployed workspace records it.
 
-- [ ] **Step 2: Run trace, streaming, and middleware regression suites**
+- [x] **Step 2: Run trace, streaming, and middleware regression suites**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_langsmith_smithdb_migration.py tests/test_rag_evaluation_cli.py tests/test_tool_trace_parenting.py tests/test_tool_execution_control_flow.py tests/test_tool_execution_recovery.py tests/test_specialist_middleware.py tests/test_specialist_tool_pipeline.py tests/test_web_tools.py tests/test_ai_sdk_v6_stream_contract.py tests/test_internal_sse_stream_contract.py
@@ -419,7 +450,7 @@ callback topology, not that the deployed workspace records it.
 
 Expected: all tests pass and Ruff reports no errors.
 
-- [ ] **Step 3: Commit Task 4**
+- [x] **Step 3: Commit Task 4**
 
 ```powershell
 git add docs/operations/routing-v2-rollout.md
@@ -428,17 +459,17 @@ git commit -m "docs: record live trace ancestry canary"
 
 ## Acceptance Checklist
 
-- [ ] Runtime and environment dependency declarations satisfy `langsmith>=0.10.15`.
-- [ ] Production Python contains no legacy run-query method or `/api/v1/runs/query` literal.
-- [ ] RAG comparison metrics use `runs.query()` with project UUID, root filter, explicit selects, and the project's full time window.
-- [ ] Feedback aggregation reads the SDK's `FeedbackStats` objects, and its tests use that type rather than dictionaries.
-- [ ] An authenticated RAG evaluation canary emits no deprecated response header or v1 run-query request.
-- [ ] No production call site passes an upstream `RunnableConfig` into a nested tool invocation.
-- [ ] Callback tests assert `provider.parent_run_id == product.run_id`, not merely a non-null parent.
-- [ ] Nested Tavily and Brave invocations are children of their product tool, across the async path, the synchronous path, and a retry.
-- [ ] Existing cancellation, timeout, retry, receipt, artifact, and image tests pass.
-- [ ] The live LangSmith canary contains no conversation-owned provider root runs.
-- [ ] No model-visible output or public stream contract changed.
+- [x] Runtime and environment dependency declarations satisfy `langsmith>=0.10.15`.
+- [x] Production Python contains no legacy run-query method or `/api/v1/runs/query` literal.
+- [x] RAG comparison metrics use `runs.query()` with project UUID, root filter, explicit selects, and the project's full time window.
+- [x] Feedback aggregation reads the SDK's `FeedbackStats` objects, and its tests use that type rather than dictionaries.
+- [ ] An authenticated RAG evaluation canary emits no deprecated response header or v1 run-query request. **(needs live credentials)**
+- [x] No production call site passes an upstream `RunnableConfig` into a nested tool invocation.
+- [x] Callback tests assert `provider.parent_run_id == product.run_id`, not merely a non-null parent.
+- [x] Nested Tavily and Brave invocations are children of their product tool, across the async path, the synchronous path, and a retry.
+- [x] Existing cancellation, timeout, retry, receipt, artifact, and image tests pass.
+- [ ] The live LangSmith canary contains no conversation-owned provider root runs. **(needs live credentials)**
+- [x] No model-visible output or public stream contract changed.
 
 ## Execution Handoff
 

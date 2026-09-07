@@ -70,7 +70,7 @@ def normalize_web_search(
 ) -> NormalizedWebSearch: ...
 ```
 
-- [ ] **Step 1: Write failing contract tests**
+- [x] **Step 1: Write failing contract tests**
 
 Cover these cases explicitly:
 
@@ -108,7 +108,7 @@ def test_as_of_query_preserves_historical_year():
 
 Also test whitespace normalization, domain normalization, invalid future ranges, missing `end_date` for `as_of`, max-result clamping, and that `timeless` leaves years untouched.
 
-- [ ] **Step 2: Run the new tests and verify failure**
+- [x] **Step 2: Run the new tests and verify failure**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_web_query_contract.py
@@ -116,7 +116,7 @@ Also test whitespace normalization, domain normalization, invalid future ranges,
 
 Expected: import failure because the contract module does not exist.
 
-- [ ] **Step 3: Add declared settings**
+- [x] **Step 3: Add declared settings**
 
 Add these validated settings in `app/core/config.py`:
 
@@ -130,7 +130,7 @@ tool_result_focus_max_excerpts: int = Field(default=8, ge=1, le=20)
 tool_result_focus_max_chars: int = Field(default=16_000, ge=2_000, le=80_000)
 ```
 
-- [ ] **Step 4: Implement normalization as a pure function**
+- [x] **Step 4: Implement normalization as a pure function**
 
 Use an immutable `NormalizedWebSearch` model. Strip duplicate whitespace, lowercase/IDNA-normalize domains, validate ranges against `now.date()`, clamp `max_results`, and use a word-boundary four-digit-year regex. For `recent`, replace past years in the query with `now.year`; never replace a future year silently—raise a validation error so the model receives a corrective tool error.
 
@@ -154,7 +154,7 @@ def tavily_search_args(value: NormalizedWebSearch) -> dict[str, Any]:
     return args
 ```
 
-- [ ] **Step 5: Extend the provider wrapper with exact dates**
+- [x] **Step 5: Extend the provider wrapper with exact dates**
 
 Add optional ISO `start_date` and `end_date` fields to `tavily_search`, validate
 them with `date.fromisoformat`, require start <= end, and forward them to
@@ -162,7 +162,7 @@ them with `date.fromisoformat`, require start <= end, and forward them to
 Add provider-wrapper tests that assert both dates reach the fake client and
 malformed/reversed ranges return a bounded `invalid_request` result.
 
-- [ ] **Step 6: Run and commit Task 1**
+- [x] **Step 6: Run and commit Task 1**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_web_query_contract.py tests/test_tavily_server.py tests/test_config_validation.py
@@ -201,7 +201,7 @@ def select_focused_excerpts(
 ) -> FocusedResult: ...
 ```
 
-- [ ] **Step 1: Write failing selector tests**
+- [x] **Step 1: Write failing selector tests**
 
 Tests must prove:
 
@@ -214,19 +214,19 @@ Tests must prove:
 - empty/no-match payload returns a bounded explanatory object, not the raw payload;
 - URLs and titles adjacent to content are preserved as source metadata.
 
-- [ ] **Step 2: Run tests and verify import failure**
+- [x] **Step 2: Run tests and verify import failure**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_focused_tool_result.py
 ```
 
-- [ ] **Step 3: Implement deterministic extraction and scoring**
+- [x] **Step 3: Implement deterministic extraction and scoring**
 
 Use only stdlib/Pydantic. Tokenize with Unicode word characters, remove a small static stop-word set, score term coverage plus phrase occurrence, and use original candidate order as the final tie-breaker. Cap every candidate before scoring so a single page cannot dominate memory. Serialize once during selection and trim the final excerpt if necessary to honor the exact character budget.
 
 Do not call an embedding model or LLM inside this utility: retrieval must be cheap, deterministic, trace-light, and available during degraded operation.
 
-- [ ] **Step 4: Run and commit Task 2**
+- [x] **Step 4: Run and commit Task 2**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_focused_tool_result.py
@@ -254,7 +254,7 @@ class ReadToolResultInput(BaseModel):
     max_chars: int | None = Field(default=None, ge=1000, le=80_000)
 ```
 
-- [ ] **Step 1: Rewrite tests around focused retrieval**
+- [x] **Step 1: Rewrite tests around focused retrieval**
 
 Delete assertions for `offset`, `limit`, and `next_offset`. Add assertions that one invocation returns the relevant tail evidence, reports omitted candidate counts, stays bounded, and retains owner/conversation scoping. Assert the input schema has no `offset` field.
 
@@ -270,13 +270,13 @@ assert "TAIL-8" in " ".join(item["text"] for item in payload["excerpts"])
 assert "next_offset" not in payload
 ```
 
-- [ ] **Step 2: Run reader/blob tests and verify failure**
+- [x] **Step 2: Run reader/blob tests and verify failure**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_tool_result_read_tool.py tests/test_tool_result_blob_service.py tests/test_read_tool_result_binding.py
 ```
 
-- [ ] **Step 3: Use the selector in the model-facing tool**
+- [x] **Step 3: Use the selector in the model-facing tool**
 
 After the existing scoped repository lookup and decompression, call `select_focused_excerpts`. Clamp caller values to the configured maxima. Return `FocusedResult.model_dump_json()`.
 
@@ -291,7 +291,7 @@ READ_TOOL_RESULT_DESCRIPTION = (
 )
 ```
 
-- [ ] **Step 4: Change the offload notice**
+- [x] **Step 4: Change the offload notice**
 
 The notice must say:
 
@@ -302,7 +302,7 @@ once if the preview does not contain the needed evidence.
 
 Remove every instruction to read the full text or continue with an offset. Preserve all existing detail about dropped keys, shortened fields, and omitted arrays.
 
-- [ ] **Step 5: Run and commit Task 3**
+- [x] **Step 5: Run and commit Task 3**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_tool_result_read_tool.py tests/test_tool_result_blob_service.py tests/test_read_tool_result_binding.py tests/test_research_payload_regression.py
@@ -328,7 +328,7 @@ def create_image_search_tool() -> BaseTool: ...
 
 `web_search` uses `WebSearchRequest`. `web_open` accepts `urls: list[AnyHttpUrl]` plus required `question`; `image_search` accepts a concrete `query`, optional `intent`, and bounded count.
 
-- [ ] **Step 1: Write failing product-tool tests**
+- [x] **Step 1: Write failing product-tool tests**
 
 Cover provider argument mapping, date normalization, focused extract query, maximum URL/result clamps, provider error normalization, content caps, deduplication, and cancellation of a sibling image task. Assert:
 
@@ -343,27 +343,27 @@ assert extract_tool.calls == [{
 
 Also assert a direct test invocation can supply `now` through an injected clock, so tests never depend on wall-clock time.
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_web_tools.py
 ```
 
-- [ ] **Step 3: Implement `web_search`**
+- [x] **Step 3: Implement `web_search`**
 
 Resolve Tavily lazily, normalize `WebSearchRequest`, call `tavily_search` with `include_raw_content=False`, project each result to `title`, `url`, `published_date`, `snippet`, and score, deduplicate canonical URLs, and enforce `web_search_result_max_chars` before returning JSON.
 
 The tool should not automatically extract every search result. The model selects URLs and calls `web_open` only if snippets are insufficient.
 
-- [ ] **Step 4: Implement `web_open`**
+- [x] **Step 4: Implement `web_open`**
 
 Require `question`. Call `tavily_extract` with `query=question` and `chunks_per_source=3`, never with a missing query. Feed the provider response through `select_focused_excerpts` using the same question, cap to the configured extract limits, and include per-URL failure records without returning raw provider metadata.
 
-- [ ] **Step 5: Implement `image_search`**
+- [x] **Step 5: Implement `image_search`**
 
 Wrap `discover_images` as its own tool. Keep the existing rich image/artifact stream contract and provider result cap. Do not couple it to textual search latency.
 
-- [ ] **Step 6: Run and commit Task 4**
+- [x] **Step 6: Run and commit Task 4**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_web_tools.py tests/test_brave_image_search_server.py tests/test_image_preview_stream.py tests/test_rich_response_streaming.py
@@ -383,7 +383,7 @@ git commit -m "feat: add focused web search open and image tools"
 - Modify: `tests/test_deferred_tool_binding.py`
 - Modify: `tests/test_tool_search_runtime_exclusions.py`
 
-- [ ] **Step 1: Write failing binding and exclusion tests**
+- [x] **Step 1: Write failing binding and exclusion tests**
 
 For chat/search specialists assert `web_search`, `web_open`, `image_search`, and `read_tool_result` are bound. Assert `web_research` is absent. Search `tool_search` with matching descriptions and assert these qualified raw tools cannot be returned in ordinary scope:
 
@@ -401,17 +401,17 @@ names. Tests should additionally assert the corresponding qualified catalog IDs
 
 Keep an explicit diagnostic-scope test proving an authorized caller can opt into raw tools.
 
-- [ ] **Step 2: Run and verify failures**
+- [x] **Step 2: Run and verify failures**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_web_research_binding.py tests/test_search_agent_time_context.py tests/test_deferred_tool_binding.py tests/test_tool_search_runtime_exclusions.py
 ```
 
-- [ ] **Step 3: Change binding and discovery policy**
+- [x] **Step 3: Change binding and discovery policy**
 
 Bind the three product tools directly in `BaseAgent`. Merge `RAW_WEB_TOOL_NAMES` into the ordinary `excluded_tool_names` passed to deferred discovery. Put the denylist in one exported policy constant, not duplicated prompt strings.
 
-- [ ] **Step 4: Replace mandatory time-tool instructions**
+- [x] **Step 4: Replace mandatory time-tool instructions**
 
 Update search guidance to say:
 
@@ -426,7 +426,7 @@ Update search guidance to say:
 
 Remove the instruction that forces `get_current_time` before every web/news search and remove it from `_SEARCH_AGENT_PINNED_SPECS`. The server-injected current-date prompt and Python normalizer remain authoritative.
 
-- [ ] **Step 5: Run and commit Task 5**
+- [x] **Step 5: Run and commit Task 5**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_web_research_binding.py tests/test_search_agent_time_context.py tests/test_deferred_tool_binding.py tests/test_tool_search_runtime_exclusions.py tests/test_read_tool_result_binding.py
@@ -443,7 +443,7 @@ git commit -m "refactor: expose bounded web tools to ordinary agents"
 - Modify: any remaining imports returned by `rg`
 - Modify: `docs/operations/routing-v2-rollout.md`
 
-- [ ] **Step 1: Prove there are no production callers**
+- [x] **Step 1: Prove there are no production callers**
 
 ```powershell
 rg -n "web_research|create_web_research_tool" app tests
@@ -451,15 +451,15 @@ rg -n "web_research|create_web_research_tool" app tests
 
 Expected before deletion: only the old module/tests and explicit migration assertions remain. Resolve every production import before deleting.
 
-- [ ] **Step 2: Delete the compatibility module and migrate residual tests**
+- [x] **Step 2: Delete the compatibility module and migrate residual tests**
 
 Use `apply_patch` to delete the two files. Keep regression coverage in `tests/test_web_tools.py`; do not simply discard cancellation, payload, or image coverage.
 
-- [ ] **Step 3: Add rollout observations**
+- [x] **Step 3: Add rollout observations**
 
 Document metrics/log fields for normalized freshness, search/open count, deduplicated result count, provider payload chars, model-visible chars, focused-reader calls, and repeated-objective rejection. Values derived from user text must be attributes with normal redaction, never metric labels.
 
-- [ ] **Step 4: Run full focused-web verification**
+- [x] **Step 4: Run full focused-web verification**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_web_query_contract.py tests/test_focused_tool_result.py tests/test_web_tools.py tests/test_tool_result_read_tool.py tests/test_tool_result_blob_service.py tests/test_read_tool_result_binding.py tests/test_research_payload_regression.py tests/test_deferred_tool_binding.py tests/test_tool_search_runtime_exclusions.py tests/test_search_agent_time_context.py tests/test_specialist_tool_pipeline.py tests/test_ai_sdk_v6_stream_contract.py tests/test_internal_sse_stream_contract.py
@@ -468,7 +468,7 @@ Document metrics/log fields for normalized freshness, search/open count, dedupli
 
 Expected: all pass; `rg` finds no production `web_research` caller and no prompt tells a model to page blobs.
 
-- [ ] **Step 5: Commit Task 6**
+- [x] **Step 5: Commit Task 6**
 
 ```powershell
 git add -A app/ai/web_research_tool.py tests/test_web_research_tool.py docs/operations/routing-v2-rollout.md
@@ -477,14 +477,45 @@ git commit -m "chore: retire combined web research tool"
 
 ## Acceptance Checklist
 
-- [ ] Ordinary agents cannot discover raw Tavily/Brave tools.
-- [ ] Search requests carry a concrete objective and typed freshness.
-- [ ] Current requests use the server's actual year without a preceding time-tool call.
-- [ ] Historical/as-of years are preserved.
-- [ ] Page extraction always has a focused question and bounded output.
-- [ ] `read_tool_result` has no offset/next-offset loop and returns bounded relevant excerpts in one call.
-- [ ] Human/admin raw blob access remains owner-scoped and available.
-- [ ] Search, extraction, image, offload, and stream regression suites pass.
+- [x] Ordinary agents cannot discover raw Tavily/Brave tools.
+- [x] Search requests carry a concrete objective and typed freshness.
+- [x] Current requests use the server's actual year without a preceding time-tool call.
+- [x] Historical/as-of years are preserved.
+- [x] Page extraction always has a focused question and bounded output.
+- [x] `read_tool_result` has no offset/next-offset loop and returns bounded relevant excerpts in one call.
+- [x] Human/admin raw blob access remains owner-scoped and available.
+- [x] Search, extraction, image, offload, and stream regression suites pass.
+- [ ] Retrieval quality of `web_open` and `read_tool_result` measured against a live provider. **Never run; the seven evidence bounds remain carried defaults.**
+
+## Post-Review Amendments (2026-09-07)
+
+`output/audits/2026-09-07-three-plan-review.md` reviewed the landed change at
+`70054bd` and found seven defects, all since fixed. Two of them were defects in
+this plan, not deviations from it:
+
+- **String-leaf extraction (Task 2).** The plan specified candidates drawn from
+  JSON *string* leaves and paragraphs. Every non-string scalar was therefore
+  invisible: `{"annual_revenue": 42000000}` answered "no passage matched" to an
+  objective naming annual revenue. The generic replacement for a raw pager has
+  to be able to see a number. Scalars now form key-addressed facts, with the
+  key carried alongside the value because the value alone is unmatchable.
+- **Envelope-blind budgeting (Task 4, Step 4).** "Cap to the configured extract
+  limits" was implemented as a cap on the excerpts, while the model receives an
+  envelope that also holds the URL echo, the failure records, the added keys
+  and every separator. Four long URLs under a 2,000-character cap returned
+  2,269. The cap now applies to the exact returned string.
+
+The other five were implementation defects: token-overlap deduplication
+collapsing sources that disagree on a number, `rfind` returning -1 into a
+truthy branch, omissions counted before budget trimming, a public query bound
+100 characters wider than the provider wrapper's, and a `min_length` that
+counted whitespace as an objective. Each has a regression test named for the
+behavior it protects.
+
+One documentation claim was also narrower in the code than in the rollout
+guide: "one log line per call" skipped client-only denials and every
+`read_tool_result` refusal. Both paths now emit their own outcome, so the
+statement is true rather than aspirational.
 
 ## Execution Handoff
 
