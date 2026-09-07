@@ -224,6 +224,17 @@ materially; do not start them from the current text.
 
 ### Task 1: Persist the Authoritative Generation Lifecycle
 
+> **Landed 2026-09-07.** Verified against a real PostgreSQL (`chatbot_test`):
+> 20 integration tests, the 50-test alembic chain applying and round-tripping
+> the migration from empty, and `alembic check` reporting no new drift — only
+> the two pre-existing `document_chunks` items. R5's command ledger replaced
+> the single last-command column. Head is now `d0e1f2a3b4c5`; `_HEAD` in
+> `tests/test_alembic_full_chain_postgres.py` and the README head reference
+> were updated with it.
+>
+> The migration is **not applied to the live `chatbot` database** — that is
+> Thai's call, and the app applies migrations at startup.
+
 **Files:**
 - Create: `app/models/generation.py` (lifecycle row + command ledger)
 - Create: `app/repositories/generation.py`
@@ -264,17 +275,17 @@ class GenerationSnapshot(BaseModel):
     terminal_reason: str | None
 ```
 
-- [ ] **Step 1: Write failing model/repository tests**
+- [x] **Step 1: Write failing model/repository tests**
 
 Test owner-scoped lookup, unique `(logical_turn_id)`, version increments, and legal compare-and-set transitions. Two concurrent Continue attempts with the same expected version/idempotency key must produce one epoch increment. A different idempotency key against the consumed continuation must return the current snapshot, not increment again.
 
-- [ ] **Step 2: Run and verify import failures**
+- [x] **Step 2: Run and verify import failures**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_generation_repository.py tests/integration/test_generation_repository_postgres.py
 ```
 
-- [ ] **Step 3: Define the row and indexes**
+- [x] **Step 3: Define the row and indexes**
 
 Use `generations` with UUID PK, owner/conversation FKs, unique logical turn, indexed checkpoint thread, status enum, version, epoch, active agent, budget JSON, research accounting JSON (R4), assistant message FK, continuation UUID, continuation availability/block reason, terminal reason, and timezone-aware lifecycle timestamps.
 
@@ -287,7 +298,7 @@ result instead of executing against the wrong epoch. Add a unique partial index 
 
 The migration revision is `d0e1f2a3b4c5` with `down_revision = "c9d0e1f2a3b4"`. Before executing this task, run `alembic heads`; if another migration has landed, create a merge revision first rather than silently editing `down_revision` into a fork.
 
-- [ ] **Step 4: Implement repository compare-and-set methods**
+- [x] **Step 4: Implement repository compare-and-set methods**
 
 ```python
 class GenerationRepository(RepositorySessionMixin):
@@ -320,7 +331,7 @@ class GenerationRepository(RepositorySessionMixin):
 
 Every mutation is one `UPDATE ... WHERE id/user/conversation/status/version ... RETURNING`, never read-then-write.
 
-- [ ] **Step 5: Run migration and persistence verification**
+- [x] **Step 5: Run migration and persistence verification**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_generation_repository.py tests/integration/test_generation_repository_postgres.py tests/test_alembic_full_chain_postgres.py tests/test_database_schema_contract.py
