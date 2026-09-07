@@ -1419,6 +1419,40 @@ class Settings(BaseSettings):
         default=True,
         description="Kill switch for turn-local research dedup and call caps.",
     )
+    # The soft rungs reserve one tool-free model call so an exhausted turn
+    # still produces a validated answer. The hard rungs are the framework's own
+    # limits and must stay above them, or the framework raises on exactly the
+    # call the soft budget reserved.
+    generation_soft_model_calls_per_epoch: int = Field(
+        default=7,
+        ge=1,
+        le=50,
+        description="Model calls per epoch before the answer call is reserved.",
+    )
+    generation_hard_model_calls_per_epoch: int = Field(
+        default=9,
+        ge=2,
+        le=60,
+        description="Framework model-call ceiling per epoch. Must exceed the soft limit.",
+    )
+    generation_soft_tool_calls_per_epoch: int = Field(
+        default=12,
+        ge=1,
+        le=100,
+        description="Tool calls per epoch before further calls are refused.",
+    )
+    generation_hard_tool_calls_per_epoch: int = Field(
+        default=16,
+        ge=2,
+        le=120,
+        description="Framework tool-call ceiling per epoch. Must exceed the soft limit.",
+    )
+    generation_total_epochs_per_turn: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="How many times one logical turn may be continued in total.",
+    )
     generation_stop_wait_seconds: float = Field(
         default=5.0,
         ge=0.1,
@@ -2137,6 +2171,19 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _cross_field_checks(self) -> "Settings":
+        # A hard rung at or below its soft rung means the framework raises on
+        # exactly the call the soft budget reserved for the answer, turning a
+        # validated partial back into a generic execution error.
+        if self.generation_hard_model_calls_per_epoch <= self.generation_soft_model_calls_per_epoch:
+            raise ValueError(
+                "generation hard model-call limit must exceed the soft limit, "
+                "or no synthesis call is reserved"
+            )
+        if self.generation_hard_tool_calls_per_epoch <= self.generation_soft_tool_calls_per_epoch:
+            raise ValueError(
+                "generation hard tool-call limit must exceed the soft limit, "
+                "or no synthesis call is reserved"
+            )
         if self.model_usage_reconcile_minutes >= self.model_usage_raw_retention_days * 1_440:
             raise ValueError(
                 "model usage reconcile window must be strictly shorter than raw-event retention"
