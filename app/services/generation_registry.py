@@ -1,9 +1,20 @@
-"""
-In-flight generation registry for tracking and cancelling active streaming responses.
+"""Process-local shortcut for cancelling an in-flight generation.
 
-Provides a module-level singleton backed by cachetools.TTLCache to prevent unbounded
-growth if cleanup fails. Entries are keyed by the persisted user message ID created
-at stream start.
+This is not the authority on whether a turn is running -- ``generations`` is.
+Before that row existed, a Stop that missed this cache reported "not in flight"
+and the turn carried on; now a missed entry only means the owning worker is in
+another process, and the durable ``stop_requested`` status reaches it instead.
+
+What the registry adds is speed. It holds the cooperative cancel event and the
+producer task, so a Stop landing on the owning worker interrupts it now rather
+than at the next durable check -- and the task matters as much as the event,
+because a worker blocked in a provider call reaches no check point at all.
+
+Entries are keyed by ``generation_id``. They deliberately survive an HTTP wait
+timeout: the request gave up, the worker has not, and dropping the entry there
+is how a retried Stop came to find nothing to cancel. Only the worker removes
+its own entry. A TTLCache still backs the store so a lost worker cannot leak
+one forever.
 """
 
 from __future__ import annotations
@@ -30,6 +41,9 @@ class InflightEntry:
     conversation_id: UUID
     user_id: UUID
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    # The producer coroutine, when this process owns it. Set by the worker
+    # after registering, because the task does not exist until it is running.
+    task: asyncio.Task | None = None
     partial_text: str = ""
     partial_thinking: str = ""
     active_agent_id: str | None = None
@@ -63,8 +77,16 @@ class InflightEntry:
         self.last_event_at = time.monotonic()
 
     def request_cancel(self) -> None:
-        """Signal cancellation to the producer."""
+        """Signal cancellation to the producer, cooperatively and hard.
+
+        The event is what a well-behaved producer checks between awaits. The
+        task cancellation is what reaches one blocked inside a provider call,
+        where no check point comes around.
+        """
         self.cancel_event.set()
+        task = self.task
+        if task is not None and not task.done():
+            task.cancel()
 
     @property
     def is_cancelled(self) -> bool:
@@ -85,8 +107,8 @@ class GenerationRegistry:
     """
     Best-effort in-memory registry of in-flight streaming generations.
 
-    Keyed by the *user_message_id* (UUID) emitted in the ``user_message_created``
-    SSE event. Backed by a TTLCache so orphan entries expire automatically.
+    Keyed by ``generation_id``. Backed by a TTLCache so an entry whose worker
+    died cannot leak forever, which is the only reason anything expires here.
     """
 
     def __init__(self, maxsize: int = 1000, ttl: int = 600) -> None:
@@ -98,7 +120,7 @@ class GenerationRegistry:
 
     def register(
         self,
-        user_message_id: UUID,
+        generation_id: UUID,
         conversation_id: UUID,
         user_id: UUID,
         *,
@@ -106,7 +128,7 @@ class GenerationRegistry:
         paused: bool = False,
     ) -> InflightEntry:
         """Register a new in-flight generation. Returns the entry."""
-        key = str(user_message_id)
+        key = str(generation_id)
         entry = InflightEntry(
             conversation_id=conversation_id,
             user_id=user_id,
@@ -117,18 +139,18 @@ class GenerationRegistry:
         logger.debug("Registered in-flight generation for user_message_id=%s", key)
         return entry
 
-    def mark_paused(self, user_message_id: UUID) -> InflightEntry | None:
+    def mark_paused(self, generation_id: UUID) -> InflightEntry | None:
         """Flag an entry as paused (HITL) so it remains a lock token until resume."""
-        entry = self.get(user_message_id)
+        entry = self.get(generation_id)
         if entry is not None:
             entry.paused = True
             entry.touch()
-            logger.debug("Marked generation paused for user_message_id=%s", user_message_id)
+            logger.debug("Marked generation paused for generation_id=%s", generation_id)
         return entry
 
-    def set_active_agent_id(self, user_message_id: UUID, agent_id: str | None) -> None:
+    def set_active_agent_id(self, generation_id: UUID, agent_id: str | None) -> None:
         """Record the currently selected runtime agent for an entry."""
-        entry = self.get(user_message_id)
+        entry = self.get(generation_id)
         if entry is not None:
             entry.active_agent_id = agent_id
             entry.touch()
@@ -200,31 +222,40 @@ class GenerationRegistry:
                 removed += 1
         return removed
 
-    def get(self, user_message_id: UUID) -> InflightEntry | None:
+    def get(self, generation_id: UUID) -> InflightEntry | None:
         """Look up an in-flight entry (returns ``None`` if expired/missing)."""
-        return self._store.get(str(user_message_id))
+        return self._store.get(str(generation_id))
 
-    def remove(self, user_message_id: UUID) -> InflightEntry | None:
-        """Remove and return an entry (idempotent)."""
-        key = str(user_message_id)
+    def remove(self, generation_id: UUID) -> InflightEntry | None:
+        """Remove and return an entry. Only the owning worker calls this."""
+        key = str(generation_id)
         entry = self._store.pop(key, None)
         if entry is not None:
-            logger.debug("Removed in-flight entry for user_message_id=%s", key)
+            logger.debug("Removed in-flight entry for generation_id=%s", key)
         return entry
 
-    def cancel(self, user_message_id: UUID) -> InflightEntry | None:
-        """Signal cancellation for a given user_message_id. Returns the entry or None."""
-        entry = self.get(user_message_id)
-        if entry is not None:
-            entry.request_cancel()
-            logger.info("Cancellation requested for user_message_id=%s", user_message_id)
-        return entry
+    def request_cancel(self, generation_id: UUID) -> bool:
+        """Interrupt the local producer if this process owns it.
+
+        Returns whether an entry was found. ``False`` is an ordinary answer,
+        not a failure: the owning worker is simply elsewhere, and it learns
+        about the Stop from the durable status instead.
+
+        The entry is left in place. Removing it here would leave a retried Stop
+        with nothing to cancel while the turn was still running.
+        """
+        entry = self.get(generation_id)
+        if entry is None:
+            return False
+        entry.request_cancel()
+        logger.info("Cancellation requested for generation_id=%s", generation_id)
+        return True
 
     def __len__(self) -> int:
         return len(self._store)
 
-    def __contains__(self, user_message_id: UUID) -> bool:
-        return str(user_message_id) in self._store
+    def __contains__(self, generation_id: UUID) -> bool:
+        return str(generation_id) in self._store
 
 
 # ---------------------------------------------------------------------------

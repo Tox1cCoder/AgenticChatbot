@@ -1419,6 +1419,38 @@ class Settings(BaseSettings):
         default=True,
         description="Kill switch for turn-local research dedup and call caps.",
     )
+    generation_stop_wait_seconds: float = Field(
+        default=5.0,
+        ge=0.1,
+        le=30.0,
+        description=(
+            "How long a Stop request waits for the owning worker to confirm "
+            "before answering. A timeout returns stop_requested, which is "
+            "pending -- it is never reported as stopped."
+        ),
+    )
+    generation_stop_channel: str = Field(
+        default="generation:stop",
+        min_length=1,
+        max_length=200,
+        description=(
+            "Redis pub/sub channel carrying stop signals to the worker that "
+            "owns a generation. Payload is a schema version, generation id and "
+            "lifecycle version only."
+        ),
+    )
+    generation_stop_reconnect_seconds: float = Field(
+        default=1.0,
+        ge=0.05,
+        le=60.0,
+        description="Initial backoff before a dropped stop subscriber reconnects.",
+    )
+    generation_stop_max_reconnect_seconds: float = Field(
+        default=30.0,
+        ge=0.05,
+        le=300.0,
+        description="Ceiling for the stop subscriber's exponential reconnect backoff.",
+    )
     remote_image_enrichment_enabled: bool = Field(
         default=True,
         description="Enable Brave-backed remote image enrichment for rich responses.",

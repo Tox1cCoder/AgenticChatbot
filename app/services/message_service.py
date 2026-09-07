@@ -1108,8 +1108,11 @@ class MessageService(IMessageService):
 
         # Register in-flight entry
         registry = get_generation_registry()
+        # Still the user message id until the generation lifecycle owns
+        # identity (Task 5 of the generation-controls plan); the registry key is
+        # opaque either way.
         inflight = registry.register(
-            user_message_id=user_message_id,
+            generation_id=user_message_id,
             conversation_id=message_create_data.conversation_id,
             user_id=user_id,
         )

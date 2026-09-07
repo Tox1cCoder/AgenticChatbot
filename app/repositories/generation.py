@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -34,7 +35,17 @@ from app.schemas.generation import CommandClaim, CreateGeneration, GenerationSna
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["GenerationRepository"]
+__all__ = ["GenerationRepository", "ResumeContext"]
+
+
+@dataclass(frozen=True)
+class ResumeContext:
+    """Server-side fields a Continue needs. Never returned to a client."""
+
+    checkpoint_thread_id: str
+    active_agent_id: str | None
+    research_accounting: dict[str, Any] | None
+    execution_budget: dict[str, Any] | None
 
 _RETURNED = tuple(Generation.__table__.c)
 
@@ -98,6 +109,43 @@ class GenerationRepository(RepositorySessionMixin):
                 )
             ).first()
             return None if row is None else GenerationSnapshot.from_row(row)
+
+        return await self._arun(work)
+
+    async def aget_resume_context(
+        self,
+        generation_id: uuid.UUID,
+        user_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+    ) -> ResumeContext | None:
+        """The parts of the row a resume needs and a client must not see.
+
+        Separate from ``aget_owned`` on purpose: the checkpoint thread is a
+        resume handle and the accounting is server bookkeeping, so neither
+        belongs on the snapshot every transport returns.
+        """
+
+        def work(session: Session) -> ResumeContext | None:
+            row = session.execute(
+                select(
+                    Generation.checkpoint_thread_id,
+                    Generation.active_agent_id,
+                    Generation.research_accounting,
+                    Generation.execution_budget,
+                ).where(
+                    Generation.id == generation_id,
+                    Generation.user_id == user_id,
+                    Generation.conversation_id == conversation_id,
+                )
+            ).first()
+            if row is None:
+                return None
+            return ResumeContext(
+                checkpoint_thread_id=row.checkpoint_thread_id,
+                active_agent_id=row.active_agent_id,
+                research_accounting=row.research_accounting,
+                execution_budget=row.execution_budget,
+            )
 
         return await self._arun(work)
 

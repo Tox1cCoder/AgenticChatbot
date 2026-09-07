@@ -19,9 +19,13 @@ from app.models.generation import GenerationCommandAction, GenerationStatus
 
 __all__ = [
     "CommandClaim",
+    "ContinuationLease",
     "ContinueGenerationCommand",
     "CreateGeneration",
     "GenerationSnapshot",
+    "MarkCompleted",
+    "MarkContinuable",
+    "MarkStopped",
     "StopGenerationCommand",
 ]
 
@@ -128,3 +132,64 @@ class CommandClaim(BaseModel):
     action: GenerationCommandAction
     fence: int
     result: dict[str, Any] | None = None
+
+
+class MarkContinuable(BaseModel):
+    """A validated partial answer is persisted and the turn may be continued.
+
+    ``research_accounting`` is carried here, not left in process memory: the
+    Continue may be served by a different worker, and an absent budget looks to
+    that worker exactly like a fresh turn with a full quota.
+    """
+
+    generation_id: UUID
+    conversation_id: UUID
+    user_id: UUID
+    expected_version: int = Field(ge=1)
+    assistant_message_id: UUID
+    research_accounting: dict[str, Any] | None = None
+    execution_budget: dict[str, Any] | None = None
+    continuation_block_reason: str | None = Field(default=None, max_length=128)
+
+
+class MarkStopped(BaseModel):
+    """The worker actually stopped, and says whether the turn can resume."""
+
+    generation_id: UUID
+    conversation_id: UUID
+    user_id: UUID
+    expected_version: int = Field(ge=1)
+    assistant_message_id: UUID | None = None
+    continuation_available: bool = False
+    continuation_id: UUID | None = None
+    continuation_block_reason: str | None = Field(default=None, max_length=128)
+    terminal_reason: str | None = Field(default=None, max_length=128)
+
+
+class MarkCompleted(BaseModel):
+    """The answer finished on its own. Nothing here is continuable."""
+
+    generation_id: UUID
+    conversation_id: UUID
+    user_id: UUID
+    expected_version: int = Field(ge=1)
+    assistant_message_id: UUID | None = None
+    partial: bool = False
+    terminal_reason: str | None = Field(default=None, max_length=128)
+
+
+class ContinuationLease(BaseModel):
+    """Permission to run one more epoch, and what it must run with.
+
+    Internal, unlike :class:`GenerationSnapshot`: it carries the checkpoint
+    thread and the carried accounting because the caller is the worker that
+    resumes the graph, not a client.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    snapshot: GenerationSnapshot
+    execution_epoch: int
+    checkpoint_thread_id: str
+    active_agent_id: str | None = None
+    research_accounting: dict[str, Any] | None = None

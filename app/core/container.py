@@ -45,6 +45,7 @@ from app.repositories.document_image import DocumentImageRepository
 from app.repositories.document_index_generation import DocumentIndexGenerationRepository
 from app.repositories.document_parse_artifact import DocumentParseArtifactRepository
 from app.repositories.feedback import FeedbackRepository
+from app.repositories.generation import GenerationRepository
 from app.repositories.hitl_interrupt import HITLInterruptRepository
 from app.repositories.message import MessageRepository
 from app.repositories.model_provider import ModelProviderRepository
@@ -72,6 +73,8 @@ from app.services.document_parse_service import DocumentParseService
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.document_service import DocumentService
 from app.services.feedback_service import FeedbackService
+from app.services.generation_control_bus import build_generation_control_bus
+from app.services.generation_control_service import GenerationControlService
 from app.services.generation_registry import get_generation_registry
 from app.services.hitl_settings_service import HitlSettingsService
 from app.services.jwt_service import JwtService
@@ -470,6 +473,30 @@ class Container(containers.DeclarativeContainer):
         ToolExecutionReceiptRepository,
         session_factory=db.provided.session,
         async_session_factory=db.provided.async_session,
+    )
+
+    generation_repository = providers.Factory(
+        GenerationRepository,
+        session_factory=db.provided.session,
+        async_session_factory=db.provided.async_session,
+    )
+
+    # One bus per process. A Singleton because it owns a Redis connection and a
+    # subscriber task: a Factory here would open one of each per request and
+    # deliver a stop signal to a subscriber nobody is listening to.
+    generation_control_bus = providers.Singleton(
+        build_generation_control_bus,
+        redis_url=settings.redis_url,
+        channel=settings.generation_stop_channel,
+        reconnect_backoff_seconds=settings.generation_stop_reconnect_seconds,
+        max_reconnect_backoff_seconds=settings.generation_stop_max_reconnect_seconds,
+    )
+
+    generation_control_service = providers.Factory(
+        GenerationControlService,
+        repository=generation_repository,
+        bus=generation_control_bus,
+        stop_wait_seconds=settings.generation_stop_wait_seconds,
     )
 
     history_provider = providers.Singleton(
