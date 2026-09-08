@@ -401,6 +401,153 @@ that code, not surface it as a failure.
 The in-process backend exists for tests and is **rejected** when
 `production=True`, because it coordinates nothing between workers.
 
+## Generation controls: Stop and Continue
+
+The durable generation lifecycle (`generations`, `generation_commands`) is what
+makes Stop work when the command lands on a worker other than the one
+streaming. Before it, a Stop that missed the in-process registry reported "not
+in flight" and the turn carried on.
+
+### Settings
+
+All in `app/core/config.py`. **Every one is a carried default; none was
+selected from measurement.** The rungs in particular decide when a user's turn
+is cut short, and no evaluation has been run on them.
+
+| Setting | Default | What it decides |
+|---|---:|---|
+| `generation_soft_model_calls_per_epoch` | 7 | Model calls before the answer call is reserved |
+| `generation_hard_model_calls_per_epoch` | 9 | Framework ceiling; must exceed the soft rung |
+| `generation_soft_tool_calls_per_epoch` | 12 | Tool calls before further calls are refused |
+| `generation_hard_tool_calls_per_epoch` | 16 | Framework ceiling; must exceed the soft rung |
+| `generation_total_epochs_per_turn` | 5 | How many times one turn may be continued |
+| `generation_stop_wait_seconds` | 5.0 | How long a Stop waits for the worker before answering `stop_requested` |
+| `generation_stop_channel` | `generation:stop` | Redis channel carrying stop signals between workers |
+| `generation_stop_reconnect_seconds` | 1.0 | Initial backoff for a dropped stop subscriber |
+| `generation_stop_max_reconnect_seconds` | 30.0 | Ceiling for that backoff |
+
+A cross-field validator refuses a hard rung at or below its soft rung, because
+the framework would then raise on exactly the call the soft budget reserved.
+
+### Migration order
+
+1. `d0e1f2a3b4c5` creates `generations` and `generation_commands`.
+2. `e1f2a3b4c5d6` relaxes `generations.assistant_message_id` to
+   `ON DELETE SET NULL`. **Apply this one before any message deletion or
+   retention job runs.** Without it, deleting an assistant message that a
+   generation references fails with `ForeignKeyViolation` — the bookkeeping
+   vetoing the thing it books.
+
+Migrations are applied automatically in the lifespan hook, so a deploy carries
+them. `generations.conversation_id` is deliberately `NO ACTION`, matching
+`messages` and `hitl_interrupts`: deleting a conversation is the application's
+business, so any job that removes conversations must remove their generation
+rows first.
+
+### Rollout order
+
+Server first, clients last, so no client can offer a control the server does
+not yet honour:
+
+1. **Server persistence and events.** The lifecycle rows, `run_start`,
+   `generation_status`, `continuation_available`. Clients that ignore the new
+   events are unaffected.
+2. **Client-backend proxy.** `/messages/continue`, `/ai/continue`, and the
+   snapshot endpoint. Confirm the stop proxy preserves a `202`: it returns the
+   upstream response, and flattening that to `200` tells a client the turn
+   ended when nothing has confirmed it.
+3. **Streamlit and AI SDK controls.** The buttons.
+4. **Soft-limit pausing.** Last, because until step 3 lands a paused turn shows
+   a partial answer with no way to continue it.
+
+### Redis subscriber health
+
+The bus is a `Singleton` — one connection and one subscriber task per process.
+A `Factory` would open one of each per request and deliver stop signals to a
+subscriber nobody is listening to.
+
+- The signal is published **after** the durable transition, never instead of
+  it. A worker that misses it still finds `stop_requested` on its next check,
+  so a subscriber outage degrades Stop's latency, not its correctness.
+- Payload is a schema version, a generation id and a lifecycle version. No
+  content, no prompt, no user id.
+- Watch reconnect backoff climbing to `generation_stop_max_reconnect_seconds`
+  and staying there: that is a subscriber that is not recovering.
+
+### Reconciling a stuck `stop_requested`
+
+`stop_requested` means a client asked and no worker has confirmed. It is a
+pending state, not a failure, and it is never reported as `stopped`.
+
+```sql
+-- Turns asked to stop that no worker has confirmed.
+SELECT id, conversation_id, execution_epoch, version, updated_at
+FROM generations
+WHERE status = 'stop_requested'
+  AND updated_at < now() - interval '10 minutes'
+ORDER BY updated_at;
+```
+
+A row here for longer than one provider timeout means the owning worker died
+between the transition and its confirmation. Resolve by marking it terminal —
+`stopped` with `terminal_reason = 'worker_lost'` — after confirming no worker
+holds it. Do not mark it `completed`: no answer was validated.
+
+```sql
+-- Turns holding a continuation nobody redeemed.
+SELECT id, conversation_id, execution_epoch, continuation_block_reason
+FROM generations
+WHERE status = 'continuable' AND updated_at < now() - interval '24 hours';
+```
+
+These are harmless — `continuable` is outside the single-active-lifecycle index
+predicate, so a paused turn does not block the next question — but a rising
+count means users are being offered Continue and not taking it.
+
+### Metrics
+
+Scrapeable at `/metrics/routing`.
+
+| Counter | Read it as |
+|---|---|
+| `execution.limit.<agent>.<kind>` | The framework ceiling fired. Rising means a soft rung is set too close to its hard rung, since the soft rung is supposed to reserve the answer call one earlier |
+| `worker.partial.<agent>` | A delegated worker returned a partial to its parent |
+| `worker.failed.<agent>` | A dispatched worker produced nothing usable |
+| `grounding.<outcome>` | Unchanged by these controls |
+
+**Not yet instrumented, and worth knowing before reading a dashboard as
+complete:** there is no counter for lifecycle transitions, continuation
+conversion (offered versus redeemed), or duplicate command claims. The
+lifecycle is observable only by querying `generations` and
+`generation_commands` as above. An uninstrumented counter is worse than a
+missing one, so these are named here rather than half-added.
+
+Duplicate command claims are countable directly:
+
+```sql
+SELECT action, count(*) AS replays
+FROM generation_commands
+GROUP BY action, generation_id
+HAVING count(*) > 1;
+```
+
+### Rollback
+
+Rolling back the client steps is safe in any order — the events are additive
+and an older client ignores them.
+
+Rolling back the server is not symmetrical:
+
+- Reverting steps 1–2 while step 3 is deployed leaves clients showing Continue
+  buttons whose endpoint is gone. Roll back clients first.
+- Do **not** downgrade past `d0e1f2a3b4c5` while any turn is mid-flight: the
+  rows are the only record that a turn can be stopped or continued, and
+  dropping them mid-turn strands whatever is running.
+- Setting `generation_total_epochs_per_turn = 1` disables continuation without
+  a schema change: a turn with no epochs left is never offered a Continue,
+  and `validate_output` sends it to `finalize` instead. That is the fastest
+  safe way to turn the feature off.
+
 ## Known gaps
 
 Removal is enforced by `tests/test_routing_legacy_removal.py`, which asserts
@@ -424,9 +571,24 @@ both what was deleted and what is still live.
    asks the model not to, and no code checks.
 6. **Provider trace ancestry is verified offline only.** `tests/test_tool_trace_parenting.py`
    pins the callback topology, and the canary in "Verify provider trace
-   ancestry" has not been run against a live workspace. Note also that the test
-   suite inherits `LANGSMITH_TRACING=true` from the environment file, so local
-   runs write into the same LangSmith project as real turns.
+   ancestry" has not been run against a live workspace. The test suite no
+   longer traces to LangSmith — `tests/conftest.py` disables it before
+   `app.core.config` imports, with a guard test — so local runs no longer
+   write into the same project as real turns.
+7. **The execution rungs are carried defaults.** The seven settings in
+   "Generation controls" were chosen to be plausible, not measured. They decide
+   when a user's turn is cut short in favour of a partial answer, and no
+   evaluation has been run on any of them.
+8. **The generation lifecycle has no metrics.** Transitions, continuation
+   conversion and duplicate command claims are observable only by querying
+   `generations` and `generation_commands`. The SQL is in "Generation
+   controls"; treat any dashboard as incomplete until counters exist.
+9. **Continue has never run against a live provider.** The pause, the carried
+   evidence and the resume are covered by tests including a real compiled
+   LangGraph with a real checkpointer, but no continued turn has been served by
+   a real model, and no Stop has been raced across two real worker processes.
+   The cross-worker path is verified against a real PostgreSQL, not against two
+   processes.
 Closed since the last revision of this document: RAG and Planning no longer run
 pre-v2 loops; `_tool_node`/`_approval_node` are deleted; the
 `disable_outer_timeout` allowlist is empty, so every interactive tool call is

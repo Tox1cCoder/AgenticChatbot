@@ -154,6 +154,66 @@ def test_the_pause_payload_names_the_epoch_it_is_pausing():
     assert payload.execution_epoch == 0
 
 
+def test_the_pause_payload_reports_an_undecidable_mutation():
+    """The turn has to know, not just the model.
+
+    A ``MutationOutcomeUnknown`` is answered to the model in band as a
+    ``ToolMessage``, but the continuation decision is made outside that loop
+    and cannot read prose. Without this the offer would be minted for a turn
+    whose side effect may or may not have happened.
+    """
+    from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+    from app.ai.workflow.continuation import make_continuation_pause_node
+    from app.ai.workflow.contracts import OutcomeProvenance, ResponseOutcome
+
+    outcome = ResponseOutcome(
+        agent_id="chat_agent",
+        response=AgentResponse(
+            agent_type=AgentType.CHAT,
+            agent_id="chat_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content="partial"),
+            metadata={"mutation_outcome_unknown": True},
+        ),
+        provenance=OutcomeProvenance(output_policy_ids=("public_content",)),
+    )
+
+    seen: list[dict] = []
+    node = make_continuation_pause_node(
+        interrupt_fn=lambda payload: seen.append(payload) or {"action": "stop"}
+    )
+
+    import asyncio
+
+    asyncio.run(
+        node(
+            {
+                "agent_outcome": outcome,
+                "active_agent_id": "chat_agent",
+                "execution_epoch": 0,
+                "execution_budget": {"exhausted_by": "tool_calls"},
+            }
+        )
+    )
+
+    assert seen[0]["mutation_outcome_unknown"] is True
+
+
+def test_an_ordinary_pause_reports_no_undecidable_mutation():
+    """The flag must not default to blocking every continuation."""
+    import asyncio
+
+    from app.ai.workflow.continuation import make_continuation_pause_node
+
+    seen: list[dict] = []
+    node = make_continuation_pause_node(
+        interrupt_fn=lambda payload: seen.append(payload) or {"action": "stop"}
+    )
+
+    asyncio.run(node(_paused_state()))
+
+    assert seen[0]["mutation_outcome_unknown"] is False
+
+
 def test_the_pause_payload_is_distinguishable_from_a_tool_approval():
     """The graph must not treat this as a HITL interrupt.
 

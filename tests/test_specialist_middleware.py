@@ -349,6 +349,90 @@ async def test_images_are_collected_separately_from_artifacts(monkeypatch):
     assert middleware.images == [{"image_id": "img-1"}]
 
 
+async def test_an_undecidable_mutation_is_recorded_on_the_middleware(monkeypatch):
+    """The turn needs to know, not just the model.
+
+    ``MutationOutcomeUnknown`` is answered in band as a ``ToolMessage`` the
+    model can read, but the continuation decision is made outside this loop and
+    cannot read prose. Without the flag, a turn whose side effect may or may not
+    have happened would still be offered a Continue — and continuing it could
+    perform that effect a second time.
+    """
+    from uuid import uuid4
+
+    from app.ai.workflow import middleware as middleware_module
+    from app.services.tool_execution_receipt_service import MutationOutcomeUnknown
+
+    async def refuse_to_decide(scope, invoke):
+        raise MutationOutcomeUnknown("execution-key-1")
+
+    scope = _mutating_scope(refuse_to_decide, uuid4())
+    monkeypatch.setattr(
+        middleware_module, "resolve_call_identity", lambda call, **kwargs: _mutation_identity()
+    )
+    middleware = ToolExecutionMiddleware(scope=scope, tool_factory=_no_tools)
+    assert middleware.mutation_outcome_unknown is False
+
+    message = await middleware.awrap_tool_call(_tool_request(), _unused_handler)
+
+    assert message.status == "error"
+    assert middleware.mutation_outcome_unknown is True
+
+
+async def test_a_decided_mutation_leaves_the_flag_alone(monkeypatch):
+    """The flag must mean "undecidable", not merely "mutating"."""
+    from uuid import uuid4
+
+    from app.ai.workflow import middleware as middleware_module
+
+    async def decide(scope, invoke):
+        return SimpleNamespace(model_visible_payload=lambda: {"content": "done"})
+
+    scope = _mutating_scope(decide, uuid4())
+    monkeypatch.setattr(
+        middleware_module, "resolve_call_identity", lambda call, **kwargs: _mutation_identity()
+    )
+    middleware = ToolExecutionMiddleware(scope=scope, tool_factory=_no_tools)
+
+    message = await middleware.awrap_tool_call(_tool_request(), _unused_handler)
+
+    assert message.status == "success"
+    assert middleware.mutation_outcome_unknown is False
+
+
+def _mutation_identity():
+    """A call identity the receipt path accepts as a mutation."""
+    return SimpleNamespace(
+        name="do_thing",
+        qualified_tool_id="server::do_thing",
+        mutation=True,
+        tool_origin="server",
+    )
+
+
+def _mutating_scope(execute_mutation, user_id):
+    """A scope complete enough for ``mutation_scope`` to return a receipt.
+
+    Every field here is load-bearing: a partial identity makes
+    ``mutation_scope`` return ``None``, the mutation branch is skipped, and the
+    test would pass for the wrong reason.
+    """
+    from uuid import uuid4
+
+    scope = _scope(
+        # Real UUIDs: ``MutationExecutionScope`` parses both, and the string
+        # ids the other tests use make it log "ran without a receipt" and skip
+        # the whole branch.
+        user_id=str(user_id),
+        conversation_id=str(uuid4()),
+        thread_id="wf2:conv:turn-1",
+        turn_id="turn-1",
+        receipt_service=SimpleNamespace(execute_mutation=execute_mutation),
+    )
+    scope.offer([FakeTool("do_thing")])
+    return scope
+
+
 async def _no_tools():
     return []
 

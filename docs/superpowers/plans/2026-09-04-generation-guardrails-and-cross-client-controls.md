@@ -232,8 +232,11 @@ materially; do not start them from the current text.
 > `tests/test_alembic_full_chain_postgres.py` and the README head reference
 > were updated with it.
 >
-> The migration is **not applied to the live `chatbot` database** — that is
-> Thai's call, and the app applies migrations at startup.
+> ~~The migration is **not applied to the live `chatbot` database**~~ —
+> **superseded 2026-09-08.** `alembic current` reports the live `chatbot`
+> database at `d0e1f2a3b4c5`, so it had already been applied, presumably by an
+> app startup. It is now at `e1f2a3b4c5d6`, applied with Thai's approval; see
+> the Task 5 note for why that follow-up was needed.
 
 **Files:**
 - Create: `app/models/generation.py` (lifecycle row + command ledger)
@@ -660,17 +663,48 @@ git commit -m "feat: pause validated limited responses for continuation"
 
 ### Task 5: Make MessageService Own Start, Pause, Continue, and Stop
 
-> **Not started. One prerequisite fix landed 2026-09-08** so the current
-> behaviour is at least honest while this task waits:
-> `stop_message_generation` no longer removes the registry entry when its HTTP
-> wait times out — that left a retried Stop with nothing to cancel while the
-> turn was still running — and no longer reports `cancelled` for a stop nobody
-> confirmed. A timeout returns `stop_requested`. Nine tests; the method
-> previously had none, which is how both defects shipped.
+> **Landed 2026-09-08** (`b907eec`). 48 tests across
+> `test_message_generation_lifecycle.py` and
+> `test_message_stream_cancellation.py`.
 >
-> This task still replaces the method wholesale: the fix above is confined to
-> one worker's own registry, and the point of the durable lifecycle is that
-> Stop works when the request lands on a different worker than the stream.
+> The row is allocated before the first streamed event, so a Stop arriving on
+> the very first token has something durable to transition. `run_start` — a
+> declared-but-unemitted event type until now — carries the identity and the
+> version that fences a later command. The registry keeps its entry keyed by
+> generation id and now holds the producer task, because the cooperative event
+> cannot reach a worker blocked inside a provider call.
+>
+> **Stop has one implementation, not two.** `stop_generation` transitions
+> durably first and signals this process second; `stop_message_generation`
+> becomes the turn-scoped entry point, resolving a user message id through the
+> *logical turn* rather than through "whatever is active in this conversation"
+> — that shortcut would let a stale turn id cancel the turn running now, which
+> is the R5 defect one level up. A new repository read, `aget_by_logical_turn`,
+> is what makes that fenced.
+>
+> Two things found by writing the tests rather than by reading the code:
+>
+> - A Stop that lost the race to the turn's own ending raised
+>   `IllegalTransition` — a late Stop click was a 500. It now reports where the
+>   turn landed, and the catch is narrow: an illegal transition on a row that
+>   is still active stays an exception, because swallowing it would make Stop
+>   appear to work while doing nothing.
+> - `generations.assistant_message_id` was a plain foreign key, so deleting an
+>   assistant message any generation referenced failed with
+>   `ForeignKeyViolation`. Bookkeeping was outranking the thing it books.
+>   Migration `e1f2a3b4c5d6` makes it `ON DELETE SET NULL`, matching
+>   `model_usage_events.request_message_id`; `CASCADE` would have destroyed the
+>   lifecycle history instead. **Applied to the live `chatbot` database**,
+>   which was already at `d0e1f2a3b4c5` — the Task 1 note claiming otherwise
+>   was stale.
+>
+> `ContinuationLease` gained `paused_epoch`. `prepare_continue` advances the
+> *row*, but the checkpoint has not moved and the pause node fences against its
+> own state, so the value sent back into the graph is the paused epoch. Sending
+> the leased one is refused as stale, and that refusal is indistinguishable
+> from a legitimately expired continuation — an off-by-one that would have made
+> every Continue look broken for a reason nothing pointed at. Two named fields,
+> not one and a subtraction.
 
 **Files:**
 - Modify: `app/services/message_service.py:1043-2225`
@@ -706,7 +740,7 @@ async def stop_message_generation(
 ) -> GenerationSnapshot: ...
 ```
 
-- [ ] **Step 1: Write service lifecycle tests**
+- [x] **Step 1: Write service lifecycle tests**
 
 Prove generation row allocation occurs before `run_start`, whose data includes `generation_id`, `logical_turn_id`, and epoch. At a continuation pause, assert the validated assistant message is committed before `message_delta` and `continuation_available`. Then assert the turn advisory lock is released.
 
@@ -714,33 +748,33 @@ Continue must reacquire the same conversation lock, use the exact checkpoint/act
 
 Test disconnect separately: closing the HTTP stream requests Stop but reports only authoritative lifecycle states; no registry-only `cancelled` result remains.
 
-- [ ] **Step 2: Run and verify failures**
+- [x] **Step 2: Run and verify failures**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_message_generation_lifecycle.py tests/test_message_stream_cancellation.py tests/test_workflow_concurrency.py
 ```
 
-- [ ] **Step 3: Allocate identity and register the owner task**
+- [x] **Step 3: Allocate identity and register the owner task**
 
 In `create_message_stream`, persist the user message, create generation identity, emit `run_start`, and register the current producer task by generation ID. The existing `user_message_created` event may carry the ID for compatibility, but Stop logic must ignore it.
 
 At every graph event and before/after tool/model boundaries, check the cooperative cancel event and durable status. On `CancelledError`, shield the short persistence/classification transaction, then re-raise only after state is authoritative.
 
-- [ ] **Step 4: Persist before publishing continuation**
+- [x] **Step 4: Persist before publishing continuation**
 
 Buffer the validated pause response, write the assistant partial with metadata `{generation_id, logical_turn_id, execution_epoch, partial: true}`, transition to `continuable` with a new opaque continuation ID, then emit public deltas and `continuation_available`. If persistence fails, mark `failed` and emit no answer/control event.
 
-- [ ] **Step 5: Add exact-checkpoint Continue**
+- [x] **Step 5: Add exact-checkpoint Continue**
 
 Call `prepare_continue`, then `AIService.resume_generation_control_stream` which wraps `workflow.resume_with_continuation_stream(Command(resume={...}))`. Do not call `create_message_stream`, the router, `sendMessage`, regenerate, or append a synthetic/hidden user message.
 
-- [ ] **Step 6: Replace registry-only Stop**
+- [x] **Step 6: Replace registry-only Stop**
 
 Authorize through `GenerationControlService`, transition durably, publish Redis, signal the local owner if present, and await its completion only up to the configured timeout. Return the current `GenerationSnapshot`; `stop_requested` is a successful pending state, not a timeout exception.
 
 Classify mutation receipts before marking resumable. Any `outcome_unknown` sets `continuation_available=false` and `continuation_block_reason="mutation_outcome_unknown"`.
 
-- [ ] **Step 7: Run and commit Task 5**
+- [x] **Step 7: Run and commit Task 5**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_message_generation_lifecycle.py tests/test_message_stream_cancellation.py tests/test_workflow_concurrency.py tests/test_generation_control_service.py tests/test_tool_execution_receipt_service.py
@@ -750,6 +784,40 @@ git commit -m "feat: orchestrate durable stop and exact continuation"
 ```
 
 ### Task 6: Expose One Control API Through Both Transports
+
+> **Landed 2026-09-08** (`ed8c384`). 26 API contract tests plus 7 proxy tests.
+>
+> `run_start` is reused as the start event rather than adding the
+> `generation_start` this plan named: a second canonical event carrying an
+> identical payload is two systems doing one job. The internal SSE *publishes*
+> it as `generation_start`, and the AI SDK folds all three lifecycle events
+> into one `data-generation` part discriminated by `phase`. A test compares the
+> two adapters' published field sets rather than trusting them to agree.
+>
+> The part is not `transient`: a reconnecting client still needs the identity
+> and the version that make a command addressable at all.
+>
+> Three fields never cross the boundary - the validated partial's text (it
+> arrived as deltas and lives in the message row), the execution budget, and
+> the checkpoint thread. Asserted by searching the rendered response, not by
+> reviewing the projection.
+>
+> Two boundary defects fixed while wiring it:
+>
+> - The client-backend stop proxy returned the parsed body, flattening a `202`
+>   into a `200` and telling the client a turn had ended that no worker had
+>   confirmed. It now returns the upstream response.
+> - `/messages/generations/{id}` has to be declared *before*
+>   `/messages/{message_id}` in both the server and the sidecar, because
+>   FastAPI matches in order and the parameterized route otherwise captures
+>   "generations" as a message id. A test asserts the ordering, since the
+>   symptom is a 404 that reads like an ownership refusal.
+>
+> Stop accepts either `generationId` (canonical) or `userMessageId` (the
+> turn-scoped form). Both `StopGenerationRequest` and
+> `ContinueGenerationRequest` carry `expectedVersion` per R5; it is optional
+> only for a client predating `run_start`, and the endpoint then reads the row
+> rather than inventing a fence the client never held.
 
 **Files:**
 - Modify: `app/schemas/generation.py`
@@ -781,7 +849,7 @@ class ContinueGenerationRequest(BaseModel):
     inline_rich_response_v1: bool = False
 ```
 
-- [ ] **Step 1: Write API and adapter contract tests**
+- [x] **Step 1: Write API and adapter contract tests**
 
 Add owner-scope 404 tests, idempotency tests, and these endpoints:
 
@@ -793,19 +861,19 @@ Add owner-scope 404 tests, idempotency tests, and these endpoints:
 
 Both stream adapters must expose `generation-start`, `generation-status`, and `continuation-available` from canonical events. AI SDK uses custom `data-generation` parts; internal SSE uses the canonical names unchanged. Neither adapter derives state from socket close.
 
-- [ ] **Step 2: Run and verify failures**
+- [x] **Step 2: Run and verify failures**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_generation_control_api.py tests/test_internal_sse_stream_contract.py tests/test_ai_sdk_v6_stream_contract.py tests/client_backend/test_messages.py
 ```
 
-- [ ] **Step 3: Add canonical events and routes**
+- [x] **Step 3: Add canonical events and routes**
 
 Extend `StreamEventType` with `generation_start`, `generation_status`, and `continuation_available`. The continuation event data contains IDs, status, epoch, assistant message ID, and safe block reason only—no checkpoint internals or raw content.
 
 Both Continue routes call the same MessageService method and differ only in adapter. Both Stop callers use the same JSON route. Return `202` when status remains `stop_requested`, otherwise `200`.
 
-- [ ] **Step 4: Document AI SDK client semantics**
+- [x] **Step 4: Document AI SDK client semantics**
 
 In the route description and stream-contract tests, pin this client flow:
 
@@ -826,7 +894,7 @@ async function stopGeneration(snapshot: GenerationSnapshot) {
 
 Continue posts to `/ai/continue` and consumes its UI Message Stream. It must not call `resumeStream`, `regenerate`, or `sendMessage`; `resume: false` stays configured because semantic continuation is explicit.
 
-- [ ] **Step 5: Run and commit Task 6**
+- [x] **Step 5: Run and commit Task 6**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_generation_control_api.py tests/test_internal_sse_stream_contract.py tests/test_ai_sdk_v6_stream_contract.py tests/client_backend/test_messages.py tests/test_message_service_event_streaming.py
@@ -837,6 +905,31 @@ git commit -m "feat: expose generation controls across stream transports"
 
 ### Task 7: Implement the Streamlit Continue/Stop State Machine
 
+> **Landed 2026-09-08** (`7984a7f`). 36 tests.
+>
+> `generation_controls` is a pure function from canonical status to which
+> buttons appear, so a closed socket changes nothing. A guard test asserts every
+> declared `GenerationStatus` is covered by one of the three sets it branches
+> on - an uncovered status falls through to "no controls" silently, and both
+> buttons would vanish from a turn that is still running.
+>
+> `_handle_stop_rerun` no longer reports "Generation stopped" for a
+> `stop_requested`. That was the one claim this control must never make.
+>
+> The idempotency key is derived from (action, generation, version) rather than
+> generated per render: Streamlit reruns the whole script on every click, so a
+> key held in a local is fresh each time - which is how a control that is "safe
+> because idempotent" stops being idempotent.
+>
+> `generation_snapshot` deliberately survives `_clear_inflight_state`: a paused
+> turn is not in flight but is still continuable.
+>
+> **One deliberate shortfall.** `_handle_continue` drives its own renderer
+> rather than the ~200-line inline block a new turn uses, so "feeds its events
+> through the same renderer" is met only at the level of the event vocabulary.
+> Extracting that shared renderer is a refactor of untested UI code and was not
+> attempted.
+
 **Files:**
 - Modify: `demo.py:2680-2805`
 - Modify: `demo.py:8900-9100`
@@ -844,7 +937,7 @@ git commit -m "feat: expose generation controls across stream transports"
 - Modify: `tests/test_demo_stop_generation.py`
 - Create: `tests/test_demo_generation_controls.py`
 
-- [ ] **Step 1: Write failing UI state tests**
+- [x] **Step 1: Write failing UI state tests**
 
 Test button visibility and state transitions:
 
@@ -858,21 +951,21 @@ Test button visibility and state transitions:
 
 Assert Continue uses generation/continuation IDs, never creates a pending user bubble, and appends deltas to a new assistant message. Assert repeated clicks reuse an idempotency key until a response arrives.
 
-- [ ] **Step 2: Run and verify failures**
+- [x] **Step 2: Run and verify failures**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_demo_stop_generation.py tests/test_demo_generation_controls.py
 ```
 
-- [ ] **Step 3: Store canonical generation snapshots in session state**
+- [x] **Step 3: Store canonical generation snapshots in session state**
 
 Replace the two-phase `user_message_id` cancellation token with a generation snapshot. Consume `generation_start`, `generation_status`, and `continuation_available` events. A network close alone changes no canonical status.
 
-- [ ] **Step 4: Implement buttons against shared endpoints**
+- [x] **Step 4: Implement buttons against shared endpoints**
 
 Stop first closes the local iterator for responsiveness, posts `/messages/stop`, then reconciles from its snapshot/status endpoint. Continue posts `/messages/continue` and feeds its events through the same renderer used for a new stream. Stop from `continuable` keeps the partial message and resolves to `completed_partial`.
 
-- [ ] **Step 5: Run and commit Task 7**
+- [x] **Step 5: Run and commit Task 7**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_demo_stop_generation.py tests/test_demo_generation_controls.py tests/test_hitl_demo_panel.py tests/test_rich_response_streaming.py
@@ -883,31 +976,58 @@ git commit -m "feat: add consistent Streamlit generation controls"
 
 ### Task 8: Verify Parity, Races, and Rollout Safety
 
+> **Landed 2026-09-08.** 16 parity tests, 13 PostgreSQL race tests, and the
+> rollout procedure in `docs/operations/routing-v2-rollout.md`.
+>
+> The race suite taught something worth recording. Written first, all of it
+> passed with `WHERE version = :expected` deleted from the repository - so it
+> was verifying "one winner" while resting entirely on a predicate that only
+> happens to cover those cases. Two other things settle those races before the
+> fence is reached: the service's own `_require_fresh` refuses a command whose
+> version has moved (the sequential retry), and `atransition`'s
+> `status IN (...)` predicate refuses a concurrent loser whose winner moved the
+> row out of the declared set.
+>
+> `test_the_repository_version_fence_refuses_the_second_writer` isolates the
+> fence itself - two writers reading one version and targeting `stop_requested`,
+> a status that is *itself* stoppable, so nothing but the version tells them
+> apart. It is asserted against `atransition` directly, and it is the one test
+> in the file that fails when the fence is removed. Verified by removing it.
+>
+> The parity tests normalize both adapter projections to a transport-independent
+> shape and compare them as values, across nine scenarios. Verified by making
+> one adapter stop stripping the private pause fields: seven tests failed.
+>
+> The rollout section documents the settings (all carried defaults), migration
+> order - `e1f2a3b4c5d6` before any retention job, or message deletion fails -
+> subscriber health, the SQL for stuck `stop_requested` rows, and the metrics
+> that exist versus the three that do not.
+
 **Files:**
 - Create: `tests/test_generation_transport_parity.py`
 - Create: `tests/integration/test_generation_control_races_postgres.py`
 - Modify: `docs/operations/routing-v2-rollout.md`
 
-- [ ] **Step 1: Add black-box parity scenarios**
+- [x] **Step 1: Add black-box parity scenarios**
 
 Run the same scripted workflow through internal SSE and AI SDK and compare normalized event projections for: normal completion, soft-limit continuation, Stop during provider wait, Stop timeout, Stop while continuable, Continue after pause, repeated Continue, disconnect, and blocked mutation outcome. Assert identical final lifecycle snapshots and persisted messages.
 
-- [ ] **Step 2: Add PostgreSQL race tests**
+- [x] **Step 2: Add PostgreSQL race tests**
 
 Race Continue/Continue, Stop/Stop, and Continue/Stop from separate sessions. Assert one legal winning transition, one epoch increment, no duplicate assistant message, and monotonic versions.
 
-- [ ] **Step 3: Add live rollout procedure**
+- [x] **Step 3: Add live rollout procedure**
 
 Document feature flags, migration order, Redis subscriber health, stuck `stop_requested` reconciliation, lifecycle metrics, execution-budget metrics, continuation conversion, duplicate-command count, and rollback. Roll out server persistence/events first, then client-backend proxy, then Streamlit/AI SDK buttons, then enable soft-limit pausing.
 
-- [ ] **Step 4: Run the complete verification set**
+- [x] **Step 4: Run the complete verification set**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/test_generation_repository.py tests/integration/test_generation_repository_postgres.py tests/test_generation_control_service.py tests/test_generation_control_bus.py tests/test_execution_budget_middleware.py tests/test_workflow_continuation.py tests/test_message_generation_lifecycle.py tests/test_generation_control_api.py tests/test_generation_transport_parity.py tests/integration/test_generation_control_races_postgres.py tests/test_internal_sse_stream_contract.py tests/test_ai_sdk_v6_stream_contract.py tests/test_demo_stop_generation.py tests/test_demo_generation_controls.py tests/test_production_workflow_graph.py tests/test_routing_service.py tests/test_routing_v2_continuation_streaming.py tests/test_tool_execution_receipt_service.py
 .\.venv\Scripts\python.exe -m ruff check app/models/generation.py app/repositories/generation.py app/schemas/generation.py app/services/generation_control_service.py app/services/generation_control_bus.py app/services/generation_registry.py app/ai/workflow/execution_budget.py app/ai/workflow/continuation.py app/ai/workflow/contracts.py app/ai/workflow/state.py app/ai/workflow/specialists.py app/ai/workflow/finalization.py app/ai/workflow/graph_builder.py app/ai/graph.py app/services/message_service.py app/services/ai_service.py app/api/messages.py app/api/ai_sdk.py app/services/event_streaming client_backend/api/messages.py client_backend/services/server_api.py demo.py
 ```
 
-- [ ] **Step 5: Commit Task 8**
+- [x] **Step 5: Commit Task 8**
 
 ```powershell
 git add tests/test_generation_transport_parity.py tests/integration/test_generation_control_races_postgres.py docs/operations/routing-v2-rollout.md
@@ -916,22 +1036,71 @@ git commit -m "test: verify generation control parity and races"
 
 ## Acceptance Checklist
 
-- [ ] Soft model/tool limits always reserve one tool-free answer call.
-- [ ] Hard-limit defects produce a validated partial/fallback, not a generic public error.
-- [ ] Continuation pauses only after assistant content is validated and persisted.
-- [ ] Continue resumes the exact checkpoint/agent without routing or a user message.
-- [ ] Stop is durable, distributed, idempotent, and honest about pending cancellation.
-- [ ] Unknown mutation outcomes block continuation.
-- [ ] Internal SSE, AI SDK, client-backend proxy, and Streamlit produce the same lifecycle result.
-- [ ] AI SDK Stop combines local `useChat.stop()` with the explicit server Stop command.
-- [ ] Streamlit exposes both Continue and Stop according to the canonical status table.
-- [ ] Race tests show one epoch increment and no duplicate assistant message.
-- [ ] `finalize -> END` remains the graph's sole terminal edge.
-- [ ] Forced synthesis and hard-limit handling are asserted on the specialist, RAG, and delegated-worker paths (R1).
-- [ ] Epoch 2 receives epoch 1's evidence, asserted on the messages handed to the model (R2).
-- [ ] The final tool-free call is asserted after the full middleware stack, including one provider fallback (R3).
+Verified offline, 2026-09-08. Suite: 5309 passed, 130 skipped. The
+PostgreSQL items ran against a real `chatbot_test`, not a fake.
+
+- [x] Soft model/tool limits always reserve one tool-free answer call.
+- [x] Hard-limit defects produce a validated partial/fallback, not a generic public error.
+- [x] Continuation pauses only after assistant content is validated and persisted.
+- [x] Continue resumes the exact checkpoint/agent without routing or a user message.
+- [~] Stop is durable, distributed, idempotent, and honest about pending cancellation.
+  Durable, idempotent and honest are tested, the last against a real fence.
+  **Distributed is verified by construction, not by experiment:** the transition
+  precedes the publication and a worker that misses the signal finds
+  `stop_requested` on its next check, but no test runs two worker processes.
+  The bus tests use `InMemoryGenerationControlBus`.
+- [x] Unknown mutation outcomes block continuation.
+  Wired 2026-09-08, having been plumbed-but-unreachable: `ToolExecutionMiddleware`
+  records the undecidable mutation, `_to_outcome` carries it, the pause payload
+  reports it, and `_apublish_continuation_pause` turns it into
+  `continuation_block_reason="mutation_outcome_unknown"` with no continuation id
+  minted. The partial answer is still persisted and shown.
+- [x] Internal SSE, AI SDK, client-backend proxy, and Streamlit produce the same lifecycle result.
+  `tests/test_generation_transport_parity.py` normalizes both adapter
+  projections and compares them as values across nine scenarios, and asserts
+  their published field sets are identical.
+- [x] AI SDK Stop combines local `useChat.stop()` with the explicit server Stop command.
+  Pinned in the `/ai/continue` route description. Not executed — it is client
+  TypeScript this repository does not own.
+- [x] Streamlit exposes both Continue and Stop according to the canonical status table.
+- [x] Race tests show one epoch increment and no duplicate assistant message.
+- [x] `finalize -> END` remains the graph's sole terminal edge.
+- [x] Forced synthesis and hard-limit handling are asserted on the specialist, RAG, and delegated-worker paths (R1).
+- [x] Epoch 2 receives epoch 1's evidence, asserted on the messages handed to the model (R2).
+- [x] The final tool-free call is asserted after the full middleware stack, including one provider fallback (R3).
 - [ ] Research accounting is keyed by logical turn, persisted, and rehydrated; a failed rehydration fails the Continue (R4).
-- [ ] A delayed Stop replay after a later Continue is refused as stale, not executed (R5).
+  **Not done, and the only open item.** The column exists, `MarkContinuable`
+  accepts it and `ContinuationLease` returns it, but nothing writes it and
+  nothing rehydrates it: `app/ai/research_budget.py` still keys
+  `_budgets: OrderedDict[str, ResearchBudget]` by conversation id at module
+  scope, and a new turn resets it (`app/ai/graph.py:646`). So a Continue served
+  by another worker sees no accounting at all, and one served by this worker
+  shares a conversation-keyed budget with any other turn in flight.
+  Consequence: cross-epoch search deduplication does not survive Continue, so
+  a continued turn may repeat a query the previous epoch already refused. R4's
+  "fail the Continue rather than proceed with an empty budget" is therefore
+  also unimplemented — an empty budget is currently indistinguishable from a
+  fresh turn's full quota.
+- [x] A delayed Stop replay after a later Continue is refused as stale, not executed (R5).
+  Tested at the service boundary and against the real fence in
+  `tests/integration/test_generation_control_races_postgres.py`.
+
+### Not covered by any test
+
+Named here rather than left for a reader to discover:
+
+- **No turn has been continued by a real model.** The pause, the carried
+  evidence and the resume are covered by tests including a real compiled
+  LangGraph with a real checkpointer, but every model in them is scripted.
+- **No Stop has been raced across two processes.** The cross-worker guarantee
+  is verified against a real PostgreSQL from separate sessions, which is the
+  part the database owns; the Redis hop between processes is not exercised.
+- **The seven execution rungs are carried defaults.** They decide when a user's
+  turn is cut short in favour of a partial answer, and none was selected from
+  measurement.
+- **The lifecycle has no metrics.** Transitions, continuation conversion and
+  duplicate command claims are observable only by SQL. The queries are in
+  `docs/operations/routing-v2-rollout.md`.
 
 ## Execution Handoff
 

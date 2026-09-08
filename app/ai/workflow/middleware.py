@@ -405,6 +405,11 @@ class ToolExecutionMiddleware(AgentMiddleware):
         self._tool_factory = tool_factory
         self.artifacts: list[dict[str, Any]] = []
         self.images: list[dict[str, Any]] = []
+        # True once a mutating tool call ended with an effect nobody can
+        # decide. The model is told in band, but the *turn* has to know too:
+        # continuing a turn whose side effect may or may not have happened
+        # risks performing it a second time, so this blocks the Continue offer.
+        self.mutation_outcome_unknown = False
 
     async def awrap_model_call(self, request: Any, handler: Any) -> Any:
         """Bind the tool set as it stands now, not as it stood at compile time."""
@@ -442,6 +447,10 @@ class ToolExecutionMiddleware(AgentMiddleware):
         try:
             result = await self._scope.receipt_service.execute_mutation(mutation_scope, invoke)
         except MutationOutcomeUnknown:
+            # Recorded on the middleware as well as answered in band, because
+            # the continuation decision is made outside this loop and cannot
+            # read a ToolMessage's prose.
+            self.mutation_outcome_unknown = True
             return ToolMessage(
                 content=MUTATION_OUTCOME_UNKNOWN_TEXT,
                 tool_call_id=str(call.get("id") or ""),

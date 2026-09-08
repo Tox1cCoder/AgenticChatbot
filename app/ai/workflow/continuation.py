@@ -56,6 +56,10 @@ class ContinuationPausePayload(BaseModel):
     active_agent_id: str
     validated_content: str
     budget: dict[str, Any] = Field(default_factory=dict)
+    #: A mutating tool call in this epoch ended with an effect nobody can
+    #: decide. The partial answer is still shown, but Continue must be refused
+    #: until it is reconciled: resuming could perform the side effect twice.
+    mutation_outcome_unknown: bool = False
 
 
 class ContinuationResume(BaseModel):
@@ -179,6 +183,7 @@ def make_continuation_pause_node(*, interrupt_fn: Any = None) -> Any:
             active_agent_id=str(active_agent_id or ""),
             validated_content=_validated_content(outcome),
             budget=dict(state.get("execution_budget") or {}),
+            mutation_outcome_unknown=_mutation_outcome_unknown(outcome),
         )
 
         decision = resume_with(payload.model_dump(mode="json"))
@@ -222,6 +227,17 @@ def make_continuation_pause_node(*, interrupt_fn: Any = None) -> Any:
 def _validated_content(outcome: Any) -> str:
     message = getattr(getattr(outcome, "response", None), "message", None)
     return str(getattr(message, "content", "") or "")
+
+
+def _mutation_outcome_unknown(outcome: Any) -> bool:
+    """Whether this epoch left a side effect nobody can decide.
+
+    Read off the response metadata rather than the tool messages: by the time
+    the pause is built, the middleware that saw the failure is gone, and the
+    ``ToolMessage`` carries the fact only as prose for the model.
+    """
+    metadata = getattr(getattr(outcome, "response", None), "metadata", None)
+    return bool(isinstance(metadata, dict) and metadata.get("mutation_outcome_unknown"))
 
 
 def _read_decision(decision: Any) -> tuple[str, int]:

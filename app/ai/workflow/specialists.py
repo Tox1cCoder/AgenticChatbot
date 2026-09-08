@@ -824,6 +824,10 @@ class SpecialistFactory:
         artifacts = list(tool_execution.artifacts)
         images = list(tool_execution.images)
         metadata: dict[str, Any] = {"images": images} if images else {}
+        if getattr(tool_execution, "mutation_outcome_unknown", False):
+            # Travels on the response so the continuation decision can read it
+            # without reaching back into middleware that has gone.
+            metadata["mutation_outcome_unknown"] = True
         if accountant is not None:
             # Carried on the response so the graph can read why the turn
             # stopped without reaching back into middleware that has gone.

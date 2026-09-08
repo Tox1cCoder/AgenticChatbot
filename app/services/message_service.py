@@ -332,12 +332,22 @@ class MessageService(IMessageService):
             )
             return
 
+        # An undecidable side effect blocks Continue. The partial answer is
+        # still persisted and shown -- what is refused is spending another
+        # epoch, because resuming could perform the mutation a second time.
+        # `mark_continuable` turns a block reason into
+        # `continuation_available=false` with no continuation id minted.
+        block_reason = (
+            "mutation_outcome_unknown" if payload.get("mutation_outcome_unknown") else None
+        )
+
         try:
             offered = await self._amark_generation_continuable(
                 generation,
                 user_id=user_id,
                 assistant_message_id=bot_message_id,
                 execution_budget=budget,
+                block_reason=block_reason,
             )
         except Exception:
             # The answer is saved and streamed, so the turn is not a failure —

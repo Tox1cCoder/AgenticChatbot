@@ -407,6 +407,68 @@ async def test_a_pause_that_cannot_be_recorded_still_publishes_the_answer():
     assert service.persisted, "the answer was discarded along with the offer"
 
 
+async def test_an_undecidable_mutation_blocks_the_continuation():
+    """Resuming could perform the side effect a second time.
+
+    The partial answer is still persisted and published — the user should see
+    what happened — but no continuation id is minted, so there is nothing for a
+    Continue to redeem.
+    """
+    control = build_control_service()
+    service = _service(control)
+    running = await service._amark_generation_running(await _started(control), user_id=USER_ID)
+    event = _pause_event()
+    event.data["mutation_outcome_unknown"] = True
+
+    events = await _publish_pause(service, control, running, event=event)
+
+    assert service.persisted, "the answer was withheld along with the offer"
+    offer = events[-1].data
+    assert offer["continuation_available"] is False
+    assert offer["continuation_id"] is None
+    assert offer["continuation_block_reason"] == "mutation_outcome_unknown"
+
+
+async def test_a_decidable_turn_is_not_blocked():
+    """The guard must not fire on every pause."""
+    control = build_control_service()
+    service = _service(control)
+    running = await service._amark_generation_running(await _started(control), user_id=USER_ID)
+
+    events = await _publish_pause(service, control, running)
+
+    assert events[-1].data["continuation_available"] is True
+    assert events[-1].data["continuation_block_reason"] is None
+
+
+async def test_a_blocked_continuation_cannot_be_redeemed():
+    """The block is enforced, not merely reported."""
+    from app.schemas.generation import ContinueGenerationCommand
+    from app.services.generation_control_service import ContinuationUnavailable
+
+    control = build_control_service()
+    service = _service(control)
+    running = await service._amark_generation_running(await _started(control), user_id=USER_ID)
+    event = _pause_event()
+    event.data["mutation_outcome_unknown"] = True
+    await _publish_pause(service, control, running)  # a normal pause first
+    blocked = await control.find_by_logical_turn(
+        logical_turn_id="turn-1", user_id=USER_ID, conversation_id=CONVERSATION_ID
+    )
+
+    with pytest.raises(ContinuationUnavailable):
+        await control.prepare_continue(
+            ContinueGenerationCommand(
+                generation_id=blocked.generation_id,
+                continuation_id=uuid4(),
+                conversation_id=CONVERSATION_ID,
+                user_id=USER_ID,
+                idempotency_key="continue-key-0001",
+                expected_version=blocked.version,
+            )
+        )
+
+
 # ----------------------------------------------------------------------
 # terminal transitions
 # ----------------------------------------------------------------------
