@@ -567,12 +567,17 @@ git commit -m "feat: reserve tool-free synthesis at execution limits"
 >   refusal inside it goes to `finalize` rather than raising, because it sits on
 >   the only path a paused turn can leave by.
 >
-> **Not done here:** the graph-stream normalization in Step 4's last paragraph.
-> Nothing yet emits a typed internal continuation event, so the pause is
-> currently invisible to a client — the interrupt is raised but no adapter
-> distinguishes it from a tool-approval interrupt. That belongs with Task 6's
-> canonical events, and until it lands the pause cannot be exercised
-> end-to-end.
+> **Also landed:** `pending_continuation_payload` reads the pause back off a
+> checkpoint, and is deliberately disjoint from
+> `hitl_config.pending_interrupt_payload` — that one matches `action_requests`,
+> this one the `type` literal, and both directions are asserted. It never
+> raises: a checkpoint is read on every resume.
+>
+> **Still not done:** nothing *emits* the pause as a public stream event. The
+> graph raises it and the reader can find it, but no adapter projects it, so a
+> client cannot see a paused turn. That is Task 6's canonical
+> `continuation_available` event, and until it lands the pause cannot be
+> exercised end-to-end.
 
 **Files:**
 - Create: `app/ai/workflow/continuation.py`
@@ -645,6 +650,18 @@ git commit -m "feat: pause validated limited responses for continuation"
 ```
 
 ### Task 5: Make MessageService Own Start, Pause, Continue, and Stop
+
+> **Not started. One prerequisite fix landed 2026-09-08** so the current
+> behaviour is at least honest while this task waits:
+> `stop_message_generation` no longer removes the registry entry when its HTTP
+> wait times out — that left a retried Stop with nothing to cancel while the
+> turn was still running — and no longer reports `cancelled` for a stop nobody
+> confirmed. A timeout returns `stop_requested`. Nine tests; the method
+> previously had none, which is how both defects shipped.
+>
+> This task still replaces the method wholesale: the fix above is confined to
+> one worker's own registry, and the point of the durable lifecycle is that
+> Stop works when the request lands on a different worker than the stream.
 
 **Files:**
 - Modify: `app/services/message_service.py:1043-2225`
