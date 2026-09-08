@@ -35,6 +35,7 @@ __all__ = [
     "carry_messages",
     "make_continuation_pause_node",
     "pairs_are_intact",
+    "pending_continuation_payload",
 ]
 
 
@@ -240,3 +241,47 @@ def _read_decision(decision: Any) -> tuple[str, int]:
             return action, -1
     logger.warning("Unreadable continuation resume value of type %s", type(decision).__name__)
     return "stop", -1
+
+
+def pending_continuation_payload(snapshot: Any) -> ContinuationPausePayload | None:
+    """The live budget pause on a checkpoint, or ``None``.
+
+    Deliberately the mirror of ``hitl_config.pending_interrupt_payload``, and
+    deliberately disjoint from it: that one matches on ``action_requests`` and
+    this one on the ``type`` literal, so a budget pause can never be presented
+    to a human as a tool approval, nor an approval resumed as a budget
+    decision. ``tests/test_workflow_continuation.py`` asserts both directions.
+
+    Never raises. A checkpoint is read on every resume, so an unparseable value
+    has to mean "not a pause" rather than strand the turn.
+    """
+    for item in _live_interrupts(snapshot):
+        value = getattr(item, "value", None)
+        if not isinstance(value, dict):
+            continue
+        if value.get("type") != "execution_budget_exhausted":
+            continue
+        try:
+            return ContinuationPausePayload.model_validate(value)
+        except Exception:
+            logger.warning("Ignored an unreadable continuation pause payload")
+            return None
+    return None
+
+
+def _live_interrupts(snapshot: Any) -> list[Any]:
+    """Interrupts whose task has not produced a result yet.
+
+    ``task.result is None`` is the whole test. LangGraph keeps reporting an
+    answered interrupt on both the snapshot and its task, so anything looser
+    would re-present a pause the user already decided.
+    """
+    tasks = list(getattr(snapshot, "tasks", None) or ())
+    if tasks:
+        return [
+            item
+            for task in tasks
+            if getattr(task, "result", None) is None
+            for item in (getattr(task, "interrupts", None) or ())
+        ]
+    return list(getattr(snapshot, "interrupts", None) or ())

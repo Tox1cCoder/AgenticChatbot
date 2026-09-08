@@ -487,3 +487,99 @@ async def test_a_hard_limit_is_continuable_too():
     command = await node(_paused_state(execution_budget={"exhausted_by": "hard_limit"}))
 
     assert command.goto == "continuation_pause"
+
+
+# ----------------------------------------------------------------------
+# reading the pause back off a checkpoint
+# ----------------------------------------------------------------------
+
+
+class _Interrupt:
+    def __init__(self, value, interrupt_id="i1"):
+        self.value = value
+        self.id = interrupt_id
+
+
+class _Task:
+    def __init__(self, interrupts, result=None):
+        self.interrupts = interrupts
+        self.result = result
+
+
+class _Snapshot:
+    def __init__(self, tasks):
+        self.tasks = tasks
+
+
+def _pause_value(**overrides) -> dict:
+    value = {
+        "type": "execution_budget_exhausted",
+        "generation_id": "11111111-1111-1111-1111-111111111111",
+        "logical_turn_id": "turn-1",
+        "execution_epoch": 0,
+        "active_agent_id": "chat_agent",
+        "validated_content": "partial answer",
+        "budget": {"exhausted_by": "tool_calls"},
+    }
+    value.update(overrides)
+    return value
+
+
+def _approval_value() -> dict:
+    return {
+        "action_requests": [{"action": "web_search", "args": {}, "tool_call_id": "c1"}],
+        "metadata": {"interrupt_id": "i1"},
+    }
+
+
+def test_a_live_pause_is_recognised():
+    from app.ai.workflow.continuation import pending_continuation_payload
+
+    snapshot = _Snapshot([_Task([_Interrupt(_pause_value())])])
+
+    payload = pending_continuation_payload(snapshot)
+
+    assert payload is not None
+    assert payload.validated_content == "partial answer"
+    assert payload.execution_epoch == 0
+
+
+def test_an_answered_pause_is_not_reported_as_live():
+    """LangGraph keeps reporting a resolved interrupt; only the task result differs."""
+    from app.ai.workflow.continuation import pending_continuation_payload
+
+    snapshot = _Snapshot([_Task([_Interrupt(_pause_value())], result={})])
+
+    assert pending_continuation_payload(snapshot) is None
+
+
+def test_a_tool_approval_is_not_read_as_a_pause():
+    from app.ai.workflow.continuation import pending_continuation_payload
+
+    snapshot = _Snapshot([_Task([_Interrupt(_approval_value())])])
+
+    assert pending_continuation_payload(snapshot) is None
+
+
+def test_a_pause_is_not_read_as_a_tool_approval():
+    """The other direction, which is the one that would ask a human to approve nothing."""
+    from app.ai.hitl_config import pending_interrupt_payload
+
+    snapshot = _Snapshot([_Task([_Interrupt(_pause_value())])])
+
+    assert pending_interrupt_payload(snapshot) is None
+
+
+def test_a_malformed_pause_value_is_ignored_rather_than_raised():
+    """A checkpoint is read on every resume; raising there strands the turn."""
+    from app.ai.workflow.continuation import pending_continuation_payload
+
+    snapshot = _Snapshot([_Task([_Interrupt({"type": "execution_budget_exhausted"})])])
+
+    assert pending_continuation_payload(snapshot) is None
+
+
+def test_no_interrupts_at_all_is_not_a_pause():
+    from app.ai.workflow.continuation import pending_continuation_payload
+
+    assert pending_continuation_payload(_Snapshot([])) is None
