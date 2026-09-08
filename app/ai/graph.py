@@ -644,7 +644,18 @@ class MultiAgentWorkflow(
 
         # A new user turn gets a clean research budget; the previous turn's
         # deduplication must not suppress a legitimate follow-up question.
-        reset_research_budget(str(request.conversation_id) if request.conversation_id else None)
+        #
+        # Since R4 the store is keyed by logical turn, so a new turn already
+        # starts clean and this only stops the store holding an entry no epoch
+        # will ask for again. It is keyed the same way the lookups are, or it
+        # would clear nothing.
+        turn_identity = initial_state.get("turn_identity")
+        reset_research_budget(
+            logical_turn_id=str(getattr(turn_identity, "turn_id", "") or "") or None,
+            conversation_id=(
+                str(request.conversation_id) if request.conversation_id else None
+            ),
+        )
 
         # Derive planning_phase from persisted lifecycle:
         # If lifecycle is "executing", set execution phase so the planning agent
@@ -1840,6 +1851,7 @@ class MultiAgentWorkflow(
                 hitl_policy=dict(request.hitl_policy or {}),
                 attachments=list(request.attachments),
                 mode="public",
+                logical_turn_id=state_view.logical_turn_id(),
             )
         )
 

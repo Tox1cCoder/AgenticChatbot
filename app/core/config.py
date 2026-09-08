@@ -1463,6 +1463,18 @@ class Settings(BaseSettings):
             "pending -- it is never reported as stopped."
         ),
     )
+    generation_stop_poll_seconds: float = Field(
+        default=2.0,
+        ge=0.0,
+        le=60.0,
+        description=(
+            "Minimum seconds between a streaming worker's reads of its own "
+            "generation status. The row is what a Stop from another worker "
+            "changed, and the Redis signal is only a latency optimisation, so "
+            "this bounds how long such a Stop can go unnoticed. 0 checks at "
+            "every boundary."
+        ),
+    )
     generation_stop_channel: str = Field(
         default="generation:stop",
         min_length=1,

@@ -1036,19 +1036,37 @@ git commit -m "test: verify generation control parity and races"
 
 ## Acceptance Checklist
 
-Verified offline, 2026-09-08. Suite: 5309 passed, 130 skipped. The
-PostgreSQL items ran against a real `chatbot_test`, not a fake.
+Verified 2026-09-08. Suite: 5385 passed, 130 skipped. The PostgreSQL items
+ran against a real `chatbot_test` (141 tests) and the control-bus items
+against a real Redis, not fakes.
+
+**Every item below is now checked.** Two were checked only after the notes
+excusing them turned out to be wrong: see the Stop entry, whose
+"verified by construction" claim described a mechanism with no receiving
+half.
 
 - [x] Soft model/tool limits always reserve one tool-free answer call.
 - [x] Hard-limit defects produce a validated partial/fallback, not a generic public error.
 - [x] Continuation pauses only after assistant content is validated and persisted.
 - [x] Continue resumes the exact checkpoint/agent without routing or a user message.
-- [~] Stop is durable, distributed, idempotent, and honest about pending cancellation.
-  Durable, idempotent and honest are tested, the last against a real fence.
-  **Distributed is verified by construction, not by experiment:** the transition
-  precedes the publication and a worker that misses the signal finds
-  `stop_requested` on its next check, but no test runs two worker processes.
-  The bus tests use `InMemoryGenerationControlBus`.
+- [x] Stop is durable, distributed, idempotent, and honest about pending cancellation.
+  **The "distributed" claim was false when first written here, and the note
+  that excused it was wrong twice over.** It said a worker missing the signal
+  "finds `stop_requested` on its next check" — there was no such check — and it
+  called the delivery path verified by construction when the construction had
+  no receiving half at all: `bus.subscribe` was never called anywhere in
+  production, so `publish_stop` broadcast into a void. A Stop landing on a
+  worker other than the streaming one transitioned the row and interrupted
+  nothing.
+  Both halves now exist. `app/services/generation_stop_subscriber.py` attaches
+  this process's registry to the bus at startup (the fast path, best effort),
+  and `_DurableStopWatch` has the streaming worker read its own
+  `generations.status` at tool and model boundaries (the authoritative path,
+  since the row cannot un-stop). Verified over a real Redis in
+  `tests/integration/test_generation_stop_bus_redis.py` — two buses, separate
+  connections, publisher and subscriber sharing no Python state — and end to
+  end through the real stream loop in `tests/test_generation_stop_delivery.py`.
+  Both were confirmed by removing the mechanism and watching them fail.
 - [x] Unknown mutation outcomes block continuation.
   Wired 2026-09-08, having been plumbed-but-unreachable: `ToolExecutionMiddleware`
   records the undecidable mutation, `_to_outcome` carries it, the pause payload
@@ -1068,19 +1086,28 @@ PostgreSQL items ran against a real `chatbot_test`, not a fake.
 - [x] Forced synthesis and hard-limit handling are asserted on the specialist, RAG, and delegated-worker paths (R1).
 - [x] Epoch 2 receives epoch 1's evidence, asserted on the messages handed to the model (R2).
 - [x] The final tool-free call is asserted after the full middleware stack, including one provider fallback (R3).
-- [ ] Research accounting is keyed by logical turn, persisted, and rehydrated; a failed rehydration fails the Continue (R4).
-  **Not done, and the only open item.** The column exists, `MarkContinuable`
-  accepts it and `ContinuationLease` returns it, but nothing writes it and
-  nothing rehydrates it: `app/ai/research_budget.py` still keys
-  `_budgets: OrderedDict[str, ResearchBudget]` by conversation id at module
-  scope, and a new turn resets it (`app/ai/graph.py:646`). So a Continue served
-  by another worker sees no accounting at all, and one served by this worker
-  shares a conversation-keyed budget with any other turn in flight.
-  Consequence: cross-epoch search deduplication does not survive Continue, so
-  a continued turn may repeat a query the previous epoch already refused. R4's
-  "fail the Continue rather than proceed with an empty budget" is therefore
-  also unimplemented — an empty budget is currently indistinguishable from a
-  fresh turn's full quota.
+- [x] Research accounting is keyed by logical turn, persisted, and rehydrated; a failed rehydration fails the Continue (R4).
+  Done 2026-09-08. The store is keyed by logical turn, threaded through
+  `ToolContext.logical_turn_id` to all three `tool_execution_context` call
+  sites and both `RagExecutionRequest` constructions. `to_state`/
+  `research_budget_from_state` persist the dedup memory onto the row; the pause
+  writes it and both Continue paths rehydrate through the same
+  `install_research_budget`, so a same-worker Continue cannot get a different
+  allowance than a cross-worker one.
+  What a Continue replenishes is now explicit and tested: the per-epoch call
+  caps reset, the "already searched this" memory does not. Only token sets
+  travel, never result text — the next epoch already has the previous one's
+  `ToolMessage`s through `carried_messages`, and a row is the wrong place for
+  provider output.
+  An unreadable payload raises `ResearchAccountingUnreadable` and fails the
+  Continue with a typed `research_accounting_unreadable` error. Degrading to an
+  empty budget is the one thing it must not do, because an empty budget is
+  indistinguishable from a fresh turn's full quota. Eleven parameterized cases
+  cover the malformed shapes; both guarantees were confirmed by mutation.
+  The accessors are keyword-only. Before R4 the single positional parameter was
+  the conversation id, so making the turn id positional would have let every
+  existing call keep working against a *different* key — a silently wrong cache
+  key, which the image-research tests caught immediately.
 - [x] A delayed Stop replay after a later Continue is refused as stale, not executed (R5).
   Tested at the service boundary and against the real fence in
   `tests/integration/test_generation_control_races_postgres.py`.
@@ -1092,9 +1119,11 @@ Named here rather than left for a reader to discover:
 - **No turn has been continued by a real model.** The pause, the carried
   evidence and the resume are covered by tests including a real compiled
   LangGraph with a real checkpointer, but every model in them is scripted.
-- **No Stop has been raced across two processes.** The cross-worker guarantee
-  is verified against a real PostgreSQL from separate sessions, which is the
-  part the database owns; the Redis hop between processes is not exercised.
+- **No Stop has been raced across two OS processes.** The database half is
+  verified against a real PostgreSQL from separate sessions, and the Redis hop
+  is verified between two buses on separate connections — which is what Redis
+  actually distinguishes. What remains unexercised is a process boundary, to
+  which Redis is indifferent.
 - **The seven execution rungs are carried defaults.** They decide when a user's
   turn is cut short in favour of a partial answer, and none was selected from
   measurement.

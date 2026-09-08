@@ -148,6 +148,10 @@ class RagExecutionRequest(BaseModel):
     # by a worker that never ran the previous epoch, and an absent budget there
     # would look exactly like a fresh turn with a full quota.
     execution_budget: dict[str, Any] | None = None
+    # The key research accounting is stored under (R4). Without it a RAG turn's
+    # tool calls would fall back to conversation scoping and share a bucket
+    # with any other turn in flight for the same conversation.
+    logical_turn_id: str | None = None
 
 
 class RagModelTurn(BaseModel):
@@ -774,6 +778,7 @@ class ProductionRagRuntime:
                 _agent_key(agent),
                 request.device_id,
                 rich_response_capable=True,
+                logical_turn_id=request.logical_turn_id,
             ):
                 outputs, produced_artifacts, produced_images = await execute_tool_calls(
                     tool_calls=non_search,

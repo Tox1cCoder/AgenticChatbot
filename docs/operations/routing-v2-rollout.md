@@ -422,6 +422,7 @@ is cut short, and no evaluation has been run on them.
 | `generation_hard_tool_calls_per_epoch` | 16 | Framework ceiling; must exceed the soft rung |
 | `generation_total_epochs_per_turn` | 5 | How many times one turn may be continued |
 | `generation_stop_wait_seconds` | 5.0 | How long a Stop waits for the worker before answering `stop_requested` |
+| `generation_stop_poll_seconds` | 2.0 | Minimum gap between a streaming worker's reads of its own status. Bounds how long a Stop from another worker can go unnoticed if the Redis signal is missed |
 | `generation_stop_channel` | `generation:stop` | Redis channel carrying stop signals between workers |
 | `generation_stop_reconnect_seconds` | 1.0 | Initial backoff for a dropped stop subscriber |
 | `generation_stop_max_reconnect_seconds` | 30.0 | Ceiling for that backoff |
@@ -460,6 +461,29 @@ not yet honour:
 4. **Soft-limit pausing.** Last, because until step 3 lands a paused turn shows
    a partial answer with no way to continue it.
 
+### How a Stop actually reaches the owning worker
+
+Two mechanisms, and it is worth knowing which one is load-bearing. Until
+2026-09-08 neither existed: `publish_stop` broadcast into a void because
+nothing called `bus.subscribe`, and the streaming worker read only its
+in-process cancel event — which only a Stop landing on *that* worker can set.
+A cross-worker Stop changed the row and interrupted nothing.
+
+1. **The subscriber** (`app/services/generation_stop_subscriber.py`, attached
+   in the lifespan hook) hands the signal to this process's registry, which
+   cancels the producer task. This is what reaches a worker blocked inside a
+   provider call, where no check point is coming. Best effort.
+2. **The worker's own status read** (`_DurableStopWatch`) polls
+   `generations.status` at tool and model boundaries — not per token, which
+   would put a query on the hot path of every answer. This is the
+   authoritative path: the row cannot un-stop, so the check only has to happen
+   eventually. `generation_stop_poll_seconds` bounds how long a Stop can go
+   unnoticed by a worker that never received the signal.
+
+If the subscriber is down, Stop still works and is merely slower by up to that
+interval. If the *poll* were removed, a cross-worker Stop would depend entirely
+on a best-effort signal.
+
 ### Redis subscriber health
 
 The bus is a `Singleton` — one connection and one subscriber task per process.
@@ -467,12 +491,35 @@ A `Factory` would open one of each per request and deliver stop signals to a
 subscriber nobody is listening to.
 
 - The signal is published **after** the durable transition, never instead of
-  it. A worker that misses it still finds `stop_requested` on its next check,
-  so a subscriber outage degrades Stop's latency, not its correctness.
+  it. A worker that misses it still finds `stop_requested` on its next status
+  read, so a subscriber outage degrades Stop's latency, not its correctness.
 - Payload is a schema version, a generation id and a lifecycle version. No
   content, no prompt, no user id.
 - Watch reconnect backoff climbing to `generation_stop_max_reconnect_seconds`
   and staying there: that is a subscriber that is not recovering.
+
+### What a Continue replenishes
+
+Explicit because getting it backwards is silently expensive in provider calls:
+
+| Quota | On Continue |
+|---|---|
+| Per-epoch model/tool call caps | **Reset.** That is what continuing is for |
+| Research call caps (`research_max_search_calls_per_turn`) | **Reset** |
+| Image-discovery slots | **Reset** |
+| "Already searched this" dedup memory | **Kept.** Carried on `generations.research_accounting` |
+| Image-subject dedup memory | **Kept** |
+
+Keeping the dedup memory is the point: without it Continue becomes a way to
+re-run the identical query the previous epoch's cap had just refused. Only the
+query token sets are persisted, never result text — the next epoch already
+receives the previous one's tool results through the carried transcript.
+
+An accounting payload that exists but cannot be read **fails the Continue**
+(`research_accounting_unreadable`). Degrading to an empty budget would look
+like success while granting the epoch a full new quota, which is
+indistinguishable from a fresh turn. A turn that never searched has no payload,
+and that is not an error.
 
 ### Reconciling a stuck `stop_requested`
 
@@ -586,9 +633,12 @@ both what was deleted and what is still live.
 9. **Continue has never run against a live provider.** The pause, the carried
    evidence and the resume are covered by tests including a real compiled
    LangGraph with a real checkpointer, but no continued turn has been served by
-   a real model, and no Stop has been raced across two real worker processes.
-   The cross-worker path is verified against a real PostgreSQL, not against two
-   processes.
+   a real model.
+10. **No Stop has been raced across two OS processes.** The database half runs
+    against a real PostgreSQL from separate sessions and the Redis hop against
+    a real Redis between two separate connections — which is the distinction
+    Redis actually makes. What remains unexercised is a process boundary, to
+    which Redis is indifferent.
 Closed since the last revision of this document: RAG and Planning no longer run
 pre-v2 loops; `_tool_node`/`_approval_node` are deleted; the
 `disable_outer_timeout` allowlist is empty, so every interactive tool call is

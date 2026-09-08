@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
@@ -125,6 +126,88 @@ def _service_event_from_ai_event(
     public stream strictly monotonic.
     """
     return event.model_copy(update={"sequence": sequence})
+
+
+#: Stream events at which a durable stop check is worth a database read. Tool
+#: and model boundaries, and the route landing -- the points where the turn is
+#: about to spend something. Token deltas are excluded on purpose: a read per
+#: token would put a query on the hot path of every answer.
+_DURABLE_STOP_CHECKPOINTS = frozenset(
+    {
+        "agent_selected",
+        "tool_call_available",
+        "tool_execution_start",
+        "tool_execution_end",
+        "message_start",
+        "reasoning_start",
+        "subagent_start",
+        "subagent_end",
+        "state_snapshot",
+    }
+)
+
+
+class _DurableStopWatch:
+    """Reads ``generations.status`` at boundaries, not per event.
+
+    Why this exists at all: the in-process registry can only be signalled by a
+    Stop that landed on *this* worker. The Redis broadcast reaches the others,
+    but a signal is best-effort — a dropped subscriber, a restarted process, a
+    publish that failed after the transition committed. The row is what is
+    always true, so the worker asks it.
+
+    Why it is throttled: correctness needs the check to happen *eventually*,
+    not immediately, because the row cannot un-stop. So a minimum interval
+    between reads costs a little latency and removes a per-token query from
+    every answer the system produces.
+    """
+
+    def __init__(self, *, control: Any, generation: Any, user_id: UUID | None) -> None:
+        self._control = control
+        self._generation = generation
+        self._user_id = user_id
+        self._last_checked = 0.0
+        self._settled = False
+
+    @property
+    def _interval(self) -> float:
+        return max(0.0, float(getattr(settings, "generation_stop_poll_seconds", 2.0)))
+
+    async def stop_requested(self, event_type: str) -> bool:
+        """Whether the row says this turn should stop.
+
+        ``False`` for every reason that is not a definite yes: no lifecycle
+        service, an unreadable row, a read that failed. A stop that cannot be
+        confirmed must not end a turn that is producing a good answer.
+        """
+        if self._settled or self._control is None or self._generation is None:
+            return False
+        if event_type not in _DURABLE_STOP_CHECKPOINTS:
+            return False
+
+        now = time.monotonic()
+        if now - self._last_checked < self._interval:
+            return False
+        self._last_checked = now
+
+        from app.models.generation import GenerationStatus
+
+        try:
+            snapshot = await self._control.aget_snapshot(
+                generation_id=self._generation.generation_id,
+                user_id=self._user_id,
+                conversation_id=self._generation.conversation_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed read never stops a turn
+            logging.debug("Durable stop check failed: %s", type(exc).__name__)
+            return False
+
+        if snapshot is None:
+            return False
+        if snapshot.status is GenerationStatus.STOP_REQUESTED:
+            self._settled = True
+            return True
+        return False
 
 
 class MessageService(IMessageService):
@@ -347,6 +430,9 @@ class MessageService(IMessageService):
                 user_id=user_id,
                 assistant_message_id=bot_message_id,
                 execution_budget=budget,
+                research_accounting=self._research_accounting_snapshot(
+                    payload.get("logical_turn_id"), conversation_id
+                ),
                 block_reason=block_reason,
             )
         except Exception:
@@ -471,6 +557,58 @@ class MessageService(IMessageService):
             )
             return None
 
+    @staticmethod
+    def _install_research_accounting(lease: Any, *, conversation_id: UUID) -> None:
+        """Restore the turn's research dedup memory for the epoch about to run.
+
+        Both Continue paths go through this, on purpose: a Continue served by
+        *this* worker rehydrates from the row exactly as one served by another
+        worker does, rather than reusing whatever the in-memory entry holds. One
+        path means the two cannot disagree about how much quota the epoch has.
+
+        A turn that never searched has no accounting, and that is not an error —
+        there is nothing for the next epoch to be refused against. Only a
+        payload that exists and cannot be read is fatal, and it raises.
+        """
+        from app.ai.research_budget import install_research_budget
+
+        payload = getattr(lease, "research_accounting", None)
+        if payload is None:
+            return
+        install_research_budget(
+            payload,
+            logical_turn_id=lease.snapshot.logical_turn_id,
+            conversation_id=str(conversation_id),
+        )
+
+    @staticmethod
+    def _research_accounting_snapshot(
+        logical_turn_id: Any,
+        conversation_id: UUID,
+    ) -> dict[str, Any] | None:
+        """The turn's research dedup memory, for the next epoch to respect.
+
+        Persisted on the row rather than left in process memory (R4): a
+        Continue may be served by a worker that never ran this epoch, and an
+        absent accounting there is indistinguishable from a fresh turn with a
+        full quota.
+
+        Never raises. Failing to snapshot costs the next epoch its dedup
+        memory, which is a worse answer but still an answer; failing the *pause*
+        over it would discard a validated partial the user can already see.
+        The Continue side is where an unreadable payload is fatal.
+        """
+        from app.ai.research_budget import snapshot_research_budget
+
+        try:
+            return snapshot_research_budget(
+                logical_turn_id=str(logical_turn_id) if logical_turn_id else None,
+                conversation_id=str(conversation_id),
+            )
+        except Exception as exc:  # noqa: BLE001 - never fails a validated pause
+            logging.warning("Could not snapshot research accounting: %s", type(exc).__name__)
+            return None
+
     async def _amark_generation_continuable(
         self,
         generation: Any,
@@ -478,6 +616,7 @@ class MessageService(IMessageService):
         user_id: UUID,
         assistant_message_id: UUID,
         execution_budget: dict[str, Any] | None = None,
+        research_accounting: dict[str, Any] | None = None,
         block_reason: str | None = None,
     ):
         """Offer Continue on a partial answer that is already persisted.
@@ -507,6 +646,7 @@ class MessageService(IMessageService):
                 expected_version=generation.version,
                 assistant_message_id=assistant_message_id,
                 execution_budget=execution_budget,
+                research_accounting=research_accounting,
                 continuation_block_reason=block_reason,
             )
         )
@@ -1598,6 +1738,12 @@ class MessageService(IMessageService):
             stream_tool_artifacts: list[dict[str, Any]] = []
             stream_tool_args_by_id: dict[str, Any] = {}
 
+            stop_watch = _DurableStopWatch(
+                control=self._generation_control(),
+                generation=generation,
+                user_id=resolved_user_id or user_id,
+            )
+
             try:
                 async for raw_event in self.ai_service.execute_request_stream(workflow_request):
                     # ---- Check cancellation before processing each event ----
@@ -1610,6 +1756,22 @@ class MessageService(IMessageService):
 
                     event = _service_event_from_ai_event(raw_event, sequence=_next_sequence())
                     event_type = event.type
+
+                    # The row is the authority on whether this turn was asked
+                    # to stop, and it is the only thing a Stop that landed on
+                    # another worker could have changed. Polled at coarse
+                    # boundaries rather than per token — see _DurableStopWatch.
+                    if await stop_watch.stop_requested(event_type):
+                        logging.info(
+                            "Stream stopping on durable status for generation=%s",
+                            registry_key,
+                        )
+                        # `mark_cancelled`, not `request_cancel`: this producer
+                        # is stopping itself and is already at a check point.
+                        # Cancelling its own task would raise out of the very
+                        # code below that persists the partial.
+                        inflight.mark_cancelled()
+                        break
 
                     if event_type == "agent_selected":
                         active_agent_id = event.agent or event.data.get("agent")
@@ -2739,6 +2901,30 @@ class MessageService(IMessageService):
             nonlocal sequence
             sequence += 1
             return sequence
+
+        # R4: restore the turn's research accounting before anything can spend
+        # it. An unreadable payload fails the Continue rather than proceeding,
+        # because an empty budget looks exactly like a fresh turn's full quota
+        # and the epoch would re-run every search the last one already paid for.
+        try:
+            self._install_research_accounting(lease, conversation_id=conversation_id)
+        except Exception as exc:
+            logging.warning(
+                "Refusing a continuation whose research accounting is unreadable: %s", exc
+            )
+            yield make_event(
+                "error",
+                sequence=_next_sequence(),
+                conversation_id=str(conversation_id),
+                data={
+                    "error": (
+                        "This answer cannot be continued: its research accounting could "
+                        "not be restored."
+                    ),
+                    "error_code": "research_accounting_unreadable",
+                },
+            )
+            return
 
         registry = get_generation_registry()
         inflight = registry.register(

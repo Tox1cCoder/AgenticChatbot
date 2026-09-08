@@ -238,6 +238,7 @@ class SpecialistToolScope:
             self.agent_key,
             self.device_id,
             rich_response_capable=self.rich_response_capable,
+            logical_turn_id=self.turn_id,
         )
 
 

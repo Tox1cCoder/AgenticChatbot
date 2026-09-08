@@ -35,7 +35,13 @@ from langgraph.types import Command, Send
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from typing_extensions import NotRequired, TypedDict
 
-from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+from app.ai.schemas import (
+    AgentMessage,
+    AgentResponse,
+    AgentType,
+    GraphStateView,
+    MessageRole,
+)
 from app.ai.workflow.contracts import (
     DispatchSubagentsInput,
     OutcomeProvenance,
@@ -498,6 +504,9 @@ class PlanningWorkerRuntime:
                 mode="worker",
                 dispatch_id=task.dispatch_id,
                 task_id=task.task_id,
+                # A delegated worker shares the turn's accounting: two workers
+                # searching the same thing is the duplication this bounds.
+                logical_turn_id=GraphStateView(dict(state)).logical_turn_id(),
             )
         )
         return WorkerResult(

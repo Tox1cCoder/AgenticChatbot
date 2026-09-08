@@ -82,11 +82,26 @@ class InflightEntry:
         The event is what a well-behaved producer checks between awaits. The
         task cancellation is what reaches one blocked inside a provider call,
         where no check point comes around.
+
+        For a producer stopping *itself* — one that noticed the durable status
+        moved — use :meth:`mark_cancelled` instead. This method would cancel
+        the caller's own task, so the cooperative break it was about to make
+        never happens and the partial is never persisted.
         """
         self.cancel_event.set()
         task = self.task
         if task is not None and not task.done():
             task.cancel()
+
+    def mark_cancelled(self) -> None:
+        """Set the cooperative flag without cancelling the task.
+
+        For the producer noticing its own stop. It is already at a check point,
+        so it needs the flag set so the post-loop path persists its partial —
+        cancelling its own task instead would raise ``CancelledError`` out of
+        the very code that was about to handle the stop cleanly.
+        """
+        self.cancel_event.set()
 
     @property
     def is_cancelled(self) -> bool:

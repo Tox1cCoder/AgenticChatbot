@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.ai.research_budget import (
     ResearchBudget,
     get_research_budget,
@@ -153,20 +155,268 @@ def test_a_failed_image_search_does_not_buy_a_retry():
 
 
 def test_budget_is_per_conversation_and_resettable():
-    first = get_research_budget("conv-a")
+    first = get_research_budget(conversation_id="conv-a")
     first.record_search("alpha", "A")
 
-    assert get_research_budget("conv-a") is first
-    assert get_research_budget("conv-b") is not first
+    assert get_research_budget(conversation_id="conv-a") is first
+    assert get_research_budget(conversation_id="conv-b") is not first
 
-    reset_research_budget("conv-a")
-    assert get_research_budget("conv-a").search_calls == 0
+    reset_research_budget(conversation_id="conv-a")
+    assert get_research_budget(conversation_id="conv-a").search_calls == 0
 
 
 def test_missing_conversation_id_gets_an_isolated_budget():
-    reset_research_budget(None)
-    budget = get_research_budget(None)
+    reset_research_budget(conversation_id=None)
+    budget = get_research_budget(conversation_id=None)
     budget.record_search("alpha", "A")
 
-    reset_research_budget(None)
-    assert get_research_budget(None).search_calls == 0
+    reset_research_budget(conversation_id=None)
+    assert get_research_budget(conversation_id=None).search_calls == 0
+
+
+# ----------------------------------------------------------------------
+# keyed by logical turn, and carried across epochs (R4)
+# ----------------------------------------------------------------------
+
+
+def test_the_budget_is_keyed_by_logical_turn_not_conversation():
+    """Two turns in one conversation must not share a dedup memory.
+
+    Conversation keying meant a turn in flight shared its allowance and its
+    "already searched" memory with any other turn for the same conversation.
+    """
+    first = get_research_budget(logical_turn_id="turn-1", conversation_id="conv-a")
+    second = get_research_budget(logical_turn_id="turn-2", conversation_id="conv-a")
+
+    assert first is not second
+
+
+def test_the_same_turn_finds_the_same_budget():
+    first = get_research_budget(logical_turn_id="turn-3", conversation_id="conv-a")
+    first.record_search("alpha", "A")
+
+    assert get_research_budget(logical_turn_id="turn-3", conversation_id="conv-a") is first
+
+
+def test_a_caller_without_a_turn_falls_back_to_conversation_scope():
+    """Not to one shared global bucket, which would leak between turns."""
+    scoped = get_research_budget(conversation_id="conv-fallback")
+
+    assert get_research_budget(logical_turn_id=None, conversation_id="conv-fallback") is scoped
+    assert get_research_budget(conversation_id="conv-other") is not scoped
+
+
+def test_the_accessors_are_keyword_only():
+    """A positional call would read and write a different key than it meant.
+
+    Before R4 the single positional parameter was the conversation id. Making
+    the turn id positional instead would have let every existing call keep
+    working against the wrong key — silent, and worse than a crash.
+    """
+    with pytest.raises(TypeError):
+        get_research_budget("conv-a")  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        reset_research_budget("conv-a")  # type: ignore[misc]
+
+
+def test_a_persisted_accounting_round_trips():
+    from app.ai.research_budget import research_budget_from_state
+
+    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget.record_search("population of vietnam 2024", "…", scope=("advanced", 5))
+
+    restored = research_budget_from_state(budget.to_state())
+
+    assert restored.searched_in_prior_epoch(
+        "population of vietnam 2024", scope=("advanced", 5)
+    )
+
+
+def test_a_scope_survives_the_round_trip_as_a_tuple():
+    """A list would never compare equal to a caller's tuple, so the guard
+    would silently stop matching and every query would look new."""
+    from app.ai.research_budget import research_budget_from_state
+
+    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget.record_search("alpha beta", "…", scope=("advanced", 5))
+
+    restored = research_budget_from_state(budget.to_state())
+
+    assert restored.searched_in_prior_epoch("alpha beta", scope=("advanced", 5)) is True
+    # A different scope is a different search, before and after the round trip.
+    assert restored.searched_in_prior_epoch("alpha beta", scope=("basic", 5)) is False
+
+
+def test_a_continued_epoch_gets_its_call_cap_back():
+    """The point of continuing. The allowance resets; the memory does not."""
+    from app.ai.research_budget import research_budget_from_state
+
+    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget.record_search("alpha", "A")
+    budget.record_search("beta", "B")
+    assert budget.reserve_search("gamma") is False, "the first epoch should be spent"
+
+    restored = research_budget_from_state(budget.to_state())
+
+    assert restored.search_calls == 0
+    assert restored.reserve_search("gamma") is True
+
+
+def test_a_continued_epoch_cannot_re_run_a_query_the_last_one_made():
+    """Otherwise Continue is a way around the cap that just refused it."""
+    from app.ai.research_budget import research_budget_from_state
+
+    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget.record_search("population of vietnam", "…")
+
+    restored = research_budget_from_state(budget.to_state())
+
+    assert restored.reserve_search("population of vietnam") is False
+
+
+def test_a_near_duplicate_of_a_prior_epochs_query_is_also_refused():
+    from app.ai.research_budget import research_budget_from_state
+
+    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget.record_search("population of vietnam 2024", "…")
+
+    restored = research_budget_from_state(budget.to_state())
+
+    assert restored.reserve_search("vietnam population 2024") is False
+
+
+def test_a_prior_epochs_query_has_no_result_to_reuse():
+    """Only tokens are persisted, never result text.
+
+    The next epoch receives the previous one's ToolMessages through
+    ``carried_messages``, so the row does not need to carry the evidence — and
+    a row is the wrong place to put unbounded provider output.
+    """
+    from app.ai.research_budget import research_budget_from_state
+
+    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget.record_search("alpha", "the full provider response")
+
+    state = budget.to_state()
+
+    assert "the full provider response" not in str(state)
+    assert research_budget_from_state(state).find_reuse("alpha") is None
+
+
+def test_an_image_subject_is_not_searched_twice_across_epochs():
+    from app.ai.research_budget import research_budget_from_state
+
+    budget = ResearchBudget(
+        max_search_calls=2, near_duplicate_threshold=0.75, max_image_searches=1
+    )
+    assert budget.reserve_image_search("a red bicycle") is True
+
+    restored = research_budget_from_state(budget.to_state())
+
+    assert restored.reserve_image_search("a red bicycle") is False
+    # But the slot itself is replenished for a different subject.
+    assert restored.reserve_image_search("a blue canoe") is True
+
+
+def test_the_epoch_count_advances_with_each_restore():
+    from app.ai.research_budget import research_budget_from_state
+
+    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget.record_search("alpha", "A")
+
+    second = research_budget_from_state(budget.to_state())
+    third = research_budget_from_state(second.to_state())
+
+    assert (budget.epochs_recorded, second.epochs_recorded, third.epochs_recorded) == (1, 2, 3)
+
+
+def test_the_persisted_memory_is_bounded():
+    """A row is not a place for unbounded growth."""
+    from app.ai.research_budget import _MAX_PERSISTED_SEARCHES
+
+    budget = ResearchBudget(max_search_calls=1000, near_duplicate_threshold=1.0)
+    for index in range(_MAX_PERSISTED_SEARCHES + 25):
+        budget.record_search(f"query number {index}", "…")
+
+    assert len(budget.to_state()["searched"]) == _MAX_PERSISTED_SEARCHES
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        "not-an-object",
+        {},
+        {"schema_version": 999, "searched": []},
+        {"schema_version": 1},
+        {"schema_version": 1, "searched": "not-a-list"},
+        {"schema_version": 1, "searched": ["not-an-object"]},
+        {"schema_version": 1, "searched": [{"tokens": "abc", "scope": []}]},
+        {"schema_version": 1, "searched": [{"tokens": [], "scope": "nope"}]},
+        {"schema_version": 1, "searched": [], "image_subjects": "nope"},
+        {"schema_version": 1, "searched": [], "image_subjects": ["not-a-list"]},
+    ],
+)
+def test_an_unreadable_accounting_is_refused_not_emptied(payload):
+    """R4's explicit requirement: fail rather than proceed.
+
+    An empty budget is indistinguishable from a fresh turn with a full quota,
+    so degrading to one would silently re-run every search the previous epoch
+    already paid for — while looking like success.
+    """
+    from app.ai.research_budget import (
+        ResearchAccountingUnreadable,
+        research_budget_from_state,
+    )
+
+    with pytest.raises(ResearchAccountingUnreadable):
+        research_budget_from_state(payload)
+
+
+def test_a_turn_that_never_searched_snapshots_nothing():
+    """``None``, not an empty payload.
+
+    "Never searched" and "restored from a payload with no entries" must stay
+    distinguishable, or a rehydration failure could not be told from a turn
+    that simply had nothing to carry.
+    """
+    from app.ai.research_budget import snapshot_research_budget
+
+    reset_research_budget(logical_turn_id="turn-quiet")
+    get_research_budget(logical_turn_id="turn-quiet")
+
+    assert snapshot_research_budget(logical_turn_id="turn-quiet") is None
+
+
+def test_a_turn_that_searched_snapshots_its_memory():
+    from app.ai.research_budget import snapshot_research_budget
+
+    reset_research_budget(logical_turn_id="turn-busy")
+    get_research_budget(logical_turn_id="turn-busy").record_search("alpha beta", "A")
+
+    state = snapshot_research_budget(logical_turn_id="turn-busy")
+
+    assert state is not None
+    assert state["searched"]
+
+
+def test_installing_an_accounting_replaces_the_live_budget():
+    """Both Continue paths rehydrate, including a same-worker one.
+
+    Reusing the in-memory entry for a same-worker Continue would give it a
+    spent allowance while a cross-worker Continue got a fresh one — the two
+    paths must not disagree.
+    """
+    from app.ai.research_budget import install_research_budget
+
+    reset_research_budget(logical_turn_id="turn-install")
+    live = get_research_budget(logical_turn_id="turn-install")
+    live.record_search("alpha", "A")
+    live.record_search("beta", "B")
+    assert live.reserve_search("gamma") is False
+
+    installed = install_research_budget(live.to_state(), logical_turn_id="turn-install")
+
+    assert get_research_budget(logical_turn_id="turn-install") is installed
+    assert installed.reserve_search("gamma") is True
+    assert installed.reserve_search("alpha") is False

@@ -264,6 +264,22 @@ class GraphStateView:
         value = self._state.get("user_id")
         return value if isinstance(value, str) or value is None else str(value)
 
+    def logical_turn_id(self) -> str | None:
+        """The turn's stable id, from ``turn_identity`` or the flat key.
+
+        Research accounting is keyed by this (R4). ``turn_identity`` is the
+        routing-v2 home for it; the flat ``logical_turn_id`` key is what a
+        resumed continuation carries, so both are read.
+        """
+        identity = self._state.get("turn_identity")
+        turn_id = getattr(identity, "turn_id", None)
+        if turn_id:
+            return str(turn_id)
+        if isinstance(identity, dict) and identity.get("turn_id"):
+            return str(identity["turn_id"])
+        value = self._state.get("logical_turn_id")
+        return str(value) if value else None
+
     def device_id(self) -> str | None:
         value = self._state.get("device_id")
         return value if isinstance(value, str) or value is None else str(value)

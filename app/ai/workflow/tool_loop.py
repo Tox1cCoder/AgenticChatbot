@@ -261,6 +261,7 @@ class ToolLoopMixin:
             agent_key,
             device_id,
             rich_response_capable=rich_response_capable_from_context(state.get("context")),
+            logical_turn_id=state_view.logical_turn_id(),
         ):
             outputs, artifacts, images = await execute_tool_calls(
                 tool_calls=tool_calls,

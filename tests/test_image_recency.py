@@ -201,14 +201,14 @@ class _Tool:
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     clear_tool_context()
-    reset_research_budget(CONVERSATION_ID)
+    reset_research_budget(conversation_id=CONVERSATION_ID)
     monkeypatch.setattr(
         web_tools.settings, "remote_image_enrichment_enabled", True, raising=False
     )
     monkeypatch.setattr(web_tools.settings, "inline_rich_response_enabled", True, raising=False)
     yield
     clear_tool_context()
-    reset_research_budget(CONVERSATION_ID)
+    reset_research_budget(conversation_id=CONVERSATION_ID)
 
 
 async def _discover(**call_args: object) -> list[dict]:

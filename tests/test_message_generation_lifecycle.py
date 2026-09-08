@@ -470,6 +470,160 @@ async def test_a_blocked_continuation_cannot_be_redeemed():
 
 
 # ----------------------------------------------------------------------
+# research accounting across epochs (R4)
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def _clean_research_budget():
+    from app.ai.research_budget import reset_research_budget
+
+    reset_research_budget(logical_turn_id="turn-1", conversation_id=str(CONVERSATION_ID))
+    yield
+    reset_research_budget(logical_turn_id="turn-1", conversation_id=str(CONVERSATION_ID))
+
+
+async def test_the_pause_persists_the_turns_research_accounting(_clean_research_budget):
+    """It must reach the row, not stay in this worker's memory.
+
+    A Continue may be served by a worker that never ran this epoch, and an
+    absent accounting there is indistinguishable from a fresh turn with a full
+    quota — so it would re-run every search this epoch already paid for.
+    """
+    from app.ai.research_budget import get_research_budget
+
+    control = build_control_service()
+    service = _service(control)
+    running = await service._amark_generation_running(await _started(control), user_id=USER_ID)
+    get_research_budget(
+        logical_turn_id="turn-1", conversation_id=str(CONVERSATION_ID)
+    ).record_search("population of vietnam", "…")
+
+    await _publish_pause(service, control, running)
+
+    row = control._test_repository.rows[running.generation_id]
+    assert row["research_accounting"] is not None
+    assert row["research_accounting"]["searched"], "the dedup memory was not persisted"
+
+
+async def test_a_turn_that_never_searched_persists_no_accounting(_clean_research_budget):
+    control = build_control_service()
+    service = _service(control)
+    running = await service._amark_generation_running(await _started(control), user_id=USER_ID)
+
+    await _publish_pause(service, control, running)
+
+    assert control._test_repository.rows[running.generation_id]["research_accounting"] is None
+
+
+async def test_continue_restores_the_accounting_before_the_epoch_runs(_clean_research_budget):
+    """Restored, and restored *before* anything can spend it."""
+    from app.ai.research_budget import get_research_budget
+
+    control = build_control_service()
+    service = _service(control)
+    running = await service._amark_generation_running(await _started(control), user_id=USER_ID)
+    get_research_budget(
+        logical_turn_id="turn-1", conversation_id=str(CONVERSATION_ID)
+    ).record_search("population of vietnam", "…")
+    await _publish_pause(service, control, running)
+    offered = await control.find_by_logical_turn(
+        logical_turn_id="turn-1", user_id=USER_ID, conversation_id=CONVERSATION_ID
+    )
+
+    observed: dict[str, Any] = {}
+
+    async def resume_generation_control_stream(**kwargs):
+        budget = get_research_budget(
+            logical_turn_id="turn-1", conversation_id=str(CONVERSATION_ID)
+        )
+        observed["repeat_refused"] = budget.reserve_search("population of vietnam") is False
+        observed["fresh_allowed"] = budget.reserve_search("a different question") is True
+        yield make_event("complete", sequence=1, data={"response": None})
+
+    service.ai_service = SimpleNamespace(
+        resume_generation_control_stream=resume_generation_control_stream
+    )
+
+    async for _event in service.continue_message_generation_stream(
+        generation_id=offered.generation_id,
+        continuation_id=offered.continuation_id,
+        conversation_id=CONVERSATION_ID,
+        user_id=USER_ID,
+        idempotency_key="continue-key-0001",
+        expected_version=offered.version,
+    ):
+        pass
+
+    assert observed["repeat_refused"], "the continued epoch could re-run a spent query"
+    assert observed["fresh_allowed"], "the continued epoch got no new allowance"
+
+
+async def test_an_unreadable_accounting_fails_the_continue(_clean_research_budget):
+    """R4's explicit requirement, at the boundary that must honour it.
+
+    Proceeding with an empty budget would look like success while silently
+    granting the epoch a full new quota.
+    """
+    control = build_control_service()
+    service = _service(control)
+    running = await service._amark_generation_running(await _started(control), user_id=USER_ID)
+    offered = await service._amark_generation_continuable(
+        running,
+        user_id=USER_ID,
+        assistant_message_id=uuid4(),
+        research_accounting={"schema_version": 999, "searched": []},
+    )
+
+    async def resume_generation_control_stream(**kwargs):
+        pytest.fail("the specialist ran despite an unreadable accounting")
+        yield  # pragma: no cover
+
+    service.ai_service = SimpleNamespace(
+        resume_generation_control_stream=resume_generation_control_stream
+    )
+
+    events = [
+        event
+        async for event in service.continue_message_generation_stream(
+            generation_id=offered.generation_id,
+            continuation_id=offered.continuation_id,
+            conversation_id=CONVERSATION_ID,
+            user_id=USER_ID,
+            idempotency_key="continue-key-0001",
+            expected_version=offered.version,
+        )
+    ]
+
+    assert [event.type for event in events] == ["error"]
+    assert events[0].data["error_code"] == "research_accounting_unreadable"
+
+
+async def test_a_pause_whose_snapshot_fails_still_offers_the_continuation(monkeypatch):
+    """Losing the dedup memory is worse than keeping it, but not fatal.
+
+    The alternative — failing the pause — would discard a validated partial the
+    user can already see, over bookkeeping. The Continue side is where an
+    unreadable payload is fatal; this side degrades.
+    """
+    from app.ai import research_budget as research_budget_module
+
+    control = build_control_service()
+    service = _service(control)
+    running = await service._amark_generation_running(await _started(control), user_id=USER_ID)
+
+    def explode(**_kwargs):
+        raise RuntimeError("the store is on fire")
+
+    monkeypatch.setattr(research_budget_module, "snapshot_research_budget", explode)
+
+    events = await _publish_pause(service, control, running)
+
+    assert [event.type for event in events] == ["message_end", "continuation_available"]
+    assert events[-1].data["continuation_available"] is True
+
+
+# ----------------------------------------------------------------------
 # terminal transitions
 # ----------------------------------------------------------------------
 

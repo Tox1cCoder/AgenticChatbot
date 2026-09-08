@@ -46,7 +46,7 @@ class _Tool:
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     clear_tool_context()
-    reset_research_budget(CONVERSATION_ID)
+    reset_research_budget(conversation_id=CONVERSATION_ID)
     monkeypatch.setattr(
         web_tools.settings,
         "remote_image_enrichment_enabled",
@@ -56,7 +56,7 @@ def _clean(monkeypatch):
     monkeypatch.setattr(web_tools.settings, "inline_rich_response_enabled", True, raising=False)
     yield
     clear_tool_context()
-    reset_research_budget(CONVERSATION_ID)
+    reset_research_budget(conversation_id=CONVERSATION_ID)
 
 
 def _brave_payload(*confidences: str) -> str:

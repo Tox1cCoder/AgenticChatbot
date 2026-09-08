@@ -53,6 +53,12 @@ class ToolContext:
     device_id: str | None = None
     tool_scope: str | None = None
     rich_response_capable: bool = True
+    # The turn research accounting is keyed by (R4). Same value as the
+    # checkpoint thread's turn segment and `generations.logical_turn_id`, so
+    # one turn has one key wherever it is looked up. `None` falls back to
+    # conversation scoping, which is what a caller with no turn identity had
+    # before.
+    logical_turn_id: str | None = None
 
     def __bool__(self) -> bool:
         """Return True if any context field is set."""
@@ -118,6 +124,7 @@ def tool_execution_context(
     device_id: str | None = None,
     tool_scope: str | ToolScope | None = None,
     rich_response_capable: bool = True,
+    logical_turn_id: str | None = None,
 ):
     """
     Context manager that sets tool execution context for the duration of a block.
@@ -145,6 +152,7 @@ def tool_execution_context(
         device_id=device_id,
         tool_scope=resolve_tool_scope(device_id=device_id, tool_scope=tool_scope).value,
         rich_response_capable=bool(rich_response_capable),
+        logical_turn_id=logical_turn_id,
     )
 
     # Save previous context (for nested contexts, though unlikely)

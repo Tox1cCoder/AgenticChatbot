@@ -231,7 +231,11 @@ def create_web_search_tool(
 
         args = tavily_search_args(normalized)
         scope = _search_scope(args)
-        budget = get_research_budget(get_tool_context().conversation_id)
+        _context = get_tool_context()
+        budget = get_research_budget(
+            logical_turn_id=_context.logical_turn_id,
+            conversation_id=_context.conversation_id,
+        )
         reused = (
             budget.find_reuse(normalized.query, scope=scope)
             if settings.research_budget_enabled
@@ -363,7 +367,10 @@ def create_image_search_tool(
             log_web_tool_call("image_search", outcome="skipped")
             return _image_payload(subject, 0, "Image discovery is unavailable for this request.")
 
-        budget = get_research_budget(context.conversation_id)
+        budget = get_research_budget(
+            logical_turn_id=context.logical_turn_id,
+            conversation_id=context.conversation_id,
+        )
         if not budget.reserve_image_search(subject):
             record_discovery_outcome("skipped")
             log_web_tool_call("image_search", outcome="repeated_subject_rejected")

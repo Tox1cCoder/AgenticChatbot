@@ -206,6 +206,28 @@ async def _verify_async_database_ready() -> None:
         logger.info("Verified %s", description)
 
 
+async def _subscribe_generation_stop_signals() -> None:
+    """Attach this worker's registry to the generation stop bus.
+
+    Without it the bus published into a void: a Stop landing on a worker other
+    than the streaming one transitioned the row and interrupted nothing. Stop
+    is still correct without this — the row is the authority and each worker
+    checks it at its own tool and model boundaries — but a worker blocked
+    inside a provider call has no check point coming, and this is what reaches
+    it.
+    """
+    from app.services.generation_stop_subscriber import install_generation_stop_subscriber
+
+    try:
+        container = get_container()
+        await install_generation_stop_subscriber(container.generation_control_bus())
+    except Exception as exc:  # noqa: BLE001 - degrades to the durable path
+        logger.warning(
+            "Generation stop signals are not subscribed on this worker: %s",
+            type(exc).__name__,
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
@@ -218,6 +240,7 @@ async def lifespan(app: FastAPI):
     await init_agents()
     _log_widget_runtime_status()
     _ensure_qdrant_collection()
+    await _subscribe_generation_stop_signals()
     if settings.enable_client_runtime_bridge:
         _client_runtime_cleanup_task = asyncio.create_task(
             periodic_session_cleanup_task(
