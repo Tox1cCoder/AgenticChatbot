@@ -2948,6 +2948,52 @@ class MessageService(IMessageService):
         )
         return self._legacy_stop_result(result, user_id=user_id)
 
+    async def aget_generation(
+        self,
+        *,
+        generation_id: UUID,
+        conversation_id: UUID,
+        user_id: UUID,
+    ):
+        """The current lifecycle state, or ``None`` if it is not this owner's.
+
+        The read a client polls after a ``stop_requested``, and the one a
+        reconnecting client uses to find out whether the turn it lost is still
+        running, finished, or waiting to be continued. ``None`` rather than a
+        refusal, because "not yours" and "not there" must be indistinguishable.
+        """
+        control = self._generation_control()
+        if control is None:
+            return None
+        self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
+        return await control.aget_snapshot(
+            generation_id=generation_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+
+    async def aresolve_generation_for_turn(
+        self,
+        *,
+        user_message_id: UUID,
+        conversation_id: UUID,
+        user_id: UUID,
+    ):
+        """The generation for one logical turn, for a client that has only that.
+
+        Fenced through the logical turn rather than "whatever is active in this
+        conversation": that shortcut would resolve a stale turn id to the turn
+        running now.
+        """
+        control = self._generation_control()
+        if control is None:
+            return None
+        return await control.find_by_logical_turn(
+            logical_turn_id=str(user_message_id),
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+
     async def stop_generation(
         self,
         *,

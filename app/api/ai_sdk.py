@@ -19,7 +19,11 @@ from app.schemas.conversation import (
     ConversationRead,
     ConversationUpdate,
 )
-from app.schemas.message import InterruptResumeRequest, MessageCreate
+from app.schemas.message import (
+    ContinueGenerationRequest,
+    InterruptResumeRequest,
+    MessageCreate,
+)
 from app.schemas.pagination import ConversationPaginationParams, MessagePaginationParams
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
@@ -635,6 +639,104 @@ async def resume_interrupt_ai_sdk(
             interrupt_id=resume_request.interrupt_id,
             device_id=resume_request.device_id,
             decisions=resume_request.decisions,
+            bot_message_id=bot_message_id,
+            inline_rich_response_v1=inline_rich_response_v1,
+        )
+
+    return _build_ui_message_stream_response(event_source, state)
+
+
+@router.post(
+    "/ai/continue",
+    summary="Continue a paused generation (AI SDK)",
+    description=(
+        "Continue a turn that paused at its execution budget, streaming the next epoch "
+        "as a **Vercel AI SDK UI Message Stream**. The `generationId`, `continuationId` "
+        "and `expectedVersion` come from the `data-generation` part whose `phase` is "
+        "`continuation_available`.\n\n"
+        "**This is not `resumeStream`.** Keep `resume: false` configured: semantic "
+        "continuation is an explicit user decision, while `resumeStream` is transport "
+        "recovery for a dropped socket. Do not call `regenerate` or `sendMessage` "
+        "either — both would append a turn and re-route it, which can land the "
+        "continuation on a different agent than the one holding the evidence.\n\n"
+        "```ts\n"
+        "async function continueGeneration(snapshot: GenerationSnapshot) {\n"
+        "  const response = await fetch('/ai/continue', {\n"
+        "    method: 'POST',\n"
+        "    headers: { 'content-type': 'application/json' },\n"
+        "    body: JSON.stringify({\n"
+        "      conversationId: snapshot.conversationId,\n"
+        "      generationId: snapshot.generationId,\n"
+        "      continuationId: snapshot.continuationId,\n"
+        "      expectedVersion: snapshot.version,\n"
+        "      idempotencyKey: crypto.randomUUID(),\n"
+        "    }),\n"
+        "  })\n"
+        "  // Consume as a UI Message Stream, the same as /api/chat.\n"
+        "  return response\n"
+        "}\n"
+        "```\n\n"
+        "**Stop** pairs the local abort with the explicit server command, in that "
+        "order — `stop()` ends this client's read immediately, and the POST is what "
+        "reaches the worker, which may be in another process:\n\n"
+        "```ts\n"
+        "async function stopGeneration(snapshot: GenerationSnapshot) {\n"
+        "  stop() // abort useChat's fetch immediately\n"
+        "  return fetch('/messages/stop', {\n"
+        "    method: 'POST',\n"
+        "    headers: { 'content-type': 'application/json' },\n"
+        "    body: JSON.stringify({\n"
+        "      generationId: snapshot.generationId,\n"
+        "      conversationId: snapshot.conversationId,\n"
+        "      expectedVersion: snapshot.version,\n"
+        "      idempotencyKey: crypto.randomUUID(),\n"
+        "    }),\n"
+        "  })\n"
+        "}\n"
+        "```\n\n"
+        "A `202` from that POST means accepted but unconfirmed: poll "
+        "`GET /messages/generations/{generationId}` rather than assuming the turn "
+        "ended. `stop()` alone changes no server state, and a closed socket is never "
+        "treated as a lifecycle transition."
+    ),
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "Vercel AI SDK UI Message Stream (SSE)",
+            "content": {"text/event-stream": {"schema": {"type": "string"}}},
+        }
+    },
+)
+@AppAutoInjector.auto_inject()
+async def continue_generation_ai_sdk(
+    continue_request: ContinueGenerationRequest,
+    message_service: IMessageService,
+    current_user_id: UUID,
+) -> StreamingResponse:
+    """Continue a paused generation for an AI SDK client.
+
+    Differs from the internal SSE route only in the adapter: both call the same
+    service method, so the lifecycle result cannot diverge between transports.
+    """
+    bot_message_id = uuid4()
+    inline_rich_response_v1 = bool(continue_request.inline_rich_response_v1)
+    state = StreamState(
+        message_id=str(bot_message_id),
+        text_id=str(uuid4()),
+        reasoning_id=str(uuid4()),
+        inline_rich_response_v1=(
+            inline_rich_response_v1 and getattr(settings, "inline_rich_response_enabled", False)
+        ),
+    )
+
+    def event_source():
+        return message_service.continue_message_generation_stream(
+            generation_id=continue_request.generation_id,
+            continuation_id=continue_request.continuation_id,
+            conversation_id=continue_request.conversation_id,
+            user_id=current_user_id,
+            idempotency_key=continue_request.idempotency_key,
+            expected_version=continue_request.expected_version,
             bot_message_id=bot_message_id,
             inline_rich_response_v1=inline_rich_response_v1,
         )

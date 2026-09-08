@@ -19,6 +19,22 @@ from .events import (
     apply_inline_preview_wire_budget,
 )
 
+#: Canonical lifecycle event -> the name the Streamlit client reads. Both
+#: adapters project the same three, so a Stop or Continue behaves identically
+#: whichever transport a client is on.
+_GENERATION_LIFECYCLE_TYPES = {
+    "run_start": "generation_start",
+    "generation_status": "generation_status",
+    "continuation_available": "continuation_available",
+}
+
+#: Fields of the internal pause event that must not reach a client. The
+#: validated text arrived as deltas and lives in the persisted message; the
+#: budget and the checkpoint thread are server bookkeeping and a resume handle.
+_PRIVATE_PAUSE_FIELDS = frozenset(
+    {"validated_content", "budget", "thread_id", "type", "active_agent_id"}
+)
+
 
 def legacy_event_from_v3(event: V3StreamEvent) -> dict[str, Any] | None:
     if event.type == "message_delta":
@@ -109,6 +125,17 @@ def legacy_event_from_v3(event: V3StreamEvent) -> dict[str, Any] | None:
         if isinstance(message, dict):
             # Streamlit renders the persisted error bot message directly.
             payload["message"] = message
+        return payload
+    if event.type in _GENERATION_LIFECYCLE_TYPES:
+        # The three lifecycle events a client needs to render Stop and Continue.
+        # `run_start` is projected as `generation_start` rather than adding a
+        # second canonical event that would carry the same payload; the
+        # validated partial's text is stripped, because the client already
+        # received it as deltas and the message row is where it lives.
+        payload = {
+            key: value for key, value in event.data.items() if key not in _PRIVATE_PAUSE_FIELDS
+        }
+        payload["type"] = _GENERATION_LIFECYCLE_TYPES[event.type]
         return payload
     if event.type == "title_updated":
         return {

@@ -586,6 +586,14 @@ class ServerAPIClient:
         async for event in self.stream_sse("/messages/resume-interrupt", json=payload):
             yield event
 
+    async def continue_generation(
+        self,
+        payload: dict[str, Any],
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Continue a paused generation over the internal SSE stream."""
+        async for event in self.stream_sse("/messages/continue", json=payload):
+            yield event
+
     async def stream_ai_sdk_chat(
         self,
         conversation_id: str,
@@ -593,6 +601,18 @@ class ServerAPIClient:
     ) -> AsyncIterator[dict[str, Any]]:
         """Proxy the AI SDK UI message stream."""
         async for event in self.stream_sse(f"/api/chat/{conversation_id}", json=payload):
+            yield event
+
+    async def continue_ai_sdk_generation(
+        self,
+        payload: dict[str, Any],
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Continue a paused generation over the AI SDK UI message stream.
+
+        Same command, different adapter — the parity that keeps a Continue from
+        behaving differently depending on which client issued it.
+        """
+        async for event in self.stream_sse("/ai/continue", json=payload):
             yield event
 
     async def resume_ai_sdk_interrupt(

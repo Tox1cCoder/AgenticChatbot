@@ -226,11 +226,61 @@ async def resume_interrupt(
 async def stop_generation(
     payload: dict[str, Any],
     _session: LocalSessionPayload = Depends(require_local_session),
-) -> dict[str, Any]:
-    """Proxy a stop-generation request."""
+) -> Response:
+    """Proxy a stop-generation request, status code included.
+
+    Returns the upstream ``Response`` rather than its parsed body: the server
+    answers ``202`` for a stop it has accepted but not confirmed, and flattening
+    that to ``200`` would tell the client the turn had ended when nothing has
+    said so.
+    """
     try:
         normalized_payload = add_device_context(payload)
-        return await get_server_client().post("/messages/stop", json=normalized_payload)
+        return await _build_upstream_json_response(
+            method="POST",
+            path="/messages/stop",
+            json=normalized_payload,
+        )
+    except Exception as exc:
+        raise_server_error(exc)
+
+
+@router.post("/messages/continue")
+async def continue_generation(
+    payload: dict[str, Any],
+    _session: LocalSessionPayload = Depends(require_local_session),
+):
+    """Proxy the server's continued-generation SSE stream.
+
+    The runtime bridge is ensured first, exactly as for a new turn: a continued
+    epoch runs the same specialist with the same client tools, so a continuation
+    that skipped this would silently lose them mid-answer.
+    """
+    await _ensure_runtime_bridge_for_message_flow()
+    normalized_payload = add_device_context(payload)
+    return _build_sse_response(get_server_client().continue_generation(normalized_payload))
+
+
+# Declared before ``/messages/{message_id}``: FastAPI matches in order, so the
+# parameterized route would otherwise capture "generations" as a message id and
+# this endpoint would be unreachable.
+@router.get("/messages/generations/{generation_id}")
+async def get_generation(
+    generation_id: str,
+    conversation_id: str,
+    _session: LocalSessionPayload = Depends(require_local_session),
+) -> Response:
+    """Proxy the authoritative lifecycle state of one generation.
+
+    What a client polls after a ``202`` stop, and what it reads on reconnect to
+    find out whether the turn it lost is running, finished, or continuable.
+    """
+    try:
+        return await _build_upstream_json_response(
+            method="GET",
+            path=f"/messages/generations/{generation_id}",
+            params={"conversation_id": conversation_id},
+        )
     except Exception as exc:
         raise_server_error(exc)
 
@@ -304,5 +354,25 @@ async def ai_sdk_resume_interrupt(
     normalized_payload = add_device_context(payload)
     return _build_sse_response(
         get_server_client().resume_ai_sdk_interrupt(normalized_payload),
+        ai_sdk=True,
+    )
+
+
+@ai_sdk_router.post("/ai/continue")
+async def ai_sdk_continue_generation(
+    payload: dict[str, Any],
+    _session: LocalSessionPayload = Depends(require_local_session),
+):
+    """Continue a paused generation over the AI SDK UI message stream.
+
+    Deliberately separate from ``resumeStream``: that recovers a dropped
+    socket, while this spends another execution epoch because a user asked for
+    one. The runtime bridge is ensured for the same reason a new turn does it —
+    the continued epoch binds the same client tools.
+    """
+    await _ensure_runtime_bridge_for_message_flow()
+    normalized_payload = add_device_context(payload)
+    return _build_sse_response(
+        get_server_client().continue_ai_sdk_generation(normalized_payload),
         ai_sdk=True,
     )

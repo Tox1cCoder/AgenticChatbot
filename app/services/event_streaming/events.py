@@ -15,7 +15,14 @@ from pydantic import BaseModel, Field
 StreamSchemaVersion = Literal["v3"]
 
 StreamEventType = Literal[
+    # The opening event of a turn. Carries the generation identity and the
+    # lifecycle version a later Stop or Continue is fenced against, so a client
+    # that has seen it can issue either.
     "run_start",
+    # An unsolicited lifecycle change, for a client that is watching rather
+    # than commanding. Never derived from a socket close: only a worker's own
+    # transition moves a turn's status.
+    "generation_status",
     "message_start",
     "message_delta",
     "message_end",

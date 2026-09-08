@@ -38,6 +38,23 @@ from .events import (
 
 _AI_SDK_HEARTBEAT_INTERVAL_SECONDS = 15.0
 
+#: Canonical lifecycle event -> the ``phase`` on the shared ``data-generation``
+#: part. `run_start` projects as ``start`` rather than earning a second
+#: canonical event that would carry the identical payload.
+_GENERATION_LIFECYCLE_PHASES = {
+    "run_start": "start",
+    "generation_status": "status",
+    "continuation_available": "continuation_available",
+}
+
+#: Internal fields of the pause event that never cross to a client: the
+#: validated text already arrived as deltas and lives in the persisted message,
+#: while the budget and the checkpoint thread are bookkeeping and a resume
+#: handle respectively.
+_PRIVATE_PAUSE_FIELDS = frozenset(
+    {"validated_content", "budget", "thread_id", "type", "active_agent_id"}
+)
+
 
 def _sse(data: dict[str, Any]) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False, separators=(',', ':'))}\n\n"
@@ -236,6 +253,27 @@ class AISDKV6StreamAdapter:
                     "type": "data-agent-selected",
                     "data": {"agent": event.agent or data.get("agent")},
                     "transient": True,
+                }
+            )
+            return
+
+        if etype in _GENERATION_LIFECYCLE_PHASES:
+            # One custom part for all three lifecycle events, discriminated by
+            # `phase`, so a client subscribes once. Not `transient`: a client
+            # that reconnects still needs the identity and the version, which
+            # are what make a Stop or Continue addressable at all.
+            yield _sse(
+                {
+                    "type": "data-generation",
+                    "id": str(data.get("generation_id") or ""),
+                    "data": {
+                        "phase": _GENERATION_LIFECYCLE_PHASES[etype],
+                        **{
+                            key: value
+                            for key, value in data.items()
+                            if key not in _PRIVATE_PAUSE_FIELDS
+                        },
+                    },
                 }
             )
             return

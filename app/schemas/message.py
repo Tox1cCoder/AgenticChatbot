@@ -223,12 +223,88 @@ class MessageInDB(BaseModel):
 
 
 class StopGenerationRequest(BaseModel):
-    """Request to stop an in-flight streaming generation."""
+    """Request to stop an in-flight streaming generation.
+
+    Two ways to name the turn, because the durable lifecycle arrived after the
+    endpoint did. ``generation_id`` is canonical and comes from ``run_start``;
+    ``user_message_id`` is the turn-scoped form, resolved through the logical
+    turn so a stale id stops nothing rather than the turn running now.
+
+    ``expected_version`` fences the command (R5). Without it a delayed replay of
+    a Stop issued against one epoch executes against whatever epoch is running
+    when it lands. It is optional only for clients that predate ``run_start``;
+    a client that has a version must send it.
+    """
 
     conversation_id: UUID = Field(..., description="Conversation ID")
-    user_message_id: UUID = Field(
-        ..., description="User message ID from the user_message_created SSE event"
+    generation_id: UUID | None = Field(
+        default=None, description="Generation ID from the run_start SSE event"
     )
+    user_message_id: UUID | None = Field(
+        default=None, description="User message ID from the user_message_created SSE event"
+    )
+    idempotency_key: str | None = Field(
+        default=None,
+        min_length=8,
+        max_length=160,
+        description="Replay key; the same key returns the first attempt's recorded result",
+    )
+    expected_version: int | None = Field(
+        default=None, ge=1, description="Lifecycle version this command was issued against"
+    )
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    @model_validator(mode="after")
+    def _one_identity(self) -> StopGenerationRequest:
+        if self.generation_id is None and self.user_message_id is None:
+            raise ValueError("either generationId or userMessageId is required")
+        return self
+
+
+class ContinueGenerationRequest(BaseModel):
+    """Request to continue a paused or stopped generation.
+
+    ``continuation_id`` is single-use, which is what stops a replayed Continue
+    from opening a second epoch on the same answer. Both it and the version come
+    from the ``continuation_available`` event.
+    """
+
+    conversation_id: UUID = Field(..., description="Conversation ID")
+    generation_id: UUID = Field(..., description="Generation ID to continue")
+    continuation_id: UUID = Field(
+        ..., description="Single-use continuation ID from continuation_available"
+    )
+    idempotency_key: str = Field(
+        ..., min_length=8, max_length=160, description="Replay key for this Continue"
+    )
+    expected_version: int = Field(
+        ..., ge=1, description="Lifecycle version this command was issued against"
+    )
+    inline_rich_response_v1: bool = False
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
+class GenerationSnapshotResponse(BaseModel):
+    """The lifecycle state every transport publishes.
+
+    Deliberately omits the checkpoint thread (a resume handle) and the budget
+    and research-accounting blobs (server bookkeeping). ``version`` is here
+    because a client cannot issue a fenced command without it.
+    """
+
+    generation_id: UUID
+    logical_turn_id: str
+    conversation_id: UUID
+    status: str
+    version: int
+    execution_epoch: int
+    continuation_id: UUID | None = None
+    continuation_available: bool = False
+    continuation_block_reason: str | None = None
+    assistant_message_id: UUID | None = None
+    terminal_reason: str | None = None
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -236,10 +312,14 @@ class StopGenerationRequest(BaseModel):
 class StopGenerationResponse(BaseModel):
     """Response from the stop generation endpoint."""
 
-    status: str = Field(..., description="'cancelled' or 'not_inflight'")
+    status: str = Field(..., description="'cancelled', 'stop_requested' or 'not_inflight'")
     message: dict[str, Any] | None = Field(
         default=None,
         description="Persisted assistant message (partial or final), if available",
+    )
+    generation: GenerationSnapshotResponse | None = Field(
+        default=None,
+        description="Durable lifecycle snapshot; the field a client should read",
     )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
