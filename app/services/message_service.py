@@ -2173,39 +2173,53 @@ class MessageService(IMessageService):
         conversation_id: UUID,
         user_id: UUID,
         user_message_id: UUID,
+        wait_seconds: float = 5.0,
     ) -> dict:
-        """
-        Request cancellation of an in-flight streaming generation.
+        """Request cancellation of an in-flight streaming generation.
 
         Returns a dict with:
-          - ``status``: ``"cancelled"`` | ``"not_inflight"``
-          - ``message``: optional MessageRead dict (the persisted partial/final message)
+
+        * ``status`` -- ``"cancelled"`` when the producer confirmed and its
+          partial is persisted, ``"stop_requested"`` when it has not answered
+          yet, ``"not_inflight"`` when this process holds no such generation.
+        * ``message`` -- the persisted partial/final message, when there is one.
+
+        ``stop_requested`` is not a failure and not a lie. The producer may be
+        mid-provider-call, possibly in another process, and reporting
+        ``cancelled`` before it confirms tells the user their tool call was
+        abandoned when it may still be running.
+
+        The registry entry survives a timeout deliberately. The request gave up;
+        the producer has not, and removing the entry here is what left a retried
+        Stop with nothing to cancel while the turn was still going.
+
+        Superseded by the durable lifecycle in ``generations``, which is what
+        makes a Stop work across workers rather than only within this one.
         """
         self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
 
         registry = get_generation_registry()
         entry = registry.get(user_message_id)
 
+        # A missing entry and one owned by somebody else answer identically:
+        # "it exists but is not yours" is information about another user's
+        # conversation.
         if entry is None:
-            # Not in flight – generation already completed or never started.
             return {"status": "not_inflight", "message": None}
-
-        # Verify the caller owns this entry
         if entry.conversation_id != conversation_id or entry.user_id != user_id:
             return {"status": "not_inflight", "message": None}
 
-        # Signal cancellation
+        # Cooperative event plus task cancellation: the event is what a
+        # well-behaved producer checks between awaits, the cancellation is what
+        # reaches one blocked inside a provider call.
         entry.request_cancel()
 
-        # Wait for the producer to finish (with a timeout)
         try:
-            result = await asyncio.wait_for(asyncio.shield(entry.done), timeout=5.0)
+            result = await asyncio.wait_for(asyncio.shield(entry.done), timeout=wait_seconds)
         except (asyncio.TimeoutError, asyncio.CancelledError):
-            result = None
+            return {"status": "stop_requested", "message": None}
 
-        # Clean up
         registry.remove(user_message_id)
-
         return {"status": "cancelled", "message": result}
 
     def get_by_id(self, message_id: UUID, user_id: UUID) -> MessageRead:

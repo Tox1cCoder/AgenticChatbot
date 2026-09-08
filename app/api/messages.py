@@ -186,8 +186,10 @@ async def stop_message_generation(
     """
     Request cancellation of an in-flight streaming generation.
 
-    Idempotent: calling stop multiple times is safe.  If the generation has
-    already completed, returns ``status: "not_inflight"`` so the UI can
+    Idempotent: calling stop multiple times is safe. ``status`` distinguishes
+    three outcomes -- ``cancelled`` (the producer confirmed and its partial is
+    persisted), ``stop_requested`` (asked, not yet confirmed; retry or poll),
+    and ``not_inflight`` (already finished, or never held here) so the UI can
     refresh messages normally.
     """
     result = await message_service.stop_message_generation(
@@ -195,13 +197,16 @@ async def stop_message_generation(
         user_id=user_id,
         user_message_id=stop_request.user_message_id,
     )
+    # Each status gets its own sentence. Reporting a pending stop as "stopped"
+    # is the claim this endpoint must not make.
+    messages = {
+        "cancelled": "Generation stopped",
+        "stop_requested": "Stop requested; the generation has not confirmed yet",
+        "not_inflight": "Generation not in flight",
+    }
     return ApiResponse(
         success=True,
-        message=(
-            "Generation stopped"
-            if result.get("status") == "cancelled"
-            else "Generation not in flight"
-        ),
+        message=messages.get(str(result.get("status")), "Generation not in flight"),
         data=result,
     )
 

@@ -104,12 +104,19 @@ class IMessageService(ABC):
         conversation_id: UUID,
         user_id: UUID,
         user_message_id: UUID,
+        wait_seconds: float = 5.0,
     ) -> dict:
         """
         Request cancellation of an in-flight streaming generation.
 
         Returns a dict with:
-          - ``status``: ``"cancelled"`` | ``"not_inflight"``
+          - ``status``: ``"cancelled"`` when the producer confirmed,
+            ``"stop_requested"`` when it has not answered within
+            ``wait_seconds``, ``"not_inflight"`` when no such generation is held
           - ``message``: optional ``MessageRead`` (the persisted partial/final message)
+
+        ``stop_requested`` is a pending state, not a failure: the producer may
+        be mid-provider-call, and reporting ``cancelled`` before it confirms
+        would claim something no one has verified.
         """
         pass
