@@ -23,6 +23,21 @@ _PYTEST_RUNTIME = tempfile.TemporaryDirectory(
 os.environ["CLIENT_PROFILE_ROOT"] = _PYTEST_RUNTIME.name
 atexit.register(_PYTEST_RUNTIME.cleanup)
 
+# The suite does not trace. This must be set before ``app.core.config`` is
+# imported, because that module reads the environment at import time and copies
+# the LangSmith settings into LangChain's own variables -- and because
+# ``load_dotenv`` does not override a variable that already exists, setting it
+# here is what stops the developer's file from switching tracing on.
+#
+# Not a tidiness measure. A full run emits thousands of traces against the
+# developer's real workspace, which exhausted a monthly unique-trace quota and
+# took the authenticated canaries down with it. Test traces also polluted the
+# very project an operator queries to check that no provider call became a root
+# run. A test that genuinely cares about trace topology controls it locally with
+# ``langsmith.run_helpers.tracing_context``; see tests/test_tool_trace_parenting.py.
+os.environ["LANGSMITH_TRACING"] = "false"
+os.environ["LANGCHAIN_TRACING_V2"] = "false"
+
 # Client settings also read a dotenv file, defaulting to the repository's own
 # .env.client. Whatever a developer keeps in that file would otherwise leak into
 # the suite, so point the loader at an empty file instead.

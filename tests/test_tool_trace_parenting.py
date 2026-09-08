@@ -470,3 +470,21 @@ async def test_a_turn_using_all_three_product_tools_creates_no_provider_root():
     observed = {start.name for start in handler.starts}
     assert provider_names <= observed
     assert [start.name for start in handler.starts if start.parent_run_id is None] == []
+
+
+def test_the_suite_itself_does_not_trace():
+    """A full run must emit nothing to the developer's LangSmith workspace.
+
+    It used to. Thousands of traces per run exhausted a monthly unique-trace
+    quota, which took the authenticated canaries down with it, and test traces
+    landed in the very project an operator queries to check that no provider
+    call became a root run.
+
+    ``tests/conftest.py`` disables tracing before ``app.core.config`` is
+    imported. This asserts the result rather than the mechanism, because the
+    mechanism has three moving parts -- two environment variables and an import
+    order -- and any of them could be undone without the others noticing.
+    """
+    from langsmith.utils import tracing_is_enabled
+
+    assert tracing_is_enabled() is False
