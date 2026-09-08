@@ -85,7 +85,7 @@ from .utils import (
     make_json_safe,
     normalize_tool_call,
 )
-from .workflow.continuation import pending_continuation_payload
+from .workflow.continuation import ContinuationResume, pending_continuation_payload
 from .workflow.contracts import OutcomeProvenance, ResponseOutcome, TurnIdentity
 from .workflow.custom_agents import CustomAgentsMixin
 from .workflow.graph_builder import build_workflow_graph
@@ -2281,6 +2281,81 @@ class MultiAgentWorkflow(
                 Command(resume=resume_data, update=resume_state_update),
                 config=config,
                 context=self._resume_runtime_context(state_snapshot.values),
+            )
+            with use_chat_image_loader(chat_image_loader):
+                async for event in merged:
+                    for public_event in projector.map_event(event, ctx):
+                        yield public_event
+        except Exception as exc:
+            yield make_event("error", sequence=0, data={"error": str(exc)})
+            return
+
+        async for public_event in self._finish_stream(
+            ctx, config=config, thread_id=thread_id, conversation_id=conversation_id
+        ):
+            yield public_event
+
+    async def resume_with_continuation_stream(
+        self,
+        thread_id: str,
+        resume: "ContinuationResume",
+    ):
+        """Resume a turn paused at its execution budget, from its exact checkpoint.
+
+        Deliberately not ``resume_with_decisions_stream``. That one addresses
+        decisions to ``action_requests`` and would find none here; this one
+        carries a single typed decision and never touches the router — the turn
+        already chose its agent, and re-routing a continuation could land it on
+        a different specialist than the one whose evidence it is carrying.
+
+        No state update rides along. Everything the next epoch needs — the
+        epoch bump, the cleared budget, the carried transcript — is decided by
+        the pause node itself, because that is the only place that has the
+        outgoing outcome in hand.
+        """
+        if not self.checkpointer:
+            yield make_event(
+                "error",
+                sequence=0,
+                data={"error": "Checkpointing is not enabled, cannot continue."},
+            )
+            return
+
+        config = self._build_graph_config(thread_id)
+        state_snapshot = await self.graph.aget_state(config)
+
+        if pending_continuation_payload(state_snapshot) is None:
+            # Distinguishable on purpose: a turn waiting on a tool approval is
+            # paused, but not in a way Continue can answer.
+            reason = (
+                "Workflow is waiting on a human decision, not a continuation"
+                if pending_interrupt_payload(state_snapshot) is not None
+                else "Workflow is not paused at an execution budget"
+            )
+            yield make_event("error", sequence=0, data={"error": reason})
+            return
+
+        values = getattr(state_snapshot, "values", None) or {}
+        active_agent_id = values.get("active_agent_id", "chat_agent")
+        conversation_id = values.get("conversation_id")
+
+        projector = GraphPublicStreamProjector(
+            tool_end_events_from_node_state=self._tool_end_events_from_node_state,
+            suppress_internal_stream_chunks=settings.suppress_internal_stream_chunks,
+        )
+        ctx = StreamProjectionContext(
+            last_emitted_agent=active_agent_id,
+            suppress_tokens=active_agent_id == "image_generator_agent",
+        )
+
+        chat_image_loader = self._build_chat_image_loader(values.get("user_id"))
+
+        try:
+            merged = iter_v3_events_from_graph(
+                self.graph,
+                Command(resume=resume.model_dump(mode="json")),
+                config=config,
+                context=self._resume_runtime_context(values),
             )
             with use_chat_image_loader(chat_image_loader):
                 async for event in merged:

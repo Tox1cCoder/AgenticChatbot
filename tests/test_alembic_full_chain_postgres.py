@@ -23,7 +23,11 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _SCRATCH_DATABASE_PREFIX = "chatbot_migration_smoke_"
 _SCRATCH_DATABASE_RE = re.compile(r"chatbot_migration_smoke_[0-9a-f]{32}")
 _OLD_HEAD = "a4b5c6d7e8f9"
-_HEAD = "d0e1f2a3b4c5"
+_HEAD = "e1f2a3b4c5d6"
+#: Not "head minus one". ``_assert_previous_head_schema`` describes the schema
+#: at *this* revision specifically — it asserts, among other things, that
+#: ``document_index_generations`` does not exist yet — so advancing it with each
+#: new head breaks the round-trip assertions rather than updating them.
 _PREVIOUS_HEAD = "b2c3d4e5f6a7"
 _PRE_RECONCILIATION_HEAD = "1ce64a959f7d"
 _PARALLEL_ALLOW_CUSTOM_MODEL_HEAD = "0f1e2d3c4b5a"

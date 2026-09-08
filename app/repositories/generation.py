@@ -149,6 +149,34 @@ class GenerationRepository(RepositorySessionMixin):
 
         return await self._arun(work)
 
+    async def aget_by_logical_turn(
+        self,
+        logical_turn_id: str,
+        user_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+    ) -> GenerationSnapshot | None:
+        """Read the generation for one logical turn.
+
+        This is how a caller holding only a turn-scoped id — the user message
+        id an older Stop endpoint carries — reaches the lifecycle row. It is
+        deliberately not ``aget_active_for_conversation``: resolving a stale
+        turn id to "whatever is active in this conversation" would let a
+        delayed Stop cancel a turn it was never issued against, which is the
+        R5 defect one level up.
+        """
+
+        def work(session: Session) -> GenerationSnapshot | None:
+            row = session.execute(
+                select(*_RETURNED).where(
+                    Generation.logical_turn_id == str(logical_turn_id),
+                    Generation.user_id == user_id,
+                    Generation.conversation_id == conversation_id,
+                )
+            ).first()
+            return None if row is None else GenerationSnapshot.from_row(row)
+
+        return await self._arun(work)
+
     async def aget_active_for_conversation(
         self, conversation_id: uuid.UUID, user_id: uuid.UUID
     ) -> GenerationSnapshot | None:

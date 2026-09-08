@@ -40,6 +40,20 @@ class IWorkflowRuntime(ABC):
         pass
 
     @abstractmethod
+    async def resume_with_continuation_stream(
+        self,
+        thread_id: str,
+        resume: Any,
+    ) -> AsyncIterator[V3StreamEvent]:
+        """Resume a turn paused at its execution budget.
+
+        Separate from ``resume_with_decisions_stream`` on purpose: that one
+        answers a human-approval interrupt by addressing decisions to pending
+        ``action_requests``, which a budget pause has none of.
+        """
+        pass
+
+    @abstractmethod
     async def compact_checkpoint_after_terminal_response(self, thread_id: str | None) -> None:
         """Clear transient checkpoint transcript after durable response persistence."""
         pass

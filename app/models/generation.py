@@ -172,7 +172,20 @@ class Generation(Base):
     # The continuation ID is opaque and single-use: it is what a client
     # presents to continue, and rotating it is what makes a consumed
     # continuation unusable without consulting the status alone.
-    assistant_message_id = Column(UUID(as_uuid=True), ForeignKey("messages.id"), nullable=True)
+    # ``SET NULL``, not the default: a generation row is bookkeeping *about* a
+    # turn and must not be able to veto deletion of the message the turn
+    # produced. ``CASCADE`` would take the opposite wrong turn and destroy the
+    # lifecycle history. Same choice, for the same reason, as
+    # ``model_usage_events.request_message_id``.
+    assistant_message_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "messages.id",
+            name="fk_generations_assistant_message",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
     continuation_id = Column(UUID(as_uuid=True), nullable=True)
     continuation_available = Column(
         Boolean, nullable=False, default=False, server_default=text("false")

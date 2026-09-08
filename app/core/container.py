@@ -680,6 +680,7 @@ class Container(containers.DeclarativeContainer):
         chat_image_service=chat_image_service,
         web_image_service=web_image_service,
         turn_coordinator=conversation_turn_coordinator,
+        generation_control_service=generation_control_service,
     )
 
     feedback_service: providers.Provider[IFeedbackService] = providers.Factory(

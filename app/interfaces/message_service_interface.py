@@ -115,8 +115,57 @@ class IMessageService(ABC):
             ``wait_seconds``, ``"not_inflight"`` when no such generation is held
           - ``message``: optional ``MessageRead`` (the persisted partial/final message)
 
+          - ``generation``: the durable lifecycle snapshot, when the deployment
+            has the generation control service wired. This is what a client
+            should read; ``status`` above is kept for existing ones.
+
         ``stop_requested`` is a pending state, not a failure: the producer may
         be mid-provider-call, and reporting ``cancelled`` before it confirms
         would claim something no one has verified.
+        """
+        pass
+
+    @abstractmethod
+    async def stop_generation(
+        self,
+        *,
+        generation_id: UUID,
+        conversation_id: UUID,
+        user_id: UUID,
+        idempotency_key: str,
+        expected_version: int,
+    ):
+        """Stop one generation durably, returning its ``GenerationSnapshot``.
+
+        The canonical Stop. It works when the command lands on a different
+        worker than the stream, which is the whole reason the lifecycle row
+        exists; :meth:`stop_message_generation` is the turn-scoped entry point
+        that resolves a user message id to a generation and delegates here.
+
+        ``expected_version`` fences the command (R5): a delayed replay issued
+        against an earlier state is refused rather than executed against
+        whatever epoch happens to be running when it arrives.
+        """
+        pass
+
+    @abstractmethod
+    async def continue_message_generation_stream(
+        self,
+        *,
+        generation_id: UUID,
+        continuation_id: UUID,
+        conversation_id: UUID,
+        user_id: UUID,
+        idempotency_key: str,
+        expected_version: int,
+        bot_message_id: UUID | None = None,
+        inline_rich_response_v1: bool = False,
+    ) -> AsyncGenerator[V3StreamEvent, None]:
+        """Resume a paused turn from its exact checkpoint.
+
+        Not a new turn: no user message is appended, the router is not
+        consulted, and the specialist the turn already chose is the one that
+        resumes. ``continuation_id`` is single-use, so a replayed Continue
+        cannot open a second epoch on the same answer.
         """
         pass

@@ -181,6 +181,98 @@ async def test_a_new_generation_starts_at_version_one_and_epoch_zero(seeded: See
     assert snapshot.continuation_available is False
 
 
+async def test_deleting_the_assistant_message_releases_the_generation(seeded: Seeded) -> None:
+    """A generation row must not be able to veto a message deletion.
+
+    Created with a plain foreign key, ``DELETE FROM messages`` raised
+    ``ForeignKeyViolation`` for any message a generation referenced — the
+    bookkeeping outranking the thing it books. ``ON DELETE SET NULL`` keeps the
+    lifecycle history, where ``CASCADE`` would silently destroy it.
+    """
+    from sqlalchemy import delete as sql_delete
+
+    from app.models.enums import MessageRole
+    from app.models.message import Message
+
+    snapshot = await seeded.repository.acreate(_create(seeded, turn="turn-fk"))
+    message_id = uuid4()
+    with seeded.session_factory() as session:  # type: ignore[operator]
+        session.add(
+            Message(
+                id=message_id,
+                conversation_id=seeded.conversation_id,
+                sender=MessageRole.assistant,
+                content="a partial answer",
+                sequence=1,
+            )
+        )
+        session.commit()
+        session.execute(
+            Generation.__table__.update()
+            .where(Generation.id == snapshot.generation_id)
+            .values(assistant_message_id=message_id)
+        )
+        session.commit()
+
+        session.execute(sql_delete(Message).where(Message.id == message_id))
+        session.commit()
+
+        remaining = session.execute(
+            select(Generation.id, Generation.assistant_message_id).where(
+                Generation.id == snapshot.generation_id
+            )
+        ).one()
+
+    assert remaining.id == snapshot.generation_id
+    assert remaining.assistant_message_id is None
+
+
+async def test_a_generation_is_reachable_by_its_logical_turn(seeded: Seeded) -> None:
+    """The route a caller holding only a turn id takes.
+
+    An older Stop endpoint carries the user message id, which is the logical
+    turn. Resolving it to "whatever is active in this conversation" instead
+    would let a delayed Stop cancel a turn it was never issued against.
+    """
+    snapshot = await seeded.repository.acreate(_create(seeded, turn="turn-lookup"))
+
+    found = await seeded.repository.aget_by_logical_turn(
+        "turn-lookup", seeded.owner_id, seeded.conversation_id
+    )
+
+    assert found is not None
+    assert found.generation_id == snapshot.generation_id
+
+
+async def test_a_logical_turn_lookup_is_owner_and_conversation_scoped(seeded: Seeded) -> None:
+    await seeded.repository.acreate(_create(seeded, turn="turn-scoped"))
+
+    assert (
+        await seeded.repository.aget_by_logical_turn(
+            "turn-scoped", seeded.other_user_id, seeded.conversation_id
+        )
+        is None
+    )
+    assert (
+        await seeded.repository.aget_by_logical_turn(
+            "turn-scoped", seeded.owner_id, seeded.other_conversation_id
+        )
+        is None
+    )
+
+
+async def test_an_unknown_logical_turn_is_not_resolved_to_a_neighbour(seeded: Seeded) -> None:
+    """A stale turn id must find nothing, not the turn running now."""
+    await seeded.repository.acreate(_create(seeded, turn="turn-current"))
+
+    assert (
+        await seeded.repository.aget_by_logical_turn(
+            "turn-that-never-existed", seeded.owner_id, seeded.conversation_id
+        )
+        is None
+    )
+
+
 async def test_a_generation_is_not_readable_by_another_user(seeded: Seeded) -> None:
     snapshot = await seeded.repository.acreate(_create(seeded))
 

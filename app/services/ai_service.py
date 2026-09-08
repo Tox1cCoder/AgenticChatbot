@@ -501,6 +501,57 @@ class AIService:
         ):
             yield mapped_event
 
+    async def resume_generation_control_stream(
+        self,
+        *,
+        thread_id: str,
+        action: str,
+        continuation_id: str,
+        expected_epoch: int,
+        inline_rich_response_v1: bool = False,
+        user_id: UUID | None = None,
+        conversation_id: UUID | None = None,
+    ):
+        """Stream a Continue or a Stop-while-paused from the exact checkpoint.
+
+        The fence travels with the decision rather than being trusted from the
+        caller: the pause node refuses an ``expected_epoch`` the turn has
+        already left, so a delayed Continue cannot open an epoch on top of a
+        later one.
+        """
+        from app.ai.workflow.continuation import ContinuationResume
+
+        if not self.checkpointer:
+            yield make_event(
+                "error",
+                sequence=1,
+                data={"error": "Cannot continue: Checkpointing not enabled"},
+            )
+            return
+
+        resume_context = UsageContext(
+            user_id=_parse_uuid(user_id),
+            conversation_id=_parse_uuid(conversation_id) or _parse_uuid(thread_id),
+            correlation_id=thread_id,
+            operation="workflow",
+        )
+        workflow_stream = self.workflow.resume_with_continuation_stream(
+            thread_id=thread_id,
+            resume=ContinuationResume(
+                action=action,
+                continuation_id=continuation_id,
+                expected_epoch=expected_epoch,
+            ),
+        )
+        context_bound_stream = self._iterate_in_usage_context(workflow_stream, resume_context)
+        async for mapped_event in self._map_workflow_stream(
+            context_bound_stream,
+            emit_rich_items=bool(
+                getattr(settings, "inline_rich_response_enabled", False) and inline_rich_response_v1
+            ),
+        ):
+            yield mapped_event
+
     def get_bot_response_sync(
         self,
         user_message: str,

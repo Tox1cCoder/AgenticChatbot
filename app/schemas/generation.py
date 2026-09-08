@@ -184,12 +184,23 @@ class ContinuationLease(BaseModel):
     Internal, unlike :class:`GenerationSnapshot`: it carries the checkpoint
     thread and the carried accounting because the caller is the worker that
     resumes the graph, not a client.
+
+    Two epochs are named, and confusing them breaks Continue silently:
+
+    * ``execution_epoch`` is the one now leased — the row has already been
+      advanced to it.
+    * ``paused_epoch`` is the one the *graph* is still sitting in. The pause
+      node fences the resume against its own state and advances the epoch
+      itself, so the value sent back into the graph is this one. Passing the
+      leased epoch instead is refused as stale, and the refusal looks exactly
+      like a legitimately expired continuation.
     """
 
     model_config = ConfigDict(frozen=True)
 
     snapshot: GenerationSnapshot
     execution_epoch: int
+    paused_epoch: int
     checkpoint_thread_id: str
     active_agent_id: str | None = None
     research_accounting: dict[str, Any] | None = None

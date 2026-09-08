@@ -210,6 +210,36 @@ class GenerationControlService:
             },
         )
 
+    async def mark_failed(
+        self,
+        *,
+        generation_id: uuid.UUID,
+        user_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+        expected_version: int,
+        terminal_reason: str,
+    ) -> GenerationSnapshot:
+        """The turn produced nothing a client can read.
+
+        Distinct from ``mark_completed(partial=True)``: that one has an answer
+        and simply stopped early, while this one has none. Nothing here is
+        continuable, because there is no first half to continue.
+        """
+        return await self._must_transition(
+            generation_id=generation_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            expected_statuses=_STOPPABLE,
+            expected_version=expected_version,
+            values={
+                "status": GenerationStatus.FAILED,
+                "continuation_available": False,
+                "continuation_id": None,
+                "terminal_reason": terminal_reason,
+                "terminal_at": _now(),
+            },
+        )
+
     async def mark_completed(self, command: MarkCompleted) -> GenerationSnapshot:
         status = (
             GenerationStatus.COMPLETED_PARTIAL if command.partial else GenerationStatus.COMPLETED
@@ -313,6 +343,9 @@ class GenerationControlService:
             lease = ContinuationLease(
                 snapshot=advanced,
                 execution_epoch=advanced.execution_epoch,
+                # The epoch the graph is still in. The row moved; the checkpoint
+                # did not, and the pause node advances it itself on resume.
+                paused_epoch=snapshot.execution_epoch,
                 checkpoint_thread_id=context.checkpoint_thread_id,
                 active_agent_id=context.active_agent_id,
                 research_accounting=context.research_accounting,
@@ -323,6 +356,39 @@ class GenerationControlService:
 
         await self._record(command, lease.model_dump(mode="json"))
         return lease
+
+    async def aget_snapshot(
+        self,
+        *,
+        generation_id: uuid.UUID,
+        user_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+    ) -> GenerationSnapshot | None:
+        """Read one generation's current state, or ``None`` for a non-owner.
+
+        The read every status endpoint and every "where did this land?" recovery
+        path uses. Returns ``None`` rather than raising, because "not yours" and
+        "not there" must be indistinguishable.
+        """
+        return await self._repository.aget_owned(generation_id, user_id, conversation_id)
+
+    async def find_by_logical_turn(
+        self,
+        *,
+        logical_turn_id: str,
+        user_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+    ) -> GenerationSnapshot | None:
+        """The generation for one logical turn, or ``None`` for a non-owner.
+
+        The route a caller holding only a turn-scoped id takes — the user
+        message id an older Stop endpoint carries. Exposed here rather than
+        letting callers reach into the repository, so owner scoping stays this
+        service's concern.
+        """
+        return await self._repository.aget_by_logical_turn(
+            str(logical_turn_id), user_id, conversation_id
+        )
 
     async def await_stop_settled(
         self,

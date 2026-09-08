@@ -10,22 +10,21 @@ many times it arrives. The two questions it exists to keep separate:
 * Stop on a paused, already-validated answer is a *decision*. Nothing is
   running, so it resolves immediately to ``completed_partial``.
 
-The fake repository here is deliberately faithful about the fence and about
-returning ``None`` for a refused transition, because that is the contract the
-service is written against. What it cannot model — real concurrency — is
-covered in ``tests/integration/test_generation_repository_postgres.py``.
+The repository double lives in ``tests/generation_control_support.py`` and is
+deliberately faithful about the fence and about returning ``None`` for a
+refused transition, because that is the contract this service is written
+against. What it cannot model — real concurrency — is covered in
+``tests/integration/test_generation_repository_postgres.py``.
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
 
 from app.models.generation import GenerationCommandAction, GenerationStatus
 from app.schemas.generation import (
-    CommandClaim,
     ContinueGenerationCommand,
     CreateGeneration,
     GenerationSnapshot,
@@ -34,127 +33,26 @@ from app.schemas.generation import (
     MarkStopped,
     StopGenerationCommand,
 )
-from app.services.generation_control_bus import InMemoryGenerationControlBus
 from app.services.generation_control_service import (
     ContinuationUnavailable,
-    GenerationControlService,
     GenerationNotFound,
     IllegalTransition,
     StaleCommand,
 )
+from tests.generation_control_support import (
+    CONVERSATION_ID,
+    USER_ID,
+    build_control_service,
+)
 
-CONVERSATION_ID = UUID("11111111-1111-1111-1111-111111111111")
-USER_ID = UUID("22222222-2222-2222-2222-222222222222")
-
-
-class FakeRepository:
-    """Enough of the repository to hold the service to its own contract."""
-
-    def __init__(self) -> None:
-        self.rows: dict[UUID, dict] = {}
-        self.commands: dict[tuple[UUID, str], dict] = {}
-        self.transitions: list[dict] = []
-
-    async def acreate(self, command: CreateGeneration) -> GenerationSnapshot:
-        generation_id = uuid4()
-        self.rows[generation_id] = {
-            "id": generation_id,
-            "logical_turn_id": command.logical_turn_id,
-            "conversation_id": command.conversation_id,
-            "user_id": command.user_id,
-            "checkpoint_thread_id": command.checkpoint_thread_id,
-            "active_agent_id": command.active_agent_id,
-            "status": GenerationStatus.STARTING,
-            "version": 1,
-            "execution_epoch": 0,
-            "continuation_id": None,
-            "continuation_available": False,
-            "continuation_block_reason": None,
-            "assistant_message_id": None,
-            "terminal_reason": None,
-            "research_accounting": None,
-        }
-        return self._snapshot(generation_id)
-
-    async def aget_owned(self, generation_id, user_id, conversation_id):
-        row = self.rows.get(generation_id)
-        if row is None or row["user_id"] != user_id or row["conversation_id"] != conversation_id:
-            return None
-        return self._snapshot(generation_id)
-
-    async def atransition(
-        self,
-        *,
-        generation_id,
-        user_id,
-        conversation_id,
-        expected_statuses,
-        expected_version,
-        values,
-    ):
-        self.transitions.append({"generation_id": generation_id, "values": dict(values)})
-        row = self.rows.get(generation_id)
-        if row is None or row["user_id"] != user_id or row["conversation_id"] != conversation_id:
-            return None
-        if row["version"] != expected_version or row["status"] not in expected_statuses:
-            return None
-        row.update(values)
-        row["version"] += 1
-        return self._snapshot(generation_id)
-
-    async def aget_resume_context(self, generation_id, user_id, conversation_id):
-        row = self.rows.get(generation_id)
-        if row is None or row["user_id"] != user_id or row["conversation_id"] != conversation_id:
-            return None
-        return SimpleNamespace(
-            checkpoint_thread_id=row["checkpoint_thread_id"],
-            active_agent_id=row["active_agent_id"],
-            research_accounting=row["research_accounting"],
-            execution_budget=row.get("execution_budget"),
-        )
-
-    async def aclaim_command(self, *, generation_id, idempotency_key, action, fence):
-        key = (generation_id, idempotency_key)
-        existing = self.commands.get(key)
-        if existing is not None:
-            return CommandClaim(
-                claimed=False,
-                action=existing["action"],
-                fence=existing["fence"],
-                result=existing["result"],
-            )
-        self.commands[key] = {"action": action, "fence": fence, "result": None}
-        return CommandClaim(claimed=True, action=action, fence=fence, result=None)
-
-    async def arecord_command_result(self, *, generation_id, idempotency_key, result):
-        entry = self.commands.get((generation_id, idempotency_key))
-        if entry is not None and entry["result"] is None:
-            entry["result"] = result
-
-    # -- helpers -------------------------------------------------------
-
-    def _snapshot(self, generation_id: UUID) -> GenerationSnapshot:
-        row = self.rows[generation_id]
-
-        class _Row:
-            def __init__(self, values: dict) -> None:
-                self.__dict__.update(values)
-
-        return GenerationSnapshot.from_row(_Row(row))
-
-    def force(self, generation_id: UUID, **values) -> GenerationSnapshot:
-        self.rows[generation_id].update(values)
-        return self._snapshot(generation_id)
+# The repository double and these ids live in ``generation_control_support`` so
+# the message-service lifecycle tests drive the *real* control service over the
+# same faithful fence rather than a second fake of it.
 
 
 @pytest.fixture()
 def service():
-    repository = FakeRepository()
-    bus = InMemoryGenerationControlBus()
-    control = GenerationControlService(repository=repository, bus=bus, stop_wait_seconds=0.05)
-    control._test_repository = repository  # type: ignore[attr-defined]
-    control._test_bus = bus  # type: ignore[attr-defined]
-    return control
+    return build_control_service()
 
 
 async def _started(service) -> GenerationSnapshot:
@@ -413,6 +311,23 @@ async def test_continue_on_continuable_leases_the_next_epoch(service):
     assert lease.snapshot.status is GenerationStatus.CONTINUING
     assert lease.checkpoint_thread_id == "routing-v2:turn-1"
     assert lease.active_agent_id == "chat_agent"
+
+
+async def test_the_lease_names_both_the_leased_and_the_paused_epoch(service):
+    """The row moves; the checkpoint does not.
+
+    The pause node fences a resume against the epoch in *graph* state and
+    advances it itself, so the value sent back into the graph is the paused
+    epoch. Sending the leased one is refused as stale, and that refusal is
+    indistinguishable from a legitimately expired continuation — which is
+    exactly why these are two named fields rather than one and a subtraction.
+    """
+    paused = await _continuable(service)
+
+    lease = await service.prepare_continue(_continue(paused))
+
+    assert lease.paused_epoch == paused.execution_epoch
+    assert lease.execution_epoch == lease.paused_epoch + 1
 
 
 async def test_the_lease_carries_the_accounting_the_next_epoch_must_respect(service):

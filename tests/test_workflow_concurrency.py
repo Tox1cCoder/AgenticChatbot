@@ -414,6 +414,30 @@ def test_the_container_wires_a_durable_turn_coordinator_into_message_service():
     assert "turn_coordinator=conversation_turn_coordinator" in message_service_block
 
 
+def test_the_container_wires_the_generation_control_service():
+    """A lifecycle service nobody injects is a Stop that works in one process.
+
+    Without this injection ``_generation_control()`` returns ``None`` in
+    production, the durable row is never allocated, and Stop silently falls
+    back to the process-local registry — which is the exact defect the
+    ``generations`` table exists to remove. The failure would be invisible:
+    every same-worker Stop still appears to work.
+    """
+    import inspect
+
+    from app.core import container as container_module
+
+    assert (
+        "generation_control_service" in inspect.signature(MessageService.__init__).parameters
+    )
+
+    source = inspect.getsource(container_module)
+    message_service_block = source.split("message_service: providers.Provider")[1].split(
+        "feedback_service"
+    )[0]
+    assert "generation_control_service=generation_control_service" in message_service_block
+
+
 # ----------------------------------------------------------------------
 # the production backend against a real session factory
 # ----------------------------------------------------------------------

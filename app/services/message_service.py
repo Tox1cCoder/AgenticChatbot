@@ -19,7 +19,7 @@ from fastapi import status as http_status
 from app.ai.suggestion_generator import generate_follow_up_suggestions
 from app.ai.utils import resolve_interrupt_decision_id
 from app.ai.workflow.contracts import WorkflowRoutingException
-from app.ai.workflow.errors import workflow_error_payload
+from app.ai.workflow.errors import workflow_error, workflow_error_payload
 from app.core.config import settings
 from app.core.exceptions import CustomHTTPException, PauseReason
 from app.core.response_constants import (
@@ -142,6 +142,7 @@ class MessageService(IMessageService):
         chat_image_service=None,
         web_image_service=None,
         turn_coordinator: ConversationTurnCoordinator | None = None,
+        generation_control_service: Any | None = None,
     ):
         self.repository = message_repository
         self.conversation_validation_utils = conversation_validation_utils
@@ -162,7 +163,382 @@ class MessageService(IMessageService):
         # through response persistence. Injected rather than constructed here
         # so the lock's durability is a deployment decision, not this class's.
         self._turn_coordinator = turn_coordinator
+        # Owns the durable generation lifecycle: the row that makes Stop work
+        # when the command lands on a different worker than the stream, and
+        # Continue resume the exact checkpoint a pause left behind.
+        self.generation_control_service = generation_control_service
         self.redis_client = self._init_redis_client()
+
+    def _generation_control(self):
+        """The durable lifecycle service, or ``None`` when it is not wired.
+
+        Same shape as :meth:`_hold_turn`: tests build this service with
+        ``__new__`` and doubles, and
+        ``test_the_container_wires_the_generation_control_service`` asserts the
+        container-wired one always has it, so an undurable production path
+        cannot pass unnoticed.
+        """
+        return getattr(self, "generation_control_service", None)
+
+    async def _astart_generation(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: UUID,
+        logical_turn_id: UUID,
+    ):
+        """Allocate the lifecycle row before anything can be asked to stop it.
+
+        Ordering is the contract: the row exists before the first streamed
+        event, so a Stop arriving on the very first token already has something
+        durable to transition. The logical turn is the user message id, which
+        is also the checkpoint's turn segment — one identity, so a Continue can
+        find the exact thread from the row alone.
+
+        A conflict here is reported, not swallowed. The partial unique index
+        allows one active lifecycle per conversation, so an ``IntegrityError``
+        means a turn really is already running — retriable, and exactly what
+        ``conversation_turn_conflict`` says.
+        """
+        control = self._generation_control()
+        if control is None:
+            return None
+
+        from sqlalchemy.exc import IntegrityError
+
+        from app.ai.workflow.state import build_checkpoint_thread_id
+        from app.schemas.generation import CreateGeneration
+
+        try:
+            return await control.start_generation(
+                CreateGeneration(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    logical_turn_id=str(logical_turn_id),
+                    checkpoint_thread_id=build_checkpoint_thread_id(
+                        str(conversation_id), str(logical_turn_id)
+                    ),
+                )
+            )
+        except IntegrityError as exc:
+            raise WorkflowRoutingException(
+                workflow_error(
+                    "conversation_turn_conflict",
+                    request_id=str(logical_turn_id),
+                    details={"reason": "a generation is already active for this conversation"},
+                )
+            ) from exc
+
+    @staticmethod
+    def _generation_status_data(snapshot: Any) -> dict[str, Any]:
+        """The lifecycle fields every transport publishes, and nothing else.
+
+        Written out field by field rather than dumping the snapshot, so adding
+        a column to ``generations`` cannot silently start publishing it. What
+        is deliberately absent is the checkpoint thread — a resume handle — and
+        the budget and research-accounting blobs, which are bookkeeping.
+        """
+        return {
+            "generation_id": str(snapshot.generation_id),
+            "logical_turn_id": snapshot.logical_turn_id,
+            "conversation_id": str(snapshot.conversation_id),
+            "status": snapshot.status.value,
+            "version": snapshot.version,
+            "execution_epoch": snapshot.execution_epoch,
+            "continuation_id": (
+                str(snapshot.continuation_id) if snapshot.continuation_id else None
+            ),
+            "continuation_available": bool(snapshot.continuation_available),
+            "continuation_block_reason": snapshot.continuation_block_reason,
+            "assistant_message_id": (
+                str(snapshot.assistant_message_id) if snapshot.assistant_message_id else None
+            ),
+            "terminal_reason": snapshot.terminal_reason,
+        }
+
+    async def _apublish_continuation_pause(
+        self,
+        event: V3StreamEvent,
+        *,
+        generation: Any,
+        conversation_id: UUID,
+        user_id: UUID,
+        bot_message_id: UUID,
+        sanitized_persona: str | None,
+        workflow_request: Any,
+        inflight: Any,
+        tool_artifacts: list[dict[str, Any]] | None,
+        next_sequence: Any,
+    ):
+        """Persist the validated partial, then offer Continue on it.
+
+        The order is the requirement, not an implementation detail. A client
+        that receives ``continuation_available`` may redeem the continuation id
+        immediately, and the resumed epoch is assembled around an assistant
+        message that must already exist. Advertising first would produce a
+        Continue whose first half was never saved.
+
+        If persistence fails, the turn is marked ``failed`` and no answer and
+        no control event are emitted. A partial nobody can read is not an
+        answer, and offering to continue it would be offering to continue
+        nothing.
+        """
+        payload = dict(event.data or {})
+        content = str(payload.get("validated_content") or "").strip()
+        budget = payload.get("budget") if isinstance(payload.get("budget"), dict) else None
+
+        metadata: dict[str, Any] = {
+            "partial": True,
+            "continuable": True,
+            "stop_reason": "execution_budget_exhausted",
+            "generation_id": payload.get("generation_id") or str(generation.generation_id)
+            if generation
+            else payload.get("generation_id"),
+            "logical_turn_id": payload.get("logical_turn_id"),
+            "execution_epoch": payload.get("execution_epoch"),
+            "persona_used": sanitized_persona,
+        }
+        if budget:
+            metadata["execution_budget"] = budget
+        if tool_artifacts:
+            metadata["tool_artifacts"] = tool_artifacts
+        self._attach_active_agent_metadata(
+            metadata,
+            payload.get("active_agent_id") or inflight.active_agent_id,
+            getattr(workflow_request, "custom_agents", None),
+        )
+
+        try:
+            bot_message = await self._acreate_bot_response_message(
+                conversation_id=conversation_id,
+                content=fix_markdown_code_blocks(content) if content else content,
+                metadata=metadata,
+                message_id=bot_message_id,
+            )
+        except Exception:
+            logging.exception("Could not persist the validated partial for a paused turn")
+            await self._amark_generation_failed(generation, user_id=user_id)
+            yield make_event(
+                "error",
+                sequence=next_sequence(),
+                conversation_id=str(conversation_id),
+                data=workflow_error_payload(
+                    workflow_error(
+                        "response_persistence_failed",
+                        request_id=str(bot_message_id),
+                        details={"reason": "the paused partial answer could not be saved"},
+                    )
+                ),
+            )
+            return
+
+        try:
+            offered = await self._amark_generation_continuable(
+                generation,
+                user_id=user_id,
+                assistant_message_id=bot_message_id,
+                execution_budget=budget,
+            )
+        except Exception:
+            # The answer is saved and streamed, so the turn is not a failure —
+            # it simply cannot be continued. Saying so beats advertising a
+            # continuation id no Continue could redeem.
+            logging.exception("Could not offer a continuation for a paused turn")
+            offered = None
+
+        yield make_event(
+            "message_end",
+            sequence=next_sequence(),
+            conversation_id=str(conversation_id),
+            message_id=str(bot_message_id),
+            data={"message": bot_message.model_dump(mode="json")},
+        )
+
+        if offered is None:
+            return
+
+        yield make_event(
+            "continuation_available",
+            sequence=next_sequence(),
+            conversation_id=str(conversation_id),
+            message_id=str(bot_message_id),
+            data=self._generation_status_data(offered),
+        )
+
+    async def _amark_generation_failed(self, generation: Any, *, user_id: UUID):
+        """Record a turn that could not produce a readable answer."""
+        control = self._generation_control()
+        if control is None or generation is None:
+            return None
+
+        try:
+            return await control.mark_failed(
+                generation_id=generation.generation_id,
+                user_id=user_id,
+                conversation_id=generation.conversation_id,
+                expected_version=generation.version,
+                terminal_reason="response_persistence_failed",
+            )
+        except Exception as exc:  # noqa: BLE001 - bookkeeping never fails a turn
+            logging.warning(
+                "Could not mark generation %s failed: %s",
+                generation.generation_id,
+                type(exc).__name__,
+            )
+            return None
+
+    async def _amark_generation_running(self, generation: Any, *, user_id: UUID):
+        """Move ``starting`` to ``running`` once the turn is really executing.
+
+        Not cosmetic. ``continuable`` is only legal from ``running`` (or a later
+        active status), so a turn that paused at its budget without ever
+        leaving ``starting`` could not be offered a Continue at all.
+
+        Returns the advanced snapshot, or the original one when the transition
+        could not be made — every later transition fences on the version this
+        returns, so handing back a stale one would make them all fail.
+        """
+        control = self._generation_control()
+        if control is None or generation is None:
+            return generation
+
+        try:
+            return await control.mark_running(
+                generation_id=generation.generation_id,
+                user_id=user_id,
+                conversation_id=generation.conversation_id,
+                expected_version=generation.version,
+            )
+        except Exception as exc:  # noqa: BLE001 - a Stop already won this race
+            logging.info(
+                "Generation %s did not enter running: %s",
+                generation.generation_id,
+                type(exc).__name__,
+            )
+            return generation
+
+    async def _amark_generation_completed(
+        self,
+        generation: Any,
+        *,
+        user_id: UUID,
+        assistant_message_id: UUID | None,
+        partial: bool = False,
+        terminal_reason: str | None = None,
+    ):
+        """Close the lifecycle row for a turn that finished on its own.
+
+        ``user_id`` is passed rather than read off the snapshot: the snapshot is
+        what transports publish, and an owner id is not something a client
+        should be able to read back out of one.
+
+        Never raises into the stream. The answer is already persisted and
+        streamed by the time this runs, so failing the turn over a bookkeeping
+        write would discard a good response; the row is left for the stuck-state
+        reconciliation the rollout procedure documents.
+        """
+        control = self._generation_control()
+        if control is None or generation is None:
+            return None
+
+        from app.schemas.generation import MarkCompleted
+
+        try:
+            return await control.mark_completed(
+                MarkCompleted(
+                    generation_id=generation.generation_id,
+                    conversation_id=generation.conversation_id,
+                    user_id=user_id,
+                    expected_version=generation.version,
+                    assistant_message_id=assistant_message_id,
+                    partial=partial,
+                    terminal_reason=terminal_reason,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - bookkeeping never fails a turn
+            logging.warning(
+                "Could not close generation %s: %s", generation.generation_id, type(exc).__name__
+            )
+            return None
+
+    async def _amark_generation_continuable(
+        self,
+        generation: Any,
+        *,
+        user_id: UUID,
+        assistant_message_id: UUID,
+        execution_budget: dict[str, Any] | None = None,
+        block_reason: str | None = None,
+    ):
+        """Offer Continue on a partial answer that is already persisted.
+
+        Ordering is the whole contract of Task 5 Step 4: the assistant message
+        must be committed before this runs, because the continuation id minted
+        here is what a client uses to ask for more of an answer it can already
+        see. Offering first and persisting second would leave a Continue that
+        resumes work whose first half was never saved.
+
+        Unlike the completion transition this one *does* propagate. A failure
+        here means the offer was not recorded, so publishing
+        ``continuation_available`` anyway would advertise a continuation id
+        that no Continue could ever redeem.
+        """
+        control = self._generation_control()
+        if control is None or generation is None:
+            return None
+
+        from app.schemas.generation import MarkContinuable
+
+        return await control.mark_continuable(
+            MarkContinuable(
+                generation_id=generation.generation_id,
+                conversation_id=generation.conversation_id,
+                user_id=user_id,
+                expected_version=generation.version,
+                assistant_message_id=assistant_message_id,
+                execution_budget=execution_budget,
+                continuation_block_reason=block_reason,
+            )
+        )
+
+    async def _amark_generation_stopped(
+        self,
+        generation: Any,
+        *,
+        user_id: UUID,
+        assistant_message_id: UUID | None,
+        terminal_reason: str = "stopped",
+    ):
+        """Record that this worker actually stopped.
+
+        This is the transition that turns a client's ``stop_requested`` into
+        ``stopped``. Only the owning worker can make it, because only the
+        worker knows it has really let go of the turn.
+        """
+        control = self._generation_control()
+        if control is None or generation is None:
+            return None
+
+        from app.schemas.generation import MarkStopped
+
+        try:
+            return await control.mark_stopped(
+                MarkStopped(
+                    generation_id=generation.generation_id,
+                    conversation_id=generation.conversation_id,
+                    user_id=user_id,
+                    expected_version=generation.version,
+                    assistant_message_id=assistant_message_id,
+                    terminal_reason=terminal_reason,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - bookkeeping never fails a turn
+            logging.warning(
+                "Could not record the stop of generation %s: %s",
+                generation.generation_id,
+                type(exc).__name__,
+            )
+            return None
 
     def _hold_turn(self, conversation_id: Any, *, request_id: str):
         """Hold this conversation's turn lock for the body of the turn.
@@ -1106,16 +1482,29 @@ class MessageService(IMessageService):
         with contextlib.suppress(Exception):
             self.ai_service.invalidate_history_cache(str(message_create_data.conversation_id))
 
-        # Register in-flight entry
+        # The durable row comes before the first streamed event, so a Stop that
+        # arrives on the very first token already has something to transition.
+        generation = await self._astart_generation(
+            conversation_id=message_create_data.conversation_id,
+            user_id=user_id,
+            logical_turn_id=user_message_id,
+        )
+
+        # Register in-flight entry, keyed by generation id when there is one.
+        # The user message id remains the fallback so an unwired service keeps
+        # working; Stop never reads it as identity either way, because the
+        # durable row is what a Stop from another worker can see.
         registry = get_generation_registry()
-        # Still the user message id until the generation lifecycle owns
-        # identity (Task 5 of the generation-controls plan); the registry key is
-        # opaque either way.
+        registry_key = generation.generation_id if generation else user_message_id
         inflight = registry.register(
-            generation_id=user_message_id,
+            generation_id=registry_key,
             conversation_id=message_create_data.conversation_id,
             user_id=user_id,
         )
+        # The event alone cannot reach a producer blocked inside a provider
+        # call; the task can. It does not exist until this coroutine runs, so
+        # it is attached here rather than passed to ``register``.
+        inflight.task = asyncio.current_task()
 
         sequence = 0
 
@@ -1123,6 +1512,18 @@ class MessageService(IMessageService):
             nonlocal sequence
             sequence += 1
             return sequence
+
+        if generation is not None:
+            # The canonical opening event of a turn. Everything a client needs
+            # to address a later Stop or Continue is here, including the version
+            # that fences them (R5).
+            yield make_event(
+                "run_start",
+                sequence=_next_sequence(),
+                conversation_id=str(message_create_data.conversation_id),
+                message_id=str(bot_message_id),
+                data=self._generation_status_data(generation),
+            )
 
         # Yield user message creation event
         yield make_event(
@@ -1172,6 +1573,13 @@ class MessageService(IMessageService):
                 conversation=conversation,
                 user_message_id=user_message_id,
                 assistant_message_id=bot_message_id,
+            )
+
+            # `starting` to `running` before the graph is entered. A turn that
+            # paused at its budget while still `starting` could not be offered
+            # a Continue, because `continuable` is not legal from there.
+            generation = await self._amark_generation_running(
+                generation, user_id=resolved_user_id or user_id
             )
 
             # Stream bot response generation
@@ -1301,7 +1709,31 @@ class MessageService(IMessageService):
                         # edited/deleted/detached while this run can still resume.
                         _cancel_title_task()
                         inflight.resolve()
-                        registry.mark_paused(user_message_id)
+                        registry.mark_paused(registry_key)
+                        return
+
+                    elif event_type == "continuation_available":
+                        # The turn paused at its execution budget with a
+                        # validated partial answer. Persist first, offer second:
+                        # the continuation id a client redeems must point at an
+                        # answer that is already saved, or Continue would resume
+                        # work whose first half was never written down.
+                        _cancel_title_task()
+                        async for paused_event in self._apublish_continuation_pause(
+                            event,
+                            generation=generation,
+                            conversation_id=message_create_data.conversation_id,
+                            user_id=resolved_user_id or user_id,
+                            bot_message_id=bot_message_id,
+                            sanitized_persona=sanitized_persona,
+                            workflow_request=workflow_request,
+                            inflight=inflight,
+                            tool_artifacts=stream_tool_artifacts or None,
+                            next_sequence=_next_sequence,
+                        ):
+                            yield paused_event
+                        inflight.resolve()
+                        registry.mark_paused(registry_key)
                         return
 
                     elif event_type == "complete":
@@ -1346,9 +1778,24 @@ class MessageService(IMessageService):
                             message_id=bot_message_id,
                         )
                         inflight.resolve(bot_message.model_dump(mode="json"))
+                        # The worker confirming it let go. Only this side can
+                        # make the transition, which is what turns a client's
+                        # `stop_requested` into an authoritative `stopped`.
+                        await self._amark_generation_stopped(
+                            generation,
+                            user_id=resolved_user_id or user_id,
+                            assistant_message_id=bot_message_id,
+                            terminal_reason="user_requested",
+                        )
                     else:
                         inflight.resolve(None)
-                    registry.remove(user_message_id)
+                        await self._amark_generation_stopped(
+                            generation,
+                            user_id=resolved_user_id or user_id,
+                            assistant_message_id=None,
+                            terminal_reason="user_requested",
+                        )
+                    registry.remove(registry_key)
                     return
 
                 _merge_stream_tool_artifacts_into_response(bot_response, stream_tool_artifacts)
@@ -1371,7 +1818,13 @@ class MessageService(IMessageService):
 
                 # Resolve the inflight future with the final message
                 inflight.resolve(bot_message.model_dump(mode="json"))
-                registry.remove(user_message_id)
+                await self._amark_generation_completed(
+                    generation,
+                    user_id=resolved_user_id or user_id,
+                    assistant_message_id=bot_message_id,
+                    terminal_reason="completed",
+                )
+                registry.remove(registry_key)
 
                 # Emit the title update BEFORE the terminal completion so the
                 # Streamlit SSE client (which stops reading after `complete`)
@@ -1431,7 +1884,7 @@ class MessageService(IMessageService):
                         inflight.resolve(bot_msg.model_dump(mode="json"))
                     else:
                         inflight.resolve(None)
-                    registry.remove(user_message_id)
+                    registry.remove(registry_key)
                 return
 
             except Exception as exc:
@@ -1449,7 +1902,7 @@ class MessageService(IMessageService):
                 )
 
                 inflight.resolve(error_message.model_dump(mode="json"))
-                registry.remove(user_message_id)
+                registry.remove(registry_key)
 
                 yield make_event(
                     "error",
@@ -2168,6 +2621,274 @@ class MessageService(IMessageService):
                 },
             )
 
+    async def continue_message_generation_stream(
+        self,
+        *,
+        generation_id: UUID,
+        continuation_id: UUID,
+        conversation_id: UUID,
+        user_id: UUID,
+        idempotency_key: str,
+        expected_version: int,
+        bot_message_id: UUID | None = None,
+        inline_rich_response_v1: bool = False,
+    ):
+        """Resume a paused turn from its exact checkpoint.
+
+        What this deliberately does not do is as much of the contract as what
+        it does. It does not call ``create_message_stream``, the router,
+        ``sendMessage``, or regenerate, and it appends no user message —
+        synthetic or hidden. Continue is more of the *same* answer to the
+        *same* question; anything that adds a turn would re-route it and could
+        land it on a different specialist than the one holding the evidence.
+
+        The conversation lock is reacquired for the same reason a new turn
+        holds it: this writes an assistant message for the conversation.
+        """
+        control = self._generation_control()
+        if control is None:
+            yield make_event(
+                "error",
+                sequence=0,
+                conversation_id=str(conversation_id),
+                data={"error": "Generation controls are not enabled on this deployment."},
+            )
+            return
+
+        await self.conversation_validation_utils.avalidate_conversation_access(
+            user_id, conversation_id
+        )
+        if bot_message_id is None:
+            bot_message_id = uuid4()
+
+        try:
+            async with self._hold_turn(conversation_id, request_id=str(bot_message_id)):
+                async for event in self._acontinue_holding_turn(
+                    generation_id=generation_id,
+                    continuation_id=continuation_id,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    idempotency_key=idempotency_key,
+                    expected_version=expected_version,
+                    bot_message_id=bot_message_id,
+                    inline_rich_response_v1=inline_rich_response_v1,
+                ):
+                    yield event
+        except WorkflowRoutingException as exc:
+            yield make_event(
+                "error",
+                sequence=0,
+                conversation_id=str(conversation_id),
+                data=workflow_error_payload(exc.error),
+            )
+
+    async def _acontinue_holding_turn(
+        self,
+        *,
+        generation_id: UUID,
+        continuation_id: UUID,
+        conversation_id: UUID,
+        user_id: UUID,
+        idempotency_key: str,
+        expected_version: int,
+        bot_message_id: UUID,
+        inline_rich_response_v1: bool,
+    ):
+        """Lease the epoch, then stream it. Refusals stay typed."""
+        from app.schemas.generation import ContinueGenerationCommand
+        from app.services.generation_control_service import GenerationControlError
+
+        control = self._generation_control()
+        try:
+            lease = await control.prepare_continue(
+                ContinueGenerationCommand(
+                    generation_id=generation_id,
+                    continuation_id=continuation_id,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    idempotency_key=idempotency_key,
+                    expected_version=expected_version,
+                    inline_rich_response_v1=inline_rich_response_v1,
+                )
+            )
+        except GenerationControlError as exc:
+            # A refusal is the answer, not a broken stream: the client asked
+            # for something the lifecycle will not allow and the reason is safe
+            # to say.
+            yield make_event(
+                "error",
+                sequence=0,
+                conversation_id=str(conversation_id),
+                data={"error": str(exc), "error_code": exc.code, **exc.detail},
+            )
+            return
+
+        sequence = 0
+
+        def _next_sequence() -> int:
+            nonlocal sequence
+            sequence += 1
+            return sequence
+
+        registry = get_generation_registry()
+        inflight = registry.register(
+            generation_id=generation_id,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            active_agent_id=lease.active_agent_id,
+        )
+        inflight.task = asyncio.current_task()
+
+        yield make_event(
+            "run_start",
+            sequence=_next_sequence(),
+            conversation_id=str(conversation_id),
+            message_id=str(bot_message_id),
+            data=self._generation_status_data(lease.snapshot),
+        )
+
+        async for event in self._astream_continuation(
+            lease,
+            continuation_id=continuation_id,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            bot_message_id=bot_message_id,
+            inline_rich_response_v1=inline_rich_response_v1,
+            inflight=inflight,
+            next_sequence=_next_sequence,
+        ):
+            yield event
+
+        registry.remove(generation_id)
+
+    async def _astream_continuation(
+        self,
+        lease: Any,
+        *,
+        continuation_id: UUID,
+        conversation_id: UUID,
+        user_id: UUID,
+        bot_message_id: UUID,
+        inline_rich_response_v1: bool,
+        inflight: Any,
+        next_sequence: Any,
+    ):
+        """Project the resumed graph's events, persisting whatever it ends with.
+
+        The epoch handed back to the graph is ``paused_epoch``, not the leased
+        one: the row has advanced but the checkpoint has not, and the pause node
+        fences against its own state.
+        """
+        bot_response = None
+        partial_text = ""
+
+        stream = self.ai_service.resume_generation_control_stream(
+            thread_id=lease.checkpoint_thread_id,
+            action="continue",
+            continuation_id=str(continuation_id),
+            expected_epoch=lease.paused_epoch,
+            inline_rich_response_v1=inline_rich_response_v1,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+
+        async for raw_event in stream:
+            if inflight.is_cancelled:
+                break
+            event = _service_event_from_ai_event(raw_event, sequence=next_sequence())
+            if event.type == "message_delta":
+                partial_text += event.data.get("text", "")
+                inflight.partial_text = partial_text
+                inflight.touch()
+                yield event
+            elif event.type == "complete":
+                bot_response = event.data.get("response")
+                break
+            elif event.type == "error":
+                yield event
+                return
+            elif event.type == "continuation_available":
+                # The turn ran out of budget again. Same rule as the first
+                # pause, and the epoch cap in `validate_output` is what stops
+                # this from recurring forever.
+                async for paused_event in self._apublish_continuation_pause(
+                    event,
+                    generation=lease.snapshot,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    bot_message_id=bot_message_id,
+                    sanitized_persona=None,
+                    workflow_request=None,
+                    inflight=inflight,
+                    tool_artifacts=None,
+                    next_sequence=next_sequence,
+                ):
+                    yield paused_event
+                return
+            else:
+                inflight.touch()
+                yield event
+
+        if bot_response is None:
+            await self._amark_generation_stopped(
+                lease.snapshot,
+                user_id=user_id,
+                assistant_message_id=None,
+                terminal_reason="user_requested",
+            )
+            return
+
+        bot_message = await self._acreate_bot_response_message(
+            conversation_id=conversation_id,
+            content=fix_markdown_code_blocks(
+                str(getattr(getattr(bot_response, "message", None), "content", "") or "")
+                or partial_text
+            ),
+            metadata=self._continuation_metadata(lease, bot_response),
+            message_id=bot_message_id,
+        )
+        inflight.resolve(bot_message.model_dump(mode="json"))
+        await self._amark_generation_completed(
+            lease.snapshot,
+            user_id=user_id,
+            assistant_message_id=bot_message_id,
+            partial=True,
+            terminal_reason="continued",
+        )
+
+        yield make_event(
+            "complete",
+            sequence=next_sequence(),
+            conversation_id=str(conversation_id),
+            message_id=str(bot_message_id),
+            data={"message": bot_message.model_dump(mode="json")},
+        )
+
+    @staticmethod
+    def _continuation_metadata(lease: Any, bot_response: Any) -> dict[str, Any]:
+        """Metadata for the assistant message a continued epoch produced.
+
+        ``partial`` stays true across the whole chain. The answer was assembled
+        over more than one epoch, and a reader that treats the last one as the
+        whole answer would misattribute where the evidence came from.
+        """
+        metadata: dict[str, Any] = {
+            "partial": True,
+            "continued": True,
+            "generation_id": str(lease.snapshot.generation_id),
+            "logical_turn_id": lease.snapshot.logical_turn_id,
+            "execution_epoch": lease.execution_epoch,
+        }
+        response_metadata = getattr(bot_response, "metadata", None)
+        if isinstance(response_metadata, dict):
+            for key in ("images", "execution_budget"):
+                if response_metadata.get(key):
+                    metadata[key] = response_metadata[key]
+        artifacts = getattr(bot_response, "tool_artifacts", None)
+        if artifacts:
+            metadata["tool_artifacts"] = list(artifacts)
+        return metadata
+
     async def stop_message_generation(
         self,
         conversation_id: UUID,
@@ -2193,11 +2914,122 @@ class MessageService(IMessageService):
         the producer has not, and removing the entry here is what left a retried
         Stop with nothing to cancel while the turn was still going.
 
-        Superseded by the durable lifecycle in ``generations``, which is what
-        makes a Stop work across workers rather than only within this one.
+        This is the turn-scoped entry point: the caller holds a user message id,
+        which is the logical turn. It resolves that to the durable generation
+        and delegates, so there is one Stop implementation rather than a
+        process-local one beside a durable one.
         """
         self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
 
+        control = self._generation_control()
+        if control is None:
+            return await self._astop_locally(
+                conversation_id, user_id, user_message_id, wait_seconds
+            )
+
+        snapshot = await control.find_by_logical_turn(
+            logical_turn_id=str(user_message_id),
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        if snapshot is None:
+            return {"status": "not_inflight", "message": None}
+
+        result = await self.stop_generation(
+            generation_id=snapshot.generation_id,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            # Derived, not client-supplied: this endpoint predates the fenced
+            # command and has no key to send. A retry therefore genuinely
+            # re-issues rather than replaying, which the durable transition
+            # already makes idempotent.
+            idempotency_key=f"legacy-stop-{snapshot.generation_id}",
+            expected_version=snapshot.version,
+        )
+        return self._legacy_stop_result(result, user_id=user_id)
+
+    async def stop_generation(
+        self,
+        *,
+        generation_id: UUID,
+        conversation_id: UUID,
+        user_id: UUID,
+        idempotency_key: str,
+        expected_version: int,
+    ):
+        """Stop one generation durably, and report only what is true.
+
+        The durable transition comes first and the local shortcut second, in
+        that order on purpose: a worker that misses the in-process signal still
+        finds ``stop_requested`` on its next check, whereas a signal sent
+        without the transition reaches only this process.
+
+        A wait timeout returns ``stop_requested``. It is a successful pending
+        state, not an exception and not ``stopped`` — the worker may be
+        mid-provider-call in another process, and claiming it stopped would tell
+        a user their tool call was abandoned when it may still be running.
+        """
+        control = self._generation_control()
+        if control is None:
+            raise RuntimeError("generation controls are not enabled on this deployment")
+
+        from app.models.generation import TERMINAL_STATUSES
+        from app.schemas.generation import StopGenerationCommand
+        from app.services.generation_control_service import IllegalTransition
+
+        # The authorization and the durable transition. Its result is
+        # deliberately not returned: a stop this worker owns may still be
+        # settling, and `await_stop_settled` below is what reports the state
+        # the turn actually reached.
+        try:
+            await control.request_stop(
+                StopGenerationCommand(
+                    generation_id=generation_id,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    idempotency_key=idempotency_key,
+                    expected_version=expected_version,
+                )
+            )
+        except IllegalTransition:
+            # A Stop that lost a race with the turn's own ending. The command is
+            # genuinely illegal — nothing is left to stop — but the user asked
+            # for the turn to be over and it is, so reporting where it landed is
+            # the idempotent answer rather than an error. Narrow on purpose: an
+            # illegal transition on a row that is still active is a real defect
+            # and stays an exception.
+            settled = await control.aget_snapshot(
+                generation_id=generation_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
+            )
+            if settled is None or settled.status not in TERMINAL_STATUSES:
+                raise
+            return settled
+
+        # Accelerate the owning worker if it happens to be this one. The entry
+        # is left in place: removing it here is what left a retried Stop with
+        # nothing to cancel while the turn was still running.
+        get_generation_registry().request_cancel(generation_id)
+
+        return await control.await_stop_settled(
+            generation_id=generation_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+
+    async def _astop_locally(
+        self,
+        conversation_id: UUID,
+        user_id: UUID,
+        user_message_id: UUID,
+        wait_seconds: float,
+    ) -> dict:
+        """Process-local Stop, for a deployment with no lifecycle service wired.
+
+        Kept only for that case. It cannot stop a turn owned by another worker,
+        which is the whole reason the durable lifecycle exists.
+        """
         registry = get_generation_registry()
         entry = registry.get(user_message_id)
 
@@ -2209,9 +3041,6 @@ class MessageService(IMessageService):
         if entry.conversation_id != conversation_id or entry.user_id != user_id:
             return {"status": "not_inflight", "message": None}
 
-        # Cooperative event plus task cancellation: the event is what a
-        # well-behaved producer checks between awaits, the cancellation is what
-        # reaches one blocked inside a provider call.
         entry.request_cancel()
 
         try:
@@ -2221,6 +3050,38 @@ class MessageService(IMessageService):
 
         registry.remove(user_message_id)
         return {"status": "cancelled", "message": result}
+
+    def _legacy_stop_result(self, snapshot: Any, *, user_id: UUID) -> dict:
+        """Project a lifecycle snapshot into the legacy Stop response shape.
+
+        ``cancelled`` is kept as the name for a confirmed stop because existing
+        clients switch on it. The durable statuses travel alongside under
+        ``generation``, which is what a client should move to reading.
+        """
+        from app.models.generation import GenerationStatus
+
+        confirmed = {
+            GenerationStatus.STOPPED,
+            GenerationStatus.COMPLETED_PARTIAL,
+            GenerationStatus.COMPLETED,
+        }
+        status = "cancelled" if snapshot.status in confirmed else "stop_requested"
+
+        message = None
+        if snapshot.assistant_message_id is not None:
+            # Best effort. The status is the answer; the message is a
+            # convenience, and a read failure must not turn a successful stop
+            # into an error.
+            with contextlib.suppress(Exception):
+                message = self.get_by_id(snapshot.assistant_message_id, user_id).model_dump(
+                    mode="json"
+                )
+
+        return {
+            "status": status,
+            "message": message,
+            "generation": self._generation_status_data(snapshot),
+        }
 
     def get_by_id(self, message_id: UUID, user_id: UUID) -> MessageRead:
         self.message_validation_utils.validate_message_access(user_id, message_id)
