@@ -10,6 +10,7 @@ tool binding and configuration.
 """
 
 import logging
+from functools import lru_cache
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -21,6 +22,52 @@ from ..core.config import settings
 from ..core.runtime_modeling import ResolvedRuntimeModelConfig, StrictRuntimeResolutionError
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=4)
+def _bounded_tool_openai_class(base: type) -> type:
+    """A ``ChatOpenAI`` subclass that cannot send a description OpenAI refuses.
+
+    OpenAI validates the whole `tools` array before generating anything and
+    rejects the entire request with 400 `string_above_max_length` when any
+    `function.description` exceeds 1024 characters. Gemini has no such limit,
+    so descriptions tuned for Gemini broke every OpenAI call that offered
+    tools — and the configured fallback answered on Gemini instead, so the only
+    symptom was a warning about "a provider error".
+
+    Clamped here rather than at the tool definitions because the limit belongs
+    to this provider: the same tool objects are bound for Gemini, which accepts
+    them whole. See ``app/ai/openai_tool_limits.py``.
+
+    Built as a cached factory over ``base`` rather than a module-level ``class``
+    statement so the base is resolved when a model is created, not when this
+    module is imported — otherwise substituting the ``ChatOpenAI`` name (which
+    the retry-configuration tests do) would have no effect on what gets built.
+    """
+
+    class _BoundedToolChatOpenAI(base):  # type: ignore[misc,valid-type]
+        def bind_tools(self, tools, **kwargs):  # type: ignore[override]
+            from .openai_tool_limits import clamp_openai_tool_descriptions
+
+            return super().bind_tools(clamp_openai_tool_descriptions(list(tools)), **kwargs)
+
+    _BoundedToolChatOpenAI.__name__ = f"BoundedTool{base.__name__}"
+    _BoundedToolChatOpenAI.__qualname__ = _BoundedToolChatOpenAI.__name__
+    return _BoundedToolChatOpenAI
+
+
+def _build_openai_chat_model(**model_kwargs: Any) -> Any:
+    """Construct the OpenAI chat model, with the tool clamp applied.
+
+    ``ChatOpenAI`` is read from the module namespace at call time so it stays a
+    substitutable seam. A substitute that is not a class is called directly —
+    there is nothing to subclass, and a caller replacing the constructor has
+    already opted out of the clamp.
+    """
+    base = ChatOpenAI
+    if not isinstance(base, type):
+        return base(**model_kwargs)
+    return _bounded_tool_openai_class(base)(**model_kwargs)
 
 
 class ModelFactory:
@@ -166,7 +213,7 @@ class ModelFactory:
         )
 
         try:
-            return ChatOpenAI(**model_kwargs)
+            return _build_openai_chat_model(**model_kwargs)
         except TypeError as exc:
             # Older langchain-openai versions may not support reasoning parameter
             if "reasoning" in str(exc) and "unexpected keyword argument" in str(exc):
@@ -175,7 +222,7 @@ class ModelFactory:
                     "Consider upgrading to get extended thinking support for o1/o3 models."
                 )
                 model_kwargs.pop("reasoning", None)
-                return ChatOpenAI(**model_kwargs)
+                return _build_openai_chat_model(**model_kwargs)
             raise
 
     @staticmethod
