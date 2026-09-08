@@ -92,7 +92,13 @@ WORKFLOW_ERROR_CODES: tuple[WorkflowErrorCode, ...] = (
     "conversation_turn_conflict",
 )
 
-WorkerStatus = Literal["completed", "failed"]
+#: ``partial`` is a worker that hit its execution ceiling with real evidence in
+#: hand. It is deliberately neither of the others: ``failed`` tells the
+#: synthesizing parent to disregard the result and discards the artifacts, while
+#: ``completed`` would claim the objective was met. Only the top-level turn
+#: pauses for a Continue decision; a delegated worker reports what it has and
+#: lets its parent decide (R1).
+WorkerStatus = Literal["completed", "partial", "failed"]
 
 
 class RoutingDecision(BaseModel):

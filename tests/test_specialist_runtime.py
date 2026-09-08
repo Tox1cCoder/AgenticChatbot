@@ -239,10 +239,16 @@ async def test_worker_failure_becomes_a_typed_failed_result():
     assert result.content == ""
 
 
-async def test_worker_execution_limit_maps_to_the_typed_code():
+async def test_worker_execution_limit_maps_to_a_partial_not_a_failure():
+    """R1: a delegated worker reports what it has; only the turn pauses.
+
+    This asserted ``failed``/``agent_execution_limit`` until 2026-09-08. That
+    mapping discarded the worker's artifacts and told the synthesizing parent
+    to disregard evidence it had actually collected.
+    """
     from langchain.agents.middleware import ModelCallLimitMiddleware  # noqa: F401
 
-    from app.ai.workflow.specialists import ModelCallLimitExceededError
+    from app.ai.workflow.specialists import HARD_LIMIT_PARTIAL_TEXT, ModelCallLimitExceededError
 
     factory = _factory()
 
@@ -256,8 +262,9 @@ async def test_worker_execution_limit_maps_to_the_typed_code():
     factory._agent_builder = build_agent
     result = await factory.invoke_worker(_request(), task=_worker_task())
 
-    assert result.status == "failed"
-    assert result.error_code == "agent_execution_limit"
+    assert result.status == "partial"
+    assert result.content == HARD_LIMIT_PARTIAL_TEXT
+    assert result.error_code is None
 
 
 async def test_recursive_planning_worker_is_rejected():

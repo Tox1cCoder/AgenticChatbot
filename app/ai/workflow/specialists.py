@@ -620,6 +620,10 @@ class SpecialistFactory:
         if request.agent_id == PLANNING_AGENT_ID:
             return _failed_worker(task, "recursive_planning")
 
+        # Bound outside the `try` so the limit handler can still reach the
+        # records the tool pipeline wrote before the ceiling fired. Reporting a
+        # bare failure there discarded them, which is the loss R1 objects to.
+        tool_execution: ToolExecutionMiddleware | None = None
         try:
             definition = self.definition_for(request.agent_id)
             # A delegated worker gets the same budget as a top-level turn: it
@@ -637,7 +641,7 @@ class SpecialistFactory:
             get_routing_metrics_recorder().agent_execution_limit(
                 agent_id=task.agent_id, limit_kind=type(exc).__name__
             )
-            return _failed_worker(task, "agent_execution_limit")
+            return _partial_worker(task, tool_execution)
         except TimeoutError:
             return _failed_worker(task, "worker_timeout")
         except UnavailableSpecialist:
@@ -915,6 +919,32 @@ def _failed_worker(task: WorkerTask, error_code: str) -> WorkerResult:
         status="failed",
         content="",
         error_code=error_code,
+    )
+
+
+def _partial_worker(
+    task: WorkerTask, tool_execution: ToolExecutionMiddleware | None
+) -> WorkerResult:
+    """A worker that ran out of budget with evidence already in hand.
+
+    The model's own text died with the exception, so the content is the same
+    server-owned statement a top-level hard limit produces -- ``partial`` is
+    what tells the synthesizing parent to read it as unfinished rather than as
+    an answer. ``error_code`` stays unset: a partial is not an error, and
+    populating it would render as one wherever a worker end is displayed.
+
+    ``tool_execution`` is ``None`` only when the ceiling fired before the stack
+    was assembled, which cannot happen through ``_build`` but is cheap to allow.
+    """
+    return WorkerResult(
+        dispatch_id=task.dispatch_id,
+        task_id=task.task_id,
+        position=task.position,
+        agent_id=task.agent_id,
+        status="partial",
+        content=HARD_LIMIT_PARTIAL_TEXT,
+        artifacts=tuple(getattr(tool_execution, "artifacts", ()) or ()),
+        images=tuple(getattr(tool_execution, "images", ()) or ()),
     )
 
 

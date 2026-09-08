@@ -38,6 +38,11 @@ StreamEventType = Literal[
     "rich_items",
     "image_preview",
     "interrupt",
+    # A turn that paused at its execution budget with a validated partial
+    # answer. Deliberately not `interrupt`: that one means a human is being
+    # asked to approve tool calls, and projecting a budget pause through it
+    # would ask for approval of calls that do not exist.
+    "continuation_available",
     "complete",
     "error",
     "heartbeat",

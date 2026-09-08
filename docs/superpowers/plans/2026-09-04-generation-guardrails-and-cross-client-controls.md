@@ -468,10 +468,19 @@ git commit -m "feat: coordinate generation lifecycle and distributed stop"
 >   does not survive the exception, so the message says that rather than
 >   inventing an answer. The metric still fires.
 >
-> One deliberate non-change: `invoke_worker` still maps a hard limit to
-> `_failed_worker(task, "agent_execution_limit")`. A delegated worker reports a
-> typed failure to its parent, which decides — changing that is Task 4's
-> question about what a worker returns, not this one's.
+> **Resolved 2026-09-08 (the last R1 item).** `invoke_worker` no longer maps a
+> hard limit to `_failed_worker(task, "agent_execution_limit")`. `WorkerStatus`
+> gained `partial`, and the limit handler now returns
+> `_partial_worker(task, tool_execution)` — the same server-owned text a
+> top-level hard limit produces, carrying the artifacts and images the worker's
+> tool pipeline had already recorded. `error_code` stays unset, because a
+> partial is not an error and populating it renders as one wherever a worker
+> end is shown; the `execution.limit.*` metric still fires, and
+> `worker_completed` was already status-agnostic so `worker.partial.<agent>`
+> needs no change. `render_worker_results` shows the synthesizing parent
+> `status=partial`, and `build_planning_outcome` already aggregated evidence
+> across results regardless of status — which is exactly what the old mapping
+> was throwing away.
 
 **Files:**
 - Create: `app/ai/workflow/execution_budget.py`
@@ -541,7 +550,7 @@ Retain LangChain's built-in run limit as a higher last-resort threshold. Catch i
 - [x] **Step 5: Run and commit Task 3**
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q tests/test_execution_budget_middleware.py tests/test_specialist_middleware.py tests/test_workflow_contracts.py tests/test_specialist_subgraph_contract.py tests/test_graph_tool_budget.py tests/test_rag_tool_loop_finalization.py
+.\.venv\Scripts\python.exe -m pytest -q tests/test_execution_budget_middleware.py tests/test_specialist_middleware.py tests/test_workflow_contracts.py tests/test_specialist_subgraph_execution.py tests/test_graph_tool_budget.py tests/test_rag_tool_loop_finalization.py
 .\.venv\Scripts\python.exe -m ruff check app/ai/workflow/execution_budget.py app/ai/workflow/contracts.py app/ai/workflow/state.py app/ai/workflow/specialists.py
 git add app/ai/workflow/execution_budget.py app/ai/workflow/contracts.py app/ai/workflow/state.py app/ai/workflow/specialists.py app/core/config.py tests/test_execution_budget_middleware.py tests/test_specialist_middleware.py tests/test_workflow_contracts.py
 git commit -m "feat: reserve tool-free synthesis at execution limits"

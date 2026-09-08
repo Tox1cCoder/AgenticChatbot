@@ -85,6 +85,7 @@ from .utils import (
     make_json_safe,
     normalize_tool_call,
 )
+from .workflow.continuation import pending_continuation_payload
 from .workflow.contracts import OutcomeProvenance, ResponseOutcome, TurnIdentity
 from .workflow.custom_agents import CustomAgentsMixin
 from .workflow.graph_builder import build_workflow_graph
@@ -2379,11 +2380,19 @@ class MultiAgentWorkflow(
                 return
 
         if snapshot is not None and snapshot.next:
+            # Approval is read first. A human waiting on a decision is the only
+            # thing that unblocks such a turn, so Continue must never be
+            # offered as an alternative to answering them.
             interrupt_event = self._pending_interrupt_event(
                 snapshot, thread_id=thread_id, conversation_id=conversation_id
             )
             if interrupt_event is not None:
                 yield interrupt_event
+                return
+
+            continuation_event = self._pending_continuation_event(snapshot, thread_id=thread_id)
+            if continuation_event is not None:
+                yield continuation_event
                 return
 
         # The checkpoint is authoritative when it holds the finalized response;
@@ -2436,6 +2445,34 @@ class MultiAgentWorkflow(
                 "pending_tool_calls": payload["action_requests"],
                 "interrupt": build_interrupt_response(payload, thread_id, conversation_id or ""),
             },
+        )
+
+    def _pending_continuation_event(self, snapshot: Any, *, thread_id: str | None):
+        """The continuation offer for a turn paused at its budget, or nothing.
+
+        This is the *internal* event. It carries the validated partial text
+        because the message service has to persist that as the assistant
+        message before any Continue can be offered against it — there is
+        nothing else to persist, since the pause is what stopped ``finalize``
+        from running. The public projections strip it and publish identity,
+        status and epoch only.
+
+        Without this branch a paused turn had no representation at all: the
+        approval reader above cannot see a budget pause, ``finalize`` never
+        ran, and the fall-through reported a validated answer as
+        ``NO_RESPONSE_GENERATED``.
+        """
+        payload = pending_continuation_payload(snapshot)
+        if payload is None:
+            return None
+
+        data = payload.model_dump(mode="json")
+        data["thread_id"] = thread_id
+        return make_event(
+            "continuation_available",
+            sequence=0,
+            agent=payload.active_agent_id or None,
+            data=data,
         )
 
     async def get_state(self, thread_id: str) -> dict:

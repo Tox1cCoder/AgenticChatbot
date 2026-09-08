@@ -270,7 +270,14 @@ def _worker_task(task_id: str = "t1", agent_id: str = "chat_agent", **overrides)
     return WorkerTask(**payload)
 
 
-async def test_execution_limit_becomes_a_typed_worker_failure():
+def _spinning_worker_factory():
+    """A worker whose model never stops asking for the same tool.
+
+    Its soft rung is one call below its hard rung, so the ceiling fires on the
+    very call the soft budget reserved for an answer -- the case a delegated
+    worker has to survive without taking the parent turn down with it.
+    """
+
     @tool
     def spin() -> str:
         """Always asks to be called again."""
@@ -282,7 +289,7 @@ async def test_execution_limit_becomes_a_typed_worker_failure():
             for i in range(10)
         ]
     )
-    factory = _factory(
+    return _factory(
         model,
         tools=[spin],
         settings=SimpleNamespace(
@@ -293,10 +300,80 @@ async def test_execution_limit_becomes_a_typed_worker_failure():
         ),
     )
 
+
+async def test_a_worker_execution_limit_returns_a_partial_not_a_failure():
+    """R1: only the top-level turn pauses; a worker hands its parent a partial.
+
+    Reporting ``failed``/``agent_execution_limit`` here threw away everything
+    the worker gathered *and* told the synthesizing parent to disregard it.
+    ``partial`` is the honest status: the evidence is real, the work is not
+    finished, and the parent decides what that is worth.
+    """
+    result = await _spinning_worker_factory().invoke_worker(_request(), task=_worker_task())
+
+    assert result.status == "partial"
+    assert result.content
+    # `error_code` stays paired with `failed`. A partial is not an error, and
+    # populating it here would render as one wherever a worker end is shown.
+    assert result.error_code is None
+
+
+async def test_a_worker_partial_keeps_the_identity_of_its_dispatched_task():
+    """No dispatched task may be orphaned, whatever status answers it."""
+    task = _worker_task(task_id="t9", agent_id="chat_agent", position=3)
+
+    result = await _spinning_worker_factory().invoke_worker(_request(), task=task)
+
+    assert (result.dispatch_id, result.task_id, result.position) == ("d1", "t9", 3)
+    assert result.agent_id == "chat_agent"
+
+
+async def test_a_worker_partial_carries_what_its_tool_pipeline_recorded():
+    """The evidence is the whole point of not reporting a bare failure.
+
+    ``_failed_worker`` sets no artifacts and no images, so the old mapping
+    discarded every record the worker's tools had already written -- and
+    ``build_planning_outcome`` aggregates those across results regardless of
+    status, so they were lost from the parent's synthesis too.
+    """
+    factory = _spinning_worker_factory()
+    recorded = [{"kind": "web_result", "url": "https://example.test/a"}]
+    factory_build = factory._build
+
+    async def build_with_artifacts(definition, request):
+        agent, tool_execution, accountant = await factory_build(definition, request)
+        tool_execution.artifacts.extend(recorded)
+        return agent, tool_execution, accountant
+
+    factory._build = build_with_artifacts
+
     result = await factory.invoke_worker(_request(), task=_worker_task())
 
-    assert result.status == "failed"
-    assert result.error_code == "agent_execution_limit"
+    assert result.status == "partial"
+    assert list(result.artifacts) == recorded
+
+
+async def test_a_worker_partial_still_records_the_execution_limit_metric():
+    """The rung firing is an operational signal even when the turn survives.
+
+    Downgrading the status must not also downgrade the telemetry: a rising
+    limit rate is how a soft rung set too close to its hard rung is noticed.
+    """
+    from app.observability.routing import get_routing_metrics_recorder
+
+    recorder = get_routing_metrics_recorder()
+    recorder.reset()
+    try:
+        await _spinning_worker_factory().invoke_worker(_request(), task=_worker_task())
+        limit_counters = {
+            key: value
+            for key, value in recorder.counters.items()
+            if key.startswith("execution.limit.")
+        }
+    finally:
+        recorder.reset()
+
+    assert limit_counters, "the execution-limit counter did not fire for a worker partial"
 
 
 async def test_usage_is_recorded_for_every_model_turn_in_the_loop():
