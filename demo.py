@@ -2694,6 +2694,109 @@ if "cache_cleared_v2" not in st.session_state:
     st.session_state.cache_cleared_v2 = True
 
 
+# ── generation lifecycle: the canonical status vocabulary ────────────────────
+#
+# These are the server's statuses, not a UI approximation of them. What the
+# buttons show is a pure function of the last snapshot the stream published, so
+# a network close changes nothing: only a worker's own transition moves a turn.
+
+#: A turn with work outstanding. Stop is meaningful; Continue is not, because
+#: there is nothing paused to continue.
+GENERATION_ACTIVE_STATUSES = frozenset(
+    {"starting", "running", "continuing", "finalizing_after_limit"}
+)
+
+#: A turn that is over. Neither control applies -- except that `stopped` may
+#: still be resumable, which `generation_controls` reads off the snapshot
+#: rather than off the status alone.
+GENERATION_TERMINAL_STATUSES = frozenset({"completed", "completed_partial", "failed"})
+
+
+def generation_controls(snapshot: dict | None) -> dict[str, str]:
+    """Which controls a canonical snapshot calls for.
+
+    Returns ``{"stop": ..., "continue": ...}`` where each is ``"enabled"``,
+    ``"disabled"`` or ``"hidden"``.
+
+    Two rows of the table earn their place:
+
+    * ``stop_requested`` disables Stop rather than hiding it. Hiding would read
+      as "the turn ended"; disabled says "asked, waiting", which is what is
+      true while the worker has not confirmed.
+    * ``stopped`` offers Continue only when the snapshot says the continuation
+      is available. A stop with an unknown mutation outcome is not resumable,
+      and offering a Continue the server would refuse is worse than offering
+      none.
+    """
+    status = str((snapshot or {}).get("status") or "")
+    resumable = bool((snapshot or {}).get("continuation_available")) and bool(
+        (snapshot or {}).get("continuation_id")
+    )
+
+    if status in GENERATION_ACTIVE_STATUSES:
+        return {"stop": "enabled", "continue": "hidden"}
+    if status == "stop_requested":
+        return {"stop": "disabled", "continue": "hidden"}
+    if status == "continuable":
+        # Stop here accepts the validated partial; nothing is cancelled.
+        return {"stop": "enabled", "continue": "enabled" if resumable else "hidden"}
+    if status == "stopped":
+        return {"stop": "hidden", "continue": "enabled" if resumable else "hidden"}
+    return {"stop": "hidden", "continue": "hidden"}
+
+
+def generation_block_reason(snapshot: dict | None) -> str | None:
+    """Why Continue is unavailable, when the server said something safe.
+
+    Surfaced so a user whose turn cannot be continued learns that rather than
+    finding an absent button.
+    """
+    reason = (snapshot or {}).get("continuation_block_reason")
+    return str(reason) if reason else None
+
+
+def _apply_generation_event(event: dict) -> None:
+    """Record a lifecycle event as the current snapshot.
+
+    The three lifecycle events carry the same fields, so one reader handles
+    all of them. Only fields the event actually names are overwritten: a
+    ``generation_status`` that omits the continuation must not erase one a
+    previous ``continuation_available`` established.
+    """
+    snapshot = dict(st.session_state.get("generation_snapshot") or {})
+    for key in (
+        "generation_id",
+        "logical_turn_id",
+        "conversation_id",
+        "status",
+        "version",
+        "execution_epoch",
+        "continuation_id",
+        "continuation_available",
+        "continuation_block_reason",
+        "assistant_message_id",
+        "terminal_reason",
+    ):
+        if key in event:
+            snapshot[key] = event[key]
+    st.session_state.generation_snapshot = snapshot
+
+
+def _generation_command_key(action: str) -> str:
+    """A stable idempotency key per (generation, version, action).
+
+    Reused until one of those changes, so a user mashing Stop replays one
+    command and gets its recorded result rather than issuing several. Streamlit
+    reruns the whole script on every click, so a key held in a local would be
+    regenerated each time -- which is exactly how a "safe because idempotent"
+    control stops being idempotent.
+    """
+    snapshot = st.session_state.get("generation_snapshot") or {}
+    generation_id = str(snapshot.get("generation_id") or "unknown")
+    version = str(snapshot.get("version") or "0")
+    return f"{action}-{generation_id}-{version}"
+
+
 def _clear_inflight_state() -> None:
     """Clear all in-flight streaming state keys."""
     st.session_state.stream_inflight = False
@@ -2706,6 +2809,9 @@ def _clear_inflight_state() -> None:
     st.session_state.stream_tool_index = {}
     st.session_state.stream_trace_expanded = False
     st.session_state.stream_subagent_activity = None
+    # Deliberately NOT cleared: ``generation_snapshot``. A paused turn is not
+    # in flight but is still continuable, and dropping the snapshot here is
+    # what would take the Continue button away with it.
 
 
 def _stoppable_stream_conversation_id() -> str:
@@ -2746,17 +2852,27 @@ def _handle_stop_rerun(conversation_id: str) -> None:
         st.rerun()
         return
 
-    # Call the stop endpoint
-    stop_data = {
-        "conversationId": conversation_id,
-        "userMessageId": user_message_id,
-    }
+    # Call the stop endpoint. The generation id is sent when the stream
+    # published one, which lets the command be fenced against the version the
+    # UI last saw; the user message id remains the fallback for a turn that
+    # started before `generation_start` arrived.
+    snapshot = st.session_state.get("generation_snapshot") or {}
+    stop_data: dict[str, Any] = {"conversationId": conversation_id}
+    if snapshot.get("generation_id"):
+        stop_data["generationId"] = str(snapshot["generation_id"])
+        stop_data["idempotencyKey"] = _generation_command_key("stop")
+        if snapshot.get("version"):
+            stop_data["expectedVersion"] = int(snapshot["version"])
+    else:
+        stop_data["userMessageId"] = user_message_id
     stop_response = make_api_request("POST", "/messages/stop", data=stop_data)
 
     # Process the response
     if stop_response and stop_response.get("success"):
         result_data = stop_response.get("data", {})
         stop_status = result_data.get("status", "not_inflight")
+        if isinstance(result_data.get("generation"), dict):
+            _apply_generation_event(result_data["generation"])
 
         viewing_stopped_conversation = (
             str(st.session_state.get("current_conversation_id") or "") == conversation_id
@@ -2767,6 +2883,13 @@ def _handle_stop_rerun(conversation_id: str) -> None:
             if viewing_stopped_conversation:
                 st.session_state.messages.append(result_data["message"])
             st.toast("Generation stopped", icon=":material/stop_circle:")
+        elif stop_status == "stop_requested":
+            # Asked, not confirmed. Saying "stopped" here is the one claim this
+            # control must never make: the worker may be mid-provider-call in
+            # another process and the tool call may still be running.
+            st.session_state.conversation_messages_page = 0
+            st.session_state.has_more_messages = True
+            st.toast("Stop requested…", icon=":material/hourglass_top:")
         else:
             # Fallback: reset conversation state so next rerun reloads messages
             st.session_state.conversation_messages_page = 0
@@ -2783,6 +2906,153 @@ def _handle_stop_rerun(conversation_id: str) -> None:
     st.session_state.pending_image_attachments = []
     st.session_state.show_attachment_uploader = False
     _clear_inflight_state()
+    st.rerun()
+
+
+def build_continue_request(snapshot: dict | None, conversation_id: str) -> dict[str, Any] | None:
+    """The body for ``POST /messages/continue``, or ``None`` if it cannot be built.
+
+    Refuses rather than guessing. Every field here is server-issued: the
+    continuation id is single-use and the version is the fence, so a body
+    assembled from anything but the last snapshot would either be refused as
+    stale or -- worse -- accepted against an epoch the user never saw.
+    """
+    snapshot = snapshot or {}
+    generation_id = snapshot.get("generation_id")
+    continuation_id = snapshot.get("continuation_id")
+    version = snapshot.get("version")
+    if not generation_id or not continuation_id or not version:
+        return None
+    if not conversation_id or conversation_id == "pending_new":
+        return None
+    return {
+        "conversationId": str(conversation_id),
+        "generationId": str(generation_id),
+        "continuationId": str(continuation_id),
+        "expectedVersion": int(version),
+        "idempotencyKey": _generation_command_key("continue"),
+    }
+
+
+def refresh_generation_snapshot(conversation_id: str) -> dict | None:
+    """Re-read the authoritative status after an unsettled command.
+
+    What a ``202`` from Stop is answered with. The UI never infers a status
+    from a closed socket, so reconciling means asking.
+    """
+    snapshot = st.session_state.get("generation_snapshot") or {}
+    generation_id = snapshot.get("generation_id")
+    if not generation_id or not conversation_id or conversation_id == "pending_new":
+        return None
+    # ``use_cache=False``: this is polled precisely because the value changes,
+    # and a cached snapshot would show a settled turn as still pending.
+    response = make_api_request(
+        "GET",
+        f"/messages/generations/{generation_id}?conversation_id={conversation_id}",
+        use_cache=False,
+    )
+    if not response or not response.get("success"):
+        return None
+    data = response.get("data")
+    if not isinstance(data, dict):
+        return None
+    # The API answers camelCase; the session snapshot is snake_case, which is
+    # also what the stream events use.
+    normalized = {_camel_to_snake(key): value for key, value in data.items()}
+    _apply_generation_event(normalized)
+    return st.session_state.get("generation_snapshot")
+
+
+def _camel_to_snake(name: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", str(name)).lower()
+
+
+def consume_continue_stream(events, renderer=None) -> dict[str, Any]:
+    """Fold a continued epoch's events into the state a rerun renders.
+
+    Handles exactly the vocabulary a continued turn produces. Two absences are
+    the point: no user message is created, because Continue asks nothing new,
+    and no status is inferred from the stream ending — a turn that stops
+    producing events has not thereby become ``stopped``.
+
+    Returns ``{"text", "message", "error", "paused"}``.
+    """
+    accumulated = ""
+    result: dict[str, Any] = {"text": "", "message": None, "error": None, "paused": False}
+
+    for event in events:
+        event_type = str(event.get("type") or "")
+        if event_type in {"generation_start", "generation_status", "continuation_available"}:
+            _apply_generation_event(event)
+            if event_type == "continuation_available":
+                result["paused"] = True
+        elif event_type == "token":
+            accumulated += str(event.get("content") or "")
+            if renderer is not None:
+                renderer.append_text(str(event.get("content") or ""))
+        elif event_type in {"message_end", "complete"}:
+            # Both carry the persisted assistant row: `message_end` is what a
+            # pause emits, `complete` what a finished epoch emits. Whichever
+            # arrives last wins, which is correct — a paused epoch that later
+            # completes has one final message.
+            message = event.get("message")
+            if isinstance(message, dict):
+                result["message"] = message
+        elif event_type == "error":
+            result["error"] = str(event.get("error") or "The continuation failed.")
+
+    result["text"] = accumulated
+    return result
+
+
+def _render_continue_control(conversation_id: str) -> None:
+    """Offer Continue when, and only when, the snapshot says the turn is paused.
+
+    Placed outside the message form so clicking it does not submit a draft the
+    user was still typing.
+    """
+    snapshot = st.session_state.get("generation_snapshot") or {}
+    controls = generation_controls(snapshot)
+    if controls["continue"] != "enabled":
+        reason = generation_block_reason(snapshot)
+        if reason and str(snapshot.get("status")) in {"continuable", "stopped"}:
+            st.caption(f"This answer cannot be continued: {reason}")
+        return
+
+    request_body = build_continue_request(snapshot, conversation_id)
+    if request_body is None:
+        return
+
+    epoch = snapshot.get("execution_epoch")
+    label = "Continue this answer" if not epoch else f"Continue (epoch {int(epoch) + 1})"
+    if st.button(label, key="continue_generation_btn", icon=":material/play_arrow:"):
+        _handle_continue(request_body, conversation_id)
+
+
+def _handle_continue(request_body: dict[str, Any], conversation_id: str) -> None:
+    """Run one continued epoch and fold its result into the message list."""
+    with st.status("Continuing…", expanded=True) as status:
+        response_placeholder = st.empty()
+        renderer = _StreamingRichResponseRenderer(
+            response_placeholder,
+            message_key=f"continue::{conversation_id}",
+        )
+        outcome = consume_continue_stream(
+            make_streaming_request("/messages/continue", request_body), renderer
+        )
+        _update_stream_status(status, label="Continued", state="complete")
+
+    if outcome["error"]:
+        st.error(outcome["error"])
+        return
+
+    if outcome["message"] is not None:
+        st.session_state.messages.append(outcome["message"])
+    else:
+        # Nothing to append locally; reload rather than invent a message.
+        st.session_state.conversation_messages_page = 0
+        st.session_state.has_more_messages = True
+
     st.rerun()
 
 
@@ -10482,6 +10752,9 @@ def render_chat_view():
             _handle_stop_rerun(stoppable_conversation_id)
             return
 
+        # ── Continue, for a turn the server paused at its execution limit ──
+        _render_continue_control(str(conversation_id))
+
         # Check for pending suggestion from suggestion buttons
         pending_suggestion = st.session_state.pop("pending_suggestion", "")
         preserved_draft = _consume_preserved_message_draft(conversation_id)
@@ -10656,7 +10929,22 @@ def render_chat_view():
                         if event_type in {"complete", "error", "interrupt"}:
                             _handle_usage_stream_event(str(event_type))
 
-                        if event_type == "user_message_created":
+                        if event_type in {
+                            "generation_start",
+                            "generation_status",
+                            "continuation_available",
+                        }:
+                            # The canonical lifecycle. Recorded rather than
+                            # acted on: what the controls show is a pure
+                            # function of this snapshot, so a socket that
+                            # closes on the next line changes nothing.
+                            _apply_generation_event(event)
+                            if event_type == "continuation_available":
+                                _update_stream_status(
+                                    status, label="Paused at the execution limit"
+                                )
+
+                        elif event_type == "user_message_created":
                             # Store user_message_id for stop endpoint
                             user_msg = event.get("message", {})
                             st.session_state.stream_user_message_id = str(user_msg.get("id", ""))
