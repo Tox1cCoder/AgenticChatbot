@@ -242,10 +242,31 @@ def seeded_conversation_id(require_async_db):
     # Persisting an assistant message also enqueues a compaction job whose
     # foreign key targets (conversation_id, sequence), so dependents must go
     # before the messages they reference.
+    #
+    # A streamed turn now also allocates a ``generations`` row, whose
+    # ``conversation_id`` is ``NO ACTION`` like ``messages`` and
+    # ``hitl_interrupts``: conversation deletion is the application's business,
+    # not the database's. So it is deleted here explicitly. Its
+    # ``assistant_message_id`` is ``ON DELETE SET NULL``, which is why the
+    # message delete below no longer needs this row gone first.
     from app.models.conversation_memory_summary import ConversationMemorySummary
     from app.models.conversation_summary_job import ConversationSummaryJob
+    from app.models.generation import Generation, GenerationCommand
 
     with SessionLocal() as session:
+        generation_ids = [
+            row[0]
+            for row in session.query(Generation.id)
+            .filter(Generation.conversation_id == conversation_id)
+            .all()
+        ]
+        if generation_ids:
+            session.query(GenerationCommand).filter(
+                GenerationCommand.generation_id.in_(generation_ids)
+            ).delete(synchronize_session=False)
+        session.query(Generation).filter(
+            Generation.conversation_id == conversation_id
+        ).delete(synchronize_session=False)
         for model in (ConversationSummaryJob, ConversationMemorySummary):
             session.query(model).filter(model.conversation_id == conversation_id).delete()
         session.query(Message).filter(Message.conversation_id == conversation_id).delete()
