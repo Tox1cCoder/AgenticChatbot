@@ -114,6 +114,10 @@ class ResearchBudget:
     # `_searches` does, which is what makes the cap per-epoch.
     _prior_searches: list[tuple[frozenset[str], SearchScope]] = field(default_factory=list)
     _prior_image_searches: list[frozenset[str]] = field(default_factory=list)
+    # Queries whose provider call failed. Remembered so the model cannot retry
+    # the same broken query, but deliberately *not* counted against the call
+    # cap: a provider error is not research the turn got the benefit of.
+    _failed_searches: list[tuple[frozenset[str], SearchScope]] = field(default_factory=list)
     #: How many epochs have contributed to this accounting, this one included.
     epochs_recorded: int = 1
     _instance_lock: threading.Lock = field(
@@ -183,6 +187,15 @@ class ResearchBudget:
                 # which is what stops a Continue re-running the query the
                 # previous epoch's cap had already turned down.
                 return False
+            for failed_tokens, failed_scope in self._failed_searches:
+                if failed_scope != scope:
+                    continue
+                if failed_tokens == tokens or near_duplicate(
+                    failed_tokens, tokens, threshold=self.near_duplicate_threshold
+                ):
+                    # This exact query already failed at the provider; retrying
+                    # it in the same turn returns the same error.
+                    return False
             for reserved_tokens, reserved_scope in self._in_flight:
                 if reserved_scope != scope:
                     continue
@@ -200,18 +213,39 @@ class ResearchBudget:
     def record_search(self, query: str, result_text: str, *, scope: SearchScope = ()) -> None:
         """Append a completed result and release the reservation it used.
 
-        A failed search never reaches this method, so its reservation is never
-        released: a provider error must not buy the model a second attempt at
-        the same broken query within the same turn.
+        A failed search goes to :meth:`record_failed_search` instead, which
+        releases the reservation without recording a result.
         """
 
         with self._instance_lock:
             tokens = normalize_query_tokens(query)
             self._searches.append((tokens, scope, result_text))
-            for index, reservation in enumerate(self._in_flight):
-                if reservation == (tokens, scope):
-                    self._in_flight.pop(index)
-                    break
+            self._release(tokens, scope)
+
+    def record_failed_search(self, query: str, *, scope: SearchScope = ()) -> None:
+        """Release a failed query's reservation while still refusing a retry.
+
+        The reservation must be released. Holding it makes a provider error
+        consume a slot for the rest of the turn, so a single failure alongside
+        one success reaches the cap and every *later, unrelated* query is
+        refused with a message blaming a budget the turn never spent.
+
+        The query itself is still remembered, which is what stops the model
+        immediately re-running the same broken search: that was the point of
+        holding the reservation, and it is kept here without the collateral.
+        """
+
+        with self._instance_lock:
+            tokens = normalize_query_tokens(query)
+            self._failed_searches.append((tokens, scope))
+            self._release(tokens, scope)
+
+    def _release(self, tokens: frozenset[str], scope: SearchScope) -> None:
+        """Drop one in-flight reservation. Caller holds the lock."""
+        for index, reservation in enumerate(self._in_flight):
+            if reservation == (tokens, scope):
+                self._in_flight.pop(index)
+                return
 
     def accumulated(self) -> list[str]:
         return [result_text for _, _, result_text in self._searches]

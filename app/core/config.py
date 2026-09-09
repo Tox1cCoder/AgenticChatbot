@@ -23,6 +23,18 @@ if _langsmith_tracing and _langsmith_api_key:
     os.environ["LANGCHAIN_TRACING_V2"] = "true"
     os.environ["LANGCHAIN_API_KEY"] = _langsmith_api_key
     os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGSMITH_PROJECT", "sample-chatbot")
+else:
+    # Off has to be *enforced*, not merely "not switched on". The tracer reads
+    # several variables and `.env` has already been loaded into the process by
+    # the time this runs, so leaving them untouched lets a stale
+    # LANGCHAIN_TRACING_V2/LANGSMITH_TRACING keep the exporter alive — which is
+    # how a disabled tracer still emitted 429s on every turn.
+    #
+    # `load_dotenv` does not override a variable already in the environment, so
+    # exporting LANGSMITH_TRACING=false before launch reaches here and wins
+    # over `.env` without editing the file.
+    for _tracing_var in ("LANGCHAIN_TRACING_V2", "LANGCHAIN_TRACING", "LANGSMITH_TRACING"):
+        os.environ[_tracing_var] = "false"
 
 
 _DEV_SECRET_KEY_PATH = Path(__file__).resolve().parents[2] / ".dev_secret_key"
@@ -2315,6 +2327,18 @@ class Settings(BaseSettings):
 def _log_startup_warnings(s: "Settings") -> None:
     """Log warnings for settings that may indicate misconfiguration."""
     _logger = logging.getLogger(__name__)
+    # Stated once, plainly. "Is tracing actually on?" is otherwise answerable
+    # only by reading `.env`, the process environment and the import order
+    # together -- and getting it wrong means every turn ends in an exporter
+    # error whose cause is nowhere in the traceback.
+    if os.environ.get("LANGCHAIN_TRACING_V2", "").lower() == "true":
+        _logger.info(
+            "LangSmith tracing is ON (project %r). Set LANGSMITH_TRACING=false "
+            "in .env or in the launching environment to disable it.",
+            os.environ.get("LANGCHAIN_PROJECT", "sample-chatbot"),
+        )
+    else:
+        _logger.info("LangSmith tracing is OFF.")
     zero_budget_fields = []
     for attr in (
         "chat_history_max_messages",

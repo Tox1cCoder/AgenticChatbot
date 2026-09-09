@@ -258,12 +258,14 @@ def create_web_search_tool(
             raw = await _call_provider(tavily_tool, "tavily", "tavily_search", args)
         except WebProviderError as exc:
             logger.warning("Web search provider failed: %s", exc)
+            budget.record_failed_search(normalized.query, scope=scope)
             log_web_tool_call(
                 "web_search", outcome="provider_error", freshness=normalized.freshness
             )
             return _error_payload(str(exc), retryable=exc.retryable)
         except Exception as exc:
             logger.warning("Web search failed: %s", exc)
+            budget.record_failed_search(normalized.query, scope=scope)
             log_web_tool_call(
                 "web_search", outcome="provider_error", freshness=normalized.freshness
             )
@@ -808,16 +810,36 @@ def _image_payload(query: str, selected: int, note: str) -> str:
 
 
 def _budget_spent_payload(budget: Any) -> str:
+    """Explain why this search was refused, distinguishing the two causes.
+
+    ``reserve_search`` refuses both a spent quota and a query the turn has
+    already run or already failed. Reporting the second as ``budget_exhausted``
+    told the model -- and anyone reading the log -- that the turn was out of
+    searches when it still had some, which sends it to summarise instead of
+    rephrasing.
+    """
+    limit = max(1, int(getattr(budget, "max_search_calls", 1)))
+    used = int(getattr(budget, "search_calls", 0))
+    at_cap = used >= limit
     return json.dumps(
         {
             "status": "error",
-            "error_type": "budget_exhausted",
+            "error_type": "budget_exhausted" if at_cap else "duplicate_query",
             "retryable": False,
-            "searches_used": budget.search_calls,
+            "searches_used": used,
+            "search_limit": limit,
             "hint": (
-                "The per-turn search budget is spent. Answer from the sources already "
-                "gathered in this turn, or open one of them with web_open; another "
-                "search would return the same results."
+                (
+                    "The per-turn search budget is spent. Answer from the sources already "
+                    "gathered in this turn, or open one of them with web_open; another "
+                    "search would return the same results."
+                )
+                if at_cap
+                else (
+                    "This turn already ran this query, or it already failed at the "
+                    "provider. The budget is not spent: search for something the turn "
+                    "has not asked yet, or open a gathered source with web_open."
+                )
             ),
         },
         ensure_ascii=False,
