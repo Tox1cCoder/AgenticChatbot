@@ -85,6 +85,7 @@ __all__ = [
     "make_specialist_wrapper",
     "make_subgraph_specialist_wrapper",
     "make_tool_stage_wrapper",
+    "planning_worker_run_config",
     "resolve_node_for_agent_id",
 ]
 
@@ -98,6 +99,21 @@ class UnavailableSpecialist(KeyError):
 FINALIZE_OWNS_TERMINAL_MESSAGE = "v2_finalize_owns_terminal_message"
 
 SpecialistCallable = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+
+
+def planning_worker_run_config(
+    *, agent_id: str, dispatch_id: str | None, task_id: str | None
+) -> dict[str, Any]:
+    """Tag a private worker model run so its stream can be attributed."""
+    return {
+        "tags": [f"specialist:{agent_id}", "internal", "planning_subagent"],
+        "metadata": {
+            "purpose": "planning_subagent",
+            "subagent_dispatch_id": dispatch_id,
+            "subagent_task_id": task_id,
+            "subagent_agent": agent_id,
+        },
+    }
 StageRouter = Callable[[dict[str, Any]], Any]
 
 
@@ -759,7 +775,14 @@ class SpecialistFactory:
 
     @staticmethod
     def _run_config(request: SpecialistRequest) -> dict[str, Any]:
-        return {"tags": [f"specialist:{request.agent_id}"]}
+        tags = [f"specialist:{request.agent_id}"]
+        if not request.extras.get("worker"):
+            return {"tags": tags}
+        return planning_worker_run_config(
+            agent_id=request.agent_id,
+            dispatch_id=_extra_str(request, "dispatch_id"),
+            task_id=_extra_str(request, "task_id"),
+        )
 
     @staticmethod
     def _invocation_messages(request: SpecialistRequest) -> list[Any]:

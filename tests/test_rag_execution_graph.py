@@ -22,6 +22,7 @@ from langgraph.errors import GraphBubbleUp
 
 from app.ai.workflow.rag_execution import (
     EvidenceIdAllocator,
+    ProductionRagRuntime,
     RagExecutionGraph,
     RagExecutionRequest,
     RagExecutionResult,
@@ -146,6 +147,40 @@ def _retrieve_then_answer(*evidence_ids: str, text: str = "The answer is 42.") -
         RagModelTurn(tool_calls=(_search_call(),)),
         RagModelTurn(text=text, answer=_answer(*evidence_ids, text=text)),
     ]
+
+
+async def test_production_rag_worker_tags_its_model_run_for_stream_attribution():
+    captured = {}
+
+    class CapturingRagAgent:
+        async def process_message(self, message, conversation_id):
+            captured["message"] = message
+            captured["conversation_id"] = conversation_id
+            return SimpleNamespace(
+                message=SimpleNamespace(tool_calls=[_search_call()], content=""),
+                metadata={},
+            )
+
+    runtime = ProductionRagRuntime(
+        rag_agent=CapturingRagAgent(),
+        agent_lookup=lambda _name: None,
+        settings=SimpleNamespace(),
+    )
+
+    await runtime.model_turn(
+        _request(mode="worker", dispatch_id="dispatch-1", task_id="task-1"),
+        messages=(),
+        evidence=None,
+    )
+
+    run_config = captured["message"].metadata["run_config"]
+    assert run_config["tags"] == ["specialist:rag_agent", "internal", "planning_subagent"]
+    assert run_config["metadata"] == {
+        "purpose": "planning_subagent",
+        "subagent_dispatch_id": "dispatch-1",
+        "subagent_task_id": "task-1",
+        "subagent_agent": "rag_agent",
+    }
 
 
 # ----------------------------------------------------------------------

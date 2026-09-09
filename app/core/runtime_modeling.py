@@ -11,6 +11,9 @@ class RuntimeFallbackConfig:
     temperature: float
     api_key: str
     key_source: str
+    capabilities: dict[str, bool] = field(default_factory=dict)
+    reasoning_effort: str | None = None
+    context_window: dict[str, Any] | None = None
 
 
 @dataclass

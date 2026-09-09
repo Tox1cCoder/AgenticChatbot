@@ -630,6 +630,8 @@ class ModelConfigService(IRuntimeModelResolver):
                 temperature=float((effective_config.get(agent_key) or {}).get("temperature", 1.0)),
                 api_key=api_key.strip(),
                 key_source=str(credentials.get("key_source") or "none"),
+                capabilities=self._build_capabilities(provider, model, snapshot),
+                context_window=self._resolve_context_window_metadata(provider, model, snapshot),
             )
 
         return None

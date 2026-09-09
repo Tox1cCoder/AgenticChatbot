@@ -100,3 +100,23 @@ def test_incompatible_saved_level_falls_back_to_provider_default() -> None:
     config = service.get_effective_model_config(USER_ID)["chat"]
     assert config["reasoning_effort"] is None
     assert any("unsupported" in warning.lower() for warning in config["warnings"])
+
+
+def test_runtime_fallback_candidate_carries_its_own_model_metadata() -> None:
+    service, _ = _service()
+    snapshots = {provider: _snapshot(provider) for provider in ("gemini", "openai")}
+
+    fallback = service._build_runtime_fallback_candidate(
+        user_id=USER_ID,
+        agent_key="search",
+        provider_snapshots=snapshots,
+        effective_config={"search": {"provider": "gemini", "temperature": 0.4}},
+        current_provider="gemini",
+    )
+
+    assert fallback is not None
+    assert fallback.provider == "openai"
+    assert fallback.capabilities["supports_reasoning"] is True
+    assert fallback.context_window["provider"] == "openai"
+    assert fallback.context_window["model"] == "gpt-5.6-sol"
+    assert fallback.reasoning_effort is None

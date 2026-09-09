@@ -154,7 +154,7 @@
   },
   {
     "file": "app/ai/model_factory.py",
-    "function": "_build_openai_chat_model",
+    "function": "ModelFactory._create_openai_model",
     "call_chain": "ChatOpenAI",
     "disposition": "startup_validation"
   },

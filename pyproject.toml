@@ -104,7 +104,10 @@ kani-client-backend = "client_backend.cli:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4.0",
-    "pytest-asyncio>=0.21.0",
+    # tests/conftest.py implements the pytest_asyncio_loop_factories hook,
+    # which pytest-asyncio only exposes from 1.4.0 onward. A lower version
+    # aborts collection with PluginValidationError.
+    "pytest-asyncio>=1.4.0",
     # The linter this file already configures under [tool.ruff].
     "ruff>=0.15.2",
 ]

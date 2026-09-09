@@ -22,6 +22,7 @@ from app.ai.workflow.specialists import (
     SpecialistDefinition,
     SpecialistFactory,
     SpecialistRequest,
+    build_worker_request,
 )
 
 pytestmark = pytest.mark.usefixtures("disable_langsmith_tracing")
@@ -268,6 +269,45 @@ def _worker_task(task_id: str = "t1", agent_id: str = "chat_agent", **overrides)
     }
     payload.update(overrides)
     return WorkerTask(**payload)
+
+
+async def test_invoke_worker_stamps_stream_attribution_metadata():
+    captured = {}
+
+    class CapturingAgent:
+        async def ainvoke(self, payload, *, context, config):
+            captured.update(config)
+            return {"messages": [*payload["messages"], AIMessage(content="done")]}
+
+    task = _worker_task()
+    request = build_worker_request(
+        task,
+        {
+            "conversation_id": "conversation-1",
+            "user_id": "user-1",
+            "device_id": "device-1",
+            "context": {},
+        },
+    )
+    factory = _factory(
+        scripted_model([]),
+        agent_builder=lambda **_kwargs: CapturingAgent(),
+    )
+
+    result = await factory.invoke_worker(request, task=task)
+
+    assert result.status == "completed"
+    assert captured["tags"] == [
+        "specialist:chat_agent",
+        "internal",
+        "planning_subagent",
+    ]
+    assert captured["metadata"] == {
+        "purpose": "planning_subagent",
+        "subagent_dispatch_id": "d1",
+        "subagent_task_id": "t1",
+        "subagent_agent": "chat_agent",
+    }
 
 
 def _spinning_worker_factory():

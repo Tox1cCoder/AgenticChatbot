@@ -68,6 +68,54 @@ def test_build_checkpoint_serializer_passes_both_allowlists():
     assert list(captured["allowed_msgpack_modules"]) == _expected_msgpack_allowlist()
 
 
+def test_build_checkpoint_serializer_rejects_legacy_msgpack_api(monkeypatch):
+    class LegacySerializer:
+        def __init__(self, *, allowed_json_modules=None):
+            self.allowed_json_modules = allowed_json_modules
+
+    monkeypatch.setattr(checkpoint_module, "JsonPlusSerializer", LegacySerializer)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"langgraph-checkpoint>=4\.1\.1",
+    ):
+        checkpoint_module._build_checkpoint_serializer()
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_setup_validates_serializer_before_opening_pool(monkeypatch):
+    events: list[str] = []
+
+    def reject_legacy_serializer():
+        events.append("serializer")
+        raise RuntimeError("unsupported checkpoint serializer")
+
+    class UnexpectedPool:
+        def __init__(self, *args, **kwargs):
+            events.append("pool")
+
+    monkeypatch.setattr(
+        checkpoint_module,
+        "_build_checkpoint_serializer",
+        reject_legacy_serializer,
+    )
+    monkeypatch.setattr(checkpoint_module, "AsyncConnectionPool", UnexpectedPool)
+    manager = checkpoint_module.CheckpointManager(
+        db_url="postgresql://user:pass@localhost/db",
+        settings=SimpleNamespace(
+            checkpoint_schema="public",
+            checkpoint_pool_min_size=1,
+            checkpoint_pool_max_size=2,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="unsupported checkpoint serializer"):
+        await manager.setup()
+
+    assert events == ["serializer"]
+    assert manager._pool is None
+
+
 @pytest.mark.asyncio
 async def test_checkpoint_manager_delete_thread_delegates_to_async_saver():
     manager = checkpoint_module.CheckpointManager(

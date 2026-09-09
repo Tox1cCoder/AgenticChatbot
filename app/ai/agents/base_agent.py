@@ -716,11 +716,9 @@ class BaseAgent(ABC):
             f"Provider fallback applied: {from_provider} -> {fallback.provider} ({reason})."
         )
 
-        # Fallback bypasses ModelConfigService, so we resolve the context
-        # window from the static registry. Provider catalog metadata is not
-        # available here; the registry is good enough for the rare fallback
-        # path.
-        context_window = resolve_model_context_window(fallback.provider, fallback.model).to_dict()
+        context_window = fallback.context_window or resolve_model_context_window(
+            fallback.provider, fallback.model
+        ).to_dict()
 
         return ResolvedRuntimeModelConfig(
             agent_key=self.agent_config_key,
@@ -731,17 +729,13 @@ class BaseAgent(ABC):
             key_source=fallback.key_source,
             source="fallback",
             warnings=warnings,
-            capabilities={
-                "supports_vision": True,
-                "supports_tool_calling": True,
-                "supports_streaming": True,
-                "supports_reasoning": True,
-            },
+            capabilities=dict(fallback.capabilities),
             provider_fallback={
                 "from": from_provider,
                 "to": fallback.provider,
                 "reason": reason,
             },
+            reasoning_effort=fallback.reasoning_effort,
             context_window=context_window,
         )
 
@@ -784,25 +778,19 @@ class BaseAgent(ABC):
         if user_key and user_key in _OPENAI_REASONING_SUMMARY_DISABLED_USERS:
             include_reasoning_summary = False
 
-        openai_kwargs: dict[str, Any] = {
-            "provider": "openai",
-            "model": runtime_config.model,
-            "api_key": runtime_config.api_key,
-            "temperature": runtime_config.temperature,
+        model_kwargs: dict[str, Any] = {
             "timeout": settings.openai_request_timeout_seconds,
             "streaming": True,
         }
 
         model_lower = runtime_config.model.lower()
-        if native_effort:
-            openai_kwargs["reasoning"] = {"effort": native_effort}
-        elif include_reasoning_summary:
+        if not native_effort and include_reasoning_summary:
             if "o1" in model_lower or "o3" in model_lower:
-                openai_kwargs["reasoning"] = {"effort": "medium"}
+                model_kwargs["reasoning"] = {"effort": "medium"}
             else:
-                openai_kwargs["reasoning"] = {"summary": "auto"}
+                model_kwargs["reasoning"] = {"summary": "auto"}
 
-        llm = ModelFactory.create_model(**openai_kwargs)
+        llm = ModelFactory.create_model_from_runtime(runtime_config, **model_kwargs)
         return llm, include_reasoning_summary
 
     def _create_gemini_client_from_runtime(

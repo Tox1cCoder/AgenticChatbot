@@ -698,6 +698,16 @@ class ProductionRagRuntime:
         from app.ai.schemas import AgentMessage, MessageRole
         from app.services.rag_grounding import parse_grounded_answer
 
+        run_config = None
+        if request.mode == "worker":
+            from app.ai.workflow.specialists import planning_worker_run_config
+
+            run_config = planning_worker_run_config(
+                agent_id="rag_agent",
+                dispatch_id=request.dispatch_id,
+                task_id=request.task_id,
+            )
+
         agent_message = AgentMessage(
             role=MessageRole.USER,
             content=request.objective,
@@ -710,6 +720,7 @@ class ProductionRagRuntime:
                 "user_id": request.user_id,
                 "device_id": request.device_id,
                 "rag_force_final_response": bool(force_final),
+                "run_config": run_config,
             },
             attachments=list(request.attachments),
         )

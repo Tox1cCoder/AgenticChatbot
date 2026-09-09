@@ -298,14 +298,6 @@ class RuntimeModelMiddleware(AgentMiddleware):
             if fallback is None or not (getattr(fallback, "api_key", "") or "").strip():
                 raise
 
-            # The exception is logged, not just its existence. Without it this
-            # line said "after a provider error" and dropped `exc` — so a 400
-            # caused by our own payload (a tool description over OpenAI's
-            # 1024-character limit, in the case that prompted this) was
-            # indistinguishable from a provider outage, for months, while the
-            # fallback quietly answered every turn. `except Exception` above
-            # also catches bugs in our own downstream code, so the message no
-            # longer asserts whose fault it is.
             logger.warning(
                 "Specialist %s falling back from %s to %s after %s: %s",
                 self._agent_key,
@@ -324,7 +316,16 @@ class RuntimeModelMiddleware(AgentMiddleware):
                 key_source=fallback.key_source,
                 source="fallback",
                 warnings=list(config.warnings),
-                capabilities=dict(config.capabilities),
+                capabilities=dict(fallback.capabilities),
+                provider_fallback={
+                    "from": config.provider,
+                    "to": fallback.provider,
+                    "reason": "provider_error",
+                },
+                reasoning_effort=fallback.reasoning_effort,
+                context_window=(
+                    dict(fallback.context_window) if fallback.context_window else None
+                ),
             )
             self._runtime_config = fallback_config
             fallback_model = self._model_factory.create_model_from_runtime(fallback_config)

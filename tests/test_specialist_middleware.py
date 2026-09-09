@@ -113,10 +113,21 @@ async def test_runtime_model_middleware_resolves_per_invocation():
     assert resolver.calls == [("user-1", "chat", {"provider": "gemini"})]
 
 
-async def test_runtime_model_middleware_falls_back_after_a_provider_error():
+async def test_runtime_model_middleware_falls_back_after_a_provider_error(caplog):
+    fallback_capabilities = {
+        "supports_reasoning": True,
+        "supports_streaming": True,
+    }
+    fallback_context = {"provider": "openai", "model": "gpt-5", "known": True}
     resolved = _runtime_config(
         fallback_config=RuntimeFallbackConfig(
-            provider="openai", model="gpt-5", temperature=1.0, api_key="k2", key_source="env"
+            provider="openai",
+            model="gpt-5",
+            temperature=1.0,
+            api_key="k2",
+            key_source="env",
+            capabilities=fallback_capabilities,
+            context_window=fallback_context,
         )
     )
     factory = FakeFactory()
@@ -140,6 +151,55 @@ async def test_runtime_model_middleware_falls_back_after_a_provider_error():
 
     assert result.content == "recovered"
     assert attempts == ["gemini:gemini-3-flash-preview", "openai:gpt-5"]
+    assert "ConnectionError: primary provider down" in caplog.text
+    assert middleware.runtime_config.capabilities == fallback_capabilities
+    assert middleware.runtime_config.context_window == fallback_context
+    assert middleware.runtime_config.provider_fallback == {
+        "from": "gemini",
+        "to": "openai",
+        "reason": "provider_error",
+    }
+
+
+async def test_openai_failure_uses_gemini_fallback_metadata():
+    fallback_capabilities = {
+        "supports_reasoning": True,
+        "supports_vision": True,
+    }
+    resolved = _runtime_config(
+        provider="openai",
+        model="gpt-5.6-luna",
+        fallback_config=RuntimeFallbackConfig(
+            provider="gemini",
+            model="gemini-3-flash-preview",
+            temperature=0.8,
+            api_key="k2",
+            key_source="env",
+            capabilities=fallback_capabilities,
+            reasoning_effort="high",
+        ),
+    )
+    middleware = RuntimeModelMiddleware(
+        runtime_model_resolver=FakeResolver(resolved),
+        model_factory=FakeFactory(),
+        agent_key="search",
+        user_id="user-1",
+        model_request=None,
+    )
+    calls = 0
+
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ConnectionError("openai unavailable")
+        return AIMessage(content="recovered")
+
+    await middleware.awrap_model_call(_model_request(), handler)
+
+    assert middleware.runtime_config.provider == "gemini"
+    assert middleware.runtime_config.capabilities == fallback_capabilities
+    assert middleware.runtime_config.reasoning_effort == "high"
 
 
 async def test_runtime_model_middleware_reraises_without_a_fallback_candidate():

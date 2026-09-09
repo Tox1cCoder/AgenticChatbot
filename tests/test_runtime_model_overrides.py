@@ -61,12 +61,13 @@ def test_openai_explicit_reasoning_effort_reaches_model_factory(monkeypatch):
 
     captured: dict[str, Any] = {}
 
-    def fake_create_model(**kwargs):
-        captured.update(kwargs)
+    def fake_create_model(config, **kwargs):
+        captured["config"] = config
+        captured["kwargs"] = kwargs
         return object()
 
     monkeypatch.setattr(
-        "app.ai.model_factory.ModelFactory.create_model",
+        "app.ai.model_factory.ModelFactory.create_model_from_runtime",
         staticmethod(fake_create_model),
     )
 
@@ -74,20 +75,20 @@ def test_openai_explicit_reasoning_effort_reaches_model_factory(monkeypatch):
     runtime = _runtime_config(reasoning_effort="high")
     base_module.BaseAgent._create_langchain_model_from_runtime(agent, runtime)
 
-    reasoning = captured.get("reasoning")
-    assert isinstance(reasoning, dict)
-    assert reasoning.get("effort") == "high"
+    assert captured["config"] is runtime
+    assert captured["config"].reasoning_effort == "high"
 
 
 def test_openai_max_reasoning_effort_is_not_truncated(monkeypatch):
     captured: dict[str, Any] = {}
 
-    def fake_create_model(**kwargs):
-        captured.update(kwargs)
+    def fake_create_model(config, **kwargs):
+        captured["config"] = config
+        captured["kwargs"] = kwargs
         return object()
 
     monkeypatch.setattr(
-        "app.ai.model_factory.ModelFactory.create_model",
+        "app.ai.model_factory.ModelFactory.create_model_from_runtime",
         staticmethod(fake_create_model),
     )
     agent = _FakeAgent(model_name="gpt-5.6-sol")
@@ -95,7 +96,7 @@ def test_openai_max_reasoning_effort_is_not_truncated(monkeypatch):
     base_module.BaseAgent._create_langchain_model_from_runtime(
         agent, _runtime_config(model="gpt-5.6-sol", reasoning_effort="max")
     )
-    assert captured["reasoning"] == {"effort": "max"}
+    assert captured["config"].reasoning_effort == "max"
 
 
 def test_openai_default_reasoning_summary_unchanged_when_no_explicit_effort(monkeypatch):
@@ -106,12 +107,13 @@ def test_openai_default_reasoning_summary_unchanged_when_no_explicit_effort(monk
 
     captured: dict[str, Any] = {}
 
-    def fake_create_model(**kwargs):
-        captured.update(kwargs)
+    def fake_create_model(config, **kwargs):
+        captured["config"] = config
+        captured["kwargs"] = kwargs
         return object()
 
     monkeypatch.setattr(
-        "app.ai.model_factory.ModelFactory.create_model",
+        "app.ai.model_factory.ModelFactory.create_model_from_runtime",
         staticmethod(fake_create_model),
     )
 
@@ -119,8 +121,8 @@ def test_openai_default_reasoning_summary_unchanged_when_no_explicit_effort(monk
     runtime = _runtime_config(model="gpt-4o")
     base_module.BaseAgent._create_langchain_model_from_runtime(agent, runtime)
 
-    reasoning = captured.get("reasoning")
-    assert reasoning == {"summary": "auto"}
+    assert captured["config"] is runtime
+    assert captured["kwargs"]["reasoning"] == {"summary": "auto"}
 
 
 # ---------------------------------------------------------------------------

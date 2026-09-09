@@ -1,5 +1,8 @@
 import contextlib
+import inspect
 import logging
+import sys
+from importlib.metadata import PackageNotFoundError, version
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -50,12 +53,23 @@ logger = logging.getLogger(__name__)
 
 
 def _build_checkpoint_serializer() -> JsonPlusSerializer:
-    """Build the serializer that round-trips every checkpointed contract.
+    """Build a serializer with strict JSON and MsgPack type allowlists."""
+    try:
+        parameters = inspect.signature(JsonPlusSerializer).parameters
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Cannot inspect the LangGraph checkpoint serializer API") from exc
 
-    Both allowlists are required: a type missing from either comes back as a
-    plain dict, and a control-plane contract that degrades to a dict stops
-    being validated on the way out of the checkpoint.
-    """
+    if "allowed_msgpack_modules" not in parameters:
+        try:
+            installed_version = version("langgraph-checkpoint")
+        except PackageNotFoundError:
+            installed_version = "unknown"
+        raise RuntimeError(
+            "Unsupported langgraph-checkpoint "
+            f"{installed_version}; install langgraph-checkpoint>=4.1.1,<5.0.0 "
+            f"in the active interpreter ({sys.executable})"
+        )
+
     return JsonPlusSerializer(
         allowed_json_modules=_CHECKPOINT_ALLOWED_JSON_MODULES,
         allowed_msgpack_modules=_CHECKPOINT_ALLOWED_MSGPACK_MODULES,
@@ -79,11 +93,13 @@ class CheckpointManager:
         logger.debug(f"CheckpointManager initialized with schema: {settings.checkpoint_schema}")
 
     async def setup(self) -> None:
-        """
-        Initialize the checkpoint database tables with connection pooling.
-        """
+        """Initialize checkpoint persistence and its connection pool."""
         if self._initialized:
             return
+
+        # Validate the dependency before allocating database resources. Older
+        # serializers cannot enforce the MsgPack type allowlist.
+        serde = _build_checkpoint_serializer()
 
         try:
             # Get pool configuration from settings
@@ -102,7 +118,6 @@ class CheckpointManager:
             await self._pool.open()
 
             # Create AsyncPostgresSaver with the pool (not a dedicated connection)
-            serde = _build_checkpoint_serializer()
             self.checkpointer = AsyncPostgresSaver(self._pool, serde=serde)
 
             # Run one-time setup using a temporary pooled connection
