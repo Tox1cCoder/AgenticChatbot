@@ -198,7 +198,14 @@ def test_translator_block_delta_tool_call_chunk_becomes_tool_call_delta():
     assert events[0].data["args_delta"] == '{"query"'
 
 
-def _worker_messages_event(message_event, *, seq=1, task_id="w1", agent="search_agent"):
+def _worker_messages_event(
+    message_event,
+    *,
+    seq=1,
+    dispatch_id="d1",
+    task_id="w1",
+    agent="search_agent",
+):
     return _v3(
         "messages",
         (
@@ -210,6 +217,7 @@ def _worker_messages_event(message_event, *, seq=1, task_id="w1", agent="search_
                 "purpose": "planning_subagent",
                 "subagent": True,
                 "subagent_agent": agent,
+                "subagent_dispatch_id": dispatch_id,
                 "subagent_task_id": task_id,
                 "tags": ["internal", "planning_subagent"],
             },
@@ -234,9 +242,9 @@ def test_translator_routes_worker_reasoning_delta_to_subagent_message_delta():
     assert [e.type for e in events] == ["subagent_message_delta"]
     assert events[0].data == {"text": "worker plan", "channel": "reasoning"}
     assert events[0].subagent is not None
-    assert events[0].subagent.id == "w1"
+    assert events[0].subagent.id == "d1:w1"
     assert events[0].subagent.name == "search_agent"
-    assert events[0].subagent.path == ["planning_agent", "w1"]
+    assert events[0].subagent.path == ["d1", "w1"]
     assert events[0].subagent.status == "running"
 
 
@@ -255,6 +263,27 @@ def test_translator_routes_worker_text_delta_to_subagent_message_delta():
     )
     assert [e.type for e in events] == ["subagent_message_delta"]
     assert events[0].data == {"text": "worker answer", "channel": "text"}
+
+
+def test_translator_distinguishes_same_task_id_across_dispatches():
+    message_event = {
+        "event": "content-block-delta",
+        "index": 0,
+        "delta": {"type": "text-delta", "text": "worker answer"},
+    }
+    translator = V3ProtocolTranslator()
+
+    refs = [
+        list(
+            translator.translate(
+                _worker_messages_event(message_event, dispatch_id=dispatch_id)
+            )
+        )[0].subagent
+        for dispatch_id in ("d1", "d2")
+    ]
+
+    assert [ref.id for ref in refs] == ["d1:w1", "d2:w1"]
+    assert [ref.path for ref in refs] == [["d1", "w1"], ["d2", "w1"]]
 
 
 def test_translator_suppresses_worker_message_lifecycle_and_tool_chunks():

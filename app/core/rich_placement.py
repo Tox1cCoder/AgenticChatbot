@@ -25,6 +25,7 @@ from .rich_response import (
     parse_inline_rich_references,
     provenance_provider,
     remove_inline_rich_reference,
+    strip_malformed_rich_markers,
 )
 
 logger = logging.getLogger(__name__)
@@ -504,8 +505,11 @@ def _finalize_article_content(response: Any, content: str) -> str:
         allowed_image_ids = allowed_image_ids.intersection(
             str(item_id) for item_id in raw_presented_ids
         )
-    cleaned_content = content
-    for reference in parse_inline_rich_references(content):
+    # Unresolvable markers go first. The authorization sweep below can only
+    # remove what the strict grammar can parse, so a marker with a space in its
+    # id survives every check and is rendered to the reader verbatim.
+    cleaned_content = strip_malformed_rich_markers(content)
+    for reference in parse_inline_rich_references(cleaned_content):
         if reference.startswith(("image:", "imagegroup:")) and reference not in allowed_image_ids:
             cleaned_content = remove_inline_rich_reference(cleaned_content, reference)
     if cleaned_content != content:

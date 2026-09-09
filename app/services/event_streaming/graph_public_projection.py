@@ -20,8 +20,9 @@ from typing import Any
 from langchain_core.messages import AIMessage, ToolMessage
 
 from ...ai.utils import coerce_response_text, make_json_safe, normalize_tool_call
+from ...core.rich_response import RichMarkerStreamFilter
 from ..rag_grounding import CitationStreamFilter
-from .events import V3StreamEvent, make_event
+from .events import SubagentRef, V3StreamEvent, make_event
 
 # Planning nodes whose state carries user-visible progress. ``planning_package``
 # is where a Planning turn's answer is assembled, so it is what completion is
@@ -59,6 +60,7 @@ class StreamProjectionContext:
     internal_content_only: bool = True
     accumulated_content: str = ""
     accumulated_thinking: str = ""
+    subagent_content: dict[tuple[str, str], str] = field(default_factory=dict)
     last_state_values: dict[str, Any] | None = None
     current_tool_calls: dict[Any, dict[str, Any]] = field(default_factory=dict)
     emitted_tool_call_ids: set[str] = field(default_factory=set)
@@ -67,23 +69,28 @@ class StreamProjectionContext:
     # the same helper the renderer uses on the finished answer. Per stream:
     # one turn's retrieved ids authorize that turn's citations and no other's.
     citation_filter: CitationStreamFilter = field(default_factory=CitationStreamFilter)
+    # Same reason as the citation filter, for the other marker grammar: an
+    # unresolvable rich marker used to be published verbatim and only removed
+    # once the finished answer was rendered.
+    rich_marker_filter: RichMarkerStreamFilter = field(default_factory=RichMarkerStreamFilter)
 
 
 def _publish_answer_text(delta: str, ctx: StreamProjectionContext):
-    """Emit answer text once the citation rule can be applied to it.
+    """Emit answer text once both marker rules can be applied to it.
 
     A marker split across chunks would otherwise reach the reader half-judged,
-    so the filter may hold a few characters back. Whatever it holds is released
-    by ``flush_answer_text`` when the stream ends.
+    so the filters may hold a few characters back. Whatever they hold is
+    released by ``flush_answer_text`` when the stream ends.
     """
-    publishable = ctx.citation_filter.feed(delta)
+    publishable = ctx.citation_filter.feed(ctx.rich_marker_filter.feed(delta))
     if publishable:
         yield make_event("message_delta", sequence=0, data={"text": publishable})
 
 
 def flush_answer_text(ctx: StreamProjectionContext):
-    """Release any text the citation filter is still holding."""
-    remainder = ctx.citation_filter.flush()
+    """Release any text the filters are still holding, in the same order."""
+    remainder = ctx.citation_filter.feed(ctx.rich_marker_filter.flush())
+    remainder += ctx.citation_filter.flush()
     if remainder:
         yield make_event("message_delta", sequence=0, data={"text": remainder})
 
@@ -130,16 +137,11 @@ def _is_internal_stream_chunk(metadata: Any) -> bool:
 
 
 def _is_internal_node_metadata(metadata: Any) -> bool:
-    """Whether this chunk's node is one that may never answer the user.
-
-    Imported lazily to keep this module's import graph free of the workflow
-    package; the node set itself is derived from the graph, not copied.
-    """
     if not isinstance(metadata, dict):
         return False
     from .langchain_v3 import _is_internal_node, _node_from_metadata
 
-    return _is_internal_node(_node_from_metadata(metadata))
+    return _is_internal_node(_node_from_metadata(metadata), metadata=metadata)
 
 
 def _consume_stream_text_chunk(accumulated_content: str, text_chunk: Any) -> tuple[str, str | None]:
@@ -394,6 +396,13 @@ class GraphPublicStreamProjector:
         """Reproduce the legacy ``stream_mode="messages"`` chunk handling."""
         if isinstance(message_chunk, ToolMessage):
             return
+        if isinstance(metadata, dict):
+            from .langchain_v3 import _subagent_ref_from_metadata
+
+            subagent = _subagent_ref_from_metadata(metadata)
+            if subagent is not None:
+                yield from self._map_legacy_subagent_chunk(message_chunk, subagent, ctx)
+                return
         if self._suppress_internal_stream_chunks and _is_internal_stream_chunk(metadata):
             return
         # Same structural backstop the v3 translator applies. It has to be
@@ -516,6 +525,59 @@ class GraphPublicStreamProjector:
                         tool_call_id=tool_call_id, tool_name=tool_call["name"], args=args
                     )
             ctx.current_tool_calls = {}
+
+    @staticmethod
+    def _map_legacy_subagent_chunk(
+        message_chunk: Any,
+        subagent: SubagentRef,
+        ctx: StreamProjectionContext,
+    ):
+        blocks = getattr(message_chunk, "content_blocks", None) or []
+        emitted = False
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "text":
+                text, channel = block.get("text", ""), "text"
+            elif block_type in {"thinking", "reasoning"}:
+                text = block.get(block_type, "") or block.get("text", "")
+                channel = "reasoning"
+            else:
+                continue
+            if text:
+                emitted = True
+                key = (subagent.id, channel)
+                accumulated, delta = _consume_stream_text_chunk(
+                    ctx.subagent_content.get(key, ""), text
+                )
+                ctx.subagent_content[key] = accumulated
+                if not delta:
+                    continue
+                yield make_event(
+                    "subagent_message_delta",
+                    sequence=0,
+                    subagent=subagent,
+                    data={"text": delta, "channel": channel},
+                )
+        if emitted:
+            return
+
+        text = coerce_response_text(getattr(message_chunk, "content", ""))
+        if text:
+            key = (subagent.id, "text")
+            accumulated, delta = _consume_stream_text_chunk(
+                ctx.subagent_content.get(key, ""), text
+            )
+            ctx.subagent_content[key] = accumulated
+            if not delta:
+                return
+            yield make_event(
+                "subagent_message_delta",
+                sequence=0,
+                subagent=subagent,
+                data={"text": delta, "channel": "text"},
+            )
 
     def _map_legacy_update_node(
         self, node_name: Any, node_state: Any, ctx: StreamProjectionContext

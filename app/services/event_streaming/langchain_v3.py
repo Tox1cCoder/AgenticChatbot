@@ -48,18 +48,19 @@ def _subagent_ref_from_metadata(metadata: dict[str, Any]) -> SubagentRef | None:
     """Identify a planning-subagent worker model run from its merged metadata.
 
     The Planning worker runtime stamps every worker model call with
-    ``purpose=planning_subagent`` + ``subagent_task_id``/``subagent_agent``,
-    which LangGraph merges into the messages-channel metadata.
+    ``purpose=planning_subagent`` plus dispatch, task, and agent identity, which
+    LangGraph merges into the messages-channel metadata.
     """
     if metadata.get("purpose") != "planning_subagent":
         return None
+    dispatch_id = str(metadata.get("subagent_dispatch_id") or "").strip()
     task_id = str(metadata.get("subagent_task_id") or "").strip()
-    if not task_id:
+    if not dispatch_id or not task_id:
         return None
     return SubagentRef(
-        id=task_id,
+        id=f"{dispatch_id}:{task_id}",
         name=str(metadata.get("subagent_agent") or "unknown_agent"),
-        path=["planning_agent", task_id],
+        path=[dispatch_id, task_id],
         status="running",
     )
 
@@ -87,21 +88,30 @@ def _public_answer_nodes() -> frozenset[str]:
 PUBLIC_ANSWER_NODES: frozenset[str] = _public_answer_nodes()
 
 
-def _is_internal_node(node: str | None) -> bool:
-    """Whether a delta from ``node`` must stay private.
+def _namespace_root(
+    namespace: list[str] | None,
+    metadata: dict[str, Any] | None = None,
+) -> str | None:
+    parts = list(namespace or [])
+    if not parts and isinstance(metadata, dict):
+        checkpoint_ns = metadata.get("langgraph_checkpoint_ns")
+        if isinstance(checkpoint_ns, str) and checkpoint_ns:
+            parts = [checkpoint_ns.split("|", 1)[0]]
+    if not parts:
+        return None
+    return str(parts[0]).split(":", 1)[0] or None
 
-    The router runs inside the graph, and its model returns a
-    ``RoutingDecision`` -- users were shown that JSON as the assistant's reply.
-    `planning_actions` had the same latent leak from its rubric grader. Both
-    should carry an ``internal`` tag, and now do, but relying on every future
-    author to remember one is how this reached production: the tag mechanism
-    was already built and already enabled, and simply had no caller here.
 
-    An *unattributed* delta stays public on purpose. This module also serves
-    scripted doubles and older runnables that emit no node, and muting those
-    would break legitimate output to close a hole they cannot open.
-    """
-    return node is not None and node not in PUBLIC_ANSWER_NODES
+def _is_internal_node(
+    node: str | None,
+    *,
+    namespace: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> bool:
+    """Keep control-plane model output private without muting specialist subgraphs."""
+    if node is None or node in PUBLIC_ANSWER_NODES:
+        return False
+    return not (node == "model" and _namespace_root(namespace, metadata) in PUBLIC_ANSWER_NODES)
 
 
 def _text_from_block(block: dict[str, Any]) -> str:
@@ -451,7 +461,7 @@ class V3ProtocolTranslator:
             if settings.suppress_internal_stream_chunks and _is_internal_run(metadata):
                 return
         # Structural backstop, applied whether or not the run was tagged.
-        if _is_internal_node(node):
+        if _is_internal_node(node, namespace=namespace, metadata=metadata):
             return
 
         if event_name == "content-block-delta":
@@ -696,6 +706,13 @@ class V3ProtocolTranslator:
             return
         event_name = data.get("event")
         ns = list(data.get("namespace") or namespace)
+        if _namespace_root(ns) in PUBLIC_ANSWER_NODES:
+            # A specialist is not a subagent. Since routing-v2 every specialist
+            # runs its own compiled subgraph, so this lifecycle fires on every
+            # ordinary turn -- a plain "Hello" reported a "Chat" subagent that
+            # was never dispatched. Delegated workers keep their own events,
+            # emitted from the dispatch and worker-tool channels.
+            return
         graph_name = data.get("graph_name") or (ns[-1] if ns else "subagent")
         task_id = ns[-1] if ns else graph_name
         if event_name in {"started", "running"}:

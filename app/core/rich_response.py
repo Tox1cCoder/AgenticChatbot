@@ -423,6 +423,10 @@ _MARKER_LINE_RE = re.compile(
     r"^[ ]{0,3}<!--rich:([A-Za-z0-9_\-.:]+)-->[ \t]*$",
 )
 _MARKER_RE = re.compile(r"<!--rich:([A-Za-z0-9_\-.:]+)-->")
+#: Deliberately tolerant: it matches a marker the strict grammar rejects, which
+#: is the only way such a marker can be found and deleted. Never use it to
+#: resolve an id.
+_ANY_MARKER_RE = re.compile(r"<!--rich:([^\n]*?)-->")
 _BACKTICK_RUN_RE = re.compile(r"`+")
 
 
@@ -472,6 +476,144 @@ def _iter_inline_rich_marker_matches(line: str) -> Iterable[re.Match[str]]:
         if not _ITEM_ID_PATTERN.match(candidate):
             continue
         yield match
+
+
+def _iter_malformed_rich_marker_matches(line: str) -> Iterable[re.Match[str]]:
+    """Yield rich markers whose id could never name a real item.
+
+    Every strict consumer -- the reference parser, the stripper, the
+    authorization sweep -- skips a marker whose id is not
+    ``_ITEM_ID_PATTERN``-shaped. That is right for *resolution* and wrong for
+    *removal*: a marker nobody can see is a marker nobody deletes, so it
+    reaches the reader as literal HTML-comment text. The usual source is a
+    model building an id out of a title, which puts spaces in it.
+    """
+    if "<!--rich:" not in line:
+        return
+    code_ranges = _inline_code_ranges(line)
+    for match in _ANY_MARKER_RE.finditer(line):
+        if _overlaps_any_range(match.start(), match.end(), code_ranges):
+            continue
+        candidate = match.group(1)
+        if len(candidate) <= RICH_ITEM_ID_MAX_LENGTH and _ITEM_ID_PATTERN.match(candidate):
+            # Well-formed: it names an item, and whether that item is allowed
+            # is the authorization sweep's decision, not this one's.
+            continue
+        yield match
+
+
+def strip_malformed_rich_markers(markdown: str) -> str:
+    """Remove rich markers that can never resolve, leaving valid ones intact.
+
+    Code fences, indented code, and inline code spans are preserved so a
+    documented example of the marker grammar survives.
+    """
+    if not markdown or "<!--rich:" not in markdown:
+        return markdown
+    normalized = markdown.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    in_fence = _strip_fenced_code_blocks(lines)
+    changed = False
+    out: list[str] = []
+    for line, inside in zip(lines, in_fence, strict=False):
+        if inside or _is_indented_code(line):
+            out.append(line)
+            continue
+        pieces: list[str] = []
+        cursor = 0
+        line_changed = False
+        for match in _iter_malformed_rich_marker_matches(line):
+            pieces.append(line[cursor : match.start()])
+            cursor = match.end()
+            line_changed = True
+            changed = True
+        if not line_changed:
+            out.append(line)
+            continue
+        pieces.append(line[cursor:])
+        stripped = "".join(pieces)
+        if stripped.strip():
+            out.append(stripped)
+        elif line.strip():
+            # The marker was the whole line. Dropping the line as well avoids
+            # leaving a blank that splits the paragraph it sat in.
+            continue
+        else:
+            out.append(stripped)
+    return "\n".join(out) if changed else markdown
+
+
+_MARKER_OPEN = "<!--rich:"
+_MARKER_CLOSE = "-->"
+#: Past this much held text the open marker is treated as prose that merely
+#: looks like one. Holding without bound would stall an answer on a stray
+#: ``<!--rich:`` the model never closes.
+_MAX_HELD_MARKER_CHARS = RICH_ITEM_ID_MAX_LENGTH + len(_MARKER_OPEN) + len(_MARKER_CLOSE) + 64
+
+
+def _first_marker_candidate(text: str) -> int:
+    """Index where a rich marker starts, or could still start. ``-1`` if none."""
+    start = 0
+    while True:
+        index = text.find("<", start)
+        if index == -1:
+            return -1
+        rest = text[index:]
+        if rest.startswith(_MARKER_OPEN) or _MARKER_OPEN.startswith(rest):
+            return index
+        start = index + 1
+
+
+class RichMarkerStreamFilter:
+    """Applies the unresolvable-marker rule to text arriving in pieces.
+
+    The renderer sees a whole answer and can strip a marker that will never
+    resolve; the stream sees whatever the provider chunked, and published a raw
+    ``<!--rich:...-->`` to the reader before anything could judge it. Both call
+    :func:`strip_malformed_rich_markers`, so the text watched and the text
+    stored agree.
+
+    Only a marker that could still be one is held. Ordinary prose containing
+    ``<`` never stalls, and a well-formed marker passes straight through --
+    whether it is *authorized* is decided at finalization, not here.
+    """
+
+    def __init__(self) -> None:
+        self._pending = ""
+
+    def feed(self, text: str) -> str:
+        """Return the part of ``text`` that is safe to publish now."""
+        self._pending += str(text or "")
+        out: list[str] = []
+        while self._pending:
+            index = _first_marker_candidate(self._pending)
+            if index == -1:
+                out.append(self._pending)
+                self._pending = ""
+                break
+            out.append(self._pending[:index])
+            rest = self._pending[index:]
+            if not rest.startswith(_MARKER_OPEN):
+                # A partial open: wait for the rest of it.
+                self._pending = rest
+                break
+            close = rest.find(_MARKER_CLOSE, len(_MARKER_OPEN))
+            if close == -1:
+                if len(rest) > _MAX_HELD_MARKER_CHARS:
+                    out.append(rest)
+                    self._pending = ""
+                else:
+                    self._pending = rest
+                break
+            end = close + len(_MARKER_CLOSE)
+            out.append(strip_malformed_rich_markers(rest[:end]))
+            self._pending = rest[end:]
+        return "".join(out)
+
+    def flush(self) -> str:
+        """Release whatever is still held, at end of stream."""
+        remainder, self._pending = self._pending, ""
+        return strip_malformed_rich_markers(remainder) if remainder else ""
 
 
 def _strip_fenced_code_blocks(lines: list[str]) -> list[bool]:
@@ -564,8 +706,15 @@ def strip_inline_rich_markers(markdown: str) -> str:
     This is used for clients that did not opt into the rich-response contract
     so marker comments cannot leak as visible text. Code fences, indented code,
     and inline code spans are preserved.
+
+    A client that renders no markers must be left with none, so this removes
+    the unresolvable ones too -- they are the likeliest to leak, being invisible
+    to the strict grammar every other consumer uses.
     """
     if not markdown or "<!--rich:" not in markdown:
+        return markdown
+    markdown = strip_malformed_rich_markers(markdown)
+    if "<!--rich:" not in markdown:
         return markdown
     normalized = markdown.replace("\r\n", "\n").replace("\r", "\n")
     lines = normalized.split("\n")

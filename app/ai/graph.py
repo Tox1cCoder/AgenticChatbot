@@ -179,7 +179,13 @@ def _build_inline_rich_inventory_for_state(context: dict[str, Any] | None) -> st
     """
     if not isinstance(context, dict):
         return ""
-    context["_presented_rich_image_ids"] = []
+    # Clear any earlier presentation, but leave the key *absent* until an
+    # inventory is actually built. Placement reads a present list as the
+    # definitive set of images the model was shown and drops everything outside
+    # it, so an empty list left here discards every image discovered later in
+    # the turn. A specialist builds its request before running any tool, which
+    # is exactly when that happens.
+    context.pop("_presented_rich_image_ids", None)
     if not getattr(settings, "inline_rich_response_enabled", False):
         return ""
     if not context.get("inline_rich_response_v1"):

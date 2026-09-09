@@ -38,7 +38,13 @@ from app.services.event_streaming.langchain_v3 import V3ProtocolTranslator
 ROUTING_JSON = '{"agent_id":"chat_agent","confidence":1.0,"reason":"a general greeting"}'
 
 
-def _messages_event(text: str, *, node: str | None, tags: list[str] | None = None) -> dict:
+def _messages_event(
+    text: str,
+    *,
+    node: str | None,
+    namespace: list[str] | None = None,
+    tags: list[str] | None = None,
+) -> dict:
     """One v3 ``messages`` envelope carrying a text delta from ``node``."""
     metadata: dict = {}
     if node is not None:
@@ -49,7 +55,7 @@ def _messages_event(text: str, *, node: str | None, tags: list[str] | None = Non
         "type": "event",
         "method": "messages",
         "params": {
-            "namespace": [],
+            "namespace": list(namespace or []),
             "data": (
                 {
                     "event": "content-block-delta",
@@ -127,6 +133,77 @@ def test_every_specialist_node_still_streams_its_answer():
         )
 
 
+def test_nested_specialist_model_output_streams_under_its_public_namespace():
+    event = _messages_event(
+        "hello",
+        node="model",
+        namespace=["search_agent:run-123"],
+    )
+
+    assert _public_text([event]) == "hello"
+
+
+@pytest.mark.parametrize("namespace", [["route:run-1"], ["planning_actions:run-2"]])
+def test_nested_internal_model_output_stays_private(namespace):
+    assert _public_text(
+        [_messages_event("internal", node="model", namespace=namespace)]
+    ) == ""
+
+
+async def test_real_nested_agent_streams_each_model_chunk():
+    from langchain.agents import create_agent
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+    from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    from app.services.event_streaming.langchain_v3 import iter_v3_events_from_graph
+
+    class StreamingModel(BaseChatModel):
+        @property
+        def _llm_type(self):
+            return "streaming-test"
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def _generate(self, messages, **kwargs):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ABC"))])
+
+        async def _agenerate(self, messages, **kwargs):
+            return self._generate(messages)
+
+        async def _astream(self, messages, **kwargs):
+            for text in "ABC":
+                yield ChatGenerationChunk(message=AIMessageChunk(content=text))
+
+    agent = create_agent(model=StreamingModel(), tools=[])
+
+    async def search_agent(state, config):
+        return await agent.ainvoke({"messages": state["messages"]}, config=config)
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("search_agent", search_agent)
+    builder.add_edge(START, "search_agent")
+    builder.add_edge("search_agent", END)
+    graph = builder.compile()
+    projector = GraphPublicStreamProjector(
+        tool_end_events_from_node_state=lambda *_args, **_kwargs: [],
+        suppress_internal_stream_chunks=True,
+    )
+    context = StreamProjectionContext()
+    chunks = []
+
+    async for event in iter_v3_events_from_graph(
+        graph, {"messages": [HumanMessage(content="go")]}, config=None
+    ):
+        for public in projector.map_event(event, context):
+            if public.type == "message_delta":
+                chunks.append(public.data["text"])
+
+    assert chunks == ["A", "B", "C"]
+
+
 def test_an_unattributed_delta_is_still_published():
     """Scripted doubles and older runnables emit no node; they must still work."""
     assert _public_text([_messages_event("hello", node=None)]) == "hello"
@@ -195,7 +272,13 @@ async def test_the_route_node_marks_its_model_run_internal():
 # ----------------------------------------------------------------------
 
 
-def _legacy_chunk_event(text: str, *, node: str | None, tags: list[str] | None = None) -> dict:
+def _legacy_chunk_event(
+    text: str,
+    *,
+    node: str | None,
+    checkpoint_namespace: str | None = None,
+    tags: list[str] | None = None,
+) -> dict:
     """A ``state_snapshot`` carrier as ``_iter_tuple_fallback`` builds it."""
     from types import SimpleNamespace
 
@@ -204,6 +287,8 @@ def _legacy_chunk_event(text: str, *, node: str | None, tags: list[str] | None =
         metadata["langgraph_node"] = node
     if tags is not None:
         metadata["tags"] = tags
+    if checkpoint_namespace is not None:
+        metadata["langgraph_checkpoint_ns"] = checkpoint_namespace
     return {
         "kind": "messages_tuple",
         "chunk": SimpleNamespace(content=text, content_blocks=None),
@@ -245,6 +330,109 @@ def test_the_plan_grader_is_also_silent_on_the_tuple_fallback_path():
 
 def test_a_specialist_still_streams_on_the_tuple_fallback_path():
     assert _public_text_from_legacy([_legacy_chunk_event("hello", node="chat_agent")]) == "hello"
+
+
+def test_a_nested_specialist_still_streams_on_the_tuple_fallback_path():
+    event = _legacy_chunk_event(
+        "hello",
+        node="model",
+        checkpoint_namespace="search_agent:run-123|model:run-456",
+    )
+
+    assert _public_text_from_legacy([event]) == "hello"
+
+
+@pytest.mark.parametrize("suppress_internal", [True, False])
+def test_tuple_fallback_keeps_planning_worker_text_attributed(suppress_internal):
+    from app.services.event_streaming.events import make_event
+
+    payload = _legacy_chunk_event(
+        "worker result",
+        node="model",
+        checkpoint_namespace="planning_model:run-1|model:run-2",
+        tags=["internal", "planning_subagent"],
+    )
+    payload["metadata"].update(
+        {
+            "purpose": "planning_subagent",
+            "subagent_dispatch_id": "dispatch-1",
+            "subagent_task_id": "task-1",
+            "subagent_agent": "search_agent",
+        }
+    )
+    projector = GraphPublicStreamProjector(
+        tool_end_events_from_node_state=lambda *_args, **_kwargs: [],
+        suppress_internal_stream_chunks=suppress_internal,
+    )
+
+    events = list(
+        projector.map_event(
+            make_event("state_snapshot", sequence=1, data=payload),
+            StreamProjectionContext(),
+        )
+    )
+
+    assert [event.type for event in events] == ["subagent_message_delta"]
+    assert events[0].subagent.id == "dispatch-1:task-1"
+    assert events[0].data == {"text": "worker result", "channel": "text"}
+
+
+def test_tuple_fallback_normalizes_cumulative_planning_worker_chunks():
+    from app.services.event_streaming.events import make_event
+
+    metadata = {
+        "langgraph_node": "model",
+        "langgraph_checkpoint_ns": "planning_model:run-1|model:run-2",
+        "purpose": "planning_subagent",
+        "subagent_dispatch_id": "dispatch-1",
+        "subagent_task_id": "task-1",
+        "subagent_agent": "search_agent",
+    }
+    projector = GraphPublicStreamProjector(
+        tool_end_events_from_node_state=lambda *_args, **_kwargs: [],
+        suppress_internal_stream_chunks=True,
+    )
+    context = StreamProjectionContext()
+    deltas = []
+
+    for sequence, text in enumerate(("A", "AB", "ABC"), start=1):
+        payload = _legacy_chunk_event(text, node="model")
+        payload["metadata"] = metadata
+        for event in projector.map_event(
+            make_event("state_snapshot", sequence=sequence, data=payload), context
+        ):
+            if event.type == "subagent_message_delta":
+                deltas.append(event.data["text"])
+
+    assert deltas == ["A", "B", "C"]
+
+
+def test_tuple_fallback_does_not_emit_an_empty_reasoning_delta():
+    from types import SimpleNamespace
+
+    from app.services.event_streaming.events import make_event
+
+    payload = {
+        "kind": "messages_tuple",
+        "chunk": SimpleNamespace(
+            content="",
+            content_blocks=[{"type": "reasoning", "reasoning": "", "text": ""}],
+        ),
+        "metadata": {"langgraph_node": "chat_agent"},
+    }
+    projector = GraphPublicStreamProjector(
+        tool_end_events_from_node_state=lambda *_args, **_kwargs: [],
+        suppress_internal_stream_chunks=True,
+    )
+
+    events = list(
+        projector.map_event(
+            make_event("state_snapshot", sequence=1, data=payload),
+            StreamProjectionContext(),
+        )
+    )
+
+    assert events == []
 
 
 def test_an_unattributed_chunk_still_streams_on_the_tuple_fallback_path():
