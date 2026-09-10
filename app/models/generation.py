@@ -137,6 +137,19 @@ class Generation(Base):
     logical_turn_id = Column(String(160), nullable=False)
     checkpoint_thread_id = Column(String(320), nullable=False)
 
+    # --- producer --------------------------------------------------------
+    # ``hostname:pid:started_at`` for the worker streaming this turn, so a
+    # later process can tell an abandoned turn from a live one. The partial
+    # unique index below admits one active row per conversation, so a row left
+    # active by a dead worker blocks that conversation until something
+    # terminalizes it, and nothing else recorded identifies the producer:
+    # ``build_sha`` is shared by every worker of a build, and the worker count
+    # belongs to the launch command rather than to any setting.
+    #
+    # Nullable on purpose. Rows written before this column existed name no
+    # producer, and the reaper reads those as unknown rather than as dead.
+    producer_token = Column(String(255), nullable=True)
+
     # --- owners ----------------------------------------------------------
     # Every read is filtered by both. A generation is not addressable by id
     # alone; that would let one user probe another's conversations.

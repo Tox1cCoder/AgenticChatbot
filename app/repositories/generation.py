@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -24,7 +25,9 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.producer_identity import current_producer_token
 from app.models.generation import (
+    ACTIVE_STATUSES,
     Generation,
     GenerationCommand,
     GenerationCommandAction,
@@ -84,6 +87,11 @@ class GenerationRepository(RepositorySessionMixin):
                     execution_epoch=0,
                     active_agent_id=command.active_agent_id,
                     continuation_available=False,
+                    # Stamped here rather than taken from the command: the
+                    # producer is whichever process is doing the writing, and
+                    # a caller able to name someone else's could have its rows
+                    # reclaimed out from under it.
+                    producer_token=current_producer_token(),
                 )
                 .returning(*_RETURNED)
             ).one()
@@ -242,6 +250,73 @@ class GenerationRepository(RepositorySessionMixin):
                 )
                 return None
             return GenerationSnapshot.from_row(row)
+
+        return await self._arun(work)
+
+    # ------------------------------------------------------------------
+    # reclaiming abandoned turns
+    # ------------------------------------------------------------------
+
+    async def aget_active_producer_tokens(self) -> list[str | None]:
+        """The distinct producers of every currently active generation.
+
+        Deliberately not owner-scoped: a reaper acts on behalf of the
+        deployment, not a user, and an abandoned row blocks its conversation
+        regardless of who owns it. ``None`` is included rather than filtered
+        out so the caller can report rows that name no producer instead of
+        silently ignoring them.
+        """
+
+        def work(session: Session) -> list[str | None]:
+            rows = session.execute(
+                select(Generation.producer_token)
+                .where(Generation.status.in_(tuple(ACTIVE_STATUSES)))
+                .distinct()
+            ).all()
+            return [row[0] for row in rows]
+
+        return await self._arun(work)
+
+    async def afail_active_by_producer(
+        self,
+        producer_tokens: Sequence[str],
+        *,
+        terminal_reason: str,
+    ) -> int:
+        """Terminalize the active generations produced by ``producer_tokens``.
+
+        Scoped to the named producers and to ``ACTIVE_STATUSES``. Both halves
+        matter: the first is what keeps a peer worker's streaming turn out of
+        the statement, and the second is what leaves a ``continuable`` turn
+        alone -- it holds no worker, blocks no conversation, and the user can
+        still continue it.
+
+        ``version`` is incremented like any other transition, so a client
+        holding the pre-reclaim fence is refused as stale rather than having
+        its command applied to a row that has since been failed.
+        """
+        tokens = [str(token) for token in producer_tokens if token]
+        if not tokens:
+            return 0
+
+        def work(session: Session) -> int:
+            now = _now()
+            result = session.execute(
+                update(Generation)
+                .where(
+                    Generation.producer_token.in_(tokens),
+                    Generation.status.in_(tuple(ACTIVE_STATUSES)),
+                )
+                .values(
+                    status=GenerationStatus.FAILED,
+                    terminal_reason=terminal_reason,
+                    terminal_at=now,
+                    updated_at=now,
+                    version=Generation.version + 1,
+                )
+            )
+            session.commit()
+            return int(result.rowcount or 0)
 
         return await self._arun(work)
 

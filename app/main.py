@@ -228,6 +228,52 @@ async def _subscribe_generation_stop_signals() -> None:
         )
 
 
+async def _reclaim_orphaned_generations() -> None:
+    """Free conversations whose last turn was abandoned by a departed worker.
+
+    ``uq_generations_active_per_conversation`` admits one active row per
+    conversation, so a row left active by a worker that died blocks that
+    conversation permanently -- the next question's INSERT raises
+    ``UniqueViolation`` and the API reports ``conversation_turn_conflict``,
+    which no retry can clear because no worker exists to finish the turn.
+
+    A warning rather than a failure. Conversations staying blocked is bad; a
+    process that refuses to serve anything because a cleanup query failed is
+    worse.
+    """
+    from app.services.generation_reaper import reclaim_orphaned_generations
+
+    try:
+        container = get_container()
+        await reclaim_orphaned_generations(container.generation_repository())
+    except Exception as exc:  # noqa: BLE001 - never block startup over cleanup
+        logger.warning(
+            "Abandoned generations were not reclaimed, so a conversation whose "
+            "worker died may still refuse new turns: %s",
+            type(exc).__name__,
+        )
+
+
+async def _terminalize_own_generations() -> None:
+    """Fail this worker's still-active generations before the process exits.
+
+    The ordinary case, not an exceptional one: uvicorn's reloader replaces the
+    serving child on every code change, and a Ctrl-C during a turn does the
+    same thing. Resolving it here means the process that knows it is leaving
+    records the outcome, instead of leaving a later startup to infer it.
+    """
+    from app.services.generation_reaper import terminalize_own_generations
+
+    try:
+        container = get_container()
+        await terminalize_own_generations(container.generation_repository())
+    except Exception as exc:  # noqa: BLE001 - shutdown proceeds regardless
+        logger.warning(
+            "This worker's active generations were not terminalized: %s",
+            type(exc).__name__,
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
@@ -236,6 +282,7 @@ async def lifespan(app: FastAPI):
     _ensure_selector_event_loop()
     await _verify_async_database_ready()
     await init_database_migrations()
+    await _reclaim_orphaned_generations()
     await init_checkpoint_tables()
     await init_agents()
     _log_widget_runtime_status()
@@ -250,6 +297,10 @@ async def lifespan(app: FastAPI):
         )
     yield
     # Shutdown
+    # First, while the database is certainly still reachable: a turn still
+    # streaming when the process was told to leave would otherwise block its
+    # conversation until the next startup swept it.
+    await _terminalize_own_generations()
     if _client_runtime_cleanup_task is not None:
         _client_runtime_cleanup_task.cancel()
         with suppress(asyncio.CancelledError):

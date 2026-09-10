@@ -148,6 +148,26 @@ def test_research_accounting_is_stored_on_the_row_not_in_process_memory():
     assert "research_accounting" in Generation.__table__.columns
 
 
+def test_the_row_records_the_process_producing_it():
+    """Without it an abandoned turn is indistinguishable from a live one.
+
+    The partial unique index admits one active row per conversation, so a row
+    left active by a dead worker blocks that conversation for good. Nothing
+    else recorded identifies the producer: ``build_sha`` is shared by every
+    worker of a build, and the worker count is not a setting.
+    """
+    column = Generation.__table__.columns["producer_token"]
+
+    # Nullable because rows written before this column existed name no
+    # producer, and the reaper must read those as unknown rather than dead.
+    assert column.nullable is True
+
+
+def test_the_snapshot_carries_no_producer_identity():
+    """A hostname and pid are infrastructure, and it is returned over HTTP."""
+    assert "producer_token" not in set(GenerationSnapshot.model_fields)
+
+
 def test_the_owner_columns_are_indexed_because_every_read_is_owner_scoped():
     columns = Generation.__table__.columns
 

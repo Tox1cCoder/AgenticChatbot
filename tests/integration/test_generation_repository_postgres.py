@@ -24,17 +24,19 @@ from __future__ import annotations
 
 import asyncio
 import os
+import socket
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, delete, select
+from sqlalchemy import create_engine, delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.core.producer_identity import current_producer_token
 from app.models.base import Base
 from app.models.conversation import Conversation
 from app.models.generation import (
@@ -46,6 +48,10 @@ from app.models.generation import (
 from app.models.user import User
 from app.repositories.generation import GenerationRepository
 from app.schemas.generation import CreateGeneration
+from app.services.generation_reaper import (
+    reclaim_orphaned_generations,
+    terminalize_own_generations,
+)
 
 pytestmark = pytest.mark.selector_event_loop
 
@@ -663,3 +669,254 @@ async def test_two_generations_may_share_one_idempotency_key(seeded: Seeded) -> 
             fence=1,
         )
         assert claim.claimed is True
+
+
+# ----------------------------------------------------------------------
+# reclaiming a turn whose worker is gone
+# ----------------------------------------------------------------------
+#
+# The partial unique index admits one active row per conversation, which is
+# what stops two turns running at once. Its cost is that a row left active by a
+# worker that died -- a crash, a hard kill, or uvicorn's reloader replacing the
+# child on a code change -- blocks that conversation permanently: every later
+# turn's INSERT raises UniqueViolation and the API reports
+# ``conversation_turn_conflict``, which no retry can clear because no worker
+# exists to finish the turn.
+#
+# What makes reclaiming safe rather than reckless is that it is scoped to a
+# named producer. "Fail everything active at startup" would be correct only
+# under an assumption this application refuses to encode -- that there is one
+# worker -- and would otherwise terminalize a peer's streaming turn.
+
+
+def _dead_producer_token() -> str:
+    """A token for a process that is provably not running on this host."""
+    import psutil
+
+    for candidate in range(2**22, 2**22 + 5_000):
+        if not psutil.pid_exists(candidate):
+            return f"{socket.gethostname()}:{candidate}:1"
+    raise AssertionError("no unused pid found in the probed range")
+
+
+def _stamp(seeded: Seeded, generation_id: UUID, token: str | None) -> None:
+    """Write a producer directly, standing in for another worker's INSERT."""
+    with seeded.session_factory.begin() as session:
+        session.execute(
+            update(Generation).where(Generation.id == generation_id).values(producer_token=token)
+        )
+
+
+def _read(seeded: Seeded, generation_id: UUID) -> Generation:
+    with seeded.session_factory() as session:
+        row = session.get(Generation, generation_id)
+        assert row is not None
+        return row
+
+
+async def test_a_new_generation_records_the_process_producing_it(seeded: Seeded) -> None:
+    snapshot = await seeded.repository.acreate(_create(seeded, turn="turn-producer"))
+
+    assert _read(seeded, snapshot.generation_id).producer_token == current_producer_token()
+
+
+async def test_the_active_producers_are_what_the_reaper_reads(seeded: Seeded) -> None:
+    """Only active rows matter: a terminal row blocks nothing."""
+    live = await seeded.repository.acreate(_create(seeded, turn="turn-live"))
+    _stamp(seeded, live.generation_id, "host-a:11:1")
+    done = await seeded.repository.acreate(
+        _create(
+            seeded,
+            turn="turn-done",
+            conversation_id=seeded.other_conversation_id,
+            user_id=seeded.other_user_id,
+        )
+    )
+    _stamp(seeded, done.generation_id, "host-b:22:1")
+    await seeded.repository.atransition(
+        generation_id=done.generation_id,
+        user_id=seeded.other_user_id,
+        conversation_id=seeded.other_conversation_id,
+        expected_statuses=(GenerationStatus.STARTING,),
+        expected_version=done.version,
+        values={"status": GenerationStatus.COMPLETED},
+    )
+
+    tokens = await seeded.repository.aget_active_producer_tokens()
+
+    assert "host-a:11:1" in tokens
+    assert "host-b:22:1" not in tokens
+
+
+async def test_failing_a_producers_generations_terminalizes_them(seeded: Seeded) -> None:
+    orphan = await seeded.repository.acreate(_create(seeded, turn="turn-orphan"))
+    _stamp(seeded, orphan.generation_id, "gone-host:99:1")
+
+    reclaimed = await seeded.repository.afail_active_by_producer(
+        ["gone-host:99:1"], terminal_reason="producer_lost"
+    )
+
+    row = _read(seeded, orphan.generation_id)
+    assert reclaimed == 1
+    assert row.status is GenerationStatus.FAILED
+    assert row.terminal_reason == "producer_lost"
+    assert row.terminal_at is not None
+
+
+async def test_reclaiming_bumps_the_version_so_a_command_against_it_is_stale(
+    seeded: Seeded,
+) -> None:
+    """A client holding the old fence must be refused, not silently applied."""
+    orphan = await seeded.repository.acreate(_create(seeded, turn="turn-fence"))
+    _stamp(seeded, orphan.generation_id, "gone-host:98:1")
+
+    await seeded.repository.afail_active_by_producer(
+        ["gone-host:98:1"], terminal_reason="producer_lost"
+    )
+
+    assert _read(seeded, orphan.generation_id).version == orphan.version + 1
+
+
+async def test_failing_one_producer_leaves_another_producers_turn_running(
+    seeded: Seeded,
+) -> None:
+    """The whole point of naming the producer: a peer's turn is untouched."""
+    mine = await seeded.repository.acreate(_create(seeded, turn="turn-mine"))
+    _stamp(seeded, mine.generation_id, "host-mine:1:1")
+    theirs = await seeded.repository.acreate(
+        _create(
+            seeded,
+            turn="turn-theirs",
+            conversation_id=seeded.other_conversation_id,
+            user_id=seeded.other_user_id,
+        )
+    )
+    _stamp(seeded, theirs.generation_id, "host-theirs:2:1")
+
+    await seeded.repository.afail_active_by_producer(
+        ["host-mine:1:1"], terminal_reason="producer_lost"
+    )
+
+    assert _read(seeded, mine.generation_id).status is GenerationStatus.FAILED
+    assert _read(seeded, theirs.generation_id).status is GenerationStatus.STARTING
+
+
+async def test_failing_a_producer_leaves_its_paused_turn_alone(seeded: Seeded) -> None:
+    """``continuable`` holds no worker and blocks nothing, so it is not an orphan.
+
+    Terminalizing it would destroy a turn the user can still continue.
+    """
+    paused = await seeded.repository.acreate(_create(seeded, turn="turn-paused"))
+    _stamp(seeded, paused.generation_id, "gone-host:97:1")
+    await seeded.repository.atransition(
+        generation_id=paused.generation_id,
+        user_id=seeded.owner_id,
+        conversation_id=seeded.conversation_id,
+        expected_statuses=(GenerationStatus.STARTING,),
+        expected_version=paused.version,
+        values={"status": GenerationStatus.CONTINUABLE, "continuation_available": True},
+    )
+
+    reclaimed = await seeded.repository.afail_active_by_producer(
+        ["gone-host:97:1"], terminal_reason="producer_lost"
+    )
+
+    assert reclaimed == 0
+    assert _read(seeded, paused.generation_id).status is GenerationStatus.CONTINUABLE
+
+
+async def test_a_conversation_can_start_a_new_turn_once_its_orphan_is_reclaimed(
+    seeded: Seeded,
+) -> None:
+    """The bug this exists for, asserted end to end.
+
+    Before reclaiming, the conversation's next question cannot even be
+    inserted; afterwards it can.
+    """
+    orphan = await seeded.repository.acreate(_create(seeded, turn="turn-blocking"))
+    _stamp(seeded, orphan.generation_id, "gone-host:96:1")
+
+    with pytest.raises(IntegrityError):
+        await seeded.repository.acreate(_create(seeded, turn="turn-blocked"))
+
+    await seeded.repository.afail_active_by_producer(
+        ["gone-host:96:1"], terminal_reason="producer_lost"
+    )
+
+    revived = await seeded.repository.acreate(_create(seeded, turn="turn-unblocked"))
+    assert revived.status is GenerationStatus.STARTING
+
+
+# ----------------------------------------------------------------------
+# the reaper's policy
+# ----------------------------------------------------------------------
+
+
+async def test_the_startup_sweep_reclaims_a_turn_whose_worker_is_gone(seeded: Seeded) -> None:
+    orphan = await seeded.repository.acreate(_create(seeded, turn="turn-sweep-dead"))
+    _stamp(seeded, orphan.generation_id, _dead_producer_token())
+
+    reclaimed = await reclaim_orphaned_generations(seeded.repository)
+
+    assert reclaimed == 1
+    assert _read(seeded, orphan.generation_id).terminal_reason == "producer_lost"
+
+
+async def test_the_startup_sweep_leaves_this_processes_own_turn_running(seeded: Seeded) -> None:
+    """This process is alive by definition, so its rows are not orphans."""
+    mine = await seeded.repository.acreate(_create(seeded, turn="turn-sweep-mine"))
+
+    reclaimed = await reclaim_orphaned_generations(seeded.repository)
+
+    assert reclaimed == 0
+    assert _read(seeded, mine.generation_id).status is GenerationStatus.STARTING
+
+
+async def test_the_startup_sweep_leaves_a_turn_produced_on_another_host(
+    seeded: Seeded,
+) -> None:
+    """This host cannot see that process; guessing would reap a live turn."""
+    remote = await seeded.repository.acreate(_create(seeded, turn="turn-sweep-remote"))
+    _stamp(seeded, remote.generation_id, f"not-{socket.gethostname()}:1234:1")
+
+    reclaimed = await reclaim_orphaned_generations(seeded.repository)
+
+    assert reclaimed == 0
+    assert _read(seeded, remote.generation_id).status is GenerationStatus.STARTING
+
+
+async def test_the_startup_sweep_leaves_a_turn_that_names_no_producer(seeded: Seeded) -> None:
+    """Rows written before the column existed are unknown, not dead."""
+    legacy = await seeded.repository.acreate(_create(seeded, turn="turn-sweep-legacy"))
+    _stamp(seeded, legacy.generation_id, None)
+
+    reclaimed = await reclaim_orphaned_generations(seeded.repository)
+
+    assert reclaimed == 0
+    assert _read(seeded, legacy.generation_id).status is GenerationStatus.STARTING
+
+
+async def test_shutdown_terminalizes_this_workers_own_active_turn(seeded: Seeded) -> None:
+    """A reload kills the child, so the row is failed before the process goes.
+
+    Recorded as ``producer_shutdown`` rather than ``producer_lost``: the
+    process knew it was leaving, which is a different fact from a crash.
+    """
+    mine = await seeded.repository.acreate(_create(seeded, turn="turn-shutdown"))
+
+    terminalized = await terminalize_own_generations(seeded.repository)
+
+    row = _read(seeded, mine.generation_id)
+    assert terminalized == 1
+    assert row.status is GenerationStatus.FAILED
+    assert row.terminal_reason == "producer_shutdown"
+
+
+async def test_shutdown_leaves_another_workers_turn_alone(seeded: Seeded) -> None:
+    theirs = await seeded.repository.acreate(_create(seeded, turn="turn-shutdown-peer"))
+    _stamp(seeded, theirs.generation_id, "peer-host:5:1")
+
+    terminalized = await terminalize_own_generations(seeded.repository)
+
+    assert terminalized == 0
+    assert _read(seeded, theirs.generation_id).status is GenerationStatus.STARTING
