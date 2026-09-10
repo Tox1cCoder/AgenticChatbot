@@ -1435,34 +1435,40 @@ class Settings(BaseSettings):
     # still produces a validated answer. The hard rungs are the framework's own
     # limits and must stay above them, or the framework raises on exactly the
     # call the soft budget reserved.
+    # The original ladder (7/9 model, 12/16 tool, 5 epochs) was tuned before
+    # research turns routinely chained web_search, image_search, web_open and
+    # retrieval in one epoch. It was reached mid-answer often enough that the
+    # refusal read as a broken tool, so the headroom is roughly quadrupled. The
+    # ceilings are far above the defaults on purpose: this is the knob to turn
+    # for a deeper turn, and it should not need a code change.
     generation_soft_model_calls_per_epoch: int = Field(
-        default=7,
+        default=24,
         ge=1,
-        le=50,
+        le=200,
         description="Model calls per epoch before the answer call is reserved.",
     )
     generation_hard_model_calls_per_epoch: int = Field(
-        default=9,
+        default=28,
         ge=2,
-        le=60,
+        le=240,
         description="Framework model-call ceiling per epoch. Must exceed the soft limit.",
     )
     generation_soft_tool_calls_per_epoch: int = Field(
-        default=12,
+        default=48,
         ge=1,
-        le=100,
+        le=400,
         description="Tool calls per epoch before further calls are refused.",
     )
     generation_hard_tool_calls_per_epoch: int = Field(
-        default=16,
+        default=56,
         ge=2,
-        le=120,
+        le=480,
         description="Framework tool-call ceiling per epoch. Must exceed the soft limit.",
     )
     generation_total_epochs_per_turn: int = Field(
-        default=5,
+        default=10,
         ge=1,
-        le=20,
+        le=50,
         description="How many times one logical turn may be continued in total.",
     )
     generation_stop_wait_seconds: float = Field(

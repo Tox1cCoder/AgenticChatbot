@@ -416,11 +416,11 @@ is cut short, and no evaluation has been run on them.
 
 | Setting | Default | What it decides |
 |---|---:|---|
-| `generation_soft_model_calls_per_epoch` | 7 | Model calls before the answer call is reserved |
-| `generation_hard_model_calls_per_epoch` | 9 | Framework ceiling; must exceed the soft rung |
-| `generation_soft_tool_calls_per_epoch` | 12 | Tool calls before further calls are refused |
-| `generation_hard_tool_calls_per_epoch` | 16 | Framework ceiling; must exceed the soft rung |
-| `generation_total_epochs_per_turn` | 5 | How many times one turn may be continued |
+| `generation_soft_model_calls_per_epoch` | 24 | Model calls before the answer call is reserved |
+| `generation_hard_model_calls_per_epoch` | 28 | Framework ceiling; must exceed the soft rung |
+| `generation_soft_tool_calls_per_epoch` | 48 | Tool calls before further calls are refused |
+| `generation_hard_tool_calls_per_epoch` | 56 | Framework ceiling; must exceed the soft rung |
+| `generation_total_epochs_per_turn` | 10 | How many times one turn may be continued |
 | `generation_stop_wait_seconds` | 5.0 | How long a Stop waits for the worker before answering `stop_requested` |
 | `generation_stop_poll_seconds` | 2.0 | Minimum gap between a streaming worker's reads of its own status. Bounds how long a Stop from another worker can go unnoticed if the Redis signal is missed |
 | `generation_stop_channel` | `generation:stop` | Redis channel carrying stop signals between workers |
