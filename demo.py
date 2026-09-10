@@ -10898,6 +10898,13 @@ def render_chat_view():
                     accumulated_content = ""  # Initialize empty for accumulation
                     accumulated_thinking = ""  # Accumulate thinking content
                     final_message = None
+                    # A paused turn never emits `complete`; it emits
+                    # `message_end` with the validated partial and then
+                    # `continuation_available`. Tracked separately so the
+                    # meaning of `final_message` ("this epoch finished") is
+                    # unchanged.
+                    paused_message = None
+                    paused = False
                     interrupt_data = None
                     received_title_update = False
 
@@ -10940,9 +10947,16 @@ def render_chat_view():
                             # closes on the next line changes nothing.
                             _apply_generation_event(event)
                             if event_type == "continuation_available":
+                                paused = True
                                 _update_stream_status(
                                     status, label="Paused at the execution limit"
                                 )
+
+                        elif event_type == "message_end":
+                            # The persisted assistant row. On a finished epoch
+                            # `complete` follows and wins; on a pause this is
+                            # the only carrier of the partial answer.
+                            paused_message = _reconcile_terminal_trace(event.get("message"))
 
                         elif event_type == "user_message_created":
                             # Store user_message_id for stop endpoint
@@ -11085,6 +11099,24 @@ def render_chat_view():
                         load_messages_page(1)
                         _merge_terminal_message_into_session(final_message)
                         st.toast("Message sent!", icon=":material/check_circle:")
+                        st.rerun()
+                    elif paused:
+                        # The turn stopped at its execution budget with a
+                        # validated partial answer. Rerunning is what puts the
+                        # Continue and Stop controls on screen:
+                        # `_render_continue_control` runs near the top of the
+                        # script, long before this stream, so the snapshot that
+                        # just arrived is only read on the next pass. Without
+                        # this the answer appeared with no way to resume it,
+                        # and the branch below called a paused turn a failure.
+                        if title_sync_conversation_id and not received_title_update:
+                            sync_conversation_title_from_server(title_sync_conversation_id)
+                        st.session_state.pending_image_attachments = []
+                        reset_conversation_state()
+                        st.session_state.show_attachment_uploader = False
+                        load_messages_page(1)
+                        if paused_message:
+                            _merge_terminal_message_into_session(paused_message)
                         st.rerun()
                     elif event_type != "error" and not interrupt_data:
                         st.toast("Failed to send message", icon=":material/cancel:")
