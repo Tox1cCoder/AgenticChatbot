@@ -50,7 +50,7 @@ Introduce a `WebResearchService` as the only active orchestration boundary for p
 The service owns:
 
 - request normalization;
-- turn budgets and deadlines;
+- turn work budgets, cancellation, and transport-liveness policy;
 - provider selection, retry, fallback, and circuit breaking;
 - URL canonicalization and deduplication;
 - page-open policy;
@@ -180,21 +180,28 @@ Selection must not depend on English token overlap between the search query and 
 
 ## Reliability and latency
 
-### Deadlines and budgets
+### Work budgets and progress-aware execution
 
-- `quick` research has a six-second hard deadline and a target added p95 latency of at most four seconds, measured separately from answer generation.
-- `agentic` research has a fifteen-second hard deadline and a target research p95 of at most ten seconds.
-- Image download validation receives at most three seconds within the research deadline.
-- The first tool-status event should be emitted within 250 ms of dispatch under normal server load.
+Research has no fixed end-to-end wall-clock deadline. A guessed elapsed-time cap could interrupt a healthy provider request or page transfer, and this project has no measured production baseline that would justify one.
 
-These values are configuration with bounded production defaults, not model-controlled arguments.
+Work remains bounded structurally:
+
+- `quick` may perform one search, admit up to five results, and open at most two pages;
+- `agentic` may perform up to three materially distinct searches and admit up to eight unique public sources;
+- ordinary visual research performs one image query and offers at most four validated candidates to the model;
+- explicit gallery research may offer at most six validated candidates;
+- every fetch retains byte, redirect, content-type, and decompression limits.
+
+Provider clients retain configurable connection and idle-read liveness controls so a dead socket or a provider that makes no progress cannot hang forever. These controls are not total research deadlines: an operation that continues to make valid progress is not cancelled merely because a fixed number of seconds elapsed. Explicit user stop, client disconnect, application shutdown, and upstream cancellation propagate promptly through all active work.
+
+Latency is observed by mode, provider, operation, and outcome. Initial rollout establishes a production baseline; service objectives may be proposed later from measured distributions rather than embedded in this design as unsupported thresholds.
 
 ### Provider behavior
 
 - Use an ordered, configurable provider chain.
 - Do not hedge normal calls across providers, avoiding duplicate cost.
-- Invoke fallback only after timeout, a retryable provider error, an open circuit, or an objectively unusable result set.
-- Permit one bounded retry with jitter for transport failures, `429`, and `5xx` responses when the turn deadline allows it.
+- Invoke fallback only after a transport-liveness failure, a retryable provider error, an open circuit, or an objectively unusable result set.
+- Permit one bounded retry with jitter for transport failures, `429`, and `5xx` responses.
 - Do not retry invalid requests, authentication failures, policy rejection, or unsafe URLs.
 - Maintain per-provider circuit-breaker state and cooldown.
 - Cache normalized requests briefly, with maximum age constrained by the request's freshness requirement.
@@ -228,13 +235,13 @@ No human reviewer or runtime judge is required.
 
 ### Deterministic tests
 
-- Mode selection, budgets, deadlines, retry eligibility, fallback order, and circuit transitions.
+- Mode selection, structural work budgets, cancellation propagation, transport-liveness behavior, retry eligibility, fallback order, and circuit transitions.
 - Provider normalization using sanitized recorded responses; ordinary CI does not call live providers.
 - URL canonicalization, deduplication, redirect policy, SSRF rejection, MIME sniffing, byte limits, and dimension limits.
 - Dynamic context rebuilding after tool completion, including the class of defect where post-tool images are absent from a statically resolved prompt.
 - Citation tokens split across stream chunks, unknown-ID rejection, valid-link generation, and turn scoping.
 - Selection restricted to image candidates actually shown to the model.
-- Figure, comparison, multiple-entity, gallery, zero-valid-image, and image-timeout behavior.
+- Figure, comparison, multiple-entity, gallery, zero-valid-image, stalled-image-transport, and cancellation behavior.
 - Stream, persistence, history reload, Streamlit, and AI SDK source/image identity parity.
 
 ### General quality matrix
@@ -262,7 +269,7 @@ An opt-in live canary may exercise configured providers and write a machine-read
 - Every selected image ID was included in the multimodal candidate set and passed validation.
 - No private origin, unsafe URL, credential, or raw binary payload leaks into public metadata.
 - Streamed and reloaded messages produce the same visible answer, sources, and selected images.
-- Search and image work stays within configured call, byte, candidate, and time budgets.
+- Search and image work stays within configured call, source, page-open, byte, redirect, and candidate budgets.
 
 ## Migration, consolidation, and cleanup
 
@@ -321,6 +328,6 @@ The project is complete when:
 - Streamlit and AI SDK streams expose the same public source identities, with native AI SDK `source-url` parts;
 - answers and history reloads contain consistent clickable citations and selected images;
 - deterministic release invariants pass without live providers or human review;
-- latency, call, byte, and candidate limits are enforced and observable;
+- call, source, page-open, byte, redirect, and candidate limits are enforced, while latency and progress are observable;
 - superseded active code paths are removed or isolated as historical readers;
 - configuration, rollout, rollback, and operations documentation are current.
