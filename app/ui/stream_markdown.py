@@ -142,6 +142,37 @@ def _apply_outside_code(text: str, transform: Callable[[str], str]) -> str:
     return "".join(pieces)
 
 
+#: LaTeX's own display and inline delimiters. Models emit these constantly --
+#: they are the standard form -- but Streamlit's Markdown reads only ``$`` and
+#: ``$$``. Worse than being ignored, CommonMark treats ``\[`` as an escaped
+#: literal bracket, so the backslash is eaten and the reader is shown
+#: ``[ r_s=\frac{2GM}{c^2} ]`` as prose.
+_DISPLAY_BRACKET_MATH_RE = re.compile(r"\\\[(.+?)\\\]", re.DOTALL)
+_INLINE_PAREN_MATH_RE = re.compile(r"\\\((.+?)\\\)", re.DOTALL)
+
+
+def _bracket_math_to_dollars(chunk: str) -> str:
+    chunk = _DISPLAY_BRACKET_MATH_RE.sub(lambda m: f"$${m.group(1).strip()}$$", chunk)
+    return _INLINE_PAREN_MATH_RE.sub(lambda m: f"${m.group(1).strip()}$", chunk)
+
+
+def normalize_bracket_math(text: str) -> str:
+    r"""Rewrite ``\[...\]`` and ``\(...\)`` into the delimiters Streamlit reads.
+
+    Only a *closed* pair is rewritten, so a lone ``\[`` meant as a literal
+    bracket is left exactly as it was. Code spans and fences are untouched, so
+    a documented example of the delimiter survives as text.
+
+    This runs before the dollar guards rather than after: the result is
+    ordinary ``$``/``$$`` math, and it must face the same unterminated-fence,
+    currency and unparseable-span checks as math the model wrote that way
+    itself.
+    """
+    if "\\[" not in text and "\\(" not in text:
+        return text
+    return _apply_outside_code(text, _bracket_math_to_dollars)
+
+
 def escape_unterminated_math_fence(text: str) -> str:
     r"""Escape a ``$$`` block fence that has no closing fence yet.
 
@@ -337,17 +368,20 @@ def escape_unparseable_math(text: str) -> str:
 
 
 def normalize_display_markdown_text(content: str) -> str:
-    """Prepare stored Markdown for ``st.markdown`` without mutating storage.
+    r"""Prepare stored Markdown for ``st.markdown`` without mutating storage.
 
-    Applies the display-only dollar-marker guards: an unterminated ``$$``
-    block is neutralised, recognised price runs and price-plus-prose spans are
-    escaped, and spans KaTeX would reject are rendered literally instead of as
-    a parse error. Use this for any text an agent, tool, or document supplied
-    — none of it is authored against Streamlit's LaTeX syntax.
+    LaTeX's own ``\[...\]`` / ``\(...\)`` delimiters are rewritten to the
+    ``$$``/``$`` Streamlit understands, then the display-only dollar-marker
+    guards apply: an unterminated ``$$`` block is neutralised, recognised
+    price runs and price-plus-prose spans are escaped, and spans KaTeX would
+    reject are rendered literally instead of as a parse error. Use this for
+    any text an agent, tool, or document supplied — none of it is authored
+    against Streamlit's LaTeX syntax.
     """
     if not isinstance(content, str) or not content:
         return ""
-    normalized = escape_unterminated_math_fence(content)
+    normalized = normalize_bracket_math(content)
+    normalized = escape_unterminated_math_fence(normalized)
     normalized = escape_markdown_currency(normalized)
     normalized = escape_currency_prose_math(normalized)
     return escape_unparseable_math(normalized)
