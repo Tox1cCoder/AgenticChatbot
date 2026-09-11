@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import inspect
+import warnings
 from collections.abc import AsyncGenerator, Iterable
 from typing import Any
 
@@ -31,6 +32,18 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from ...core.config import settings
 from .events import SubagentRef, V3StreamEvent, make_event
+
+# Opening the v3 stream emits a beta warning from both this module's call and
+# from Pregel itself, so every turn logged it twice. The experimental status is
+# a known, deliberate choice -- `iter_v3_events_from_graph` probes the first
+# event and falls back to the v1/v2 tuple protocol when v3 is absent -- and a
+# per-turn reminder of it is noise that buries real warnings. Scoped to this
+# one message so any *other* beta warning still surfaces.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*v3 streaming protocol on Pregel is experimental.*",
+    category=Warning,
+)
 
 # ---------------------------------------------------------------------------
 # Shared helpers

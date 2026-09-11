@@ -74,6 +74,12 @@ class GeminiImageProvider:
                 number_of_images=request.max_images,
                 aspect_ratio=request.aspect_ratio,
             )
+        # Image generation binds no tools, and automatic function calling
+        # defaults to enabled. Saying so keeps the SDK out of the business of
+        # executing anything on this path.
+        config_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(
+            disable=True
+        )
         return types.GenerateContentConfig(**config_kwargs)
 
     async def stream_generate(

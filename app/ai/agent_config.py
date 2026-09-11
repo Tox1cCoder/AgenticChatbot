@@ -173,6 +173,17 @@ def build_gemini_generate_config(
     if not config_kwargs:
         return None
 
+    # This product runs its own tool loop: authorization, approval, mutation
+    # receipts, artifacts, and the execution budget all live there. Automatic
+    # function calling defaults to *enabled* in google-genai, and it executes
+    # any Python callable in `tools` itself -- which would bypass every one of
+    # those. Nothing here passes a callable today, so this changes no
+    # behaviour; it makes the refusal a decision rather than a property of the
+    # tool shape we happen to send.
+    config_kwargs.setdefault(
+        "automatic_function_calling",
+        types.AutomaticFunctionCallingConfig(disable=True),
+    )
     return types.GenerateContentConfig(**config_kwargs)
 
 
