@@ -23,7 +23,7 @@
 - Unselected candidates, private upstream image URLs, provider payloads, credentials, and image bytes never enter public message metadata.
 - Legacy message formats may remain in an isolated read-only compatibility projection, but no legacy format remains an active write path.
 - Tests and production code contain no topic-specific routing or image-selection rules derived from reported examples.
-- Use `C:\Users\ADMIN\miniconda3\envs\agents\python.exe` for repository verification in this workspace.
+- Use the active repository interpreter via `python`; do not embed a machine-local interpreter path in tracked instructions.
 
 ---
 
@@ -89,7 +89,7 @@ def test_bundle_rejects_an_image_without_a_source_record():
 
 - [ ] **Step 2: Run the new tests and verify missing-module failures**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_contracts.py tests/test_web_source_registry.py -q`
+Run: `python -m pytest tests/test_web_research_contracts.py tests/test_web_source_registry.py -q`
 
 Expected: FAIL because `app.ai.web_research` does not exist.
 
@@ -168,7 +168,7 @@ Canonicalization must lowercase/IDNA-normalize the host, remove fragments and de
 
 - [ ] **Step 5: Run focused tests and commit**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_contracts.py tests/test_web_source_registry.py -q`
+Run: `python -m pytest tests/test_web_research_contracts.py tests/test_web_source_registry.py -q`
 
 Expected: PASS.
 
@@ -217,7 +217,7 @@ def test_quick_budget_is_structural_not_elapsed_time():
 
 - [ ] **Step 2: Run the focused tests and verify failures**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_policy.py tests/test_research_budget.py -q`
+Run: `python -m pytest tests/test_web_research_policy.py tests/test_research_budget.py -q`
 
 Expected: FAIL because the policy, routing fields, and page/source counters are absent.
 
@@ -253,7 +253,7 @@ Gallery raises only `model_images` to six; it does not raise text-search or page
 
 - [ ] **Step 5: Run routing/accounting tests and commit**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_policy.py tests/test_research_budget.py tests/test_production_workflow_graph.py -q`
+Run: `python -m pytest tests/test_web_research_policy.py tests/test_research_budget.py tests/test_production_workflow_graph.py -q`
 
 Expected: PASS.
 
@@ -302,7 +302,7 @@ async def test_provider_cancellation_is_not_normalized_as_retryable_failure():
 
 - [ ] **Step 2: Run provider tests and verify failures**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_providers.py -q`
+Run: `python -m pytest tests/test_web_research_providers.py -q`
 
 Expected: FAIL because the adapter module does not exist.
 
@@ -327,7 +327,7 @@ Move provider payload parsing and MCP resolution out of `web_tools.py`. Preserve
 
 - [ ] **Step 4: Run adapter and existing query tests**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_providers.py tests/test_web_query_contract.py tests/test_focused_tool_result.py -q`
+Run: `python -m pytest tests/test_web_research_providers.py tests/test_web_query_contract.py tests/test_focused_tool_result.py -q`
 
 Expected: PASS.
 
@@ -376,7 +376,7 @@ async def test_in_progress_search_has_no_total_elapsed_deadline():
 
 - [ ] **Step 2: Run service tests and verify failures**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_service.py -q`
+Run: `python -m pytest tests/test_web_research_service.py -q`
 
 Expected: FAIL because the service and session do not exist.
 
@@ -413,7 +413,7 @@ Circuit state must count only retryable provider failures, open after the config
 
 - [ ] **Step 5: Run service and cancellation tests and commit**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_service.py tests/test_message_stream_cancellation.py tests/test_research_budget_failure_release.py -q`
+Run: `python -m pytest tests/test_web_research_service.py tests/test_message_stream_cancellation.py tests/test_research_budget_failure_release.py -q`
 
 Expected: PASS.
 
@@ -464,7 +464,7 @@ async def test_non_vision_model_gets_no_candidate_metadata_selection():
 
 - [ ] **Step 2: Run image tests and verify failures**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_images.py tests/test_web_image_service.py -q`
+Run: `python -m pytest tests/test_web_research_images.py tests/test_web_image_service.py -q`
 
 Expected: FAIL because prepared candidates and cleanup methods are absent.
 
@@ -495,7 +495,7 @@ If registration fails, remove that candidate before the answer call. Public meta
 
 - [ ] **Step 5: Run image/storage tests and commit**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_images.py tests/test_web_image_service.py tests/test_web_image_reference_repository.py tests/test_web_images_api.py -q`
+Run: `python -m pytest tests/test_web_research_images.py tests/test_web_image_service.py tests/test_web_image_reference_repository.py tests/test_web_images_api.py -q`
 
 Expected: PASS.
 
@@ -547,7 +547,7 @@ def test_chat_and_search_bind_only_canonical_product_web_tools(agent):
 
 - [ ] **Step 2: Run tool session tests and verify failures**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_tool_session.py tests/test_web_tool_binding.py -q`
+Run: `python -m pytest tests/test_web_research_tool_session.py tests/test_web_tool_binding.py -q`
 
 Expected: FAIL because context has no session and `image_search` remains bound.
 
@@ -565,7 +565,7 @@ Inject `WebResearchService` through `Container -> create_workflow -> MultiAgentW
 
 - [ ] **Step 5: Run tool, isolation, and continuation tests and commit**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_tool_session.py tests/test_web_tool_binding.py tests/test_client_invocation_isolation.py tests/test_conversation_compaction_message_paths.py tests/test_research_budget.py -q`
+Run: `python -m pytest tests/test_web_research_tool_session.py tests/test_web_tool_binding.py tests/test_client_invocation_isolation.py tests/test_conversation_compaction_message_paths.py tests/test_research_budget.py -q`
 
 Expected: PASS.
 
@@ -614,7 +614,7 @@ async def test_fallback_model_capability_is_checked_on_each_attempt():
 
 - [ ] **Step 2: Run dynamic-context tests and verify the current failure**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_model_context.py tests/test_selected_image_reaches_the_model.py -q`
+Run: `python -m pytest tests/test_web_research_model_context.py tests/test_selected_image_reaches_the_model.py -q`
 
 Expected: FAIL because `SpecialistFactory` resolves its prompt once before tools and no middleware attaches candidate pixels.
 
@@ -643,7 +643,7 @@ Prompt text must say: cite only supplied `[[source:S#]]` IDs; place only visuall
 
 - [ ] **Step 5: Run specialist/model-context tests and commit**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_model_context.py tests/test_selected_image_reaches_the_model.py tests/test_specialist_rich_image_lift.py tests/test_base_agent_image_history.py -q`
+Run: `python -m pytest tests/test_web_research_model_context.py tests/test_selected_image_reaches_the_model.py tests/test_specialist_rich_image_lift.py tests/test_base_agent_image_history.py -q`
 
 Expected: PASS.
 
@@ -701,7 +701,7 @@ Add a Planning worker case proving that worker web sources and selected rich ite
 
 - [ ] **Step 2: Run grounding tests and verify failures**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_grounding.py tests/test_output_validation.py -q`
+Run: `python -m pytest tests/test_web_grounding.py tests/test_output_validation.py -q`
 
 Expected: FAIL because no web grounding resolver exists.
 
@@ -730,7 +730,7 @@ Remove image selection and image anchoring from `finalize_article_content`; reta
 
 - [ ] **Step 5: Run finalization/rich tests and commit**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_grounding.py tests/test_output_validation.py tests/test_rich_placement.py tests/test_rich_response_contract.py tests/test_rich_response_metadata.py -q`
+Run: `python -m pytest tests/test_web_grounding.py tests/test_output_validation.py tests/test_rich_placement.py tests/test_rich_response_contract.py tests/test_rich_response_metadata.py -q`
 
 Expected: PASS.
 
@@ -782,7 +782,7 @@ def test_history_projects_persisted_sources_as_ai_sdk_parts():
 
 - [ ] **Step 2: Run stream tests and verify failures**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_source_streaming.py tests/test_ai_sdk_v6_stream_contract.py tests/test_internal_sse_stream_contract.py -q`
+Run: `python -m pytest tests/test_web_source_streaming.py tests/test_ai_sdk_v6_stream_contract.py tests/test_internal_sse_stream_contract.py -q`
 
 Expected: FAIL because `sources_upsert` is not a canonical event and history has no source parts.
 
@@ -811,7 +811,7 @@ Persist sources through `build_bot_metadata` for complete, partial, interrupted,
 
 - [ ] **Step 5: Run stream/history tests and commit**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_source_streaming.py tests/test_ai_sdk_v6_stream_contract.py tests/test_internal_sse_stream_contract.py tests/test_message_service_event_streaming.py tests/test_routing_v2_continuation_streaming.py -q`
+Run: `python -m pytest tests/test_web_source_streaming.py tests/test_ai_sdk_v6_stream_contract.py tests/test_internal_sse_stream_contract.py tests/test_message_service_event_streaming.py tests/test_routing_v2_continuation_streaming.py -q`
 
 Expected: PASS.
 
@@ -852,7 +852,7 @@ def test_image_failure_does_not_discard_valid_cited_text():
 
 - [ ] **Step 2: Run policy tests and verify failures**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_output_policy.py tests/test_output_validation.py -q`
+Run: `python -m pytest tests/test_web_research_output_policy.py tests/test_output_validation.py -q`
 
 Expected: FAIL because finalization does not distinguish required web evidence.
 
@@ -864,7 +864,7 @@ Image failures remain optional degradation. A page-open failure downgrades that 
 
 - [ ] **Step 4: Run finalization tests and commit**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_output_policy.py tests/test_output_validation.py tests/test_production_readiness_contract.py -q`
+Run: `python -m pytest tests/test_web_research_output_policy.py tests/test_output_validation.py tests/test_production_readiness_contract.py -q`
 
 Expected: PASS.
 
@@ -914,7 +914,7 @@ def test_metrics_reject_query_text_as_a_label():
 
 - [ ] **Step 2: Run config/metrics tests and verify failures**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_config.py tests/test_web_research_metrics.py -q`
+Run: `python -m pytest tests/test_web_research_config.py tests/test_web_research_metrics.py -q`
 
 Expected: FAIL because the canonical settings and recorder do not exist.
 
@@ -930,7 +930,7 @@ Expose an internal health snapshot containing configured providers, circuit stat
 
 - [ ] **Step 5: Run tests and commit**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_config.py tests/test_web_research_metrics.py tests/test_model_usage_docs.py -q`
+Run: `python -m pytest tests/test_web_research_config.py tests/test_web_research_metrics.py tests/test_model_usage_docs.py -q`
 
 Expected: PASS.
 
@@ -975,7 +975,7 @@ def test_contract_metrics_fail_an_unsupported_image_claim():
 
 - [ ] **Step 2: Run evaluation tests and verify failures**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_evaluation.py -q`
+Run: `python -m pytest tests/test_web_research_evaluation.py -q`
 
 Expected: FAIL because the evaluation package and cases are absent.
 
@@ -991,9 +991,9 @@ The deterministic suite is the release gate. The visual judge is an optional har
 
 - [ ] **Step 5: Run deterministic evaluation and commit**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_evaluation.py -q`
+Run: `python -m pytest tests/test_web_research_evaluation.py -q`
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe scripts/evaluate_web_research.py --cases eval/web_research/cases.json --output output/audits/web-research-eval.json`
+Run: `python scripts/evaluate_web_research.py --cases eval/web_research/cases.json --output output/audits/web-research-eval.json`
 
 Expected: tests PASS; command exits `0` and writes a report whose `release_invariants_pass` is `true`.
 
@@ -1049,7 +1049,7 @@ def test_raw_provider_tools_are_not_ordinary_agent_capabilities():
 
 - [ ] **Step 2: Run the inventory test and capture all current failures**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_active_path_inventory.py -q`
+Run: `python -m pytest tests/test_web_research_active_path_inventory.py -q`
 
 Expected: FAIL and list the remaining production imports/callers.
 
@@ -1069,7 +1069,7 @@ Run: `rg -n "selected_image_sink|offer_selected_images|select_brave_candidates|a
 
 Expected: no production hits; test/docs hits only when explicitly describing historical compatibility, otherwise none.
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_active_path_inventory.py tests/test_web_tools.py tests/test_rich_placement.py tests/test_ai_sdk_context_window.py -q`
+Run: `python -m pytest tests/test_web_research_active_path_inventory.py tests/test_web_tools.py tests/test_rich_placement.py tests/test_ai_sdk_context_window.py -q`
 
 Expected: PASS.
 
@@ -1109,7 +1109,7 @@ Document flags, provider order, retry/circuit/cache behavior, source and image r
 
 - [ ] **Step 3: Run focused documentation and contract suites**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_docs.py tests/test_web_research_active_path_inventory.py tests/test_web_source_streaming.py tests/test_web_research_evaluation.py -q`
+Run: `python -m pytest tests/test_web_research_docs.py tests/test_web_research_active_path_inventory.py tests/test_web_source_streaming.py tests/test_web_research_evaluation.py -q`
 
 Expected: PASS.
 
@@ -1118,24 +1118,24 @@ Expected: PASS.
 Run:
 
 ```powershell
-C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest tests/test_web_research_contracts.py tests/test_web_source_registry.py tests/test_web_research_policy.py tests/test_web_research_providers.py tests/test_web_research_service.py tests/test_web_research_images.py tests/test_web_research_tool_session.py tests/test_web_research_model_context.py tests/test_web_grounding.py tests/test_web_source_streaming.py tests/test_web_research_output_policy.py tests/test_web_research_config.py tests/test_web_research_metrics.py tests/test_web_research_evaluation.py tests/test_web_tools.py tests/test_research_budget.py tests/test_output_validation.py tests/test_rich_placement.py tests/test_rich_response_contract.py tests/test_rich_response_metadata.py tests/test_ai_sdk_v6_stream_contract.py tests/test_internal_sse_stream_contract.py tests/test_message_service_event_streaming.py tests/test_message_stream_cancellation.py tests/test_routing_v2_continuation_streaming.py -q
+python -m pytest tests/test_web_research_contracts.py tests/test_web_source_registry.py tests/test_web_research_policy.py tests/test_web_research_providers.py tests/test_web_research_service.py tests/test_web_research_images.py tests/test_web_research_tool_session.py tests/test_web_research_model_context.py tests/test_web_grounding.py tests/test_web_source_streaming.py tests/test_web_research_output_policy.py tests/test_web_research_config.py tests/test_web_research_metrics.py tests/test_web_research_evaluation.py tests/test_web_tools.py tests/test_research_budget.py tests/test_output_validation.py tests/test_rich_placement.py tests/test_rich_response_contract.py tests/test_rich_response_metadata.py tests/test_ai_sdk_v6_stream_contract.py tests/test_internal_sse_stream_contract.py tests/test_message_service_event_streaming.py tests/test_message_stream_cancellation.py tests/test_routing_v2_continuation_streaming.py -q
 ```
 
 Expected: PASS with no live-provider calls.
 
 - [ ] **Step 5: Run repository quality gates**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m ruff check app client_backend tests scripts`
+Run: `python -m ruff check app client_backend tests scripts`
 
 Expected: PASS.
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe -m pytest -q -m "not live_provider"`
+Run: `python -m pytest -q -m "not live_provider"`
 
 Expected: PASS.
 
 - [ ] **Step 6: Generate deterministic release evidence**
 
-Run: `C:\Users\ADMIN\miniconda3\envs\agents\python.exe scripts/evaluate_web_research.py --cases eval/web_research/cases.json --output output/audits/web-research-eval.json`
+Run: `python scripts/evaluate_web_research.py --cases eval/web_research/cases.json --output output/audits/web-research-eval.json`
 
 Expected: exit `0`, all release invariants true, and observed latency distributions recorded without pass/fail thresholds.
 
