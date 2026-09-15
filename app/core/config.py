@@ -425,6 +425,31 @@ class Settings(BaseSettings):
         le=30.0,
         description="Total deadline covering every router attempt for one turn",
     )
+    # Underneath the total deadline, because sharing one deadline across both
+    # attempts meant an attempt slower than the whole budget left the retry
+    # nothing: the router reported two attempts having made one provider call.
+    # The retry exists for the transient failure most likely to be slow, so
+    # that is exactly when it was disabled.
+    routing_attempt_timeout_seconds: float = Field(
+        default=6.0,
+        gt=0.0,
+        le=30.0,
+        description=(
+            "Deadline for a single router attempt. Bounded by "
+            "routing_timeout_seconds, which remains the ceiling for the turn."
+        ),
+    )
+    router_thinking_level: str = Field(
+        default="low",
+        description=(
+            "Gemini 3 thinking level for the router, mirroring "
+            "chat_agent_thinking_level. Routing is classification against a "
+            "fixed inventory, not synthesis, and gemini-3-flash-preview's own "
+            "default level is 'high' -- which nothing overrode, so the router "
+            "reasoned at that level behind a single-digit-second deadline. An "
+            "effort configured for the router agent still wins over this."
+        ),
+    )
     routing_max_attempts: int = Field(
         default=2,
         ge=1,
@@ -1400,12 +1425,21 @@ class Settings(BaseSettings):
         le=80_000,
         description="Maximum characters of focused excerpts returned by read_tool_result.",
     )
+    # Two was tuned when a turn made one or two searches. The execution ladder
+    # was quadrupled once turns began chaining web_search, image_search,
+    # web_open and retrieval, but this cap was left behind and became the
+    # binding constraint: a three-facet question was refused on its third
+    # *distinct* query, which reads as a broken tool rather than a spent
+    # budget. Deduplication, not the cap, is what suppresses wasted calls.
     research_max_search_calls_per_turn: int = Field(
-        default=2,
+        default=6,
         ge=1,
         description=(
-            "Distinct Tavily network requests allowed per user turn. Further calls "
-            "return the accumulated research result instead of searching again."
+            "Distinct Tavily network requests allowed per epoch of a turn; a "
+            "continued turn gets a fresh allowance while the already-searched "
+            "memory carries over. A repeat of a query this turn already ran "
+            "returns the recorded result instead of searching again; a further "
+            "distinct query past this cap is refused."
         ),
     )
     research_max_image_searches_per_turn: int = Field(

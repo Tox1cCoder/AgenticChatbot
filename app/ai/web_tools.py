@@ -243,16 +243,18 @@ def create_web_search_tool(
         )
         if reused is not None:
             return _project_search(normalized, reused, reused=True, budget=budget)
-        if settings.research_budget_enabled and not budget.reserve_search(
-            normalized.query, scope=scope
-        ):
-            log_web_tool_call(
-                "web_search",
-                outcome="repeated_query_rejected",
-                freshness=normalized.freshness,
-                searches_used=budget.search_calls,
-            )
-            return _budget_spent_payload(budget)
+        if settings.research_budget_enabled:
+            # One log outcome covered both refusals, so an operator could not
+            # tell a turn that ran out of budget from one repeating itself.
+            refusal = budget.reserve_search(normalized.query, scope=scope)
+            if refusal is not None:
+                log_web_tool_call(
+                    "web_search",
+                    outcome=refusal,
+                    freshness=normalized.freshness,
+                    searches_used=budget.search_calls,
+                )
+                return _budget_spent_payload(budget, refusal)
 
         try:
             raw = await _call_provider(tavily_tool, "tavily", "tavily_search", args)
@@ -809,32 +811,33 @@ def _image_payload(query: str, selected: int, note: str) -> str:
     return json.dumps({"query": query, "selected": selected, "note": note}, ensure_ascii=False)
 
 
-def _budget_spent_payload(budget: Any) -> str:
-    """Explain why this search was refused, distinguishing the two causes.
+def _budget_spent_payload(budget: Any, refusal: str) -> str:
+    """Report the refusal the budget itself named.
 
-    ``reserve_search`` refuses both a spent quota and a query the turn has
-    already run or already failed. Reporting the second as ``budget_exhausted``
-    told the model -- and anyone reading the log -- that the turn was out of
-    searches when it still had some, which sends it to summarise instead of
-    rephrasing.
+    ``refusal`` is ``reserve_search``'s own verdict. Deriving it here from
+    ``search_calls`` was wrong in both directions, because that counter cannot
+    see the reservations in flight that the cap check counts.
+
+    The at-cap hint deliberately does not claim another search would return the
+    same results. It would not — a distinct query returns distinct sources —
+    and reading that the rest of its plan is pointless is what makes the model
+    stop gathering instead of working with what it has.
     """
-    limit = max(1, int(getattr(budget, "max_search_calls", 1)))
-    used = int(getattr(budget, "search_calls", 0))
-    at_cap = used >= limit
+
     return json.dumps(
         {
             "status": "error",
-            "error_type": "budget_exhausted" if at_cap else "duplicate_query",
+            "error_type": refusal,
             "retryable": False,
-            "searches_used": used,
-            "search_limit": limit,
+            "searches_used": budget.search_calls,
+            "search_limit": max(1, int(budget.max_search_calls)),
             "hint": (
                 (
-                    "The per-turn search budget is spent. Answer from the sources already "
-                    "gathered in this turn, or open one of them with web_open; another "
-                    "search would return the same results."
+                    "This epoch's search budget is spent. Answer from the sources "
+                    "already gathered in this turn, or open one of them with "
+                    "web_open; do not repeat this search."
                 )
-                if at_cap
+                if refusal == "budget_exhausted"
                 else (
                     "This turn already ran this query, or it already failed at the "
                     "provider. The budget is not spent: search for something the turn "

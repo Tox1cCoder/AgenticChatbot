@@ -55,12 +55,22 @@ _CITATION_PATTERN = re.compile(r"\[(E\d+)\]")
 
 
 class OutputValidationError(RuntimeError):
-    """A candidate public response failed a mandatory output contract."""
+    """A candidate public response failed a mandatory output contract.
 
-    def __init__(self, reason: str, detail: str = "") -> None:
+    ``retriable`` separates the two kinds. An invented artifact id or a
+    mismatched agent identity is a contract violation: running the turn again
+    produces the same thing, so it is final. A response that simply carried no
+    text is a transient provider outcome -- the specialist has already re-asked
+    once without tools by the time this is raised -- and reporting it as final
+    dead-ended the turn at "Error: No response generated" when resubmitting
+    would very likely have worked.
+    """
+
+    def __init__(self, reason: str, detail: str = "", *, retriable: bool = False) -> None:
         super().__init__(detail or reason)
         self.reason = reason
         self.detail = detail
+        self.retriable = retriable
 
 
 class OutputPolicy(Protocol):
@@ -85,7 +95,9 @@ class PublicContentPolicy:
         has_interrupt = bool((response.metadata or {}).get("interrupt"))
         if not (has_content or has_artifacts or has_images or has_interrupt or response.error):
             raise OutputValidationError(
-                "empty_public_content", "no publishable content, artifact, image, or error"
+                "empty_public_content",
+                "no publishable content, artifact, image, or error",
+                retriable=True,
             )
 
 
@@ -347,15 +359,22 @@ def make_validate_output_node(
         try:
             validated = await validator.validate(outcome, state)
         except OutputValidationError as exc:
-            logger.warning("Output validation failed: %s", exc.reason)
+            logger.warning("Output validation failed: %s (%s)", exc.reason, exc.detail)
             return Command(
                 update={
                     "execution_phase": "failed",
                     "workflow_error": WorkflowError(
                         code="response_validation_failed",
-                        retriable=False,
+                        retriable=exc.retriable,
                         request_id=request_id,
-                        details={"reason": exc.reason},
+                        # ``{"reason": ...}`` alone named the symptom and
+                        # nothing else, so one occurrence was indistinguishable
+                        # from any other and none could be diagnosed.
+                        details={
+                            "reason": exc.reason,
+                            "detail": exc.detail,
+                            "agent_id": getattr(outcome, "agent_id", None),
+                        },
                     ),
                 },
                 goto="finalize",

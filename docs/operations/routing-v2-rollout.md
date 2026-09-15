@@ -122,10 +122,23 @@ Confirm before deploying:
 ```
 router_provider                        # must be gemini or openai
 router_model                           # non-empty
-routing_timeout_seconds                # default 8.0
+routing_timeout_seconds                # default 8.0, the whole turn's ceiling
+routing_attempt_timeout_seconds        # default 6.0, one attempt, under the above
+router_thinking_level                  # default low
 routing_max_attempts                   # 1 or 2
 conversation_turn_lock_timeout_seconds # default 30.0
 ```
+
+`routing_attempt_timeout_seconds` exists because one deadline covering both
+attempts meant a first attempt slower than the whole budget left the retry
+nothing: the router reported two attempts having made one provider call and
+failed `routing_timeout`. Raise `routing_timeout_seconds` if two full attempts
+should fit; at the defaults the retry gets whatever the first attempt left.
+
+`router_thinking_level` is applied only when the account has not configured a
+reasoning effort for the router agent. Sending no level does not mean no
+reasoning -- it means the provider's default, which for `gemini-3-flash-preview`
+is the highest one.
 
 A provider without an installed structured-output adapter fails closed. It does
 not fall back.
@@ -505,7 +518,7 @@ Explicit because getting it backwards is silently expensive in provider calls:
 | Quota | On Continue |
 |---|---|
 | Per-epoch model/tool call caps | **Reset.** That is what continuing is for |
-| Research call caps (`research_max_search_calls_per_turn`) | **Reset** |
+| Research call caps (`research_max_search_calls_per_turn`, default 6) | **Reset** |
 | Image-discovery slots | **Reset** |
 | "Already searched this" dedup memory | **Kept.** Carried on `generations.research_accounting` |
 | Image-subject dedup memory | **Kept** |

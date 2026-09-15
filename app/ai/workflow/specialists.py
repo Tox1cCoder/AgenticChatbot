@@ -618,6 +618,18 @@ class SpecialistFactory:
             return self._hard_limit_outcome(definition, request, tool_execution, accountant, exc)
         _reject_swallowed_interrupt(result, request.agent_id)
         produced = self._produced_messages(request, result)
+        if not _final_text(produced).strip():
+            # Why the model returned no text is not established, and a recovery
+            # here would hide the evidence needed to find out. The turn fails,
+            # but retriably (see `PublicContentPolicy`), and this line carries
+            # what the old `details={"reason": ...}` never did: one occurrence
+            # was otherwise indistinguishable from any other.
+            logger.warning(
+                "Specialist %s produced %d message(s) and no answer text. Final content: %.300r",
+                request.agent_id,
+                len(produced),
+                getattr(produced[-1], "content", None) if produced else None,
+            )
         return self._to_outcome(definition, request, produced, tool_execution, accountant)
 
     async def invoke_worker(self, request: SpecialistRequest, *, task: WorkerTask) -> WorkerResult:
@@ -798,10 +810,17 @@ class SpecialistFactory:
 
     @staticmethod
     def _produced_messages(request: SpecialistRequest, result: Any) -> list[Any]:
+        """The messages this invocation added, by position.
+
+        Counted against everything ``_invocation_messages`` sent, the carried
+        epoch included. Omitting it made the slice start inside the carried
+        evidence on a Continue, so input messages were recorded as this
+        epoch's own production and re-entered the transcript.
+        """
         messages = result.get("messages") if isinstance(result, dict) else None
         if not isinstance(messages, list):
             return []
-        sent = len(request.history) + len(request.messages)
+        sent = len(request.history) + len(request.carried_messages) + len(request.messages)
         return messages[sent:] if len(messages) > sent else []
 
     def _hard_limit_outcome(
@@ -1051,24 +1070,17 @@ def _final_text(messages: list[Any]) -> str:
     Intermediate tool-calling turns carry no answer, so they are skipped
     rather than concatenated: the answer is the last message that actually
     said something.
+
+    ``BaseMessage.text`` is the extraction, not a hand-rolled one. The previous
+    version collected any block carrying a ``text`` key, which published a
+    Gemini thought part -- ``{"type": "thinking", "text": ...}`` -- as the
+    answer. langchain-core already knows which blocks are reasoning; this
+    module should not be relitigating that per block type.
     """
     for message in reversed(messages):
         if getattr(message, "type", None) != "ai":
             continue
-        content = getattr(message, "content", "")
-        text = content if isinstance(content, str) else _coerce_blocks(content)
+        text = getattr(message, "text", "") or ""
         if text.strip():
             return text
     return ""
-
-
-def _coerce_blocks(content: Any) -> str:
-    if not isinstance(content, list):
-        return ""
-    parts: list[str] = []
-    for block in content:
-        if isinstance(block, str):
-            parts.append(block)
-        elif isinstance(block, dict) and isinstance(block.get("text"), str):
-            parts.append(block["text"])
-    return "".join(parts)

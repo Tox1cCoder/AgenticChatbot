@@ -166,49 +166,49 @@ class ResearchBudget:
                 return True
         return False
 
-    def reserve_search(self, query: str, *, scope: SearchScope = ()) -> bool:
-        """Atomically claim a search slot, or refuse if none remain.
+    def reserve_search(self, query: str, *, scope: SearchScope = ()) -> str | None:
+        """Claim a search slot, or name the rule that refused it.
 
-        A caller checks the budget, awaits a network call, then records the
-        result — two steps with an await in between. The model can emit
-        parallel tool calls, so two concurrent callers could both pass a plain
-        boolean check before either records its result, silently letting the
-        turn exceed its cap. Comparing completed searches plus in-flight
-        reservations to the cap inside one lock closes that window: the check
-        and the claim happen as a single step.
+        Returns ``None`` when a slot was claimed, otherwise the ``error_type``
+        the caller reports to the model: ``"budget_exhausted"`` for a spent
+        cap, ``"duplicate_query"`` for a query this turn already ran or that
+        already failed at the provider.
+
+        Returning the reason rather than a bare boolean is the point. The cap
+        compares completed searches *plus in-flight reservations* to the limit,
+        and in-flight is invisible to any caller looking afterwards, so a
+        caller re-deriving "why was I refused?" was reading a different, later
+        state than the one that refused it — and got it wrong in both
+        directions. It told a turn at its cap the budget was intact whenever
+        siblings were still running, which is the shape the model emits.
+
+        The claim itself happens inside one lock because the model emits
+        parallel tool calls: two callers could otherwise both pass a check
+        before either recorded its result, and the turn would exceed its cap.
         """
 
         with self._instance_lock:
             tokens = normalize_query_tokens(query)
             if self.find_reuse(query, scope=scope) is not None:
-                return False
+                return "duplicate_query"
             if self.searched_in_prior_epoch(query, scope=scope):
                 # Refused across the epoch boundary as well as within it,
                 # which is what stops a Continue re-running the query the
                 # previous epoch's cap had already turned down.
-                return False
-            for failed_tokens, failed_scope in self._failed_searches:
-                if failed_scope != scope:
+                return "duplicate_query"
+            for recorded_tokens, recorded_scope in (*self._failed_searches, *self._in_flight):
+                if recorded_scope != scope:
                     continue
-                if failed_tokens == tokens or near_duplicate(
-                    failed_tokens, tokens, threshold=self.near_duplicate_threshold
+                if recorded_tokens == tokens or near_duplicate(
+                    recorded_tokens, tokens, threshold=self.near_duplicate_threshold
                 ):
-                    # This exact query already failed at the provider; retrying
-                    # it in the same turn returns the same error.
-                    return False
-            for reserved_tokens, reserved_scope in self._in_flight:
-                if reserved_scope != scope:
-                    continue
-                if reserved_tokens == tokens or near_duplicate(
-                    reserved_tokens,
-                    tokens,
-                    threshold=self.near_duplicate_threshold,
-                ):
-                    return False
+                    # Already failed at the provider, or already running: both
+                    # return the model what it has.
+                    return "duplicate_query"
             if self.search_calls + len(self._in_flight) >= max(1, int(self.max_search_calls)):
-                return False
+                return "budget_exhausted"
             self._in_flight.append((tokens, scope))
-            return True
+            return None
 
     def record_search(self, query: str, result_text: str, *, scope: SearchScope = ()) -> None:
         """Append a completed result and release the reservation it used.

@@ -24,6 +24,7 @@ from uuid import UUID
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.ai.reasoning_controls import validate_reasoning_effort
 from app.ai.workflow.contracts import (
     RoutingDecision,
     WorkflowError,
@@ -671,6 +672,9 @@ class RoutingService:
         self._metrics = metrics
         self._usage_recorder = usage_recorder
         self._timeout_seconds = float(getattr(settings, "routing_timeout_seconds", 8.0))
+        self._attempt_timeout_seconds = float(
+            getattr(settings, "routing_attempt_timeout_seconds", 0.0) or 0.0
+        ) or self._timeout_seconds
         self._max_attempts = int(getattr(settings, "routing_max_attempts", 2))
 
     @property
@@ -749,6 +753,11 @@ class RoutingService:
                 remaining_seconds = deadline - time.monotonic()
                 if remaining_seconds <= 0:
                     raise TimeoutError("routing deadline exhausted")
+                # Each attempt gets its own, smaller deadline under the turn's.
+                # One shared deadline let a single slow attempt consume the
+                # whole budget, so the configured retry never reached the
+                # provider at all -- inert in precisely the case it exists for.
+                attempt_timeout = min(self._attempt_timeout_seconds, remaining_seconds)
                 result = await asyncio.wait_for(
                     self._invoke_recorded(
                         structured,
@@ -757,7 +766,7 @@ class RoutingService:
                         provider=provider,
                         model=model_id,
                     ),
-                    timeout=remaining_seconds,
+                    timeout=attempt_timeout,
                 )
                 decision = self._parse(result)
                 self._validator.validate(decision, inventory)
@@ -783,6 +792,15 @@ class RoutingService:
 
         code = self._failure_code(last_failure)
         details = self._failure_details(last_failure)
+        if code == "routing_timeout":
+            # ``details={}`` gave whoever read the failure nothing to act on --
+            # not how long was waited, nor whether the retry ran.
+            details = {
+                **details,
+                "attempts": attempts,
+                "attempt_timeout_seconds": self._attempt_timeout_seconds,
+                "timeout_seconds": self._timeout_seconds,
+            }
         self._record_failure(code, provider, model_id, attempts)
         raise self._error(code, request_id, details)
 
@@ -844,7 +862,48 @@ class RoutingService:
             raise StrictRuntimeResolutionError(
                 "missing_capabilities", "router model lacks structured output"
             )
-        return configured
+        return self._with_router_reasoning_level(configured)
+
+    def _with_router_reasoning_level(
+        self, configured: ResolvedRuntimeModelConfig
+    ) -> ResolvedRuntimeModelConfig:
+        """Apply the router's own thinking level when nothing pinned one.
+
+        Sending no reasoning parameter does not mean the model does not reason
+        — it means the *provider's* default applies, and for the router's
+        default model that default is the highest level. Routing is
+        classification against a fixed inventory, and it runs behind a
+        single-digit-second deadline, so it is the one call that should not be
+        reasoning hardest.
+
+        An effort the account configured for the router agent is left alone: it
+        is a deliberate choice, and overriding it here would make that setting
+        silently ineffective.
+        """
+
+        if configured.reasoning_effort:
+            return configured
+        level = str(getattr(self._settings, "router_thinking_level", "") or "").strip()
+        if not level:
+            return configured
+        try:
+            validated = validate_reasoning_effort(
+                configured.provider,
+                configured.model,
+                level,
+                supports_reasoning=configured.capabilities.get("supports_reasoning"),
+            )
+        except ValueError:
+            # An unsupported level is dropped rather than raised: a router that
+            # refuses to run is worse than one reasoning at the provider default.
+            logger.warning(
+                "router_thinking_level %r is unsupported for %s:%s; using the provider default",
+                level,
+                configured.provider,
+                configured.model,
+            )
+            return configured
+        return replace(configured, reasoning_effort=validated)
 
     @staticmethod
     def _coerce_user_id(user_id: Any) -> UUID | None:

@@ -537,8 +537,8 @@ async def test_continue_restores_the_accounting_before_the_epoch_runs(_clean_res
         budget = get_research_budget(
             logical_turn_id="turn-1", conversation_id=str(CONVERSATION_ID)
         )
-        observed["repeat_refused"] = budget.reserve_search("population of vietnam") is False
-        observed["fresh_allowed"] = budget.reserve_search("a different question") is True
+        observed["repeat_refused"] = budget.reserve_search("population of vietnam") is not None
+        observed["fresh_allowed"] = budget.reserve_search("a different question") is None
         yield make_event("complete", sequence=1, data={"response": None})
 
     service.ai_service = SimpleNamespace(

@@ -37,7 +37,7 @@ def test_a_failed_search_frees_the_slot_for_a_different_query():
     budget.reserve_search("second topic")
     budget.record_failed_search("second topic")
 
-    assert budget.reserve_search("a third, unrelated topic") is True
+    assert budget.reserve_search("a third, unrelated topic") is None
 
 
 def test_a_failed_query_is_still_refused_on_retry():
@@ -46,8 +46,8 @@ def test_a_failed_query_is_still_refused_on_retry():
     budget.reserve_search("broken query")
     budget.record_failed_search("broken query")
 
-    assert budget.reserve_search("broken query") is False
-    assert budget.reserve_search("broken  QUERY") is False
+    assert budget.reserve_search("broken query") is not None
+    assert budget.reserve_search("broken  QUERY") is not None
 
 
 def test_a_failure_does_not_count_as_a_completed_search():
@@ -65,7 +65,7 @@ def test_the_cap_still_applies_to_successful_searches():
     budget.reserve_search("two")
     budget.record_search("two", "R2")
 
-    assert budget.reserve_search("three") is False
+    assert budget.reserve_search("three") is not None
 
 
 @pytest.mark.parametrize(
@@ -77,6 +77,10 @@ def test_the_refusal_names_its_real_cause(used, cap, expected):
 
     It also misdirects the model: told the quota is gone it summarises, when
     the correct move is to rephrase and search again.
+
+    The cause now comes from the reservation that refused rather than being
+    re-derived from ``search_calls``, so each case fills the budget to ``used``
+    and then asks for the query that provokes the expected refusal.
     """
     budget = _budget(cap=cap)
     for index in range(used):
@@ -84,7 +88,16 @@ def test_the_refusal_names_its_real_cause(used, cap, expected):
         budget.reserve_search(query)
         budget.record_search(query, "R")
 
-    payload = json.loads(_budget_spent_payload(budget))
+    # At the cap, any further query is refused by it. Below the cap, only a
+    # repeat is refused at all — and a query that already failed at the
+    # provider is the repeat available at every ``used``, including zero.
+    if used < cap:
+        probe = "a query the provider already rejected"
+        budget.reserve_search(probe)
+        budget.record_failed_search(probe)
+    else:
+        probe = "an entirely unrelated subject"
+    payload = json.loads(_budget_spent_payload(budget, budget.reserve_search(probe)))
 
     assert payload["error_type"] == expected
     assert payload["searches_used"] == used
