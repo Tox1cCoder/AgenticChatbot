@@ -1,5 +1,10 @@
 # Production Web Research and Image Grounding Implementation Plan
 
+> **Superseded:** Use
+> `docs/superpowers/plans/2026-09-15-production-web-research-and-image-grounding.md`.
+> The replacement preserves the current model-driven search-count contract and
+> incorporates the 2026-09-15 codebase review.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the competing web and image paths with one provider-neutral research pipeline that produces verified clickable sources and lets the existing answer-model call inspect and select validated images.
