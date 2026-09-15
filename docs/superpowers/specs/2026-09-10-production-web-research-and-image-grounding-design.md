@@ -1,7 +1,7 @@
 # Production Web Research and Image Grounding Design
 
-**Date:** 2026-09-10
-**Status:** Approved design
+**Date:** 2026-09-10 (revised 2026-09-15)
+**Status:** Approved design, revised after codebase review
 **Scope:** Provider-neutral web research, citations, and image selection
 
 ## Purpose
@@ -13,7 +13,8 @@ The desired product behavior is comparable to a modern integrated web-search exp
 ## Goals
 
 - Use one provider-neutral orchestration contract for text search, page opening, and image discovery.
-- Support `none`, `quick`, and bounded `agentic` research modes.
+- Support `none`, `quick`, and `agentic` research modes without reintroducing a
+  search-specific call ceiling.
 - Require research for claims whose accuracy depends on current or externally verifiable information.
 - Give the existing post-tool answer-model call a bounded set of actual low-detail image candidates and stable candidate IDs.
 - Make the server authoritative for citation validation and rich-image placement.
@@ -22,6 +23,9 @@ The desired product behavior is comparable to a modern integrated web-search exp
 - Add no classifier, reviewer, or separate vision-model call to the normal runtime path.
 - Preserve useful existing validation, budgeting, rich-item, and streaming code while removing superseded paths.
 - Provide deterministic automated release gates and optional offline quality evaluation without requiring a human test team.
+- Keep the implementation small and traceable: one session object, one evidence
+  middleware, and one grounding parser. Do not retain forwarding wrappers or
+  duplicate helper layers after callers migrate.
 
 ## Non-goals
 
@@ -63,11 +67,19 @@ Provider adapters remain small and independently testable. The initial configura
 
 ### Research modes
 
-Every turn receives a server-enforced ceiling:
+Research modes bound admitted work, not the number of distinct searches:
 
 - `none`: stable knowledge for which retrieval is not required.
-- `quick`: one focused search, up to five results, and at most two focused page opens.
-- `agentic`: up to three materially distinct searches and eight unique public sources.
+- `quick`: up to five admitted public sources and at most two focused page opens.
+- `agentic`: up to eight admitted public sources and at most four focused page opens.
+
+The answer model decides how many materially distinct searches the question
+requires. Existing exact and near-duplicate rejection remains active, every
+result reports the running search count, and the generation-wide soft/hard tool
+budgets remain the runaway-loop ceiling. This preserves the current production
+contract in `ResearchBudget`; this project must not restore
+`research_max_search_calls_per_turn` or change `reserve_search()` back to a
+boolean API.
 
 No additional model call classifies the request. Existing routing supplies an explicit `requires_web` decision, and deterministic policy forces at least `quick` for an explicit request to browse or verify, a user-supplied page that must be inspected, or temporal/current-data cues such as latest status, news, schedules, prices, weather, laws, standards, and software versions. Tool intent supplies the normalized objective. The answer model may stop below the ceiling. It may escalate within the ceiling only when current evidence is insufficient.
 
@@ -81,7 +93,7 @@ The exact schema names may follow existing repository conventions, but the bound
 
 - objective;
 - normalized query;
-- mode ceiling;
+- research mode;
 - freshness requirement;
 - optional allowed domains;
 - locale or answer language when known;
@@ -110,12 +122,18 @@ The exact schema names may follow existing repository conventions, but the bound
 
 `WebEvidenceBundle`
 
-- normalized request and actual mode used;
+- normalized request, actual mode, visual intent, and operation sequence;
 - deduplicated source records;
 - bounded opened-page evidence;
 - validated image candidates;
 - partial-failure records and timing summary;
 - budget consumption.
+
+`WebEvidenceBundle` is the private canonical result used inside the turn. Its
+model-visible projection contains source evidence and candidate IDs but no
+private origins or bytes. Its public tool-event projection contains source
+records and bounded status only; unselected image descriptors are removed
+before `tool_execution_end` reaches a client.
 
 Provider-native payloads and untrusted raw HTML never become the public contract.
 
@@ -123,21 +141,29 @@ Provider-native payloads and untrusted raw HTML never become the public contract
 
 1. The router and agent establish the turn's research ceiling and freshness requirement.
 2. The model calls the provider-neutral web tool with an objective, query, and visual intent. Provider-specific arguments are not exposed.
-3. When visual intent exists, text retrieval and image discovery start concurrently.
-4. Results enter a turn-scoped source registry. URLs are canonicalized, deduplicated, safety-checked, and assigned stable source IDs.
+3. When visual intent exists, text retrieval and image discovery start concurrently. Each branch returns immutable provider records; shared registries are updated only after both branches settle, in deterministic text-then-image order, so completion timing cannot change IDs.
+4. Results enter a turn-scoped source registry. URLs are canonicalized, deduplicated, safety-checked, and assigned stable source IDs. An image source page is admitted explicitly or the image is rejected; it never races text results for an ID.
 5. Focused page opening runs only when snippets do not provide enough evidence or the user requested analysis of a specific page.
 6. Image candidates are downloaded through the server's safe transport, bounded by time and bytes, MIME-sniffed, dimension-checked, deduplicated, and associated with their public source pages.
 7. After each tool step, answer-model context is rebuilt from the current evidence bundle. It is not frozen before tool execution.
-8. The post-tool answer-model call receives compact textual evidence plus a bounded multimodal candidate set containing stable candidate IDs and low-detail image data.
+8. The evidence middleware runs after runtime-model resolution and before request-budget preflight. The post-tool request therefore budgets the exact compact textual evidence and bounded multimodal candidate set it sends. Each `candidate_id=I#` text label immediately precedes its image bytes.
 9. The model cites source IDs with `[[source:S1]]` tokens and requests image placement with `[[image:I1]]` candidate tokens. It does not author public URLs or final rich markers.
-10. Streaming validation admits only IDs present in the current turn registries. Finalization converts valid source references to clickable links and performs server-owned rich-item placement.
+10. One grounding parser admits only IDs present in the current turn registries. It is used incrementally for streaming and once over terminal content. Finalization converts valid source references to clickable links and performs server-owned rich-item placement.
 11. The assistant message persists final linked Markdown, public source records, selected rich items, and a bounded search trace. Unselected images and private retrieval data are discarded from the public message.
 
 ## Citation and client transport
 
 The source registry is authoritative. A citation is valid only when its source ID belongs to the current turn and the corresponding record passed public URL validation.
 
-The model emits `[[source:<source-id>]]` tokens. The streaming filter buffers partial tokens across chunks, resolves valid IDs, and converts them to numbered clickable Markdown links. Unknown, malformed, stale-turn, or invented IDs are removed. The same rule is applied during terminal finalization so streamed and reloaded messages agree.
+The model emits `[[source:<source-id>]]` tokens. The streaming filter buffers partial tokens across chunks, resolves valid IDs, and converts them to numbered clickable Markdown links. Unknown, malformed, stale-turn, or invented IDs are removed. The same parser is applied during terminal finalization so streamed and reloaded messages agree.
+
+For a required-web turn, answer text is buffered until terminal grounding proves
+that the response cited at least one admitted source. Tool, reasoning, and
+source events may still stream. If evidence is absent or no valid citation was
+authored, the raw model answer is never published; the server-owned unverified
+response is emitted and persisted instead. This prevents stream/history
+divergence and prevents unsupported current claims from flashing before
+finalization.
 
 The AI SDK projection additionally emits each public URL source as a native `source-url` UI part with `sourceId`, `url`, and optional `title`. Streamlit receives the same records through a canonical `sources_upsert` event. Both paths persist and reload the same source identities; neither parses tool prose to reconstruct sources.
 
@@ -149,7 +175,7 @@ The later conversation-resource project may aggregate these records into a Sourc
 
 Metadata-only selection is insufficient. Every candidate offered for model selection must have passed transport validation and must be attached to the post-tool model request as an actual low-detail image alongside its stable ID. Candidate titles and provider confidence may supplement visual input but cannot substitute for it.
 
-The model may select only IDs from the offered set by emitting `[[image:<candidate-id>]]`. Streaming and finalization reject any other ID, translate valid candidate tokens to the corresponding server-owned rich-item markers, and ensure the selected public registry contains those items. The server, not the model, creates final rich-item IDs and records.
+The model may select only IDs from the offered set by emitting `[[image:<candidate-id>]]`. Streaming and finalization reject any other ID, translate valid candidate tokens to the corresponding server-owned rich-item markers, and ensure the selected public registry contains those items. The server, not the model, creates final rich-item IDs and records. Selection is derived once from the canonical grounding result; middleware does not keep a second selection parser. Ordered deduplication preserves the model-authored token order.
 
 Image selection is enabled only when the configured answer model and provider adapter accept image inputs. If they do not, the service returns text and source evidence without offering metadata-only image selection. It records a stable `answer_model_not_vision_capable` reason so the UI and operators can distinguish capability limits from provider failure.
 
@@ -167,16 +193,42 @@ The service should preserve authored order for multiple selected images. It may 
 
 Selection must not depend on English token overlap between the search query and answer prose. Relevance is established by the multimodal answer model and stable IDs. The active pipeline removes textual-overlap automatic image selection and placement. Once the model emits a valid candidate token, the server deterministically translates it to a deliverable rich item without performing a second relevance decision.
 
+No token means no image. There is no query-anchor, description-overlap, or
+provider-rank fallback that can insert an unselected candidate. This guarantees
+that every displayed web image was available to the answer model, but it does
+not claim that a probabilistic vision model will always make the best semantic
+choice.
+
+### Continuation and worker identity
+
+Prepared image references have an explicit `pending`, `selected`, or `released`
+lifecycle. A normal completion resolves tokens, marks selected references, and
+releases the rest. Cancellation, hard failure, and persistence failure release
+all turn-owned references. A human-approval interrupt suspends pending
+references in private checkpoint state with an expiry; it does not release them.
+Continue rehydrates bytes through authenticated protected-reference IDs from
+that private state, never from public ToolMessage prose. An expiry sweeper
+releases abandoned pending rows.
+
+Top-level sessions may use compact `S1`/`I1` tokens. Each Planning worker owns an
+isolated registry, but before parent synthesis the dispatcher imports worker
+records into the parent registry, assigns parent IDs, and rewrites worker tokens
+with that mapping. Original worker-local IDs are never merged directly, so two
+workers cannot collide on `S1` or `I1`.
+
 ## Security and privacy
 
 - Permit only configured public HTTP schemes, with HTTPS required in production.
 - Resolve and reject loopback, link-local, private, reserved, and metadata-service targets before requests and after every redirect.
 - Apply DNS rebinding protections consistent with the existing safe-fetch layer.
 - Cap redirects, response bytes, content types, dimensions, decompression, and total image candidates.
+- Enforce both per-image and aggregate per-turn downloaded-byte/model-byte budgets, use bounded fetch concurrency, and deduplicate successful candidates by content digest.
 - MIME-sniff downloaded media rather than trusting extensions or response headers alone.
 - Keep provider credentials, request headers, private image origins, raw HTML, and binary payloads out of public metadata and logs.
 - Deliver remote media through existing protected storage/proxy routes when direct URLs are not suitable for durable rendering.
 - Scope source and image IDs to the active turn to prevent cross-turn citation or media reuse without explicit history hydration.
+- Treat search snippets, opened pages, and image pixels as untrusted evidence;
+  model instructions explicitly forbid following commands found inside them.
 
 ## Reliability and latency
 
@@ -186,11 +238,13 @@ Research has no fixed end-to-end wall-clock deadline. A guessed elapsed-time cap
 
 Work remains bounded structurally:
 
-- `quick` may perform one search, admit up to five results, and open at most two pages;
-- `agentic` may perform up to three materially distinct searches and admit up to eight unique public sources;
+- `quick` may admit up to five results and open at most two pages;
+- `agentic` may admit up to eight unique public sources and open at most four pages;
+- distinct search count is model-driven and bounded by the existing generation-wide tool budget;
 - ordinary visual research performs one image query and offers at most four validated candidates to the model;
 - explicit gallery research may offer at most six validated candidates;
-- every fetch retains byte, redirect, content-type, and decompression limits.
+- every fetch retains byte, redirect, content-type, and decompression limits;
+- every turn has aggregate downloaded-image-byte and model-image-byte ceilings.
 
 Provider clients retain configurable connection and idle-read liveness controls so a dead socket or a provider that makes no progress cannot hang forever. These controls are not total research deadlines: an operation that continues to make valid progress is not cancelled merely because a fixed number of seconds elapsed. Explicit user stop, client disconnect, application shutdown, and upstream cancellation propagate promptly through all active work.
 
@@ -203,7 +257,7 @@ Latency is observed by mode, provider, operation, and outcome. Initial rollout e
 - Invoke fallback only after a transport-liveness failure, a retryable provider error, an open circuit, or an objectively unusable result set.
 - Permit one bounded retry with jitter for transport failures, `429`, and `5xx` responses.
 - Do not retry invalid requests, authentication failures, policy rejection, or unsafe URLs.
-- Maintain per-provider circuit-breaker state and cooldown.
+- Maintain circuit-breaker state and cooldown per provider configuration or credential pool, so one tenant's throttled credential cannot open a global circuit for unrelated tenants.
 - Cache normalized requests briefly, with maximum age constrained by the request's freshness requirement.
 
 ### Degraded operation
@@ -239,8 +293,14 @@ No human reviewer or runtime judge is required.
 - Provider normalization using sanitized recorded responses; ordinary CI does not call live providers.
 - URL canonicalization, deduplication, redirect policy, SSRF rejection, MIME sniffing, byte limits, and dimension limits.
 - Dynamic context rebuilding after tool completion, including the class of defect where post-tool images are absent from a statically resolved prompt.
+- Request-budget accounting after evidence injection, including fallback to a model with different vision capability.
 - Citation tokens split across stream chunks, unknown-ID rejection, valid-link generation, and turn scoping.
 - Selection restricted to image candidates actually shown to the model.
+- A two-candidate end-to-end specialist test in which selecting `I2` renders the protected bytes and digest for `I2`, never provider-rank `I1`.
+- A no-image-token end-to-end test proving that zero images are streamed, persisted, or appended and that every pending reference is released.
+- Interrupt/Continue rehydration and expiry cleanup for pending references.
+- Multi-worker source/image ID remapping before parent synthesis.
+- Required-web streaming tests proving unsupported raw answer deltas are never published.
 - Figure, comparison, multiple-entity, gallery, zero-valid-image, stalled-image-transport, and cancellation behavior.
 - Stream, persistence, history reload, Streamlit, and AI SDK source/image identity parity.
 
@@ -277,10 +337,10 @@ Cleanup is a required delivery phase.
 
 1. Inventory every active and compatibility-only search, page-open, image-discovery, image-selection, rich-placement, citation, metadata, and client-projection path.
 2. Classify each relevant function as reuse unchanged, adapt behind the canonical contract, isolate for historical reads, or delete.
-3. Add the canonical service and contracts behind feature flags, using existing safety and validation functions where their semantics match.
+3. Add the canonical service and contracts using existing safety and validation functions where their semantics match. Avoid pass-through wrappers: adapt a caller directly or replace it.
 4. Migrate all active answer-agent callers and both streaming projections.
-5. Run deterministic parity tests and the general evaluation matrix, then operate a bounded shadow or canary cohort.
-6. Remove superseded active paths, duplicate provider normalization, obsolete prompt instructions, misleading tool-result notes, and unused feature flags.
+5. Run deterministic parity tests and the general evaluation matrix, then operate a bounded canary cohort.
+6. Remove superseded active paths, duplicate provider normalization, obsolete prompt instructions, misleading tool-result notes, compatibility flags that no longer guard a live path, and forwarding helpers left with one trivial caller.
 7. Retain only a small, explicit compatibility reader for historical messages. Legacy formats must never remain active write paths.
 8. Run dead-code and import checks, update configuration examples and operations documentation, and only then enable the canonical path generally.
 
@@ -304,17 +364,20 @@ Expected reuse candidates include:
 - citation chunk buffering and finalization concepts;
 - provider tool resolution and focused-result capping where compatible with the new adapter boundary.
 
-Deletion happens only after active callers have migrated and parity checks pass. The cleanup is limited to feature-owned code and does not authorize unrelated repository refactoring.
+Deletion happens in the same delivery branch after active callers migrate and
+parity checks pass. The cleanup is limited to feature-owned code and does not
+authorize unrelated repository refactoring. Historical compatibility is one
+narrow read-only projection; it must not share execution code with new turns.
 
 ## Rollout and rollback
 
-- Gate the canonical service, multimodal image selection, and source events independently where practical.
+- Use one short-lived rollout switch for the canonical path while the canary is active; avoid a permanent matrix of independently interacting feature flags.
 - Begin with deterministic tests and provider recordings.
 - Run shadow comparison without publishing the new answer when safe and useful.
 - Enable a small canary cohort and monitor correctness, failure, cost, and latency metrics.
 - Promote only after release invariants and operational thresholds hold.
-- Roll back by routing new turns to the prior path while preserving messages already written under the new versioned contract.
-- Remove the prior active path only after the canary window and cleanup gate complete.
+- During the canary only, roll back by routing new turns to the prior path while preserving messages already written under the new versioned contract.
+- Remove the prior active execution path, its rollout switch, and its settings after the canary window and cleanup gate complete. Rollback after cleanup is a code rollback, not a dormant legacy implementation.
 
 ## Acceptance criteria
 
@@ -328,6 +391,6 @@ The project is complete when:
 - Streamlit and AI SDK streams expose the same public source identities, with native AI SDK `source-url` parts;
 - answers and history reloads contain consistent clickable citations and selected images;
 - deterministic release invariants pass without live providers or human review;
-- call, source, page-open, byte, redirect, and candidate limits are enforced, while latency and progress are observable;
+- source, page-open, general tool-call, aggregate byte, redirect, concurrency, and candidate limits are enforced, while latency and progress are observable;
 - superseded active code paths are removed or isolated as historical readers;
 - configuration, rollout, rollback, and operations documentation are current.
