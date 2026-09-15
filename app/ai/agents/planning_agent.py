@@ -106,8 +106,12 @@ class PlanningAgent(BaseAgent):
             include_hand_off=include_hand_off,
             excluded_tool_names=excluded_tool_names,
         )
-        target = model if model is not None else self._get_llm()
-        return ModelFactory.bind_tools_to_model(target, tools) if tools else target
+        llm = model or self.langchain_model
+        if not tools or llm is None:
+            return llm
+        return ModelFactory.bind_tools_to_model(
+            llm, tools, tool_choice=getattr(settings, "tool_choice_mode", "auto")
+        )
 
     def _get_tools_for_binding(
         self,

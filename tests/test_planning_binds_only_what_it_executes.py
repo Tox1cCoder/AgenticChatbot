@@ -126,3 +126,52 @@ def test_planning_is_not_told_to_discover_tools_it_cannot_call():
 def test_the_unsupported_tool_backstop_survives():
     """A model that calls something anyway must still get a paired result."""
     assert "unsupported_planning_tool" in PLANNING_EXECUTION.read_text(encoding="utf-8")
+
+
+def test_binding_resolves_the_model_the_same_way_the_base_agent_does():
+    """The override must not invent an accessor the base class lacks.
+
+    The first version of this override called ``self._get_llm()``, which does
+    not exist anywhere in the hierarchy -- ``BaseAgent`` reads
+    ``self.langchain_model``. Every Planning turn that did not pass an explicit
+    model raised ``AttributeError`` inside the agent, which surfaced as an
+    empty response and then as ``empty_public_content``: the exact symptom this
+    change set was fixing, reintroduced by the fix.
+
+    Asserted against the base class rather than by name, so renaming the
+    accessor breaks this test instead of production.
+    """
+    import inspect
+
+    from app.ai.agents.base_agent import BaseAgent
+    from app.ai.agents.planning_agent import PlanningAgent
+
+    override = inspect.getsource(PlanningAgent._get_llm_with_tools)
+    base = inspect.getsource(BaseAgent._get_llm_with_tools)
+
+    accessors = {"self.langchain_model", "self._get_llm()"}
+    used_by_override = {name for name in accessors if name in override}
+    used_by_base = {name for name in accessors if name in base}
+
+    assert used_by_override, "the override resolves a model somehow"
+    assert used_by_override <= used_by_base, (
+        f"override uses {used_by_override - used_by_base}, which BaseAgent does not have"
+    )
+
+
+def test_a_planning_agent_with_no_explicit_model_binds_without_raising():
+    """Drives the branch that was broken: model=None."""
+    from langchain_core.tools import tool
+
+    from app.ai.agents.planning_agent import PlanningAgent
+
+    @tool
+    def hand_off(target: str) -> str:
+        """Transfer the conversation."""
+        return target
+
+    agent = object.__new__(PlanningAgent)
+    agent.langchain_model = None  # no credentials in a unit test
+
+    # Must return cleanly rather than raising AttributeError.
+    assert agent._get_llm_with_tools(internal_tools=[hand_off]) is None
