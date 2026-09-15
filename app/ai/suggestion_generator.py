@@ -4,6 +4,7 @@ import json
 from typing import TYPE_CHECKING
 
 from google import genai
+from google.genai import types
 
 from ..usage import UsageContext, begin_usage_operation, bind_usage_context
 from ..usage.types import UsageOperation
@@ -88,6 +89,12 @@ class SuggestionGenerator:
                 config={
                     "temperature": 1,
                     "max_output_tokens": 512,
+                    # No tools are bound here and AFC defaults to enabled, which
+                    # makes the SDK print its notice on every call -- and this
+                    # one runs on every turn.
+                    "automatic_function_calling": types.AutomaticFunctionCallingConfig(
+                        disable=True
+                    ),
                 },
             )
 

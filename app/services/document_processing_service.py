@@ -917,6 +917,10 @@ class DocumentProcessingService:
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     response_schema=ImageCaptionSections,
+                    # Structured output, no tools; AFC defaults to enabled.
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                        disable=True
+                    ),
                 ),
             )
 

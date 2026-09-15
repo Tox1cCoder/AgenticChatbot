@@ -759,6 +759,19 @@ class PlanningNodeFactory:
         ]
 
         if not tool_calls:
+            if not content.strip():
+                # The turn ends here with nothing to publish, and until this
+                # line it did so silently: `planning_package` builds the public
+                # outcome from whatever text it can find, and `validate_output`
+                # then reports only that there was none. The specialist path
+                # logs the same thing; Planning did not, which is why an
+                # occurrence could not be told apart from any other.
+                logger.warning(
+                    "Planning model returned neither tool calls nor text after %d message(s); "
+                    "the turn will fail empty_public_content. Raw content: %.300r",
+                    len(state.get("messages") or []),
+                    getattr(getattr(response, "message", None), "content", None),
+                )
             return Command(
                 update={
                     "messages": [AIMessage(content=content)],
