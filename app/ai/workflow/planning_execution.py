@@ -53,6 +53,7 @@ from app.ai.workflow.contracts import (
 )
 from app.ai.workflow.inventory import RoutingInventory
 from app.ai.workflow.specialists import UnavailableSpecialist
+from app.core.rich_response import strip_inline_rich_markers
 from app.observability.routing import get_routing_metrics_recorder
 
 logger = logging.getLogger(__name__)
@@ -578,7 +579,7 @@ def render_worker_results(
         blocks.append(
             f"{_UNTRUSTED_OPEN} task={result.task_id} agent={result.agent_id} "
             f"status={result.status}\n"
-            f"{result.content[: limits.parent_context_max_chars]}\n"
+            f"{strip_inline_rich_markers(result.content)[: limits.parent_context_max_chars]}\n"
             f"{_UNTRUSTED_CLOSE}"
         )
     payload = "\n\n".join(blocks)
@@ -593,15 +594,42 @@ def build_planning_outcome(*, content: str, results: Sequence[WorkerResult]) -> 
     validator revalidates it. A synthesis is exactly where an otherwise
     grounded worker result can be distorted.
     """
-    evidence = tuple(record for result in results for record in (result.evidence or ()))
+    all_evidence = tuple(record for result in results for record in (result.evidence or ()))
+    evidence = tuple(record for record in all_evidence if record.get("evidence_id"))
+    remapped_sources: list[dict[str, Any]] = []
+    seen_source_urls: set[str] = set()
+    for record in all_evidence:
+        url = str(record.get("url") or "")
+        if not record.get("source_id") or not url or url in seen_source_urls:
+            continue
+        seen_source_urls.add(url)
+        remapped_sources.append({**record, "source_id": f"S{len(remapped_sources) + 1}"})
+    web_sources = tuple(remapped_sources)
     artifacts = tuple(artifact for result in results for artifact in (result.artifacts or ()))
-    images = tuple(image for result in results for image in (result.images or ()))
+    all_images = tuple(image for result in results for image in (result.images or ()))
+    rich_items = tuple(
+        image
+        for image in all_images
+        if image.get("type") in {"image", "image_group"}
+        and not str(image.get("id") or "").startswith("image:web:")
+    )
+    images = tuple(image for image in all_images if image.get("image_id"))
 
     policies: tuple[str, ...] = ("public_content",)
     if evidence:
         policies = (*policies, "rag_grounding")
     if artifacts:
         policies = (*policies, "artifact_provenance")
+    if web_sources:
+        policies = (*policies, "web_evidence")
+
+    metadata: dict[str, Any] = {"images": list(images)} if images else {}
+    if web_sources:
+        metadata["web_sources"] = list(web_sources)
+        metadata["web_sources_version"] = 1
+    if rich_items:
+        metadata["_rich_item_candidates"] = list(rich_items)
+        metadata["_inline_rich_response_v1"] = True
 
     return ResponseOutcome(
         agent_id=PLANNING_AGENT_ID,
@@ -609,7 +637,7 @@ def build_planning_outcome(*, content: str, results: Sequence[WorkerResult]) -> 
             agent_type=AgentType.PLANNING,
             agent_id=PLANNING_AGENT_ID,
             message=AgentMessage(role=MessageRole.ASSISTANT, content=str(content)),
-            metadata={"images": list(images)} if images else {},
+            metadata=metadata,
             tool_artifacts=list(artifacts) or None,
         ),
         provenance=OutcomeProvenance(
@@ -617,6 +645,8 @@ def build_planning_outcome(*, content: str, results: Sequence[WorkerResult]) -> 
             evidence=evidence,
             artifacts=artifacts,
             images=images,
+            web_sources=web_sources,
+            rich_items=rich_items,
         ),
     )
 

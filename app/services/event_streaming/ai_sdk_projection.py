@@ -376,7 +376,7 @@ def attach_image_parts_to_message(
 
 
 def ensure_leading_text_part(message: dict[str, Any]) -> None:
-    """Guarantee ``parts`` exists and carries the message text as a part.
+    """Guarantee persisted text and canonical web sources have UI parts.
 
     AI SDK v5+ clients render from ``parts``; a history message without a
     ``text`` part would display as empty even though ``content`` is set.
@@ -388,6 +388,28 @@ def ensure_leading_text_part(message: dict[str, Any]) -> None:
     content = message.get("content")
     if not has_text and isinstance(content, str) and content.strip():
         parts.insert(0, {"type": "text", "text": content})
+    metadata = find_message_metadata(message)
+    sources = metadata.get("web_sources") if isinstance(metadata, dict) else None
+    existing_source_ids = {
+        str(part.get("sourceId"))
+        for part in parts
+        if isinstance(part, dict) and part.get("type") == "source-url"
+    }
+    for source in sources if isinstance(sources, list) else ():
+        if not isinstance(source, dict) or not source.get("url"):
+            continue
+        source_id = str(source.get("source_id") or source["url"])
+        if source_id in existing_source_ids:
+            continue
+        parts.append(
+            {
+                "type": "source-url",
+                "sourceId": source_id,
+                "url": str(source["url"]),
+                "title": str(source.get("title") or source["url"]),
+            }
+        )
+        existing_source_ids.add(source_id)
     message["parts"] = parts
 
 

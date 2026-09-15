@@ -32,7 +32,16 @@ _GENERATION_LIFECYCLE_TYPES = {
 #: validated text arrived as deltas and lives in the persisted message; the
 #: budget and the checkpoint thread are server bookkeeping and a resume handle.
 _PRIVATE_PAUSE_FIELDS = frozenset(
-    {"validated_content", "budget", "thread_id", "type", "active_agent_id"}
+    {
+        "validated_content",
+        "budget",
+        "thread_id",
+        "type",
+        "active_agent_id",
+        "web_sources",
+        "rich_items",
+        "web_grounding_warnings",
+    }
 )
 
 
@@ -72,6 +81,12 @@ def legacy_event_from_v3(event: V3StreamEvent) -> dict[str, Any] | None:
             "type": "rich_items",
             "operation": event.data.get("operation", "upsert"),
             "items": list(event.data.get("items") or []),
+        }
+    if event.type == "sources":
+        return {
+            "type": "sources",
+            "operation": event.data.get("operation", "upsert"),
+            "sources": list(event.data.get("sources") or []),
         }
     if event.type == "image_preview":
         # Second-defense inline budget at serialization time (FR-IMG-007): an

@@ -244,6 +244,7 @@ class GraphState(TypedDict):
     # service later writes to the ``messages`` table.
     user_message_id: NotRequired[str | None]
     assistant_message_id: NotRequired[str | None]
+    carried_web_sources: NotRequired[list[dict[str, Any]] | None]
 
 
 class GraphStateView:

@@ -90,12 +90,6 @@
     "disposition": "workflow_stream"
   },
   {
-    "file": "app/ai/image_discovery_flow.py",
-    "function": "discover_images",
-    "call_chain": "brave_tool.ainvoke",
-    "disposition": "non_provider_tool_dispatch"
-  },
-  {
     "file": "app/ai/image_generation/gemini.py",
     "function": "GeminiImageProvider.stream_generate",
     "call_chain": "self._client.aio.models.generate_content_stream",
@@ -186,9 +180,15 @@
     "disposition": "non_provider_tool_dispatch"
   },
   {
-    "file": "app/ai/web_tools.py",
-    "function": "_call_provider",
+    "file": "app/ai/web_research/providers.py",
+    "function": "_payload",
     "call_chain": "tool.ainvoke",
+    "disposition": "non_provider_tool_dispatch"
+  },
+  {
+    "file": "app/ai/web_research/service.py",
+    "function": "WebResearchSession._call_chain",
+    "call_chain": "invoke",
     "disposition": "non_provider_tool_dispatch"
   },
   {
@@ -215,13 +215,13 @@
   {
     "file": "app/ai/workflow/specialists.py",
     "function": "SpecialistFactory.invoke",
-    "call_chain": "agent.ainvoke",
+    "call_chain": "build.agent.ainvoke",
     "disposition": "workflow_stream"
   },
   {
     "file": "app/ai/workflow/specialists.py",
     "function": "SpecialistFactory.invoke_worker",
-    "call_chain": "agent.ainvoke",
+    "call_chain": "build.agent.ainvoke",
     "disposition": "workflow_stream"
   },
   {

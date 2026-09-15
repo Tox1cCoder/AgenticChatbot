@@ -20,8 +20,8 @@
 - No image token means no web image. There is no automatic image anchoring or provider-rank fallback.
 - A text-only answer model receives neither image bytes nor candidate-selection metadata.
 - Required-web answer text is not publicly streamed until terminal citation validation succeeds.
-- Interrupts suspend private prepared references for Continue; cancellation, failure, persistence failure, expiry, and ordinary unselection release them.
-- Worker-local IDs are remapped into parent IDs before Planning synthesis.
+- Interrupts release uncheckpointed prepared images. A resumed model must perform a new canonical search before it can select an image; source records may still be carried as text evidence.
+- Planning remaps worker source IDs but never forwards worker web-image markers or rich items. Parent image publication stays disabled until Planning has a parent-scoped multimodal evidence pass.
 - Public tool events exclude unselected image descriptors, private origins, bytes, and provider payloads.
 - Keep one session, one evidence middleware, and one grounding parser. Remove forwarding helpers and old active paths once callers migrate.
 - Preserve only a narrow read-only historical-message projection; legacy formats are never written by new turns.
@@ -158,7 +158,7 @@ Commit: `feat: add resilient web research service`
 - Modify: `tests/test_web_image_reference_model.py`
 
 **Interfaces:**
-- Produces: session-private `PreparedImage`, ordered `.finish(selected_ids)`, `.suspend()`, `.abort()`, and `.rehydrate()`.
+- Produces: session-private `PreparedImage`, ordered `.finish(selected_ids)`, `.abort()`, and bounded expiry cleanup for pending rows.
 - Produces repository transitions `amark_selected`, `arelease_many`, `aget_pending_for_user`, and `arelease_expired`.
 
 - [ ] **Step 1: Write failing byte, ordering, deduplication, and lifecycle tests**
@@ -173,9 +173,7 @@ async def test_finish_preserves_authored_order_and_releases_unselected():
 
 
 @pytest.mark.asyncio
-async def test_interrupt_suspends_but_cancellation_releases():
-    await session.suspend(expires_at=NOW + timedelta(hours=1))
-    assert await repository.aget_pending_for_user(reference_id, USER_ID)
+async def test_interrupt_releases_uncheckpointed_images():
     await session.abort()
     assert await repository.aget_pending_for_user(reference_id, USER_ID) is None
 ```
@@ -415,7 +413,7 @@ Commit: `feat: require grounded web answers`
 
 ---
 
-### Task 9: Continue recovery and Planning worker remapping
+### Task 9: Fail-closed Continue and Planning worker isolation
 
 **Files:**
 - Modify: `app/ai/workflow/continuation.py`
@@ -426,23 +424,28 @@ Commit: `feat: require grounded web answers`
 - Create: `tests/test_web_research_worker_remap.py`
 
 **Interfaces:**
-- Produces private `WebResearchSnapshot` and deterministic `import_worker_evidence()` mappings.
+- Carries canonical source records across Continue.
+- Remaps duplicate worker source IDs and strips worker web-image markers/items before Planning synthesis.
 
-- [ ] **Step 1: Write failing suspend/Continue and two-worker collision tests**
+- [ ] **Step 1: Write failing Continue and two-worker collision tests**
 
-Worker A and B both return local `S1/I1`; assert parent synthesis receives unique parent IDs and rewritten tokens. Interrupt then Continue must load cached validated bytes without contacting the upstream again.
+Worker A and B both return local `S1/I1`; assert parent sources receive unique IDs and worker image markers/items never reach synthesis or public metadata. A human-approval interrupt must release prepared references because their byte/ID state is intentionally not checkpointed. A validated budget pause persists its selected items and sources before advertising Continue.
 
 - [ ] **Step 2: Verify RED**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/test_web_research_continuation.py tests/test_web_research_worker_remap.py -q -p no:cacheprovider`
 
-- [ ] **Step 3: Carry only private authenticated snapshot state**
+- [ ] **Step 3: Carry only source evidence that is safe to checkpoint**
 
-Snapshot source records, candidate/reference IDs, budgets, and expiry into checkpoint context. Rehydrate rows through user/conversation-scoped repository reads. Do not serialize bytes or upstream URLs into public messages.
+Persist the paused epoch's validated source records and selected rich items with
+its partial assistant message, then carry only source records into the next
+epoch. Never serialize image bytes, upstream image URLs, or candidate mappings
+into graph state. A resumed answer can publish a new image only after a fresh
+canonical search offers pixels to that model call.
 
-- [ ] **Step 4: Import and rewrite worker evidence before synthesis**
+- [ ] **Step 4: Remap sources and isolate worker images before synthesis**
 
-Parent admission returns source/image mappings. Rewrite only valid grounding tokens outside code spans using the grounding parser's token scanner; do not string-replace arbitrary text.
+Allocate parent source IDs by stable URL order. Strip rich markers from worker synthesis text and release worker web-image references; do not aggregate worker web rich items into the parent outcome.
 
 - [ ] **Step 5: Verify GREEN and commit**
 
@@ -534,7 +537,7 @@ Labels are limited to operation, mode, provider fingerprint class, outcome, reas
 
 - [ ] **Step 4: Implement recorded-provider evaluation and rollout docs**
 
-The release gate covers two-candidate identity, no-token/no-image, text-only fallback, required-web stream suppression, Continue, worker remap, privacy, and cleanup. Live provider canaries remain opt-in and non-blocking.
+The deterministic scorer covers source/image membership, no-token/no-image, and stream/history parity. Real focused tests gate byte injection, text fallback, required-web suppression, fail-closed Continue, Planning isolation, privacy, concurrency, URL safety, and cleanup wiring. Live provider canaries remain opt-in and non-blocking.
 
 - [ ] **Step 5: Verify GREEN and commit**
 
@@ -579,7 +582,7 @@ Commit: `chore: verify production web research rollout`
 - Choosing `I2` publishes the protected bytes/digest for `I2`; choosing no ID publishes no image.
 - No current active path can auto-anchor or append an unselected web image.
 - Required-web raw answer text is never published without a valid source citation.
-- Continue and Planning preserve evidence without dangling references or ID collisions.
+- Continue preserves sources while releasing uncheckpointed images; Planning remaps sources and cannot relay worker web images.
 - Public tool events and metadata contain no unselected candidate, private origin, or bytes.
 - Current model-driven search-count behavior and general tool ceilings remain intact.
 - Old feature-owned execution code and trivial migration wrappers are removed.

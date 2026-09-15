@@ -152,21 +152,6 @@ class WebImageService:
             image_ids, user_id=user_id, conversation_id=conversation_id
         )
 
-    async def suspend_references(
-        self,
-        image_ids: list[UUID] | tuple[UUID, ...],
-        *,
-        user_id: UUID,
-        conversation_id: UUID,
-        expires_at: datetime,
-    ) -> int:
-        return await self.repository.asuspend_many(
-            image_ids,
-            user_id=user_id,
-            conversation_id=conversation_id,
-            expires_at=expires_at,
-        )
-
     async def fetch(self, record: Any) -> FetchedWebImage:
         cached = self._cached_image(record)
         if cached is not None:
@@ -188,7 +173,13 @@ class WebImageService:
                         duration_seconds=time.perf_counter() - started,
                     )
 
-    async def fetch_url(self, url: str, *, provider: str = "other") -> FetchedWebImage:
+    async def fetch_url(
+        self,
+        url: str,
+        *,
+        provider: str = "other",
+        max_bytes: int | None = None,
+    ) -> FetchedWebImage:
         """Fetch and validate an upstream image URL with no persisted record.
 
         Same guards as ``fetch``: HTTPS-only, public-address assertion, pinned
@@ -197,7 +188,9 @@ class WebImageService:
         started = time.perf_counter()
         outcome = "success"
         try:
-            return await self._fetch_url_with_redirects(url)
+            return await self._fetch_url_with_redirects(
+                url, max_bytes=min(self.max_bytes, max_bytes or self.max_bytes)
+            )
         except (WebImageRejected, WebImageUpstreamFailure) as exc:
             outcome = exc.reason
             raise
@@ -242,10 +235,13 @@ class WebImageService:
     async def _fetch_redirects(self, record: Any) -> FetchedWebImage:
         return await self._fetch_url_with_redirects(self._record_value(record, "upstream_url"))
 
-    async def _fetch_url_with_redirects(self, url: str) -> FetchedWebImage:
+    async def _fetch_url_with_redirects(
+        self, url: str, *, max_bytes: int | None = None
+    ) -> FetchedWebImage:
+        byte_limit = min(self.max_bytes, max_bytes or self.max_bytes)
         current_url = url
         for redirect_count in range(self.max_redirects + 1):
-            outcome = await self._fetch_once(current_url)
+            outcome = await self._fetch_once(current_url, max_bytes=byte_limit)
             if isinstance(outcome, FetchedWebImage):
                 return outcome
             if redirect_count >= self.max_redirects:
@@ -253,7 +249,7 @@ class WebImageService:
             current_url = urljoin(current_url, outcome)
         raise WebImageRejected("redirect_limit")
 
-    async def _fetch_once(self, url: str) -> FetchedWebImage | str:
+    async def _fetch_once(self, url: str, *, max_bytes: int) -> FetchedWebImage | str:
         hostname = self._https_hostname(url)
         verified_ip = await self._resolve_public_ip(hostname)
         transport = self.transport_factory(verified_ip)
@@ -287,8 +283,8 @@ class WebImageService:
                     return location
                 if not 200 <= response.status_code < 300:
                     raise WebImageUpstreamFailure("status")
-                media_type = self._validated_media_type(response)
-                content = await self._read_bounded(response)
+                media_type = self._validated_media_type(response, max_bytes=max_bytes)
+                content = await self._read_bounded(response, max_bytes=max_bytes)
         except (WebImageRejected, WebImageUpstreamFailure):
             raise
         except httpx.TimeoutException as exc:
@@ -342,25 +338,30 @@ class WebImageService:
             raise WebImageRejected("url")
         return parsed.hostname
 
-    def _validated_media_type(self, response: httpx.Response) -> str:
+    def _validated_media_type(
+        self, response: httpx.Response, *, max_bytes: int | None = None
+    ) -> str:
         media_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if media_type not in ALLOWED_WEB_IMAGE_MIME_TYPES:
             raise WebImageRejected("mime")
         content_length = response.headers.get("Content-Length")
         if content_length:
             try:
-                if int(content_length) > self.max_bytes:
+                if int(content_length) > (max_bytes or self.max_bytes):
                     raise WebImageRejected("size")
             except ValueError:
                 pass
         return media_type
 
-    async def _read_bounded(self, response: httpx.Response) -> bytes:
+    async def _read_bounded(
+        self, response: httpx.Response, *, max_bytes: int | None = None
+    ) -> bytes:
+        byte_limit = max_bytes or self.max_bytes
         chunks: list[bytes] = []
         total = 0
         async for chunk in response.aiter_bytes():
             total += len(chunk)
-            if total > self.max_bytes:
+            if total > byte_limit:
                 raise WebImageRejected("size")
             chunks.append(chunk)
         if not chunks:

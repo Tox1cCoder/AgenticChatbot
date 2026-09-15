@@ -114,18 +114,38 @@ def test_a_prior_epochs_query_is_still_refused():
     assert restored.reserve_search("an entirely different subject") is None
 
 
-def test_the_refusal_payload_no_longer_claims_a_spent_budget():
-    from app.ai.web_tools import _duplicate_query_payload
+@pytest.mark.asyncio
+async def test_the_refusal_payload_no_longer_claims_a_spent_budget():
+    from app.ai.tool_context import tool_execution_context
+    from app.ai.web_research.contracts import ResearchScope
+    from app.ai.web_research.providers import ProviderResolver, TavilyTextSearchProvider
+    from app.ai.web_research.service import WebResearchService
+    from app.ai.web_tools import create_web_search_tool
+
+    class _Fake:
+        async def ainvoke(self, args: dict) -> str:
+            return json.dumps({"results": []})
 
     budget = _budget()
-    budget.reserve_search("alpha")
-    budget.record_search("alpha", "R")
+    session = WebResearchService().new_session(
+        ResearchScope(
+            conversation_id="99999999-9999-9999-9999-999999999999",
+            user_id="11111111-1111-1111-1111-111111111111",
+            logical_turn_id="turn",
+        ),
+        budget,
+        mode="quick",
+        resolver=ProviderResolver(text=(TavilyTextSearchProvider(_Fake()),)),
+    )
+    tool = create_web_search_tool()
+    with tool_execution_context(web_research_session=session):
+        await tool.ainvoke({"query": "alpha", "objective": "find alpha"})
+        payload = json.loads(
+            await tool.ainvoke({"query": "alpha", "objective": "find alpha again"})
+        )
 
-    payload = json.loads(_duplicate_query_payload(budget))
-
-    assert payload["error_type"] == "duplicate_query"
+    assert payload["failures"][0]["code"] == "duplicate_query"
     assert "search_limit" not in payload
-    assert "budget" not in payload["hint"].lower()
     assert payload["searches_used"] == 1
 
 
@@ -133,10 +153,11 @@ def test_the_refusal_payload_no_longer_claims_a_spent_budget():
 async def test_a_successful_search_reports_the_running_count_for_pacing():
     """The only number the model gets, and the one the prompt tells it to watch."""
     import asyncio
-    from datetime import datetime, timezone
 
-    from app.ai.research_budget import reset_research_budget
-    from app.ai.tool_context import clear_tool_context, tool_execution_context
+    from app.ai.tool_context import tool_execution_context
+    from app.ai.web_research.contracts import ResearchScope
+    from app.ai.web_research.providers import ProviderResolver, TavilyTextSearchProvider
+    from app.ai.web_research.service import WebResearchService
     from app.ai.web_tools import create_web_search_tool
 
     conversation = "99999999-9999-9999-9999-999999999999"
@@ -147,26 +168,26 @@ async def test_a_successful_search_reports_the_running_count_for_pacing():
         async def ainvoke(self, args: dict) -> str:
             return json.dumps({"results": [], "total_results": 0, "answer": ""})
 
-    clear_tool_context()
-    reset_research_budget(conversation_id=conversation)
-    tool = create_web_search_tool(
-        tavily_tool=_Fake(), clock=lambda: datetime(2026, 9, 15, tzinfo=timezone.utc)
+    session = WebResearchService().new_session(
+        ResearchScope(
+            conversation_id=conversation,
+            user_id="11111111-1111-1111-1111-111111111111",
+            logical_turn_id="turn",
+        ),
+        _budget(),
+        mode="quick",
+        resolver=ProviderResolver(text=(TavilyTextSearchProvider(_Fake()),)),
     )
-    try:
-        with tool_execution_context(
-            conversation_id=conversation, user_id="u1", agent_key="search"
-        ):
-            first = json.loads(
-                await tool.ainvoke({"query": "first subject", "objective": "find a fact"})
+    tool = create_web_search_tool()
+    with tool_execution_context(web_research_session=session):
+        first = json.loads(
+            await tool.ainvoke({"query": "first subject", "objective": "find a fact"})
+        )
+        second = json.loads(
+            await tool.ainvoke(
+                {"query": "a wholly separate second subject", "objective": "find another"}
             )
-            second = json.loads(
-                await tool.ainvoke(
-                    {"query": "a wholly separate second subject", "objective": "find another"}
-                )
-            )
-    finally:
-        clear_tool_context()
-        reset_research_budget(conversation_id=conversation)
+        )
 
     assert first["searches_used"] == 1
     assert second["searches_used"] == 2

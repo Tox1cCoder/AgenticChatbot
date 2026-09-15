@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from collections import OrderedDict
 from collections.abc import Iterable, Sequence
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -31,6 +32,16 @@ def canonicalize_public_url(url: str) -> str | None:
         if parsed.username or parsed.password:
             return None
         host = parsed.hostname.encode("idna").decode("ascii").lower()
+        if host == "localhost" or host.endswith((".localhost", ".local")):
+            return None
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            if host.replace(".", "").isdigit():
+                return None
+        else:
+            if not address.is_global:
+                return None
         port = parsed.port
     except (UnicodeError, ValueError):
         return None

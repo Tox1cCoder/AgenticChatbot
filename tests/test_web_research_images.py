@@ -15,7 +15,7 @@ from app.ai.web_research.contracts import (
 )
 from app.ai.web_research.providers import ProviderResolver
 from app.ai.web_research.service import WebResearchService
-from app.services.web_image_service import FetchedWebImage
+from app.services.web_image_service import FetchedWebImage, WebImageRejected
 
 
 class TextProvider:
@@ -60,10 +60,12 @@ class ImageService:
         self.records: dict[object, SimpleNamespace] = {}
         self.selected: list[object] = []
         self.released: list[object] = []
-        self.suspended: list[object] = []
 
-    async def fetch_url(self, url: str, *, provider: str):
-        return self.fetched[url]
+    async def fetch_url(self, url: str, *, provider: str, max_bytes: int | None = None):
+        image = self.fetched[url]
+        if max_bytes is not None and len(image.content) > max_bytes:
+            raise WebImageRejected("size")
+        return image
 
     async def register(self, **kwargs):
         record = SimpleNamespace(id=uuid4(), **kwargs)
@@ -75,9 +77,6 @@ class ImageService:
 
     async def release_references(self, ids, **_scope):
         self.released.extend(ids)
-
-    async def suspend_references(self, ids, **_scope):
-        self.suspended.extend(ids)
 
 
 def _image(content: bytes) -> FetchedWebImage:
@@ -92,13 +91,18 @@ def _scope() -> ResearchScope:
     )
 
 
-async def _session(contents: tuple[bytes, ...], *, max_model_bytes: int = 100_000):
+async def _session(
+    contents: tuple[bytes, ...],
+    *,
+    max_model_bytes: int = 100_000,
+    max_download_bytes: int = 100_000,
+):
     urls = tuple(f"https://images.test/{index}.png" for index in range(len(contents)))
     image_service = ImageService(dict(zip(urls, map(_image, contents), strict=True)))
     service = WebResearchService(
         resolver=ProviderResolver(text=(TextProvider(),), images=(ImageProvider(urls),)),
         image_service=image_service,
-        max_download_bytes=100_000,
+        max_download_bytes=max_download_bytes,
         max_model_bytes=max_model_bytes,
         now=lambda: datetime(2026, 9, 15, tzinfo=timezone.utc),
     )
@@ -132,10 +136,7 @@ async def test_finish_preserves_authored_order_and_releases_unselected() -> None
     result = await session.finish(("I2", "I1", "I2"))
 
     assert result.selected_candidate_ids == ("I2", "I1")
-    assert service.selected == [
-        session.prepared_images["I2"].reference_id,
-        session.prepared_images["I1"].reference_id,
-    ]
+    assert service.selected == []
     assert service.released == [session.prepared_images["I3"].reference_id]
 
 
@@ -156,12 +157,21 @@ async def test_aggregate_model_byte_limit_rejects_later_candidates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_interrupt_suspends_but_later_abort_releases() -> None:
+async def test_aggregate_download_limit_bounds_accepted_bytes() -> None:
+    session, bundle, _service = await _session(
+        (b"1234",) * 8,
+        max_download_bytes=10,
+    )
+
+    assert session._downloaded_image_bytes <= 10
+    assert sum(image.byte_size for image in bundle.images) <= 10
+
+
+@pytest.mark.asyncio
+async def test_abort_releases_all_pending_references() -> None:
     session, _bundle, service = await _session((b"one", b"two"))
     reference_ids = [prepared.reference_id for prepared in session.prepared_images.values()]
 
-    await session.suspend()
     await session.abort()
 
-    assert service.suspended == reference_ids
     assert service.released == reference_ids

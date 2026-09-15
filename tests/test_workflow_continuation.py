@@ -100,9 +100,7 @@ def test_the_partial_answer_itself_is_not_carried():
 
     carried = carry_messages(produced)
 
-    assert not any(
-        getattr(message, "content", None) == "partial answer" for message in carried
-    )
+    assert not any(getattr(message, "content", None) == "partial answer" for message in carried)
 
 
 def test_a_human_message_is_never_carried():
@@ -233,16 +231,22 @@ def test_the_pause_payload_is_distinguishable_from_a_tool_approval():
 
 
 def test_a_resume_says_which_way_the_user_decided():
-    assert ContinuationResume(
-        action="continue",
-        continuation_id="22222222-2222-2222-2222-222222222222",
-        expected_epoch=0,
-    ).action == "continue"
-    assert ContinuationResume(
-        action="stop",
-        continuation_id="22222222-2222-2222-2222-222222222222",
-        expected_epoch=0,
-    ).action == "stop"
+    assert (
+        ContinuationResume(
+            action="continue",
+            continuation_id="22222222-2222-2222-2222-222222222222",
+            expected_epoch=0,
+        ).action
+        == "continue"
+    )
+    assert (
+        ContinuationResume(
+            action="stop",
+            continuation_id="22222222-2222-2222-2222-222222222222",
+            expected_epoch=0,
+        ).action
+        == "stop"
+    )
 
 
 # ----------------------------------------------------------------------
@@ -408,7 +412,9 @@ async def test_stopping_finalizes_without_re_appending_the_answer():
 
 
 async def test_the_payload_offered_to_the_client_describes_this_pause():
+    from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
     from app.ai.workflow.continuation import make_continuation_pause_node
+    from app.ai.workflow.contracts import OutcomeProvenance, ResponseOutcome
 
     seen: list = []
 
@@ -417,11 +423,40 @@ async def test_the_payload_offered_to_the_client_describes_this_pause():
         return {"action": "stop", "expected_epoch": 0}
 
     node = make_continuation_pause_node(interrupt_fn=interrupt_fn)
-    await node(_paused_state())
+    state = _paused_state()
+    state["agent_outcome"] = ResponseOutcome(
+        agent_id="chat_agent",
+        response=AgentResponse(
+            agent_type=AgentType.CHAT,
+            agent_id="chat_agent",
+            message=AgentMessage(
+                role=MessageRole.ASSISTANT,
+                content="partial answer\n\n<!--rich:image:web:i1-->",
+            ),
+            metadata={"web_grounding_warnings": [{"code": "unknown_image_id", "id": "I9"}]},
+        ),
+        provenance=OutcomeProvenance(
+            output_policy_ids=("public_content", "web_evidence"),
+            web_sources=(
+                {"source_id": "S1", "url": "https://example.com/report", "title": "Report"},
+            ),
+            rich_items=(
+                {
+                    "id": "image:web:i1",
+                    "type": "image",
+                    "payload": {"url": "/web-images/11111111-1111-1111-1111-111111111111"},
+                },
+            ),
+        ),
+    )
+    await node(state)
 
     assert seen[0]["type"] == "execution_budget_exhausted"
-    assert seen[0]["validated_content"] == "partial answer"
+    assert seen[0]["validated_content"].startswith("partial answer")
     assert seen[0]["active_agent_id"] == "chat_agent"
+    assert seen[0]["web_sources"][0]["source_id"] == "S1"
+    assert seen[0]["rich_items"][0]["id"] == "image:web:i1"
+    assert seen[0]["web_grounding_warnings"][0]["code"] == "unknown_image_id"
 
 
 async def test_a_resume_for_the_wrong_epoch_does_not_run_the_specialist():

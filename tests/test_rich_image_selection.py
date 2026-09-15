@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import replace
 from typing import Any
 
@@ -578,23 +577,3 @@ def test_a_resize_url_with_unknown_dimensions_is_still_selected():
     }
 
     assert len(select_rich_item_candidates([candidate], policy=_policy())) == 1
-
-
-def test_tavily_results_produce_no_image_candidates():
-    from app.ai.tool_execution import build_image_candidates_from_tool_result
-
-    payload = json.dumps(
-        {
-            "images": [
-                {"url": "https://cdn.example/a.jpg", "description": "Moi", "provider": "tavily"}
-            ],
-            "results": [],
-        }
-    )
-
-    assert (
-        build_image_candidates_from_tool_result(
-            payload, tool_call_id="call-1", tool_name="tavily_search"
-        )
-        == []
-    )

@@ -25,6 +25,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.ai.reasoning_controls import validate_reasoning_effort
+from app.ai.web_research.policy import enforce_web_requirement
 from app.ai.workflow.contracts import (
     RoutingDecision,
     WorkflowError,
@@ -561,6 +562,10 @@ How to choose:
 - `confidence` is a self-report used only for telemetry. Report it honestly; it
   does not change how your choice is used.
 - `reason` is a short, factual justification of the capability match.
+- Set `requires_web=true` when the user explicitly asks to browse/search/look
+  something up, or when the answer depends on current or changeable facts.
+  Use `research_mode=quick` for a focused lookup and `agentic` for multi-part
+  research. Otherwise use `requires_web=false` and `research_mode=none`.
 
 Return only the structured decision. Never invent an agent_id."""
 
@@ -779,6 +784,7 @@ class RoutingService:
                     self._record_schema_invalid()
                 continue
 
+            decision = enforce_web_requirement(decision, context.message)
             latency_ms = (time.monotonic() - started) * 1000.0
             self._record_success(
                 decision=decision,

@@ -56,6 +56,12 @@ class ContinuationPausePayload(BaseModel):
     active_agent_id: str
     validated_content: str
     budget: dict[str, Any] = Field(default_factory=dict)
+    # Server-owned evidence selected by the validated epoch. These fields are
+    # persisted with the partial answer before Continue is advertised; they
+    # are not prompt state for the next epoch.
+    web_sources: list[dict[str, Any]] = Field(default_factory=list)
+    rich_items: list[dict[str, Any]] = Field(default_factory=list)
+    web_grounding_warnings: list[dict[str, Any]] = Field(default_factory=list)
     #: A mutating tool call in this epoch ended with an effect nobody can
     #: decide. The partial answer is still shown, but Continue must be refused
     #: until it is reconciled: resuming could perform the side effect twice.
@@ -174,6 +180,8 @@ def make_continuation_pause_node(*, interrupt_fn: Any = None) -> Any:
         from app.ai.workflow.specialists import resolve_node_for_agent_id
 
         outcome = state.get("agent_outcome")
+        provenance = getattr(outcome, "provenance", None)
+        response_metadata = getattr(getattr(outcome, "response", None), "metadata", None)
         active_agent_id = state.get("active_agent_id")
         epoch = int(state.get("execution_epoch") or 0)
         payload = ContinuationPausePayload(
@@ -183,6 +191,13 @@ def make_continuation_pause_node(*, interrupt_fn: Any = None) -> Any:
             active_agent_id=str(active_agent_id or ""),
             validated_content=_validated_content(outcome),
             budget=dict(state.get("execution_budget") or {}),
+            web_sources=[dict(item) for item in getattr(provenance, "web_sources", ())],
+            rich_items=[dict(item) for item in getattr(provenance, "rich_items", ())],
+            web_grounding_warnings=(
+                list(response_metadata.get("web_grounding_warnings") or ())
+                if isinstance(response_metadata, dict)
+                else []
+            ),
             mutation_outcome_unknown=_mutation_outcome_unknown(outcome),
         )
 
@@ -213,6 +228,9 @@ def make_continuation_pause_node(*, interrupt_fn: Any = None) -> Any:
                 "execution_phase": "executing",
                 "carried_messages": carry_messages(
                     list(getattr(getattr(outcome, "provenance", None), "private_messages", ()))
+                ),
+                "carried_web_sources": list(
+                    getattr(getattr(outcome, "provenance", None), "web_sources", ())
                 ),
             },
             # Straight back to the agent the turn already chose. Routing again

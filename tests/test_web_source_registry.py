@@ -57,3 +57,13 @@ def test_canonicalizer_rejects_credentials_and_non_web_schemes() -> None:
     assert canonicalize_public_url("file:///etc/passwd") is None
     assert canonicalize_public_url("https://user:pass@example.com/x") is None
 
+
+def test_canonicalizer_rejects_non_public_hosts() -> None:
+    for url in (
+        "https://localhost/admin",
+        "https://127.0.0.1/admin",
+        "https://169.254.169.254/latest/meta-data",
+        "https://10.0.0.1/private",
+        "https://[::1]/admin",
+    ):
+        assert canonicalize_public_url(url) is None

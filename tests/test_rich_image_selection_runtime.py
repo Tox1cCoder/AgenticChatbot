@@ -9,7 +9,6 @@ from app.ai.rag_tool_actions import register_document_image_candidates
 from app.ai.rich_image_selection import apply_rich_image_selection
 from app.ai.workflow.tool_loop import ToolLoopMixin
 from app.core.config import settings
-from app.core.rich_placement import _image_anchor_entries
 from app.observability.rich_images import rich_image_metrics
 
 
@@ -243,7 +242,7 @@ def test_document_registration_reuses_canonical_selector() -> None:
     assert len(context["rich_item_candidates"]) == settings.rich_auto_place_max_images
 
 
-def test_prompt_and_placement_preserve_canonical_image_order() -> None:
+def test_prompt_preserves_canonical_image_order() -> None:
     context: dict[str, Any] = {"rich_item_candidates": []}
     ToolLoopMixin._lift_rich_candidates(
         context,
@@ -259,14 +258,5 @@ def test_prompt_and_placement_preserve_canonical_image_order() -> None:
         enabled=True,
         capability=True,
     )
-    anchor_ids = [
-        entry.item_id
-        for entry in _image_anchor_entries(
-            {"_rich_item_candidates": context["rich_item_candidates"]},
-            image_max_items=settings.rich_auto_place_max_images,
-        )
-    ]
-
     assert selected_ids == ["image:search:0", "imagegroup:brave:0"]
     assert guidance.index(selected_ids[0]) < guidance.index(selected_ids[1])
-    assert anchor_ids == selected_ids

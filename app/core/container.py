@@ -2,6 +2,8 @@
 Dependency Injection Container.
 """
 
+from datetime import timedelta
+
 from dependency_injector import containers, providers
 from qdrant_client import QdrantClient
 
@@ -35,6 +37,7 @@ from app.observability.model_usage import model_usage_metrics as model_usage_met
 from app.observability.rag import rag_metrics as rag_metrics_singleton
 from app.observability.rich_images import rich_image_metrics as rich_image_metrics_singleton
 from app.observability.routing import get_routing_metrics_recorder
+from app.observability.web_research import web_research_metrics as web_research_metrics_singleton
 from app.repositories.agent_model_config import AgentModelConfigRepository
 from app.repositories.chat_image import ChatImageRepository
 from app.repositories.conversation import ConversationRepository
@@ -460,6 +463,14 @@ class Container(containers.DeclarativeContainer):
     web_research_service = providers.Singleton(
         WebResearchService,
         image_service=web_image_service,
+        max_candidate_pool=providers.Object(settings.web_research_max_candidate_pool),
+        max_download_bytes=providers.Object(settings.web_research_max_download_bytes),
+        max_model_bytes=providers.Object(settings.web_research_max_model_image_bytes),
+        max_image_concurrency=providers.Object(settings.web_research_image_concurrency),
+        pending_image_ttl=providers.Object(
+            timedelta(seconds=settings.web_research_pending_image_ttl_seconds)
+        ),
+        metrics=providers.Object(web_research_metrics_singleton),
     )
 
     user_memory_repository = providers.Factory(

@@ -17,6 +17,7 @@ Task 5 of the cutover replaces those internals with per-invocation
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -124,6 +125,8 @@ def planning_worker_run_config(
             "subagent_agent": agent_id,
         },
     }
+
+
 StageRouter = Callable[[dict[str, Any]], Any]
 
 
@@ -631,7 +634,7 @@ class SpecialistFactory:
             )
         except GraphBubbleUp:
             if build.web_research_session is not None:
-                await build.web_research_session.suspend()
+                await build.web_research_session.abort()
             raise
         except (ModelCallLimitExceededError, ToolCallLimitExceededError) as exc:
             # The soft budget was supposed to reserve an answer one call
@@ -652,9 +655,7 @@ class SpecialistFactory:
         produced = self._produced_messages(request, result)
         grounding = None
         if build.web_research_session is not None:
-            grounding = GroundingParser(build.web_research_session).resolve(
-                _final_text(produced)
-            )
+            grounding = GroundingParser(build.web_research_session).resolve(_final_text(produced))
             produced = _replace_final_text(produced, grounding.text)
             await build.web_research_session.finish(grounding.selected_image_ids)
         if not _final_text(produced).strip():
@@ -715,7 +716,7 @@ class SpecialistFactory:
             )
         except GraphBubbleUp:
             if web_research_session is not None:
-                await web_research_session.suspend()
+                await web_research_session.abort()
             raise
         except (ModelCallLimitExceededError, ToolCallLimitExceededError) as exc:
             if web_research_session is not None:
@@ -744,8 +745,11 @@ class SpecialistFactory:
         if web_research_session is not None:
             resolution = GroundingParser(web_research_session).resolve(_final_text(produced))
             produced = _replace_final_text(produced, resolution.text)
-            await web_research_session.finish(resolution.selected_image_ids)
-            grounded_images = resolution.rich_items
+            # A worker's answer is private synthesis input. Its image markers
+            # must never become a parent selection the Planning model did not
+            # inspect, so release worker web images at this boundary.
+            await web_research_session.finish(())
+            grounded_images = ()
             grounded_sources = tuple(
                 source.model_dump(mode="json")
                 for source in web_research_session.source_registry.records
@@ -771,6 +775,13 @@ class SpecialistFactory:
     ) -> SpecialistBuild:
         system_prompt = await _resolve(definition.system_prompt_factory, request)
         tools = await _resolve(definition.tool_factory, request) or []
+        web_research_enabled = getattr(self._settings, "web_research_enabled", True)
+        if not web_research_enabled:
+            tools = [
+                tool
+                for tool in tools
+                if getattr(tool, "name", None) not in {"web_search", "web_open"}
+            ]
 
         worker_scope = _worker_tool_scope(request)
         if worker_scope is not None:
@@ -779,6 +790,7 @@ class SpecialistFactory:
         web_research_session = None
         if (
             self._web_research_service is not None
+            and web_research_enabled
             and definition.model_config_key in {"chat", "search"}
             and request.conversation_id
             and request.user_id
@@ -791,12 +803,34 @@ class SpecialistFactory:
             text_tool = provider_tools.get("tavily_search")
             image_tool = provider_tools.get("brave_image_search")
             open_tool = provider_tools.get("tavily_extract")
+            health_partition = hashlib.sha256(
+                f"{request.user_id}:{request.device_id or 'server'}".encode()
+            ).hexdigest()[:16]
             resolver = ProviderResolver(
-                text=(TavilyTextSearchProvider(text_tool),) if text_tool else (),
-                images=(BraveImageSearchProvider(image_tool),) if image_tool else (),
-                openers=(TavilyPageOpenProvider(open_tool),) if open_tool else (),
+                text=(TavilyTextSearchProvider(text_tool, health_key=f"tavily:{health_partition}"),)
+                if text_tool
+                else (),
+                images=(
+                    BraveImageSearchProvider(image_tool, health_key=f"brave:{health_partition}"),
+                )
+                if image_tool
+                else (),
+                openers=(
+                    TavilyPageOpenProvider(open_tool, health_key=f"tavily:{health_partition}"),
+                )
+                if open_tool
+                else (),
             )
             logical_turn_id = _extra_str(request, "turn_id") or request.conversation_id
+            routing_decision = request.state.get("routing_decision")
+            requested_mode = getattr(routing_decision, "research_mode", "none")
+            session_mode = (
+                requested_mode
+                if requested_mode in {"quick", "agentic"}
+                else "agentic"
+                if definition.model_config_key == "search"
+                else "quick"
+            )
             web_research_session = self._web_research_service.new_session(
                 ResearchScope(
                     conversation_id=request.conversation_id,
@@ -808,9 +842,20 @@ class SpecialistFactory:
                     logical_turn_id=logical_turn_id,
                     conversation_id=request.conversation_id,
                 ),
-                mode="agentic" if definition.model_config_key == "search" else "quick",
+                mode=session_mode,
                 resolver=resolver,
             )
+            carried_sources = request.state.get("carried_web_sources")
+            if isinstance(carried_sources, list):
+                from app.ai.web_research.contracts import SourceRecord
+
+                parsed_sources = []
+                for record in carried_sources:
+                    try:
+                        parsed_sources.append(SourceRecord.model_validate(record))
+                    except Exception:
+                        logger.warning("Ignored invalid carried web source")
+                web_research_session.source_registry.import_records(parsed_sources)
 
         scope = SpecialistToolScope(
             agent=definition.agent,
@@ -846,7 +891,14 @@ class SpecialistFactory:
             """
             if accountant.state.forced_synthesis:
                 return []
-            return await _resolve(definition.tool_factory, request) or []
+            live_tools = await _resolve(definition.tool_factory, request) or []
+            if not web_research_enabled:
+                live_tools = [
+                    tool
+                    for tool in live_tools
+                    if getattr(tool, "name", None) not in {"web_search", "web_open"}
+                ]
+            return live_tools
 
         tool_execution = ToolExecutionMiddleware(scope=scope, tool_factory=_live_tools)
 
@@ -1001,6 +1053,7 @@ class SpecialistFactory:
             )
             if web_sources:
                 metadata["web_sources"] = list(web_sources)
+                metadata["web_sources_version"] = 1
         if grounding is not None:
             rich_items = grounding.rich_items
             if rich_items:
@@ -1043,9 +1096,7 @@ def _outcome_budget(outcome: Any) -> dict[str, Any] | None:
     return dict(budget) if isinstance(budget, dict) and budget else None
 
 
-def _budget_accountant(
-    settings: Any, request: SpecialistRequest
-) -> ExecutionBudgetAccountant:
+def _budget_accountant(settings: Any, request: SpecialistRequest) -> ExecutionBudgetAccountant:
     """Build this invocation's accountant, resuming a carried epoch if there is one.
 
     A Continue may be served by a worker that never ran the previous epoch, so

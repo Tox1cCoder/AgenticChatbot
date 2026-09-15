@@ -86,6 +86,12 @@ class GroundingParser:
             return f"<!--rich:{prepared.rich_item['id']}-->"
 
         resolved = _SEGMENT.sub(replace, str(text or ""))
+        if image_ids and not source_ids:
+            for item in rich_items:
+                resolved = resolved.replace(f"<!--rich:{item['id']}-->", "")
+            warn("image_without_source", image_ids[0])
+            image_ids.clear()
+            rich_items.clear()
         return GroundingResolution(
             text=resolved,
             source_ids=tuple(source_ids),

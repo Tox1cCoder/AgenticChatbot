@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -353,6 +354,59 @@ async def test_the_persisted_partial_is_marked_partial_and_continuable():
     assert metadata["execution_budget"]["exhausted_by"] == "tool_calls"
 
 
+async def test_the_persisted_partial_keeps_grounded_sources_and_selected_images():
+    control = build_control_service()
+    service = _service(control)
+    web_images = SimpleNamespace(mark_selected=AsyncMock())
+    service.web_image_service = web_images
+    running = await service._amark_generation_running(await _started(control), user_id=USER_ID)
+    reference_id = uuid4()
+    event = _pause_event(content="Finding [1](https://example.com).\n\n<!--rich:image:web:i1-->")
+    event.data.update(
+        {
+            "web_sources": [{"source_id": "S1", "url": "https://example.com", "title": "Example"}],
+            "rich_items": [
+                {
+                    "id": "image:web:i1",
+                    "type": "image",
+                    "payload": {"url": f"/web-images/{reference_id}"},
+                }
+            ],
+            "web_grounding_warnings": [{"code": "unknown_image_id", "id": "I9"}],
+        }
+    )
+
+    await _publish_pause(service, control, running, event=event)
+
+    metadata = service.persisted[0].metadata
+    assert metadata["web_sources"][0]["source_id"] == "S1"
+    assert metadata["rich_items"][0]["payload"]["url"] == f"/web-images/{reference_id}"
+    assert metadata["web_grounding_warnings"][0]["code"] == "unknown_image_id"
+    web_images.mark_selected.assert_awaited_once_with(
+        [reference_id], user_id=USER_ID, conversation_id=CONVERSATION_ID
+    )
+
+
+async def test_a_failed_partial_persistence_does_not_mark_selected_web_images():
+    control = build_control_service()
+    service = _service(control, persist_fails=True)
+    web_images = SimpleNamespace(mark_selected=AsyncMock())
+    service.web_image_service = web_images
+    running = await service._amark_generation_running(await _started(control), user_id=USER_ID)
+    event = _pause_event()
+    event.data["rich_items"] = [
+        {
+            "id": "image:web:i1",
+            "type": "image",
+            "payload": {"url": f"/web-images/{uuid4()}"},
+        }
+    ]
+
+    await _publish_pause(service, control, running, event=event)
+
+    web_images.mark_selected.assert_not_awaited()
+
+
 async def test_the_offered_continuation_carries_a_redeemable_id():
     control = build_control_service()
     service = _service(control)
@@ -534,9 +588,7 @@ async def test_continue_restores_the_accounting_before_the_epoch_runs(_clean_res
     observed: dict[str, Any] = {}
 
     async def resume_generation_control_stream(**kwargs):
-        budget = get_research_budget(
-            logical_turn_id="turn-1", conversation_id=str(CONVERSATION_ID)
-        )
+        budget = get_research_budget(logical_turn_id="turn-1", conversation_id=str(CONVERSATION_ID))
         observed["repeat_refused"] = budget.reserve_search("population of vietnam") is not None
         observed["fresh_allowed"] = budget.reserve_search("a different question") is None
         yield make_event("complete", sequence=1, data={"response": None})

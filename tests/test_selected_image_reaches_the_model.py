@@ -32,8 +32,9 @@ class _ProviderTool:
 
 
 class _ImageService:
-    async def fetch_url(self, url: str, *, provider: str):
+    async def fetch_url(self, url: str, *, provider: str, max_bytes: int | None = None):
         content = b"red-pixels" if url.endswith("red.png") else b"blue-pixels"
+        assert max_bytes is None or len(content) <= max_bytes
         return FetchedWebImage(
             content=content,
             media_type="image/png",
@@ -83,7 +84,7 @@ class _TwoRoundModel(BaseChatModel):
                 ],
             )
         else:
-            result = AIMessage(content="The blue version is current [[image:I2]]")
+            result = AIMessage(content="The blue version is current [[source:S1]] [[image:I2]]")
         self.call_count += 1
         return ChatResult(generations=[ChatGeneration(message=result)])
 

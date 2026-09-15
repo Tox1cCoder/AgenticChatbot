@@ -2464,9 +2464,6 @@ class MultiAgentWorkflow(
         flushed before either — it may still be holding the tail of a marker it
         had not yet seen the end of, and dropping it would truncate the answer.
         """
-        for public_event in flush_answer_text(ctx):
-            yield public_event
-
         snapshot = None
         if self.checkpointer and thread_id:
             try:
@@ -2506,6 +2503,30 @@ class MultiAgentWorkflow(
         if response is None:
             yield make_event("error", sequence=0, data={"error": NO_RESPONSE_GENERATED})
             return
+
+        metadata = response.metadata if isinstance(response.metadata, dict) else {}
+        web_sources = metadata.get("web_sources")
+        if isinstance(web_sources, list) and web_sources:
+            yield make_event(
+                "sources",
+                sequence=0,
+                data={"operation": "upsert", "sources": web_sources},
+            )
+
+        if ctx.requires_web:
+            rich_items = metadata.get("_rich_item_candidates")
+            if isinstance(rich_items, list) and rich_items:
+                yield make_event(
+                    "rich_items",
+                    sequence=0,
+                    data={"operation": "upsert", "items": rich_items},
+                )
+            final_text = coerce_response_text(response.message.content)
+            if final_text:
+                yield make_event("message_delta", sequence=0, data={"text": final_text})
+        else:
+            for public_event in flush_answer_text(ctx):
+                yield public_event
 
         if not ctx.internal_content_only:
             apply_accumulated_thinking(response, ctx.accumulated_thinking)

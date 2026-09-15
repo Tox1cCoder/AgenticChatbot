@@ -80,8 +80,8 @@ _WIDGET_PINNED_SPECS = (
 _SEARCH_AGENT_PINNED_SPECS: tuple[str, ...] = ()
 
 #: Providers the product web tools own end to end. ``web_search``, ``web_open``
-#: and ``image_search`` carry the turn budget, the date anchoring, the bounds on
-#: what reaches context, and the deterministic provider-native image selection;
+#: carry the turn budget, date anchoring, evidence bounds, and validated image
+#: preparation;
 #: a model that can reach the raw tool bypasses all of them. Unqualified names on
 #: purpose — ``excluded_tool_names`` compares bare tool names, so a
 #: ``server::tool`` spec here would match nothing.

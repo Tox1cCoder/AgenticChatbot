@@ -202,19 +202,22 @@ choice.
 ### Continuation and worker identity
 
 Prepared image references have an explicit `pending`, `selected`, or `released`
-lifecycle. A normal completion resolves tokens, marks selected references, and
-releases the rest. Cancellation, hard failure, and persistence failure release
-all turn-owned references. A human-approval interrupt suspends pending
-references in private checkpoint state with an expiry; it does not release them.
-Continue rehydrates bytes through authenticated protected-reference IDs from
-that private state, never from public ToolMessage prose. An expiry sweeper
-releases abandoned pending rows.
+lifecycle. A normal completion resolves tokens and releases unselected
+references; selected references are marked only after their assistant message
+is durable. A validated budget partial follows the same persistence rule before
+Continue is advertised. Cancellation, hard failure, persistence failure, and a
+human-approval interrupt leave no published image; pending rows are released by
+the turn or the expiry sweeper. Image bytes and candidate mappings are
+deliberately not checkpointed; after Continue, a model must perform a fresh
+canonical search before it can select a new image. The previously persisted
+partial retains its own grounded sources and selected image references.
 
 Top-level sessions may use compact `S1`/`I1` tokens. Each Planning worker owns an
-isolated registry, but before parent synthesis the dispatcher imports worker
-records into the parent registry, assigns parent IDs, and rewrites worker tokens
-with that mapping. Original worker-local IDs are never merged directly, so two
-workers cannot collide on `S1` or `I1`.
+isolated registry. The parent remaps worker source records by stable URL order,
+but worker web-image markers and rich items are stripped and their references
+released before synthesis. Planning cannot publish a worker image until a
+future parent-scoped multimodal pass explicitly offers those bytes to the
+Planning model.
 
 ## Security and privacy
 
@@ -270,7 +273,14 @@ Latency is observed by mode, provider, operation, and outcome. Initial rollout e
 
 ## Observability
 
-Record metrics by mode and provider for:
+The rollout endpoint records low-cardinality operation counts by operation,
+mode, outcome, and visual intent. Existing rich-image, model, and routing
+telemetry supplies adjacent delivery and model-call signals. This is the
+minimum release baseline; do not manufacture high-cardinality labels merely to
+fill a dashboard.
+
+After measured production baselines exist, expand telemetry where operationally
+useful to cover:
 
 - request count, success, partial success, timeout, retry, fallback, and circuit-open outcomes;
 - provider and total research latency;
@@ -298,8 +308,8 @@ No human reviewer or runtime judge is required.
 - Selection restricted to image candidates actually shown to the model.
 - A two-candidate end-to-end specialist test in which selecting `I2` renders the protected bytes and digest for `I2`, never provider-rank `I1`.
 - A no-image-token end-to-end test proving that zero images are streamed, persisted, or appended and that every pending reference is released.
-- Interrupt/Continue rehydration and expiry cleanup for pending references.
-- Multi-worker source/image ID remapping before parent synthesis.
+- Fail-closed interrupt handling and expiry cleanup for pending references.
+- Multi-worker source remapping and web-image isolation before parent synthesis.
 - Required-web streaming tests proving unsupported raw answer deltas are never published.
 - Figure, comparison, multiple-entity, gallery, zero-valid-image, stalled-image-transport, and cancellation behavior.
 - Stream, persistence, history reload, Streamlit, and AI SDK source/image identity parity.
@@ -316,7 +326,13 @@ Evaluation varies capabilities instead of recognizing named example topics:
 - relevant, outdated, low-quality, duplicate, and misleading image candidates;
 - provider success, partial response, malformed response, timeout, and total failure.
 
-Synthetic provider recordings keep release checks deterministic. Metamorphic tests paraphrase prompts and change languages while asserting the same behavioral invariants. Production code and tests must not contain topic-specific routing or selection rules derived from reported examples.
+Synthetic provider recordings keep release checks deterministic. The small
+JSON scorer is a supplemental contract smoke check, not an end-to-end pipeline
+test; the focused pytest matrix is the release gate for provider normalization,
+byte injection, grounding, streaming, persistence, and cleanup. Metamorphic
+tests paraphrase prompts and change languages while asserting the same
+behavioral invariants. Production code and tests must not contain topic-specific
+routing or selection rules derived from reported examples.
 
 An optional scheduled multimodal judge scores general subject match, temporal suitability, and usefulness. It runs offline, adds no user-facing latency, and is a trend/regression signal rather than the sole release authority.
 

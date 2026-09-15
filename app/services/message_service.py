@@ -383,6 +383,19 @@ class MessageService(IMessageService):
         }
         if budget:
             metadata["execution_budget"] = budget
+        web_sources = payload.get("web_sources")
+        if isinstance(web_sources, list) and web_sources:
+            metadata["web_sources"] = [dict(item) for item in web_sources if isinstance(item, dict)]
+            metadata["web_sources_version"] = 1
+        rich_items = payload.get("rich_items")
+        if isinstance(rich_items, list) and rich_items:
+            metadata["rich_items"] = [dict(item) for item in rich_items if isinstance(item, dict)]
+            metadata["rich_items_version"] = 1
+        grounding_warnings = payload.get("web_grounding_warnings")
+        if isinstance(grounding_warnings, list) and grounding_warnings:
+            metadata["web_grounding_warnings"] = [
+                dict(item) for item in grounding_warnings if isinstance(item, dict)
+            ]
         if tool_artifacts:
             metadata["tool_artifacts"] = tool_artifacts
         self._attach_active_agent_metadata(
@@ -392,11 +405,22 @@ class MessageService(IMessageService):
         )
 
         try:
+            persisted_content, metadata = await self._externalize_remote_rich_images(
+                fix_markdown_code_blocks(content) if content else content,
+                metadata,
+                conversation_id,
+                user_id,
+            )
             bot_message = await self._acreate_bot_response_message(
                 conversation_id=conversation_id,
-                content=fix_markdown_code_blocks(content) if content else content,
+                content=persisted_content,
                 metadata=metadata,
                 message_id=bot_message_id,
+            )
+            await self._mark_persisted_web_images(
+                metadata,
+                conversation_id=conversation_id,
+                user_id=user_id,
             )
         except Exception:
             logging.exception("Could not persist the validated partial for a paused turn")
@@ -3034,14 +3058,30 @@ class MessageService(IMessageService):
             )
             return
 
+        bot_response_content = fix_markdown_code_blocks(
+            str(getattr(getattr(bot_response, "message", None), "content", "") or "")
+            or partial_text
+        )
+        bot_response_content = finalize_article_content(bot_response, bot_response_content)
+        metadata = build_bot_metadata(bot_response)
+        metadata.update(self._continuation_metadata(lease))
+        self._externalize_generated_images(metadata, conversation_id, user_id)
+        bot_response_content, metadata = await self._externalize_remote_rich_images(
+            bot_response_content,
+            metadata,
+            conversation_id,
+            user_id,
+        )
         bot_message = await self._acreate_bot_response_message(
             conversation_id=conversation_id,
-            content=fix_markdown_code_blocks(
-                str(getattr(getattr(bot_response, "message", None), "content", "") or "")
-                or partial_text
-            ),
-            metadata=self._continuation_metadata(lease, bot_response),
+            content=bot_response_content,
+            metadata=metadata,
             message_id=bot_message_id,
+        )
+        await self._mark_persisted_web_images(
+            metadata,
+            conversation_id=conversation_id,
+            user_id=user_id,
         )
         inflight.resolve(bot_message.model_dump(mode="json"))
         await self._amark_generation_completed(
@@ -3061,29 +3101,20 @@ class MessageService(IMessageService):
         )
 
     @staticmethod
-    def _continuation_metadata(lease: Any, bot_response: Any) -> dict[str, Any]:
+    def _continuation_metadata(lease: Any) -> dict[str, Any]:
         """Metadata for the assistant message a continued epoch produced.
 
         ``partial`` stays true across the whole chain. The answer was assembled
         over more than one epoch, and a reader that treats the last one as the
         whole answer would misattribute where the evidence came from.
         """
-        metadata: dict[str, Any] = {
+        return {
             "partial": True,
             "continued": True,
             "generation_id": str(lease.snapshot.generation_id),
             "logical_turn_id": lease.snapshot.logical_turn_id,
             "execution_epoch": lease.execution_epoch,
         }
-        response_metadata = getattr(bot_response, "metadata", None)
-        if isinstance(response_metadata, dict):
-            for key in ("images", "execution_budget"):
-                if response_metadata.get(key):
-                    metadata[key] = response_metadata[key]
-        artifacts = getattr(bot_response, "tool_artifacts", None)
-        if artifacts:
-            metadata["tool_artifacts"] = list(artifacts)
-        return metadata
 
     async def stop_message_generation(
         self,
@@ -3468,6 +3499,9 @@ class MessageService(IMessageService):
             content=bot_response_content,
             metadata=bot_metadata,
         )
+        await self._mark_persisted_web_images(
+            bot_metadata, conversation_id=conversation_id, user_id=user_id
+        )
 
         await self._compact_checkpoint_after_persist(
             conversation_id=conversation_id,
@@ -3594,6 +3628,37 @@ class MessageService(IMessageService):
         )
         self._record_final_image_selection(kept_items)
         return updated_content, updated
+
+    async def _mark_persisted_web_images(
+        self,
+        metadata: dict[str, Any],
+        *,
+        conversation_id: UUID,
+        user_id: UUID,
+    ) -> None:
+        service = getattr(self, "web_image_service", None)
+        if service is None:
+            return
+        reference_ids: list[UUID] = []
+        for item in metadata.get("rich_items") or ():
+            payload = item.get("payload") if isinstance(item, dict) else None
+            locators = payload.get("items") if isinstance(payload, dict) else None
+            if not isinstance(locators, list):
+                locators = [payload]
+            for locator in locators:
+                url = locator.get("url") if isinstance(locator, dict) else None
+                if not isinstance(url, str) or not url.startswith("/web-images/"):
+                    continue
+                try:
+                    reference_ids.append(UUID(url.removeprefix("/web-images/").split("?", 1)[0]))
+                except ValueError:
+                    continue
+        if reference_ids:
+            await service.mark_selected(
+                list(dict.fromkeys(reference_ids)),
+                user_id=user_id,
+                conversation_id=conversation_id,
+            )
 
     async def _externalize_group_cells(
         self,
@@ -4150,6 +4215,10 @@ class MessageService(IMessageService):
             metadata=bot_metadata,
             message_id=message_id,
         )
+        if user_id is not None:
+            await self._mark_persisted_web_images(
+                bot_metadata, conversation_id=conversation_id, user_id=user_id
+            )
 
         return bot_message
 

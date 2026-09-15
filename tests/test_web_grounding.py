@@ -51,6 +51,15 @@ def test_no_image_token_selects_no_image() -> None:
     assert resolution.rich_items == ()
 
 
+def test_image_without_a_grounded_source_is_not_selected() -> None:
+    resolution = GroundingParser(_session()).resolve("Uncited image [[image:I2]].")
+
+    assert resolution.selected_image_ids == ()
+    assert resolution.rich_items == ()
+    assert "rich:image" not in resolution.text
+    assert resolution.warnings[-1]["code"] == "image_without_source"
+
+
 def test_unknown_and_malformed_tokens_are_removed_with_bounded_warnings() -> None:
     resolution = GroundingParser(_session()).resolve(
         "A [[source:S99]] B [[image:I99]] C [[image: I1]]."
@@ -69,7 +78,7 @@ def test_tokens_inside_inline_fenced_and_indented_code_are_not_interpreted() -> 
         "`[[image:I1]]`\n\n"
         "```text\n[[source:S1]]\n```\n\n"
         "    [[image:I2]]\n\n"
-        "Use [[image:I3]]."
+        "Use [[source:S2]] [[image:I3]]."
     )
     resolution = GroundingParser(_session()).resolve(text)
 

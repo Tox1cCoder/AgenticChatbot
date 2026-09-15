@@ -1,11 +1,4 @@
-"""Deterministic article-style placement of unreferenced rich items.
-
-Inserts ``<!--rich:<id>-->`` markers into the final assistant markdown for
-relevant rich items the model did not place itself, so answers read like an
-article with inline media instead of silently dropping images. Placement is
-keyword-overlap based and runs once at persistence time — no extra model
-calls and no prompt-context cost.
-"""
+"""Deterministic article-style placement of unreferenced non-image rich items."""
 
 from __future__ import annotations
 
@@ -18,12 +11,10 @@ from .config import settings
 from .response_constants import extract_live_widgets_from_artifacts
 from .rich_response import (
     _ITEM_ID_PATTERN,  # noqa: PLC2701  # deliberate same-package reuse: inserter must mirror parser id rules
-    GENERIC_IMAGE_ALT_TEXT,
     RICH_ITEM_ID_MAX_LENGTH,
     RichItemType,
     _strip_fenced_code_blocks,  # noqa: PLC2701  # deliberate same-package reuse of CommonMark fence semantics
     parse_inline_rich_references,
-    provenance_provider,
     remove_inline_rich_reference,
     strip_malformed_rich_markers,
 )
@@ -167,9 +158,8 @@ def auto_place_rich_items(
     ``(new_content, placed_ids)``; content is returned unchanged when nothing
     places.
 
-    Image items never travel through here: they are anchored on the model's own
-    image query by ``anchor_image_items_by_query``, which owns the per-answer
-    image cap and the fallback-anchor rules.
+    Image items never travel through here. Web images are rendered only when
+    the answer model selects a validated candidate with ``[[image:I#]]``.
     """
     if not content or not items:
         return content, []
@@ -198,115 +188,6 @@ def auto_place_rich_items(
     if not placed:
         return content, []
     return _apply_insertions(lines, insertions), placed
-
-
-#: Origins allowed to anchor without clearing ``min_score``.
-#:
-#: ``tool_image`` is unconditional. A chart or rendered diagram carries no query
-#: at all, so it scores zero against every block by construction, and the tool
-#: call itself is the intent to display.
-#:
-#: ``image_search`` must show some evidence — at least one shared token with
-#: some block. Running the search is an intent to display, but an image whose
-#: subject appears nowhere in the finished answer is not about that answer, and
-#: anchoring it under the first paragraph regardless is how an unrelated picture
-#: ends up beside unrelated text. Full ``min_score`` is deliberately not the bar
-#: here: an answer that paraphrases its subject still deserves its picture.
-_UNCONDITIONAL_FALLBACK_ORIGINS = frozenset({"tool_image"})
-_EVIDENCE_FALLBACK_ORIGINS = frozenset({"image_search"})
-
-
-def _may_fallback_anchor(origin: str, best_score: float) -> bool:
-    if origin in _UNCONDITIONAL_FALLBACK_ORIGINS:
-        return True
-    return origin in _EVIDENCE_FALLBACK_ORIGINS and best_score > 0.0
-
-
-#: Minimum post-stopword token count for a block to accept a fallback anchor, so
-#: the image never lands under a bare heading or a two-word line.
-_FALLBACK_MIN_BLOCK_TOKENS = 8
-
-
-@dataclass(frozen=True)
-class ImageAnchorEntry:
-    """One unreferenced image item eligible for query anchoring."""
-
-    item_id: str
-    query: str
-    origin: str
-    anchorable: bool = True
-
-
-def _first_fallback_block_line(blocks: list[_Block], insertions: dict[int, str]) -> int:
-    for block in blocks:
-        if block.end_line in insertions:
-            continue
-        if len(block.tokens) >= _FALLBACK_MIN_BLOCK_TOKENS:
-            return block.end_line
-    return -1
-
-
-def anchor_image_items_by_query(
-    content: str,
-    *,
-    entries: list[ImageAnchorEntry],
-    min_score: float,
-    max_images: int,
-) -> tuple[str, dict[str, str]]:
-    """Insert markers for unreferenced image items using their image query.
-
-    Returns ``(new_content, outcomes)`` where ``outcomes`` maps each entry id to
-    ``"marker"``, ``"query_anchored"``, ``"fallback_anchored"``, or
-    ``"unplaced"``. A model-authored marker always wins: its position is
-    authoritative and nothing is inserted for that item.
-    """
-    if not entries:
-        return content, {}
-    outcomes: dict[str, str] = {}
-    if not content:
-        return content, {entry.item_id: "unplaced" for entry in entries}
-
-    referenced = set(parse_inline_rich_references(content))
-    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
-    lines = normalized.split("\n")
-    blocks = [b for b in _segment_blocks(lines) if not b.is_code]
-
-    insertions: dict[int, str] = {}
-    placed = 0
-    for entry in entries:
-        if entry.item_id in referenced:
-            outcomes[entry.item_id] = "marker"
-            continue
-        if (
-            not entry.anchorable
-            or not blocks
-            or placed >= max_images
-            or len(entry.item_id) > RICH_ITEM_ID_MAX_LENGTH
-            or not _ITEM_ID_PATTERN.match(entry.item_id)
-        ):
-            outcomes[entry.item_id] = "unplaced"
-            continue
-
-        best_line, best = _find_best_block(_tokens(entry.query or ""), blocks, insertions)
-
-        if best_line >= 0 and best >= min_score:
-            outcome = "query_anchored"
-        elif _may_fallback_anchor(entry.origin, best):
-            best_line = _first_fallback_block_line(blocks, insertions)
-            outcome = "fallback_anchored" if best_line >= 0 else "unplaced"
-        else:
-            outcome = "unplaced"
-
-        if outcome == "unplaced":
-            outcomes[entry.item_id] = "unplaced"
-            continue
-        insertions[best_line] = f"<!--rich:{entry.item_id}-->"
-        outcomes[entry.item_id] = outcome
-        placed += 1
-
-    if not insertions:
-        return content, outcomes
-    return _apply_insertions(lines, insertions), outcomes
 
 
 def _repair_unprefixed_markers(content: str, known_ids: set[str]) -> str:
@@ -363,103 +244,6 @@ def _widget_placement_entries(
         text = str(widget.get("title") or "")
         entries.append((f"widget:{widget_id}", text))
     return entries
-
-
-def _descriptive_signal_text(candidate: dict[str, Any]) -> str:
-    """Join a candidate's genuine descriptive text: title, alt_text, description.
-
-    The generic alt-text fallback is excluded — it is not a real description,
-    and using it as a placement signal lets junk images (e.g. crawler/SEO
-    URLs) match a paragraph via tokens like "tool"/"result" and render
-    broken. Used by the ``tool_image`` fallback-anchor origin in
-    ``_image_anchor_entries`` to decide "this candidate carries no genuine
-    signal, never auto-place it."
-    """
-    payload = candidate.get("payload")
-    description = payload.get("description") if isinstance(payload, dict) else None
-    alt_text = candidate.get("alt_text")
-    if alt_text == GENERIC_IMAGE_ALT_TEXT:
-        alt_text = None
-    return " ".join(str(part) for part in (candidate.get("title"), alt_text, description) if part)
-
-
-def _image_anchor_entries(
-    metadata: dict[str, Any], *, image_max_items: int
-) -> list[ImageAnchorEntry]:
-    """Map turn-scoped image candidates to anchoring entries.
-
-    Origin decides fallback eligibility: a deliberate image search may anchor
-    without a keyword match; a tool-produced image anchors the same way when
-    it carries a genuine signal (an image-search query, or real descriptive
-    text — never the generic alt-text placeholder), because the tool call
-    itself implies display but a signal-less image is exactly the junk-image
-    failure this placement system exists to prevent; a source-bound
-    web-search image may not fall back; and a query-level image is never
-    anchored because it carries no page provenance.
-
-    Only the first ``image_max_items`` image candidates are considered, matching
-    the cap the model-facing inventory applies. Without that bound the two stages
-    read different sets and an image the model was never shown could be anchored
-    into the answer. Repeated ids are collapsed, because inserting one id twice
-    would place two markers and overwrite its own outcome.
-    """
-    image_types = {RichItemType.image.value, RichItemType.image_group.value}
-    entries: list[ImageAnchorEntry] = []
-    seen_ids: set[str] = set()
-    raw_presented_ids = metadata.get("_presented_rich_image_ids")
-    presented_ids = (
-        {str(item_id) for item_id in raw_presented_ids}
-        if isinstance(raw_presented_ids, list)
-        else None
-    )
-    for candidate in metadata.get("_rich_item_candidates") or []:
-        if not isinstance(candidate, dict) or candidate.get("type") not in image_types:
-            continue
-        item_id = candidate.get("id")
-        if not isinstance(item_id, str) or not item_id or item_id in seen_ids:
-            continue
-        if presented_ids is not None and item_id not in presented_ids:
-            continue
-        if len(entries) >= image_max_items:
-            break
-        seen_ids.add(item_id)
-        provenance = candidate.get("provenance")
-        provenance = provenance if isinstance(provenance, dict) else {}
-        query = str(provenance.get("query") or "").strip()
-        source = candidate.get("source")
-        if source == "image_search":
-            origin, anchorable = "image_search", True
-        elif source == "tool_image":
-            origin = "tool_image"
-            anchorable = bool(query) or bool(_descriptive_signal_text(candidate).strip())
-        elif provenance.get("query_level"):
-            origin, anchorable = "web_search_query_level", False
-        else:
-            origin, anchorable = "web_search_source_bound", bool(query)
-        entries.append(
-            ImageAnchorEntry(item_id=item_id, query=query, origin=origin, anchorable=anchorable)
-        )
-    return entries
-
-
-def _record_anchor_outcomes(metadata: dict[str, Any], outcomes: dict[str, str]) -> None:
-    """Record anchor outcomes. Never raises: telemetry must not fail an answer."""
-    if not outcomes:
-        return
-    try:
-        from app.observability.rich_images import rich_image_metrics
-
-        providers = {
-            candidate["id"]: provenance_provider(candidate)
-            for candidate in metadata.get("_rich_item_candidates") or []
-            if isinstance(candidate, dict) and isinstance(candidate.get("id"), str)
-        }
-        for item_id, outcome in outcomes.items():
-            rich_image_metrics.record_anchor(
-                provider=providers.get(item_id, "other"), outcome=outcome
-            )
-    except Exception:  # noqa: BLE001  # telemetry is best-effort by contract
-        return
 
 
 def finalize_article_content(response: Any, content: str) -> str:

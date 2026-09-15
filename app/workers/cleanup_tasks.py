@@ -128,6 +128,7 @@ def cleanup_abandoned_interrupts():
             "conversation_checkpoint_threads_deleted": 0,
         }
         redis_checkpoints_cleaned = 0
+        expired_web_images = 0
         try:
             from app.core.container import get_container
 
@@ -138,6 +139,7 @@ def cleanup_abandoned_interrupts():
             # a conversation needs its turn IDs; without them the per-turn
             # threads survive the conversation they belong to.
             message_repo = container.message_repository()
+            web_image_repo = container.web_image_reference_repository()
 
             # psycopg3 async requires a SelectorEventLoop; the default loop on
             # Windows is a ProactorEventLoop the checkpoint pool cannot use
@@ -157,6 +159,7 @@ def cleanup_abandoned_interrupts():
                         message_repo=message_repo,
                     )
                 )
+                expired_web_images = loop.run_until_complete(web_image_repo.arelease_expired(now))
             finally:
                 loop.close()
         except Exception as retention_exc:
@@ -190,6 +193,7 @@ def cleanup_abandoned_interrupts():
             "soft_deleted_conversations_inspected": (
                 retention_counts["soft_deleted_conversations_inspected"]
             ),
+            "expired_web_images": expired_web_images,
             "message": (
                 f"Cleanup completed: {db_expired_count} DB + {redis_expired_count} Redis "
                 f"expired, {checkpoint_cleaned_count} checkpoints cleaned, "

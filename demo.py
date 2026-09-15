@@ -8075,6 +8075,15 @@ def _render_rich_segments(
         )
 
 
+def _upsert_stream_sources(sources: Any) -> None:
+    if not isinstance(sources, list):
+        return
+    registry = st.session_state.setdefault("stream_web_sources", {})
+    for source in sources:
+        if isinstance(source, dict) and source.get("source_id"):
+            registry[str(source["source_id"])] = source
+
+
 class _StreamingRichResponseRenderer:
     """Incrementally render an active assistant body as ordered rich segments.
 
@@ -10288,6 +10297,10 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
                 stream_renderer.apply_rich_items_upsert(event.get("items") or [])
                 continue
 
+            if event_type == "sources":
+                _upsert_stream_sources(event.get("sources"))
+                continue
+
             if event_type == "image_preview":
                 image_preview_panel.apply(event)
                 _update_stream_status(status, label="Image ready — finishing response...")
@@ -10914,6 +10927,7 @@ def render_chat_view():
                     st.session_state.stream_partial_text = ""
                     st.session_state.stream_partial_thinking = ""
                     st.session_state.stream_selected_agent = None
+                    st.session_state.stream_web_sources = {}
                     # New turn → restart the multi-interrupt approval counter so
                     # tool numbering reflects this turn's sequence (Tool 1, 2, ...).
                     st.session_state.hitl_step_base = 0
@@ -10948,9 +10962,7 @@ def render_chat_view():
                             _apply_generation_event(event)
                             if event_type == "continuation_available":
                                 paused = True
-                                _update_stream_status(
-                                    status, label="Paused at the execution limit"
-                                )
+                                _update_stream_status(status, label="Paused at the execution limit")
 
                         elif event_type == "message_end":
                             # The persisted assistant row. On a finished epoch
@@ -11002,6 +11014,9 @@ def render_chat_view():
 
                         elif event_type == "rich_items":
                             stream_renderer.apply_rich_items_upsert(event.get("items") or [])
+
+                        elif event_type == "sources":
+                            _upsert_stream_sources(event.get("sources"))
 
                         elif event_type == "image_preview":
                             image_preview_panel.apply(event)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -182,3 +183,86 @@ async def test_open_resolves_source_ids_in_the_same_registry() -> None:
     assert bundle.sources[0].source_id == "S1"
     assert bundle.sources[0].status == "opened"
     assert bundle.sources[0].snippet == "Focused release evidence."
+
+
+@pytest.mark.asyncio
+async def test_parallel_search_calls_are_serialized_per_session() -> None:
+    class ConcurrentProvider:
+        name = "primary"
+        health_key = "primary:key"
+
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+
+        async def search(self, request, *, query_index: int):
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            await asyncio.sleep(0)
+            self.active -= 1
+            return (
+                ProviderSource(
+                    provider=self.name,
+                    url=f"https://docs.test/{query_index}",
+                    rank=1,
+                    query_index=query_index,
+                ),
+            )
+
+    provider = ConcurrentProvider()
+    session = WebResearchService(resolver=ProviderResolver(text=(provider,))).new_session(
+        SCOPE, ResearchBudget(), mode="quick"
+    )
+
+    first, second = await asyncio.gather(
+        session.search(REQUEST),
+        session.search(REQUEST.model_copy(update={"query": "security notes"})),
+    )
+
+    assert provider.max_active == 1
+    assert (first.operation_index, second.operation_index) == (1, 2)
+
+
+@pytest.mark.asyncio
+async def test_later_text_search_does_not_invalidate_visual_evidence() -> None:
+    text = SequenceTextProvider(
+        [
+            [ProviderSource(provider="primary", url="https://docs.test/a", rank=1, query_index=1)],
+            [ProviderSource(provider="primary", url="https://docs.test/b", rank=1, query_index=2)],
+        ]
+    )
+    service = WebResearchService(resolver=ProviderResolver(text=(text,)))
+    session = service.new_session(SCOPE, ResearchBudget(), mode="quick")
+
+    await session.search(
+        REQUEST.model_copy(update={"visual_intent": "figure", "image_query": "release"})
+    )
+    bundle = await session.search(
+        REQUEST.model_copy(update={"query": "security notes", "visual_intent": "none"})
+    )
+
+    assert bundle.visual_intent == "figure"
+
+
+@pytest.mark.asyncio
+async def test_open_rejects_private_urls_before_provider_call() -> None:
+    class Opener:
+        name = "extract"
+        health_key = "extract:key"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def open(self, urls, question, *, query_index: int):
+            self.calls += 1
+            return ()
+
+    opener = Opener()
+    session = WebResearchService(resolver=ProviderResolver(openers=(opener,))).new_session(
+        SCOPE, ResearchBudget(), mode="quick"
+    )
+
+    bundle = await session.open(["https://127.0.0.1/private"], "Inspect")
+
+    assert opener.calls == 0
+    assert bundle.failures[0].code == "invalid_source"

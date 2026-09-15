@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import math
@@ -14,18 +13,12 @@ from anyio import ClosedResourceError
 from langgraph.errors import GraphBubbleUp
 
 from ..core.config import settings
-from ..core.rich_image_selection import (
-    image_aspect_ratio_ok,
-    image_url_scheme,
-    is_junk_image_url,
-)
 from ..core.rich_response import (
     GENERIC_IMAGE_ALT_TEXT,
     RichDisplayPolicy,
     RichItemType,
     sanitize_public_image_fields,
 )
-from ..observability.rich_images import rich_image_metrics
 from .client_runtime_tools import (
     CLIENT_TOOL_PREFIX,
     get_active_client_runtime_session,
@@ -33,7 +26,6 @@ from .client_runtime_tools import (
     get_client_tool_device_id,
     is_client_tool,
 )
-from .selected_image_sink import selected_image_sink
 from .tool_error_policy import (
     ToolErrorKind,
     ToolErrorSummary,
@@ -48,7 +40,7 @@ from .tool_execution_policy import (
     resolve_tool_identity,
     tool_policy_context,
 )
-from .tool_result_rendering import normalize_tool_result_for_rendering, provider_result_text
+from .tool_result_rendering import normalize_tool_result_for_rendering
 from .tool_scope import is_client_only_scope
 from .tool_search_tool import create_tool_search_tool
 from .utils import make_json_safe, normalize_tool_call
@@ -61,14 +53,13 @@ logger = logging.getLogger(__name__)
 #: The product web tools reach Tavily and Brave in-process, so none of them can
 #: run against a device-only catalog. Named here rather than probed for, because
 #: a stale entry silently reopens server access from a client-only request.
-SERVER_ONLY_WEB_TOOL_NAMES = frozenset({"web_search", "web_open", "image_search"})
+SERVER_ONLY_WEB_TOOL_NAMES = frozenset({"web_search", "web_open"})
 
 # Tool names that may load additional tools dynamically
 TOOL_LOADING_TOOLS = {"tool_search"}
 _RETRY_COMPATIBILITY_ALLOWLIST = frozenset({("internal", "internal::tool_search")})
 _WIDGET_ARTIFACT_TOOLS = {"widget_create", "widget_update"}
 _WIDGET_SESSION_BOUND_TOOLS = {"widget_create", "session_list_widgets"}
-_TYPED_WEB_IMAGE_TOOLS = frozenset({"tavily_search", "brave_image_search"})
 
 # Render-type values that should never produce a public tool_render candidate.
 # Live-widget renders have a dedicated `widget:<id>` candidate; error/text/json
@@ -94,341 +85,11 @@ def _guess_mime_from_url(url: str) -> str:
     return "image/png"
 
 
-def _short_digest(value: str) -> str:
-    """Return a short stable digest, used only to keep ids distinct."""
-    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:8]
-
-
-def _canonical_source_tool_name(tool: Any, *, exposed_tool_name: str) -> str:
-    """Return the trusted source name even when the callable uses an alias."""
-
+def _source_tool_name(tool: Any, exposed_name: str) -> str:
     try:
-        return resolve_tool_identity(
-            tool,
-            exposed_tool_name=exposed_tool_name,
-        ).source_tool_name
+        return resolve_tool_identity(tool, exposed_tool_name=exposed_name).source_tool_name
     except (AmbiguousToolExecutionPolicyError, ToolExecutionPolicyValidationError):
-        metadata = getattr(tool, "metadata", None)
-        metadata = metadata if isinstance(metadata, dict) else {}
-        return str(
-            metadata.get("source_tool_name") or getattr(tool, "name", "") or exposed_tool_name
-        ).strip()
-
-
-def _public_tool_result(result: Any, *, private_image_result: bool) -> Any:
-    if not private_image_result:
-        return result
-    return sanitize_public_image_fields(make_json_safe(result))
-
-
-def build_image_candidates_from_tool_result(
-    result_text: str,
-    *,
-    tool_call_id: str | None,
-    tool_name: str,
-    group_images: bool = True,
-    apply_candidate_cap: bool = True,
-) -> list[dict[str, Any]]:
-    """Build typed rich-item image candidates from a tool result payload.
-
-    Each candidate is a public-shape dict (matching the discriminated
-    ``RichItem`` schema) with deterministic id, source, provenance, and
-    payload. The candidate dicts are safe to forward to
-    ``build_bot_metadata()`` as transient `_rich_item_candidates`.
-
-    A Brave result with 2+ unique eligible candidates collapses into a
-    single ``image_group`` item (see ``_group_image_candidates``) so the model
-    has one marker id to copy instead of choosing among several. Tavily
-    results and single-candidate Brave results are returned as individual
-    ``image`` items. Pass ``group_images=False`` when the caller needs every
-    candidate individually — e.g. provider-native discovery, which ranks each
-    image from provider metadata before any grouping happens.
-
-    ``apply_candidate_cap=False`` is for a caller that must inspect every
-    eligible result before applying its own outcome-specific cap, such as
-    confidence-tiered Brave discovery. The default protects all existing tool
-    result consumers with the configured candidate budget.
-    """
-    if not result_text:
-        return []
-
-    try:
-        parsed = json.loads(result_text)
-    except (json.JSONDecodeError, TypeError):
-        return []
-
-    if not isinstance(parsed, dict):
-        return []
-
-    images = parsed.get("images")
-    if not isinstance(images, list):
-        return []
-
-    result_provider = str(parsed.get("provider") or "").strip().lower()
-    metric_provider = (
-        "brave"
-        if result_provider.startswith("brave") or tool_name == "brave_image_search"
-        else "tavily"
-        if result_provider == "tavily" or tool_name == "tavily_search"
-        else "other"
-    )
-    with suppress(Exception):
-        rich_image_metrics.record_discovery(
-            provider=metric_provider,
-            result_count=len(images),
-        )
-
-    def _reject(reason: str) -> None:
-        # Telemetry is best-effort: a metrics fault must never drop a candidate
-        # decision or fail the surrounding tool result.
-        with suppress(Exception):
-            rich_image_metrics.record_candidate(provider=metric_provider, outcome=reason)
-
-    if metric_provider == "tavily":
-        # Page-scraped images cannot establish relevance from page metadata, and
-        # the search tool no longer returns them. Nothing to build.
-        return []
-
-    result_query = str(parsed.get("query") or "").strip()
-    candidates: list[dict[str, Any]] = []
-    seen_display_urls: set[str] = set()
-    candidate_cap = max(1, int(getattr(settings, "rich_image_candidate_max_count", 8)))
-    minimum_width = max(1, int(getattr(settings, "rich_image_min_width_px", 320)))
-    minimum_height = max(1, int(getattr(settings, "rich_image_min_height_px", 180)))
-
-    for index, image in enumerate(images):
-        if not isinstance(image, dict):
-            _reject("rejected_malformed")
-            continue
-        url = image.get("url")
-        data = image.get("data") or image.get("b64_data")
-        if not url and not data:
-            _reject("rejected_malformed")
-            continue
-        provider = str(image.get("provider") or "").strip().lower()
-        display_source_url = str(url or "").strip()
-        thumbnail_url = str(image.get("thumbnail_url") or "").strip()
-        is_brave = provider.startswith("brave") or tool_name == "brave_image_search"
-        display_url = thumbnail_url if is_brave and thumbnail_url else display_source_url
-        private_original_url = str(image.get("original_image_url") or "").strip()
-        if is_brave and private_original_url and display_url == private_original_url:
-            # The provider's direct origin is private input for digest/dedupe,
-            # never a browser/model-facing display URL. A result without a
-            # distinct proxy thumbnail therefore cannot become a rich item.
-            _reject("rejected_private_url")
-            continue
-        original_url = private_original_url or display_url
-        width = image.get("width")
-        height = image.get("height")
-        original_aspect_known = (
-            isinstance(width, int) and width > 0 and isinstance(height, int) and height > 0
-        )
-        aspect_width = width if original_aspect_known else image.get("thumbnail_width")
-        aspect_height = height if original_aspect_known else image.get("thumbnail_height")
-        if display_url:
-            if image_url_scheme(display_url) != "https":
-                _reject("rejected_scheme")
-                continue
-            if display_url in seen_display_urls:
-                _reject("rejected_duplicate")
-                continue
-            if is_junk_image_url(display_url):
-                _reject("rejected_junk_url")
-                continue
-            if not image_aspect_ratio_ok(
-                aspect_width,
-                aspect_height,
-                minimum=float(getattr(settings, "rich_image_min_aspect_ratio", 0.2)),
-                maximum=float(getattr(settings, "rich_image_max_aspect_ratio", 5.0)),
-            ):
-                _reject("rejected_aspect_ratio")
-                continue
-            if isinstance(width, int) and width < minimum_width:
-                _reject("rejected_dimensions")
-                continue
-            if isinstance(height, int) and height < minimum_height:
-                _reject("rejected_dimensions")
-                continue
-        payload: dict[str, Any] = {}
-        mime_type = image.get("mime_type") or image.get("mimeType")
-        if display_url:
-            payload["url"] = display_url
-            if not mime_type:
-                mime_type = _guess_mime_from_url(display_url)
-        elif data:
-            payload["data"] = str(data)
-            if not mime_type:
-                mime_type = "image/png"
-        payload["mime_type"] = str(mime_type)
-        source_url = image.get("source_url")
-        if source_url:
-            payload["source_url"] = str(source_url)
-        description = image.get("description")
-        if description:
-            payload["description"] = str(description)
-        if isinstance(width, int) and width > 0:
-            payload["width"] = width
-        if isinstance(height, int) and height > 0:
-            payload["height"] = height
-        candidate_id_base = tool_call_id or tool_name or "tool"
-        provenance: dict[str, Any] = {
-            "tool_call_id": tool_call_id,
-            "tool": tool_name,
-            "index": index,
-        }
-        # Provider-specific metadata (Brave thumbnails/dimensions/source domain)
-        # is not part of the narrow public ImagePayload schema, so it is kept in
-        # provenance rather than risking forbidden payload extras.
-        for meta_key in (
-            "thumbnail_url",
-            "source_domain",
-            "source_title",
-            "provider",
-            "result_rank",
-            "result_score",
-            "query_level",
-            "confidence",
-            "thumbnail_width",
-            "thumbnail_height",
-            # When the provider last crawled the hosting page — the only recency
-            # signal an image endpoint without a freshness filter gives us.
-            "page_fetched",
-        ):
-            meta_value = image.get(meta_key)
-            if meta_value is not None:
-                provenance[meta_key] = meta_value
-        if display_url and original_url:
-            provenance["original_image_digests"] = {
-                display_url: hashlib.sha256(original_url.encode("utf-8")).hexdigest()
-            }
-        if result_query:
-            provenance["query"] = result_query
-        candidates.append(
-            {
-                "id": f"image:tool:{candidate_id_base}:{index}",
-                "type": RichItemType.image.value,
-                "source": (
-                    "web_search"
-                    if tool_name == "tavily_search"
-                    else "image_search"
-                    if is_brave
-                    else "tool_image"
-                ),
-                "display_policy": RichDisplayPolicy.inline_only.value,
-                "alt_text": str(description or image.get("alt") or GENERIC_IMAGE_ALT_TEXT),
-                "title": image.get("title"),
-                "payload": payload,
-                "provenance": provenance,
-            }
-        )
-        if display_url:
-            seen_display_urls.add(display_url)
-        with suppress(Exception):
-            rich_image_metrics.record_candidate(provider=metric_provider, outcome="eligible")
-        if apply_candidate_cap and len(candidates) >= candidate_cap:
-            break
-    if group_images and metric_provider == "brave" and len(candidates) >= 2:
-        return [
-            _group_image_candidates(
-                candidates,
-                tool_call_id=tool_call_id,
-                query=result_query,
-                metric_provider=metric_provider,
-            )
-        ]
-    return candidates
-
-
-def _group_image_candidates(
-    candidates: list[dict[str, Any]],
-    *,
-    tool_call_id: str | None,
-    query: str,
-    metric_provider: str,
-    max_items: int | None = None,
-) -> dict[str, Any]:
-    """Collapse eligible image-search candidates into one image_group item.
-
-    ``provenance["provider"]`` prefers the raw per-image provider string so a
-    group spells its provider the same way a single image does — ``provenance``
-    is client-visible metadata, and two spellings of one provider is a trap for
-    anyone reading it. The per-image copy is conditional, so ``metric_provider``
-    (the caller's classified "brave"/"tavily"/"other" label) is the fallback that
-    keeps the field from ever being None. Both normalize identically for metrics.
-
-    ``max_items`` lets a caller override the legacy ``rich_image_group_max_items``
-    setting — e.g. a provider-native discovery gallery, whose cap is
-    ``rich_image_gallery_max_items`` and is deliberately allowed to exceed the
-    legacy grid's row ceiling.
-    """
-    legacy_cap = getattr(settings, "rich_image_group_max_items", 3)
-    cap = max(2, int(max_items if max_items is not None else legacy_cap))
-    selected: list[dict[str, Any]] = []
-    seen_locators: set[str] = set()
-    for candidate in candidates:
-        payload = candidate.get("payload") or {}
-        display_url = str(payload.get("url") or "").strip()
-        locators = {f"display::{display_url}"} if display_url else set()
-        provenance = candidate.get("provenance") or {}
-        digests = provenance.get("original_image_digests")
-        if display_url and isinstance(digests, dict):
-            digest = digests.get(display_url)
-            if digest:
-                locators.add(f"original::{digest}")
-        if seen_locators.intersection(locators):
-            continue
-        selected.append(candidate)
-        seen_locators.update(locators)
-        if len(selected) >= cap:
-            break
-    if len(selected) == 1:
-        return selected[0]
-    cells: list[dict[str, Any]] = []
-    for candidate in selected:
-        payload = candidate.get("payload") or {}
-        cell: dict[str, Any] = {
-            "url": payload.get("url"),
-            "mime_type": payload.get("mime_type") or "image/jpeg",
-        }
-        for key in ("source_url", "description", "width", "height"):
-            value = payload.get(key)
-            if value is not None:
-                cell[key] = value
-        cells.append(cell)
-    first_provenance = selected[0].get("provenance") or {}
-    original_image_digests: dict[str, str] = {}
-    for candidate in selected:
-        candidate_provenance = candidate.get("provenance") or {}
-        digests = candidate_provenance.get("original_image_digests")
-        if isinstance(digests, dict):
-            original_image_digests.update(
-                {
-                    str(display_url): str(digest)
-                    for display_url, digest in digests.items()
-                    if display_url and digest
-                }
-            )
-    # Without a tool_call_id, two groups in one turn would both land on the same
-    # literal id and collide. The query discriminates them; per-image ids get the
-    # same protection from their trailing index.
-    discriminator = tool_call_id or f"q{_short_digest(query)}"
-    group = {
-        "id": f"imagegroup:tool:{discriminator}",
-        "type": RichItemType.image_group.value,
-        "source": "image_search",
-        "display_policy": RichDisplayPolicy.inline_only.value,
-        "alt_text": f"Images of {query}" if query else GENERIC_IMAGE_ALT_TEXT,
-        "payload": {"items": cells},
-        "provenance": {
-            "tool_call_id": tool_call_id,
-            "tool": first_provenance.get("tool"),
-            "provider": first_provenance.get("provider") or metric_provider,
-            "query": query,
-        },
-    }
-    if original_image_digests:
-        group["provenance"]["original_image_digests"] = original_image_digests
-    return group
+        return exposed_name
 
 
 def _extract_image_content_blocks(result: Any) -> list[dict[str, Any]]:
@@ -617,26 +278,15 @@ def _attach_rich_candidates_to_artifact(
     *,
     raw_result: Any,
     result_text: str,
-    private_result_text: str | None = None,
     render: dict[str, Any] | None,
     tool_call_id: str | None,
     tool_name: str,
-    provider_tool_name: str | None = None,
-    selected_images: list[dict[str, Any]] | None = None,
 ) -> None:
     """Compute rich-item candidates for a tool result and attach them as
     ``artifact["_rich_item_candidates"]`` for the graph layer to lift into
     ``context["rich_item_candidates"]``.
     """
     candidates: list[dict[str, Any]] = []
-    image_tool_name = provider_tool_name or tool_name
-    candidates.extend(
-        build_image_candidates_from_tool_result(
-            private_result_text if private_result_text is not None else result_text,
-            tool_call_id=tool_call_id,
-            tool_name=image_tool_name,
-        )
-    )
     candidates.extend(
         build_image_candidates_from_tool_content(
             raw_result,
@@ -655,58 +305,8 @@ def _attach_rich_candidates_to_artifact(
     )
     if tool_render is not None:
         candidates.append(tool_render)
-    # Provider-selected remote images arrive out-of-band: they must never be
-    # serialized into the model-visible result.
-    for candidate in selected_images or []:
-        if isinstance(candidate, dict):
-            candidates.append(candidate)
     if candidates:
         artifact["_rich_item_candidates"] = candidates
-
-
-def extract_images_from_tool_result(
-    result_text: str,
-    *,
-    tool_call_id: str | None = None,
-    tool_name: str | None = None,
-) -> list[dict[str, str]]:
-    """Legacy URL/description extraction used by callers that only need the
-    ``tool_images`` shape. New callers should prefer
-    ``build_image_candidates_from_tool_result()`` to receive typed records.
-
-    The kwargs are optional so the existing call sites keep working; when
-    provided they are ignored here (candidate construction is the candidate
-    builder's responsibility).
-    """
-    if not result_text:
-        return []
-
-    try:
-        parsed = json.loads(result_text)
-    except (json.JSONDecodeError, TypeError):
-        return []
-
-    if not isinstance(parsed, dict):
-        return []
-
-    images = parsed.get("images")
-    if not isinstance(images, list):
-        return []
-
-    extracted: list[dict[str, str]] = []
-    for image in images:
-        if not isinstance(image, dict):
-            continue
-        url = image.get("url")
-        if not url:
-            continue
-        extracted.append(
-            {
-                "url": str(url),
-                "description": str(image.get("description") or ""),
-            }
-        )
-    return extracted
 
 
 def _resolve_offload_service():
@@ -2102,25 +1702,19 @@ async def execute_tool_calls(
             )
             continue
 
-        canonical_tool_name = _canonical_source_tool_name(
-            tool,
-            exposed_tool_name=tool_name,
-        )
-        private_image_result = canonical_tool_name == "brave_image_search"
-
+        canonical_tool_name = _source_tool_name(tool, tool_name)
         try:
-            with selected_image_sink() as offered_images:
-                (
-                    result,
-                    error_detail,
-                    error_content,
-                    execution_detail,
-                ) = await invoke_tool_with_policy(
-                    tool,
-                    tool_args,
-                    tool_name=tool_name,
-                    tool_map=tool_map,
-                )
+            (
+                result,
+                error_detail,
+                error_content,
+                execution_detail,
+            ) = await invoke_tool_with_policy(
+                tool,
+                tool_args,
+                tool_name=tool_name,
+                tool_map=tool_map,
+            )
             if error_detail is not None:
                 _append_tool_error_output(
                     tool_call_id=tool_id,
@@ -2131,14 +1725,10 @@ async def execute_tool_calls(
                 )
                 continue
 
-            private_result_text = (
-                provider_result_text(result, tool_name=canonical_tool_name)
-                if private_image_result
-                else None
-            )
-            public_result = _public_tool_result(
-                result,
-                private_image_result=private_image_result,
+            public_result = (
+                sanitize_public_image_fields(make_json_safe(result))
+                if canonical_tool_name == "brave_image_search"
+                else result
             )
             normalized_result = normalize_tool_result_for_rendering(
                 public_result,
@@ -2170,16 +1760,12 @@ async def execute_tool_calls(
                 artifact,
                 raw_result=result,
                 result_text=result_text,
-                private_result_text=private_result_text,
                 render=normalized_result.render,
                 tool_call_id=tool_id,
                 tool_name=tool_name,
-                provider_tool_name=canonical_tool_name,
-                selected_images=offered_images,
             )
             artifacts.append(artifact)
-            if capture_images and canonical_tool_name not in _TYPED_WEB_IMAGE_TOOLS:
-                images.extend(extract_images_from_tool_result(result_text))
+            if capture_images:
                 images.extend(extract_images_from_tool_content(result))
 
             # Update LRU timestamp for deferred tools on successful execution

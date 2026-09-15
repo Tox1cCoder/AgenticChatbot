@@ -19,40 +19,36 @@ over: that fix released on provider failure and stopped there.
 from __future__ import annotations
 
 import asyncio
-import json
-from datetime import datetime, timezone
 
 import pytest
 
-from app.ai.research_budget import ResearchBudget, get_research_budget, reset_research_budget
-from app.ai.tool_context import clear_tool_context, tool_execution_context
-from app.ai.web_tools import create_web_search_tool
+from app.ai.research_budget import ResearchBudget
+from app.ai.web_research.contracts import ResearchRequest, ResearchScope
+from app.ai.web_research.providers import ProviderResolver, TavilyTextSearchProvider
+from app.ai.web_research.service import WebResearchService
 
 CONVERSATION_ID = "77777777-7777-7777-7777-777777777777"
-NOW = datetime(2026, 9, 15, 12, tzinfo=timezone.utc)
-
-
-@pytest.fixture(autouse=True)
-def _clean():
-    clear_tool_context()
-    reset_research_budget(conversation_id=CONVERSATION_ID)
-    yield
-    clear_tool_context()
-    reset_research_budget(conversation_id=CONVERSATION_ID)
-
-
 class _Hanging:
     name = "tavily_search"
 
     async def ainvoke(self, args: dict) -> str:
         await asyncio.sleep(30)
-        return json.dumps({"results": [], "total_results": 0, "answer": ""})
+        return "{}"
 
 
-async def _cancel_a_search_mid_flight():
-    tool = create_web_search_tool(tavily_tool=_Hanging(), clock=lambda: NOW)
+async def _cancel_a_search_mid_flight(budget: ResearchBudget):
+    session = WebResearchService().new_session(
+        ResearchScope(
+            conversation_id=CONVERSATION_ID,
+            user_id="11111111-1111-1111-1111-111111111111",
+            logical_turn_id="turn",
+        ),
+        budget,
+        mode="quick",
+        resolver=ProviderResolver(text=(TavilyTextSearchProvider(_Hanging()),)),
+    )
     task = asyncio.create_task(
-        tool.ainvoke({"query": "a query that hangs", "objective": "never returns"})
+        session.search(ResearchRequest(query="a query that hangs", objective="never returns"))
     )
     await asyncio.sleep(0.05)
     task.cancel()
@@ -83,28 +79,22 @@ def test_releasing_a_reservation_that_is_already_gone_is_harmless():
 
 @pytest.mark.asyncio
 async def test_a_cancelled_search_releases_its_slot():
-    with tool_execution_context(
-        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
-    ):
-        budget = get_research_budget(conversation_id=CONVERSATION_ID)
-        await _cancel_a_search_mid_flight()
+    budget = ResearchBudget()
+    await _cancel_a_search_mid_flight(budget)
 
-        assert budget.search_calls == 0
-        assert len(budget._in_flight) == 0, "the cancelled search still holds its slot"
+    assert budget.search_calls == 0
+    assert len(budget._in_flight) == 0, "the cancelled search still holds its slot"
 
 
 @pytest.mark.asyncio
 async def test_a_cancelled_search_does_not_refuse_a_later_unrelated_query():
     """The symptom: budget_exhausted with searches_used below search_limit."""
-    with tool_execution_context(
-        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
-    ):
-        budget = get_research_budget(conversation_id=CONVERSATION_ID)
-        await _cancel_a_search_mid_flight()
+    budget = ResearchBudget()
+    await _cancel_a_search_mid_flight(budget)
 
-        assert budget.reserve_search("an entirely unrelated subject") is None
-        budget.record_search("an entirely unrelated subject", "R")
-        assert budget.reserve_search("a second unrelated subject") is None
+    assert budget.reserve_search("an entirely unrelated subject") is None
+    budget.record_search("an entirely unrelated subject", "R")
+    assert budget.reserve_search("a second unrelated subject") is None
 
 
 @pytest.mark.asyncio
@@ -117,11 +107,8 @@ async def test_a_cancelled_query_is_not_remembered_as_failed():
     a bare ``reserve_search`` here would use the default scope rather than the
     one the tool derives from its arguments, and would pass without meaning it.
     """
-    with tool_execution_context(
-        conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
-    ):
-        budget = get_research_budget(conversation_id=CONVERSATION_ID)
-        await _cancel_a_search_mid_flight()
+    budget = ResearchBudget()
+    await _cancel_a_search_mid_flight(budget)
 
-        assert budget._failed_searches == []
-        assert budget._searches == []
+    assert budget._failed_searches == []
+    assert budget._searches == []

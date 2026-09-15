@@ -218,17 +218,12 @@ def test_graph_forwards_presented_image_ids_as_transient_response_state(monkeypa
     assert response.metadata["_presented_rich_image_ids"] == ["image:tool:c1:0"]
 
 
-def test_media_guidance_names_the_image_tool_and_leaves_query_shape_to_it():
-    """Image discovery is its own tool now, not a parameter riding on a
-    research call — so there is no more shared-call or parallel-call
-    instruction to check."""
+def test_media_guidance_uses_canonical_web_search_for_visual_evidence():
     from app.ai.prompts import MEDIA_CAPABILITY_SNIPPET
-    from app.ai.web_tools import IMAGE_SEARCH_DESCRIPTION
+    from app.ai.web_tools import WEB_SEARCH_DESCRIPTION
 
-    # The prompt names the tool; how to shape the query it carries is argument
-    # mechanics and lives in the tool description.
-    assert "image_search" in MEDIA_CAPABILITY_SNIPPET.lower()
-    assert "resolve what the user referred to" in IMAGE_SEARCH_DESCRIPTION.lower()
+    assert "web_search" in MEDIA_CAPABILITY_SNIPPET.lower()
+    assert "visual_intent" in WEB_SEARCH_DESCRIPTION.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -256,17 +251,14 @@ def test_media_guidance_never_requires_the_user_to_ask_for_images():
     """Visual enrichment must not depend on the model classifying the topic.
 
     Routing by named topic categories missed cases the categories did not
-    cover. Reaching for ``image_search`` is framed as the ordinary way to show
+    cover. Reaching for visual evidence is framed as the ordinary way to show
     something rather than a step gated on recognising a visual topic, and the
     guidance must not reintroduce a taxonomy the model has to match against.
     """
     from app.ai.prompts import MEDIA_CAPABILITY_SNIPPET
 
     text = MEDIA_CAPABILITY_SNIPPET.lower()
-    assert "image_search" in text
-    # Reaching for it is how you show something, not a step reserved for when
-    # sources are needed. Any phrasing that says so satisfies this.
-    assert "not a step reserved for when you need sources" in text
+    assert "web_search" in text
     # The precision counterweight must survive alongside the open invitation.
     assert "decoration" in text
 
@@ -275,10 +267,10 @@ def test_recency_guidance_preserves_text_independence_from_images():
     """Recency controls belong to the tool description; the prompt keeps the
     rule that the prose has to stand without the picture."""
     from app.ai.prompts import MEDIA_CAPABILITY_SNIPPET
-    from app.ai.web_tools import IMAGE_SEARCH_DESCRIPTION, WEB_SEARCH_DESCRIPTION
+    from app.ai.web_tools import WEB_SEARCH_DESCRIPTION
 
     assert "freshness='recent'" in WEB_SEARCH_DESCRIPTION.lower()
-    assert "time_range" in IMAGE_SEARCH_DESCRIPTION.lower()
+    assert "image_query" in WEB_SEARCH_DESCRIPTION.lower()
     assert "without them" in MEDIA_CAPABILITY_SNIPPET.lower()
 
 

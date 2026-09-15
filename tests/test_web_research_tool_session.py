@@ -15,6 +15,7 @@ class _Session:
 
     def __init__(self, bundle) -> None:
         self.bundle = bundle
+        self.budget = SimpleNamespace(search_calls=1)
         self.requests: list[ResearchRequest] = []
         self.opens: list[tuple[list[str], str]] = []
 

@@ -134,35 +134,6 @@ class WebImageReferenceRepository(RepositorySessionMixin):
 
         return await self._arun(work)
 
-    async def asuspend_many(
-        self,
-        image_ids: list[UUID] | tuple[UUID, ...],
-        *,
-        user_id: UUID,
-        conversation_id: UUID,
-        expires_at: datetime,
-    ) -> int:
-        if not image_ids:
-            return 0
-
-        def work(db: Session) -> int:
-            statement = (
-                update(WebImageReference)
-                .where(
-                    WebImageReference.id.in_(image_ids),
-                    WebImageReference.user_id == user_id,
-                    WebImageReference.conversation_id == conversation_id,
-                    WebImageReference.lifecycle_state == "pending",
-                    WebImageReference.deleted_at.is_(None),
-                )
-                .values(expires_at=expires_at)
-            )
-            result = db.execute(statement)
-            db.commit()
-            return int(result.rowcount or 0)
-
-        return await self._arun(work)
-
     async def arelease_expired(self, now: datetime) -> int:
         def work(db: Session) -> int:
             statement = (

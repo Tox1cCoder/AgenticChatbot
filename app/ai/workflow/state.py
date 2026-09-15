@@ -160,6 +160,7 @@ class WorkflowState(TypedDict):
     # continuation pause. Plain replacement, not accumulation: each pause
     # supersedes the last, and appending would resend evidence twice.
     carried_messages: NotRequired[list[Any] | None]
+    carried_web_sources: NotRequired[list[dict[str, Any]] | None]
     workflow_error: NotRequired[WorkflowError | None]
 
     # --- request scope ----------------------------------------------------

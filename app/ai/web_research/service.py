@@ -7,6 +7,7 @@ import base64
 import hashlib
 import inspect
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, TypeVar
@@ -115,6 +116,7 @@ class WebResearchService:
         max_model_bytes: int = 8 * 1024 * 1024,
         max_image_concurrency: int = 3,
         pending_image_ttl: timedelta = timedelta(minutes=15),
+        metrics: Any | None = None,
     ) -> None:
         self.resolver = resolver or ProviderResolver()
         self.now = now or (lambda: datetime.now(timezone.utc))
@@ -127,6 +129,7 @@ class WebResearchService:
         self.max_model_bytes = max(1, int(max_model_bytes))
         self.max_image_concurrency = max(1, int(max_image_concurrency))
         self.pending_image_ttl = pending_image_ttl
+        self.metrics = metrics
 
     def new_session(
         self,
@@ -169,9 +172,24 @@ class WebResearchSession:
         self._closed = False
         self._opened_urls: set[str] = set()
         self._visual_intent = "none"
+        self._operation_lock = asyncio.Lock()
 
     async def search(self, request: ResearchRequest) -> WebEvidenceBundle:
-        self._visual_intent = request.visual_intent
+        async with self._operation_lock:
+            bundle = await self._search(request)
+        if self.service.metrics is not None:
+            with suppress(Exception):
+                self.service.metrics.record(
+                    operation="search",
+                    mode=self.mode,
+                    outcome=(bundle.status if bundle.status in {"success", "partial"} else "error"),
+                    visual_intent=bundle.visual_intent,
+                )
+        return bundle
+
+    async def _search(self, request: ResearchRequest) -> WebEvidenceBundle:
+        if self._visual_intent == "none" or request.visual_intent == "gallery":
+            self._visual_intent = request.visual_intent
         self._operation_index += 1
         operation_index = self._operation_index
         normalized = normalize_web_search(
@@ -263,15 +281,33 @@ class WebResearchSession:
             providers=tuple(dict.fromkeys((*text_providers, *image_providers))),
         )
 
-    async def open(
-        self, source_ids_or_urls: Sequence[str], question: str
-    ) -> WebEvidenceBundle:
+    async def open(self, source_ids_or_urls: Sequence[str], question: str) -> WebEvidenceBundle:
+        async with self._operation_lock:
+            bundle = await self._open(source_ids_or_urls, question)
+        if self.service.metrics is not None:
+            with suppress(Exception):
+                self.service.metrics.record(
+                    operation="open",
+                    mode=self.mode,
+                    outcome=(bundle.status if bundle.status in {"success", "partial"} else "error"),
+                    visual_intent=bundle.visual_intent,
+                )
+        return bundle
+
+    async def _open(self, source_ids_or_urls: Sequence[str], question: str) -> WebEvidenceBundle:
         self._operation_index += 1
         operation_index = self._operation_index
         requested: list[str] = []
+        invalid_source = False
         for value in source_ids_or_urls:
             record = self.source_registry.resolve(value)
-            url = str(record.url) if record is not None else str(value or "").strip()
+            if record is not None:
+                url = str(record.url)
+            else:
+                from .source_registry import canonicalize_public_url
+
+                url = canonicalize_public_url(str(value or "").strip()) or ""
+                invalid_source = invalid_source or not url
             if url and url not in self._opened_urls and url not in requested:
                 requested.append(url)
 
@@ -284,7 +320,7 @@ class WebResearchSession:
                     ResearchFailure(
                         operation="open",
                         provider="server",
-                        code="page_open_limit",
+                        code="invalid_source" if invalid_source else "page_open_limit",
                         retryable=False,
                     ),
                 ),
@@ -303,33 +339,25 @@ class WebResearchSession:
                 ),
             )
 
+        self._opened_urls.update(requested)
         opened, failures, providers = await self._call_chain(
             self.resolver.openers,
             operation="open",
-            invoke=lambda provider: provider.open(
-                requested, question, query_index=operation_index
-            ),
+            invoke=lambda provider: provider.open(requested, question, query_index=operation_index),
         )
         self.source_registry.admit(tuple(opened))
         for candidate in opened:
             record = self.source_registry.resolve(candidate.url)
             if record is not None:
-                self.source_registry.mark_opened(
-                    record.source_id, snippet=candidate.snippet
-                )
-                self._opened_urls.add(str(record.url))
-        return self._bundle(
-            operation_index, failures=failures, providers=providers
-        )
+                self.source_registry.mark_opened(record.source_id, snippet=candidate.snippet)
+        return self._bundle(operation_index, failures=failures, providers=providers)
 
-    async def _prepare_images(
-        self, request: ResearchRequest
-    ) -> tuple[ResearchFailure, ...]:
+    async def _prepare_images(self, request: ResearchRequest) -> tuple[ResearchFailure, ...]:
         if self.service.image_service is None or not self.pending_provider_images:
             return ()
 
         limit = ResearchLimits.for_mode(
-            self.mode, visual_intent=request.visual_intent
+            self.mode, visual_intent=self._visual_intent
         ).max_model_images
         remaining = max(0, limit - len(self.prepared_images))
         candidates = self.pending_provider_images[: self.service.max_candidate_pool]
@@ -337,21 +365,67 @@ class WebResearchSession:
             self._omitted_image_count += len(candidates)
             return ()
 
-        semaphore = asyncio.Semaphore(self.service.max_image_concurrency)
+        download_lock = asyncio.Lock()
+        next_candidate = 0
+        reserved_bytes = 0
+        outcomes: list[tuple[int, ProviderImageCandidate, Any, str | None]] = []
+        per_image_limit = max(
+            1,
+            int(
+                getattr(
+                    self.service.image_service,
+                    "max_bytes",
+                    self.service.max_download_bytes,
+                )
+            ),
+        )
 
-        async def fetch(candidate: ProviderImageCandidate) -> Any:
-            async with semaphore:
+        async def fetch_worker() -> None:
+            nonlocal next_candidate, reserved_bytes
+            while True:
+                async with download_lock:
+                    remaining_bytes = (
+                        self.service.max_download_bytes
+                        - self._downloaded_image_bytes
+                        - reserved_bytes
+                    )
+                    if next_candidate >= len(candidates) or remaining_bytes <= 0:
+                        return
+                    index = next_candidate
+                    candidate = candidates[index]
+                    next_candidate += 1
+                    allowance = min(per_image_limit, remaining_bytes)
+                    reserved_bytes += allowance
+                image = None
+                failure_code = None
                 try:
                     image = await self.service.image_service.fetch_url(
-                        candidate.image_url, provider=candidate.provider
+                        candidate.image_url,
+                        provider=candidate.provider,
+                        max_bytes=allowance,
                     )
-                    return candidate, image, None
                 except Exception as exc:
-                    return candidate, None, str(getattr(exc, "reason", "fetch_failed"))
+                    failure_code = str(getattr(exc, "reason", "fetch_failed"))
+                async with download_lock:
+                    reserved_bytes -= allowance
+                    if image is not None:
+                        byte_size = len(image.content)
+                        if byte_size > allowance:
+                            image = None
+                            failure_code = "size"
+                        else:
+                            self._downloaded_image_bytes += byte_size
+                    outcomes.append((index, candidate, image, failure_code))
 
-        outcomes = await asyncio.gather(*(fetch(candidate) for candidate in candidates))
+        await asyncio.gather(
+            *(
+                fetch_worker()
+                for _ in range(min(self.service.max_image_concurrency, len(candidates)))
+            )
+        )
+        self._omitted_image_count += len(candidates) - len(outcomes)
         failures: list[ResearchFailure] = []
-        for candidate, fetched, failure_code in outcomes:
+        for _index, candidate, fetched, failure_code in sorted(outcomes):
             source = self.source_registry.resolve(candidate.source_url)
             if failure_code is not None or fetched is None or source is None:
                 self._omitted_image_count += 1
@@ -367,7 +441,6 @@ class WebResearchSession:
                 continue
 
             byte_size = len(fetched.content)
-            self._downloaded_image_bytes += byte_size
             digest = hashlib.sha256(fetched.content).hexdigest()
             if digest in self._image_digests:
                 self._omitted_image_count += 1
@@ -471,9 +544,6 @@ class WebResearchSession:
             )
         )
         selected_set = set(selected)
-        selected_refs = [
-            self.prepared_images[candidate_id].reference_id for candidate_id in selected
-        ]
         released_refs = [
             prepared.reference_id
             for candidate_id, prepared in self.prepared_images.items()
@@ -483,11 +553,17 @@ class WebResearchSession:
             "user_id": UUID(self.scope.user_id),
             "conversation_id": UUID(self.scope.conversation_id),
         }
-        if selected_refs:
-            await self.service.image_service.mark_selected(selected_refs, **scope)
         if released_refs:
             await self.service.image_service.release_references(released_refs, **scope)
         self._closed = True
+        if self.service.metrics is not None:
+            with suppress(Exception):
+                self.service.metrics.record(
+                    operation="finish",
+                    mode=self.mode,
+                    outcome="selected" if selected else "released",
+                    visual_intent=self._visual_intent,
+                )
         return ResearchCloseout(selected_candidate_ids=selected)
 
     async def abort(self) -> None:
@@ -499,16 +575,14 @@ class WebResearchSession:
             conversation_id=UUID(self.scope.conversation_id),
         )
         self._closed = True
-
-    async def suspend(self) -> None:
-        if self._closed or self.service.image_service is None:
-            return
-        await self.service.image_service.suspend_references(
-            [prepared.reference_id for prepared in self.prepared_images.values()],
-            user_id=UUID(self.scope.user_id),
-            conversation_id=UUID(self.scope.conversation_id),
-            expires_at=self.service.now() + self.service.pending_image_ttl,
-        )
+        if self.service.metrics is not None:
+            with suppress(Exception):
+                self.service.metrics.record(
+                    operation="finish",
+                    mode=self.mode,
+                    outcome="released",
+                    visual_intent=self._visual_intent,
+                )
 
     async def _call_chain(
         self,
@@ -566,7 +640,9 @@ class WebResearchSession:
         failures: tuple[ResearchFailure, ...] = (),
         providers: tuple[str, ...] = (),
     ) -> WebEvidenceBundle:
-        if visual_intent is not None:
+        if visual_intent is not None and (
+            self._visual_intent == "none" or visual_intent == "gallery"
+        ):
             self._visual_intent = visual_intent
         sources = self.source_registry.records
         status = "success" if sources and not failures else "partial" if sources else "failed"

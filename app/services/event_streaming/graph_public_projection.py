@@ -65,6 +65,9 @@ class StreamProjectionContext:
     current_tool_calls: dict[Any, dict[str, Any]] = field(default_factory=dict)
     emitted_tool_call_ids: set[str] = field(default_factory=set)
     emitted_tool_result_ids: set[str] = field(default_factory=set)
+    # Web answers are held until terminal output validation. This flips before
+    # the first web tool runs, so an uncited draft can never escape in deltas.
+    requires_web: bool = False
     # Applies the server's citation rule to answer text as it arrives, using
     # the same helper the renderer uses on the finished answer. Per stream:
     # one turn's retrieved ids authorize that turn's citations and no other's.
@@ -82,6 +85,8 @@ def _publish_answer_text(delta: str, ctx: StreamProjectionContext):
     so the filters may hold a few characters back. Whatever they hold is
     released by ``flush_answer_text`` when the stream ends.
     """
+    if ctx.requires_web:
+        return
     publishable = ctx.citation_filter.feed(ctx.rich_marker_filter.feed(delta))
     if publishable:
         yield make_event("message_delta", sequence=0, data={"text": publishable})
@@ -89,6 +94,8 @@ def _publish_answer_text(delta: str, ctx: StreamProjectionContext):
 
 def flush_answer_text(ctx: StreamProjectionContext):
     """Release any text the filters are still holding, in the same order."""
+    if ctx.requires_web:
+        return
     remainder = ctx.citation_filter.feed(ctx.rich_marker_filter.flush())
     remainder += ctx.citation_filter.flush()
     if remainder:
@@ -246,6 +253,8 @@ class GraphPublicStreamProjector:
             return
 
         if etype == "tool_call_available":
+            if event.tool_name in {"web_search", "web_open"}:
+                ctx.requires_web = True
             yield from self._emit_tool_start_from_canonical(
                 tool_call_id=event.tool_call_id,
                 tool_name=event.tool_name,
@@ -255,6 +264,8 @@ class GraphPublicStreamProjector:
             return
 
         if etype == "tool_execution_end":
+            if event.tool_name in {"web_search", "web_open"}:
+                ctx.requires_web = True
             tool_call_id = event.tool_call_id
             dedupe_key = str(tool_call_id) if tool_call_id else None
             if dedupe_key and dedupe_key in ctx.emitted_tool_result_ids:
@@ -588,6 +599,9 @@ class GraphPublicStreamProjector:
                 ctx.last_state_values = {}
             ctx.last_state_values.update(node_state)
             _learn_turn_evidence(node_state, ctx)
+            decision = node_state.get("routing_decision")
+            if bool(getattr(decision, "requires_web", False)):
+                ctx.requires_web = True
 
             new_agent = node_state.get("active_agent_id")
             if isinstance(new_agent, str) and new_agent != ctx.last_emitted_agent:
@@ -672,6 +686,9 @@ class GraphPublicStreamProjector:
             if ctx.last_state_values is None:
                 ctx.last_state_values = {}
             ctx.last_state_values.update(values)
+            decision = values.get("routing_decision")
+            if bool(getattr(decision, "requires_web", False)):
+                ctx.requires_web = True
 
         if isinstance(active_agent_id, str) and active_agent_id != ctx.last_emitted_agent:
             cause = self._selection_cause(ctx)

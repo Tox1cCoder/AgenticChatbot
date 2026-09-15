@@ -112,6 +112,8 @@ class RoutingDecision(BaseModel):
     agent_id: str = Field(min_length=1, max_length=160)
     confidence: float = Field(ge=0.0, le=1.0)
     reason: str = Field(min_length=1, max_length=500)
+    requires_web: bool = False
+    research_mode: Literal["none", "quick", "agentic"] = "none"
 
 
 class TurnIdentity(BaseModel):

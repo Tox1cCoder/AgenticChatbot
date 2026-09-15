@@ -1,0 +1,21 @@
+[
+  {
+    "case_id": "two-candidate-identity",
+    "offered_source_ids": ["S1"],
+    "cited_source_ids": ["S1"],
+    "offered_image_ids": ["I1", "I2"],
+    "selected_image_ids": ["I2"],
+    "stream_source_ids": ["S1"],
+    "history_source_ids": ["S1"]
+  },
+  {
+    "case_id": "no-token-no-image",
+    "offered_source_ids": ["S1"],
+    "cited_source_ids": ["S1"],
+    "offered_image_ids": ["I1"],
+    "selected_image_ids": [],
+    "expect_zero_images": true,
+    "stream_source_ids": ["S1"],
+    "history_source_ids": ["S1"]
+  }
+]

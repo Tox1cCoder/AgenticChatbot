@@ -1532,21 +1532,6 @@ class Settings(BaseSettings):
         le=300.0,
         description="Ceiling for the stop subscriber's exponential reconnect backoff.",
     )
-    remote_image_enrichment_enabled: bool = Field(
-        default=True,
-        description="Enable Brave-backed remote image enrichment for rich responses.",
-    )
-    rich_image_gallery_max_items: int = Field(
-        default=6,
-        ge=2,
-        le=8,
-        description=(
-            "Maximum images in one provider-native discovery gallery grid. "
-            "Only reachable through "
-            "image_intent='gallery'; figure mode stays bound by "
-            "rich_auto_place_max_images."
-        ),
-    )
     tool_result_blob_storage_dir: str = Field(
         default="data/tool_result_blobs",
         description=(
@@ -1933,6 +1918,21 @@ class Settings(BaseSettings):
             "backend never emits marker-bearing v1 content or rich-item stream "
             "events, regardless of the per-request capability."
         ),
+    )
+    web_research_enabled: bool = Field(
+        default=True,
+        description="Short-lived rollout switch for canonical web research.",
+    )
+    web_research_max_candidate_pool: int = Field(default=8, ge=1, le=12)
+    web_research_max_download_bytes: int = Field(
+        default=20 * 1024 * 1024, ge=1
+    )
+    web_research_max_model_image_bytes: int = Field(
+        default=8 * 1024 * 1024, ge=1
+    )
+    web_research_image_concurrency: int = Field(default=3, ge=1, le=8)
+    web_research_pending_image_ttl_seconds: int = Field(
+        default=15 * 60, ge=60, le=24 * 60 * 60
     )
     rich_item_inventory_max_items: int = Field(
         default=12,

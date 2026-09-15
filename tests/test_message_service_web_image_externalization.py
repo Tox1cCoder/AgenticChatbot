@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 
 from app.services import message_service as message_service_module
+from app.services.event_streaming.events import make_event
 from app.services.message_service import MessageService
 
 IMAGE_ID = "image:tool:c1:0"
@@ -329,6 +330,33 @@ async def test_completed_workflow_externalizes_before_message_create(monkeypatch
     assert persisted["metadata"]["rich_items"][0]["payload"]["url"] == (
         f"/web-images/{reference_id}"
     )
+    web_images.mark_selected.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_message_persistence_does_not_mark_web_image_selected(monkeypatch):
+    web_images = AsyncMock()
+    web_images.register.return_value = SimpleNamespace(id=uuid4())
+    service = _service(web_images)
+    service.chat_image_service = None
+    service.task_plan_service = None
+    service._sync_response_plan_state = Mock(return_value=False)
+    service._acreate_bot_response_message = AsyncMock(
+        side_effect=RuntimeError("persistence failed")
+    )
+    body = f"Answer\n\n<!--rich:{IMAGE_ID}-->"
+    _patch_response_builders(monkeypatch, body, _metadata())
+
+    with pytest.raises(RuntimeError, match="persistence failed"):
+        await service._persist_completed_workflow_response(
+            conversation_id=uuid4(),
+            user_id=uuid4(),
+            bot_response=SimpleNamespace(metadata={}),
+            sanitized_persona=None,
+            workflow_request=None,
+        )
+
+    web_images.mark_selected.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -355,6 +383,76 @@ async def test_resume_workflow_externalizes_before_message_create(monkeypatch):
     assert persisted["metadata"]["rich_items"][0]["payload"]["url"] == (
         f"/web-images/{reference_id}"
     )
+    web_images.mark_selected.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_completed_continuation_uses_the_normal_grounded_persistence_path(monkeypatch):
+    reference_id = uuid4()
+    web_images = AsyncMock()
+    web_images.register.return_value = SimpleNamespace(id=reference_id)
+    service = _service(web_images)
+    service.chat_image_service = None
+    body = f"Answer [1](https://publisher.example/story)\n\n<!--rich:{IMAGE_ID}-->"
+    metadata = _metadata()
+    metadata["web_sources"] = [
+        {
+            "source_id": "S1",
+            "url": "https://publisher.example/story",
+            "title": "Story",
+        }
+    ]
+    _patch_response_builders(monkeypatch, body, metadata)
+    response = SimpleNamespace(
+        message=SimpleNamespace(content=body), metadata={}, tool_artifacts=None
+    )
+
+    async def resumed_stream(**_kwargs):
+        yield make_event("complete", sequence=1, data={"response": response})
+
+    service.ai_service = SimpleNamespace(resume_generation_control_stream=resumed_stream)
+    persisted = SimpleNamespace(model_dump=lambda mode="python": {"content": body})
+    service._acreate_bot_response_message = AsyncMock(return_value=persisted)
+    service._amark_generation_completed = AsyncMock()
+    service._amark_generation_stopped = AsyncMock()
+    inflight = SimpleNamespace(
+        is_cancelled=False,
+        partial_text="",
+        resolve=Mock(),
+        touch=Mock(),
+    )
+    generation_id = uuid4()
+    lease = SimpleNamespace(
+        checkpoint_thread_id="wf2:conversation:turn",
+        paused_epoch=0,
+        execution_epoch=1,
+        snapshot=SimpleNamespace(generation_id=generation_id, logical_turn_id="turn-1"),
+    )
+    conversation_id = uuid4()
+    user_id = uuid4()
+
+    events = [
+        event
+        async for event in service._astream_continuation(
+            lease,
+            continuation_id=uuid4(),
+            conversation_id=conversation_id,
+            user_id=user_id,
+            bot_message_id=uuid4(),
+            inline_rich_response_v1=True,
+            inflight=inflight,
+            next_sequence=iter(range(1, 10)).__next__,
+        )
+    ]
+
+    persisted_call = service._acreate_bot_response_message.await_args.kwargs
+    assert persisted_call["metadata"]["web_sources"][0]["source_id"] == "S1"
+    assert persisted_call["metadata"]["rich_items"][0]["payload"]["url"] == (
+        f"/web-images/{reference_id}"
+    )
+    assert persisted_call["metadata"]["continued"] is True
+    web_images.mark_selected.assert_awaited_once()
+    assert [event.type for event in events] == ["complete"]
 
 
 @pytest.mark.asyncio

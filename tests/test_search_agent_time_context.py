@@ -120,7 +120,8 @@ def test_search_agent_binding_exposes_the_product_web_tools(monkeypatch):
     tool_names = [tool.name for tool in agent._get_tools_for_binding(conversation_id="c-1")]
 
     assert "tool_search" in tool_names
-    assert {"web_search", "web_open", "image_search"} <= set(tool_names)
+    assert {"web_search", "web_open"} <= set(tool_names)
+    assert "image_search" not in tool_names
     assert "tavily_search" not in tool_names
 
 

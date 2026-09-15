@@ -49,9 +49,13 @@ __all__ = [
 
 GRAPH_VERSION = "routing-v2"
 POLICY_IMPLEMENTATION_VERSION = "1"
+UNVERIFIED_WEB_RESPONSE = (
+    "I couldn’t verify this with web sources, so I can’t provide a reliable answer yet."
+)
 
 # Citations the grounding policy can recognise, e.g. ``[E12]``.
 _CITATION_PATTERN = re.compile(r"\[(E\d+)\]")
+_MARKDOWN_LINK_PATTERN = re.compile(r"\[[^\]]*\]\((https?://[^)\s]+)\)")
 
 
 class OutputValidationError(RuntimeError):
@@ -173,6 +177,25 @@ class RagGroundingPolicy:
             )
 
 
+class WebEvidencePolicy:
+    """A web-required answer must cite at least one admitted public source."""
+
+    policy_id = "web_evidence"
+
+    async def validate(self, outcome: ResponseOutcome, context: dict[str, Any]) -> None:
+        known = {
+            str(record.get("url"))
+            for record in outcome.provenance.web_sources
+            if isinstance(record, dict) and record.get("url")
+        }
+        cited = set(_MARKDOWN_LINK_PATTERN.findall(outcome.response.message.content or ""))
+        if known.intersection(cited) or outcome.response.message.content == UNVERIFIED_WEB_RESPONSE:
+            return
+        raise OutputValidationError(
+            "missing_web_citation", "web answer cites no source admitted for this turn"
+        )
+
+
 class ToolMessagePairingPolicy:
     """Every tool result must answer a tool call the model actually made."""
 
@@ -224,13 +247,16 @@ POLICY_REGISTRY: dict[str, OutputPolicy] = {
         ArtifactProvenancePolicy(),
         ImageDeliveryPolicy(),
         RagGroundingPolicy(),
+        WebEvidencePolicy(),
         ToolMessagePairingPolicy(),
         CanvasOutputPolicy(),
     )
 }
 
 
-def select_policies(outcome: ResponseOutcome) -> tuple[str, ...]:
+def select_policies(
+    outcome: ResponseOutcome, state: dict[str, Any] | None = None
+) -> tuple[str, ...]:
     """Choose the contracts this response must satisfy.
 
     Selection reads provenance first and declarations second. Evidence,
@@ -269,6 +295,11 @@ def select_policies(outcome: ResponseOutcome) -> tuple[str, ...]:
         ),
         (provenance.artifacts or response.tool_artifacts, "artifact_provenance"),
         (provenance.images or metadata.get("images"), "image_delivery"),
+        (
+            provenance.web_sources
+            or bool(getattr((state or {}).get("routing_decision"), "requires_web", False)),
+            "web_evidence",
+        ),
     ):
         if present and policy_id not in selected:
             selected.append(policy_id)
@@ -287,7 +318,31 @@ class OutputValidator:
         if not outcome.agent_id:
             raise OutputValidationError("missing_agent_identity", "outcome has no agent_id")
 
-        policy_ids = select_policies(outcome)
+        policy_ids = select_policies(outcome, state)
+        if "web_evidence" in policy_ids:
+            known_urls = {
+                str(record.get("url"))
+                for record in outcome.provenance.web_sources
+                if isinstance(record, dict) and record.get("url")
+            }
+            cited_urls = set(_MARKDOWN_LINK_PATTERN.findall(outcome.response.message.content or ""))
+            if not known_urls.intersection(cited_urls):
+                metadata = dict(outcome.response.metadata or {})
+                metadata["web_verification"] = {
+                    "verified": False,
+                    "reason": "missing_valid_citation" if known_urls else "no_admitted_sources",
+                }
+                metadata.pop("_rich_item_candidates", None)
+                metadata.pop("_inline_rich_response_v1", None)
+                response = outcome.response.model_copy(deep=True)
+                response.message.content = UNVERIFIED_WEB_RESPONSE
+                response.metadata = metadata
+                outcome = outcome.model_copy(
+                    update={
+                        "response": response,
+                        "provenance": outcome.provenance.model_copy(update={"rich_items": ()}),
+                    }
+                )
         context = {"state": state}
         for policy_id in policy_ids:
             await POLICY_REGISTRY[policy_id].validate(outcome, context)
@@ -602,6 +657,16 @@ def _provenance_metadata(provenance: OutcomeProvenance) -> dict[str, Any]:
             str(record.get("evidence_id"))
             for record in provenance.evidence
             if isinstance(record, dict) and record.get("evidence_id")
+        ],
+        "web_source_ids": [
+            str(record.get("source_id"))
+            for record in provenance.web_sources
+            if isinstance(record, dict) and record.get("source_id")
+        ],
+        "rich_item_ids": [
+            str(item.get("id"))
+            for item in provenance.rich_items
+            if isinstance(item, dict) and item.get("id")
         ],
     }
 

@@ -242,6 +242,20 @@ class AISDKV6StreamAdapter:
                 yield chunk
             return
 
+        if etype == "sources":
+            for source in data.get("sources") or []:
+                if not isinstance(source, dict) or not source.get("url"):
+                    continue
+                yield _sse(
+                    {
+                        "type": "source-url",
+                        "sourceId": str(source.get("source_id") or source["url"]),
+                        "url": str(source["url"]),
+                        "title": str(source.get("title") or source["url"]),
+                    }
+                )
+            return
+
         if etype == "image_preview":
             async for chunk in self._image_preview(data):
                 yield chunk
