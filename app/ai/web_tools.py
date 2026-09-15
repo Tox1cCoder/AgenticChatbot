@@ -244,8 +244,6 @@ def create_web_search_tool(
         if reused is not None:
             return _project_search(normalized, reused, reused=True, budget=budget)
         if settings.research_budget_enabled:
-            # One log outcome covered both refusals, so an operator could not
-            # tell a turn that ran out of budget from one repeating itself.
             refusal = budget.reserve_search(normalized.query, scope=scope)
             if refusal is not None:
                 log_web_tool_call(
@@ -254,7 +252,7 @@ def create_web_search_tool(
                     freshness=normalized.freshness,
                     searches_used=budget.search_calls,
                 )
-                return _budget_spent_payload(budget, refusal)
+                return _duplicate_query_payload(budget)
 
         try:
             raw = await _call_provider(tavily_tool, "tavily", "tavily_search", args)
@@ -284,7 +282,7 @@ def create_web_search_tool(
             # disconnect cancel it too, and `CancelledError` is a
             # `BaseException`. The reservation was then held for the rest of
             # the turn, so a later, unrelated query was refused
-            # `budget_exhausted` with `searches_used` below `search_limit`.
+            # a refusal to search for something it had never asked before.
             # The recording paths have already released; this is a no-op there.
             budget.release_search(normalized.query, scope=scope)
         return _project_search(normalized, raw, reused=False, budget=budget)
@@ -825,38 +823,28 @@ def _image_payload(query: str, selected: int, note: str) -> str:
     return json.dumps({"query": query, "selected": selected, "note": note}, ensure_ascii=False)
 
 
-def _budget_spent_payload(budget: Any, refusal: str) -> str:
-    """Report the refusal the budget itself named.
+def _duplicate_query_payload(budget: Any) -> str:
+    """Report a search refused because the turn already ran it.
 
-    ``refusal`` is ``reserve_search``'s own verdict. Deriving it here from
-    ``search_calls`` was wrong in both directions, because that counter cannot
-    see the reservations in flight that the cap check counts.
+    The only refusal left. A per-turn search *count* cap used to share this
+    payload, and reporting it was where two separate bugs surfaced — the
+    caller re-derived which rule had refused, and got it wrong in both
+    directions. With the cap gone there is one rule and nothing to derive.
 
-    The at-cap hint deliberately does not claim another search would return the
-    same results. It would not — a distinct query returns distinct sources —
-    and reading that the rest of its plan is pointless is what makes the model
-    stop gathering instead of working with what it has.
+    ``searches_used`` is carried so the model keeps the same running count a
+    successful search gives it, rather than losing track on a refusal.
     """
 
     return json.dumps(
         {
             "status": "error",
-            "error_type": refusal,
+            "error_type": "duplicate_query",
             "retryable": False,
             "searches_used": budget.search_calls,
-            "search_limit": max(1, int(budget.max_search_calls)),
             "hint": (
-                (
-                    "This epoch's search budget is spent. Answer from the sources "
-                    "already gathered in this turn, or open one of them with "
-                    "web_open; do not repeat this search."
-                )
-                if refusal == "budget_exhausted"
-                else (
-                    "This turn already ran this query, or it already failed at the "
-                    "provider. The budget is not spent: search for something the turn "
-                    "has not asked yet, or open a gathered source with web_open."
-                )
+                "This turn already ran this query, or it already failed at the "
+                "provider, so repeating it returns what you already have. Search "
+                "a different aspect, or open a gathered source with web_open."
             ),
         },
         ensure_ascii=False,

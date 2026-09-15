@@ -518,7 +518,7 @@ Explicit because getting it backwards is silently expensive in provider calls:
 | Quota | On Continue |
 |---|---|
 | Per-epoch model/tool call caps | **Reset.** That is what continuing is for |
-| Research call caps (`research_max_search_calls_per_turn`, default 6) | **Reset** |
+| Research call caps | **Gone.** There is no per-turn search count cap; `generation_soft_tool_calls_per_epoch` is the only bound, and it bounds every tool call |
 | Image-discovery slots | **Reset** |
 | "Already searched this" dedup memory | **Kept.** Carried on `generations.research_accounting` |
 | Image-subject dedup memory | **Kept** |

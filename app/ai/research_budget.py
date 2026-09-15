@@ -1,8 +1,17 @@
-"""Turn-local accounting for factual and image research calls.
+"""Turn-local deduplication for factual and image research calls.
 
-A model that receives a thin result reaches for another search. Bounding that
-within a turn keeps one broad question from spending three provider calls on
-near-identical queries.
+A model that receives a thin result reaches for another search. What this stops
+is the *wasteful* half of that: a turn spending provider calls on queries it has
+already run, is already running, or has already watched fail.
+
+**There is no cap on how many distinct searches a turn may make.** One existed
+and was removed. How much research a question needs is a judgement the model
+makes, told what it has already spent (``search_calls``, surfaced to the model
+as ``searches_used``) and instructed on proportionality by
+``WEB_RESEARCH_SNIPPET`` in ``app.ai.prompts``. The bound on a runaway loop is
+``generation_soft_tool_calls_per_epoch``, which bounds every tool call rather
+than singling out search. Image *subjects* are still capped, because that is a
+layout constraint on the answer rather than a cost control.
 
 **Keyed by logical turn, not by conversation (R4).** Conversation keying had two
 faults that only appear once a turn can span more than one epoch: a Continue
@@ -11,11 +20,11 @@ worker shared a single entry with any other turn in flight for the same
 conversation. The logical turn is the unit the accounting is about, so it is
 the key.
 
-**What a Continue replenishes, and what it does not.** Per-epoch call caps
-reset: a continued turn gets a fresh allowance, which is the point of
-continuing. Cross-epoch *deduplication* does not — the "already searched this"
-memory carries forward, or Continue would become a way to re-run the identical
-query the budget had just refused. That memory is what
+**What a Continue carries.** Cross-epoch *deduplication* does not reset — the
+"already searched this" memory carries forward, or Continue would become a way
+to re-run the identical query the previous epoch refused. The recorded
+*results* do not carry, because the transcript already holds them. That memory
+is what
 :meth:`ResearchBudget.to_state` persists onto the generation row and
 :func:`research_budget_from_state` restores, so any worker can serve the next
 epoch.
@@ -100,7 +109,6 @@ def near_duplicate(a: frozenset[str], b: frozenset[str], *, threshold: float) ->
 class ResearchBudget:
     """One turn's research accounting for a single conversation."""
 
-    max_search_calls: int = 2
     near_duplicate_threshold: float = 0.75
     max_image_searches: int = 1
     _searches: list[tuple[frozenset[str], SearchScope, str]] = field(default_factory=list)
@@ -169,22 +177,30 @@ class ResearchBudget:
     def reserve_search(self, query: str, *, scope: SearchScope = ()) -> str | None:
         """Claim a search slot, or name the rule that refused it.
 
-        Returns ``None`` when a slot was claimed, otherwise the ``error_type``
-        the caller reports to the model: ``"budget_exhausted"`` for a spent
-        cap, ``"duplicate_query"`` for a query this turn already ran or that
-        already failed at the provider.
+        Returns ``None`` when the search may run, otherwise the ``error_type``
+        the caller reports to the model — today only ``"duplicate_query"``:
+        this turn already ran the query, already holds its result, or already
+        watched it fail at the provider.
 
-        Returning the reason rather than a bare boolean is the point. The cap
-        compares completed searches *plus in-flight reservations* to the limit,
-        and in-flight is invisible to any caller looking afterwards, so a
-        caller re-deriving "why was I refused?" was reading a different, later
-        state than the one that refused it — and got it wrong in both
-        directions. It told a turn at its cap the budget was intact whenever
-        siblings were still running, which is the shape the model emits.
+        **There is no cap on how many distinct searches a turn may make.** One
+        existed and was removed: it never refused a turn that deserved
+        refusing, and three separate incidents traced to it — a default left
+        stale when the surrounding budgets were retuned, a refusal that named
+        the wrong rule, and a reservation leaked by a cancelled call. Each cost
+        a real answer. How much research a question needs is the model's
+        judgement, informed by the ``searches_used`` count every result
+        carries; what bounds a runaway loop is
+        ``generation_soft_tool_calls_per_epoch``, which bounds every tool call
+        rather than singling out search.
 
-        The claim itself happens inside one lock because the model emits
-        parallel tool calls: two callers could otherwise both pass a check
-        before either recorded its result, and the turn would exceed its cap.
+        The reason is returned rather than left to the caller to re-derive.
+        Deduplication reads state — ``_in_flight`` especially — that is gone by
+        the time a caller looks, and rebuilding the verdict from what remains
+        is what produced the mislabelled refusals.
+
+        The claim happens inside one lock because the model emits parallel tool
+        calls: two callers must not both pass the duplicate check before either
+        records its result.
         """
 
         with self._instance_lock:
@@ -192,9 +208,8 @@ class ResearchBudget:
             if self.find_reuse(query, scope=scope) is not None:
                 return "duplicate_query"
             if self.searched_in_prior_epoch(query, scope=scope):
-                # Refused across the epoch boundary as well as within it,
-                # which is what stops a Continue re-running the query the
-                # previous epoch's cap had already turned down.
+                # Refused across the epoch boundary as well as within it, so a
+                # Continue cannot re-run a query the turn already paid for.
                 return "duplicate_query"
             for recorded_tokens, recorded_scope in (*self._failed_searches, *self._in_flight):
                 if recorded_scope != scope:
@@ -202,11 +217,9 @@ class ResearchBudget:
                 if recorded_tokens == tokens or near_duplicate(
                     recorded_tokens, tokens, threshold=self.near_duplicate_threshold
                 ):
-                    # Already failed at the provider, or already running: both
-                    # return the model what it has.
+                    # Already failed at the provider, or already running. Both
+                    # would return the model what it is about to have anyway.
                     return "duplicate_query"
-            if self.search_calls + len(self._in_flight) >= max(1, int(self.max_search_calls)):
-                return "budget_exhausted"
             self._in_flight.append((tokens, scope))
             return None
 
@@ -396,7 +409,6 @@ def research_budget_from_state(payload: Any) -> ResearchBudget:
         raise ResearchAccountingUnreadable("epochs_recorded is not an integer") from exc
 
     return ResearchBudget(
-        max_search_calls=max(1, int(settings.research_max_search_calls_per_turn)),
         near_duplicate_threshold=float(settings.research_near_duplicate_threshold),
         max_image_searches=max(1, int(settings.research_max_image_searches_per_turn)),
         _prior_searches=prior_searches,
@@ -450,7 +462,6 @@ def get_research_budget(
         budget = _budgets.get(key)
         if budget is None:
             budget = ResearchBudget(
-                max_search_calls=max(1, int(settings.research_max_search_calls_per_turn)),
                 near_duplicate_threshold=float(settings.research_near_duplicate_threshold),
                 max_image_searches=max(1, int(settings.research_max_image_searches_per_turn)),
             )

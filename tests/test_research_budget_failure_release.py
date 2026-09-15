@@ -1,32 +1,23 @@
-"""A failed provider call must not spend the turn's search quota.
+"""A failed provider call must not hold the reservation it claimed.
 
 ``reserve_search`` claims a slot before the network call and ``record_search``
 releases it after. A failure used to reach neither, so the reservation was held
 for the rest of the turn *by design* — the stated intent being that a provider
 error must not buy the model a second attempt at the same broken query.
 
-Holding the reservation achieves that, but it also consumes a slot. With the
-default cap of 2, one success plus one failure reaches the cap, and every later
-*unrelated* query is refused reporting ``searches_used: 1`` — a budget the turn
-never actually spent. The retry guard is kept here; the collateral is not.
+Holding the reservation achieves that, but it also leaves an entry in
+``_in_flight`` that grows without bound and refuses near-duplicates of a query
+that is no longer running. The retry guard is kept here; the collateral is not,
+and ``_failed_searches`` is what actually enforces the guard.
 """
 
 from __future__ import annotations
 
-import json
-
-import pytest
-
 from app.ai.research_budget import ResearchBudget
-from app.ai.web_tools import _budget_spent_payload
 
 
-def _budget(cap: int = 2) -> ResearchBudget:
-    return ResearchBudget(
-        max_search_calls=cap,
-        near_duplicate_threshold=0.75,
-        max_image_searches=3,
-    )
+def _budget() -> ResearchBudget:
+    return ResearchBudget(near_duplicate_threshold=0.75, max_image_searches=3)
 
 
 def test_a_failed_search_frees_the_slot_for_a_different_query():
@@ -58,47 +49,11 @@ def test_a_failure_does_not_count_as_a_completed_search():
     assert budget.search_calls == 0
 
 
-def test_the_cap_still_applies_to_successful_searches():
-    budget = _budget(cap=2)
-    budget.reserve_search("one")
-    budget.record_search("one", "R1")
-    budget.reserve_search("two")
-    budget.record_search("two", "R2")
+def test_an_unrelated_query_is_never_refused_by_how_many_ran_before_it():
+    """There is no count cap; only a repeat is refused."""
+    budget = _budget()
+    for subject in ("one distinct subject", "another wholly separate matter"):
+        budget.reserve_search(subject)
+        budget.record_search(subject, "R")
 
-    assert budget.reserve_search("three") is not None
-
-
-@pytest.mark.parametrize(
-    ("used", "cap", "expected"),
-    [(2, 2, "budget_exhausted"), (1, 2, "duplicate_query"), (0, 2, "duplicate_query")],
-)
-def test_the_refusal_names_its_real_cause(used, cap, expected):
-    """A repeated query reported as an exhausted budget is a false statement.
-
-    It also misdirects the model: told the quota is gone it summarises, when
-    the correct move is to rephrase and search again.
-
-    The cause now comes from the reservation that refused rather than being
-    re-derived from ``search_calls``, so each case fills the budget to ``used``
-    and then asks for the query that provokes the expected refusal.
-    """
-    budget = _budget(cap=cap)
-    for index in range(used):
-        query = f"topic {index}"
-        budget.reserve_search(query)
-        budget.record_search(query, "R")
-
-    # At the cap, any further query is refused by it. Below the cap, only a
-    # repeat is refused at all — and a query that already failed at the
-    # provider is the repeat available at every ``used``, including zero.
-    if used < cap:
-        probe = "a query the provider already rejected"
-        budget.reserve_search(probe)
-        budget.record_failed_search(probe)
-    else:
-        probe = "an entirely unrelated subject"
-    payload = json.loads(_budget_spent_payload(budget, budget.reserve_search(probe)))
-
-    assert payload["error_type"] == expected
-    assert payload["searches_used"] == used
-    assert payload["search_limit"] == cap
+    assert budget.reserve_search("a third, unrelated topic entirely") is None

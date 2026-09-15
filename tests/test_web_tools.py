@@ -1014,36 +1014,8 @@ async def test_the_observation_line_never_carries_user_derived_text(caplog):
 
 
 @pytest.mark.asyncio
-async def test_a_query_past_the_cap_is_logged_as_a_spent_budget(caplog, monkeypatch):
-    """The unrelated second query here is refused by the cap, not as a repeat.
-
-    Both refusals shared one log outcome, so an operator could not tell a turn
-    that ran out of budget from one repeating itself — the same conflation the
-    model saw in the refusal payload. The log now carries the refusal verbatim,
-    so the line and the model's ``error_type`` cannot drift apart.
-    """
-    monkeypatch.setattr(
-        web_tools.settings, "research_max_search_calls_per_turn", 1, raising=False
-    )
-    tool = create_web_search_tool(
-        tavily_tool=_FakeTool("tavily_search", _search_payload()), clock=_clock
-    )
-
-    await _run(tool, query="aurora release date", objective="Find the release date")
-    with caplog.at_level("INFO", logger="app.ai.web_tools"):
-        await _run(tool, query="quite unrelated ornithology digest", objective="Find birds")
-
-    assert any(
-        "outcome=budget_exhausted" in record.getMessage() for record in caplog.records
-    )
-
-
-@pytest.mark.asyncio
-async def test_a_repeated_query_is_reported_as_a_rejection(caplog, monkeypatch):
+async def test_a_repeated_query_is_reported_as_a_rejection(caplog):
     """A genuine repeat, with the cap left with room to spare."""
-    monkeypatch.setattr(
-        web_tools.settings, "research_max_search_calls_per_turn", 4, raising=False
-    )
     tool = create_web_search_tool(
         tavily_tool=_FakeTool("tavily_search", _search_payload()), clock=_clock
     )

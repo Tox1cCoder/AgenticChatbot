@@ -1425,23 +1425,6 @@ class Settings(BaseSettings):
         le=80_000,
         description="Maximum characters of focused excerpts returned by read_tool_result.",
     )
-    # Two was tuned when a turn made one or two searches. The execution ladder
-    # was quadrupled once turns began chaining web_search, image_search,
-    # web_open and retrieval, but this cap was left behind and became the
-    # binding constraint: a three-facet question was refused on its third
-    # *distinct* query, which reads as a broken tool rather than a spent
-    # budget. Deduplication, not the cap, is what suppresses wasted calls.
-    research_max_search_calls_per_turn: int = Field(
-        default=6,
-        ge=1,
-        description=(
-            "Distinct Tavily network requests allowed per epoch of a turn; a "
-            "continued turn gets a fresh allowance while the already-searched "
-            "memory carries over. A repeat of a query this turn already ran "
-            "returns the recorded result instead of searching again; a further "
-            "distinct query past this cap is refused."
-        ),
-    )
     research_max_image_searches_per_turn: int = Field(
         default=3,
         ge=1,

@@ -61,7 +61,7 @@ async def _cancel_a_search_mid_flight():
 
 
 def test_release_search_frees_a_slot_without_recording_anything():
-    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget = ResearchBudget(near_duplicate_threshold=0.75)
     assert budget.reserve_search("abandoned topic") is None
 
     budget.release_search("abandoned topic")
@@ -72,7 +72,7 @@ def test_release_search_frees_a_slot_without_recording_anything():
 
 
 def test_releasing_a_reservation_that_is_already_gone_is_harmless():
-    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget = ResearchBudget(near_duplicate_threshold=0.75)
     budget.reserve_search("topic")
     budget.record_search("topic", "RESULT")
 
@@ -100,7 +100,6 @@ async def test_a_cancelled_search_does_not_refuse_a_later_unrelated_query():
         conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"
     ):
         budget = get_research_budget(conversation_id=CONVERSATION_ID)
-        budget.max_search_calls = 2
         await _cancel_a_search_mid_flight()
 
         assert budget.reserve_search("an entirely unrelated subject") is None

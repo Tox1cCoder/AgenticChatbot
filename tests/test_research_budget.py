@@ -49,7 +49,7 @@ def test_trace_third_query_is_genuinely_distinct():
 
 
 def test_trace_produces_two_network_searches_and_one_reuse():
-    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget = ResearchBudget(near_duplicate_threshold=0.75)
 
     assert budget.find_reuse(TRACE_Q1) is None
     budget.record_search(TRACE_Q1, "first result")
@@ -64,7 +64,7 @@ def test_trace_produces_two_network_searches_and_one_reuse():
 
 
 def test_tavily_controls_scope_near_duplicate_reuse():
-    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget = ResearchBudget(near_duplicate_threshold=0.75)
     general_scope = (None, None, None, None)
     news_scope = ("news", "week", None, None)
 
@@ -75,36 +75,23 @@ def test_tavily_controls_scope_near_duplicate_reuse():
     assert budget.reserve_search(TRACE_Q2, scope=news_scope) is None
 
 
-def test_a_fourth_distinct_query_is_refused_and_returns_accumulated_results():
-    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+def test_accumulated_returns_every_result_this_epoch_recorded():
+    budget = ResearchBudget(near_duplicate_threshold=0.75)
     budget.record_search("alpha topic one", "A")
     budget.record_search("beta topic two", "B")
 
-    assert budget.reserve_search("gamma topic three") is not None
     assert budget.accumulated() == ["A", "B"]
 
 
-def test_reserve_search_enforces_the_cap_before_any_result_is_recorded():
-    # Expresses the race sequentially: two reservations land before either
-    # result is recorded, exactly like two parallel tool calls racing ahead
-    # of their awaits. The cap must hold on reservations alone.
-    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
-
-    assert budget.reserve_search("alpha topic one") is None
-    assert budget.reserve_search("beta topic two") is None
-    assert budget.reserve_search("gamma topic three") is not None
-    assert budget.search_calls == 0
-
-
 def test_reserve_search_refuses_a_near_duplicate_of_an_already_recorded_query():
-    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget = ResearchBudget(near_duplicate_threshold=0.75)
     budget.record_search(TRACE_Q1, "first result")
 
     assert budget.reserve_search(TRACE_Q2) is not None
 
 
 def test_record_search_releases_the_reservation_for_a_further_distinct_query():
-    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget = ResearchBudget(near_duplicate_threshold=0.75)
 
     assert budget.reserve_search("alpha topic one") is None
     budget.record_search("alpha topic one", "A")
@@ -117,7 +104,7 @@ def test_a_distinct_image_subject_gets_its_own_search():
     """One image search per turn meant every picture in an answer came from one
     query, so an answer needing an official logo *and* a gameplay shot could
     only ever get two renderings of whichever one was asked for."""
-    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75, max_image_searches=3)
+    budget = ResearchBudget(near_duplicate_threshold=0.75, max_image_searches=3)
 
     assert budget.reserve_image_search("Pokemon Unite logo") is True
     budget.record_image_search([{"id": "image:logo"}])
@@ -130,14 +117,14 @@ def test_a_distinct_image_subject_gets_its_own_search():
 
 def test_a_repeated_image_subject_is_refused():
     """Asking twice for the same subject is how duplicates come back."""
-    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75, max_image_searches=3)
+    budget = ResearchBudget(near_duplicate_threshold=0.75, max_image_searches=3)
 
     assert budget.reserve_image_search("Pokemon Unite gameplay") is True
     assert budget.reserve_image_search("Pokemon Unite gameplay") is False
 
 
 def test_the_image_search_cap_bounds_the_turn():
-    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75, max_image_searches=2)
+    budget = ResearchBudget(near_duplicate_threshold=0.75, max_image_searches=2)
 
     assert budget.reserve_image_search("first subject") is True
     assert budget.reserve_image_search("second subject") is True
@@ -148,7 +135,7 @@ def test_the_image_search_cap_bounds_the_turn():
 def test_a_failed_image_search_does_not_buy_a_retry():
     """Matching reserve_search: a reservation is consumed on claim, so a
     provider failure cannot be retried into the same slot."""
-    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75, max_image_searches=1)
+    budget = ResearchBudget(near_duplicate_threshold=0.75, max_image_searches=1)
 
     assert budget.reserve_image_search("subject") is True
     assert budget.reserve_image_search("different subject") is False
@@ -222,7 +209,7 @@ def test_the_accessors_are_keyword_only():
 def test_a_persisted_accounting_round_trips():
     from app.ai.research_budget import research_budget_from_state
 
-    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget = ResearchBudget(near_duplicate_threshold=0.75)
     budget.record_search("population of vietnam 2024", "…", scope=("advanced", 5))
 
     restored = research_budget_from_state(budget.to_state())
@@ -237,7 +224,7 @@ def test_a_scope_survives_the_round_trip_as_a_tuple():
     would silently stop matching and every query would look new."""
     from app.ai.research_budget import research_budget_from_state
 
-    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget = ResearchBudget(near_duplicate_threshold=0.75)
     budget.record_search("alpha beta", "…", scope=("advanced", 5))
 
     restored = research_budget_from_state(budget.to_state())
@@ -247,26 +234,33 @@ def test_a_scope_survives_the_round_trip_as_a_tuple():
     assert restored.searched_in_prior_epoch("alpha beta", scope=("basic", 5)) is False
 
 
-def test_a_continued_epoch_gets_its_call_cap_back():
-    """The point of continuing. The allowance resets; the memory does not."""
+def test_a_continued_epoch_starts_with_no_recorded_results():
+    """What resets and what does not.
+
+    There is no call cap to replenish any more, but the epoch boundary is still
+    real: the new epoch holds none of the previous one's *results* (the
+    transcript carries those), while every query it already asked stays in the
+    dedup memory.
+    """
     from app.ai.research_budget import research_budget_from_state
 
-    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget = ResearchBudget(near_duplicate_threshold=0.75)
     budget.record_search("alpha", "A")
     budget.record_search("beta", "B")
-    assert budget.reserve_search("gamma") is not None, "the first epoch should be spent"
 
     restored = research_budget_from_state(budget.to_state())
 
     assert restored.search_calls == 0
-    assert restored.reserve_search("gamma") is None
+    assert restored.accumulated() == []
+    assert restored.reserve_search("alpha") == "duplicate_query"
+    assert restored.reserve_search("an entirely unrelated subject") is None
 
 
 def test_a_continued_epoch_cannot_re_run_a_query_the_last_one_made():
     """Otherwise Continue is a way around the cap that just refused it."""
     from app.ai.research_budget import research_budget_from_state
 
-    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget = ResearchBudget(near_duplicate_threshold=0.75)
     budget.record_search("population of vietnam", "…")
 
     restored = research_budget_from_state(budget.to_state())
@@ -277,7 +271,7 @@ def test_a_continued_epoch_cannot_re_run_a_query_the_last_one_made():
 def test_a_near_duplicate_of_a_prior_epochs_query_is_also_refused():
     from app.ai.research_budget import research_budget_from_state
 
-    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget = ResearchBudget(near_duplicate_threshold=0.75)
     budget.record_search("population of vietnam 2024", "…")
 
     restored = research_budget_from_state(budget.to_state())
@@ -294,7 +288,7 @@ def test_a_prior_epochs_query_has_no_result_to_reuse():
     """
     from app.ai.research_budget import research_budget_from_state
 
-    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget = ResearchBudget(near_duplicate_threshold=0.75)
     budget.record_search("alpha", "the full provider response")
 
     state = budget.to_state()
@@ -307,7 +301,7 @@ def test_an_image_subject_is_not_searched_twice_across_epochs():
     from app.ai.research_budget import research_budget_from_state
 
     budget = ResearchBudget(
-        max_search_calls=2, near_duplicate_threshold=0.75, max_image_searches=1
+        near_duplicate_threshold=0.75, max_image_searches=1
     )
     assert budget.reserve_image_search("a red bicycle") is True
 
@@ -321,7 +315,7 @@ def test_an_image_subject_is_not_searched_twice_across_epochs():
 def test_the_epoch_count_advances_with_each_restore():
     from app.ai.research_budget import research_budget_from_state
 
-    budget = ResearchBudget(max_search_calls=2, near_duplicate_threshold=0.75)
+    budget = ResearchBudget(near_duplicate_threshold=0.75)
     budget.record_search("alpha", "A")
 
     second = research_budget_from_state(budget.to_state())
@@ -334,7 +328,7 @@ def test_the_persisted_memory_is_bounded():
     """A row is not a place for unbounded growth."""
     from app.ai.research_budget import _MAX_PERSISTED_SEARCHES
 
-    budget = ResearchBudget(max_search_calls=1000, near_duplicate_threshold=1.0)
+    budget = ResearchBudget(near_duplicate_threshold=1.0)
     for index in range(_MAX_PERSISTED_SEARCHES + 25):
         budget.record_search(f"query number {index}", "…")
 
@@ -400,31 +394,25 @@ def test_a_turn_that_searched_snapshots_its_memory():
     assert state["searched"]
 
 
-def test_installing_an_accounting_replaces_the_live_budget(monkeypatch):
+def test_installing_an_accounting_replaces_the_live_budget():
     """Both Continue paths rehydrate, including a same-worker one.
 
     Reusing the in-memory entry for a same-worker Continue would give it a
     spent allowance while a cross-worker Continue got a fresh one — the two
     paths must not disagree.
 
-    The cap is pinned rather than inherited: this test is about rehydration,
-    and reading it off the configured default made it fail the day that
-    default changed, for a reason unrelated to what it asserts.
     """
-    from app.ai import research_budget as research_budget_module
     from app.ai.research_budget import install_research_budget
 
-    monkeypatch.setattr(
-        research_budget_module.settings, "research_max_search_calls_per_turn", 2
-    )
     reset_research_budget(logical_turn_id="turn-install")
     live = get_research_budget(logical_turn_id="turn-install")
     live.record_search("alpha", "A")
     live.record_search("beta", "B")
-    assert live.reserve_search("gamma") is not None
 
     installed = install_research_budget(live.to_state(), logical_turn_id="turn-install")
 
     assert get_research_budget(logical_turn_id="turn-install") is installed
+    assert installed.search_calls == 0
+    # The dedup memory came across; a fresh subject is still free.
+    assert installed.reserve_search("alpha") == "duplicate_query"
     assert installed.reserve_search("gamma") is None
-    assert installed.reserve_search("alpha") is not None
