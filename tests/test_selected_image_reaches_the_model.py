@@ -84,7 +84,12 @@ class _TwoRoundModel(BaseChatModel):
                 ],
             )
         else:
-            result = AIMessage(content="The blue version is current [[source:S1]] [[image:I2]]")
+            result = AIMessage(
+                content=(
+                    "The blue version is current "
+                    "[Release notes](https://source.test/release). [[image:I2]]"
+                )
+            )
         self.call_count += 1
         return ChatResult(generations=[ChatGeneration(message=result)])
 

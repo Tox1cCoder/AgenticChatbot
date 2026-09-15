@@ -23,8 +23,17 @@ def _session():
         )
         for candidate_id in ("I1", "I2", "I3")
     }
+
+    def resolve_source(value: str):
+        return sources.get(value) or next(
+            (source for source in sources.values() if source.url == value), None
+        )
+
     return SimpleNamespace(
-        source_registry=SimpleNamespace(resolve=lambda value: sources.get(value)),
+        source_registry=SimpleNamespace(
+            records=tuple(sources.values()),
+            resolve=resolve_source,
+        ),
         prepared_images=images,
     )
 
@@ -57,6 +66,30 @@ def test_image_without_a_grounded_source_is_not_selected() -> None:
     assert resolution.selected_image_ids == ()
     assert resolution.rich_items == ()
     assert "rich:image" not in resolution.text
+    assert resolution.warnings[-1]["code"] == "image_without_source"
+
+
+def test_admitted_markdown_citation_grounds_a_selected_image() -> None:
+    """A model-selected image must survive when its citation uses Markdown."""
+    resolution = GroundingParser(_session()).resolve(
+        "Image from [Two](https://example.test/two). [[image:I2]]"
+    )
+
+    assert resolution.source_ids == ("S2",)
+    assert resolution.selected_image_ids == ("I2",)
+    assert "<!--rich:image:web:i2-->" in resolution.text
+    assert [item["id"] for item in resolution.rich_items] == ["image:web:i2"]
+    assert not any(warning["code"] == "image_without_source" for warning in resolution.warnings)
+
+
+def test_unadmitted_markdown_link_does_not_ground_a_selected_image() -> None:
+    resolution = GroundingParser(_session()).resolve(
+        "Untrusted [page](https://other.test/page). [[image:I2]]"
+    )
+
+    assert resolution.source_ids == ()
+    assert resolution.selected_image_ids == ()
+    assert resolution.rich_items == ()
     assert resolution.warnings[-1]["code"] == "image_without_source"
 
 

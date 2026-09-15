@@ -147,15 +147,15 @@ Provider-native payloads and untrusted raw HTML never become the public contract
 6. Image candidates are downloaded through the server's safe transport, bounded by time and bytes, MIME-sniffed, dimension-checked, deduplicated, and associated with their public source pages.
 7. After each tool step, answer-model context is rebuilt from the current evidence bundle. It is not frozen before tool execution.
 8. The evidence middleware runs after runtime-model resolution and before request-budget preflight. The post-tool request therefore budgets the exact compact textual evidence and bounded multimodal candidate set it sends. Each `candidate_id=I#` text label immediately precedes its image bytes.
-9. The model cites source IDs with `[[source:S1]]` tokens and requests image placement with `[[image:I1]]` candidate tokens. It does not author public URLs or final rich markers.
-10. One grounding parser admits only IDs present in the current turn registries. It is used incrementally for streaming and once over terminal content. Finalization converts valid source references to clickable links and performs server-owned rich-item placement.
+9. The model should cite source IDs with `[[source:S1]]` tokens and requests image placement with `[[image:I1]]` candidate tokens. It does not author final rich markers.
+10. One grounding parser admits only IDs and citation URLs present in the current turn registries. It is used incrementally for streaming and once over terminal content. Finalization converts valid source references to clickable links, accepts an already-authored Markdown citation only when its canonical URL is admitted, and performs server-owned rich-item placement.
 11. The assistant message persists final linked Markdown, public source records, selected rich items, and a bounded search trace. Unselected images and private retrieval data are discarded from the public message.
 
 ## Citation and client transport
 
 The source registry is authoritative. A citation is valid only when its source ID belongs to the current turn and the corresponding record passed public URL validation.
 
-The model emits `[[source:<source-id>]]` tokens. The streaming filter buffers partial tokens across chunks, resolves valid IDs, and converts them to numbered clickable Markdown links. Unknown, malformed, stale-turn, or invented IDs are removed. The same parser is applied during terminal finalization so streamed and reloaded messages agree.
+The model should emit `[[source:<source-id>]]` tokens. The streaming filter buffers partial tokens across chunks, resolves valid IDs, and converts them to numbered clickable Markdown links. If the model instead emits an ordinary Markdown citation, it is grounded only when its canonical URL resolves to the current turn's source registry; this equivalent admitted citation may support an explicitly selected image. Unknown, malformed, stale-turn, invented, or unadmitted references are rejected. The same parser is applied during terminal finalization so streamed and reloaded messages agree.
 
 For a required-web turn, answer text is buffered until terminal grounding proves
 that the response cited at least one admitted source. Tool, reasoning, and

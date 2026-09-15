@@ -14,6 +14,7 @@ _SEGMENT = re.compile(
     r"|(?P<token>\[\[(?P<kind>source|image):(?P<identifier>[^\]]*)\]\])",
     re.MULTILINE | re.DOTALL,
 )
+_MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\((https?://[^)\s]+)\)")
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,11 @@ class GroundingParser:
             return f"<!--rich:{prepared.rich_item['id']}-->"
 
         resolved = _SEGMENT.sub(replace, str(text or ""))
+        for url in _MARKDOWN_LINK.findall(resolved):
+            source = self._session.source_registry.resolve(url)
+            source_id = str(getattr(source, "source_id", "") or "")
+            if source_id and source_id not in source_ids:
+                source_ids.append(source_id)
         if image_ids and not source_ids:
             for item in rich_items:
                 resolved = resolved.replace(f"<!--rich:{item['id']}-->", "")
