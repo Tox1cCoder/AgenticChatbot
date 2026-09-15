@@ -4,7 +4,7 @@ import pytest
 
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from app.ai.workflow.contracts import OutcomeProvenance, ResponseOutcome, RoutingDecision
-from app.ai.workflow.finalization import UNVERIFIED_WEB_RESPONSE, OutputValidator
+from app.ai.workflow.finalization import OutputValidationError, OutputValidator
 
 
 def _outcome(
@@ -39,7 +39,7 @@ async def test_admitted_source_link_passes_web_policy() -> None:
 
 
 @pytest.mark.asyncio
-async def test_uncited_web_answer_is_replaced_not_published() -> None:
+async def test_uncited_web_answer_is_rejected_without_rewriting_model_content() -> None:
     image = {"id": "image:web:one", "type": "image", "payload": {"url": "/web-images/one"}}
     outcome = _outcome(
         "Unsupported current claim. <!--rich:image:web:one-->",
@@ -47,16 +47,20 @@ async def test_uncited_web_answer_is_replaced_not_published() -> None:
         rich_items=(image,),
     )
 
-    validated = await OutputValidator().validate(outcome, {})
+    with pytest.raises(OutputValidationError) as excinfo:
+        await OutputValidator().validate(outcome, {})
 
-    assert validated.response.message.content == UNVERIFIED_WEB_RESPONSE
-    assert validated.response.metadata["web_verification"]["reason"] == "missing_valid_citation"
-    assert "_rich_item_candidates" not in validated.response.metadata
-    assert validated.provenance.rich_items == ()
+    assert excinfo.value.reason == "missing_web_citation"
+    assert excinfo.value.retriable is True
+    assert outcome.response.message.content == (
+        "Unsupported current claim. <!--rich:image:web:one-->"
+    )
+    assert outcome.response.metadata["_rich_item_candidates"] == [image]
+    assert outcome.provenance.rich_items == (image,)
 
 
 @pytest.mark.asyncio
-async def test_required_route_without_evidence_gets_server_owned_response() -> None:
+async def test_required_route_without_admitted_sources_keeps_the_model_answer() -> None:
     outcome = _outcome("The current price is 100.")
     state = {
         "routing_decision": RoutingDecision(
@@ -70,5 +74,5 @@ async def test_required_route_without_evidence_gets_server_owned_response() -> N
 
     validated = await OutputValidator().validate(outcome, state)
 
-    assert validated.response.message.content == UNVERIFIED_WEB_RESPONSE
-    assert validated.response.metadata["web_verification"]["reason"] == "no_admitted_sources"
+    assert validated.response.message.content == "The current price is 100."
+    assert "web_evidence" not in validated.provenance.output_policy_ids

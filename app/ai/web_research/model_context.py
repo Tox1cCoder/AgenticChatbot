@@ -40,7 +40,8 @@ def inject_latest_web_evidence(
     if image_blocks:
         lines.append(
             "Inspect each labeled image. Select only relevant visible evidence with "
-            "[[image:I#]]; selecting none is valid."
+            "[[image:I#]]; selecting none is valid. Every answer that selects an image "
+            "must also cite at least one supporting source with [[source:S#]]."
         )
 
     return [

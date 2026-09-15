@@ -106,6 +106,27 @@ async def test_forced_final_response_records_the_exhausted_budget():
     assert finalized.metadata["tool_budget_exhausted"]["limit"] == 5
 
 
+@pytest.mark.asyncio
+async def test_forced_final_response_never_authors_assistant_text():
+    workflow = _budget_workflow()
+    state = _forced_final_state()
+    response = AgentResponse(
+        agent_type=AgentType.CHAT,
+        agent_id="chat_agent",
+        message=AgentMessage(
+            role=MessageRole.ASSISTANT,
+            content="",
+            tool_calls=[{"id": "call-1", "name": "search", "args": {}}],
+        ),
+        metadata={},
+    )
+
+    finalized = workflow._finalize_forced_final_response(state, response)
+
+    assert finalized.message.tool_calls is None
+    assert finalized.message.content == ""
+
+
 class _DummyAgent(BaseAgent):
     def _init_gemini(self) -> None:
         self.gemini_client = None

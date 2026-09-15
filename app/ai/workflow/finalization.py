@@ -49,9 +49,6 @@ __all__ = [
 
 GRAPH_VERSION = "routing-v2"
 POLICY_IMPLEMENTATION_VERSION = "1"
-UNVERIFIED_WEB_RESPONSE = (
-    "I couldn’t verify this with web sources, so I can’t provide a reliable answer yet."
-)
 
 # Citations the grounding policy can recognise, e.g. ``[E12]``.
 _CITATION_PATTERN = re.compile(r"\[(E\d+)\]")
@@ -189,10 +186,12 @@ class WebEvidencePolicy:
             if isinstance(record, dict) and record.get("url")
         }
         cited = set(_MARKDOWN_LINK_PATTERN.findall(outcome.response.message.content or ""))
-        if known.intersection(cited) or outcome.response.message.content == UNVERIFIED_WEB_RESPONSE:
+        if known.intersection(cited):
             return
         raise OutputValidationError(
-            "missing_web_citation", "web answer cites no source admitted for this turn"
+            "missing_web_citation",
+            "web answer cites no source admitted for this turn",
+            retriable=True,
         )
 
 
@@ -296,8 +295,7 @@ def select_policies(
         (provenance.artifacts or response.tool_artifacts, "artifact_provenance"),
         (provenance.images or metadata.get("images"), "image_delivery"),
         (
-            provenance.web_sources
-            or bool(getattr((state or {}).get("routing_decision"), "requires_web", False)),
+            provenance.web_sources,
             "web_evidence",
         ),
     ):
@@ -319,30 +317,6 @@ class OutputValidator:
             raise OutputValidationError("missing_agent_identity", "outcome has no agent_id")
 
         policy_ids = select_policies(outcome, state)
-        if "web_evidence" in policy_ids:
-            known_urls = {
-                str(record.get("url"))
-                for record in outcome.provenance.web_sources
-                if isinstance(record, dict) and record.get("url")
-            }
-            cited_urls = set(_MARKDOWN_LINK_PATTERN.findall(outcome.response.message.content or ""))
-            if not known_urls.intersection(cited_urls):
-                metadata = dict(outcome.response.metadata or {})
-                metadata["web_verification"] = {
-                    "verified": False,
-                    "reason": "missing_valid_citation" if known_urls else "no_admitted_sources",
-                }
-                metadata.pop("_rich_item_candidates", None)
-                metadata.pop("_inline_rich_response_v1", None)
-                response = outcome.response.model_copy(deep=True)
-                response.message.content = UNVERIFIED_WEB_RESPONSE
-                response.metadata = metadata
-                outcome = outcome.model_copy(
-                    update={
-                        "response": response,
-                        "provenance": outcome.provenance.model_copy(update={"rich_items": ()}),
-                    }
-                )
         context = {"state": state}
         for policy_id in policy_ids:
             await POLICY_REGISTRY[policy_id].validate(outcome, context)

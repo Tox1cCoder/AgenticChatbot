@@ -25,7 +25,7 @@ from typing import Any
 
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
@@ -627,37 +627,68 @@ class SpecialistFactory:
         build = await self._build(definition, request)
 
         try:
+            invocation_messages = self._invocation_messages(request)
             result = await build.agent.ainvoke(
-                {"messages": self._invocation_messages(request)},
+                {"messages": invocation_messages},
                 context=self._runtime_context(request),
                 config=self._run_config(request),
             )
+            _reject_swallowed_interrupt(result, request.agent_id)
+            produced = self._produced_messages(request, result)
+            grounding = None
+            if build.web_research_session is not None:
+                parser = GroundingParser(build.web_research_session)
+                grounding = parser.resolve(_final_text(produced))
+                if build.web_research_session.source_registry.records and not grounding.source_ids:
+                    correction = HumanMessage(
+                        content=(
+                            "Your previous draft cannot be published because it did not cite an "
+                            "admitted web source. Rewrite the complete answer now using at least "
+                            "one [[source:S#]] token from WEB EVIDENCE. If you show an image, use "
+                            "[[image:I#]] only for an image you inspected and include its "
+                            "supporting [[source:S#]]. Do not call tools or mention this "
+                            "correction."
+                        )
+                    )
+                    repair_input = [*invocation_messages, *produced, correction]
+                    previous_disable_tools = request.extras.get("disable_tools")
+                    request.extras["disable_tools"] = True
+                    try:
+                        repaired = await build.agent.ainvoke(
+                            {"messages": repair_input},
+                            context=self._runtime_context(request),
+                            config=self._run_config(request),
+                        )
+                    finally:
+                        if previous_disable_tools is None:
+                            request.extras.pop("disable_tools", None)
+                        else:
+                            request.extras["disable_tools"] = previous_disable_tools
+                    _reject_swallowed_interrupt(repaired, request.agent_id)
+                    repaired_messages = (
+                        repaired.get("messages") if isinstance(repaired, dict) else []
+                    )
+                    repaired_produced = (
+                        repaired_messages[len(repair_input) :]
+                        if isinstance(repaired_messages, list)
+                        else []
+                    )
+                    produced = [*produced, correction, *repaired_produced]
+                    grounding = parser.resolve(_final_text(repaired_produced))
+                produced = _replace_final_text(produced, grounding.text)
+                await build.web_research_session.finish(grounding.selected_image_ids)
         except GraphBubbleUp:
             if build.web_research_session is not None:
                 await build.web_research_session.abort()
             raise
-        except (ModelCallLimitExceededError, ToolCallLimitExceededError) as exc:
-            # The soft budget was supposed to reserve an answer one call
-            # earlier. It did not, so this is the last honest thing that can be
-            # said -- and saying it beats reporting agent_execution_limit, which
-            # discards the artifacts the pipeline already recorded and gives the
-            # user nothing to act on.
+        except (ModelCallLimitExceededError, ToolCallLimitExceededError):
             if build.web_research_session is not None:
                 await build.web_research_session.abort()
-            return self._hard_limit_outcome(
-                definition, request, build.tool_execution, build.accountant, exc
-            )
+            raise
         except BaseException:
             if build.web_research_session is not None:
                 await build.web_research_session.abort()
             raise
-        _reject_swallowed_interrupt(result, request.agent_id)
-        produced = self._produced_messages(request, result)
-        grounding = None
-        if build.web_research_session is not None:
-            grounding = GroundingParser(build.web_research_session).resolve(_final_text(produced))
-            produced = _replace_final_text(produced, grounding.text)
-            await build.web_research_session.finish(grounding.selected_image_ids)
         if not _final_text(produced).strip():
             # Why the model returned no text is not established, and a recovery
             # here would hide the evidence needed to find out. The turn fails,
@@ -889,7 +920,7 @@ class SpecialistFactory:
             tool-free -- and it holds through provider retries and fallbacks,
             which re-enter the same chain.
             """
-            if accountant.state.forced_synthesis:
+            if accountant.state.forced_synthesis or request.extras.get("disable_tools"):
                 return []
             live_tools = await _resolve(definition.tool_factory, request) or []
             if not web_research_enabled:
@@ -989,38 +1020,6 @@ class SpecialistFactory:
             return []
         sent = len(request.history) + len(request.carried_messages) + len(request.messages)
         return messages[sent:] if len(messages) > sent else []
-
-    def _hard_limit_outcome(
-        self,
-        definition: SpecialistDefinition,
-        request: SpecialistRequest,
-        tool_execution: ToolExecutionMiddleware,
-        accountant: ExecutionBudgetAccountant,
-        exc: BaseException,
-    ) -> ResponseOutcome:
-        """A validated partial built from what survived the exception.
-
-        The model's own text did not: it was mid-loop when the ceiling fired.
-        What did survive is the artifact and image records the tool pipeline
-        wrote, and the counters, so the message is server-owned and says
-        exactly that rather than inventing an answer.
-        """
-        accountant.note_hard_limit()
-        get_routing_metrics_recorder().agent_execution_limit(
-            agent_id=request.agent_id, limit_kind=type(exc).__name__
-        )
-        logger.warning(
-            "Specialist %s hit the execution ceiling (%s); returning a server-owned partial",
-            request.agent_id,
-            type(exc).__name__,
-        )
-        return self._to_outcome(
-            definition,
-            request,
-            [AIMessage(content=HARD_LIMIT_PARTIAL_TEXT)],
-            tool_execution,
-            accountant,
-        )
 
     def _to_outcome(
         self,

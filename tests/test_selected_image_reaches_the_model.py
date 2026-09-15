@@ -52,21 +52,26 @@ class _ImageService:
         return None
 
 
-class _TwoRoundModel(BaseChatModel):
+class _GroundingRepairModel(BaseChatModel):
     requests: list[list] = []
     call_count: int = 0
+    bound_tools: list = []
+    tool_counts: list[int] = []
 
     model_config = {"arbitrary_types_allowed": True}
 
     @property
     def _llm_type(self) -> str:
-        return "two-round-web-evidence"
+        return "grounding-repair-web-evidence"
 
-    def bind_tools(self, _tools, **_kwargs):
+    def bind_tools(self, tools, **_kwargs):
+        self.bound_tools = list(tools)
         return self
 
     def _answer(self, messages):
         self.requests.append(list(messages))
+        self.tool_counts.append(len(self.bound_tools))
+        self.bound_tools = []
         if self.call_count == 0:
             result = AIMessage(
                 content="",
@@ -83,11 +88,13 @@ class _TwoRoundModel(BaseChatModel):
                     }
                 ],
             )
+        elif self.call_count == 1:
+            result = AIMessage(content="Here is the current interface. [[image:I2]]")
         else:
             result = AIMessage(
                 content=(
                     "The blue version is current "
-                    "[Release notes](https://source.test/release). [[image:I2]]"
+                    "[[source:S1]]. [[image:I2]]"
                 )
             )
         self.call_count += 1
@@ -101,7 +108,7 @@ class _TwoRoundModel(BaseChatModel):
 
 
 @pytest.mark.asyncio
-async def test_second_answer_model_request_contains_labeled_validated_pixels() -> None:
+async def test_invalid_image_draft_is_repaired_with_the_same_validated_pixels() -> None:
     text_tool = _ProviderTool(
         "tavily_search",
         {
@@ -132,7 +139,7 @@ async def test_second_answer_model_request_contains_labeled_validated_pixels() -
         },
     )
     owner = SimpleNamespace(tools=[text_tool, image_tool], agent_config_key="chat")
-    model = _TwoRoundModel()
+    model = _GroundingRepairModel()
     definition = SpecialistDefinition(
         agent_id="chat_agent",
         agent_type=AgentType.CHAT,
@@ -181,13 +188,29 @@ async def test_second_answer_model_request_contains_labeled_validated_pixels() -
 
     outcome = await factory.invoke(request)
 
-    assert len(model.requests) == 2
+    assert len(model.requests) == 3
     second = model.requests[1]
     evidence = second[-1].content
     assert evidence[1]["text"].startswith("Image candidate I1")
     assert evidence[2]["image_url"]["url"].endswith("cmVkLXBpeGVscw==")
     assert evidence[3]["text"].startswith("Image candidate I2")
     assert evidence[4]["image_url"]["url"].endswith("Ymx1ZS1waXhlbHM=")
+    third = model.requests[2]
+    correction = " ".join(
+        str(message.content)
+        for message in third
+        if isinstance(message, HumanMessage)
+    )
+    assert "Rewrite the complete answer" in correction
+    assert model.tool_counts[-1] == 0
+    repaired_evidence = next(
+        message.content
+        for message in third
+        if (message.additional_kwargs or {}).get("web_evidence_v1")
+    )
+    assert repaired_evidence[3]["text"].startswith("Image candidate I2")
+    assert repaired_evidence[4]["image_url"]["url"].endswith("Ymx1ZS1waXhlbHM=")
+    assert "https://source.test/release" in outcome.response.message.content
     assert "<!--rich:image:web:" in outcome.response.message.content
     assert "[[image:" not in outcome.response.message.content
     assert len(outcome.provenance.rich_items) == 1

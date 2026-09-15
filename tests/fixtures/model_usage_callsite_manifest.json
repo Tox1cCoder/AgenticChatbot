@@ -220,6 +220,12 @@
   },
   {
     "file": "app/ai/workflow/specialists.py",
+    "function": "SpecialistFactory.invoke",
+    "call_chain": "build.agent.ainvoke",
+    "disposition": "workflow_stream"
+  },
+  {
+    "file": "app/ai/workflow/specialists.py",
     "function": "SpecialistFactory.invoke_worker",
     "call_chain": "build.agent.ainvoke",
     "disposition": "workflow_stream"

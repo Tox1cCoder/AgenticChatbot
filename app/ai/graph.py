@@ -1236,12 +1236,6 @@ class MultiAgentWorkflow(
                 len(response.message.tool_calls),
             )
             response.message.tool_calls = None
-            if not coerce_response_text(response.message.content):
-                response.message.content = (
-                    "I reached the tool-use limit before I could make additional tool calls. "
-                    "Based on the tool results already gathered, I cannot complete the "
-                    "remaining lookup reliably in this turn."
-                )
 
         context.pop("force_final_response", None)
         context.pop("tool_budget", None)
