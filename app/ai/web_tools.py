@@ -272,7 +272,21 @@ def create_web_search_tool(
                 "web_search", outcome="provider_error", freshness=normalized.freshness
             )
             return _error_payload(str(exc))
-        budget.record_search(normalized.query, raw, scope=scope)
+        else:
+            # In `else`, not after the block: this runs before the `finally`
+            # below, so the completed search is on the books before its
+            # reservation comes off them. Releasing first would open a window
+            # where a parallel sibling sees neither and exceeds the cap.
+            budget.record_search(normalized.query, raw, scope=scope)
+        finally:
+            # A cancelled tool call reaches neither `except`: the executor
+            # cancels the task on its soft timeout, and Stop and client
+            # disconnect cancel it too, and `CancelledError` is a
+            # `BaseException`. The reservation was then held for the rest of
+            # the turn, so a later, unrelated query was refused
+            # `budget_exhausted` with `searches_used` below `search_limit`.
+            # The recording paths have already released; this is a no-op there.
+            budget.release_search(normalized.query, scope=scope)
         return _project_search(normalized, raw, reused=False, budget=budget)
 
     return _internal_tool(

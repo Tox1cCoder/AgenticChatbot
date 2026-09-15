@@ -240,6 +240,28 @@ class ResearchBudget:
             self._failed_searches.append((tokens, scope))
             self._release(tokens, scope)
 
+    def release_search(self, query: str, *, scope: SearchScope = ()) -> None:
+        """Give back a slot for a call that never reached a verdict.
+
+        The third outcome of a reservation, alongside :meth:`record_search` and
+        :meth:`record_failed_search`. A tool call can be *cancelled* — the tool
+        executor cancels the task on its soft timeout, and a Stop or a client
+        disconnect cancels it too — and ``asyncio.CancelledError`` is a
+        ``BaseException``, so it reaches neither recording path. The slot was
+        then held for the rest of the turn, and later unrelated queries were
+        refused reporting a budget the turn had not spent.
+
+        Unlike :meth:`record_failed_search` the query is deliberately *not*
+        remembered: a cancellation is not the provider's answer, so the model
+        must be free to ask it again.
+
+        A reservation that has already been released is not an error; every
+        exit path calls this, and the recording paths run first.
+        """
+
+        with self._instance_lock:
+            self._release(normalize_query_tokens(query), scope)
+
     def _release(self, tokens: frozenset[str], scope: SearchScope) -> None:
         """Drop one in-flight reservation. Caller holds the lock."""
         for index, reservation in enumerate(self._in_flight):
