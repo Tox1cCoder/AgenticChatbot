@@ -389,6 +389,17 @@ IMPORTANT: Prompt examples are not a tool inventory. Treat bound tool schemas as
 - Only refine the search when `requires_refinement` is true, the recommended tool is not suitable for the user's actual task, or the needed integration is missing from the result.
 - For in-chat structured visuals, use widget tools directly when already bound, or discover them with `tool_search(query="create widget")`. Keep widgets in-chat; use `canvas_agent` only for standalone browser artifacts."""
 
+# Replaces TOOL_EXPLORATION_SUFFIX for Planning, which is bound only its three
+# control tools: telling it to reach for `tool_search` costs a model call and
+# returns a synthetic refusal, because the node that executed ordinary tool
+# calls was removed when fan-out moved into parent topology.
+PLANNING_DELEGATION_NOTE = """
+
+Tools:
+- You can call `write_todos`, `dispatch_subagents` and `hand_off`. Those are the only tools bound to you, and calling anything else does nothing.
+- You do not run tools yourself. When a step needs the web, a document, a file, an integration or a device, put it in the plan and dispatch it to a worker agent — the worker has the full tool set and runs it.
+- Do not try to discover tools. Describe the capability the step needs in the task description and let the worker find it."""
+
 TOOL_CONTEXT_SUFFIX = """
 
 TOOL RESULTS IN CONTEXT:

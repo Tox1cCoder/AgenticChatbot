@@ -24,7 +24,11 @@ from ..planning_rubric import (
     parse_planning_rubric_evaluation,
 )
 from ..planning_tools import create_write_todos_tool
-from ..prompts import PLANNING_EXECUTION_PROMPT
+from ..prompts import (
+    PLANNING_DELEGATION_NOTE,
+    PLANNING_EXECUTION_PROMPT,
+    TOOL_EXPLORATION_SUFFIX,
+)
 from ..request_budget import ContextBudgetExceededError
 from ..schemas import (
     AgentMessage,
@@ -39,6 +43,15 @@ from .base_agent import BaseAgent
 
 if TYPE_CHECKING:
     from ...usage.recorder import ModelUsageRecorder
+
+
+#: The only tool names Planning's model node has a branch for. Anything else
+#: it is offered gets a synthetic ``unsupported_planning_tool`` message rather
+#: than a result, so offering it is a turn that ends with no answer. Named here
+#: rather than imported from ``workflow.planning_execution`` to keep the agent
+#: free of a workflow import; ``test_planning_binds_only_what_it_executes``
+#: asserts the two stay identical.
+EXECUTABLE_PLANNING_TOOLS = frozenset({"write_todos", "dispatch_subagents", "hand_off"})
 
 
 class PlanningAgent(BaseAgent):
@@ -79,21 +92,22 @@ class PlanningAgent(BaseAgent):
         include_hand_off: bool | None = None,
         excluded_tool_names: set[str] | frozenset[str] | None = None,
     ) -> Any:
-        """
-        Override to ensure write_todos is always included as an internal tool.
+        """Bind only the control tools Planning can actually execute.
 
-        This guarantees write_todos is available even in deferred tool loading mode,
-        where only tool_search + pinned tools + loaded tools would normally be bound.
+        Same set as :meth:`_get_tools_for_binding`, and it has to stay the same
+        set: a tool the model is offered but the node loop cannot route is a
+        turn that ends with no answer.
         """
-        return super()._get_llm_with_tools(
-            model=model,
+        tools = self._get_tools_for_binding(
             conversation_id=conversation_id,
-            internal_tools=self._combine_with_write_todos(internal_tools),
+            internal_tools=internal_tools,
             user_id=user_id,
             device_id=device_id,
             include_hand_off=include_hand_off,
             excluded_tool_names=excluded_tool_names,
         )
+        target = model if model is not None else self._get_llm()
+        return ModelFactory.bind_tools_to_model(target, tools) if tools else target
 
     def _get_tools_for_binding(
         self,
@@ -105,18 +119,27 @@ class PlanningAgent(BaseAgent):
         include_hand_off: bool | None = None,
         excluded_tool_names: set[str] | frozenset[str] | None = None,
     ) -> list[BaseTool]:
+        """Only the control tools Planning's own node loop can execute.
+
+        Planning plans and delegates; it does not run tools. Its model node
+        routes ``write_todos``, ``dispatch_subagents`` and ``hand_off``, and
+        answers anything else with a synthetic ``unsupported_planning_tool``
+        message -- the executor that used to run ordinary tool calls was
+        removed when fan-out moved into parent topology.
+
+        Delegating to ``BaseAgent`` here kept offering the model ``tool_search``,
+        MCP, web, client and skill tools it could no longer execute. It called
+        them, got a refusal that was not a tool result, looped, and the turn
+        ended with nothing to publish. Real tool work reaches a full pipeline
+        through ``planning_dispatch`` -> ``planning_worker`` -> a specialist.
         """
-        Ensure write_todos is always present in both binding and execution maps.
-        """
-        return super()._get_tools_for_binding(
-            conversation_id=conversation_id,
-            internal_tools=self._combine_with_write_todos(internal_tools),
-            user_id=user_id,
-            device_id=device_id,
-            tool_scope=tool_scope,
-            include_hand_off=include_hand_off,
-            excluded_tool_names=excluded_tool_names,
-        )
+        excluded = set(excluded_tool_names or ())
+        return [
+            tool
+            for tool in self._combine_with_write_todos(internal_tools)
+            if getattr(tool, "name", None) in EXECUTABLE_PLANNING_TOOLS
+            and getattr(tool, "name", None) not in excluded
+        ]
 
     @staticmethod
     def _combine_with_write_todos(
@@ -153,6 +176,10 @@ class PlanningAgent(BaseAgent):
         **kwargs: Any,
     ) -> str:
         base_prompt = super()._build_system_prompt(persona, has_tool_context, **kwargs)
+        # The shared suffix tells every agent to reach for `tool_search` when a
+        # capability is missing. Planning cannot execute it, so following that
+        # instruction costs a model call and returns a synthetic refusal.
+        base_prompt = base_prompt.replace(TOOL_EXPLORATION_SUFFIX, PLANNING_DELEGATION_NOTE)
         handoff_enabled = bool(kwargs.get("include_hand_off"))
         handoff_planning_guidance = (
             dedent(
