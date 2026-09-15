@@ -157,13 +157,22 @@ The source registry is authoritative. A citation is valid only when its source I
 
 The model should emit `[[source:<source-id>]]` tokens. The streaming filter buffers partial tokens across chunks, resolves valid IDs, and converts them to numbered clickable Markdown links. If the model instead emits an ordinary Markdown citation, it is grounded only when its canonical URL resolves to the current turn's source registry; this equivalent admitted citation may support an explicitly selected image. Unknown, malformed, stale-turn, invented, or unadmitted references are rejected. The same parser is applied during terminal finalization so streamed and reloaded messages agree.
 
-For a required-web turn, answer text is buffered until terminal grounding proves
-that the response cited at least one admitted source. Tool, reasoning, and
-source events may still stream. If evidence is absent or no valid citation was
-authored, the raw model answer is never published; the server-owned unverified
-response is emitted and persisted instead. This prevents stream/history
-divergence and prevents unsupported current claims from flashing before
-finalization.
+For a required-web turn, answer text is buffered until terminal grounding. Tool,
+reasoning, and source events may still stream. When the runtime admitted web
+sources but the draft cites none, or when it selects an image without an admitted
+source citation, the specialist performs one bounded, tool-free correction while
+the same turn-scoped source registry and validated image pixels are still
+available. The correction must rewrite the complete answer, use admitted source
+tokens, and select only inspected image candidates. Grounding and session
+closeout happen after that correction.
+
+The validator never authors or substitutes assistant prose. It validates the
+model-authored result and either publishes it unchanged or returns a structured
+workflow error. A required-web route with no admitted source is not made
+impossible to complete by demanding a citation that cannot exist; the model's
+own answer remains responsible for describing unavailable or uncertain evidence.
+This keeps stream and history output aligned without presenting a server fallback
+as though it came from the model.
 
 The AI SDK projection additionally emits each public URL source as a native `source-url` UI part with `sourceId`, `url`, and optional `title`. Streamlit receives the same records through a canonical `sources_upsert` event. Both paths persist and reload the same source identities; neither parses tool prose to reconstruct sources.
 

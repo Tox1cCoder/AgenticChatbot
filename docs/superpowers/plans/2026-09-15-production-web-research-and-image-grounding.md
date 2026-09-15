@@ -587,3 +587,83 @@ Commit: `chore: verify production web research rollout`
 - Current model-driven search-count behavior and general tool ceilings remain intact.
 - Old feature-owned execution code and trivial migration wrappers are removed.
 - Focused tests, Ruff, the non-live suite, and deterministic evaluation pass.
+
+---
+
+### Task 13: Correct invalid grounded drafts before research closeout
+
+**Files:**
+- Modify: `app/ai/web_research/model_context.py`
+- Modify: `app/ai/workflow/specialists.py`
+- Modify: `tests/test_selected_image_reaches_the_model.py`
+- Modify: `tests/test_web_research_model_context.py`
+
+**Interfaces:**
+- Consumes: `GroundingParser.resolve(text)`, the live `WebResearchSession`, and the existing specialist execution budget.
+- Produces: one model-authored corrected response before `WebResearchSession.finish(selected_image_ids)`.
+
+- [ ] **Step 1: Write the failing end-to-end specialist regression**
+
+Script the answer model to first select `[[image:I2]]` without a source token and then return a complete corrected answer containing both `[[source:S1]]` and `[[image:I2]]`. Assert that the correction request still contains the labeled validated pixels, offers no tools, runs exactly once, and closes the session with `I2` selected.
+
+- [ ] **Step 2: Verify RED**
+
+Run: `.venv\Scripts\python.exe -m pytest tests/test_selected_image_reaches_the_model.py -q -p no:cacheprovider`
+
+Expected: FAIL because the current specialist grounds and closes the first invalid draft without a correction call.
+
+- [ ] **Step 3: Implement the bounded correction in the existing specialist flow**
+
+Make image-source coupling explicit in the evidence instruction. After the first draft, resolve grounding while the session is open. If admitted sources exist and no admitted citation was authored, append one concise correction instruction and invoke the same specialist once with tools disabled. Resolve the corrected full answer, then call `finish()` exactly once. Do not introduce a new retry service, graph node, or generalized wrapper.
+
+- [ ] **Step 4: Verify GREEN**
+
+Run: `.venv\Scripts\python.exe -m pytest tests/test_selected_image_reaches_the_model.py tests/test_web_research_model_context.py tests/test_web_grounding.py -q -p no:cacheprovider`
+
+- [ ] **Step 5: Commit**
+
+Commit: `fix: correct web grounding before image closeout`
+
+---
+
+### Task 14: Remove server-authored assistant fallbacks
+
+**Files:**
+- Modify: `app/ai/workflow/finalization.py`
+- Modify: `app/ai/workflow/specialists.py`
+- Modify: `tests/test_web_research_output_policy.py`
+- Modify: `tests/test_specialist_runtime.py`
+
+**Interfaces:**
+- Consumes: `OutputValidationError` and the graph's existing structured `WorkflowError` finalization path.
+- Produces: validators that never mutate response prose and public hard-limit failures that remain typed errors rather than canned assistant messages.
+
+- [ ] **Step 1: Write failing policy and hard-limit regressions**
+
+Assert that an uncited answer with admitted sources raises `OutputValidationError(reason="missing_web_citation", retriable=True)` without mutating the model response. Assert that a required-web route with no admitted sources does not demand an impossible citation. Assert that a public specialist hard limit propagates the framework limit for the wrapper to convert into a structured failure instead of returning `HARD_LIMIT_PARTIAL_TEXT`.
+
+- [ ] **Step 2: Verify RED**
+
+Run: `.venv\Scripts\python.exe -m pytest tests/test_web_research_output_policy.py tests/test_specialist_runtime.py -q -p no:cacheprovider`
+
+Expected: FAIL because validation currently substitutes `UNVERIFIED_WEB_RESPONSE` and the public specialist currently returns `HARD_LIMIT_PARTIAL_TEXT`.
+
+- [ ] **Step 3: Delete the legacy substitution paths**
+
+Remove `UNVERIFIED_WEB_RESPONSE`, the response-rewriting branch in `OutputValidator`, and the public `_hard_limit_outcome` path. Select `web_evidence` only from admitted web-source provenance, let `WebEvidencePolicy` raise a retriable typed error for model noncompliance, and re-raise public framework limits after aborting transient web state. Keep operational error codes and private budget/tool instructions; they are protocol state, not assistant answers.
+
+- [ ] **Step 4: Verify GREEN and repository inventory**
+
+Run: `.venv\Scripts\python.exe -m pytest tests/test_web_research_output_policy.py tests/test_specialist_runtime.py tests/test_workflow_continuation.py tests/test_workflow_end_to_end.py -q -p no:cacheprovider`
+
+Run: `rg -n "UNVERIFIED_WEB_RESPONSE|I couldn.t verify this with web sources|_hard_limit_outcome" app tests`
+
+Expected: all tests pass and the inventory has no production or test hits.
+
+- [ ] **Step 5: Run final quality gates and commit**
+
+Run: `.venv\Scripts\python.exe -m ruff check app tests`
+
+Run: `.venv\Scripts\python.exe -m pytest -q -m "not live_provider" -p no:cacheprovider`
+
+Commit: `refactor: keep assistant prose model-authored`
