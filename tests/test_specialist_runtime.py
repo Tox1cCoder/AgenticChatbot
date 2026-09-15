@@ -111,6 +111,31 @@ async def test_standard_specialist_is_created_per_invocation():
     assert RecordingAgent.instances[0] is not RecordingAgent.instances[1]
 
 
+async def test_each_specialist_build_gets_one_shared_but_unreused_research_session():
+    class ResearchService:
+        def __init__(self) -> None:
+            self.sessions: list[object] = []
+
+        def new_session(self, *_args, **_kwargs):
+            session = object()
+            self.sessions.append(session)
+            return session
+
+    research = ResearchService()
+    definition = _definition(agent=SimpleNamespace(tools=[]))
+    factory = _factory(
+        definitions={"chat_agent": definition}, web_research_service=research
+    )
+
+    first = await factory._build(definition, _request())
+    second = await factory._build(definition, _request())
+
+    assert first.web_research_session is research.sessions[0]
+    assert first.tool_execution._scope.web_research_session is research.sessions[0]
+    assert second.web_research_session is research.sessions[1]
+    assert research.sessions[0] is not research.sessions[1]
+
+
 async def test_each_invocation_carries_its_own_authenticated_scope():
     factory = _factory()
     await factory.invoke(_request(user_id="user-a", device_id="device-a"))

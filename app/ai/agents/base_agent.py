@@ -77,7 +77,6 @@ from ..utils import (
     extract_public_thinking_summary,
 )
 from ..web_tools import (
-    create_image_search_tool,
     create_web_open_tool,
     create_web_search_tool,
 )
@@ -489,7 +488,6 @@ class BaseAgent(ABC):
             for factory in (
                 create_web_search_tool,
                 create_web_open_tool,
-                create_image_search_tool,
             ):
                 _add_internal(factory(tool_scope=effective_scope.value))
 

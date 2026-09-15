@@ -381,9 +381,9 @@ async def test_a_worker_partial_carries_what_its_tool_pipeline_recorded():
     factory_build = factory._build
 
     async def build_with_artifacts(definition, request):
-        agent, tool_execution, accountant = await factory_build(definition, request)
-        tool_execution.artifacts.extend(recorded)
-        return agent, tool_execution, accountant
+        build = await factory_build(definition, request)
+        build.tool_execution.artifacts.extend(recorded)
+        return build
 
     factory._build = build_with_artifacts
 

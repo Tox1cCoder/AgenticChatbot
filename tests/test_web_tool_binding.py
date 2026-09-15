@@ -1,6 +1,6 @@
 """What the chat and search agents actually bind for web work.
 
-Three product tools plus the result reader, and no raw provider under any
+Two product tools plus the result reader, and no raw provider under any
 name. The combined ``web_research`` tool these replace is gone; a test asserting
 its absence is what stops it being reintroduced as a convenience.
 """
@@ -15,7 +15,7 @@ from app.ai.agents.base_agent import BaseAgent
 from app.ai.deferred_tool_binding import RAW_WEB_TOOL_NAMES, _get_required_pinned_specs
 from app.ai.schemas import AgentType
 
-PRODUCT_WEB_TOOLS = ("web_search", "web_open", "image_search")
+PRODUCT_WEB_TOOLS = ("web_search", "web_open")
 
 
 class _BindingTestAgent(BaseAgent):
@@ -123,7 +123,6 @@ def test_bound_product_tools_carry_only_the_scope_dependency(monkeypatch):
     for name, attribute in (
         ("web_search", "create_web_search_tool"),
         ("web_open", "create_web_open_tool"),
-        ("image_search", "create_image_search_tool"),
     ):
         monkeypatch.setattr(f"app.ai.agents.base_agent.{attribute}", _capture(name))
     agent = _BindingTestAgent(agent_config_key="search", recorder=object())
@@ -144,20 +143,20 @@ def test_bound_product_tools_carry_only_the_scope_dependency(monkeypatch):
     assert all(entry["tool_scope"] == "default" for entry in captured)
 
 
-def test_media_guidance_describes_image_search_only():
-    """The model reaches images through image_search and nothing else.
+def test_media_guidance_describes_integrated_visual_search_only():
+    """The model requests image candidates through web_search and nothing else.
 
     The guidance spans two texts that are both always in context: the system
     prompt says when a visual is worth having, the tool description says how to
     drive the arguments. Neither may name the raw provider tool.
     """
     from app.ai.prompts import MEDIA_CAPABILITY_SNIPPET
-    from app.ai.web_tools import IMAGE_SEARCH_DESCRIPTION
+    from app.ai.web_tools import WEB_SEARCH_DESCRIPTION
 
-    guidance = f"{MEDIA_CAPABILITY_SNIPPET}\n{IMAGE_SEARCH_DESCRIPTION}"
+    guidance = f"{MEDIA_CAPABILITY_SNIPPET}\n{WEB_SEARCH_DESCRIPTION}"
 
-    assert "image_search" in MEDIA_CAPABILITY_SNIPPET
+    assert "web_search" in MEDIA_CAPABILITY_SNIPPET
     assert "web_research" not in guidance
-    assert "intent" in IMAGE_SEARCH_DESCRIPTION
+    assert "visual_intent" in WEB_SEARCH_DESCRIPTION
     assert "brave_image_search" not in guidance
     assert "include_images" not in guidance

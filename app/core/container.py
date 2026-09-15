@@ -14,6 +14,7 @@ from app.ai.mcp_registry import MCPRegistry
 from app.ai.model_factory import ModelFactory
 from app.ai.planning_runtime_adapter import PlanningRuntimeAdapter
 from app.ai.skills_tool import get_available_skill_summaries
+from app.ai.web_research.service import WebResearchService
 from app.ai.workflow.routing import RoutingContextBuilder, RoutingService
 from app.core.config import settings
 from app.core.dependency_injection import AppAutoInjector, AppContainerInjector
@@ -456,6 +457,11 @@ class Container(containers.DeclarativeContainer):
         metrics=providers.Object(rich_image_metrics_singleton),
     )
 
+    web_research_service = providers.Singleton(
+        WebResearchService,
+        image_service=web_image_service,
+    )
+
     user_memory_repository = providers.Factory(
         UserMemoryRepository,
         session_factory=db.provided.session,
@@ -612,6 +618,7 @@ class Container(containers.DeclarativeContainer):
             model_usage_recorder=container.model_usage_recorder(),
             chat_image_service=container.chat_image_service(),
             tool_execution_receipt_repository=container.tool_execution_receipt_repository(),
+            web_research_service=container.web_research_service(),
         )
         rag_agent = getattr(workflow_runtime, "rag_agent", None)
         if rag_agent is not None:

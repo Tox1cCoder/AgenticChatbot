@@ -223,6 +223,7 @@ class MultiAgentWorkflow(
         chat_image_service: Any | None = None,
         routing_service: Any | None = None,
         tool_execution_receipt_repository: Any | None = None,
+        web_research_service: Any | None = None,
     ):
         self.qdrant_client = qdrant_client
         # Resolves stored image references back to base64 for the model when
@@ -290,6 +291,7 @@ class MultiAgentWorkflow(
         # base agents do. Custom agents are built on demand from workflow state.
         self._runtime_model_resolver = runtime_model_resolver
         self._model_usage_recorder = model_usage_recorder
+        self._web_research_service = web_research_service
 
         # Durable mutation receipts. Absent (no repository wired), mutations run
         # exactly as before: the crash gap stays open and is not concealed.
@@ -1700,6 +1702,7 @@ class MultiAgentWorkflow(
             usage_recorder=self._model_usage_recorder,
             settings=settings,
             receipt_service=receipt_service,
+            web_research_service=self._web_research_service,
         )
 
     async def _specialist_request_for(self, node_name: str, state: GraphState) -> SpecialistRequest:
@@ -2605,6 +2608,7 @@ def create_workflow(
     model_usage_recorder: "ModelUsageRecorder | None" = None,
     chat_image_service: Any | None = None,
     tool_execution_receipt_repository: Any | None = None,
+    web_research_service: Any | None = None,
 ) -> MultiAgentWorkflow:
     """
     Create multi-agent workflow with required shared dependencies.
@@ -2619,4 +2623,5 @@ def create_workflow(
         model_usage_recorder=model_usage_recorder,
         chat_image_service=chat_image_service,
         tool_execution_receipt_repository=tool_execution_receipt_repository,
+        web_research_service=web_research_service,
     )

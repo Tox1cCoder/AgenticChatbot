@@ -37,6 +37,15 @@ class ImageSearchProvider(Protocol):
     async def search(self, request: ResearchRequest) -> tuple[ProviderImageCandidate, ...]: ...
 
 
+class PageOpenProvider(Protocol):
+    name: str
+    health_key: str
+
+    async def open(
+        self, urls: Sequence[str], question: str, *, query_index: int
+    ) -> tuple[ProviderSource, ...]: ...
+
+
 class ProviderResolver:
     """Configured provider order, with no runtime service lookup."""
 
@@ -45,9 +54,11 @@ class ProviderResolver:
         *,
         text: Sequence[TextSearchProvider] = (),
         images: Sequence[ImageSearchProvider] = (),
+        openers: Sequence[PageOpenProvider] = (),
     ) -> None:
         self.text = tuple(text)
         self.images = tuple(images)
+        self.openers = tuple(openers)
 
 
 def _datetime(value: Any) -> datetime | None:
@@ -148,11 +159,51 @@ class BraveImageSearchProvider:
         return tuple(records)
 
 
+class TavilyPageOpenProvider:
+    name = "tavily"
+
+    def __init__(self, tool: Any, *, health_key: str = "tavily:default") -> None:
+        self.tool = tool
+        self.health_key = health_key
+
+    async def open(
+        self, urls: Sequence[str], question: str, *, query_index: int
+    ) -> tuple[ProviderSource, ...]:
+        payload = await _payload(
+            self.tool,
+            {
+                "urls": list(urls),
+                "query": question,
+                "chunks_per_source": 3,
+                "include_images": False,
+            },
+            provider=self.name,
+        )
+        records: list[ProviderSource] = []
+        for rank, raw in enumerate(payload.get("results") or (), start=1):
+            if not isinstance(raw, dict) or not raw.get("url"):
+                continue
+            records.append(
+                ProviderSource(
+                    provider=self.name,
+                    url=str(raw["url"]),
+                    title=str(raw["title"]) if raw.get("title") else None,
+                    snippet=str(raw.get("raw_content") or raw.get("content") or "")[:4000]
+                    or None,
+                    rank=rank,
+                    query_index=query_index,
+                )
+            )
+        return tuple(records)
+
+
 __all__ = [
     "BraveImageSearchProvider",
     "ImageSearchProvider",
+    "PageOpenProvider",
     "ProviderFailure",
     "ProviderResolver",
     "TavilyTextSearchProvider",
+    "TavilyPageOpenProvider",
     "TextSearchProvider",
 ]

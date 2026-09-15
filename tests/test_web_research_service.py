@@ -142,3 +142,43 @@ async def test_valid_image_sources_are_admitted_after_text_sources() -> None:
         "https://text-source.test/a",
         "https://image-source.test/a",
     ]
+
+
+@pytest.mark.asyncio
+async def test_open_resolves_source_ids_in_the_same_registry() -> None:
+    class Opener:
+        name = "extract"
+        health_key = "extract:key"
+
+        def __init__(self) -> None:
+            self.urls: list[str] = []
+
+        async def open(self, urls, _question, *, query_index: int):
+            self.urls = list(urls)
+            return (
+                ProviderSource(
+                    provider="extract",
+                    url=urls[0],
+                    snippet="Focused release evidence.",
+                    rank=1,
+                    query_index=query_index,
+                ),
+            )
+
+    text = SequenceTextProvider(
+        [[ProviderSource(provider="primary", url="https://docs.test/a", rank=1, query_index=1)]]
+    )
+    opener = Opener()
+    service = WebResearchService(
+        resolver=ProviderResolver(text=(text,), openers=(opener,)),
+        now=lambda: datetime(2026, 9, 15, tzinfo=timezone.utc),
+    )
+    session = service.new_session(SCOPE, ResearchBudget(), mode="quick")
+    await session.search(REQUEST)
+
+    bundle = await session.open(["S1"], "What changed?")
+
+    assert opener.urls == ["https://docs.test/a"]
+    assert bundle.sources[0].source_id == "S1"
+    assert bundle.sources[0].status == "opened"
+    assert bundle.sources[0].snippet == "Focused release evidence."

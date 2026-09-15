@@ -23,6 +23,7 @@ from .contracts import (
     ResearchMode,
     ResearchRequest,
     ResearchScope,
+    VisualIntent,
     WebEvidenceBundle,
 )
 from .policy import ResearchLimits
@@ -103,7 +104,7 @@ class WebResearchService:
     def __init__(
         self,
         *,
-        resolver: ProviderResolver,
+        resolver: ProviderResolver | None = None,
         now: Callable[[], datetime] | None = None,
         health: ProviderHealthRegistry | None = None,
         cache: ResearchResultCache | None = None,
@@ -115,7 +116,7 @@ class WebResearchService:
         max_image_concurrency: int = 3,
         pending_image_ttl: timedelta = timedelta(minutes=15),
     ) -> None:
-        self.resolver = resolver
+        self.resolver = resolver or ProviderResolver()
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.health = health or ProviderHealthRegistry(now=self.now)
         self.cache = cache or ResearchResultCache(now=self.now)
@@ -133,8 +134,11 @@ class WebResearchService:
         budget: ResearchBudget,
         *,
         mode: ResearchMode,
+        resolver: ProviderResolver | None = None,
     ) -> WebResearchSession:
-        return WebResearchSession(self, scope, budget, mode=mode)
+        return WebResearchSession(
+            self, scope, budget, mode=mode, resolver=resolver or self.resolver
+        )
 
 
 class WebResearchSession:
@@ -145,11 +149,13 @@ class WebResearchSession:
         budget: ResearchBudget,
         *,
         mode: ResearchMode,
+        resolver: ProviderResolver,
     ) -> None:
         self.service = service
         self.scope = scope
         self.budget = budget
         self.mode = mode
+        self.resolver = resolver
         self.limits = ResearchLimits.for_mode(mode)
         self.source_registry = SourceRegistry(max_sources=self.limits.max_sources)
         self._operation_index = 0
@@ -161,8 +167,11 @@ class WebResearchSession:
         self._downloaded_image_bytes = 0
         self._omitted_image_count = 0
         self._closed = False
+        self._opened_urls: set[str] = set()
+        self._visual_intent = "none"
 
     async def search(self, request: ResearchRequest) -> WebEvidenceBundle:
+        self._visual_intent = request.visual_intent
         self._operation_index += 1
         operation_index = self._operation_index
         normalized = normalize_web_search(
@@ -188,8 +197,8 @@ class WebResearchSession:
         refusal = self.budget.reserve_search(normalized.query, scope=search_scope)
         if refusal is not None:
             return self._bundle(
-                request,
                 operation_index,
+                visual_intent=request.visual_intent,
                 failures=(
                     ResearchFailure(
                         operation="search",
@@ -202,7 +211,7 @@ class WebResearchSession:
 
         text_task = asyncio.create_task(
             self._call_chain(
-                self.service.resolver.text,
+                self.resolver.text,
                 operation="search",
                 invoke=lambda provider: provider.search(normalized, query_index=operation_index),
             )
@@ -210,7 +219,7 @@ class WebResearchSession:
         image_task = (
             asyncio.create_task(
                 self._call_chain(
-                    self.service.resolver.images,
+                    self.resolver.images,
                     operation="image_search",
                     invoke=lambda provider: provider.search(request),
                 )
@@ -248,10 +257,69 @@ class WebResearchSession:
         )
         image_fetch_failures = await self._prepare_images(request)
         return self._bundle(
-            request,
             operation_index,
+            visual_intent=request.visual_intent,
             failures=(*text_failures, *image_failures, *image_fetch_failures),
             providers=tuple(dict.fromkeys((*text_providers, *image_providers))),
+        )
+
+    async def open(
+        self, source_ids_or_urls: Sequence[str], question: str
+    ) -> WebEvidenceBundle:
+        self._operation_index += 1
+        operation_index = self._operation_index
+        requested: list[str] = []
+        for value in source_ids_or_urls:
+            record = self.source_registry.resolve(value)
+            url = str(record.url) if record is not None else str(value or "").strip()
+            if url and url not in self._opened_urls and url not in requested:
+                requested.append(url)
+
+        remaining = max(0, self.limits.max_page_opens - len(self._opened_urls))
+        requested = requested[:remaining]
+        if not requested:
+            return self._bundle(
+                operation_index,
+                failures=(
+                    ResearchFailure(
+                        operation="open",
+                        provider="server",
+                        code="page_open_limit",
+                        retryable=False,
+                    ),
+                ),
+            )
+
+        if not self.resolver.openers:
+            return self._bundle(
+                operation_index,
+                failures=(
+                    ResearchFailure(
+                        operation="open",
+                        provider="server",
+                        code="provider_unavailable",
+                        retryable=False,
+                    ),
+                ),
+            )
+
+        opened, failures, providers = await self._call_chain(
+            self.resolver.openers,
+            operation="open",
+            invoke=lambda provider: provider.open(
+                requested, question, query_index=operation_index
+            ),
+        )
+        self.source_registry.admit(tuple(opened))
+        for candidate in opened:
+            record = self.source_registry.resolve(candidate.url)
+            if record is not None:
+                self.source_registry.mark_opened(
+                    record.source_id, snippet=candidate.snippet
+                )
+                self._opened_urls.add(str(record.url))
+        return self._bundle(
+            operation_index, failures=failures, providers=providers
         )
 
     async def _prepare_images(
@@ -492,18 +560,20 @@ class WebResearchSession:
 
     def _bundle(
         self,
-        request: ResearchRequest,
         operation_index: int,
         *,
+        visual_intent: VisualIntent | None = None,
         failures: tuple[ResearchFailure, ...] = (),
         providers: tuple[str, ...] = (),
     ) -> WebEvidenceBundle:
+        if visual_intent is not None:
+            self._visual_intent = visual_intent
         sources = self.source_registry.records
         status = "success" if sources and not failures else "partial" if sources else "failed"
         return WebEvidenceBundle(
             status=status,
             mode=self.mode,
-            visual_intent=request.visual_intent,
+            visual_intent=self._visual_intent,
             operation_index=operation_index,
             sources=sources,
             images=tuple(prepared.record for prepared in self.prepared_images.values()),

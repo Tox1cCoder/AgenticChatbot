@@ -120,6 +120,7 @@ class SpecialistToolScope:
         turn_id: str | None = None,
         dispatch_id: str = TOP_LEVEL_DISPATCH_ID,
         task_id: str | None = None,
+        web_research_session: Any = None,
     ) -> None:
         self.agent = agent
         self.agent_key = agent_key
@@ -137,6 +138,7 @@ class SpecialistToolScope:
         self.turn_id = turn_id
         self.dispatch_id = dispatch_id or TOP_LEVEL_DISPATCH_ID
         self.task_id = task_id or agent_key
+        self.web_research_session = web_research_session
         self._tool_map: dict[str, Any] | None = None
         self._bound: dict[str, Any] = {}
 
@@ -239,6 +241,7 @@ class SpecialistToolScope:
             self.device_id,
             rich_response_capable=self.rich_response_capable,
             logical_turn_id=self.turn_id,
+            web_research_session=self.web_research_session,
         )
 
 

@@ -41,6 +41,7 @@ from .web_query_contract import (
     normalize_web_search,
     tavily_search_args,
 )
+from .web_research.contracts import ResearchRequest
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,11 @@ WEB_SEARCH_DESCRIPTION = (
     "Returns ranked titles, URLs, publication dates, and snippets. It does not "
     "fetch page bodies: read a snippet first, and call web_open only for the "
     "few URLs whose snippets cannot answer the question. Do not repeat an "
-    "unchanged query — the same query returns the same sources."
+    "unchanged query — the same query returns the same sources.\n\n"
+    "Set visual_intent when seeing a figure, comparison, or gallery would "
+    "materially improve the answer, and provide a concrete image_query. "
+    "Validated candidates are shown privately on the next model call; no "
+    "image is published unless you explicitly select one in the answer."
 )
 
 WEB_OPEN_DESCRIPTION = (
@@ -149,6 +154,23 @@ class WebOpenInput(BaseModel):
     )
 
 
+class ProductWebSearchInput(WebSearchRequest):
+    mode: Literal["quick", "agentic"] = Field(
+        default="quick",
+        description="Requested research depth; server policy may cap the actual mode.",
+    )
+    visual_intent: Literal["none", "figure", "comparison", "gallery"] = Field(
+        default="none",
+        description="The kind of visual evidence that would materially help.",
+    )
+    image_query: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=300,
+        description="Concrete visual subject. Required when visual_intent is not 'none'.",
+    )
+
+
 class ImageSearchInput(BaseModel):
     query: str = Field(
         min_length=2,
@@ -201,10 +223,30 @@ def create_web_search_tool(
         locale: str | None = None,
         include_domains: list[str] | None = None,
         max_results: int = 5,
+        mode: str = "quick",
+        visual_intent: str = "none",
+        image_query: str | None = None,
     ) -> str:
         denied = _denied_in_client_only("web_search", tool_scope)
         if denied is not None:
             return denied
+        context = get_tool_context()
+        research_session = context.web_research_session
+        if research_session is not None:
+            request = ResearchRequest(
+                query=query,
+                objective=objective,
+                mode=research_session.mode,
+                freshness=freshness,
+                start_date=start_date,
+                end_date=end_date,
+                locale=locale,
+                include_domains=tuple(include_domains or ()),
+                visual_intent=visual_intent,
+                image_query=image_query,
+            )
+            bundle = await research_session.search(request)
+            return _project_research_bundle(bundle)
         try:
             normalized = normalize_web_search(
                 WebSearchRequest(
@@ -291,9 +333,45 @@ def create_web_search_tool(
         _search,
         name="web_search",
         description=WEB_SEARCH_DESCRIPTION,
-        args_schema=WebSearchRequest,
+        args_schema=ProductWebSearchInput,
         tool_scope=tool_scope,
     )
+
+
+def _project_research_bundle(bundle: Any) -> str:
+    """Return source evidence only; image candidates stay session-private."""
+
+    payload = {
+        "status": bundle.status,
+        "mode": bundle.mode,
+        "operation_index": bundle.operation_index,
+        "sources": [
+            {
+                "source_id": source.source_id,
+                "title": source.title,
+                "url": str(source.url),
+                "snippet": source.snippet,
+                "published_at": (
+                    source.published_at.isoformat() if source.published_at else None
+                ),
+                "status": source.status,
+            }
+            for source in bundle.sources
+        ],
+        "failures": [
+            {
+                "operation": failure.operation,
+                "provider": failure.provider,
+                "code": failure.code,
+                "retryable": failure.retryable,
+            }
+            for failure in bundle.failures
+        ],
+        "reused": bundle.reused,
+        "omitted_source_count": bundle.omitted_source_count,
+        "omitted_image_count": bundle.omitted_image_count,
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def create_web_open_tool(
@@ -326,6 +404,10 @@ def create_web_open_tool(
                 error_type="invalid_request",
                 hint="Pass URLs discovered by web_search or supplied by the user.",
             )
+        research_session = get_tool_context().web_research_session
+        if research_session is not None:
+            bundle = await research_session.open(requested, focus)
+            return _project_research_bundle(bundle)
 
         args = {
             "urls": requested,

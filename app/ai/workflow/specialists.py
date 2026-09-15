@@ -28,8 +28,16 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
+from app.ai.research_budget import get_research_budget
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from app.ai.tool_context import rich_response_capable_from_context
+from app.ai.web_research.contracts import ResearchScope
+from app.ai.web_research.providers import (
+    BraveImageSearchProvider,
+    ProviderResolver,
+    TavilyPageOpenProvider,
+    TavilyTextSearchProvider,
+)
 from app.ai.workflow.contracts import (
     OutcomeProvenance,
     ResponseOutcome,
@@ -75,6 +83,7 @@ __all__ = [
     "FINALIZE_OWNS_TERMINAL_MESSAGE",
     "PLANNING_AGENT_ID",
     "ModelCallLimitExceededError",
+    "SpecialistBuild",
     "SpecialistDefinition",
     "SpecialistFactory",
     "SpecialistRequest",
@@ -555,6 +564,14 @@ class SpecialistRuntimeContext:
     persona: str | None
 
 
+@dataclass(frozen=True)
+class SpecialistBuild:
+    agent: Any
+    tool_execution: ToolExecutionMiddleware
+    accountant: ExecutionBudgetAccountant
+    web_research_session: Any = None
+
+
 class SpecialistFactory:
     """Compiles and runs one specialist subgraph per invocation.
 
@@ -574,6 +591,7 @@ class SpecialistFactory:
         usage_recorder: Any = None,
         settings: Any = None,
         receipt_service: Any = None,
+        web_research_service: Any = None,
     ) -> None:
         self._definitions = dict(definitions)
         self._runtime_model_resolver = runtime_model_resolver
@@ -582,6 +600,7 @@ class SpecialistFactory:
         self._usage_recorder = usage_recorder
         self._settings = settings
         self._receipt_service = receipt_service
+        self._web_research_service = web_research_service
 
     # -- registry --------------------------------------------------------
 
@@ -601,10 +620,10 @@ class SpecialistFactory:
     async def invoke(self, request: SpecialistRequest) -> ResponseOutcome:
         """Run a specialist for a public turn and return a server-owned outcome."""
         definition = self.definition_for(request.agent_id)
-        agent, tool_execution, accountant = await self._build(definition, request)
+        build = await self._build(definition, request)
 
         try:
-            result = await agent.ainvoke(
+            result = await build.agent.ainvoke(
                 {"messages": self._invocation_messages(request)},
                 context=self._runtime_context(request),
                 config=self._run_config(request),
@@ -615,7 +634,9 @@ class SpecialistFactory:
             # said -- and saying it beats reporting agent_execution_limit, which
             # discards the artifacts the pipeline already recorded and gives the
             # user nothing to act on.
-            return self._hard_limit_outcome(definition, request, tool_execution, accountant, exc)
+            return self._hard_limit_outcome(
+                definition, request, build.tool_execution, build.accountant, exc
+            )
         _reject_swallowed_interrupt(result, request.agent_id)
         produced = self._produced_messages(request, result)
         if not _final_text(produced).strip():
@@ -630,7 +651,9 @@ class SpecialistFactory:
                 len(produced),
                 getattr(produced[-1], "content", None) if produced else None,
             )
-        return self._to_outcome(definition, request, produced, tool_execution, accountant)
+        return self._to_outcome(
+            definition, request, produced, build.tool_execution, build.accountant
+        )
 
     async def invoke_worker(self, request: SpecialistRequest, *, task: WorkerTask) -> WorkerResult:
         """Run a specialist as a Planning worker.
@@ -657,8 +680,9 @@ class SpecialistFactory:
             # A delegated worker gets the same budget as a top-level turn: it
             # runs the same specialists through the same builder, so leaving it
             # out would have been the R1 gap one level down.
-            agent, tool_execution, _accountant = await self._build(definition, request)
-            result = await agent.ainvoke(
+            build = await self._build(definition, request)
+            tool_execution = build.tool_execution
+            result = await build.agent.ainvoke(
                 {"messages": self._invocation_messages(request)},
                 context=self._runtime_context(request),
                 config=self._run_config(request),
@@ -696,13 +720,49 @@ class SpecialistFactory:
         self,
         definition: SpecialistDefinition,
         request: SpecialistRequest,
-    ) -> tuple[Any, ToolExecutionMiddleware, ExecutionBudgetAccountant]:
+    ) -> SpecialistBuild:
         system_prompt = await _resolve(definition.system_prompt_factory, request)
         tools = await _resolve(definition.tool_factory, request) or []
 
         worker_scope = _worker_tool_scope(request)
         if worker_scope is not None:
             tools = worker_scope.filter_tools(tools)
+
+        web_research_session = None
+        if (
+            self._web_research_service is not None
+            and definition.model_config_key in {"chat", "search"}
+            and request.conversation_id
+            and request.user_id
+        ):
+            provider_tools = {
+                tool.name: tool
+                for tool in (getattr(definition.agent, "tools", None) or ())
+                if getattr(tool, "name", None)
+            }
+            text_tool = provider_tools.get("tavily_search")
+            image_tool = provider_tools.get("brave_image_search")
+            open_tool = provider_tools.get("tavily_extract")
+            resolver = ProviderResolver(
+                text=(TavilyTextSearchProvider(text_tool),) if text_tool else (),
+                images=(BraveImageSearchProvider(image_tool),) if image_tool else (),
+                openers=(TavilyPageOpenProvider(open_tool),) if open_tool else (),
+            )
+            logical_turn_id = _extra_str(request, "turn_id") or request.conversation_id
+            web_research_session = self._web_research_service.new_session(
+                ResearchScope(
+                    conversation_id=request.conversation_id,
+                    user_id=request.user_id,
+                    logical_turn_id=logical_turn_id,
+                    device_id=request.device_id,
+                ),
+                get_research_budget(
+                    logical_turn_id=logical_turn_id,
+                    conversation_id=request.conversation_id,
+                ),
+                mode="agentic" if definition.model_config_key == "search" else "quick",
+                resolver=resolver,
+            )
 
         scope = SpecialistToolScope(
             agent=definition.agent,
@@ -719,6 +779,7 @@ class SpecialistFactory:
             # collide on an execution key with a delegated one.
             dispatch_id=_extra_str(request, "dispatch_id") or TOP_LEVEL_DISPATCH_ID,
             task_id=_extra_str(request, "task_id") or request.agent_id,
+            web_research_session=web_research_session,
         )
         # Seed the scope with the tools bound at build time. A resumed run
         # re-enters after the model call, so the refresh in the execution
@@ -771,7 +832,12 @@ class SpecialistFactory:
             middleware=middleware,
             context_schema=SpecialistRuntimeContext,
         )
-        return agent, tool_execution, accountant
+        return SpecialistBuild(
+            agent=agent,
+            tool_execution=tool_execution,
+            accountant=accountant,
+            web_research_session=web_research_session,
+        )
 
     def _limit(self, name: str, default: int) -> int:
         return int(getattr(self._settings, name, default) or default)
