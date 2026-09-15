@@ -60,6 +60,7 @@ class ImageService:
         self.records: dict[object, SimpleNamespace] = {}
         self.selected: list[object] = []
         self.released: list[object] = []
+        self.suspended: list[object] = []
 
     async def fetch_url(self, url: str, *, provider: str):
         return self.fetched[url]
@@ -74,6 +75,9 @@ class ImageService:
 
     async def release_references(self, ids, **_scope):
         self.released.extend(ids)
+
+    async def suspend_references(self, ids, **_scope):
+        self.suspended.extend(ids)
 
 
 def _image(content: bytes) -> FetchedWebImage:
@@ -149,3 +153,15 @@ async def test_aggregate_model_byte_limit_rejects_later_candidates() -> None:
 
     assert [image.candidate_id for image in bundle.images] == ["I1"]
     assert bundle.omitted_image_count == 1
+
+
+@pytest.mark.asyncio
+async def test_interrupt_suspends_but_later_abort_releases() -> None:
+    session, _bundle, service = await _session((b"one", b"two"))
+    reference_ids = [prepared.reference_id for prepared in session.prepared_images.values()]
+
+    await session.suspend()
+    await session.abort()
+
+    assert service.suspended == reference_ids
+    assert service.released == reference_ids

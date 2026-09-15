@@ -32,6 +32,7 @@ from app.ai.research_budget import get_research_budget
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from app.ai.tool_context import rich_response_capable_from_context
 from app.ai.web_research.contracts import ResearchScope
+from app.ai.web_research.grounding import GroundingParser, GroundingResolution
 from app.ai.web_research.providers import (
     BraveImageSearchProvider,
     ProviderResolver,
@@ -628,17 +629,34 @@ class SpecialistFactory:
                 context=self._runtime_context(request),
                 config=self._run_config(request),
             )
+        except GraphBubbleUp:
+            if build.web_research_session is not None:
+                await build.web_research_session.suspend()
+            raise
         except (ModelCallLimitExceededError, ToolCallLimitExceededError) as exc:
             # The soft budget was supposed to reserve an answer one call
             # earlier. It did not, so this is the last honest thing that can be
             # said -- and saying it beats reporting agent_execution_limit, which
             # discards the artifacts the pipeline already recorded and gives the
             # user nothing to act on.
+            if build.web_research_session is not None:
+                await build.web_research_session.abort()
             return self._hard_limit_outcome(
                 definition, request, build.tool_execution, build.accountant, exc
             )
+        except BaseException:
+            if build.web_research_session is not None:
+                await build.web_research_session.abort()
+            raise
         _reject_swallowed_interrupt(result, request.agent_id)
         produced = self._produced_messages(request, result)
+        grounding = None
+        if build.web_research_session is not None:
+            grounding = GroundingParser(build.web_research_session).resolve(
+                _final_text(produced)
+            )
+            produced = _replace_final_text(produced, grounding.text)
+            await build.web_research_session.finish(grounding.selected_image_ids)
         if not _final_text(produced).strip():
             # Why the model returned no text is not established, and a recovery
             # here would hide the evidence needed to find out. The turn fails,
@@ -652,7 +670,13 @@ class SpecialistFactory:
                 getattr(produced[-1], "content", None) if produced else None,
             )
         return self._to_outcome(
-            definition, request, produced, build.tool_execution, build.accountant
+            definition,
+            request,
+            produced,
+            build.tool_execution,
+            build.accountant,
+            grounding=grounding,
+            web_research_session=build.web_research_session,
         )
 
     async def invoke_worker(self, request: SpecialistRequest, *, task: WorkerTask) -> WorkerResult:
@@ -675,6 +699,7 @@ class SpecialistFactory:
         # records the tool pipeline wrote before the ceiling fired. Reporting a
         # bare failure there discarded them, which is the loss R1 objects to.
         tool_execution: ToolExecutionMiddleware | None = None
+        web_research_session = None
         try:
             definition = self.definition_for(request.agent_id)
             # A delegated worker gets the same budget as a top-level turn: it
@@ -682,27 +707,49 @@ class SpecialistFactory:
             # out would have been the R1 gap one level down.
             build = await self._build(definition, request)
             tool_execution = build.tool_execution
+            web_research_session = build.web_research_session
             result = await build.agent.ainvoke(
                 {"messages": self._invocation_messages(request)},
                 context=self._runtime_context(request),
                 config=self._run_config(request),
             )
         except GraphBubbleUp:
+            if web_research_session is not None:
+                await web_research_session.suspend()
             raise
         except (ModelCallLimitExceededError, ToolCallLimitExceededError) as exc:
+            if web_research_session is not None:
+                await web_research_session.abort()
             get_routing_metrics_recorder().agent_execution_limit(
                 agent_id=task.agent_id, limit_kind=type(exc).__name__
             )
             return _partial_worker(task, tool_execution)
         except TimeoutError:
+            if web_research_session is not None:
+                await web_research_session.abort()
             return _failed_worker(task, "worker_timeout")
         except UnavailableSpecialist:
+            if web_research_session is not None:
+                await web_research_session.abort()
             return _failed_worker(task, "agent_unavailable")
         except Exception as exc:  # noqa: BLE001 - normalized into a typed result
+            if web_research_session is not None:
+                await web_research_session.abort()
             logger.warning("Worker %s failed for task %s: %s", request.agent_id, task.task_id, exc)
             return _failed_worker(task, "tool_execution_failed")
 
         produced = self._produced_messages(request, result)
+        grounded_images = tuple(tool_execution.images)
+        grounded_sources: tuple[dict[str, Any], ...] = ()
+        if web_research_session is not None:
+            resolution = GroundingParser(web_research_session).resolve(_final_text(produced))
+            produced = _replace_final_text(produced, resolution.text)
+            await web_research_session.finish(resolution.selected_image_ids)
+            grounded_images = resolution.rich_items
+            grounded_sources = tuple(
+                source.model_dump(mode="json")
+                for source in web_research_session.source_registry.records
+            )
         return WorkerResult(
             dispatch_id=task.dispatch_id,
             task_id=task.task_id,
@@ -711,7 +758,8 @@ class SpecialistFactory:
             status="completed",
             content=_final_text(produced),
             artifacts=tuple(tool_execution.artifacts),
-            images=tuple(tool_execution.images),
+            evidence=grounded_sources,
+            images=grounded_images,
         )
 
     # -- construction ----------------------------------------------------
@@ -929,6 +977,9 @@ class SpecialistFactory:
         produced: list[Any],
         tool_execution: ToolExecutionMiddleware,
         accountant: ExecutionBudgetAccountant | None = None,
+        *,
+        grounding: GroundingResolution | None = None,
+        web_research_session: Any = None,
     ) -> ResponseOutcome:
         artifacts = list(tool_execution.artifacts)
         images = list(tool_execution.images)
@@ -941,6 +992,22 @@ class SpecialistFactory:
             # Carried on the response so the graph can read why the turn
             # stopped without reaching back into middleware that has gone.
             metadata["execution_budget"] = accountant.state.model_dump(mode="json")
+        web_sources: tuple[dict[str, Any], ...] = ()
+        rich_items: tuple[dict[str, Any], ...] = ()
+        if web_research_session is not None:
+            web_sources = tuple(
+                source.model_dump(mode="json")
+                for source in web_research_session.source_registry.records
+            )
+            if web_sources:
+                metadata["web_sources"] = list(web_sources)
+        if grounding is not None:
+            rich_items = grounding.rich_items
+            if rich_items:
+                metadata["_rich_item_candidates"] = list(rich_items)
+                metadata["_inline_rich_response_v1"] = True
+            if grounding.warnings:
+                metadata["web_grounding_warnings"] = list(grounding.warnings)
         response = AgentResponse(
             agent_type=definition.agent_type,
             agent_id=request.agent_id,
@@ -955,6 +1022,8 @@ class SpecialistFactory:
                 output_policy_ids=definition.output_policy_ids,
                 artifacts=tuple(artifacts),
                 images=tuple(images),
+                web_sources=web_sources,
+                rich_items=rich_items,
                 private_messages=tuple(produced),
             ),
         )
@@ -1151,3 +1220,15 @@ def _final_text(messages: list[Any]) -> str:
         if text.strip():
             return text
     return ""
+
+
+def _replace_final_text(messages: list[Any], text: str) -> list[Any]:
+    """Replace only the final answering message, preserving tool history."""
+
+    revised = list(messages)
+    for index in range(len(revised) - 1, -1, -1):
+        message = revised[index]
+        if getattr(message, "type", None) == "ai" and (getattr(message, "text", "") or "").strip():
+            revised[index] = message.model_copy(update={"content": text})
+            break
+    return revised

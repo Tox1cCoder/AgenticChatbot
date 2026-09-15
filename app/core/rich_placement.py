@@ -520,31 +520,19 @@ def _finalize_article_content(response: Any, content: str) -> str:
         return cleaned_content
 
     items = _widget_placement_entries(metadata, getattr(response, "tool_artifacts", None))
-    # One cap, one candidate set: the inventory the model saw and the anchoring
-    # pass must bound the same list, or an unseen image can be placed.
-    max_images = int(getattr(settings, "rich_auto_place_max_images", 2))
-    anchor_entries = _image_anchor_entries(metadata, image_max_items=max_images)
-    if not items and not anchor_entries:
+    if not items:
         return cleaned_content
 
     # Repair markers the model authored without the ``rich:`` prefix first, so
     # the now-canonical marker is recognized as a reference (the item renders
     # inline) and auto-placement does not place a second copy of it.
-    known_ids = {entry[0] for entry in items} | {e.item_id for e in anchor_entries}
+    known_ids = {entry[0] for entry in items}
     repaired = _repair_unprefixed_markers(cleaned_content, known_ids)
     new_content, _placed = auto_place_rich_items(
         repaired,
         items=items,
         min_score=settings.rich_auto_place_min_score,
     )
-    if anchor_entries:
-        new_content, outcomes = anchor_image_items_by_query(
-            new_content,
-            entries=anchor_entries,
-            min_score=float(getattr(settings, "rich_image_anchor_min_score", 0.34)),
-            max_images=max_images,
-        )
-        _record_anchor_outcomes(metadata, outcomes)
     if new_content == cleaned_content:
         return cleaned_content
 

@@ -44,6 +44,12 @@ class _ImageService:
     async def register(self, **kwargs):
         return SimpleNamespace(id=uuid4(), **kwargs)
 
+    async def mark_selected(self, _ids, **_scope):
+        return None
+
+    async def release_references(self, _ids, **_scope):
+        return None
+
 
 class _TwoRoundModel(BaseChatModel):
     requests: list[list] = []
@@ -167,7 +173,7 @@ async def test_second_answer_model_request_contains_labeled_validated_pixels() -
         extras={"turn_id": str(uuid4())},
     )
 
-    await factory.invoke(request)
+    outcome = await factory.invoke(request)
 
     assert len(model.requests) == 2
     second = model.requests[1]
@@ -176,3 +182,6 @@ async def test_second_answer_model_request_contains_labeled_validated_pixels() -
     assert evidence[2]["image_url"]["url"].endswith("cmVkLXBpeGVscw==")
     assert evidence[3]["text"].startswith("Image candidate I2")
     assert evidence[4]["image_url"]["url"].endswith("Ymx1ZS1waXhlbHM=")
+    assert "<!--rich:image:web:" in outcome.response.message.content
+    assert "[[image:" not in outcome.response.message.content
+    assert len(outcome.provenance.rich_items) == 1

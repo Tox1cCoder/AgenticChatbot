@@ -160,6 +160,8 @@ class OutcomeProvenance(BaseModel):
     evidence: tuple[dict[str, JsonValue], ...] = ()
     artifacts: tuple[dict[str, JsonValue], ...] = ()
     images: tuple[dict[str, JsonValue], ...] = ()
+    web_sources: tuple[dict[str, JsonValue], ...] = ()
+    rich_items: tuple[dict[str, JsonValue], ...] = ()
     private_messages: tuple[AnyMessage, ...] = ()
 
 

@@ -149,7 +149,7 @@ def _image_candidate(item_id="image:tool:c1:0", description="Eiffel Tower at nig
     }
 
 
-def test_finalize_places_image_and_mutates_response_message(monkeypatch):
+def test_finalize_never_places_an_image_without_a_grounding_marker(monkeypatch):
     monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
     monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
     # Long enough (>= _FALLBACK_MIN_BLOCK_TOKENS non-stopword tokens) for the
@@ -158,8 +158,8 @@ def test_finalize_places_image_and_mutates_response_message(monkeypatch):
     content = "The Eiffel Tower is stunning at night, lit by thousands of golden lamps."
     response = _make_response(content, candidates=[_image_candidate()])
     new_content = finalize_article_content(response, content)
-    assert "<!--rich:image:tool:c1:0-->" in new_content
-    assert response.message.content == new_content
+    assert "<!--rich:image:tool:c1:0-->" not in new_content
+    assert response.message.content == content
 
 
 def test_finalize_does_not_place_image_trimmed_from_prompt_inventory(monkeypatch):
@@ -734,7 +734,7 @@ def test_invalid_item_id_is_never_inserted():
 # ---------------------------------------------------------------------------
 
 
-def test_finalize_uses_query_anchoring(monkeypatch):
+def test_finalize_does_not_use_query_anchoring(monkeypatch):
     monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
     monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
     candidate = {
@@ -749,7 +749,7 @@ def test_finalize_uses_query_anchoring(monkeypatch):
     }
     response = _make_response(BODY, candidates=[candidate])
     content = finalize_article_content(response, BODY)
-    assert "<!--rich:imagegroup:tool:c1-->" in content
+    assert "<!--rich:imagegroup:tool:c1-->" not in content
     assert response.message.content == content
 
 
@@ -806,7 +806,7 @@ def test_finalize_leaves_source_bound_web_search_image_unplaced_without_query(mo
     assert finalize_article_content(response, content) == content
 
 
-def test_single_brave_image_result_is_placed_like_a_group(monkeypatch):
+def test_single_brave_image_result_is_not_placed_without_selection(monkeypatch):
     """A single eligible Brave candidate is anchored like a Brave group.
 
     Grouping needs two candidates, but a single result carries the same
@@ -850,7 +850,7 @@ def test_single_brave_image_result_is_placed_like_a_group(monkeypatch):
     )
     response = _make_response(content, candidates=[candidate])
     new_content = finalize_article_content(response, content)
-    assert f"<!--rich:{candidate['id']}-->" in new_content
+    assert f"<!--rich:{candidate['id']}-->" not in new_content
 
 
 # ---------------------------------------------------------------------------
