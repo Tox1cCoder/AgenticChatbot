@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import hashlib
 import inspect
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, TypeVar
+from uuid import UUID
 
 from app.ai.research_budget import ResearchBudget
 from app.ai.web_query_contract import WebSearchRequest, normalize_web_search
 
 from .contracts import (
+    ImageCandidateRecord,
     ProviderImageCandidate,
     ProviderSource,
     ResearchFailure,
@@ -24,6 +30,19 @@ from .providers import ProviderFailure, ProviderResolver
 from .source_registry import SourceRegistry
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class PreparedImage:
+    record: ImageCandidateRecord
+    reference_id: UUID
+    content: bytes
+    rich_item: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ResearchCloseout:
+    selected_candidate_ids: tuple[str, ...]
 
 
 class ProviderHealthRegistry:
@@ -89,12 +108,24 @@ class WebResearchService:
         health: ProviderHealthRegistry | None = None,
         cache: ResearchResultCache | None = None,
         retry_backoff: Callable[[int], Awaitable[None] | None] | None = None,
+        image_service: Any | None = None,
+        max_candidate_pool: int = 8,
+        max_download_bytes: int = 20 * 1024 * 1024,
+        max_model_bytes: int = 8 * 1024 * 1024,
+        max_image_concurrency: int = 3,
+        pending_image_ttl: timedelta = timedelta(minutes=15),
     ) -> None:
         self.resolver = resolver
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.health = health or ProviderHealthRegistry(now=self.now)
         self.cache = cache or ResearchResultCache(now=self.now)
         self.retry_backoff = retry_backoff or (lambda _attempt: None)
+        self.image_service = image_service
+        self.max_candidate_pool = max(1, int(max_candidate_pool))
+        self.max_download_bytes = max(1, int(max_download_bytes))
+        self.max_model_bytes = max(1, int(max_model_bytes))
+        self.max_image_concurrency = max(1, int(max_image_concurrency))
+        self.pending_image_ttl = pending_image_ttl
 
     def new_session(
         self,
@@ -123,6 +154,13 @@ class WebResearchSession:
         self.source_registry = SourceRegistry(max_sources=self.limits.max_sources)
         self._operation_index = 0
         self.pending_provider_images: tuple[ProviderImageCandidate, ...] = ()
+        self.prepared_images: dict[str, PreparedImage] = {}
+        self.reason_codes: set[str] = set()
+        self._image_digests: set[str] = set()
+        self._model_image_bytes = 0
+        self._downloaded_image_bytes = 0
+        self._omitted_image_count = 0
+        self._closed = False
 
     async def search(self, request: ResearchRequest) -> WebEvidenceBundle:
         self._operation_index += 1
@@ -162,16 +200,20 @@ class WebResearchSession:
                 ),
             )
 
-        text_task = self._call_chain(
-            self.service.resolver.text,
-            operation="search",
-            invoke=lambda provider: provider.search(normalized, query_index=operation_index),
+        text_task = asyncio.create_task(
+            self._call_chain(
+                self.service.resolver.text,
+                operation="search",
+                invoke=lambda provider: provider.search(normalized, query_index=operation_index),
+            )
         )
         image_task = (
-            self._call_chain(
-                self.service.resolver.images,
-                operation="image_search",
-                invoke=lambda provider: provider.search(request),
+            asyncio.create_task(
+                self._call_chain(
+                    self.service.resolver.images,
+                    operation="image_search",
+                    invoke=lambda provider: provider.search(request),
+                )
             )
             if request.visual_intent != "none" and request.image_query
             else None
@@ -204,11 +246,200 @@ class WebResearchSession:
         self.pending_provider_images = tuple(
             image for image in image_records if self.source_registry.resolve(image.source_url)
         )
+        image_fetch_failures = await self._prepare_images(request)
         return self._bundle(
             request,
             operation_index,
-            failures=(*text_failures, *image_failures),
+            failures=(*text_failures, *image_failures, *image_fetch_failures),
             providers=tuple(dict.fromkeys((*text_providers, *image_providers))),
+        )
+
+    async def _prepare_images(
+        self, request: ResearchRequest
+    ) -> tuple[ResearchFailure, ...]:
+        if self.service.image_service is None or not self.pending_provider_images:
+            return ()
+
+        limit = ResearchLimits.for_mode(
+            self.mode, visual_intent=request.visual_intent
+        ).max_model_images
+        remaining = max(0, limit - len(self.prepared_images))
+        candidates = self.pending_provider_images[: self.service.max_candidate_pool]
+        if not remaining:
+            self._omitted_image_count += len(candidates)
+            return ()
+
+        semaphore = asyncio.Semaphore(self.service.max_image_concurrency)
+
+        async def fetch(candidate: ProviderImageCandidate) -> Any:
+            async with semaphore:
+                try:
+                    image = await self.service.image_service.fetch_url(
+                        candidate.image_url, provider=candidate.provider
+                    )
+                    return candidate, image, None
+                except Exception as exc:
+                    return candidate, None, str(getattr(exc, "reason", "fetch_failed"))
+
+        outcomes = await asyncio.gather(*(fetch(candidate) for candidate in candidates))
+        failures: list[ResearchFailure] = []
+        for candidate, fetched, failure_code in outcomes:
+            source = self.source_registry.resolve(candidate.source_url)
+            if failure_code is not None or fetched is None or source is None:
+                self._omitted_image_count += 1
+                failures.append(
+                    ResearchFailure(
+                        operation="image_fetch",
+                        provider=candidate.provider,
+                        code=(failure_code or "source_missing")[:64],
+                        retryable=False,
+                        source_id=source.source_id if source is not None else None,
+                    )
+                )
+                continue
+
+            byte_size = len(fetched.content)
+            self._downloaded_image_bytes += byte_size
+            digest = hashlib.sha256(fetched.content).hexdigest()
+            if digest in self._image_digests:
+                self._omitted_image_count += 1
+                continue
+            if (
+                self._downloaded_image_bytes > self.service.max_download_bytes
+                or self._model_image_bytes + byte_size > self.service.max_model_bytes
+                or len(self.prepared_images) >= limit
+            ):
+                self._omitted_image_count += 1
+                continue
+
+            persisted = await self.service.image_service.register(
+                conversation_id=UUID(self.scope.conversation_id),
+                user_id=UUID(self.scope.user_id),
+                upstream_url=candidate.image_url,
+                expected_mime=fetched.media_type,
+                provider=candidate.provider,
+                cached=fetched,
+                expires_at=self.service.now() + self.service.pending_image_ttl,
+            )
+            candidate_id = f"I{len(self.prepared_images) + 1}"
+            delivery_url = f"/web-images/{persisted.id}"
+            record = ImageCandidateRecord(
+                candidate_id=candidate_id,
+                source_id=source.source_id,
+                delivery_url=delivery_url,
+                mime_type=fetched.media_type,
+                width=fetched.width,
+                height=fetched.height,
+                byte_size=byte_size,
+                digest=digest,
+                title=candidate.title,
+                description=candidate.description,
+                provider=candidate.provider,
+            )
+            self.prepared_images[candidate_id] = PreparedImage(
+                record=record,
+                reference_id=persisted.id,
+                content=fetched.content,
+                rich_item={
+                    "id": f"image:web:{persisted.id}",
+                    "type": "image",
+                    "source": "image_search",
+                    "title": candidate.title,
+                    "payload": {
+                        "url": delivery_url,
+                        "mime_type": fetched.media_type,
+                        "width": fetched.width,
+                        "height": fetched.height,
+                        "description": candidate.description,
+                    },
+                    "provenance": {
+                        "provider": candidate.provider,
+                        "source_id": source.source_id,
+                    },
+                },
+            )
+            self._image_digests.add(digest)
+            self._model_image_bytes += byte_size
+        return tuple(failures)
+
+    def model_evidence_blocks(self, *, supports_vision: bool) -> list[dict[str, Any]]:
+        if not supports_vision:
+            if self.prepared_images:
+                self.reason_codes.add("answer_model_not_vision_capable")
+            return []
+
+        blocks: list[dict[str, Any]] = []
+        for candidate_id, prepared in self.prepared_images.items():
+            record = prepared.record
+            blocks.extend(
+                (
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Image candidate {candidate_id}; source {record.source_id}. "
+                            "Select it only if its visible content supports the answer."
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": (
+                                f"data:{record.mime_type};base64,"
+                                f"{base64.b64encode(prepared.content).decode('ascii')}"
+                            ),
+                            "detail": "low",
+                        },
+                    },
+                )
+            )
+        return blocks
+
+    async def finish(self, selected_candidate_ids: Sequence[str]) -> ResearchCloseout:
+        selected = tuple(
+            dict.fromkeys(
+                candidate_id
+                for candidate_id in selected_candidate_ids
+                if candidate_id in self.prepared_images
+            )
+        )
+        selected_set = set(selected)
+        selected_refs = [
+            self.prepared_images[candidate_id].reference_id for candidate_id in selected
+        ]
+        released_refs = [
+            prepared.reference_id
+            for candidate_id, prepared in self.prepared_images.items()
+            if candidate_id not in selected_set
+        ]
+        scope = {
+            "user_id": UUID(self.scope.user_id),
+            "conversation_id": UUID(self.scope.conversation_id),
+        }
+        if selected_refs:
+            await self.service.image_service.mark_selected(selected_refs, **scope)
+        if released_refs:
+            await self.service.image_service.release_references(released_refs, **scope)
+        self._closed = True
+        return ResearchCloseout(selected_candidate_ids=selected)
+
+    async def abort(self) -> None:
+        if self._closed or self.service.image_service is None:
+            return
+        await self.service.image_service.release_references(
+            [prepared.reference_id for prepared in self.prepared_images.values()],
+            user_id=UUID(self.scope.user_id),
+            conversation_id=UUID(self.scope.conversation_id),
+        )
+        self._closed = True
+
+    async def suspend(self) -> None:
+        if self._closed or self.service.image_service is None:
+            return
+        await self.service.image_service.suspend_references(
+            [prepared.reference_id for prepared in self.prepared_images.values()],
+            user_id=UUID(self.scope.user_id),
+            conversation_id=UUID(self.scope.conversation_id),
+            expires_at=self.service.now() + self.service.pending_image_ttl,
         )
 
     async def _call_chain(
@@ -275,14 +506,18 @@ class WebResearchSession:
             visual_intent=request.visual_intent,
             operation_index=operation_index,
             sources=sources,
+            images=tuple(prepared.record for prepared in self.prepared_images.values()),
             failures=failures,
             providers_used=providers,
+            omitted_image_count=self._omitted_image_count,
         )
 
 
 __all__ = [
     "ProviderHealthRegistry",
     "ResearchResultCache",
+    "PreparedImage",
+    "ResearchCloseout",
     "WebResearchService",
     "WebResearchSession",
 ]

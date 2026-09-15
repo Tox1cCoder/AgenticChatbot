@@ -13,6 +13,9 @@ def test_web_image_reference_columns_are_bounded_and_owned():
     assert columns["expected_mime"].type.length == 128
     assert columns["provider"].type.length == 32
     assert columns["deleted_at"].nullable is True
+    assert columns["lifecycle_state"].type.length == 16
+    assert columns["lifecycle_state"].nullable is False
+    assert columns["expires_at"].nullable is True
 
 
 def test_web_image_reference_caches_only_verified_bytes():

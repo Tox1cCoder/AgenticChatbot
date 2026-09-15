@@ -21,6 +21,10 @@ class _ScalarResult:
         return self.rows[0] if self.rows else None
 
 
+class _UpdateResult:
+    rowcount = 1
+
+
 class _SyncSession:
     def __init__(self, rows=None):
         self.rows = rows or []
@@ -40,6 +44,8 @@ class _SyncSession:
 
     def execute(self, statement):
         self.statements.append(statement)
+        if statement.is_update:
+            return _UpdateResult()
         return _ScalarResult(self.rows)
 
 
@@ -111,3 +117,42 @@ async def test_aget_for_user_filters_id_owner_and_soft_delete():
     assert "web_image_references.user_id" in compiled
     assert user_id.hex in compiled
     assert "web_image_references.deleted_at IS NULL" in compiled
+
+
+@pytest.mark.asyncio
+async def test_release_many_is_owned_and_marks_the_lifecycle_released():
+    session = _SyncSession()
+    repository = WebImageReferenceRepository(
+        _sync_factory_that_must_not_run(), _async_factory(session)
+    )
+    image_id = uuid4()
+    user_id = uuid4()
+    conversation_id = uuid4()
+
+    changed = await repository.arelease_many(
+        [image_id], user_id=user_id, conversation_id=conversation_id
+    )
+
+    assert changed == 1
+    compiled = str(session.statements[0].compile(compile_kwargs={"literal_binds": True}))
+    assert image_id.hex in compiled
+    assert user_id.hex in compiled
+    assert conversation_id.hex in compiled
+    assert "lifecycle_state='released'" in compiled.replace(" ", "")
+
+
+@pytest.mark.asyncio
+async def test_pending_lookup_requires_owner_conversation_and_pending_state():
+    marker = object()
+    session = _SyncSession(rows=[marker])
+    repository = WebImageReferenceRepository(
+        _sync_factory_that_must_not_run(), _async_factory(session)
+    )
+
+    assert (
+        await repository.aget_pending_for_user(uuid4(), uuid4(), conversation_id=uuid4())
+        is marker
+    )
+
+    compiled = str(session.statements[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "web_image_references.lifecycle_state = 'pending'" in compiled

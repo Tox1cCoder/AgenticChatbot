@@ -10,6 +10,7 @@ import time
 import warnings
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime
 from io import BytesIO
 from typing import Any
 from urllib.parse import urljoin, urlsplit
@@ -103,6 +104,7 @@ class WebImageService:
         expected_mime: str | None,
         provider: str,
         cached: FetchedWebImage | None = None,
+        expires_at: datetime | None = None,
     ) -> Any:
         """Persist metadata, plus already-validated bytes when they are supplied.
 
@@ -123,7 +125,46 @@ class WebImageService:
                 "content": cached.content if cached is not None else None,
                 "cached_width": cached.width if cached is not None else None,
                 "cached_height": cached.height if cached is not None else None,
+                "lifecycle_state": "pending",
+                "expires_at": expires_at,
             }
+        )
+
+    async def mark_selected(
+        self,
+        image_ids: list[UUID] | tuple[UUID, ...],
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+    ) -> int:
+        return await self.repository.amark_selected(
+            image_ids, user_id=user_id, conversation_id=conversation_id
+        )
+
+    async def release_references(
+        self,
+        image_ids: list[UUID] | tuple[UUID, ...],
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+    ) -> int:
+        return await self.repository.arelease_many(
+            image_ids, user_id=user_id, conversation_id=conversation_id
+        )
+
+    async def suspend_references(
+        self,
+        image_ids: list[UUID] | tuple[UUID, ...],
+        *,
+        user_id: UUID,
+        conversation_id: UUID,
+        expires_at: datetime,
+    ) -> int:
+        return await self.repository.asuspend_many(
+            image_ids,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            expires_at=expires_at,
         )
 
     async def fetch(self, record: Any) -> FetchedWebImage:

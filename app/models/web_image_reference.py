@@ -31,6 +31,10 @@ class WebImageReference(Base):
     content = Column(LargeBinary, nullable=True)
     cached_width = Column(Integer, nullable=True)
     cached_height = Column(Integer, nullable=True)
+    lifecycle_state = Column(
+        String(16), nullable=False, server_default="pending", index=True
+    )
+    expires_at = Column(DateTime(timezone=True), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
