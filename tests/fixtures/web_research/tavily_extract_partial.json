@@ -1,0 +1,11 @@
+{
+  "results": [
+    {
+      "url": "https://docs.example.test/release",
+      "raw_content": "Focused release details"
+    }
+  ],
+  "failed_results": [
+    {"url": "https://docs.example.test/missing", "error": "timeout"}
+  ]
+}

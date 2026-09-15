@@ -1,0 +1,13 @@
+{
+  "images": [
+    {
+      "url": "https://images.example.test/release.webp",
+      "source_url": "https://docs.example.test/release",
+      "title": "Release interface",
+      "description": "The version 9.2 interface",
+      "width": 1200,
+      "height": 800,
+      "result_rank": 1
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "results": [
+    {
+      "url": "https://docs.example.test/release",
+      "title": "Release notes",
+      "content": "Version 9.2 was released.",
+      "published_date": "2026-09-14T00:00:00Z",
+      "raw_content": "must not survive"
+    }
+  ]
+}
