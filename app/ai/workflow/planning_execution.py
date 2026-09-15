@@ -1116,14 +1116,25 @@ def _last_tool_calls(state: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _last_ai_text(state: Mapping[str, Any]) -> str:
-    """The last thing the Planning model actually said."""
+    """The last thing the Planning model actually said.
+
+    ``BaseMessage.text`` is the extraction. The previous version read
+    ``content if isinstance(content, str) else ""``, which discarded *every*
+    list-shaped content -- and content is list-shaped whenever the model emits
+    thought parts alongside its answer. Planning has no per-agent thinking
+    level, so it inherits the global one and the answer routinely arrived in a
+    ``text`` block this function threw away. The turn then failed
+    ``empty_public_content`` as though the model had said nothing.
+
+    langchain-core also knows which blocks are reasoning, so a thought part is
+    not mistaken for the plan.
+    """
     for message in reversed(state.get("messages") or []):
         if getattr(message, "type", None) != "ai":
             continue
         if getattr(message, "tool_calls", None):
             continue
-        content = getattr(message, "content", "")
-        text = content if isinstance(content, str) else ""
+        text = getattr(message, "text", "") or ""
         if text.strip():
             return text
     return ""
