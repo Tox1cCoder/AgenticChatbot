@@ -226,6 +226,27 @@ def _normalized_usage_from_token_breakdown(
     return NormalizedUsage(source="unavailable")
 
 
+
+def _finish_reason(response: Any) -> str | None:
+    """The provider's stop reason, wherever the adapter put it.
+
+    Gemini reports it under ``finish_reason``; OpenAI under ``finish_reason``
+    too but sometimes only on ``response_metadata``; a streamed message may
+    carry it on ``additional_kwargs``. Read all three rather than assume one.
+    """
+
+    for holder in (
+        getattr(response, "response_metadata", None),
+        getattr(response, "additional_kwargs", None),
+    ):
+        if not isinstance(holder, dict):
+            continue
+        for key in ("finish_reason", "stop_reason", "finishReason"):
+            value = holder.get(key)
+            if value:
+                return str(value)
+    return None
+
 class BaseAgent(ABC):
     """Abstract base class for all agents.
 
@@ -1752,6 +1773,25 @@ class BaseAgent(ABC):
                 metadata["reasoning_summary"] = reasoning_summary.strip()
             if isinstance(reasoning_tokens, int) and reasoning_tokens >= 0:
                 metadata["reasoning_tokens"] = reasoning_tokens
+
+            # The provider's own account of why it stopped. Nothing in this
+            # codebase read it, so an empty candidate -- MAX_TOKENS spent on
+            # thinking, SAFETY, RECITATION, MALFORMED_FUNCTION_CALL -- arrived
+            # downstream as an ordinary response with no text and no reason,
+            # and every consumer had to guess. A turn that produced neither
+            # text nor a tool call is worth a line on its own: it is the shape
+            # that fails `empty_public_content` two nodes later.
+            finish_reason = _finish_reason(response)
+            if finish_reason:
+                metadata["finish_reason"] = finish_reason
+            if not response_text.strip() and not tool_calls:
+                logger.warning(
+                    "%s produced no text and no tool calls (finish_reason=%s, "
+                    "content=%.200r); the turn has nothing to publish",
+                    self.agent_id,
+                    finish_reason or "unreported",
+                    getattr(response, "content", None),
+                )
 
             agent_message = AgentMessage(
                 role=MessageRole.ASSISTANT, content=response_text, tool_calls=tool_calls
