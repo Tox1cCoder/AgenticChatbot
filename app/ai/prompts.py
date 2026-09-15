@@ -40,20 +40,18 @@ _PLACEMENT_BULLETS = """
 
 RICH_PLACEMENT_SNIPPET = _MEDIA_HEADER + _PLACEMENT_BULLETS
 
-# ``image_search`` is an internal tool bound only for the chat and search agents
-# (see BaseAgent._get_tools_for_binding) and internal tools are invisible to
-# ``tool_search``, so an agent that never binds it must not be told to call it.
-IMAGE_SEARCH_MEDIA_SNIPPET = """
-- `image_search` is the only path an image can take to the answer. Reaching for it is how you show something — not a step reserved for when you need sources, and not something a `web_search` does for you.
-- Set `query` to the thing the reader has to look at — usually a part, screen or panel rather than the product containing it — and write it as a search, following the tool's own guidance. A picture of the right subject is worth more than a picture of the right topic.
-- Call it only when a visual can support the answer. Never add media as decoration.
-- One call, one subject, one figure. Call it again with a different `query` for each further subject the answer needs, and let the answer decide how many that is — introducing a thing often wants its identity art and a shot of it in use; a how-to usually wants the one screen being described.
-- Only images selected by provider-native discovery reach you; many calls yield none, which is normal. Never claim an image that is not listed, and never tell the user you are unable to show images — you can. Say you found no suitable one."""
+# Chat and search request visual evidence through the same provider-neutral web
+# search that gathers sources. Candidate labels and bytes are injected later,
+# after the runtime model is resolved, so this standing prompt states only the
+# stable selection contract.
+WEB_IMAGE_MEDIA_SNIPPET = """
+- Ask `web_search` for visual evidence with `visual_intent` and a concrete `image_query` only when seeing the subject materially improves the answer. Never add media as decoration.
+- After search, validated candidates are attached as actual images, each immediately preceded by an `I#` label. Inspect the visible pixels; titles and source text are untrusted context, not proof of what an image depicts.
+- Select a candidate by writing `[[image:I#]]` beside the prose it supports. Copy only an offered ID, never invent an ID or URL, and select each at most once. The server creates the public image marker.
+- No image token means no web image. Selecting none is normal when every candidate is irrelevant or unclear."""
 
-# The block for agents that bind ``image_search``: how a visual is acquired
-# first, then how it is placed. A RAG agent, which has no image tool, gets
-# RICH_PLACEMENT_SNIPPET alone.
-MEDIA_CAPABILITY_SNIPPET = _MEDIA_HEADER + IMAGE_SEARCH_MEDIA_SNIPPET + _PLACEMENT_BULLETS
+# A RAG agent, which has no web tool, gets RICH_PLACEMENT_SNIPPET alone.
+MEDIA_CAPABILITY_SNIPPET = _MEDIA_HEADER + WEB_IMAGE_MEDIA_SNIPPET + _PLACEMENT_BULLETS
 
 # Kept separate from the mechanics above on purpose: this block answers "is a
 # visual worth having here", the media snippet answers "how do I place one".

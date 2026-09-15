@@ -38,6 +38,7 @@ from app.ai.tool_execution import (
     execute_tool_calls,
 )
 from app.ai.utils import apply_hitl_decisions, normalize_tool_call
+from app.ai.web_research.model_context import inject_latest_web_evidence
 from app.core.runtime_modeling import ResolvedRuntimeModelConfig
 from app.services.tool_execution_receipt_service import (
     MutationExecutionScope,
@@ -54,6 +55,7 @@ __all__ = [
     "ToolApprovalMiddleware",
     "ToolExecutionMiddleware",
     "UsageRecordingMiddleware",
+    "WebEvidenceMiddleware",
     "WorkerToolScopeMiddleware",
     "build_specialist_middleware",
     "tool_identities",
@@ -400,6 +402,30 @@ class RequestBudgetMiddleware(AgentMiddleware):
         return await handler(request)
 
 
+class WebEvidenceMiddleware(AgentMiddleware):
+    """Attach the latest validated web evidence for the resolved model attempt."""
+
+    def __init__(
+        self,
+        *,
+        session: Any,
+        runtime_config_provider: Callable[[], ResolvedRuntimeModelConfig | None],
+    ) -> None:
+        super().__init__()
+        self._session = session
+        self._runtime_config_provider = runtime_config_provider
+
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+        config = self._runtime_config_provider()
+        supports_vision = bool(
+            config is not None and config.capabilities.get("supports_vision", False)
+        )
+        messages = inject_latest_web_evidence(
+            list(request.messages), self._session, supports_vision=supports_vision
+        )
+        return await handler(request.override(messages=messages))
+
+
 class ToolExecutionMiddleware(AgentMiddleware):
     """Run tool calls through the product's execution pipeline.
 
@@ -709,6 +735,7 @@ def build_specialist_middleware(
     worker_tool_scope: WorkerToolScopeMiddleware | None = None,
     preflight: PreflightCallable | None = None,
     compact_messages: Callable[[list[Any]], list[Any]] | None = None,
+    web_research_session: Any = None,
 ) -> list[AgentMiddleware]:
     """Assemble one specialist's middleware stack.
 
@@ -747,6 +774,14 @@ def build_specialist_middleware(
         ToolCallLimitMiddleware(thread_limit=max_tool_calls, exit_behavior="error"),
         runtime_model,
     ]
+
+    if web_research_session is not None:
+        stack.append(
+            WebEvidenceMiddleware(
+                session=web_research_session,
+                runtime_config_provider=lambda: runtime_model.runtime_config,
+            )
+        )
 
     if preflight is not None:
         stack.append(

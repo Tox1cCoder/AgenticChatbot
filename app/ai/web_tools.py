@@ -72,6 +72,9 @@ WEB_SEARCH_DESCRIPTION = (
     "unchanged query — the same query returns the same sources.\n\n"
     "Set visual_intent when seeing a figure, comparison, or gallery would "
     "materially improve the answer, and provide a concrete image_query. "
+    "Name the exact part, screen, identity art, photo, diagram, map, or chart "
+    "the reader must inspect; resolve pronouns from the conversation and add "
+    "a version or year when appearance changes over time. "
     "Validated candidates are shown privately on the next model call; no "
     "image is published unless you explicitly select one in the answer."
 )

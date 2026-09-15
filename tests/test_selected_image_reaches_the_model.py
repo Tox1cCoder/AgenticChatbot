@@ -1,118 +1,178 @@
-"""The full chain from a provider-selected image to a model-copyable marker."""
+"""Regression: the answer model must receive validated candidate pixels."""
 
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 
-from app.ai import web_tools
-from app.ai.prompts import build_rich_response_guidance
-from app.ai.research_budget import reset_research_budget
-from app.ai.rich_image_selection import apply_rich_image_selection
-from app.ai.selected_image_sink import selected_image_sink
-from app.ai.tool_context import clear_tool_context, tool_execution_context
-from app.ai.tool_execution import _attach_rich_candidates_to_artifact
-from app.ai.web_tools import create_image_search_tool
-from app.ai.workflow.tool_loop import ToolLoopMixin
-from app.core.rich_response import sanitize_public_rich_item
-
-CONVERSATION_ID = "77777777-7777-7777-7777-777777777777"
-ORIGINAL_IMAGE_URL = "https://origin.example/t1-team.webp?private=1"
-THUMBNAIL_URL = "https://imgs.search.brave.com/t1-team-thumbnail.webp"
+from app.ai.schemas import AgentType
+from app.ai.web_research.service import WebResearchService
+from app.ai.web_tools import create_web_search_tool
+from app.ai.workflow.specialists import (
+    SpecialistDefinition,
+    SpecialistFactory,
+    SpecialistRequest,
+)
+from app.services.web_image_service import FetchedWebImage
 
 
-class _Brave:
-    def __init__(self, *, confidence: str) -> None:
-        self.confidence = confidence
+class _ProviderTool:
+    def __init__(self, name: str, payload: dict) -> None:
+        self.name = name
+        self.payload = payload
 
-    async def ainvoke(self, args: dict) -> str:
-        return json.dumps(
-            {
-                "query": args["query"],
-                "provider": "brave_image_search",
-                "images": [
-                    {
-                        "url": "https://imgs.search.brave.com/t1-team-display.webp",
-                        "original_image_url": ORIGINAL_IMAGE_URL,
-                        "thumbnail_url": THUMBNAIL_URL,
-                        "confidence": self.confidence,
-                        "result_rank": 1,
-                        "provider": "brave_image_search",
-                        "mime_type": "image/webp",
-                        "title": "T1 2026 roster",
-                        "description": "T1 2026 roster",
-                        "width": 995,
-                        "height": 565,
-                        "source_url": "https://sheepesports.example/t1",
-                    }
-                ],
-                "total_results": 1,
-            }
+    async def ainvoke(self, _args):
+        return json.dumps(self.payload)
+
+
+class _ImageService:
+    async def fetch_url(self, url: str, *, provider: str):
+        content = b"red-pixels" if url.endswith("red.png") else b"blue-pixels"
+        return FetchedWebImage(
+            content=content,
+            media_type="image/png",
+            width=32,
+            height=32,
         )
 
-
-@pytest.fixture(autouse=True)
-def _clean(monkeypatch):
-    clear_tool_context()
-    reset_research_budget(conversation_id=CONVERSATION_ID)
-    monkeypatch.setattr(
-        web_tools.settings,
-        "remote_image_enrichment_enabled",
-        True,
-        raising=False,
-    )
-    monkeypatch.setattr(web_tools.settings, "inline_rich_response_enabled", True, raising=False)
-    yield
-    clear_tool_context()
-    reset_research_budget(conversation_id=CONVERSATION_ID)
+    async def register(self, **kwargs):
+        return SimpleNamespace(id=uuid4(), **kwargs)
 
 
-async def _provider_selected_candidates() -> list[dict]:
-    tool = create_image_search_tool(brave_tool=_Brave(confidence="high"))
-    with (
-        tool_execution_context(conversation_id=CONVERSATION_ID, user_id="u1", agent_key="search"),
-        selected_image_sink() as sink,
-    ):
-        await tool.ainvoke({"query": "T1 team photo"})
-    return list(sink)
+class _TwoRoundModel(BaseChatModel):
+    requests: list[list] = []
+    call_count: int = 0
 
+    model_config = {"arbitrary_types_allowed": True}
 
-@pytest.mark.asyncio
-async def test_a_provider_selected_image_becomes_a_marker_the_model_can_copy():
-    selected = await _provider_selected_candidates()
-    assert selected, "provider selection produced no candidate for the chain"
+    @property
+    def _llm_type(self) -> str:
+        return "two-round-web-evidence"
 
-    artifact: dict = {}
-    _attach_rich_candidates_to_artifact(
-        artifact,
-        raw_result=None,
-        result_text="{}",
-        render=None,
-        tool_call_id="call-1",
-        tool_name="image_search",
-        selected_images=selected,
-    )
-    context: dict = {}
-    ToolLoopMixin._lift_rich_candidates(context, [artifact])
-    apply_rich_image_selection(context)
+    def bind_tools(self, _tools, **_kwargs):
+        return self
 
-    candidates = context.get("rich_item_candidates") or []
-    assert candidates[0]["source"] == "image_search"
+    def _answer(self, messages):
+        self.requests.append(list(messages))
+        if self.call_count == 0:
+            result = AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "search-1",
+                        "name": "web_search",
+                        "args": {
+                            "query": "release interface",
+                            "objective": "identify the current interface",
+                            "visual_intent": "comparison",
+                            "image_query": "release interface",
+                        },
+                    }
+                ],
+            )
+        else:
+            result = AIMessage(content="The blue version is current [[image:I2]]")
+        self.call_count += 1
+        return ChatResult(generations=[ChatGeneration(message=result)])
 
-    guidance = build_rich_response_guidance(candidates=candidates, enabled=True, capability=True)
-    assert f"<!--rich:{candidates[0]['id']}-->" in guidance
-    assert "AVAILABLE RICH ITEMS" in guidance
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        return self._answer(messages)
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        return self._answer(messages)
 
 
 @pytest.mark.asyncio
-async def test_public_selected_image_metadata_uses_the_thumbnail_without_original_url():
-    selected = await _provider_selected_candidates()
+async def test_second_answer_model_request_contains_labeled_validated_pixels() -> None:
+    text_tool = _ProviderTool(
+        "tavily_search",
+        {
+            "results": [
+                {
+                    "url": "https://source.test/release",
+                    "title": "Release notes",
+                    "content": "The blue interface is current.",
+                }
+            ]
+        },
+    )
+    image_tool = _ProviderTool(
+        "brave_image_search",
+        {
+            "images": [
+                {
+                    "thumbnail_url": "https://images.test/red.png",
+                    "source_url": "https://source.test/release",
+                    "title": "Red interface",
+                },
+                {
+                    "thumbnail_url": "https://images.test/blue.png",
+                    "source_url": "https://source.test/release",
+                    "title": "Blue interface",
+                },
+            ]
+        },
+    )
+    owner = SimpleNamespace(tools=[text_tool, image_tool], agent_config_key="chat")
+    model = _TwoRoundModel()
+    definition = SpecialistDefinition(
+        agent_id="chat_agent",
+        agent_type=AgentType.CHAT,
+        model_config_key="chat",
+        system_prompt_factory=lambda _request: "Use grounded web evidence.",
+        tool_factory=lambda _request: [create_web_search_tool()],
+        agent=owner,
+        output_policy_ids=("public_content",),
+    )
+    runtime_config = SimpleNamespace(
+        agent_key="chat",
+        provider="test",
+        model="vision-model",
+        temperature=0.0,
+        api_key="key",
+        key_source="test",
+        source="test",
+        warnings=[],
+        capabilities={"supports_vision": True},
+        fallback_config=None,
+    )
+    factory = SpecialistFactory(
+        definitions={"chat_agent": definition},
+        runtime_model_resolver=SimpleNamespace(
+            resolve_runtime_config=lambda *_args, **_kwargs: runtime_config
+        ),
+        model_factory=SimpleNamespace(create_model_from_runtime=lambda _config: model),
+        web_research_service=WebResearchService(image_service=_ImageService()),
+        settings=SimpleNamespace(
+            generation_hard_model_calls_per_epoch=4,
+            generation_soft_model_calls_per_epoch=3,
+            generation_hard_tool_calls_per_epoch=4,
+            generation_soft_tool_calls_per_epoch=3,
+        ),
+    )
+    request = SpecialistRequest(
+        agent_id="chat_agent",
+        conversation_id=str(uuid4()),
+        user_id=str(uuid4()),
+        device_id=None,
+        persona=None,
+        model_request=None,
+        messages=[HumanMessage(content="Which interface is current?")],
+        extras={"turn_id": str(uuid4())},
+    )
 
-    public = sanitize_public_rich_item(selected[0])
-    assert public["payload"]["url"] == THUMBNAIL_URL
-    assert public["payload"]["width"] == 995
-    assert public["payload"]["height"] == 565
-    assert public["payload"]["mime_type"] == "image/webp"
-    assert "original_image_digests" not in public["provenance"]
-    assert ORIGINAL_IMAGE_URL not in json.dumps(public)
+    await factory.invoke(request)
+
+    assert len(model.requests) == 2
+    second = model.requests[1]
+    evidence = second[-1].content
+    assert evidence[1]["text"].startswith("Image candidate I1")
+    assert evidence[2]["image_url"]["url"].endswith("cmVkLXBpeGVscw==")
+    assert evidence[3]["text"].startswith("Image candidate I2")
+    assert evidence[4]["image_url"]["url"].endswith("Ymx1ZS1waXhlbHM=")

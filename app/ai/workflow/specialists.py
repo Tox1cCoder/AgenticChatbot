@@ -821,6 +821,7 @@ class SpecialistFactory:
             approval=ToolApprovalMiddleware(scope=scope, hitl_policy=request.hitl_policy or {}),
             worker_tool_scope=worker_scope,
             preflight=_preflight_for(definition, request),
+            web_research_session=web_research_session,
         )
 
         # The model is resolved inside RuntimeModelMiddleware per attempt; the
