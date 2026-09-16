@@ -7,14 +7,19 @@ from uuid import uuid4
 import pytest
 
 from app.ai.research_budget import ResearchBudget
+from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from app.ai.web_research.contracts import (
     ProviderImageCandidate,
     ProviderSource,
     ResearchRequest,
     ResearchScope,
 )
+from app.ai.web_research.grounding import GroundingParser
 from app.ai.web_research.providers import ProviderResolver
 from app.ai.web_research.service import WebResearchService
+from app.core.config import settings
+from app.core.response_constants import build_bot_metadata
+from app.core.rich_response import ImageRichItem, validate_public_rich_item
 from app.services.web_image_service import FetchedWebImage, WebImageRejected
 
 
@@ -127,6 +132,49 @@ async def test_validated_bytes_become_candidates_and_duplicate_digests_collapse(
     assert session.model_evidence_blocks(supports_vision=True)[1]["image_url"]["url"].startswith(
         "data:image/png;base64,"
     )
+
+
+@pytest.mark.asyncio
+async def test_prepared_web_image_satisfies_public_rich_contract() -> None:
+    session, _bundle, _service = await _session((b"one",))
+    item = session.prepared_images["I1"].rich_item
+
+    validated = validate_public_rich_item(item)
+
+    assert isinstance(validated, ImageRichItem)
+    assert validated.alt_text
+    assert str(validated.payload.source_url) == "https://source.test/article"
+    assert validated.payload.url.startswith("/web-images/")
+
+
+@pytest.mark.asyncio
+async def test_selected_web_image_survives_grounding_and_metadata_finalization(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    session, _bundle, _service = await _session((b"one",))
+    resolution = GroundingParser(session).resolve(
+        "Current view [[source:S1]].\n\n[[image:I1]]"
+    )
+    response = AgentResponse(
+        agent_type=AgentType.CHAT,
+        agent_id="chat_agent",
+        message=AgentMessage(role=MessageRole.ASSISTANT, content=resolution.text),
+        metadata={
+            "_rich_item_candidates": list(resolution.rich_items),
+            "_inline_rich_response_v1": True,
+        },
+    )
+
+    metadata = build_bot_metadata(response)
+
+    assert "<!--rich:image:web:" in response.message.content
+    assert len(metadata["rich_items"]) == 1
+    item = metadata["rich_items"][0]
+    assert item["payload"]["url"].startswith("/web-images/")
+    assert item["payload"]["source_url"] == "https://source.test/article"
+    assert item["alt_text"]
+    assert metadata["rich_reference_warnings"] == []
 
 
 @pytest.mark.asyncio

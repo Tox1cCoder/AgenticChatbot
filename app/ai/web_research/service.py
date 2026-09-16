@@ -15,6 +15,11 @@ from uuid import UUID
 
 from app.ai.research_budget import ResearchBudget
 from app.ai.web_query_contract import WebSearchRequest, normalize_web_search
+from app.core.rich_response import (
+    GENERIC_IMAGE_ALT_TEXT,
+    ImageRichItem,
+    RichItemType,
+)
 
 from .contracts import (
     ImageCandidateRecord,
@@ -477,27 +482,32 @@ class WebResearchSession:
                 description=candidate.description,
                 provider=candidate.provider,
             )
+            rich_item = ImageRichItem(
+                id=f"image:web:{persisted.id}",
+                type=RichItemType.image,
+                source="image_search",
+                title=candidate.title,
+                alt_text=str(
+                    candidate.description or candidate.title or GENERIC_IMAGE_ALT_TEXT
+                ),
+                payload={
+                    "url": delivery_url,
+                    "mime_type": fetched.media_type,
+                    "source_url": str(source.url),
+                    "width": fetched.width,
+                    "height": fetched.height,
+                    "description": candidate.description,
+                },
+                provenance={
+                    "provider": candidate.provider,
+                    "source_id": source.source_id,
+                },
+            ).model_dump(mode="json", exclude_none=True)
             self.prepared_images[candidate_id] = PreparedImage(
                 record=record,
                 reference_id=persisted.id,
                 content=fetched.content,
-                rich_item={
-                    "id": f"image:web:{persisted.id}",
-                    "type": "image",
-                    "source": "image_search",
-                    "title": candidate.title,
-                    "payload": {
-                        "url": delivery_url,
-                        "mime_type": fetched.media_type,
-                        "width": fetched.width,
-                        "height": fetched.height,
-                        "description": candidate.description,
-                    },
-                    "provenance": {
-                        "provider": candidate.provider,
-                        "source_id": source.source_id,
-                    },
-                },
+                rich_item=rich_item,
             )
             self._image_digests.add(digest)
             self._model_image_bytes += byte_size
