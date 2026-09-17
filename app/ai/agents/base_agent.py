@@ -247,6 +247,36 @@ def _finish_reason(response: Any) -> str | None:
                 return str(value)
     return None
 
+#: Stop reasons that mean the provider failed to generate, rather than that it
+#: decided something. Only these are worth sending again.
+#:
+#: ``MALFORMED_FUNCTION_CALL`` is Gemini reporting that the tool call it began
+#: could not be parsed -- on an HTTP 200, with the whole output spent on
+#: thinking and nothing usable returned. Replaying the same request succeeds,
+#: which is what makes it a transient failure and not an answer.
+#:
+#: Deliberately not here: ``SAFETY``, ``RECITATION`` and ``PROHIBITED_CONTENT``
+#: are decisions -- an identical retry is refused identically, and the user is
+#: owed the real reason. ``MAX_TOKENS`` would truncate again the same way.
+_RETRYABLE_GENERATION_FAILURES = frozenset({"MALFORMED_FUNCTION_CALL"})
+
+
+def _failed_generation_reason(response: Any) -> str | None:
+    """The provider's own "this generation failed", if nothing usable came back.
+
+    A malformed call that still carried text or a routable tool call is a
+    partial success: the turn can use it, and retrying would throw it away.
+    """
+    reason = _finish_reason(response)
+    if not reason or str(reason).upper() not in _RETRYABLE_GENERATION_FAILURES:
+        return None
+    if getattr(response, "tool_calls", None):
+        return None
+    if coerce_response_text(getattr(response, "content", None)).strip():
+        return None
+    return str(reason).upper()
+
+
 class BaseAgent(ABC):
     """Abstract base class for all agents.
 
@@ -1220,20 +1250,46 @@ class BaseAgent(ABC):
             return llm_with_tools.ainvoke(messages)
 
         last_exc: Exception | None = None
+        last_failed_generation: Any = None
         for attempt in range(1, attempts + 1):
             try:
                 # Record exactly one attempt per generic-retry iteration when a
                 # usage operation is in flight; otherwise call the provider
                 # directly so recorder-less construction is byte-for-byte today.
                 if self.recorder is not None and operation is not None:
-                    return await self.recorder.record_one_async_attempt(
+                    response = await self.recorder.record_one_async_attempt(
                         call=_ainvoke,
                         provider=provider or "unknown",
                         model=model or "unknown",
                         operation=operation,
                         usage_transform=self._transform_recorded_usage,
                     )
-                return await _ainvoke()
+                else:
+                    response = await _ainvoke()
+
+                # A 200 that declares its own generation failed is not a
+                # success with nothing in it. Only an exception used to reach
+                # the backoff below, so this arrived downstream as an ordinary
+                # empty response and failed the turn `empty_public_content`.
+                if _failed_generation_reason(response) is None:
+                    return response
+                last_failed_generation = response
+                if attempt >= attempts:
+                    # Returned rather than raised: the turn's own diagnostics
+                    # report the finish reason, and inventing an exception here
+                    # would replace that with a less specific failure.
+                    return response
+                logger.warning(
+                    "%s: provider reported %s with nothing usable; retrying (%s/%s)",
+                    self.agent_id,
+                    _failed_generation_reason(response),
+                    attempt,
+                    attempts,
+                )
+                sleep_for = delay * (2 ** (attempt - 1))
+                if sleep_for:
+                    await asyncio.sleep(sleep_for)
+                continue
             except Exception as exc:
                 last_exc = exc
 
@@ -1249,6 +1305,8 @@ class BaseAgent(ABC):
                 if sleep_for:
                     await asyncio.sleep(sleep_for)
 
+        if last_failed_generation is not None:
+            return last_failed_generation
         raise last_exc or RuntimeError("Provider call failed")
 
     def _augment_run_config_with_usage(

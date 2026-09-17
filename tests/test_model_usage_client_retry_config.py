@@ -46,7 +46,7 @@ def test_model_factory_gemini_disables_retries(monkeypatch):
     from app.ai import model_factory
 
     capture = _Capture()
-    monkeypatch.setattr(model_factory, "ChatGoogleGenerativeAI", capture)
+    monkeypatch.setattr(model_factory, "ReasoningNormalizedChatGoogleGenerativeAI", capture)
     model_factory.ModelFactory.create_model(provider="gemini", model="gemini-3-flash", api_key="k")
     assert capture.kwargs["max_retries"] == 0
 

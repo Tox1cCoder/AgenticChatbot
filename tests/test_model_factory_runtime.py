@@ -81,7 +81,11 @@ def test_gemini_runtime_reasoning_reaches_provider_constructor(monkeypatch):
         captured.update(kwargs)
         return SimpleNamespace(**kwargs)
 
-    monkeypatch.setattr("app.ai.model_factory.ChatGoogleGenerativeAI", constructor)
+    # The subclass is what this path constructs; patching the plain class
+    # would patch a name the factory no longer calls.
+    monkeypatch.setattr(
+        "app.ai.model_factory.ReasoningNormalizedChatGoogleGenerativeAI", constructor
+    )
 
     ModelFactory.create_model_from_runtime(
         _runtime(

@@ -10,6 +10,7 @@ from langchain_openai import ChatOpenAI
 
 from ..core.config import settings
 from ..core.runtime_modeling import ResolvedRuntimeModelConfig, StrictRuntimeResolutionError
+from .gemini_content import ReasoningNormalizedChatGoogleGenerativeAI
 from .reasoning_controls import gemini_reasoning_kwargs, resolve_reasoning_control
 
 logger = logging.getLogger(__name__)
@@ -66,7 +67,9 @@ class ModelFactory:
         model_kwargs.update(kwargs)
 
         logger.info("Creating Gemini model %s with temperature=%s", model, temperature)
-        return ChatGoogleGenerativeAI(**model_kwargs)
+        # The same subclass `create_langchain_model` builds: it refuses AFC,
+        # which the SDK otherwise enables by default on every LangChain call.
+        return ReasoningNormalizedChatGoogleGenerativeAI(**model_kwargs)
 
     @staticmethod
     def _create_openai_model(

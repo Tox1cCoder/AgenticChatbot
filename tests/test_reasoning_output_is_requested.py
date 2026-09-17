@@ -28,7 +28,11 @@ def captured(monkeypatch):
         seen.update(kwargs)
         return SimpleNamespace(**kwargs)
 
-    monkeypatch.setattr("app.ai.model_factory.ChatGoogleGenerativeAI", constructor)
+    # The subclass is what the factory constructs; patching the plain class
+    # would patch a name the factory no longer calls.
+    monkeypatch.setattr(
+        "app.ai.model_factory.ReasoningNormalizedChatGoogleGenerativeAI", constructor
+    )
     monkeypatch.setattr("app.ai.model_factory.ChatOpenAI", constructor)
     return seen
 

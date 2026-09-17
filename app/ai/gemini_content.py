@@ -27,6 +27,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
+from google.genai import types
 from langchain_core.messages import BaseMessage
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -110,7 +111,32 @@ class ReasoningNormalizedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
     Applied to both streaming and non-streaming paths so persisted content and
     live deltas agree, and so ``AIMessage.content_blocks`` reports ``reasoning``
     instead of ``non_standard``.
+
+    It also refuses automatic function calling on every request it sends.
+    ``google-genai`` enables AFC unless a config says otherwise, and
+    ``langchain-google-genai`` says nothing -- it sets
+    ``automatic_function_calling`` nowhere. So the SDK applies its own default,
+    logs its "direct use of AFC is not recommended" notice (naming
+    ``AsyncModels.generate_content``, which is what ``_agenerate`` calls), and
+    stands ready to run its own function-calling loop over any Python callable
+    it is handed -- bypassing this product's tool loop, where authorization,
+    approval, mutation receipts, artifacts and the execution budget live.
+    Nothing is executed today only because LangChain passes declarations rather
+    than callables, which is a property of the adapter and not a guarantee.
     """
+
+    def _prepare_request(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        # ``_prepare_request`` is the only seam that carries this. A constructor
+        # kwarg is diverted into ``model_kwargs`` and never reaches the request,
+        # and ``bind`` returns a ``RunnableBinding`` that would fail the
+        # ``isinstance`` checks tool binding depends on. A fresh config per
+        # request because the SDK may mutate what it is given; ``setdefault``
+        # because this is a default, not a lock, matching the direct-SDK side.
+        kwargs.setdefault(
+            "automatic_function_calling",
+            types.AutomaticFunctionCallingConfig(disable=True),
+        )
+        return super()._prepare_request(*args, **kwargs)
 
     def _stream(self, *args: Any, **kwargs: Any) -> Iterator[ChatGenerationChunk]:
         for chunk in super()._stream(*args, **kwargs):
