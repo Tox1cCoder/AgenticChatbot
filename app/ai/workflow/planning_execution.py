@@ -680,6 +680,22 @@ EXECUTION_ACTIONS = frozenset({"start_todo", "complete_todo"})
 
 WRITE_TODOS_TOOL_NAME = "write_todos"
 
+#: Paired feedback for a control call no route could run.
+#:
+#: Each Planning route handles one control call and sends the turn somewhere,
+#: but the model emits several in one message -- ``write_todos`` bookkeeping
+#: alongside a ``dispatch_subagents`` is ordinary, not an error. Those todo
+#: calls are applied wherever they appear (``_run_turn_todos``); this code is
+#: for what is genuinely left over, such as a ``hand_off`` proposed in the same
+#: message as a dispatch, where only one of the two can decide the turn.
+#:
+#: Leaving one unanswered is not an option. A provider requires exactly one
+#: result per call, and Gemini answers a dangling one with an empty candidate:
+#: no parts, no tokens, ``finish_reason=STOP``. That reaches the model node as
+#: "no text and no tool calls" and fails the turn two nodes later as
+#: ``empty_public_content``.
+NOT_RUN_THIS_TURN = "not_run_this_turn"
+
 
 class PlanningNodeFactory:
     """The six real outer-graph nodes that make up Planning.
@@ -784,7 +800,7 @@ class PlanningNodeFactory:
         names = {str(call.get("name") or "") for call in tool_calls}
 
         if DISPATCH_CONTROL_TOOL_NAME in names:
-            return self._route_dispatch(state, ai_message, tool_calls)
+            return await self._route_dispatch(state, ai_message, tool_calls)
 
         if HANDOFF_TOOL_NAME in names and len(tool_calls) == 1:
             return self._route_handoff(state, ai_message, tool_calls[0])
@@ -808,16 +824,25 @@ class PlanningNodeFactory:
             goto="planning_model",
         )
 
-    def _route_dispatch(
+    async def _route_dispatch(
         self,
         state: Mapping[str, Any],
         ai_message: AIMessage,
         tool_calls: Sequence[dict[str, Any]],
     ) -> Command:
-        """Validate the proposal in full, then either fan out or report back."""
+        """Validate the proposal in full, then either fan out or report back.
+
+        The todo calls beside the dispatch are applied either way. Whether the
+        proposal is valid says nothing about whether a ``complete_todo`` should
+        run, and the route a turn takes is not a reason to refuse the rest of
+        what the model asked for.
+        """
         dispatch_call = next(
             call for call in tool_calls if call.get("name") == DISPATCH_CONTROL_TOOL_NAME
         )
+        todo_messages, todo_update = await self._run_turn_todos(state, tool_calls)
+        applied = {str(message.tool_call_id or "") for message in todo_messages}
+
         # Validation reads sibling calls off the message, so it has to see the
         # message this turn produced rather than the one already in state.
         validation_state = {**dict(state), "messages": [*(state.get("messages") or []), ai_message]}
@@ -833,25 +858,45 @@ class PlanningNodeFactory:
         except InvalidPlanningDispatch as invalid:
             return Command(
                 update={
+                    **todo_update,
                     "messages": [
                         ai_message,
+                        *todo_messages,
                         *(
                             _control_message(
                                 call,
                                 invalid.code
                                 if call.get("id") == invalid.tool_call_id
-                                else "dispatch_rejected",
+                                # Only the dispatch call failed validation.
+                                # Reporting its code on a sibling describes
+                                # someone else's failure on a call that had
+                                # nothing to do with it.
+                                else NOT_RUN_THIS_TURN,
                             )
                             for call in tool_calls
+                            if str(call.get("id") or "") not in applied
                         ),
-                    ]
+                    ],
                 },
                 goto="planning_model",
             )
 
         return Command(
             update={
-                "messages": [ai_message],
+                **todo_update,
+                # The dispatch call is answered later, by `planning_collect`.
+                # Everything else on this message is answered here -- applied
+                # where it could be run, paired with a code where it could not.
+                "messages": [
+                    ai_message,
+                    *todo_messages,
+                    *(
+                        _control_message(call, NOT_RUN_THIS_TURN)
+                        for call in tool_calls
+                        if str(call.get("id") or "") != dispatch.tool_call_id
+                        and str(call.get("id") or "") not in applied
+                    ),
+                ],
                 "planning_dispatch": dispatch,
                 "planning_control_call_id": dispatch.tool_call_id,
                 "execution_phase": "executing",
@@ -1021,21 +1066,29 @@ class PlanningNodeFactory:
 
     # -- todos ------------------------------------------------------------
 
-    async def planning_actions(self, state: Mapping[str, Any]) -> Command:
-        """Apply this turn's ``write_todos`` calls and grade the result.
+    async def _run_turn_todos(
+        self,
+        state: Mapping[str, Any],
+        tool_calls: Sequence[Mapping[str, Any]],
+    ) -> tuple[tuple[ToolMessage, ...], dict[str, Any]]:
+        """Apply this turn's ``write_todos`` calls, whichever route carries them.
 
-        The rubric runs only on plan-mutating actions. Grading a
-        ``start_todo`` would score the plan for something that did not change
-        it, and ``needs_revision`` routes back to the model with feedback
-        instead of emitting the normal plan-summary pass.
+        Both routes that can receive one call this, so a todo action runs the
+        same way and grades the same way wherever it appears. It used to live
+        only in ``planning_actions``, which meant a model turn that marked a
+        todo done *and* dispatched work had its bookkeeping thrown away --
+        visible to the user as their own tool calls coming back refused.
+
+        The rubric runs only on plan-mutating actions. Grading a ``start_todo``
+        would score the plan for something that did not change it.
         """
-        calls = [
-            call for call in _last_tool_calls(state) if call.get("name") == WRITE_TODOS_TOOL_NAME
-        ]
+        calls = [call for call in tool_calls if call.get("name") == WRITE_TODOS_TOOL_NAME]
+        if not calls:
+            return (), {}
+
         outcome = _as_todo_outcome(await _maybe_await(self._apply_todo_actions(state, calls)))
 
         update: dict[str, Any] = {
-            "messages": list(outcome.tool_messages),
             "todos": list(outcome.todos),
             "current_task_index": outcome.current_task_index,
         }
@@ -1051,6 +1104,26 @@ class PlanningNodeFactory:
             context["plan_just_modified"] = True
             context = await self._graded_context(state, context, outcome)
         update["context"] = context
+
+        return tuple(outcome.tool_messages), update
+
+    async def planning_actions(self, state: Mapping[str, Any]) -> Command:
+        """Apply this turn's ``write_todos`` calls and grade the result."""
+        turn_calls = _last_tool_calls(state)
+        todo_messages, update = await self._run_turn_todos(state, turn_calls)
+
+        # Anything the applier did not answer is still owed a result. Read from
+        # what it actually answered rather than from the tool name, so a
+        # `write_todos` call it skipped is covered too.
+        applied = {str(message.tool_call_id or "") for message in todo_messages}
+        update["messages"] = [
+            *todo_messages,
+            *(
+                _control_message(call, NOT_RUN_THIS_TURN)
+                for call in turn_calls
+                if str(call.get("id") or "") not in applied
+            ),
+        ]
 
         return Command(update=update, goto="planning_model")
 

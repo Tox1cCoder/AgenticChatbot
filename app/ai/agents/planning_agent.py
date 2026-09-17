@@ -280,54 +280,21 @@ class PlanningAgent(BaseAgent):
                   reply.
                 - You are the only actor allowed to call `write_todos`.
 
-                ### Task fields — required shapes
-                - `task`: a string. Put the worker instructions here.
-                - `context`: optional, MUST be a JSON object (dict). For
-                  arbitrary text like a crawled page or a document excerpt,
-                  wrap it: `{"text": "...long blob..."}`. For a list of
-                  references/citations: `{"items": [...]}`. Never pass a raw
-                  string or array as `context` — the call will be rejected.
+                ### Task fields — these four, and nothing else
+                A task carrying any other key is rejected, and one bad key
+                rejects the whole call, not just that task.
+                - `task_id`: required. A short id you choose, unique within
+                  this call. It is how the result comes back to you.
+                - `objective`: required. The worker instructions, in plain
+                  words. Everything the worker needs to know goes here —
+                  there is no separate field for context or excerpts, so
+                  include the relevant text inline.
+                - `agent_id`: required. Which worker, by the ids listed above.
                 - `related_todo_ids`: optional list of todo id strings.
 
-                ## Subagent model choice (optional `model_override`)
-                - If the user names a model, pass it in `model_override`.
-                - Otherwise use the worker's default model for normal tasks.
-                - Use faster/lower-cost models for simple extraction,
-                  formatting, search summaries, and high-volume parallel
-                  checks.
-                - Use frontier/high-reasoning models only for hard coding,
-                  architecture, debugging, ambiguous synthesis, or tasks
-                  where a cheap retry would cost more time than one strong
-                  call.
-
-                ### Allowed `model_override.model` values (use these EXACT ids)
-                OpenAI (`provider: "openai"`):
-                - `gpt-5.5` — frontier coding/professional reasoning.
-                - `gpt-5.4` — frontier, lower cost than 5.5.
-                - `gpt-5.4-mini` — fast mini model for subagents / high-volume
-                  parallel checks.
-
-                Gemini (`provider: "gemini"`):
-                - `gemini-3.1-pro-preview` — complex agentic / vibe-coding
-                  (Pro supports `low`/`high` reasoning_effort only).
-                - `gemini-3-flash-preview` — lower-cost frontier; supports
-                  `minimal`/`low`/`medium`/`high` reasoning_effort.
-
-                ### `reasoning_effort` is a SEPARATE optional field
-                Use only a provider-native value advertised for that exact model;
-                otherwise omit it for Provider default. NEVER append it to the
-                `model` id.
-
-                Correct:
-                ```json
-                {"provider": "openai", "model": "gpt-5.5",
-                 "reasoning_effort": "medium"}
-                ```
-                Wrong (these are invalid model ids and the worker will
-                fail with `model_not_found`):
-                - `"model": "gpt-5.5-medium"`
-                - `"model": "gemini-3-flash"` (missing `-preview`)
-                - `"model": "gpt-5"` or `"model": "gemini"` (not a real id)
+                You do not choose the worker's model, and you cannot attach a
+                context object to a task: both are the server's to decide, and
+                every worker runs on the model this turn is already using.
 
                 ## Anti-narration rule
                 Never describe a delegation in prose without emitting the
@@ -373,7 +340,7 @@ class PlanningAgent(BaseAgent):
             prompt += (
                 "\n\n## Custom worker agents available to dispatch_subagents\n"
                 "In addition to base workers, you may dispatch to these attached "
-                "custom agents by using their runtime id as the task `agent`:\n"
+                "custom agents by using their runtime id as the task `agent_id`:\n"
                 + "\n".join(worker_lines)
             )
 
