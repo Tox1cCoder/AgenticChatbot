@@ -1455,38 +1455,53 @@ class Settings(BaseSettings):
     # The original ladder (7/9 model, 12/16 tool, 5 epochs) was tuned before
     # research turns routinely chained web_search, image_search, web_open and
     # retrieval in one epoch. It was reached mid-answer often enough that the
-    # refusal read as a broken tool, so the headroom is roughly quadrupled. The
-    # ceilings are far above the defaults on purpose: this is the knob to turn
-    # for a deeper turn, and it should not need a code change.
+    # refusal read as a broken tool, so the headroom was roughly quadrupled.
+    #
+    # Raised again for `generation_auto_continue`: with the turn rolling its own
+    # epochs, a per-epoch number is no longer "how much work a turn may do" --
+    # it is only how often the turn stops to write a checkpoint summary, which
+    # costs one model call each time. The ceiling that matters is the product,
+    # now 400 tool calls x 50 epochs. The bounds are unchanged; these defaults
+    # simply sit at them, because a plan that runs for hours is the case this
+    # ladder now has to serve.
     generation_soft_model_calls_per_epoch: int = Field(
-        default=24,
+        default=200,
         ge=1,
         le=200,
         description="Model calls per epoch before the answer call is reserved.",
     )
     generation_hard_model_calls_per_epoch: int = Field(
-        default=28,
+        default=240,
         ge=2,
         le=240,
         description="Framework model-call ceiling per epoch. Must exceed the soft limit.",
     )
     generation_soft_tool_calls_per_epoch: int = Field(
-        default=48,
+        default=400,
         ge=1,
         le=400,
         description="Tool calls per epoch before further calls are refused.",
     )
     generation_hard_tool_calls_per_epoch: int = Field(
-        default=56,
+        default=480,
         ge=2,
         le=480,
         description="Framework tool-call ceiling per epoch. Must exceed the soft limit.",
     )
     generation_total_epochs_per_turn: int = Field(
-        default=10,
+        default=50,
         ge=1,
         le=50,
         description="How many times one logical turn may be continued in total.",
+    )
+    generation_auto_continue: bool = Field(
+        default=True,
+        description=(
+            "Whether a turn that spends an epoch's budget rolls into the next "
+            "epoch itself instead of answering a partial and waiting for "
+            "Continue. Off restores the pause; the epoch ceiling bounds the "
+            "turn either way, and Stop ends it either way."
+        ),
     )
     generation_stop_wait_seconds: float = Field(
         default=5.0,

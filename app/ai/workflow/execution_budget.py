@@ -45,11 +45,11 @@ ExhaustionReason = Literal["model_calls", "tool_calls", "hard_limit"]
 #: rather than importing ``Settings`` so this module stays free of app config;
 #: a test asserts they equal the declared defaults.
 DEFAULT_LIMITS: dict[str, int] = {
-    "generation_soft_model_calls_per_epoch": 24,
-    "generation_hard_model_calls_per_epoch": 28,
-    "generation_soft_tool_calls_per_epoch": 48,
-    "generation_hard_tool_calls_per_epoch": 56,
-    "generation_total_epochs_per_turn": 10,
+    "generation_soft_model_calls_per_epoch": 200,
+    "generation_hard_model_calls_per_epoch": 240,
+    "generation_soft_tool_calls_per_epoch": 400,
+    "generation_hard_tool_calls_per_epoch": 480,
+    "generation_total_epochs_per_turn": 50,
 }
 
 

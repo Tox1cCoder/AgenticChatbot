@@ -157,17 +157,29 @@ def _requested_ids(messages: list[BaseMessage]) -> set[str]:
     return ids
 
 
-def make_continuation_pause_node(*, interrupt_fn: Any = None) -> Any:
-    """Build the node that offers Continue on a validated partial answer.
+def make_continuation_pause_node(
+    *, interrupt_fn: Any = None, auto_continue: bool | None = None
+) -> Any:
+    """Build the node a budget-exhausted turn leaves by.
 
     Reached only from ``validate_output``, and only for an outcome whose budget
-    was exhausted. Everything it hands the client has therefore already passed
-    the same validation a finished answer passes.
+    was exhausted *and* still has an epoch left -- ``_is_continuable`` owns both
+    checks. Everything it hands the client has therefore already passed the same
+    validation a finished answer passes.
+
+    With ``auto_continue`` the turn rolls into the next epoch itself instead of
+    writing a partial answer and waiting to be asked. That wait is what makes a
+    long plan appear to stop halfway. Nothing else about the ladder changes: the
+    per-epoch counters still reset, evidence is still carried, and a turn out of
+    epochs never reaches this node at all, so the partial answer remains what a
+    genuinely exhausted turn produces. Stop is unaffected -- the streaming
+    consumer polls it at every tool and subagent boundary, not here.
 
     Every refusal goes to ``finalize`` rather than raising. This node sits on
     the only path a paused turn can leave by, so raising here would strand the
     turn active with nothing running -- and ``finalize`` is the single terminal
-    boundary the whole graph is built around.
+    boundary the whole graph is built around. That matters more under
+    ``auto_continue``, where no human is watching the rollover.
 
     ``interrupt_fn`` is injected so the decision can be scripted in a test;
     production passes LangGraph's own ``interrupt``.
@@ -175,6 +187,23 @@ def make_continuation_pause_node(*, interrupt_fn: Any = None) -> Any:
     from langgraph.types import Command, interrupt
 
     resume_with = interrupt_fn or interrupt
+
+    def _rolls_its_own_epoch() -> bool:
+        """Whether this turn advances its own epoch instead of asking.
+
+        Deliberately not named after the auto-continuation outer loop that
+        routing-v2 removed (``test_routing_legacy_removal`` still bans its
+        vocabulary, so do not reintroduce it here). That was a different
+        mechanism and stays removed: it re-entered ``route`` for a second
+        round, against a routing decision that is set once per turn. This rolls
+        the epoch and returns to the agent the turn already chose -- the same
+        ``goto`` the human Continue has always taken.
+        """
+        if auto_continue is not None:
+            return bool(auto_continue)
+        from app.core.config import settings
+
+        return bool(getattr(settings, "generation_auto_continue", True))
 
     async def continuation_pause(state: dict[str, Any], runtime: Any = None) -> Any:
         from app.ai.workflow.specialists import resolve_node_for_agent_id
@@ -201,8 +230,19 @@ def make_continuation_pause_node(*, interrupt_fn: Any = None) -> Any:
             mutation_outcome_unknown=_mutation_outcome_unknown(outcome),
         )
 
-        decision = resume_with(payload.model_dump(mode="json"))
-        action, expected_epoch = _read_decision(decision)
+        if _rolls_its_own_epoch():
+            # No interrupt at all. Emitting one would advertise a Continue that
+            # nothing is waiting to redeem, and the turn would still have to
+            # answer it itself.
+            logger.info(
+                "Auto-continuing turn into epoch %s after %s",
+                epoch + 1,
+                payload.budget.get("exhausted_by") or "an exhausted budget",
+            )
+            action, expected_epoch = "continue", epoch
+        else:
+            decision = resume_with(payload.model_dump(mode="json"))
+            action, expected_epoch = _read_decision(decision)
 
         if action != "continue":
             return Command(update={"execution_phase": "finalizing"}, goto="finalize")

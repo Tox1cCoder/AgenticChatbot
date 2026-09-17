@@ -247,7 +247,7 @@ def _paused_graph():
 
     ``pause`` is the real ``make_continuation_pause_node`` wired to LangGraph's
     own ``interrupt``; ``answer`` stands in for the specialist the decision
-    routes back to.
+    routes back to. The pause is opted into -- see the note at the node.
     """
     from langgraph.checkpoint.memory import InMemorySaver
     from langgraph.graph import END, START, StateGraph
@@ -300,7 +300,12 @@ def _paused_graph():
 
     builder = StateGraph(_State)
     builder.add_node("enter", enter)
-    builder.add_node("continuation_pause", make_continuation_pause_node())
+    # `auto_continue=False`: this file is the end-to-end proof that the Continue
+    # offer still works when it is enabled. Production rolls the epoch over
+    # without asking, which would mean nothing here ever pauses.
+    builder.add_node(
+        "continuation_pause", make_continuation_pause_node(auto_continue=False)
+    )
     builder.add_node("chat_agent", chat_agent)
     builder.add_node("finalize", finalize)
     builder.add_edge(START, "enter")

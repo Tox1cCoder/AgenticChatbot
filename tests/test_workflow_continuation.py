@@ -177,6 +177,7 @@ def test_the_pause_payload_reports_an_undecidable_mutation():
 
     seen: list[dict] = []
     node = make_continuation_pause_node(
+        auto_continue=False,
         interrupt_fn=lambda payload: seen.append(payload) or {"action": "stop"}
     )
 
@@ -204,6 +205,7 @@ def test_an_ordinary_pause_reports_no_undecidable_mutation():
 
     seen: list[dict] = []
     node = make_continuation_pause_node(
+        auto_continue=False,
         interrupt_fn=lambda payload: seen.append(payload) or {"action": "stop"}
     )
 
@@ -321,6 +323,11 @@ def test_a_first_epoch_carries_nothing_and_is_unchanged():
 
 # ----------------------------------------------------------------------
 # the pause node
+#
+# `auto_continue=False` throughout: these tests are about the pause itself --
+# what it offers, what it refuses, and what each decision does. Production
+# defaults to rolling the epoch over without asking, so the pause has to be
+# opted into to be exercised at all.
 # ----------------------------------------------------------------------
 
 
@@ -359,6 +366,7 @@ async def test_continuing_advances_the_epoch_and_returns_to_the_same_agent():
     from app.ai.workflow.continuation import make_continuation_pause_node
 
     node = make_continuation_pause_node(
+        auto_continue=False,
         interrupt_fn=lambda payload: {"action": "continue", "expected_epoch": 0}
     )
 
@@ -373,6 +381,7 @@ async def test_continuing_clears_the_spent_budget():
     from app.ai.workflow.continuation import make_continuation_pause_node
 
     node = make_continuation_pause_node(
+        auto_continue=False,
         interrupt_fn=lambda payload: {"action": "continue", "expected_epoch": 0}
     )
 
@@ -386,6 +395,7 @@ async def test_continuing_carries_the_evidence_forward():
     from app.ai.workflow.continuation import make_continuation_pause_node
 
     node = make_continuation_pause_node(
+        auto_continue=False,
         interrupt_fn=lambda payload: {"action": "continue", "expected_epoch": 0}
     )
 
@@ -401,6 +411,7 @@ async def test_stopping_finalizes_without_re_appending_the_answer():
     from app.ai.workflow.continuation import make_continuation_pause_node
 
     node = make_continuation_pause_node(
+        auto_continue=False,
         interrupt_fn=lambda payload: {"action": "stop", "expected_epoch": 0}
     )
 
@@ -422,7 +433,7 @@ async def test_the_payload_offered_to_the_client_describes_this_pause():
         seen.append(payload)
         return {"action": "stop", "expected_epoch": 0}
 
-    node = make_continuation_pause_node(interrupt_fn=interrupt_fn)
+    node = make_continuation_pause_node(auto_continue=False, interrupt_fn=interrupt_fn)
     state = _paused_state()
     state["agent_outcome"] = ResponseOutcome(
         agent_id="chat_agent",
@@ -464,6 +475,7 @@ async def test_a_resume_for_the_wrong_epoch_does_not_run_the_specialist():
     from app.ai.workflow.continuation import make_continuation_pause_node
 
     node = make_continuation_pause_node(
+        auto_continue=False,
         interrupt_fn=lambda payload: {"action": "continue", "expected_epoch": 5}
     )
 
@@ -476,7 +488,9 @@ async def test_a_resume_for_the_wrong_epoch_does_not_run_the_specialist():
 async def test_an_unreadable_resume_finalizes_rather_than_guessing():
     from app.ai.workflow.continuation import make_continuation_pause_node
 
-    node = make_continuation_pause_node(interrupt_fn=lambda payload: "not a decision")
+    node = make_continuation_pause_node(
+        auto_continue=False, interrupt_fn=lambda payload: "not a decision"
+    )
 
     command = await node(_paused_state())
 
@@ -487,6 +501,7 @@ async def test_an_unresolvable_agent_finalizes_rather_than_jumping_blind():
     from app.ai.workflow.continuation import make_continuation_pause_node
 
     node = make_continuation_pause_node(
+        auto_continue=False,
         interrupt_fn=lambda payload: {"action": "continue", "expected_epoch": 0}
     )
 
