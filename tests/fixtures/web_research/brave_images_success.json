@@ -1,13 +1,67 @@
 {
+  "query": "RTX 5090 Founders Edition graphics card",
+  "query_metadata": {
+    "original": "RTX 5090 Founders Edition graphics card",
+    "altered": null,
+    "spellcheck_off": false,
+    "show_strict_warning": false
+  },
+  "safety": {
+    "might_be_offensive": false
+  },
+  "provider": "brave_image_search",
   "images": [
     {
-      "url": "https://images.example.test/release.webp",
-      "source_url": "https://docs.example.test/release",
-      "title": "Release interface",
-      "description": "The version 9.2 interface",
+      "url": "https://imgs.search.brave.com/HTGfrAAATP5_Okooy0N7bmQLFvIrE1gfG9WqMEMYiDQ/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "provider": "brave_image_search",
+      "result_rank": 1,
+      "confidence": "high",
+      "source_url": "https://www.thefpsreview.com/2025/01/23/nvidia-geforce-rtx-5090-founders-edition-video-card-review/",
+      "thumbnail_url": "https://imgs.search.brave.com/HTGfrAAATP5_Okooy0N7bmQLFvIrE1gfG9WqMEMYiDQ/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "original_image_url": "https://cdn.thefpsreview.com/wp-content/uploads/2025/01/rtx5090_14-1024x576.jpg",
+      "title": "NVIDIA GeForce RTX 5090 Founders Edition Label",
+      "description": "NVIDIA GeForce RTX 5090 Founders Edition Label",
+      "source_domain": "www.thefpsreview.com",
+      "width": 1024,
+      "height": 576,
+      "thumbnail_width": 500,
+      "thumbnail_height": 281,
+      "page_fetched": "2026-08-24T12:37:46Z"
+    },
+    {
+      "url": "https://imgs.search.brave.com/do7IYW_Dr8tWdt1WxfWIzGnIxQppeDi8rNzlMppMrIw/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "provider": "brave_image_search",
+      "result_rank": 2,
+      "confidence": "high",
+      "source_url": "https://www.thefpsreview.com/2025/01/23/nvidia-geforce-rtx-5090-founders-edition-video-card-review/",
+      "thumbnail_url": "https://imgs.search.brave.com/do7IYW_Dr8tWdt1WxfWIzGnIxQppeDi8rNzlMppMrIw/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "original_image_url": "https://cdn.thefpsreview.com/wp-content/uploads/2025/01/rtx5090_19-1024x576.jpg",
+      "title": "NVIDIA GeForce RTX 5090 Founders Edition 12VHPWR 2x6 Power Connector",
+      "description": "NVIDIA GeForce RTX 5090 Founders Edition 12VHPWR 2x6 Power Connector",
+      "source_domain": "www.thefpsreview.com",
+      "width": 1024,
+      "height": 576,
+      "thumbnail_width": 500,
+      "thumbnail_height": 281,
+      "page_fetched": "2026-08-24T12:37:46Z"
+    },
+    {
+      "url": "https://imgs.search.brave.com/P24YGmKAIpSAJI1ZxmD_MXjQdi_yM2yWI_FapAhR7yY/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "provider": "brave_image_search",
+      "result_rank": 3,
+      "confidence": "high",
+      "source_url": "https://www.club386.com/nvidia-geforce-rtx-5090-review/",
+      "thumbnail_url": "https://imgs.search.brave.com/P24YGmKAIpSAJI1ZxmD_MXjQdi_yM2yWI_FapAhR7yY/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "original_image_url": "https://www.club386.com/wp-content/uploads/2025/01/5090-indent.jpg",
+      "title": "GeForce RTX 5090 Founders Edition fin curvature.",
+      "description": "GeForce RTX 5090 Founders Edition fin curvature.",
+      "source_domain": "www.club386.com",
       "width": 1200,
-      "height": 800,
-      "result_rank": 1
+      "height": 1200,
+      "thumbnail_width": 500,
+      "thumbnail_height": 500,
+      "page_fetched": "2026-09-14T23:30:49Z"
     }
-  ]
+  ],
+  "total_results": 3
 }

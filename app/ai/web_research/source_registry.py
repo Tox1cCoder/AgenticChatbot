@@ -73,6 +73,25 @@ class SourceRegistry:
     def records(self) -> tuple[SourceRecord, ...]:
         return tuple(self._by_url.values())
 
+    @property
+    def capacity(self) -> int:
+        return self._max_sources
+
+    @property
+    def free_slots(self) -> int:
+        return max(0, self._max_sources - len(self._by_url))
+
+    def grow_capacity(self, max_sources: int) -> None:
+        """Raise the admission ceiling. Never lowers it.
+
+        A session learns its visual intent from the first search that declares
+        one, after the registry already exists. Growing is safe because admitted
+        records and their IDs are append-only; shrinking would orphan IDs the
+        model has already been shown, so it is refused.
+        """
+
+        self._max_sources = max(self._max_sources, max(0, int(max_sources)))
+
     def admit(self, candidates: Sequence[ProviderSource]) -> tuple[SourceRecord, ...]:
         for candidate in candidates:
             url = canonicalize_public_url(candidate.url)

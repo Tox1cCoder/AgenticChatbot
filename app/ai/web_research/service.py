@@ -20,6 +20,7 @@ from app.core.rich_response import (
     ImageRichItem,
     RichItemType,
 )
+from app.services.web_image_service import downscale_for_model
 
 from .contracts import (
     ImageCandidateRecord,
@@ -45,11 +46,24 @@ class PreparedImage:
     reference_id: UUID
     content: bytes
     rich_item: dict[str, Any]
+    #: A downscaled rendition of ``content``, shown to the answer model instead
+    #: of the publication bytes.
+    preview: bytes
+    preview_mime: str
 
 
 @dataclass(frozen=True)
 class ResearchCloseout:
     selected_candidate_ids: tuple[str, ...]
+
+
+def _fetch_order(candidate: ProviderImageCandidate) -> tuple[str, ...]:
+    """The renditions to try, best first, without repeating one URL."""
+
+    urls = [candidate.image_url]
+    if candidate.preview_url and candidate.preview_url != candidate.image_url:
+        urls.append(candidate.preview_url)
+    return tuple(urls)
 
 
 class ProviderHealthRegistry:
@@ -165,7 +179,7 @@ class WebResearchSession:
         self.mode = mode
         self.resolver = resolver
         self.limits = ResearchLimits.for_mode(mode)
-        self.source_registry = SourceRegistry(max_sources=self.limits.max_sources)
+        self.source_registry = SourceRegistry(max_sources=self.limits.max_registry_sources)
         self._operation_index = 0
         self.pending_provider_images: tuple[ProviderImageCandidate, ...] = ()
         self.prepared_images: dict[str, PreparedImage] = {}
@@ -195,6 +209,13 @@ class WebResearchSession:
     async def _search(self, request: ResearchRequest) -> WebEvidenceBundle:
         if self._visual_intent == "none" or request.visual_intent == "gallery":
             self._visual_intent = request.visual_intent
+        # The session is built before any intent is known, so image pages only
+        # get their share of the registry once a search asks for images.
+        self.source_registry.grow_capacity(
+            ResearchLimits.for_mode(
+                self.mode, visual_intent=self._visual_intent
+            ).max_registry_sources
+        )
         self._operation_index += 1
         operation_index = self._operation_index
         normalized = normalize_web_search(
@@ -239,6 +260,20 @@ class WebResearchSession:
                 invoke=lambda provider: provider.search(normalized, query_index=operation_index),
             )
         )
+        wants_images = request.visual_intent != "none"
+        gate_failures: tuple[ResearchFailure, ...] = ()
+        if wants_images and not request.image_query:
+            # Silence here read as "the provider found nothing". Name it, so the
+            # model can retry with the subject it forgot to state.
+            wants_images = False
+            gate_failures = (
+                ResearchFailure(
+                    operation="image_search",
+                    provider="server",
+                    code="image_query_missing",
+                    retryable=False,
+                ),
+            )
         image_task = (
             asyncio.create_task(
                 self._call_chain(
@@ -247,7 +282,7 @@ class WebResearchSession:
                     invoke=lambda provider: provider.search(request),
                 )
             )
-            if request.visual_intent != "none" and request.image_query
+            if wants_images
             else None
         )
         try:
@@ -278,11 +313,34 @@ class WebResearchSession:
         self.pending_provider_images = tuple(
             image for image in image_records if self.source_registry.resolve(image.source_url)
         )
+        unadmitted = len(image_records) - len(self.pending_provider_images)
+        capacity_failures: tuple[ResearchFailure, ...] = ()
+        if unadmitted > 0:
+            # This loss used to be invisible: the candidates never reached
+            # _prepare_images, so nothing counted or reported them. Over-supply
+            # is normal -- the provider returns more than the intent's slots --
+            # so it is counted, not raised. Losing every candidate is not.
+            self._omitted_image_count += unadmitted
+            if not self.pending_provider_images:
+                capacity_failures = (
+                    ResearchFailure(
+                        operation="image_search",
+                        provider=image_records[0].provider,
+                        code="image_source_capacity",
+                        retryable=False,
+                    ),
+                )
         image_fetch_failures = await self._prepare_images(request)
         return self._bundle(
             operation_index,
             visual_intent=request.visual_intent,
-            failures=(*text_failures, *image_failures, *image_fetch_failures),
+            failures=(
+                *text_failures,
+                *image_failures,
+                *gate_failures,
+                *capacity_failures,
+                *image_fetch_failures,
+            ),
             providers=tuple(dict.fromkeys((*text_providers, *image_providers))),
         )
 
@@ -373,7 +431,7 @@ class WebResearchSession:
         download_lock = asyncio.Lock()
         next_candidate = 0
         reserved_bytes = 0
-        outcomes: list[tuple[int, ProviderImageCandidate, Any, str | None]] = []
+        outcomes: list[tuple[int, ProviderImageCandidate, Any, str | None, str]] = []
         per_image_limit = max(
             1,
             int(
@@ -403,14 +461,23 @@ class WebResearchSession:
                     reserved_bytes += allowance
                 image = None
                 failure_code = None
-                try:
-                    image = await self.service.image_service.fetch_url(
-                        candidate.image_url,
-                        provider=candidate.provider,
-                        max_bytes=allowance,
-                    )
-                except Exception as exc:
-                    failure_code = str(getattr(exc, "reason", "fetch_failed"))
+                fetched_url = candidate.image_url
+                # The publication rendition first; the provider's smaller copy
+                # only if that one is unreachable, so hotlink protection costs
+                # resolution rather than the whole candidate.
+                for url in _fetch_order(candidate):
+                    try:
+                        image = await self.service.image_service.fetch_url(
+                            url,
+                            provider=candidate.provider,
+                            max_bytes=allowance,
+                        )
+                    except Exception as exc:
+                        failure_code = str(getattr(exc, "reason", "fetch_failed"))
+                        continue
+                    fetched_url = url
+                    failure_code = None
+                    break
                 async with download_lock:
                     reserved_bytes -= allowance
                     if image is not None:
@@ -420,7 +487,7 @@ class WebResearchSession:
                             failure_code = "size"
                         else:
                             self._downloaded_image_bytes += byte_size
-                    outcomes.append((index, candidate, image, failure_code))
+                    outcomes.append((index, candidate, image, failure_code, fetched_url))
 
         await asyncio.gather(
             *(
@@ -430,7 +497,7 @@ class WebResearchSession:
         )
         self._omitted_image_count += len(candidates) - len(outcomes)
         failures: list[ResearchFailure] = []
-        for _index, candidate, fetched, failure_code in sorted(outcomes):
+        for _index, candidate, fetched, failure_code, fetched_url in sorted(outcomes):
             source = self.source_registry.resolve(candidate.source_url)
             if failure_code is not None or fetched is None or source is None:
                 self._omitted_image_count += 1
@@ -450,9 +517,10 @@ class WebResearchSession:
             if digest in self._image_digests:
                 self._omitted_image_count += 1
                 continue
+            preview = downscale_for_model(fetched)
             if (
                 self._downloaded_image_bytes > self.service.max_download_bytes
-                or self._model_image_bytes + byte_size > self.service.max_model_bytes
+                or self._model_image_bytes + len(preview.content) > self.service.max_model_bytes
                 or len(self.prepared_images) >= limit
             ):
                 self._omitted_image_count += 1
@@ -461,7 +529,7 @@ class WebResearchSession:
             persisted = await self.service.image_service.register(
                 conversation_id=UUID(self.scope.conversation_id),
                 user_id=UUID(self.scope.user_id),
-                upstream_url=candidate.image_url,
+                upstream_url=fetched_url,
                 expected_mime=fetched.media_type,
                 provider=candidate.provider,
                 cached=fetched,
@@ -508,9 +576,11 @@ class WebResearchSession:
                 reference_id=persisted.id,
                 content=fetched.content,
                 rich_item=rich_item,
+                preview=preview.content,
+                preview_mime=preview.media_type,
             )
             self._image_digests.add(digest)
-            self._model_image_bytes += byte_size
+            self._model_image_bytes += len(preview.content)
         return tuple(failures)
 
     def model_evidence_blocks(self, *, supports_vision: bool) -> list[dict[str, Any]]:
@@ -535,8 +605,8 @@ class WebResearchSession:
                         "type": "image_url",
                         "image_url": {
                             "url": (
-                                f"data:{record.mime_type};base64,"
-                                f"{base64.b64encode(prepared.content).decode('ascii')}"
+                                f"data:{prepared.preview_mime};base64,"
+                                f"{base64.b64encode(prepared.preview).decode('ascii')}"
                             ),
                             "detail": "low",
                         },

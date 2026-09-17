@@ -1,0 +1,28 @@
+{
+  "query": "version 9.2 release interface screenshot",
+  "query_metadata": {
+    "original": "version 9.2 release interface screenshot",
+    "altered": null,
+    "spellcheck_off": false,
+    "show_strict_warning": false
+  },
+  "safety": {
+    "might_be_offensive": false
+  },
+  "provider": "brave_image_search",
+  "images": [
+    {
+      "url": "https://imgs.search.brave.com/KIh7aHbzhCKk-O8pnhZex-iMeLhOinuMAIypp2PORlk/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "provider": "brave_image_search",
+      "result_rank": 1,
+      "confidence": "medium",
+      "source_url": "https://en.wikipedia.org/wiki/Internet_Explorer_9",
+      "thumbnail_url": "https://imgs.search.brave.com/KIh7aHbzhCKk-O8pnhZex-iMeLhOinuMAIypp2PORlk/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "original_image_url": "https://thumb.wikimedia.org/wikipedia/en/thumb/3/39/Internet_Explorer_9_screenshot.png/250px-Internet_Explorer_9_screenshot.png?utm_source=en.wikipedia.org&utm_campaign=parser&utm_content=thumbnail",
+      "description": "en.wikipedia.org",
+      "source_domain": "en.wikipedia.org",
+      "page_fetched": "2026-09-10T13:50:53Z"
+    }
+  ],
+  "total_results": 1
+}

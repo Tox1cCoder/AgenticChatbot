@@ -59,12 +59,15 @@ async def test_brave_adapter_returns_provider_neutral_candidates() -> None:
         image_query="version 9.2 interface",
     )
 
-    images = await BraveImageSearchProvider(
-        _Tool(_json("brave_images_success.json"))
-    ).search(request)
+    payload = _json("brave_images_success.json")
 
-    assert images[0].provider == "brave"
-    assert images[0].source_url == "https://docs.example.test/release"
+    images = await BraveImageSearchProvider(_Tool(payload)).search(request)
+
+    assert [image.provider for image in images] == ["brave"] * len(payload["images"])
+    assert [image.source_url for image in images] == [
+        raw["source_url"] for raw in payload["images"]
+    ]
+    assert [image.rank for image in images] == [1, 2, 3]
 
 
 @pytest.mark.asyncio

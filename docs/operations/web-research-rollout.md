@@ -4,10 +4,17 @@ Canonical web research is controlled by `WEB_RESEARCH_ENABLED`. Keep the flag
 enabled only after the focused web matrix, non-live suite, and deterministic
 evaluation pass.
 
-The answer model receives only MIME-validated, dimension-checked image bytes.
-Candidate metadata is private. A web image is published only when the model
-selects its `I#` token; no token means no image. Web-answer text is buffered
-until a citation resolves to a source admitted in that turn.
+The answer model receives only MIME-validated, dimension-checked image bytes,
+downscaled to a 512px preview for selection; the full-size rendition is what
+gets published. Candidate metadata is private. A web image is published only
+when the model selects its `I#` token; no token means no image. Web-answer text
+is buffered until a citation resolves to a source admitted in that turn.
+
+Image source pages hold registry capacity of their own, on top of the text
+source budget: a turn admits up to 5 text sources (8 agentic) plus up to 4
+image pages (6 for `visual_intent="gallery"`). They shared one budget until
+2026-09-16, and because text results are admitted first and a search returns
+its full quota, every image was discarded before the model saw it.
 
 Monitor bounded operation outcomes together with the existing rich-image,
 model, and routing telemetry. Do not add
@@ -26,6 +33,7 @@ Release check:
   tests/test_web_research_providers.py `
   tests/test_web_research_service.py `
   tests/test_web_research_images.py `
+  tests/test_web_image_capacity_and_resolution.py `
   tests/test_web_research_tool_session.py `
   tests/test_web_research_model_context.py `
   tests/test_web_grounding.py `

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
-from .contracts import ResearchMode, VisualIntent
+from .contracts import ResearchMode, VisualIntent, image_capacity, source_capacity
 
 _EXPLICIT_WEB_REQUEST = re.compile(
     r"\b(?:browse|search (?:the )?web|web search|look (?:it |this )?up|"
@@ -39,9 +39,21 @@ def enforce_web_requirement(decision: object, message: str):
 
 @dataclass(frozen=True)
 class ResearchLimits:
+    #: Text sources the search provider is asked for and the registry admits.
     max_sources: int
     max_page_opens: int
     max_model_images: int
+
+    @property
+    def max_registry_sources(self) -> int:
+        """Total registry capacity: text pages plus the image pages' own share.
+
+        Image source pages get capacity of their own. They used to share
+        ``max_sources`` with the text results, and were admitted second, so a
+        search that returned its full quota left them nothing.
+        """
+
+        return self.max_sources + self.max_model_images
 
     @classmethod
     def for_mode(
@@ -50,16 +62,12 @@ class ResearchLimits:
         *,
         visual_intent: VisualIntent = "none",
     ) -> ResearchLimits:
-        value = {
-            "none": cls(max_sources=0, max_page_opens=0, max_model_images=0),
-            "quick": cls(max_sources=5, max_page_opens=2, max_model_images=4),
-            "agentic": cls(max_sources=8, max_page_opens=4, max_model_images=4),
-        }[mode]
-        if visual_intent == "gallery" and mode != "none":
-            return replace(value, max_model_images=6)
-        if visual_intent == "none":
-            return replace(value, max_model_images=0)
-        return value
+        page_opens = {"none": 0, "quick": 2, "agentic": 4}[mode]
+        return cls(
+            max_sources=source_capacity(mode, "none"),
+            max_page_opens=page_opens,
+            max_model_images=image_capacity(mode, visual_intent),
+        )
 
 
 __all__ = ["ResearchLimits", "enforce_web_requirement"]

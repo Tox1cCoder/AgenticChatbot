@@ -54,6 +54,38 @@ class FetchedWebImage:
     height: int
 
 
+def downscale_for_model(image: FetchedWebImage, *, max_edge: int = 512) -> FetchedWebImage:
+    """Return a small JPEG rendition for inspection, or the original if smaller.
+
+    The answer model receives candidates base64-inlined in its prompt, so it is
+    shown a preview rather than the bytes that get published: four full-size
+    photographs would add megabytes to every attempt, and the model is only
+    deciding whether the subject is the right one.
+
+    Never raises. An image Pillow cannot re-encode is passed through unchanged,
+    because a missing preview would drop a candidate the fetch already validated.
+    """
+
+    longest = max(image.width, image.height)
+    if longest <= max_edge:
+        return image
+    try:
+        with Image.open(BytesIO(image.content)) as handle:
+            handle.draft("RGB", (max_edge, max_edge))
+            rendition = handle.convert("RGB")
+            rendition.thumbnail((max_edge, max_edge), Image.LANCZOS)
+            buffer = BytesIO()
+            rendition.save(buffer, format="JPEG", quality=80, optimize=True)
+            return FetchedWebImage(
+                content=buffer.getvalue(),
+                media_type="image/jpeg",
+                width=rendition.width,
+                height=rendition.height,
+            )
+    except (OSError, UnidentifiedImageError, ValueError):
+        return image
+
+
 class PinnedAsyncTransport(httpx.AsyncHTTPTransport):
     """Connect to a validated IP while retaining the original Host and SNI."""
 
