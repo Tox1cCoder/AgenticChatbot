@@ -2765,14 +2765,14 @@ def create_project(
     name: str, description: str | None = None, instructions: str | None = None
 ) -> dict[str, Any] | None:
     payload = {"name": name, "description": description, "instructions": instructions}
-    response = make_api_request("POST", "/projects", json=payload)
+    response = make_api_request("POST", "/projects", payload)
     if not response or not response.get("success"):
         return None
     return response.get("data")
 
 
 def update_project(project_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
-    response = make_api_request("PATCH", f"/projects/{project_id}", json=fields)
+    response = make_api_request("PATCH", f"/projects/{project_id}", fields)
     if not response or not response.get("success"):
         return None
     return response.get("data")
@@ -2787,7 +2787,7 @@ def set_project_custom_agents(project_id: str, custom_agent_ids: list[str]) -> b
     response = make_api_request(
         "PUT",
         f"/projects/{project_id}/custom-agents",
-        json={"customAgentIds": custom_agent_ids},
+        {"customAgentIds": custom_agent_ids},
     )
     return bool(response and response.get("success"))
 
@@ -2827,14 +2827,14 @@ Initialise `projects_list = []`, `projects_loaded = False`, and
 Add `render_project_view()` to `demo.py`. It must render, on one full page and
 **not** inside `st.tabs()`: a name input, a description input, an instructions
 `st.text_area` with `max_chars=8000`, an agents `st.multiselect` backed by
-`get_custom_agents()`, an explicit Save button calling `update_project` and
+`list_custom_agents()`, an explicit Save button calling `update_project` and
 `set_project_custom_agents`, a Delete button, the project's conversations from
 `get_conversations(project_id=...)`, and a "New chat in this project" button that
 sets `current_conversation_id = "pending_new"` and `active_view = "chat"` while
 keeping `current_project_id` so the new conversation is created with it.
 
 In `main()` (`demo.py:12870`), dispatch `active_view == "project"` to
-`render_project_view()` alongside the existing `"chat"` and `"planning"` branches.
+`render_project_view()`. NOTE: `active_view` is write-only today (9 assignments, 0 reads), so there are no existing branches to sit alongside — you are adding the first read site, and the else-branch must preserve the current default rendering.
 
 - [ ] **Step 6: Add the move control**
 
