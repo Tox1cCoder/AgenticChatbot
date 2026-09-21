@@ -59,9 +59,8 @@ class ProjectRepository(RepositorySessionMixin):
     def get_live(self, project_id: UUID) -> Project | None:
         """A live project regardless of owner.
 
-        Used by the instruction resolver, which already holds a conversation
-        the caller was authorised to read, and by ownership checks that need
-        to tell "missing" apart from "someone else's".
+        Used by ownership checks that need to tell "missing" apart from
+        "someone else's" (see ``ProjectService.require_owned``).
         """
         with self.session_factory() as session:
             project = session.execute(
@@ -204,9 +203,14 @@ class ProjectRepository(RepositorySessionMixin):
             project_agent_ids = list(
                 session.execute(
                     select(ProjectCustomAgent.custom_agent_id)
+                    .join(
+                        CustomAgent,
+                        CustomAgent.id == ProjectCustomAgent.custom_agent_id,
+                    )
                     .where(
                         ProjectCustomAgent.project_id == project_id,
                         ProjectCustomAgent.owner_id == owner_id,
+                        CustomAgent.deleted_at.is_(None),
                     )
                     .order_by(ProjectCustomAgent.agent_order.asc())
                 )

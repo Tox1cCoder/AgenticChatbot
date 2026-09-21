@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select, update
 
 from app.core.config import settings
 from app.database.database import Database
@@ -14,6 +14,7 @@ from app.models.conversation import Conversation
 from app.models.custom_agent import ConversationCustomAgent, CustomAgent
 from app.models.project import Project, ProjectCustomAgent
 from app.models.user import User
+from app.repositories.custom_agent import CustomAgentRepository
 from app.repositories.project import ProjectRepository
 
 
@@ -56,8 +57,16 @@ def repo_env():
         yield repository, sf, owner_id, other_id, agent_a, agent_b
     finally:
         with sf() as s:
-            s.execute(delete(ConversationCustomAgent))
-            s.execute(delete(ProjectCustomAgent))
+            s.execute(
+                delete(ConversationCustomAgent).where(
+                    ConversationCustomAgent.owner_id.in_((owner_id, other_id))
+                )
+            )
+            s.execute(
+                delete(ProjectCustomAgent).where(
+                    ProjectCustomAgent.owner_id.in_((owner_id, other_id))
+                )
+            )
             for uid in (owner_id, other_id):
                 s.execute(delete(Conversation).where(Conversation.owner_id == uid))
                 s.execute(delete(Project).where(Project.owner_id == uid))
@@ -181,6 +190,68 @@ def test_seed_is_idempotent_and_never_removes(repo_env):
             .all()
         )
     assert rows == [agent_b, agent_a], "the pre-existing attachment is kept and stays first"
+
+
+def test_seed_skips_soft_deleted_agents(repo_env):
+    """A project default that points at a soft-deleted agent is never re-seeded.
+
+    Mirrors ``list_agents``' existing ``deleted_at IS NULL`` filter: without
+    it, every conversation created after an agent's deletion would get a
+    fresh attachment row pointing right back at the deleted agent.
+    """
+    repository, sf, owner_id, _other, agent_a, agent_b = repo_env
+    project = repository.create(owner_id, {"name": "Roadmap"})
+    repository.replace_agents(owner_id, project.id, [agent_a, agent_b])
+    with sf() as s:
+        s.execute(
+            update(CustomAgent).where(CustomAgent.id == agent_a).values(deleted_at=func.now())
+        )
+        s.commit()
+    conversation_id = uuid4()
+    with sf() as s:
+        s.add(Conversation(id=conversation_id, owner_id=owner_id, title="t"))
+        s.commit()
+
+    inserted = repository.seed_conversation_agents(owner_id, project.id, conversation_id)
+
+    assert inserted == 1
+    with sf() as s:
+        rows = (
+            s.execute(
+                select(ConversationCustomAgent.custom_agent_id).where(
+                    ConversationCustomAgent.conversation_id == conversation_id
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert rows == [agent_b]
+
+
+def test_delete_with_detach_removes_project_agent_rows(repo_env):
+    """Deleting a custom agent must also drop it from every project's defaults.
+
+    Otherwise the deleted agent keeps getting re-seeded onto new conversations
+    in any project that still lists it (see ``test_seed_skips_soft_deleted_agents``
+    for the belt-and-suspenders filter on the seeding side).
+    """
+    repository, sf, owner_id, _other, agent_a, agent_b = repo_env
+    project = repository.create(owner_id, {"name": "Roadmap"})
+    repository.replace_agents(owner_id, project.id, [agent_a, agent_b])
+
+    assert CustomAgentRepository(session_factory=sf).delete_with_detach(owner_id, agent_a) is True
+
+    with sf() as s:
+        remaining = (
+            s.execute(
+                select(ProjectCustomAgent.custom_agent_id).where(
+                    ProjectCustomAgent.project_id == project.id
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert remaining == [agent_b]
 
 
 def test_conversation_counts_excludes_soft_deleted(repo_env):

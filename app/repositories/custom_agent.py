@@ -10,6 +10,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models.custom_agent import ConversationCustomAgent, CustomAgent
+from app.models.project import ProjectCustomAgent
 from app.repositories.session_transport import RepositorySessionMixin
 
 
@@ -91,7 +92,13 @@ class CustomAgentRepository(RepositorySessionMixin):
             return agent
 
     def delete_with_detach(self, owner_id: UUID, custom_agent_id: UUID) -> bool:
-        """Detach from all conversations and soft-delete, in one transaction."""
+        """Detach from all conversations and projects, then soft-delete.
+
+        Removing the ``project_custom_agents`` rows too (not just the
+        conversation attachments) matters: without it, every conversation
+        created in or attached to a project after the agent is deleted would
+        get seeded a fresh attachment pointing at the now-deleted agent.
+        """
         with self.session_factory() as session:
             agent = self._get_owned(session, owner_id, custom_agent_id)
             if agent is None:
@@ -99,6 +106,11 @@ class CustomAgentRepository(RepositorySessionMixin):
             session.execute(
                 delete(ConversationCustomAgent).where(
                     ConversationCustomAgent.custom_agent_id == custom_agent_id
+                )
+            )
+            session.execute(
+                delete(ProjectCustomAgent).where(
+                    ProjectCustomAgent.custom_agent_id == custom_agent_id
                 )
             )
             agent.deleted_at = func.now()
