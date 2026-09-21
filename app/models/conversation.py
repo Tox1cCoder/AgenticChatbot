@@ -7,6 +7,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Index,
     String,
     Text,
     func,
@@ -25,6 +26,12 @@ class Conversation(Base):
         CheckConstraint(
             "next_message_sequence > 0",
             name="ck_conversations_next_message_sequence_positive",
+        ),
+        Index(
+            "ix_conversations_project_updated",
+            "project_id",
+            "updated_at",
+            postgresql_where=text("deleted_at IS NULL"),
         ),
     )
 
@@ -47,6 +54,10 @@ class Conversation(Base):
     )
     # Explicit plan lifecycle state; NULL means no plan has been created.
     plan_lifecycle = Column(PlanLifecycleType, nullable=True, default=None)
+    # Nullable: a conversation may belong to at most one project, or none.
+    project_id = Column(
+        UUID(as_uuid=True), ForeignKey("projects.id"), nullable=True, index=True
+    )
 
     # Relationships
     user = relationship("User", back_populates="conversations")
