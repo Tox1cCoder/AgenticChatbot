@@ -1986,7 +1986,6 @@ def _service(sf):
     from app.repositories.conversation import ConversationRepository
     from app.repositories.custom_agent import CustomAgentRepository
     from app.repositories.project import ProjectRepository
-    from app.repositories.user import UserRepository
     from app.services.conversation_service import ConversationService
     from app.services.project_service import ProjectService
     from app.utils.validation.conversation_validation import ConversationValidationUtils
@@ -2004,9 +2003,8 @@ def _service(sf):
     return (
         ConversationService(
             conversation_repository=conversation_repository,
-            user_validation_utils=UserValidationUtils(
-                user_repository=UserRepository(session_factory=sf)
-            ),
+            # Like ConversationValidationUtils, this takes a session factory.
+            user_validation_utils=UserValidationUtils(session_factory=sf),
             conversation_validation_utils=conversation_validation_utils,
             project_service=project_service,
         ),
