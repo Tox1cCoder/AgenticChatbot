@@ -5766,6 +5766,9 @@ def render_sidebar():
                     st.session_state.conversations_list = []
                     st.session_state.conversations_loaded = False
                     st.session_state.conversations_last_fetch_params = None
+                    st.session_state.projects_list = []
+                    st.session_state.projects_loaded = False
+                    st.session_state.current_project_id = None
                     st.session_state._ls_op = "clear"
                     if "__restore" in st.query_params:
                         del st.query_params["__restore"]
@@ -5793,6 +5796,7 @@ def render_project_view() -> None:
 
     if st.button(":material/arrow_back: Back to chat"):
         st.session_state.active_view = "chat"
+        st.session_state.current_project_id = None
         st.rerun()
 
     project_id = st.session_state.get("current_project_id")

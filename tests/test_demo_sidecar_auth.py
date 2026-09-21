@@ -134,3 +134,37 @@ def test_sidebar_sign_out_logs_out_sidecar_before_clearing_local_state(monkeypat
             "auth_token": "local-session-token",
         }
     ]
+
+
+def test_sidebar_sign_out_clears_project_state(monkeypatch):
+    """A stale ``projects_loaded=True`` after sign-out would make the next
+    sign-in's sidebar keep showing the previous user's projects, since
+    ``_load_projects_if_needed`` only fetches when the flag is falsy — and a
+    stale ``current_project_id`` would carry into that user's next new
+    conversation."""
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    streamlit_stub.pressed_buttons.add("Sign Out")
+    streamlit_stub.session_state.current_user_id = "user-1"
+    streamlit_stub.session_state.auth_token = "local-session-token"
+    streamlit_stub.session_state.current_user_profile = {
+        "id": "user-1",
+        "username": "Ada",
+    }
+    streamlit_stub.session_state.current_conversation_id = "conversation-1"
+    streamlit_stub.session_state.conversations_loaded = True
+    streamlit_stub.session_state.conversations_list = []
+    streamlit_stub.session_state.conversations_last_fetch_params = None
+    streamlit_stub.session_state.projects_list = [{"id": "project-1", "name": "Roadmap"}]
+    streamlit_stub.session_state.projects_loaded = True
+    streamlit_stub.session_state.current_project_id = "project-1"
+
+    monkeypatch.setattr(demo, "close_conversation_manager", lambda: None)
+    monkeypatch.setattr(demo, "reset_conversation_state", lambda: None)
+    monkeypatch.setattr(demo, "make_api_request", lambda *args, **kwargs: {"success": True})
+
+    with pytest.raises(RuntimeError, match="rerun"):
+        demo.render_sidebar()
+
+    assert streamlit_stub.session_state.projects_list == []
+    assert streamlit_stub.session_state.projects_loaded is False
+    assert streamlit_stub.session_state.current_project_id is None

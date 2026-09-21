@@ -215,3 +215,43 @@ def test_sidebar_renders_a_projects_section(monkeypatch):
 
     assert "Projects" in source
     assert "render_project_view" in inspect.getsource(demo.main)
+
+
+def test_back_to_chat_clears_current_project_id(monkeypatch):
+    """A browsed project must not silently capture the next new conversation.
+
+    Reachable sequence: "New Chat" (clears it), click a project in the
+    sidebar to look at it, "Back to chat", then type a message — without this
+    clear the conversation is silently created inside the browsed project.
+    """
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    streamlit_stub = sys.modules["streamlit"]
+    streamlit_stub.session_state.current_user_id = "user-1"
+    streamlit_stub.session_state.auth_token = "token"
+    streamlit_stub.session_state.current_project_id = "project-1"
+    streamlit_stub.button = lambda label, *args, **kwargs: label == (
+        ":material/arrow_back: Back to chat"
+    )
+
+    def _raise_rerun():
+        raise RuntimeError("rerun")
+
+    streamlit_stub.rerun = _raise_rerun
+
+    with pytest.raises(RuntimeError, match="rerun"):
+        demo.render_project_view()
+
+    assert streamlit_stub.session_state.current_project_id is None
+    assert streamlit_stub.session_state.active_view == "chat"
+
+
+def test_new_chat_in_project_button_keeps_current_project_id(monkeypatch):
+    """The counterpart to ``test_back_to_chat_clears_current_project_id``:
+    starting a new chat from inside a project must keep ``current_project_id``
+    so the conversation is created in that project."""
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+
+    source = inspect.getsource(demo.render_project_view)
+    new_chat_block = source.split('"New chat in this project"', 1)[1].split("st.rerun()", 1)[0]
+
+    assert "current_project_id" not in new_chat_block
