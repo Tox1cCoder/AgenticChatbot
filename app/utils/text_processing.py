@@ -130,6 +130,38 @@ def sanitize_persona(persona: str | None) -> str | None:
     return cleaned if cleaned else None
 
 
+PROJECT_INSTRUCTION_HEADER = "Project instructions:"
+CONVERSATION_INSTRUCTION_HEADER = (
+    "Conversation-specific instructions:"
+)
+
+
+def compose_system_instruction(
+    project_instructions: str | None,
+    persona_prompt: str | None,
+) -> str | None:
+    """Combine a project's instructions with a conversation's persona.
+
+    Each part is sanitized independently against its own
+    8000-character cap. Composing first and truncating after would
+    silently discard the persona, because the project text leads —
+    never call :func:`sanitize_persona` on the value returned here.
+
+    Headers are added only when both parts are present, so a
+    conversation with no project renders byte-identically to how it
+    rendered before projects existed.
+    """
+    project = sanitize_persona(project_instructions)
+    persona = sanitize_persona(persona_prompt)
+
+    if project and persona:
+        return (
+            f"{PROJECT_INSTRUCTION_HEADER}\n{project}\n\n"
+            f"{CONVERSATION_INSTRUCTION_HEADER}\n{persona}"
+        )
+    return project or persona
+
+
 def fix_markdown_code_blocks(text: str) -> str:
     """
     Fix markdown code blocks that are missing newlines before opening fences.
