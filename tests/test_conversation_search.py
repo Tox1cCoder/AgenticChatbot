@@ -49,11 +49,13 @@ async def test_conversation_route_forwards_search_to_service() -> None:
 
     await get_conversations(
         conversation_service=service,
+        project_service=None,
         user_id=owner_id,
         pagination=ConversationPaginationParams(page=2, limit=25),
         include=["messages"],
         latest_messages=3,
         search="  Roadmap  ",
+        project_id=None,
     )
 
     assert service.kwargs["search"] == "  Roadmap  "

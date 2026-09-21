@@ -266,6 +266,8 @@ GET /conversations?projectId={projectId}
 
 `projectId` is an optional query parameter (alias `projectId`) that restricts the list to conversations currently in that project. Omit it to list all of the caller's conversations regardless of project.
 
+The project must be owned by the caller, or the request fails with `403 PROJECT_FORBIDDEN` before the list query runs — a foreign `projectId` never returns an empty page, matching every other project path.
+
 ### `projectId` on conversation create
 
 ```json
@@ -308,7 +310,7 @@ When a conversation belongs to a live project, the system instruction sent to th
 
 | HTTP/status | Code | Applies to | Frontend behavior |
 |---:|---|---|---|
-| `403` | `PROJECT_FORBIDDEN` | Project exists but belongs to another user; or the custom-agent ids in a `PUT .../custom-agents` body are not all owned by the caller. | Do not expose or cache the resource. Return to the project list. |
+| `403` | `PROJECT_FORBIDDEN` | Project exists but belongs to another user; the custom-agent ids in a `PUT .../custom-agents` body are not all owned by the caller; or `GET /conversations?projectId=` names a project the caller does not own. | Do not expose or cache the resource. Return to the project list. |
 | `403` | `CONVERSATION_ACCESS_DENIED` | The conversation in an attach/detach call belongs to another user. | Return to the conversation list. |
 | `404` | `PROJECT_NOT_FOUND` | Missing or soft-deleted project. | Remove it from local lists and selections. |
 | `404` | `CONVERSATION_NOT_FOUND` | The conversation in an attach/detach call does not exist. | Close the conversation and preserve any unsent draft. |

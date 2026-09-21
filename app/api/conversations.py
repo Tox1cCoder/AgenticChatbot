@@ -17,6 +17,7 @@ from app.schemas.pagination import ConversationPaginationParams, MessagePaginati
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
 from app.services.ai_service import AIService
+from app.services.project_service import ProjectService
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
@@ -77,6 +78,7 @@ async def get_conversation(
 @AppAutoInjector.auto_inject()
 async def get_conversations(
     conversation_service: IConversationService,
+    project_service: ProjectService,
     user_id: UUID,
     pagination: ConversationPaginationParams,
     include: list[str] = Query(  # noqa: B008
@@ -99,6 +101,8 @@ async def get_conversations(
     ),
 ) -> PaginatedApiResponse[ConversationRead]:
     """Get all conversations for authenticated user"""
+    if project_id is not None:
+        project_service.require_owned(user_id, project_id)
     paginated_result = conversation_service.get_by_user_id(
         user_id,
         page=pagination.page,

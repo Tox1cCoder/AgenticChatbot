@@ -54,8 +54,16 @@ def api():
         yield owner_client, other_client, owner_id, other_id, conversation_id
     finally:
         with sf() as s:
-            s.execute(delete(ConversationCustomAgent))
-            s.execute(delete(ProjectCustomAgent))
+            s.execute(
+                delete(ConversationCustomAgent).where(
+                    ConversationCustomAgent.owner_id.in_((owner_id, other_id))
+                )
+            )
+            s.execute(
+                delete(ProjectCustomAgent).where(
+                    ProjectCustomAgent.owner_id.in_((owner_id, other_id))
+                )
+            )
             for uid in (owner_id, other_id):
                 s.execute(delete(Conversation).where(Conversation.owner_id == uid))
                 s.execute(delete(Project).where(Project.owner_id == uid))
@@ -187,6 +195,29 @@ def test_another_user_cannot_delete_the_project(api):
     project_id = owner.post("/projects", json={"name": "Roadmap"}).json()["data"]["id"]
 
     response = other.delete(f"/projects/{project_id}")
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "PROJECT_FORBIDDEN"
+
+
+def test_listing_conversations_by_foreign_project_id_is_forbidden(api):
+    """GET /conversations?projectId= must 403, not return an empty page.
+
+    An empty page is indistinguishable from "this project has no
+    conversations"; every other project path errors on a foreign id.
+    """
+    from app.api.conversations import router as conversations_router
+
+    owner, _other, _oid, other_id, _cid = api
+    project_id = owner.post("/projects", json={"name": "Roadmap"}).json()["data"]["id"]
+
+    app = FastAPI()
+    app.include_router(conversations_router)
+    register_exception_handlers(app)
+    app.dependency_overrides[get_current_user_id] = lambda: other_id
+    other_conversations_client = TestClient(app)
+
+    response = other_conversations_client.get(f"/conversations?projectId={project_id}")
 
     assert response.status_code == 403
     assert response.json()["code"] == "PROJECT_FORBIDDEN"
