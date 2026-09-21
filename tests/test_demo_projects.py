@@ -128,6 +128,76 @@ def test_attach_calls_put_on_the_membership_route(monkeypatch):
     assert calls == [("PUT", f"/projects/{project_id}/conversations/{conversation_id}")]
 
 
+def test_set_project_custom_agents_sends_camel_case_body(monkeypatch):
+    """The backend contract requires ``customAgentIds`` (camelCase); a stray
+    snake_case rename here would pass silently against every mocked test
+    unless the body itself is asserted."""
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    project_id = uuid4()
+    calls = []
+
+    def _fake_request(method, path, data=None, **kwargs):
+        calls.append((method, path, data))
+        return {"success": True}
+
+    monkeypatch.setattr(demo, "make_api_request", _fake_request)
+
+    demo.set_project_custom_agents(str(project_id), ["agent-1", "agent-2"])
+
+    assert calls == [
+        (
+            "PUT",
+            f"/projects/{project_id}/custom-agents",
+            {"customAgentIds": ["agent-1", "agent-2"]},
+        )
+    ]
+
+
+def test_create_project_sends_name_description_instructions(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    calls = []
+
+    def _fake_request(method, path, data=None, **kwargs):
+        calls.append((method, path, data))
+        return {"success": True, "data": {"id": str(uuid4())}}
+
+    monkeypatch.setattr(demo, "make_api_request", _fake_request)
+
+    demo.create_project("Roadmap", "Q3 planning conversations.", "Be brief.")
+
+    assert calls == [
+        (
+            "POST",
+            "/projects",
+            {
+                "name": "Roadmap",
+                "description": "Q3 planning conversations.",
+                "instructions": "Be brief.",
+            },
+        )
+    ]
+
+
+def test_update_project_passes_fields_through_unchanged(monkeypatch):
+    """``update_project`` must not rename or reshape the caller's fields dict —
+    the backend's ``exclude_unset`` semantics depend on only the keys the
+    caller actually set being present."""
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    project_id = uuid4()
+    calls = []
+
+    def _fake_request(method, path, data=None, **kwargs):
+        calls.append((method, path, data))
+        return {"success": True, "data": {}}
+
+    monkeypatch.setattr(demo, "make_api_request", _fake_request)
+
+    fields = {"name": "Renamed", "description": None}
+    demo.update_project(str(project_id), fields)
+
+    assert calls == [("PATCH", f"/projects/{project_id}", fields)]
+
+
 def test_project_settings_are_not_rendered_inside_tabs(monkeypatch):
     """Streamlit garbage-collects widget state for tabs that are not open, so an
     unsaved 8000-character instruction edit would vanish on a tab switch."""

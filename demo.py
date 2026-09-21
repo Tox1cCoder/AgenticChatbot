@@ -5852,11 +5852,16 @@ def render_project_view() -> None:
                 name.strip(), description.strip() or None, instructions.strip() or None
             )
             if created:
-                set_project_custom_agents(created["id"], selected_agent_ids)
                 st.session_state.current_project_id = created["id"]
                 st.session_state.projects_loaded = False
-                st.success("Project created.")
-                st.rerun()
+                if set_project_custom_agents(created["id"], selected_agent_ids):
+                    st.success("Project created.")
+                    st.rerun()
+                else:
+                    st.error(
+                        "Project created, but its default agents could not be saved. "
+                        "Reopen the project and try updating them again."
+                    )
             else:
                 st.error("Could not create the project.")
         else:
@@ -5869,10 +5874,15 @@ def render_project_view() -> None:
                 },
             )
             if updated is not None:
-                set_project_custom_agents(project_id, selected_agent_ids)
                 st.session_state.projects_loaded = False
-                st.success("Project saved.")
-                st.rerun()
+                if set_project_custom_agents(project_id, selected_agent_ids):
+                    st.success("Project saved.")
+                    st.rerun()
+                else:
+                    st.error(
+                        "Project details were saved, but its default agents could not be "
+                        "saved. Try updating them again."
+                    )
             else:
                 st.error("Could not save the project.")
 
