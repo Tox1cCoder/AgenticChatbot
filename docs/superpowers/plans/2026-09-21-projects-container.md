@@ -1126,13 +1126,12 @@ def service_env():
         s.add(Conversation(id=other_conversation, owner_id=other_id, title="theirs"))
         s.commit()
 
-    conversation_repository = ConversationRepository(session_factory=sf)
     service = ProjectService(
         repository=ProjectRepository(session_factory=sf),
         custom_agent_repository=CustomAgentRepository(session_factory=sf),
-        conversation_validation_utils=ConversationValidationUtils(
-            conversation_repository=conversation_repository
-        ),
+        # ConversationValidationUtils takes a session factory and builds its own
+        # repository internally, exposing it as `.conversation_repository`.
+        conversation_validation_utils=ConversationValidationUtils(session_factory=sf),
     )
     try:
         yield service, owner_id, other_id, agent_id, owner_conversation, other_conversation
@@ -1995,9 +1994,8 @@ def _service(sf):
 
     conversation_repository = ConversationRepository(session_factory=sf)
     project_repository = ProjectRepository(session_factory=sf)
-    conversation_validation_utils = ConversationValidationUtils(
-        conversation_repository=conversation_repository
-    )
+    # Takes a session factory, not a repository; it builds its own internally.
+    conversation_validation_utils = ConversationValidationUtils(session_factory=sf)
     project_service = ProjectService(
         repository=project_repository,
         custom_agent_repository=CustomAgentRepository(session_factory=sf),
