@@ -32,6 +32,7 @@ class ConversationService(IConversationService):
         conversation_validation_utils: ConversationValidationUtils,
         ai_service: Any | None = None,
         checkpoint_manager: Any | None = None,
+        project_service: Any | None = None,
     ):
         self.repository = conversation_repository
         self.user_validation_utils = user_validation_utils
@@ -41,6 +42,9 @@ class ConversationService(IConversationService):
         # conversation is deleted. Wired through the DI container.
         self.ai_service = ai_service
         self.checkpoint_manager = checkpoint_manager
+        # Optional: not yet wired through the DI container (Task 7). When
+        # absent, project_id on create is stored but not validated or seeded.
+        self.project_service = project_service
 
     def _convert_to_read_schema(
         self, conversation_entity, include: list[str] = None
@@ -58,6 +62,7 @@ class ConversationService(IConversationService):
             "persona_prompt": conversation_entity.persona_prompt,
             "planning_mode_enabled": getattr(conversation_entity, "planning_mode_enabled", False),
             "plan_lifecycle": getattr(conversation_entity, "plan_lifecycle", None),
+            "project_id": getattr(conversation_entity, "project_id", None),
         }
 
         if hasattr(conversation_entity, "message_count"):
@@ -88,10 +93,17 @@ class ConversationService(IConversationService):
         self, conversation_create_data: ConversationCreate, owner_id: UUID
     ) -> ConversationRead:
         self.user_validation_utils.validate_user_exists(owner_id)
+        project_id = conversation_create_data.project_id
+        if project_id is not None and self.project_service is not None:
+            self.project_service.require_owned(owner_id, project_id)
         conversation_entity = ConversationFactory.create_from_schema(
             conversation_create_data, owner_id
         )
         created_conversation = self.repository.create(conversation_entity)
+        if project_id is not None and self.project_service is not None:
+            self.project_service.repository.seed_conversation_agents(
+                owner_id, project_id, created_conversation.id
+            )
         return self._convert_to_read_schema(created_conversation, include=[])
 
     def get_by_id(self, conversation_id: UUID) -> ConversationRead:
@@ -114,6 +126,7 @@ class ConversationService(IConversationService):
         include: list[str] = None,
         latest_messages: int = 3,
         search: str | None = None,
+        project_id: UUID | None = None,
     ) -> Paginator[ConversationRead]:
         """Get user conversations with optional includes"""
         if include is None:
@@ -144,6 +157,7 @@ class ConversationService(IConversationService):
             include=include,
             latest_messages=latest_messages,
             search=normalized_search or None,
+            project_id=project_id,
         )
         # Convert items to ConversationRead schemas
         conversation_reads = [

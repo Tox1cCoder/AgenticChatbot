@@ -24,12 +24,15 @@ def _build_owned_conversation_queries(
     order_by: str,
     order_direction: str,
     search: str | None,
+    project_id: UUID | None = None,
 ) -> tuple[Any, Any]:
     """Build matching count and page queries for one owner's conversations."""
     conditions = [
         Conversation.owner_id == owner_id,
         Conversation.deleted_at.is_(None),
     ]
+    if project_id is not None:
+        conditions.append(Conversation.project_id == project_id)
     normalized_search = search.strip().lower() if isinstance(search, str) else ""
 
     if normalized_search:
@@ -87,6 +90,7 @@ class ConversationCRUDStrategy(
         order_by: str = "updated_at",
         order_direction: str = "desc",
         search: str | None = None,
+        project_id: UUID | None = None,
     ) -> Paginator[Conversation]:
         """Get conversations by owner ID with page-based pagination and ordering"""
 
@@ -98,6 +102,7 @@ class ConversationCRUDStrategy(
             order_by=order_by,
             order_direction=order_direction,
             search=search,
+            project_id=project_id,
         )
         total = int(db.execute(count_statement).scalar() or 0)
         items = list(db.execute(page_statement).scalars().all())
@@ -109,6 +114,7 @@ class ConversationCRUDStrategy(
         db: Session,
         owner_id: UUID,
         search: str | None = None,
+        project_id: UUID | None = None,
     ) -> int:
         """Count conversations by owner ID"""
         count_statement, _ = _build_owned_conversation_queries(
@@ -118,6 +124,7 @@ class ConversationCRUDStrategy(
             order_by="updated_at",
             order_direction="desc",
             search=search,
+            project_id=project_id,
         )
         return int(db.execute(count_statement).scalar() or 0)
 
@@ -140,6 +147,7 @@ class ConversationCRUDStrategy(
         page: int = 1,
         limit: int = 10,
         search: str | None = None,
+        project_id: UUID | None = None,
     ) -> list[Conversation]:
         """Get conversations with limited recent messages and total message count"""
         _, page_statement = _build_owned_conversation_queries(
@@ -149,6 +157,7 @@ class ConversationCRUDStrategy(
             order_by=order_by,
             order_direction=order_direction,
             search=search,
+            project_id=project_id,
         )
         conversations = list(db.execute(page_statement).scalars().all())
 
@@ -225,6 +234,7 @@ class ConversationRepository(RepositorySessionMixin):
         include: list[str] = None,
         latest_messages: int = 3,
         search: str | None = None,
+        project_id: UUID | None = None,
     ) -> Paginator[Conversation]:
         """Get conversations by owner ID with optional includes"""
         if include is None:
@@ -242,9 +252,12 @@ class ConversationRepository(RepositorySessionMixin):
                     page,
                     limit,
                     search,
+                    project_id=project_id,
                 )
                 # Get total count for pagination
-                total = self._crud_strategy.count_by_owner_id(session, owner_id, search)
+                total = self._crud_strategy.count_by_owner_id(
+                    session, owner_id, search, project_id=project_id
+                )
                 return Paginator.create(conversations, total, page, limit)
             else:
                 return self._crud_strategy.get_by_owner_id(
@@ -255,12 +268,17 @@ class ConversationRepository(RepositorySessionMixin):
                     order_by,
                     order_direction,
                     search,
+                    project_id=project_id,
                 )
 
-    def count_by_owner_id(self, owner_id: UUID, search: str | None = None) -> int:
+    def count_by_owner_id(
+        self, owner_id: UUID, search: str | None = None, project_id: UUID | None = None
+    ) -> int:
         """Count conversations by owner ID"""
         with self.session_factory() as session:
-            return self._crud_strategy.count_by_owner_id(session, owner_id, search)
+            return self._crud_strategy.count_by_owner_id(
+                session, owner_id, search, project_id=project_id
+            )
 
     def get_with_messages(self, conversation_id: UUID) -> Conversation | None:
         """Get conversation with its messages"""

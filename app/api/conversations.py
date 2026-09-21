@@ -92,6 +92,11 @@ async def get_conversations(
         max_length=200,
         description="Case-insensitive conversation title or message search",
     ),
+    project_id: UUID | None = Query(
+        default=None,
+        alias="projectId",
+        description="Only conversations in this project",
+    ),
 ) -> PaginatedApiResponse[ConversationRead]:
     """Get all conversations for authenticated user"""
     paginated_result = conversation_service.get_by_user_id(
@@ -103,6 +108,7 @@ async def get_conversations(
         include=include,
         latest_messages=latest_messages,
         search=search,
+        project_id=project_id,
     )
     return PaginatedApiResponse.from_paginator(
         paginated_result, "Conversations retrieved successfully"

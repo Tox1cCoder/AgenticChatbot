@@ -20,6 +20,9 @@ class ConversationCreate(BaseModel):
         default=False,
         description="Enable planning mode for this conversation",
     )
+    project_id: UUID | None = Field(
+        None, description="Project this conversation belongs to, if any"
+    )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -71,6 +74,9 @@ class ConversationRead(BaseModel):
         default=None,
         description="Custom agents attached to this conversation (when requested)",
     )
+    project_id: UUID | None = Field(
+        default=None, description="Project this conversation belongs to, if any"
+    )
 
 
 class ConversationInDB(BaseModel):
@@ -94,6 +100,9 @@ class ConversationInDB(BaseModel):
     plan_lifecycle: PlanLifecycle | None = Field(
         default=None,
         description="Explicit lifecycle state of the plan",
+    )
+    project_id: UUID | None = Field(
+        default=None, description="Project this conversation belongs to, if any"
     )
 
 
