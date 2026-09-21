@@ -118,7 +118,8 @@ def test_each_part_is_capped_independently_so_the_persona_survives():
     because the project text leads and the cap is 8000."""
     result = compose_system_instruction("P" * 9000, "Q" * 9000)
 
-    assert result.count("P") == 8000
+    # 8001, not 8000: the header "Project instructions:" contributes one P.
+    assert result.count("P") == 8001
     assert result.count("Q") == 8000
     assert result.endswith("Q" * 100)
 
