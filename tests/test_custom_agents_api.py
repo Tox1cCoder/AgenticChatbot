@@ -226,6 +226,7 @@ async def test_ai_sdk_chat_uses_attached_custom_agents():
 
     svc = MessageService.__new__(MessageService)
     svc.custom_agent_service = _FakeCustomAgentSvc()
+    svc.project_context_service = None
 
     async def _planning(**_kwargs):
         return WorkflowPlanningContext()
