@@ -14,6 +14,12 @@ from .mcp import (
     ToolNotFoundError,
 )
 from .planning import PauseReason, PlanExecutionPausedException
+from .project import (
+    ProjectConversationNotFoundError,
+    ProjectForbiddenError,
+    ProjectNotFoundError,
+    ProjectValidationError,
+)
 from .resource import ResourceNotFoundException
 from .skills import SkillNotFoundError
 from .validation import FileValidationError, ValidationException
@@ -39,4 +45,8 @@ __all__ = [
     "CustomAgentForbiddenError",
     "CustomAgentNotFoundError",
     "CustomAgentInUseError",
+    "ProjectValidationError",
+    "ProjectForbiddenError",
+    "ProjectNotFoundError",
+    "ProjectConversationNotFoundError",
 ]

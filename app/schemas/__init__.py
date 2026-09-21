@@ -38,6 +38,12 @@ from app.schemas.model_usage import (
     UsageSeriesPoint,
     UsageTotals,
 )
+from app.schemas.project import (
+    ProjectCreate,
+    ProjectCustomAgentsUpdate,
+    ProjectRead,
+    ProjectUpdate,
+)
 from app.schemas.task_plan import (
     PlanningStatusResponse,
     TaskPlanCreate,
@@ -103,4 +109,9 @@ __all__ = [
     "UsageRange",
     "UsageSeriesPoint",
     "UsageTotals",
+    # Project schemas
+    "ProjectCreate",
+    "ProjectUpdate",
+    "ProjectRead",
+    "ProjectCustomAgentsUpdate",
 ]
