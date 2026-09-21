@@ -234,9 +234,21 @@ conversation and break the invariant above. Slice 1 accepts the imprecise label.
 
 `ConversationCreate.project_id: UUID | None`.
 `ConversationService.create_conversation` validates that the project exists, is
-not soft-deleted, and is owned by the caller before the factory runs. A project
-id the caller does not own returns 404, not 403, so the endpoint does not
-confirm the existence of other users' projects.
+not soft-deleted, and is owned by the caller before the factory runs.
+
+**Error contract.** Projects follow the convention already established for
+owner-scoped entities in this API: `ProjectForbiddenError` (403,
+`PROJECT_FORBIDDEN`) when the project exists but belongs to another user, and
+`ProjectNotFoundError` (404, `PROJECT_NOT_FOUND`) only when it is genuinely
+missing or soft-deleted. This mirrors `CustomAgentForbiddenError` /
+`CustomAgentNotFoundError` (`app/core/exceptions/custom_agent.py`), which
+`tests/test_custom_agents_api.py:148` pins at 403 for cross-user reads, and the
+`AuthorizationException` that conversations raise.
+
+An earlier draft of this spec specified 404 for cross-user access to avoid
+confirming that another user's project exists. That was reversed: it would have
+made projects the only owner-scoped entity in the API behaving differently, and
+a frontend branching on 403 everywhere else would need a special case.
 
 `ConversationFactory` gains `project_id` in **both** `create_from_schema`
 (`app/factories/conversation_factory.py:23`) and `create_from_dict` (`:40`).
@@ -279,8 +291,9 @@ instructions stop applying on the next turn.
 
 Detach requires that the conversation currently belongs to the project named in
 the path. `DELETE /projects/{Y}/conversations/{cid}` for a conversation in
-project X returns 404, so a stale client cannot detach a conversation from a
-project it is no longer in.
+project X returns 404 `PROJECT_CONVERSATION_NOT_FOUND` — the membership, not the
+project, is what is missing — so a stale client cannot detach a conversation
+from a project it is no longer in.
 
 ### Deleting a project
 
@@ -335,8 +348,8 @@ There is no `GET /projects/{id}/conversations`. The existing `GET /conversations
 (`app/api/conversations.py:76`) gains an optional `projectId` query parameter
 instead; it already implements pagination, ordering, and the `include`
 machinery, and a nested route would mean maintaining a second copy of all of it.
-A `projectId` the caller does not own returns 404, matching the ownership rule
-everywhere else, rather than an empty page.
+A `projectId` the caller does not own returns 403, matching the error contract
+above, rather than an empty page.
 
 No sentinel value for "unassigned" is provided, because nothing in the UI needs
 that list: the flat chat list shows every conversation, as Claude's does.
@@ -401,9 +414,11 @@ the place conversations are administered.
 ## Frontend contract
 
 `plans/PROJECTS_FE_CONTRACT.md`, following `CUSTOM_AGENTS_FE_CONTRACT.md`:
-endpoints with camelCase request and response bodies, the 404-not-403 ownership
-rule, seeding behavior on both create and attach, the 8000-characters-per-part
-cap, and the composition rule. The frontend needs the composition rule to
+endpoints with camelCase request and response bodies, the error contract (403
+`PROJECT_FORBIDDEN` for cross-user access, 404 `PROJECT_NOT_FOUND` for missing
+or soft-deleted, 404 `PROJECT_CONVERSATION_NOT_FOUND` for a wrong-project
+detach), seeding behavior on both create and attach, the
+8000-characters-per-part cap, and the composition rule. The frontend needs the composition rule to
 preview what the model will actually receive.
 
 ## Testing
@@ -416,13 +431,14 @@ preview what the model will actually receive.
 | Resolver tests | a soft-deleted project reads as project-less; a missing project does not raise |
 | Seeding tests | create seeds; attach unions insert-if-absent; `agent_order` preserved; re-attach is idempotent |
 | Lifecycle tests | project delete detaches and leaves conversations intact |
-| Ownership tests | the four cross-user cases below, each asserting 404 |
+| Ownership tests | the four cross-user cases below, each asserting 403 |
 | Migration test | upgrade then downgrade against the Postgres integration database |
 
 Ownership tests run in the reverse direction — verifying that unauthorized
 access is blocked, not only that authorized access works. User B cannot: read
 user A's project; attach their own conversation to A's project; attach A's
 conversation to their own project; create a conversation naming A's project.
+Each asserts 403, matching `tests/test_custom_agents_api.py:148`.
 
 Postgres integration tests derive `TEST_DATABASE_URL` from
 `settings.database_url` and are runnable in this environment, so "skipped,
