@@ -64,10 +64,12 @@ class AIService:
         workflow_runtime: IWorkflowRuntime,
         conversation_repository: ConversationRepository,
         checkpointer: BaseCheckpointSaver | None = None,
+        project_context_service: Any | None = None,
     ):
         self.checkpointer = checkpointer
         self.workflow = workflow_runtime
         self.conversation_repository = conversation_repository
+        self.project_context_service = project_context_service
 
     async def initialize(self) -> None:
         await self.workflow.initialize()
@@ -150,10 +152,21 @@ class AIService:
             return request
         try:
             conversation = self.conversation_repository.get_by_id(UUID(request.conversation_id))
-            raw_persona = conversation.persona_prompt if conversation else None
         except Exception:
-            raw_persona = None
-        return request.model_copy(update={"persona": sanitize_persona(raw_persona)})
+            conversation = None
+        if self.project_context_service is None:
+            return request.model_copy(
+                update={
+                    "persona": sanitize_persona(
+                        conversation.persona_prompt if conversation else None
+                    )
+                }
+            )
+        return request.model_copy(
+            update={
+                "persona": self.project_context_service.resolve_system_instruction(conversation)
+            }
+        )
 
     @staticmethod
     def _to_ai_request(request: WorkflowExecutionRequest) -> AIWorkflowExecutionRequest:

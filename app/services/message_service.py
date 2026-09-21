@@ -226,6 +226,7 @@ class MessageService(IMessageService):
         web_image_service=None,
         turn_coordinator: ConversationTurnCoordinator | None = None,
         generation_control_service: Any | None = None,
+        project_context_service: Any | None = None,
     ):
         self.repository = message_repository
         self.conversation_validation_utils = conversation_validation_utils
@@ -250,6 +251,9 @@ class MessageService(IMessageService):
         # when the command lands on a different worker than the stream, and
         # Continue resume the exact checkpoint a pause left behind.
         self.generation_control_service = generation_control_service
+        # Resolves project instructions into the system prompt when wired;
+        # None preserves plain persona-only behavior.
+        self.project_context_service = project_context_service
         self.redis_client = self._init_redis_client()
 
     def _generation_control(self):
@@ -1051,13 +1055,24 @@ class MessageService(IMessageService):
     def _get_conversation_context(
         self, conversation_id: UUID, user_id: UUID | None = None
     ) -> tuple[UUID | None, str | None]:
-        """Get user_id and persona from conversation."""
+        """Get user_id and the composed system instruction from a conversation.
+
+        Returns the instruction already sanitized and composed. The caller must
+        NOT run ``sanitize_persona`` over it: the composed string can exceed the
+        8000-character cap legitimately, and truncating it would silently drop
+        the conversation's own persona.
+        """
         conversation = self.conversation_validation_utils.conversation_repository.get_by_id(
             conversation_id
         )
         resolved_user_id = user_id or (conversation.owner_id if conversation else None)
-        persona = conversation.persona_prompt if conversation else None
-        return resolved_user_id, persona
+        if self.project_context_service is None:
+            return resolved_user_id, sanitize_persona(
+                conversation.persona_prompt if conversation else None
+            )
+        return resolved_user_id, self.project_context_service.resolve_system_instruction(
+            conversation
+        )
 
     def _create_bot_response_message(
         self,
@@ -2512,8 +2527,7 @@ class MessageService(IMessageService):
             return sequence
 
         try:
-            user_id, persona = self._get_conversation_context(conversation_id, user_id)
-            sanitized_persona = sanitize_persona(persona)
+            user_id, sanitized_persona = self._get_conversation_context(conversation_id, user_id)
 
             # Reload/validate the custom-agent map before resuming.
             self._revalidate_resume_custom_agent(user_id, conversation_id)
@@ -3909,7 +3923,14 @@ class MessageService(IMessageService):
         assistant_message_id: UUID | None = None,
     ) -> tuple[UUID | None, str | None, WorkflowExecutionRequest]:
         resolved_user_id = user_id or (conversation.owner_id if conversation else None)
-        sanitized_persona = sanitize_persona(conversation.persona_prompt if conversation else None)
+        if self.project_context_service is None:
+            sanitized_persona = sanitize_persona(
+                conversation.persona_prompt if conversation else None
+            )
+        else:
+            sanitized_persona = self.project_context_service.resolve_system_instruction(
+                conversation
+            )
         planning_context = await self._prepare_planning_context(
             conversation_id=message_create_data.conversation_id,
             user_id=resolved_user_id,
