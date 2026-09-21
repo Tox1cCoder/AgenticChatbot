@@ -56,6 +56,7 @@ def test_soft_deleted_project_reads_as_project_less():
     conversation = SimpleNamespace(project_id=uuid4(), persona_prompt="Be terse.")
 
     assert service.resolve_system_instruction(conversation) == "Be terse."
+    assert repository.calls == [conversation.project_id]
 
 
 def test_missing_conversation_does_not_raise():
