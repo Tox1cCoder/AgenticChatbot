@@ -34,6 +34,7 @@ from app.services.hitl_settings_service import HitlSettingsService
 from app.services.jwt_service import JwtService
 from app.services.mcp_service import MCPService
 from app.services.model_config_service import ModelConfigService
+from app.services.project_service import ProjectService
 from app.services.provider_service import ProviderService
 from app.utils.validation.conversation_validation import (
     ConversationValidationUtils,
@@ -140,6 +141,7 @@ class AppAutoInjector(AutoInjector):
             CustomAgentService: container_ref.custom_agent_service,
             HitlSettingsService: container_ref.hitl_settings_service,
             HITLInterruptRepository: container_ref.hitl_interrupt_repository,
+            ProjectService: container_ref.project_service,
         }
 
     @classmethod

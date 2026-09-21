@@ -44,6 +44,7 @@ class IConversationService(ABC):
         include: list[str] = None,
         latest_messages: int = 3,
         search: str | None = None,
+        project_id: UUID | None = None,
     ) -> Paginator[ConversationRead]:
         """Get all conversations for a user with optional includes"""
         pass

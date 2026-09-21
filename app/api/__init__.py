@@ -22,6 +22,7 @@ from app.api.mcp import router as mcp_router  # noqa: E402
 from app.api.messages import router as messages_router  # noqa: E402
 from app.api.model_config import router as model_config_router  # noqa: E402
 from app.api.model_usage import router as model_usage_router  # noqa: E402
+from app.api.projects import router as projects_router  # noqa: E402
 from app.api.providers import router as providers_router  # noqa: E402
 from app.api.task_plans import router as task_plans_router  # noqa: E402
 from app.api.tool_result_blobs import router as tool_result_blobs_router  # noqa: E402
@@ -38,6 +39,7 @@ __all__ = [
     "documents_router",
     "users_router",
     "conversations_router",
+    "projects_router",
     "custom_agents_router",
     "custom_agents_conversation_router",
     "messages_router",

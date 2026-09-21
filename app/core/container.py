@@ -54,6 +54,7 @@ from app.repositories.hitl_interrupt import HITLInterruptRepository
 from app.repositories.message import MessageRepository
 from app.repositories.model_provider import ModelProviderRepository
 from app.repositories.model_usage import ModelUsageRepository
+from app.repositories.project import ProjectRepository
 from app.repositories.task_plan import TaskPlanRepository
 from app.repositories.tool_approval import ToolApprovalRepository
 from app.repositories.tool_approval_setting import ToolApprovalSettingRepository
@@ -86,6 +87,8 @@ from app.services.mcp_service import MCPService
 from app.services.message_service import MessageService
 from app.services.model_config_service import ModelConfigService
 from app.services.model_usage_service import ModelUsageService
+from app.services.project_context_service import ProjectContextService
+from app.services.project_service import ProjectService
 from app.services.provider_service import ProviderService
 from app.services.rag_cache import build_rag_exact_cache
 from app.services.rag_embedding_service import (
@@ -165,6 +168,7 @@ class Container(containers.DeclarativeContainer):
             "app.api.ai_sdk",
             "app.api.providers",
             "app.api.model_config",
+            "app.api.projects",
         ]
     )
 
@@ -303,6 +307,12 @@ class Container(containers.DeclarativeContainer):
 
     custom_agent_repository = providers.Factory(
         CustomAgentRepository,
+        session_factory=db.provided.session,
+        async_session_factory=db.provided.async_session,
+    )
+
+    project_repository = providers.Factory(
+        ProjectRepository,
         session_factory=db.provided.session,
         async_session_factory=db.provided.async_session,
     )
@@ -641,9 +651,22 @@ class Container(containers.DeclarativeContainer):
             workflow_runtime=workflow_runtime,
             conversation_repository=container.conversation_repository(),
             checkpointer=checkpointer,
+            project_context_service=container.project_context_service(),
         )
 
     ai_service = providers.ThreadSafeSingleton(_create_ai_service)
+
+    project_service = providers.Factory(
+        ProjectService,
+        repository=project_repository,
+        custom_agent_repository=custom_agent_repository,
+        conversation_validation_utils=conversation_validation_utils,
+    )
+
+    project_context_service = providers.Factory(
+        ProjectContextService,
+        project_repository=project_repository,
+    )
 
     conversation_service: providers.Provider[IConversationService] = providers.Factory(
         ConversationService,
@@ -652,6 +675,7 @@ class Container(containers.DeclarativeContainer):
         conversation_validation_utils=conversation_validation_utils,
         ai_service=ai_service,
         checkpoint_manager=checkpoint_manager,
+        project_service=project_service,
     )
 
     # Custom agents (per-user, per-conversation). generation_registry is the
@@ -699,6 +723,7 @@ class Container(containers.DeclarativeContainer):
         web_image_service=web_image_service,
         turn_coordinator=conversation_turn_coordinator,
         generation_control_service=generation_control_service,
+        project_context_service=project_context_service,
     )
 
     feedback_service: providers.Provider[IFeedbackService] = providers.Factory(

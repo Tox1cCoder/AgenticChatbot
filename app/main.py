@@ -27,6 +27,7 @@ from app.api import (
     messages_router,
     model_config_router,
     model_usage_router,
+    projects_router,
     providers_router,
     task_plans_router,
     tool_result_blobs_router,
@@ -396,6 +397,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(users_router)
     app.include_router(conversations_router)
+    app.include_router(projects_router)
     app.include_router(custom_agents_router)
     app.include_router(custom_agents_conversation_router)
     # AI SDK aliases: same handlers re-mounted under /ai.
