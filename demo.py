@@ -1268,6 +1268,64 @@ def set_conversation_custom_agents(
     )
 
 
+def list_projects() -> list[dict[str, Any]]:
+    """The signed-in user's projects, newest first."""
+    response = make_api_request("GET", "/projects")
+    if not response or not response.get("success"):
+        return []
+    return response.get("data") or []
+
+
+def get_project(project_id: str) -> dict[str, Any] | None:
+    response = make_api_request("GET", f"/projects/{project_id}")
+    if not response or not response.get("success"):
+        return None
+    return response.get("data")
+
+
+def create_project(
+    name: str, description: str | None = None, instructions: str | None = None
+) -> dict[str, Any] | None:
+    payload = {"name": name, "description": description, "instructions": instructions}
+    response = make_api_request("POST", "/projects", payload)
+    if not response or not response.get("success"):
+        return None
+    return response.get("data")
+
+
+def update_project(project_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+    response = make_api_request("PATCH", f"/projects/{project_id}", fields)
+    if not response or not response.get("success"):
+        return None
+    return response.get("data")
+
+
+def delete_project(project_id: str) -> bool:
+    response = make_api_request("DELETE", f"/projects/{project_id}")
+    return bool(response and response.get("success"))
+
+
+def set_project_custom_agents(project_id: str, custom_agent_ids: list[str]) -> bool:
+    response = make_api_request(
+        "PUT",
+        f"/projects/{project_id}/custom-agents",
+        {"customAgentIds": custom_agent_ids},
+    )
+    return bool(response and response.get("success"))
+
+
+def attach_conversation_to_project(project_id: str, conversation_id: str) -> bool:
+    response = make_api_request("PUT", f"/projects/{project_id}/conversations/{conversation_id}")
+    return bool(response and response.get("success"))
+
+
+def detach_conversation_from_project(project_id: str, conversation_id: str) -> bool:
+    response = make_api_request(
+        "DELETE", f"/projects/{project_id}/conversations/{conversation_id}"
+    )
+    return bool(response and response.get("success"))
+
+
 def _provider_model_options(options: dict[str, Any]) -> dict[str, list[str]]:
     providers: dict[str, list[str]] = {}
     for entry in options.get("providers") or []:
@@ -2331,6 +2389,9 @@ SESSION_STATE_DEFAULTS: dict[str, Callable[[], Any] | Any] = {
     "conversations_list": list,
     "conversations_loaded": lambda: False,
     "conversations_last_fetch_params": lambda: None,
+    "projects_list": list,
+    "projects_loaded": lambda: False,
+    "current_project_id": lambda: None,
     CONVERSATION_MANAGER_DIALOG_KEY: lambda: False,
     "show_instructions": lambda: False,
     "auth_token": lambda: None,
@@ -4048,6 +4109,7 @@ def get_conversations(
     latest_messages: int = 3,
     fetch_all_pages: bool = False,
     search: str | None = None,
+    project_id: str | None = None,
 ) -> dict[str, Any]:
     """Retrieve conversations with controlled pagination."""
     current_page = page
@@ -4061,6 +4123,8 @@ def get_conversations(
             params.extend([("include", "messages"), ("latestMessages", latest_messages)])
         if isinstance(search, str) and search.strip():
             params.append(("search", search.strip()))
+        if project_id:
+            params.append(("projectId", project_id))
         endpoint = f"/conversations/?{urlencode(params, doseq=True)}"
 
         response = make_api_request("GET", endpoint)
@@ -5580,6 +5644,24 @@ def render_login_page():
                                 st.rerun()
 
 
+def _load_projects_if_needed() -> None:
+    """Fetch the signed-in user's projects once per session (or after an
+    explicit invalidation), mirroring the ``conversations_loaded`` pattern.
+
+    Called from ``main()`` rather than from inside ``render_sidebar()`` so
+    that tests exercising ``render_sidebar()`` in isolation (without a full
+    ``main()`` pass) do not incur a network call as a side effect of simply
+    rendering the sidebar.
+    """
+    if (
+        not st.session_state.projects_loaded
+        and st.session_state.current_user_id
+        and st.session_state.auth_token
+    ):
+        st.session_state.projects_list = list_projects()
+        st.session_state.projects_loaded = True
+
+
 def render_sidebar():
     with st.sidebar:
         st.markdown("# Multi-agent ChatBot")
@@ -5587,6 +5669,7 @@ def render_sidebar():
         # New chat button
         if st.button("New Chat", width="stretch", type="primary"):
             st.session_state.current_conversation_id = "pending_new"
+            st.session_state.current_project_id = None
             st.session_state.active_view = "chat"
             close_conversation_manager()
             reset_conversation_state()
@@ -5599,6 +5682,28 @@ def render_sidebar():
             else:
                 open_conversation_manager()
             st.rerun()
+
+        st.markdown("### :material/folder: Projects")
+        if st.button("New Project", width="stretch"):
+            st.session_state.current_project_id = None
+            st.session_state.active_view = "project"
+            st.rerun()
+
+        for project in st.session_state.projects_list:
+            project_id = project.get("id")
+            is_active_project = (
+                st.session_state.active_view == "project"
+                and st.session_state.current_project_id == project_id
+            )
+            if st.button(
+                project.get("name") or "Untitled project",
+                key=f"project_nav_{project_id}",
+                width="stretch",
+                type="primary" if is_active_project else "secondary",
+            ):
+                st.session_state.current_project_id = project_id
+                st.session_state.active_view = "project"
+                st.rerun()
 
         st.divider()
 
@@ -5671,6 +5776,143 @@ def render_sidebar():
                     st.session_state.message_image_thumbnails = {}
                     st.toast("Goodbye!", icon=":material/waving_hand:")
                     st.rerun()
+
+
+def render_project_view() -> None:
+    """Full-page project settings: create, edit, and manage one project.
+
+    Rendered as a plain page and never inside a Streamlit tab container.
+    Streamlit only executes the currently open tab, so a tab switch
+    garbage-collects widget-keyed session state for the other tabs — an
+    unsaved edit to the 8000-character instructions field would silently
+    vanish. A dedicated page with an explicit Save button avoids that.
+    """
+    if not (st.session_state.get("current_user_id") and st.session_state.get("auth_token")):
+        st.info("Sign in to manage projects.")
+        return
+
+    if st.button(":material/arrow_back: Back to chat"):
+        st.session_state.active_view = "chat"
+        st.rerun()
+
+    project_id = st.session_state.get("current_project_id")
+    project: dict[str, Any] | None = None
+    if project_id:
+        project = get_project(project_id)
+        if not project:
+            st.error("This project could not be found. It may have been deleted.")
+            st.session_state.current_project_id = None
+            return
+
+    is_new = project is None
+    widget_scope = project_id or "new"
+    st.markdown("# New Project" if is_new else f"# {project.get('name') or 'Project'}")
+
+    name = st.text_input(
+        "Name",
+        value="" if is_new else (project.get("name") or ""),
+        key=f"project_name_{widget_scope}",
+    )
+    description = st.text_area(
+        "Description",
+        value="" if is_new else (project.get("description") or ""),
+        key=f"project_description_{widget_scope}",
+    )
+    instructions = st.text_area(
+        "Instructions",
+        value="" if is_new else (project.get("instructions") or ""),
+        max_chars=8000,
+        help=(
+            "Applied to every conversation in this project, alongside any "
+            "conversation-specific persona."
+        ),
+        key=f"project_instructions_{widget_scope}",
+    )
+
+    all_agents = list_custom_agents()
+    label_by_id = {a["id"]: a.get("name", a["id"]) for a in all_agents}
+    default_agent_ids = []
+    if project and project.get("customAgents"):
+        default_agent_ids = [
+            agent.get("id") for agent in project["customAgents"] if agent.get("id") in label_by_id
+        ]
+    selected_agent_ids = st.multiselect(
+        "Default agents for new conversations in this project",
+        list(label_by_id.keys()),
+        default=default_agent_ids,
+        format_func=lambda i: label_by_id.get(i, i),
+        key=f"project_agents_{widget_scope}",
+    )
+
+    if st.button("Save", type="primary", key=f"project_save_{widget_scope}"):
+        if not name.strip():
+            st.error("Name is required.")
+        elif is_new:
+            created = create_project(
+                name.strip(), description.strip() or None, instructions.strip() or None
+            )
+            if created:
+                set_project_custom_agents(created["id"], selected_agent_ids)
+                st.session_state.current_project_id = created["id"]
+                st.session_state.projects_loaded = False
+                st.success("Project created.")
+                st.rerun()
+            else:
+                st.error("Could not create the project.")
+        else:
+            updated = update_project(
+                project_id,
+                {
+                    "name": name.strip(),
+                    "description": description.strip() or None,
+                    "instructions": instructions.strip() or None,
+                },
+            )
+            if updated is not None:
+                set_project_custom_agents(project_id, selected_agent_ids)
+                st.session_state.projects_loaded = False
+                st.success("Project saved.")
+                st.rerun()
+            else:
+                st.error("Could not save the project.")
+
+    if is_new:
+        return
+
+    if st.button("Delete project", key=f"project_delete_{widget_scope}"):
+        if delete_project(project_id):
+            st.session_state.current_project_id = None
+            st.session_state.projects_loaded = False
+            st.session_state.active_view = "chat"
+            st.toast("Project deleted.", icon=":material/check_circle:")
+            st.rerun()
+        else:
+            st.error("Could not delete the project.")
+
+    st.divider()
+    st.markdown("### Conversations in this project")
+
+    if st.button("New chat in this project", key=f"project_new_chat_{widget_scope}"):
+        st.session_state.current_conversation_id = "pending_new"
+        st.session_state.active_view = "chat"
+        reset_conversation_state()
+        st.rerun()
+
+    conversations_response = get_conversations(project_id=project_id, fetch_all_pages=True)
+    conversations = (conversations_response or {}).get("data", {}).get("items") or []
+    if not conversations:
+        st.caption("No conversations in this project yet.")
+    for conv in conversations:
+        if st.button(
+            format_conversation_title(conv.get("title", "New Conversation")),
+            key=f"project_conv_{conv.get('id')}",
+            width="stretch",
+        ):
+            st.session_state.current_conversation_id = conv.get("id")
+            st.session_state.active_view = "chat"
+            close_conversation_manager()
+            reset_conversation_state()
+            st.rerun()
 
 
 @st.cache_data(show_spinner=False)
@@ -10839,6 +11081,9 @@ def render_chat_view():
                         persona_payload = normalize_persona_input(pending_persona)
                         if persona_payload:
                             conversation_data["personaPrompt"] = persona_payload
+                        pending_project_id = st.session_state.get("current_project_id")
+                        if pending_project_id:
+                            conversation_data["projectId"] = pending_project_id
 
                         status.update(label="Creating conversation...", state="running")
                         conv_response = make_api_request(
@@ -11232,6 +11477,37 @@ def render_manage_modal():
                             st.caption(f"{sender_tag}: {preview}...")
                     else:
                         st.caption("No messages")
+
+                    # Project membership
+                    if conv_id is not None:
+                        current_project_value = conv.get("projectId")
+                        project_ids: list[str | None] = [None] + [
+                            p.get("id") for p in st.session_state.get("projects_list", [])
+                        ]
+                        project_names = {
+                            p.get("id"): (p.get("name") or "Untitled project")
+                            for p in st.session_state.get("projects_list", [])
+                        }
+                        try:
+                            project_index = project_ids.index(current_project_value)
+                        except ValueError:
+                            project_index = 0
+                        selected_project_id = st.selectbox(
+                            "Project",
+                            options=project_ids,
+                            index=project_index,
+                            format_func=lambda pid, _names=project_names: (
+                                "No project" if pid is None else _names.get(pid, pid)
+                            ),
+                            key=f"conversation_manager_project_{conv_id_str}_{idx}",
+                        )
+                        if selected_project_id != current_project_value:
+                            if selected_project_id is None:
+                                detach_conversation_from_project(current_project_value, conv_id)
+                            else:
+                                attach_conversation_to_project(selected_project_id, conv_id)
+                            st.session_state.conversations_loaded = False
+                            st.rerun()
 
                     # Actions
                     col1, col2 = st.columns(2)
@@ -12880,6 +13156,7 @@ def main():
     usage_enabled = get_usage_capability_enabled()
     st.session_state.usage_capability_enabled = usage_enabled
 
+    _load_projects_if_needed()
     render_sidebar()
 
     # Show manage modal if active
@@ -12888,7 +13165,13 @@ def main():
     # Show chunk preview modal if active
     render_chunk_preview_modal()
 
-    _render_main_workspace_tabs(usage_enabled=usage_enabled)
+    if st.session_state.active_view == "project":
+        # Full page, not a workspace tab: a project can hold an 8000-character
+        # instructions field, and Streamlit garbage-collects widget state for
+        # tabs that are not open, which would silently drop an unsaved edit.
+        render_project_view()
+    else:
+        _render_main_workspace_tabs(usage_enabled=usage_enabled)
 
 
 if __name__ == "__main__":
