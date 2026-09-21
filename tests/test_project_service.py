@@ -71,8 +71,16 @@ def service_env():
         yield service, owner_id, other_id, agent_id, owner_conversation, other_conversation
     finally:
         with sf() as s:
-            s.execute(delete(ConversationCustomAgent))
-            s.execute(delete(ProjectCustomAgent))
+            s.execute(
+                delete(ConversationCustomAgent).where(
+                    ConversationCustomAgent.owner_id.in_((owner_id, other_id))
+                )
+            )
+            s.execute(
+                delete(ProjectCustomAgent).where(
+                    ProjectCustomAgent.owner_id.in_((owner_id, other_id))
+                )
+            )
             for uid in (owner_id, other_id):
                 s.execute(delete(Conversation).where(Conversation.owner_id == uid))
                 s.execute(delete(Project).where(Project.owner_id == uid))
