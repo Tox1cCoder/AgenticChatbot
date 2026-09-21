@@ -28,6 +28,21 @@ class ProjectUpdate(BaseModel):
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
+    @field_validator("name")
+    @classmethod
+    def _name_is_not_nullable(cls, value: str | None) -> str:
+        """``name`` is a required, non-nullable column.
+
+        ``exclude_unset`` lets the field be omitted (no-op), but an explicit
+        ``null`` would otherwise reach ``setattr(project, "name", None)`` and
+        fail as an unhandled ``IntegrityError`` (500) instead of a validation
+        error. Pydantic skips this validator when the field is omitted
+        (``validate_default`` defaults to ``False``), so omission still works.
+        """
+        if value is None:
+            raise ValueError("name cannot be null; omit it to leave it unchanged")
+        return value
+
 
 class ProjectRead(BaseModel):
     model_config = ConfigDict(

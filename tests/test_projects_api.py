@@ -17,11 +17,13 @@ from app.models.conversation import Conversation
 from app.models.custom_agent import ConversationCustomAgent, CustomAgent
 from app.models.project import Project, ProjectCustomAgent
 from app.models.user import User
+from app.utils.exception_handler import register_exception_handlers
 
 
 def _build_app(user_id):
     app = FastAPI()
     app.include_router(router)
+    register_exception_handlers(app)
     app.dependency_overrides[get_current_user_id] = lambda: user_id
     return app
 
@@ -90,6 +92,21 @@ def test_instructions_over_the_cap_are_rejected(api):
     response = owner.post("/projects", json={"name": "X", "instructions": "P" * 8001})
 
     assert response.status_code == 422
+    assert response.json()["code"] == "invalid_input"
+
+
+def test_patch_with_an_explicit_null_name_is_a_422_not_a_500(api):
+    """``name`` is a required, non-nullable column. Sending an explicit
+    ``null`` used to reach ``setattr(project, "name", None)`` and fail as an
+    unhandled ``IntegrityError`` (500) instead of a validation error."""
+    owner, *_ = api
+    project_id = owner.post("/projects", json={"name": "Roadmap"}).json()["data"]["id"]
+
+    response = owner.patch(f"/projects/{project_id}", json={"name": None})
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "invalid_input"
+    assert owner.get(f"/projects/{project_id}").json()["data"]["name"] == "Roadmap"
 
 
 def test_attach_then_detach_a_conversation(api):
@@ -114,12 +131,16 @@ def test_detaching_from_the_wrong_project_is_404(api):
     response = owner.delete(f"/projects/{second}/conversations/{conversation_id}")
 
     assert response.status_code == 404
+    assert response.json()["code"] == "PROJECT_CONVERSATION_NOT_FOUND"
 
 
 def test_missing_project_is_404(api):
     owner, *_ = api
 
-    assert owner.get(f"/projects/{uuid4()}").status_code == 404
+    response = owner.get(f"/projects/{uuid4()}")
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "PROJECT_NOT_FOUND"
 
 
 def test_another_user_cannot_read_the_project(api):
@@ -127,16 +148,28 @@ def test_another_user_cannot_read_the_project(api):
     owner, other, *_ = api
     project_id = owner.post("/projects", json={"name": "Roadmap"}).json()["data"]["id"]
 
-    assert other.get(f"/projects/{project_id}").status_code == 403
+    response = other.get(f"/projects/{project_id}")
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "PROJECT_FORBIDDEN"
 
 
 def test_another_user_cannot_attach_to_the_project(api):
+    """Project-ownership enforcement specifically, not conversation-ownership.
+
+    ``conversation_id`` belongs to ``owner`` here, so a version of
+    ``attach_conversation`` that skipped its own ``require_owned`` call would
+    still return 403 — just from the next line's conversation-ownership
+    check, under a different error code. Asserting ``PROJECT_FORBIDDEN``
+    (not just the status code) is what actually pins the project check.
+    """
     owner, other, _oid, _otid, conversation_id = api
     project_id = owner.post("/projects", json={"name": "Roadmap"}).json()["data"]["id"]
 
-    assert (
-        other.put(f"/projects/{project_id}/conversations/{conversation_id}").status_code == 403
-    )
+    response = other.put(f"/projects/{project_id}/conversations/{conversation_id}")
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "PROJECT_FORBIDDEN"
 
 
 def test_another_user_cannot_attach_the_owners_conversation_to_their_own_project(api):
@@ -146,10 +179,14 @@ def test_another_user_cannot_attach_the_owners_conversation_to_their_own_project
     response = other.put(f"/projects/{their_project}/conversations/{conversation_id}")
 
     assert response.status_code == 403
+    assert response.json()["code"] == "CONVERSATION_ACCESS_DENIED"
 
 
 def test_another_user_cannot_delete_the_project(api):
     owner, other, *_ = api
     project_id = owner.post("/projects", json={"name": "Roadmap"}).json()["data"]["id"]
 
-    assert other.delete(f"/projects/{project_id}").status_code == 403
+    response = other.delete(f"/projects/{project_id}")
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "PROJECT_FORBIDDEN"

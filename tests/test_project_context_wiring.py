@@ -205,3 +205,81 @@ async def test_resume_message_creation_stream_persists_the_wired_instruction():
     assert len(persisted) == 1
     assert persisted[0]["sanitized_persona"] == LONG_INSTRUCTION
     assert len(persisted[0]["sanitized_persona"]) == 16060
+
+
+# ---------------------------------------------------------------------------
+# Container-wiring regression guards (Task 7 fix round, finding B1).
+#
+# None of the tests above construct MessageService, ConversationService, or
+# AIService through the actual container — they build doubles with __new__
+# or pass a stub resolver directly. That proves the *branches* inside those
+# classes are correct, but nothing proves the container's Factory providers
+# still pass ``project_context_service``/``project_service`` at all. Deleting
+# any one of those three keyword arguments from app/core/container.py leaves
+# every test above green (their doubles never touch the container) and
+# leaves tests/test_projects_api.py green (it builds a bare FastAPI() and
+# never constructs MessageService or AIService either) — production would
+# silently fall back to persona-only prompts while every other project
+# feature (CRUD, attach/detach, agent seeding) kept working normally.
+#
+# These follow the same source-introspection pattern as
+# test_the_container_wires_a_durable_turn_coordinator_into_message_service
+# and test_the_container_wires_the_generation_control_service in
+# tests/test_workflow_concurrency.py: read the container's own source and
+# assert the wiring keyword is actually present in the right provider block.
+# ---------------------------------------------------------------------------
+
+
+def test_the_container_wires_project_context_service_into_message_service():
+    """Without this, every turn on a project conversation silently reverts
+    to persona-only prompts: project instructions stop reaching the model,
+    while project CRUD and conversation attach/detach keep working fine."""
+    import inspect
+
+    from app.core import container as container_module
+
+    assert "project_context_service" in inspect.signature(MessageService.__init__).parameters
+
+    source = inspect.getsource(container_module)
+    message_service_block = source.split("message_service: providers.Provider")[1].split(
+        "feedback_service"
+    )[0]
+    assert "project_context_service=project_context_service" in message_service_block
+
+
+def test_the_container_wires_project_service_into_conversation_service():
+    """Without this, ConversationService.create_conversation can never
+    validate a caller-supplied projectId or seed the project's default
+    agents onto a newly created conversation — project_id is stored but
+    silently inert, and no test elsewhere in the suite would notice."""
+    import inspect
+
+    from app.core import container as container_module
+    from app.services.conversation_service import ConversationService
+
+    assert "project_service" in inspect.signature(ConversationService.__init__).parameters
+
+    source = inspect.getsource(container_module)
+    conversation_service_block = source.split("conversation_service: providers.Provider")[
+        1
+    ].split("custom_agent_service = providers.Factory")[0]
+    assert "project_service=project_service" in conversation_service_block
+
+
+def test_the_container_wires_project_context_service_into_ai_service():
+    """Without this, AIService._prepare_request falls back to the
+    conversation's raw persona_prompt: project instructions never reach the
+    model on this path even though the HTTP surface for projects works."""
+    import inspect
+
+    from app.core import container as container_module
+
+    assert "project_context_service" in inspect.signature(AIService.__init__).parameters
+
+    source = inspect.getsource(container_module)
+    create_ai_service_block = source.split("def _create_ai_service")[1].split(
+        "ai_service = providers.ThreadSafeSingleton"
+    )[0]
+    assert (
+        "project_context_service=container.project_context_service()" in create_ai_service_block
+    )

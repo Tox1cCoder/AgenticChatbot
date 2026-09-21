@@ -123,7 +123,7 @@ Response `data` is a complete `Project` with `conversationCount: 0` and `customA
     "deletedAt": null,
     "ownerId": "0c73f7d3-5aca-4a7e-8b71-4cf802f4d901",
     "name": "Roadmap",
-    "description": null,
+    "description": "Q3 planning conversations.",
     "instructions": "Be brief.",
     "conversationCount": 0,
     "customAgents": null
@@ -166,11 +166,11 @@ Content-Type: application/json
 { "name": "Renamed" }
 ```
 
-Body accepts any subset of `name`, `description`, `instructions`. Omitted fields are unchanged; the schema uses `exclude_unset`, so there is no way to explicitly clear `description`/`instructions` back to `null` through this endpoint today (sending `null` explicitly does clear it, since these fields are optional — only *omission* is a no-op).
+Body accepts any subset of `name`, `description`, `instructions`. Omitted fields are unchanged (the schema uses `exclude_unset`). Sending `null` explicitly clears `description` or `instructions` back to `null`. `name` is not nullable: sending `{"name": null}` is rejected with `422 invalid_input` rather than clearing it — omit `name` to leave it unchanged, or send a non-empty string to rename.
 
 Response `data` is the updated `Project` (`customAgents: null`, matching the list/create shape — this endpoint does not include agent detail).
 
-Errors match [Read one project](#read-one-project): `404 PROJECT_NOT_FOUND` / `403 PROJECT_FORBIDDEN`.
+Errors match [Read one project](#read-one-project): `404 PROJECT_NOT_FOUND` / `403 PROJECT_FORBIDDEN`. An explicit `null` `name` is `422 invalid_input`, not a 403/404.
 
 ## Delete
 
@@ -230,7 +230,8 @@ Points the conversation at this project and seeds the project's current default 
 Errors:
 
 - `403 PROJECT_FORBIDDEN` if the caller does not own the *project*.
-- `403 CONVERSATION_ACCESS_DENIED` (from the shared conversation-validation path) if the caller does not own the *conversation*. A conversation owned by someone else cannot be attached to your project even if you own the project.
+- `404 CONVERSATION_NOT_FOUND` (from the shared conversation-validation path, `validate_conversation_exists`) if `conversationId` does not identify any conversation.
+- `403 CONVERSATION_ACCESS_DENIED` (same shared path, `validate_user_owns_conversation`) if the caller does not own the *conversation*. A conversation owned by someone else cannot be attached to your project even if you own the project.
 
 ### Detach
 
@@ -242,7 +243,7 @@ Releases the conversation from the project (`projectId` becomes `null`). The age
 
 Errors:
 
-- `403 PROJECT_FORBIDDEN` / `403 CONVERSATION_ACCESS_DENIED` as above.
+- `403 PROJECT_FORBIDDEN` / `404 CONVERSATION_NOT_FOUND` / `403 CONVERSATION_ACCESS_DENIED` as above.
 - `404 PROJECT_CONVERSATION_NOT_FOUND` if the conversation is not currently a member of *this* project — including when it was never attached, or is currently attached to a different project. Detach from the wrong project does not silently succeed and does not touch the conversation's actual project.
 
 ## Seeding
@@ -310,8 +311,9 @@ When a conversation belongs to a live project, the system instruction sent to th
 | `403` | `PROJECT_FORBIDDEN` | Project exists but belongs to another user; or the custom-agent ids in a `PUT .../custom-agents` body are not all owned by the caller. | Do not expose or cache the resource. Return to the project list. |
 | `403` | `CONVERSATION_ACCESS_DENIED` | The conversation in an attach/detach call belongs to another user. | Return to the conversation list. |
 | `404` | `PROJECT_NOT_FOUND` | Missing or soft-deleted project. | Remove it from local lists and selections. |
+| `404` | `CONVERSATION_NOT_FOUND` | The conversation in an attach/detach call does not exist. | Close the conversation and preserve any unsent draft. |
 | `404` | `PROJECT_CONVERSATION_NOT_FOUND` | Detach where the conversation is not currently a member of that project. | Refetch the conversation's actual `projectId` and reconcile local state; do not assume detach succeeded. |
-| `422` | `invalid_input` | `name`/`description`/`instructions` over length, invalid UUID, duplicate ids in `customAgentIds`. | Map `error` paths to fields where possible; keep form state. |
+| `422` | `invalid_input` | `name`/`description`/`instructions` over length, invalid UUID, duplicate ids in `customAgentIds`, or an explicit `null` `name` on update. | Map `error` paths to fields where possible; keep form state. |
 | `500` | `internal_server_error` | Unexpected backend failure. | Keep unsaved state, show a generic retry action. |
 
 ## Recommended frontend state model

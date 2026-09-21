@@ -42,8 +42,9 @@ class ConversationService(IConversationService):
         # conversation is deleted. Wired through the DI container.
         self.ai_service = ai_service
         self.checkpoint_manager = checkpoint_manager
-        # Optional: not yet wired through the DI container (Task 7). When
-        # absent, project_id on create is stored but not validated or seeded.
+        # Optional: wired through the DI container (Task 7). When absent
+        # (e.g. tests constructing this service directly), project_id on
+        # create is stored but not validated or seeded.
         self.project_service = project_service
 
     def _convert_to_read_schema(
