@@ -64,17 +64,27 @@ not proof that Brave cannot retrieve useful images:
 `BraveImageSearchProvider` will forward locale as Brave `country` and
 `search_lang` arguments. When `include_domains` is present, it will first run
 the ordinary query and retain only results whose source domain is allowed. If
-that does not fill the configured candidate pool, it will probe at most the
-first three allowed domains individually with Brave's `site:` operator and
-merge the allowed results. It will not fall back to disallowed domains because
-the existing request contract defines `include_domains` as a restriction.
+that does not fill the requested count, it will make **one** supplemental probe
+against the first allowed domain with Brave's `site:` operator and merge the
+allowed results. It will not fall back to disallowed domains because the
+existing request contract defines `include_domains` as a restriction.
+
+Every `include_domains` entry is normalized to a bare host before it is
+compared or probed with, because the field carries whatever the model typed --
+often a full URL.
 
 Results will be deduplicated by canonical source URL plus image URL. The
 implementation will avoid one combined multi-domain query because live
 verification showed that a broad `OR site:` expression was dominated by
-unrelated results from one allowed domain. The three-probe ceiling prevents a
-large domain list from turning one product tool call into unbounded provider
-fan-out.
+unrelated results from one allowed domain.
+
+**One probe, not three.** Brave's image endpoint has a 2.5s timeout
+(`brave_image_search_timeout_seconds`) and the free tier allows roughly one
+request per second, while the whole tool call shares a 30s soft timeout with
+the parallel Tavily text search. Three supplemental probes would spend up to
+10s sequentially and risk HTTP 429; issuing them concurrently trades the
+latency for the rate limit. One probe covers the real case -- the model names
+one authoritative site -- at a worst case of two calls and ~5s.
 
 `ProviderImageCandidate` will retain Brave's normalized confidence and source
 domain. No custom semantic score or uncalibrated relevance cutoff will be
@@ -87,9 +97,16 @@ introduced.
 1. **Citation registry** — immutable `S#` records accumulated for the turn.
    IDs are never reassigned or reused.
 2. **Candidate catalog** — bounded metadata from successful image searches.
-   It retains at most `web_research_max_candidate_pool` candidates from each of
-   at most `research_max_image_searches_per_turn` search cohorts, using the
-   existing settings rather than a new limit.
+   It takes at most `web_research_max_candidate_pool` candidates from each
+   cohort and retains at most `web_research_max_candidate_catalog` (default 24)
+   across the whole turn.
+
+   This is a new setting rather than a product of the existing ones.
+   `research_max_image_searches_per_turn` bounds nothing today:
+   `ResearchBudget.reserve_image_search`, `may_image_search`, and
+   `record_image_search` have no production callers, so deriving catalog
+   capacity from it would dress an unenforced number as a budget. Wiring the
+   image-search budget is separate work.
 3. **Active vision window** — at most four candidates, or six for a gallery,
    whose validated previews are attached to the next model call.
 
@@ -105,16 +122,28 @@ Candidate ordering will be a small deterministic function in the existing
 web-research service, not a new class or module. It will use only signals the
 provider already supplies:
 
-1. source-domain match against the request's preferred domains;
+1. whether declared dimensions are adequate for display (640px longest edge);
 2. Brave confidence (`high`, `medium`, `low`, unknown);
-3. whether declared dimensions are adequate for display;
+3. source-domain match against the request's preferred domains;
 4. pixel area when dimensions are known;
 5. original Brave rank as the final tie-breaker.
+
+Adequacy leads and provenance sits below it. The provider filters a
+domain-restricted cohort strictly, so every candidate it produced is preferred;
+if that flag led, any candidate from a restricted search would outrank every
+candidate from an unrestricted one, and a 200x150 logo from the named site
+would displace a 4000x3000 photo. Provenance breaks ties between comparable
+images; it does not buy a small one a window slot.
 
 The adequate-display check is a quality bucket, not a hard rejection. A small
 image may remain when it is the only relevant result, but it cannot outrank an
 otherwise comparable full-size image merely because it appeared two provider
 positions earlier.
+
+This ordering is *quality only*. It cannot distinguish a team photo from a
+roster infographic, and a larger graphic will outrank a smaller photo. Matching
+the requested visual form is the answer model's judgement, made from the pixels
+plus the literal representation contract below.
 
 After each image search, the session merges the new cohort into the catalog,
 deduplicates it, recomputes the active window, retains already-prepared images
@@ -142,8 +171,22 @@ titles and descriptions remain untrusted evidence rather than instructions.
 ### Compact evidence projection
 
 The public result for one `web_search` operation will contain only sources
-newly admitted by that operation. Source IDs remain turn-stable, and earlier
-tool results remain in model history.
+newly admitted by that operation, named explicitly on the bundle rather than
+inferred from `query_index` -- a page the model opens belongs to the operation
+that opened it even though an earlier search admitted it. Source IDs remain
+turn-stable, and earlier tool results remain in model history. Snippets are
+bounded by source status, 1,200 characters for a search result and 3,000 for a
+deliberately opened page, so the deep-read path is not gutted by a triage
+bound.
+
+### Three audiences for the registry
+
+The complete registry, the operation delta, and the published list are three
+different questions. The registry stays complete so grounding resolves any
+`S#` the model was offered; the delta is what one tool result returns; and
+`answer_sources` -- text pages, opened pages, and image pages backing an active
+image -- is what a reader is shown. Without the third, a gallery turn would
+show the reader roughly two dozen image-host pages it never cited.
 
 The synthetic evidence message will retain the complete source-ID, title, and
 URL mapping needed for image attribution, but it will not repeat full source
@@ -195,5 +238,7 @@ of small social thumbnails, a hair close-up, and a Windows settings screenshot.
 - The selected rich item still publishes through `/web-images/{id}` with its
   original validated resolution.
 - A second search response does not repeat every previous source snippet.
+- The published source list is narrower than the registry, while every `S#` the
+  model was offered still resolves for citation.
 - Focused web-research, grounding, rich-image lifecycle, and model-context tests
   pass without adding a parallel ranking or rendering subsystem.

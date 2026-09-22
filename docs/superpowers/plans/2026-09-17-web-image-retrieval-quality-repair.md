@@ -48,7 +48,7 @@ The nine focused web-research test files pass at `47bef3cc` (91 tests). Any fail
 
 **Why one probe, not three.** Brave's image endpoint has a 2.5s timeout (`brave_image_search_timeout_seconds`) and the free tier allows roughly one request per second, while the whole tool call has a 30s soft timeout shared with the parallel Tavily text search. Four sequential calls spend up to 10s and risk HTTP 429; issuing them concurrently trades the latency for the rate limit. One supplemental probe against the first allowed domain covers the real case — the model names one authoritative site — at a worst case of two calls and ~5s.
 
-- [ ] **Step 1: Add failing host-matching tests in the query contract**
+- [x] **Step 1: Add failing host-matching tests in the query contract**
 
 In `tests/test_web_query_contract.py`, assert the shared helpers:
 
@@ -63,7 +63,7 @@ assert host_matches("", "t1.gg") is False
 
 `host_matches` normalizes **both** sides through `bare_host`, then strips a leading `www.` from the allowed side, so an entry the model wrote as a URL still matches.
 
-- [ ] **Step 2: Add failing adapter tests for locale forwarding and domain enforcement**
+- [x] **Step 2: Add failing adapter tests for locale forwarding and domain enforcement**
 
 Replace the one-payload `_Tool` test double with a call-recording sequence double while retaining compatibility with existing tests:
 
@@ -98,7 +98,7 @@ assert all("reddit.com" not in image.source_url for image in images)
 
 Also assert that provider `confidence`, declared dimensions, and provider rank survive normalization.
 
-- [ ] **Step 3: Add failing tests for bounded probing and deduplication**
+- [x] **Step 3: Add failing tests for bounded probing and deduplication**
 
 Cover these cases:
 
@@ -119,7 +119,7 @@ request = ResearchRequest(
 - An `include_domains` entry the model wrote as a full URL still restricts and still probes correctly.
 - With no `include_domains`, the adapter makes exactly one call and preserves current behavior.
 
-- [ ] **Step 4: Run provider and contract tests and verify RED**
+- [x] **Step 4: Run provider and contract tests and verify RED**
 
 Run:
 
@@ -129,7 +129,7 @@ Run:
 
 Expected: `bare_host`/`host_matches` do not exist, locale and domain constraints are not forwarded, no supplemental probe occurs, and quality metadata is discarded.
 
-- [ ] **Step 5: Publish the shared host helpers**
+- [x] **Step 5: Publish the shared host helpers**
 
 In `web_query_contract.py`, rename `_bare_host` to `bare_host`, update its internal callers, and add:
 
@@ -146,7 +146,7 @@ def host_matches(host: str, allowed: str) -> bool:
 
 Add both names to `__all__`.
 
-- [ ] **Step 6: Extend the provider-neutral candidate contract**
+- [x] **Step 6: Extend the provider-neutral candidate contract**
 
 Add only these two fields to the current contract; leave all current fields in
 place:
@@ -158,7 +158,7 @@ source_domain: str | None = Field(default=None, max_length=253)
 
 Do not introduce a confidence enum: Brave values may evolve, while the session ranking deliberately maps only known values and treats everything else as unknown.
 
-- [ ] **Step 7: Implement locale parsing and strict domain filtering in the Brave adapter**
+- [x] **Step 7: Implement locale parsing and strict domain filtering in the Brave adapter**
 
 Add a module logger to `providers.py` (it currently has none):
 
@@ -210,7 +210,7 @@ source_domain=str(
 ) or None,
 ```
 
-- [ ] **Step 8: Verify provider behavior and static checks**
+- [x] **Step 8: Verify provider behavior and static checks**
 
 Run:
 
@@ -222,7 +222,7 @@ git diff --check
 
 Expected: all selected tests and checks pass.
 
-- [ ] **Step 9: Commit provider fidelity**
+- [x] **Step 9: Commit provider fidelity**
 
 ```powershell
 git add -- app/ai/web_query_contract.py app/ai/web_research/contracts.py app/ai/web_research/providers.py tests/test_web_research_providers.py tests/test_web_query_contract.py tests/fixtures/web_research/brave_images_mixed_domains.json tests/fixtures/web_research/brave_images_t1_official.json
@@ -245,6 +245,7 @@ git commit -m "fix: preserve image search constraints"
 - Modify: `tests/test_web_research_contracts.py`
 - Modify: `tests/test_web_image_capacity_and_resolution.py`
 - Modify: `tests/test_web_research_images.py`
+- Modify: `tests/test_web_research_service.py`
 
 **Interfaces:**
 - `SourceRegistry.admit()` returns only records newly admitted by that call; `records` remains the complete stable registry.
@@ -255,7 +256,7 @@ git commit -m "fix: preserve image search constraints"
 
 **Why an explicit catalog setting.** The obvious source for this bound, `ResearchBudget.max_image_searches`, does not bound anything: `reserve_image_search`, `may_image_search`, and `record_image_search` have **no production callers** — only `tests/test_research_budget.py` — so nothing caps how many image searches a turn makes. Deriving catalog capacity from it would dress an unenforced number as a budget. Configure the catalog directly instead. Wiring the image-search budget is out of scope for this plan.
 
-- [ ] **Step 1: Write the failing source-registry delta test**
+- [x] **Step 1: Write the failing source-registry delta test**
 
 Add to `tests/test_web_source_registry.py`:
 
@@ -275,9 +276,9 @@ def test_admit_returns_only_the_current_delta() -> None:
     assert [record.source_id for record in registry.records] == ["S1", "S2"]
 ```
 
-No production caller and no existing test reads `admit()`'s return value for the complete set — all four call sites in `service.py` discard it, `import_records()` re-resolves each URL, and both existing registry tests already index `[0]`. Nothing else needs updating.
+No production caller and no existing test reads `admit()`'s return value for the complete set — all three call sites in `service.py` discard it (the fourth caller is `SourceRegistry.import_records`, which re-resolves each URL), and both existing registry tests already index `[0]`. Nothing else needs updating.
 
-- [ ] **Step 2: Write failing active-window regression tests**
+- [x] **Step 2: Write failing active-window regression tests**
 
 Build deterministic fake image providers/candidates in `tests/test_web_image_capacity_and_resolution.py`. Cover all of these in two searches on one session:
 
@@ -293,7 +294,7 @@ Build deterministic fake image providers/candidates in `tests/test_web_image_cap
 
 Use fake bytes and the existing recording image service; do not make network calls.
 
-- [ ] **Step 3: Update the existing capacity assertions this task invalidates**
+- [x] **Step 3: Update the existing capacity assertions this task invalidates**
 
 Two assertions in `tests/test_web_image_capacity_and_resolution.py` encode the old one-cohort arithmetic and must move with the design, not be worked around:
 
@@ -302,7 +303,7 @@ Two assertions in `tests/test_web_image_capacity_and_resolution.py` encode the o
 
 **Define the omission counter once, here.** `omitted_image_count` means *candidates this session will never offer the model*: candidates beyond `max_candidate_pool` for their cohort, candidates past the catalog capacity, candidates whose source page could not be admitted, candidates whose fetch or validation failed, and duplicate digests. A candidate held in the catalog but outside the current active window is **not** omitted. Record this sentence as a comment above the counter.
 
-- [ ] **Step 4: Run catalog tests and verify RED**
+- [x] **Step 4: Run catalog tests and verify RED**
 
 Run:
 
@@ -312,7 +313,7 @@ Run:
 
 Expected: repeated searches cannot improve a full first window, provider rank wins over quality, and `admit()` returns the whole registry. Note that "IDs can be reused through `len(prepared_images) + 1`" is **not** a current failure — nothing removes from `prepared_images` today, so IDs are contiguous. It is a defect this task's eviction would introduce, which Step 8 must prevent; write it as a regression test, not as a RED expectation.
 
-- [ ] **Step 5: Add the catalog capacity setting**
+- [x] **Step 5: Add the catalog capacity setting**
 
 In `config.py`, beside `web_research_max_candidate_pool`:
 
@@ -322,7 +323,7 @@ web_research_max_candidate_catalog: int = Field(default=24, ge=4, le=64)
 
 Thread it through `container.py` as `max_candidate_catalog=providers.Object(settings.web_research_max_candidate_catalog)`, accept it in `WebResearchService.__init__` as `max_candidate_catalog: int = 24` stored with `max(1, int(...))`, and add `assert fields["web_research_max_candidate_catalog"].default == 24` to `tests/test_web_research_config.py`.
 
-- [ ] **Step 6: Make source admission delta-aware and reserve separate quotas**
+- [x] **Step 6: Make source admission delta-aware and reserve separate quotas**
 
 Change `SourceRegistry.admit()` to collect and return only the `SourceRecord` objects it creates:
 
@@ -389,7 +390,7 @@ Pass `self._omitted_source_count` into `_bundle` as `omitted_source_count`; it i
 
 Remove the visual-intent `grow_capacity()` path; the session already owns its bounded catalog capacity.
 
-- [ ] **Step 7: Add one explicit candidate-priority function**
+- [x] **Step 7: Add one explicit candidate-priority function**
 
 Keep this in `service.py`; do not add a class or module:
 
@@ -422,7 +423,7 @@ def _image_candidate_priority(
 
 Small images lose the leading bucket but remain eligible. Provider rank is only the final tie-breaker; across cohorts, equal tuples fall back to catalog insertion order, which is why the catalog must be an ordinary insertion-ordered `dict`.
 
-- [ ] **Step 8: Implement catalog merge and active-window replacement**
+- [x] **Step 8: Implement catalog merge and active-window replacement**
 
 Add session state using built-in dictionaries/sets, not a new abstraction:
 
@@ -451,7 +452,7 @@ Store `catalog_key` on `PreparedImage`, and copy `source_domain` into `ImageCand
 
 Delete `pending_provider_images` and the early return based on `remaining == 0`; those two pieces are the root cause of later searches being unable to improve the window.
 
-- [ ] **Step 9: Update bundle validation for a multi-cohort registry**
+- [x] **Step 9: Update bundle validation for a multi-cohort registry**
 
 Keep these `WebEvidenceBundle` invariants:
 
@@ -462,7 +463,7 @@ Keep these `WebEvidenceBundle` invariants:
 
 Remove the `len(sources) <= source_capacity(...)` assertion from the Pydantic model. Runtime source capacity is now session-configured as text quota plus catalog quota; duplicating a smaller one-cohort limit in the contract would reject valid bounded sessions. Add a contract test proving that a bundle may contain a larger stable registry while still rejecting too many active images and unknown source IDs.
 
-- [ ] **Step 10: Delete what the new capacity model orphans**
+- [x] **Step 10: Delete what the new capacity model orphans**
 
 These are unreferenced after Step 6 and Ruff will not flag them, because they are public:
 
@@ -473,7 +474,7 @@ These are unreferenced after Step 6 and Ruff will not flag them, because they ar
 
 `free_slots` and `capacity` already have no callers today. Delete all four and confirm with `grep -rn "grow_capacity\|free_slots\|max_registry_sources\|\.capacity" app/ tests/`. `contracts.source_capacity` stays — `ResearchLimits.for_mode` still uses it.
 
-- [ ] **Step 11: Verify catalog behavior and static checks**
+- [x] **Step 11: Verify catalog behavior and static checks**
 
 Run:
 
@@ -485,7 +486,7 @@ git diff --check
 
 Expected: all tests pass; full-resolution publication and protected delivery regressions remain green.
 
-- [ ] **Step 12: Commit the catalog repair**
+- [x] **Step 12: Commit the catalog repair**
 
 ```powershell
 git add -- app/core/config.py app/core/container.py app/ai/web_research/contracts.py app/ai/web_research/policy.py app/ai/web_research/source_registry.py app/ai/web_research/service.py tests/test_web_research_config.py tests/test_web_source_registry.py tests/test_web_research_contracts.py tests/test_web_image_capacity_and_resolution.py tests/test_web_research_images.py
@@ -514,7 +515,7 @@ git commit -m "fix: rank web images across search cohorts"
 
 **Snippet bounds are per status, not one number.** `web_open` exists to read pages "whose search snippets were insufficient"; capping its result at the same bound as a triage snippet would gut the deep-read path. Use 1,200 characters for `search_result` and 3,000 for `opened`. Worst case for one operation is an agentic open of 4 pages at 3,000 = 12,000 characters, which stays under `tool_result_offload_threshold_chars` (16,000) so the deep read is not pushed out of the transcript into a blob.
 
-- [ ] **Step 1: Write failing operation-delta tests**
+- [x] **Step 1: Write failing operation-delta tests**
 
 In `tests/test_web_research_tool_session.py`, perform two searches through one session/tool context and assert:
 
@@ -528,11 +529,11 @@ assert {item["source_id"] for item in second["sources"]} == {"S3"}
 
 Then open `S1` and assert the open response includes the refreshed `S1` even though its original `query_index` is 1. This proves deltas are explicit and are not inferred from `query_index`.
 
-**Both existing `SimpleNamespace` bundle doubles must gain `operation_source_ids`** — the one in this file and the one in `tests/test_web_tool_output_privacy.py`. Without it `_project` raises `AttributeError`, and `test_web_search_uses_the_exact_session_from_tool_context` additionally asserts `public["sources"][0]["source_id"] == "S1"`, which an empty delta fails. Set `operation_source_ids=("S1",)` on the search double and `()` on the privacy double, whose bundle has no sources anyway.
+**All three existing `SimpleNamespace` bundle doubles must gain `operation_source_ids`** — two in this file (`test_web_search_uses_the_exact_session_from_tool_context` *and* `test_web_open_uses_the_same_turn_session`, whose bundle also passes through `_project`) and one in `tests/test_web_tool_output_privacy.py`. Without it `_project` raises `AttributeError`, and the search test additionally asserts `public["sources"][0]["source_id"] == "S1"`, which an empty delta fails. Set `operation_source_ids=("S1",)` on the search double and `()` on the other two, whose bundles have no sources anyway.
 
 In contract tests, assert `operation_source_ids` are unique and every ID exists in `sources`.
 
-- [ ] **Step 2: Write failing compact-context and literal-selection tests**
+- [x] **Step 2: Write failing compact-context and literal-selection tests**
 
 Update the model-context session double to expose:
 
@@ -558,7 +559,7 @@ Image candidate I7; source S4; 1920x1080; domain www.t1.gg.
 
 Do not generate descriptive alt text or infer a visual type.
 
-- [ ] **Step 3: Run evidence tests and verify RED**
+- [x] **Step 3: Run evidence tests and verify RED**
 
 Run:
 
@@ -568,7 +569,7 @@ Run:
 
 Expected: the second tool response repeats the whole registry, open cannot be represented as an explicit delta, search snippets repeat in synthetic context, and image labels omit dimensions/domain.
 
-- [ ] **Step 4: Thread explicit operation source IDs through search and open**
+- [x] **Step 4: Thread explicit operation source IDs through search and open**
 
 Add the field and validator:
 
@@ -595,11 +596,14 @@ def _bundle(
 ) -> WebEvidenceBundle:
 ```
 
+This *adds to* Task 2 Step 6's change; it does not replace it. The body still
+passes `omitted_source_count=self._omitted_source_count`.
+
 For search, pass the IDs of `image_admitted` followed by `text_admitted` from Task 2 Step 6. For open, collect the IDs from the `mark_opened` loop — records successfully opened in this operation, including records already present before it — not from `admit()`'s delta, which by definition excludes them.
 
 Leave `status` computed from the complete registry. It answers "does this session have evidence", which is the question the caller asks; Step 5 makes an empty delta readable without overloading it.
 
-- [ ] **Step 5: Project only current-operation sources**
+- [x] **Step 5: Project only current-operation sources**
 
 In `web_tools.py`, select the explicit delta while preserving complete bundles internally:
 
@@ -625,7 +629,7 @@ Add two counters so `{"status":"success","sources":[]}` is not a riddle — that
 
 The response still includes failures, reuse state, and omission counters.
 
-- [ ] **Step 6: Compact synthetic context and expose literal image target**
+- [x] **Step 6: Compact synthetic context and expose literal image target**
 
 Add simple properties on the session:
 
@@ -676,7 +680,7 @@ label = (
 )
 ```
 
-- [ ] **Step 7: Verify evidence compactness, privacy, and grounding**
+- [x] **Step 7: Verify evidence compactness, privacy, and grounding**
 
 Run:
 
@@ -688,7 +692,7 @@ git diff --check
 
 Expected: all tests pass; candidate bytes and original image URLs remain absent from public tool output.
 
-- [ ] **Step 8: Commit compact, literal evidence delivery**
+- [x] **Step 8: Commit compact, literal evidence delivery**
 
 ```powershell
 git add -- app/ai/web_research/contracts.py app/ai/web_research/service.py app/ai/web_research/model_context.py app/ai/web_tools.py tests/test_web_research_contracts.py tests/test_web_research_model_context.py tests/test_web_research_tool_session.py tests/test_web_tool_output_privacy.py
@@ -704,11 +708,11 @@ git commit -m "fix: deliver focused web image evidence"
 - Modify: `app/ai/workflow/specialists.py`
 - Add: `tests/test_web_published_source_scope.py`
 
-**The problem this task exists to prevent.** `specialists.py` publishes **every** `source_registry.records` entry to the user in three places: the citation-required check, the worker's `evidence`, and `metadata["web_sources"]` (which also feeds the `sources` stream event and message history). Task 2 raises registry capacity from `text + max_model_images` (at most 9 quick / 14 agentic) to `text + max_candidate_catalog` (5 + 24 = **29**). Without this task, a gallery turn shows the reader roughly two dozen image-host pages it never cited. Task 3's delta fixes the *tool* transcript only; this fixes the *published* list.
+**The problem this task exists to prevent.** `specialists.py` publishes **every** `source_registry.records` entry to the user in three places: the citation-required check, the worker's `evidence`, and `metadata["web_sources"]` (which also feeds the `sources` stream event and message history). Task 2 raises registry capacity from `text + max_model_images` (at most 11 quick / 14 agentic, both at `gallery`) to `text + max_candidate_catalog` (5 + 24 = **29** quick, 32 agentic). Without this task, a gallery turn shows the reader roughly two dozen image-host pages it never cited. Task 3's delta fixes the *tool* transcript only; this fixes the *published* list.
 
 **Three audiences, three views.** The complete registry stays complete for grounding — `GroundingParser` resolves any `[[source:S#]]` the model was offered, and `model_context` still lists every admitted `S#`. Task 3's `operation_source_ids` is what the tool returns. `answer_sources` is what a human sees.
 
-- [ ] **Step 1: Write the failing scope test**
+- [x] **Step 1: Write the failing scope test**
 
 In `tests/test_web_published_source_scope.py`, run one session with a saturating text provider and an image cohort whose pages share no host with the text results, then assert:
 
@@ -721,7 +725,7 @@ In `tests/test_web_published_source_scope.py`, run one session with a saturating
 
 Assert the specialist wiring by reading `specialists.py` and confirming `source_registry.records` no longer appears in the three publication sites, in the spirit of `tests/test_web_research_active_path_inventory.py`.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider tests/test_web_published_source_scope.py
@@ -729,7 +733,7 @@ Assert the specialist wiring by reading `specialists.py` and confirming `source_
 
 Expected: `answer_sources` does not exist.
 
-- [ ] **Step 3: Add the answer-relevant view**
+- [x] **Step 3: Add the answer-relevant view**
 
 On `WebResearchSession`, using the `_image_only_source_ids` set Task 2 Step 6 already maintains:
 
@@ -754,13 +758,13 @@ def answer_sources(self) -> tuple[SourceRecord, ...]:
     )
 ```
 
-- [ ] **Step 4: Publish the narrowed view**
+- [x] **Step 4: Publish the narrowed view**
 
 In `specialists.py`, replace `web_research_session.source_registry.records` with `web_research_session.answer_sources` at all three sites: the citation-required correction check, the worker `evidence` tuple, and the `metadata["web_sources"]` construction.
 
 The correction check narrows correctly: a turn whose only registry entries are image pages with no active image and no open has no evidence a citation could name, so skipping the correction there is the right behavior, not a loosening.
 
-- [ ] **Step 5: Verify scope and adjacent streaming**
+- [x] **Step 5: Verify scope and adjacent streaming**
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider tests/test_web_published_source_scope.py tests/test_web_source_streaming.py tests/test_web_research_worker_remap.py tests/test_web_research_active_path_inventory.py tests/test_web_grounding.py
@@ -768,7 +772,7 @@ The correction check narrows correctly: a turn whose only registry entries are i
 git diff --check
 ```
 
-- [ ] **Step 6: Commit the publication scope**
+- [x] **Step 6: Commit the publication scope**
 
 ```powershell
 git add -- app/ai/web_research/service.py app/ai/workflow/specialists.py tests/test_web_published_source_scope.py
@@ -790,7 +794,7 @@ git commit -m "fix: publish only answer-relevant web sources"
 
 **What these tests may and may not claim.** They prove the good candidate reaches the vision window and that the `IMAGE TARGET` line reaches the model. They must not be written so as to imply the ranking picks the right *kind* of picture — it cannot. Step 2's negative control makes that boundary explicit and failing.
 
-- [ ] **Step 1: Add deterministic end-to-end regression fixtures in code**
+- [x] **Step 1: Add deterministic end-to-end regression fixtures in code**
 
 Create candidates with no network dependency and route them through `WebResearchService`, the fake image service, `inject_latest_web_evidence`, and `GroundingParser`. Give each case's second search a distinct scope, per Task 2 Step 2.
 
@@ -804,7 +808,7 @@ assert "full T1 League of Legends team photo" in injected_text
 
 For the hair and Windows cases, assert the high-confidence, adequate-resolution candidate is active and that the literal target appears unchanged in model context. Also assert selecting its `I#` resolves to a rich item with the full-resolution record, while selecting an evicted `I#` produces no image.
 
-- [ ] **Step 2: Add the negative control**
+- [x] **Step 2: Add the negative control**
 
 Add one case where the T1 cohort also contains a 1920x1080 roster *graphic* alongside the 1200x675 team *photo*, and assert:
 
@@ -822,7 +826,7 @@ assert "A roster graphic or list of names is not a full team photo" in injected_
 
 If a future change makes the photo lead by subject matter, this test should fail and be read before it is edited — it means a taxonomy was introduced.
 
-- [ ] **Step 3: Run the new acceptance tests and verify they pass only through production code**
+- [x] **Step 3: Run the new acceptance tests and verify they pass only through production code**
 
 Run:
 
@@ -832,7 +836,7 @@ Run:
 
 Expected: all cases pass without monkeypatching the ranking function or inspecting private implementation helpers.
 
-- [ ] **Step 4: Document the runtime behavior and bounded costs**
+- [x] **Step 4: Document the runtime behavior and bounded costs**
 
 Update `docs/operations/web-research-rollout.md` with:
 
@@ -847,7 +851,7 @@ Correct the paragraph that still claims image pages get "up to 4 image pages (6 
 
 Do not document a fallback that publishes provider links as images; publication still requires a validated, model-selected candidate.
 
-- [ ] **Step 5: Run the complete focused web-research suite**
+- [x] **Step 5: Run the complete focused web-research suite**
 
 Run:
 
@@ -859,7 +863,7 @@ git diff --check
 
 Expected: all focused tests and static checks pass.
 
-- [ ] **Step 6: Commit acceptance coverage and operations notes**
+- [x] **Step 6: Commit acceptance coverage and operations notes**
 
 ```powershell
 git add -- tests/test_web_image_relevance_regressions.py docs/operations/web-research-rollout.md
@@ -873,7 +877,7 @@ git commit -m "test: cover web image relevance regressions"
 **Files:**
 - Review all files changed by Tasks 1-5.
 
-- [ ] **Step 1: Run the broader adjacent suite**
+- [x] **Step 1: Run the broader adjacent suite**
 
 Run:
 
@@ -883,7 +887,7 @@ Run:
 
 Expected: all tests pass. The baseline for the nine focused files was 91 passing at `47bef3cc`; investigate any failure before proceeding, and do not label an unrelated failure without reproducing it on the base commit.
 
-- [ ] **Step 2: Re-run static and repository checks**
+- [x] **Step 2: Re-run static and repository checks**
 
 Run:
 
@@ -896,7 +900,7 @@ git log --oneline -6
 
 Expected: Ruff and diff checks pass; only intentional changes remain; the five implementation commits are visible.
 
-- [ ] **Step 3: Request code review**
+- [x] **Step 3: Request code review**
 
 Use `superpowers:requesting-code-review`. Require the review to verify:
 
@@ -910,18 +914,37 @@ Use `superpowers:requesting-code-review`. Require the review to verify:
 - an opened page's content still reaches the answer model;
 - no taxonomy/ranking framework or answer-time fallback was introduced.
 
-- [ ] **Step 4: Apply valid review findings and repeat verification**
+- [x] **Step 4: Apply valid review findings and repeat verification**
 
 Use `superpowers:receiving-code-review` for any findings. Add a regression test before each behavior fix, rerun the relevant focused command, then repeat Steps 1-2.
 
-- [ ] **Step 5: Finish the development branch**
+- [x] **Step 5: Finish the development branch**
 
 Use `superpowers:verification-before-completion`, then `superpowers:finishing-a-development-branch`. Report exact test counts and the commit list; do not claim completion from stale output.
 
 ---
 
+## Deviations taken during execution
+
+- `tests/test_web_research_service.py::test_valid_image_sources_are_admitted_after_text_sources`
+  encoded the old admission order and had to move with the design. The plan did
+  not list that file; it is now in Task 2's set and the test asserts the
+  inverted order.
+- The active-window fixtures give every candidate a confidence, because Brave
+  grades every result. A cohort mixing graded and ungraded candidates is not a
+  shape the provider produces, and ordering one against the other proves
+  nothing.
+- The acceptance cases place the good candidate at a *later* provider rank than
+  the noise. A case whose good candidate is already rank 1 passes under
+  rank-only ordering too; all five were mutation-checked against a
+  rank-only `_image_candidate_priority` and a renamed `IMAGE TARGET` line.
+
 ## Known gaps this plan deliberately leaves open
 
 - `ResearchBudget.reserve_image_search`, `may_image_search`, and `record_image_search` have no production callers, so `research_max_image_searches_per_turn` bounds nothing. Wiring it is separate work; Task 2 avoids depending on it.
 - Nothing bounds how many image searches one turn performs. The catalog capacity bounds the *consequences*, not the provider calls.
+- The supplemental `site:` probe fires whenever a domain-restricted search
+  returns fewer than `count` (10) allowed results, which after strict filtering
+  is nearly always. A restricted image search therefore costs two Brave calls
+  in practice, within the ~5s worst case the rationale accounts for.
 - `web_open` admissions are not counted against the text quota. They are bounded instead by `max_page_opens` (2 quick / 4 agentic), which is small enough that the leak cannot exhaust the registry.
