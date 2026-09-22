@@ -256,11 +256,23 @@ def test_media_guidance_never_requires_the_user_to_ask_for_images():
     guidance must not reintroduce a taxonomy the model has to match against.
     """
     from app.ai.prompts import MEDIA_CAPABILITY_SNIPPET
+    from app.ai.web_tools import WEB_SEARCH_DESCRIPTION
 
     text = MEDIA_CAPABILITY_SNIPPET.lower()
     assert "web_search" in text
     # The precision counterweight must survive alongside the open invitation.
     assert "decoration" in text
+
+    # The invitation itself. Until 2026-09-22 the snippet carried only the
+    # counterweight -- "only when seeing the subject materially improves the
+    # answer", plus "never add media as decoration" -- and the observed result
+    # was a model that set visual_intent solely when the user asked for a
+    # picture in so many words. A bar phrased as "only when it materially
+    # improves" resolves unambiguously in exactly that one case.
+    assert "do not wait to be asked" in text
+    assert "only when" not in text
+    assert "materially" not in text
+    assert "materially" not in WEB_SEARCH_DESCRIPTION.lower()
 
 
 def test_recency_guidance_preserves_text_independence_from_images():

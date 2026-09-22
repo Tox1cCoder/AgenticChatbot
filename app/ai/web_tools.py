@@ -21,8 +21,8 @@ WEB_SEARCH_DESCRIPTION = (
     "Use freshness='recent' for current information and freshness='as_of' with "
     "end_date for a historical cutoff; never guess the current year. Results "
     "have stable S# IDs: cite supported claims with [[source:S#]].\n\n"
-    "Set visual_intent when seeing a figure, comparison, or gallery materially "
-    "improves the answer, and provide image_query naming the exact part, screen, "
+    "Set visual_intent on the same call whenever the answer would show the subject "
+    "rather than only describe it, and provide image_query naming the exact part, screen, "
     "identity art, photo, diagram, map, or chart to inspect. Resolve pronouns "
     "from the conversation and add a version or year when appearance changes. "
     "Validated candidates are shown privately on the next model call; no image "
@@ -50,7 +50,7 @@ class ProductWebSearchInput(WebSearchRequest):
     )
     visual_intent: Literal["none", "figure", "comparison", "gallery"] = Field(
         default="none",
-        description="The kind of visual evidence that would materially help.",
+        description="Visual evidence to gather alongside the sources; 'none' returns no images.",
     )
     image_query: str | None = Field(
         default=None,

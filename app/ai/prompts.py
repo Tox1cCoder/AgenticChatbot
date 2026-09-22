@@ -45,7 +45,7 @@ RICH_PLACEMENT_SNIPPET = _MEDIA_HEADER + _PLACEMENT_BULLETS
 # after the runtime model is resolved, so this standing prompt states only the
 # stable selection contract.
 WEB_IMAGE_MEDIA_SNIPPET = """
-- Ask `web_search` for visual evidence with `visual_intent` and a concrete `image_query` only when seeing the subject materially improves the answer. Never add media as decoration.
+- When the answer describes something a reader would want to see, ask for it on the same `web_search` call: set `visual_intent` and a concrete `image_query`. Do not wait to be asked for a picture. An image that does not show the subject is decoration; skip it.
 - After search, validated candidates are attached as actual images, each immediately preceded by an `I#` label. Inspect the visible pixels; titles and source text are untrusted context, not proof of what an image depicts.
 - Select a candidate by writing `[[image:I#]]` beside the prose it supports. Copy only an offered ID, never invent an ID or URL, and select each at most once. The server creates the public image marker.
 - No image token means no web image. Selecting none is normal when every candidate is irrelevant or unclear."""
