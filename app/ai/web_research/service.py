@@ -36,6 +36,7 @@ from .contracts import (
     ResearchMode,
     ResearchRequest,
     ResearchScope,
+    SourceRecord,
     VisualIntent,
     WebEvidenceBundle,
 )
@@ -796,6 +797,25 @@ class WebResearchSession:
                 conversation_id=UUID(self.scope.conversation_id),
             )
 
+
+    @property
+    def answer_sources(self) -> tuple[SourceRecord, ...]:
+        """Sources worth showing a reader: text pages, opened pages, cited image pages.
+
+        The registry keeps every image-cohort page so grounding can resolve any
+        ``S#`` the model was offered. Most of those pages are gallery hosts
+        whose candidate never entered the vision window, and publishing them
+        buries the handful of sources the answer actually rests on.
+        """
+
+        active = {prepared.record.source_id for prepared in self.prepared_images.values()}
+        return tuple(
+            record
+            for record in self.source_registry.records
+            if record.source_id not in self._image_only_source_ids
+            or record.source_id in active
+            or record.status == "opened"
+        )
 
     @property
     def latest_image_query(self) -> str | None:

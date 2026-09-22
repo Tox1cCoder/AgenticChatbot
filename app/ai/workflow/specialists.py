@@ -639,7 +639,7 @@ class SpecialistFactory:
             if build.web_research_session is not None:
                 parser = GroundingParser(build.web_research_session)
                 grounding = parser.resolve(_final_text(produced))
-                if build.web_research_session.source_registry.records and not grounding.source_ids:
+                if build.web_research_session.answer_sources and not grounding.source_ids:
                     correction = HumanMessage(
                         content=(
                             "Your previous draft cannot be published because it did not cite an "
@@ -783,7 +783,7 @@ class SpecialistFactory:
             grounded_images = ()
             grounded_sources = tuple(
                 source.model_dump(mode="json")
-                for source in web_research_session.source_registry.records
+                for source in web_research_session.answer_sources
             )
         return WorkerResult(
             dispatch_id=task.dispatch_id,
@@ -1048,7 +1048,7 @@ class SpecialistFactory:
         if web_research_session is not None:
             web_sources = tuple(
                 source.model_dump(mode="json")
-                for source in web_research_session.source_registry.records
+                for source in web_research_session.answer_sources
             )
             if web_sources:
                 metadata["web_sources"] = list(web_sources)
