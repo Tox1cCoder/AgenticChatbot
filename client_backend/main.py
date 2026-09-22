@@ -22,6 +22,7 @@ from client_backend.api.health import router as health_router
 from client_backend.api.mcp import router as mcp_router
 from client_backend.api.messages import ai_sdk_router
 from client_backend.api.messages import router as messages_router
+from client_backend.api.projects import router as projects_router
 from client_backend.api.proxy import router as proxy_router
 from client_backend.api.runtime import router as runtime_router
 from client_backend.api.skill_errors import register_skill_exception_handlers
@@ -102,6 +103,7 @@ def create_app() -> FastAPI:
         auth_router,
         conversations_router,
         messages_router,
+        projects_router,
         documents_router,
         runtime_router,
         mcp_router,
