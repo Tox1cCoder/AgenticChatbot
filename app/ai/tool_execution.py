@@ -822,6 +822,7 @@ async def _refresh_tool_map_after_search(
             agent_key,
             device_id=device_id,
             session_id=active_session.session_id if active_session is not None else None,
+            user_id=user_id,
         )
 
         if loaded_client_tools and device_id:

@@ -195,9 +195,15 @@ def test_deferred_binding_only_includes_loaded_client_tools(monkeypatch):
 
     class _DeferredStateStub:
         def get_loaded_client_tools(
-            self, conversation_id: str, agent_key: str, device_id=None, session_id=None
+            self,
+            conversation_id: str,
+            agent_key: str,
+            device_id=None,
+            session_id=None,
+            user_id=None,
         ):
             assert session_id == "session-a"
+            assert user_id == "user-1"
             all_tools = [
                 SimpleNamespace(
                     tool_name="client__time_server__get_current_time",
@@ -330,7 +336,12 @@ async def test_refresh_tool_map_after_search_uses_active_session_scope(monkeypat
 
     class _DeferredStateStub:
         def get_loaded_client_tools(
-            self, conversation_id, agent_key, device_id=None, session_id=None
+            self,
+            conversation_id,
+            agent_key,
+            device_id=None,
+            session_id=None,
+            user_id=None,
         ):
             state_calls.append(
                 {
@@ -338,6 +349,7 @@ async def test_refresh_tool_map_after_search_uses_active_session_scope(monkeypat
                     "agent_key": agent_key,
                     "device_id": device_id,
                     "session_id": session_id,
+                    "user_id": user_id,
                 }
             )
             return [SimpleNamespace(tool_name="client__time_server__get_current_time")]
@@ -381,6 +393,7 @@ async def test_refresh_tool_map_after_search_uses_active_session_scope(monkeypat
             "agent_key": "chat",
             "device_id": device_id,
             "session_id": "session-a",
+            "user_id": "user-1",
         }
     ]
     assert "client__time_server__get_current_time" in tool_map

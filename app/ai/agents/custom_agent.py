@@ -239,6 +239,7 @@ class CustomAgent(BaseAgent):
                     self.tool_state_key,
                     device_id=str(device_id) if device_id else None,
                     session_id=(active_session.session_id if active_session is not None else None),
+                    user_id=str(user_id) if user_id else None,
                 )
                 loaded_client_names = {loaded.tool_name for loaded in loaded_client_tools}
                 external_candidates.extend(

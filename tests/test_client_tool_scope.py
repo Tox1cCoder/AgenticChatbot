@@ -53,7 +53,12 @@ def test_client_scoped_binding_excludes_server_mcp_tools(monkeypatch):
 
     class _DeferredStateStub:
         def get_loaded_client_tools(
-            self, conversation_id: str, agent_key: str, device_id=None, session_id=None
+            self,
+            conversation_id: str,
+            agent_key: str,
+            device_id=None,
+            session_id=None,
+            user_id=None,
         ):
             return [
                 SimpleNamespace(

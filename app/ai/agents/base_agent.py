@@ -601,6 +601,7 @@ class BaseAgent(ABC):
                         session_id=(
                             active_session.session_id if active_session is not None else None
                         ),
+                        user_id=str(user_id) if user_id else None,
                     )
                 }
                 remote_tools = [tool for tool in remote_tools if tool.name in loaded_client_names]

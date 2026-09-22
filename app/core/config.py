@@ -1865,7 +1865,20 @@ class Settings(BaseSettings):
     )
     mcp_tool_search_loaded_tools_ttl_minutes: int = Field(
         default=30,
-        description="TTL in minutes for loaded deferred tools (evicted after expiry).",
+        description=(
+            "Idle TTL in minutes for loaded deferred tools, measured from last use "
+            "(evicted after expiry). Set to 0 to disable expiry."
+        ),
+    )
+    mcp_tool_search_max_tracked_scopes: int = Field(
+        default=500,
+        ge=1,
+        description=(
+            "Ceiling on conversation scopes tracked in deferred tool state, applied "
+            "separately to server and client scopes. The least recently active scope "
+            "is dropped past this point so a long-lived process cannot grow without "
+            "bound."
+        ),
     )
     mcp_tool_search_min_relevance_score: float = Field(
         default=0.5,
@@ -2215,6 +2228,7 @@ class Settings(BaseSettings):
         "mcp_tool_search_inventory_max_top_k",
         "mcp_tool_search_max_pinned_tools",
         "mcp_tool_search_max_loaded_tools_per_conversation",
+        "mcp_tool_search_max_tracked_scopes",
         "planning_max_iterations",
         "conversation_summary_trigger_messages",
         "conversation_summary_trigger_tokens",

@@ -198,6 +198,12 @@ class ConversationService(IConversationService):
             if self.ai_service is not None:
                 with contextlib.suppress(Exception):
                     self.ai_service.invalidate_history_cache(str(conversation_id))
+            # Deferred tool state is in-memory and keyed by conversation, so
+            # without this it would sit out its TTL after the row is gone.
+            with contextlib.suppress(Exception):
+                from app.ai.deferred_tool_state import get_deferred_tool_state
+
+                get_deferred_tool_state().clear_conversation(str(conversation_id))
             # Best-effort checkpoint thread cleanup. Errors are non-fatal —
             # the conversation row is already soft-deleted.
             if self.checkpoint_manager is not None:

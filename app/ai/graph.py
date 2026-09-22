@@ -1365,6 +1365,7 @@ class MultiAgentWorkflow(
                 agent_key=agent_key,
                 device_id=device_id,
                 session_id=session_id,
+                user_id=user_id,
             )
         except Exception as exc:
             logger.debug("Failed to persist deferred tool snapshot: %s", exc)

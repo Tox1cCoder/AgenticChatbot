@@ -439,7 +439,14 @@ Deployment, migration, rollback, backfill, monitoring, and credential-rotation p
 
 ### MCP tool search
 
-`MCP_TOOL_SEARCH_ENABLED`, `MCP_TOOL_SEARCH_DEFAULT_TOP_K`, `MCP_TOOL_SEARCH_AUTOLOAD_TOP_K`, `MCP_TOOL_SEARCH_PINNED_TOOLS`, `MCP_TOOL_SEARCH_MAX_LOADED_TOOLS_PER_CONVERSATION`, `MCP_TOOL_SEARCH_LOADED_TOOLS_TTL_MINUTES`, `MCP_TOOL_SEARCH_MIN_RELEVANCE_SCORE`, `MCP_TOOL_SEARCH_AUTOLOAD_MIN_RELEVANCE_SCORE`.
+`MCP_TOOL_SEARCH_ENABLED`, `MCP_TOOL_SEARCH_DEFAULT_TOP_K`, `MCP_TOOL_SEARCH_AUTOLOAD_TOP_K`, `MCP_TOOL_SEARCH_PINNED_TOOLS`, `MCP_TOOL_SEARCH_MAX_LOADED_TOOLS_PER_CONVERSATION`, `MCP_TOOL_SEARCH_LOADED_TOOLS_TTL_MINUTES`, `MCP_TOOL_SEARCH_MIN_RELEVANCE_SCORE`, `MCP_TOOL_SEARCH_AUTOLOAD_MIN_RELEVANCE_SCORE`, `MCP_TOOL_SEARCH_MAX_TRACKED_SCOPES`.
+
+Loaded tools live in process memory, keyed by `(conversation, agent)` for server MCP
+tools and by `(conversation, agent, device, session)` for client device tools. Three
+bounds apply: per-scope LRU eviction at `MAX_LOADED_TOOLS_PER_CONVERSATION`, an *idle*
+TTL measured from a tool's last use, and a ceiling of `MAX_TRACKED_SCOPES` scopes past
+which the least recently active scope is dropped. Abandoned scopes are swept on the
+write path, and a conversation's scopes are cleared when the conversation is deleted.
 
 ### Tool execution policy
 
