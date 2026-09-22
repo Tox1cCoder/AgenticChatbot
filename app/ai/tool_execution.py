@@ -58,8 +58,16 @@ SERVER_ONLY_WEB_TOOL_NAMES = frozenset({"web_search", "web_open"})
 # Tool names that may load additional tools dynamically
 TOOL_LOADING_TOOLS = {"tool_search"}
 _RETRY_COMPATIBILITY_ALLOWLIST = frozenset({("internal", "internal::tool_search")})
-_WIDGET_ARTIFACT_TOOLS = {"widget_create", "widget_update"}
+#: Widget tools whose result carries a full widget record, and so can be
+#: offered back to the model as a placeable mount. A read counts: without
+#: it, "show me that widget again" had no marker to place and the model
+#: answered by pasting the HTML it had just read.
+_WIDGET_ARTIFACT_TOOLS = {"widget_create", "widget_update", "widget_get_state"}
 _WIDGET_SESSION_BOUND_TOOLS = {"widget_create", "session_list_widgets"}
+#: Widget tools addressed by a bare ``widget_id``. Nothing in the argument
+#: names the conversation, so these have to be revalidated against the store
+#: the way ``app/api/widgets.py`` revalidates the HTTP path.
+_WIDGET_ID_SCOPED_TOOLS = {"widget_get_state", "widget_update", "widget_close"}
 
 # Render-type values that should never produce a public tool_render candidate.
 # Live-widget renders have a dedicated `widget:<id>` candidate; error/text/json
@@ -526,6 +534,65 @@ def _bind_widget_session_args(
         )
 
     return bound_args
+
+
+async def _widget_access_denied(
+    tool_name: str,
+    tool_args: Any,
+    conversation_id: str | None,
+) -> str | None:
+    """Refuse a widget the active conversation does not own.
+
+    Returns the refusal message, or ``None`` when the call may proceed.
+
+    A widget belongs to the conversation that created it. These tools take only
+    a ``widget_id``, so before this existed a model holding an id from another
+    conversation could read that widget's full HTML, overwrite its state, and
+    close it -- none of which ``session_list_widgets`` would have let it
+    discover, but all of which it could do with the id alone.
+
+    A widget the store does not have is *absent*, not foreign: the tool keeps
+    reporting its own "not found" so a mistyped id does not masquerade as an
+    access decision. A store that cannot answer at all leaves the call alone,
+    because failing closed here would take every widget tool down with it.
+    """
+
+    if tool_name not in _WIDGET_ID_SCOPED_TOOLS:
+        return None
+    if not conversation_id or not isinstance(tool_args, dict):
+        return None
+    widget_id = str(tool_args.get("widget_id") or "").strip()
+    if not widget_id:
+        return None
+
+    try:
+        from app.services.widget_runtime import get_widget_store
+
+        record = await get_widget_store().get(widget_id)
+    except Exception:
+        logger.warning(
+            "Could not revalidate widget %s against conversation %s; allowing the call",
+            widget_id,
+            conversation_id,
+            exc_info=True,
+        )
+        return None
+
+    if record is None:
+        return None
+    if str(getattr(record, "session_id", "")) == str(conversation_id):
+        return None
+
+    logger.warning(
+        "Refused %s for widget %s: owned by another conversation",
+        tool_name,
+        widget_id,
+    )
+    return (
+        f"Widget {widget_id} belongs to a different conversation and is not available here. "
+        "Live widgets do not carry across conversations; build one in this conversation with "
+        "widget_create."
+    )
 
 
 def build_rejected_tool_artifacts(
@@ -1575,6 +1642,32 @@ async def execute_tool_calls(
         tool_id = tool_call.get("id")
         tool_args = tool_call.get("args", {})
         tool_args = _bind_widget_session_args(tool_name or "", tool_args, conversation_id)
+
+        widget_refusal = await _widget_access_denied(
+            tool_name or "", tool_args, conversation_id
+        )
+        if widget_refusal is not None:
+            summary = ToolErrorSummary(
+                error_type=ToolErrorKind.PERMISSION.value,
+                failure_retryable=False,
+                message=widget_refusal,
+                hint="Create a widget in this conversation with widget_create.",
+                attempts=1,
+            )
+            model_content, artifact_detail = build_tool_error_payloads(
+                summary,
+                tool_name=tool_name or "unknown",
+                exception=PermissionError(widget_refusal),
+                policy_retry_allowed=False,
+            )
+            _append_tool_error_output(
+                tool_call_id=tool_id,
+                tool_name=tool_name or "unknown",
+                tool_args=tool_args,
+                model_content=model_content,
+                artifact_detail=artifact_detail,
+            )
+            continue
 
         # ``normalize_tool_call`` substitutes the sentinel "unknown" when no name
         # was provided, so an absent/blank name surfaces as that sentinel rather

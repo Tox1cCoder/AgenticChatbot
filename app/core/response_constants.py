@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from ..schemas.workflow import WorkflowResponse
 
 _logger = logging.getLogger(__name__)
-_WIDGET_TOOLS = {"widget_create", "widget_update"}
+_WIDGET_TOOLS = {"widget_create", "widget_update", "widget_get_state"}
 
 
 # === Response Fallback Messages ===
