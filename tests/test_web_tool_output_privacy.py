@@ -27,6 +27,7 @@ async def test_public_web_tool_output_contains_no_candidate_descriptor() -> None
         reused=False,
         omitted_source_count=0,
         omitted_image_count=0,
+        operation_source_ids=(),
     )
 
     class Session:

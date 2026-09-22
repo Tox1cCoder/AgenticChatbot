@@ -390,6 +390,9 @@ class WebResearchSession:
         image_fetch_failures = await self._prepare_images()
         return self._bundle(
             operation_index,
+            operation_source_ids=tuple(
+                record.source_id for record in (*image_admitted, *text_admitted)
+            ),
             visual_intent=request.visual_intent,
             failures=(
                 *text_failures,
@@ -466,11 +469,23 @@ class WebResearchSession:
             invoke=lambda provider: provider.open(requested, question, query_index=operation_index),
         )
         self.source_registry.admit(tuple(opened))
+        opened_ids: list[str] = []
         for candidate in opened:
             record = self.source_registry.resolve(candidate.url)
-            if record is not None:
-                self.source_registry.mark_opened(record.source_id, snippet=candidate.snippet)
-        return self._bundle(operation_index, failures=failures, providers=providers)
+            if record is None:
+                continue
+            self.source_registry.mark_opened(record.source_id, snippet=candidate.snippet)
+            # Not admit()'s delta, which by definition excludes a page an
+            # earlier search already admitted -- and that is the usual case
+            # here, since the model opens an S# it was shown.
+            if record.source_id not in opened_ids:
+                opened_ids.append(record.source_id)
+        return self._bundle(
+            operation_index,
+            operation_source_ids=tuple(opened_ids),
+            failures=failures,
+            providers=providers,
+        )
 
     def _merge_candidates(
         self,
@@ -782,6 +797,16 @@ class WebResearchSession:
             )
 
 
+    @property
+    def latest_image_query(self) -> str | None:
+        """The literal visual subject the most recent image search asked for."""
+
+        return self._latest_image_query
+
+    @property
+    def latest_image_objective(self) -> str | None:
+        return self._latest_image_objective
+
     def model_evidence_blocks(self, *, supports_vision: bool) -> list[dict[str, Any]]:
         if not supports_vision:
             if self.prepared_images:
@@ -796,7 +821,9 @@ class WebResearchSession:
                     {
                         "type": "text",
                         "text": (
-                            f"Image candidate {candidate_id}; source {record.source_id}. "
+                            f"Image candidate {candidate_id}; source {record.source_id}; "
+                            f"{record.width}x{record.height}; "
+                            f"domain {record.source_domain or 'unknown'}. "
                             "Select it only if its visible content supports the answer."
                         ),
                     },
@@ -915,6 +942,7 @@ class WebResearchSession:
         self,
         operation_index: int,
         *,
+        operation_source_ids: tuple[str, ...] = (),
         visual_intent: VisualIntent | None = None,
         failures: tuple[ResearchFailure, ...] = (),
         providers: tuple[str, ...] = (),
@@ -932,6 +960,7 @@ class WebResearchSession:
             operation_index=operation_index,
             sources=sources,
             images=tuple(prepared.record for prepared in self.prepared_images.values()),
+            operation_source_ids=operation_source_ids,
             failures=failures,
             providers_used=providers,
             omitted_source_count=self._omitted_source_count,

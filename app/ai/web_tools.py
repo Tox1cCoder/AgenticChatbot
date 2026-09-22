@@ -133,9 +133,23 @@ def create_web_open_tool(*, tool_scope: str | None = None) -> StructuredTool:
     )
 
 
+#: Snippet ceilings by source status. A triage snippet is bounded hard, but
+#: ``web_open`` exists to read pages "whose search snippets were insufficient",
+#: so capping a deliberate read at the same bound would gut the deep-read path.
+#: Worst case for one operation is an agentic open of 4 pages at 3,000 = 12,000
+#: characters, under ``tool_result_offload_threshold_chars`` (16,000), so the
+#: deep read stays in the transcript instead of being offloaded to a blob.
+_SNIPPET_BOUNDS = {"opened": 3000}
+_DEFAULT_SNIPPET_BOUND = 1200
+
+
 def _project(bundle: Any, *, searches_used: int) -> str:
     """Expose public source evidence; candidate metadata remains session-private."""
 
+    operation_ids = set(bundle.operation_source_ids)
+    public_sources = [
+        source for source in bundle.sources if source.source_id in operation_ids
+    ]
     payload = {
         "status": bundle.status,
         "mode": bundle.mode,
@@ -146,12 +160,20 @@ def _project(bundle: Any, *, searches_used: int) -> str:
                 "source_id": source.source_id,
                 "title": source.title,
                 "url": str(source.url),
-                "snippet": source.snippet,
+                "snippet": (source.snippet or "")[
+                    : _SNIPPET_BOUNDS.get(source.status, _DEFAULT_SNIPPET_BOUND)
+                ]
+                or None,
                 "published_at": source.published_at.isoformat() if source.published_at else None,
                 "status": source.status,
             }
-            for source in bundle.sources
+            for source in public_sources
         ],
+        # Without these, {"status":"success","sources":[]} is a riddle -- and
+        # that shape is legitimate when a search returns only pages the
+        # session already knows.
+        "new_source_count": len(public_sources),
+        "total_source_count": len(bundle.sources),
         "failures": [
             {
                 "operation": failure.operation,

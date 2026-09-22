@@ -513,3 +513,19 @@ async def test_brave_adapter_keeps_the_proxy_when_the_original_is_smaller() -> N
     ).search(request)
 
     assert "imgs.search.brave.com" in images[0].image_url
+
+
+@pytest.mark.asyncio
+async def test_a_candidate_label_names_its_dimensions_and_domain() -> None:
+    """Only server-normalized facts. Retrieved titles stay untrusted evidence."""
+
+    session, intent = _scripted_session(
+        (_candidate("official", width=1920, height=1080, rank=1, confidence="high", host="t1.gg"),)
+    )
+
+    await _search(session, intent, query="the subject")
+    blocks = session.model_evidence_blocks(supports_vision=True)
+
+    assert blocks[0]["text"].startswith(
+        "Image candidate I1; source S1; 1920x1080; domain t1.gg."
+    )

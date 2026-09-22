@@ -149,6 +149,11 @@ class WebEvidenceBundle(FrozenModel):
     failures: tuple[ResearchFailure, ...] = ()
     providers_used: tuple[str, ...] = ()
     reused: bool = False
+    #: The sources *this* operation newly contributed, as opposed to the whole
+    #: turn's registry in ``sources``. Explicit rather than inferred from
+    #: ``query_index``, because an opened page belongs to the operation that
+    #: opened it even though it was admitted by an earlier search.
+    operation_source_ids: tuple[str, ...] = ()
     omitted_source_count: int = Field(default=0, ge=0)
     omitted_image_count: int = Field(default=0, ge=0)
 
@@ -161,6 +166,10 @@ class WebEvidenceBundle(FrozenModel):
         if len(image_ids) != len(set(image_ids)):
             raise ValueError("duplicate image candidate ID")
         known_sources = set(source_ids)
+        if len(self.operation_source_ids) != len(set(self.operation_source_ids)):
+            raise ValueError("duplicate operation source ID")
+        if not set(self.operation_source_ids).issubset(known_sources):
+            raise ValueError("operation source ID is not in sources")
         for image in self.images:
             if image.source_id not in known_sources:
                 raise ValueError(f"image {image.candidate_id} has unknown source {image.source_id}")

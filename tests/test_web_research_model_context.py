@@ -15,9 +15,22 @@ from app.ai.workflow.middleware import (
 from app.core.runtime_modeling import ResolvedRuntimeModelConfig, RuntimeFallbackConfig
 
 
+def _source(source_id: str, *, status: str, snippet: str):
+    return SimpleNamespace(
+        source_id=source_id,
+        title=f"Page {source_id}",
+        url=f"https://example.test/{source_id.lower()}",
+        snippet=snippet,
+        status=status,
+    )
+
+
 class _Session:
-    def __init__(self) -> None:
-        self.source_registry = SimpleNamespace(records=())
+    latest_image_query = "full T1 League of Legends team photo"
+    latest_image_objective = "identify the complete current roster"
+
+    def __init__(self, *, records=()) -> None:
+        self.source_registry = SimpleNamespace(records=records)
         self.capability_calls: list[bool] = []
 
     def model_evidence_blocks(self, *, supports_vision: bool):
@@ -25,7 +38,10 @@ class _Session:
         if not supports_vision:
             return []
         return [
-            {"type": "text", "text": "Image candidate I2; source S1."},
+            {
+                "type": "text",
+                "text": "Image candidate I2; source S1; 1920x1080; domain www.t1.gg.",
+            },
             {
                 "type": "image_url",
                 "image_url": {"url": "data:image/png;base64,Ymx1ZQ==", "detail": "low"},
@@ -192,3 +208,61 @@ def test_evidence_middleware_is_between_runtime_and_preflight() -> None:
 
     assert names.index("RuntimeModelMiddleware") < names.index("WebEvidenceMiddleware")
     assert names.index("WebEvidenceMiddleware") < names.index("RequestBudgetMiddleware")
+
+
+def test_search_snippets_are_not_repeated_but_an_opened_page_survives() -> None:
+    """``web_open`` exists to read pages whose snippets were insufficient.
+
+    Capping a deliberate read at a triage bound would gut that path, so the
+    mapping line stands alone for a search result and carries an excerpt for
+    a page the model chose to open.
+    """
+
+    session = _Session(
+        records=(
+            _source("S1", status="search_result", snippet="triage " * 300),
+            _source("S2", status="opened", snippet="deep read " * 300),
+        )
+    )
+
+    text = _content_text(
+        inject_latest_web_evidence([HumanMessage(content="q")], session, supports_vision=False)
+    )
+
+    assert "S1: Page S1 | https://example.test/s1" in text
+    assert "triage triage" not in text
+    assert "S2: Page S2 | https://example.test/s2" in text
+    assert "deep read deep read" in text
+
+
+def test_the_literal_image_target_reaches_the_model_with_the_pixels() -> None:
+    session = _Session(records=(_source("S1", status="search_result", snippet="x"),))
+
+    text = _content_text(
+        inject_latest_web_evidence([HumanMessage(content="q")], session, supports_vision=True)
+    )
+
+    assert "IMAGE TARGET: full T1 League of Legends team photo" in text
+    assert "Match the requested visual form literally" in text
+    assert "A roster graphic or list of names is not a full team photo" in text
+    assert "Select none if no candidate visibly matches" in text
+
+
+def test_a_candidate_label_carries_only_server_known_facts() -> None:
+    session = _Session()
+
+    text = _content_text(
+        inject_latest_web_evidence([HumanMessage(content="q")], session, supports_vision=True)
+    )
+
+    assert "Image candidate I2; source S1; 1920x1080; domain www.t1.gg." in text
+
+
+def test_no_image_target_line_without_image_blocks() -> None:
+    session = _Session(records=(_source("S1", status="search_result", snippet="x"),))
+
+    text = _content_text(
+        inject_latest_web_evidence([HumanMessage(content="q")], session, supports_vision=False)
+    )
+
+    assert "IMAGE TARGET" not in text

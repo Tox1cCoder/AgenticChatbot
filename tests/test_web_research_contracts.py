@@ -124,3 +124,38 @@ def test_a_bundle_may_carry_a_registry_larger_than_one_cohort() -> None:
             sources=sources,
             images=(_image(1, source_id="S99"),),
         )
+
+
+def test_operation_source_ids_must_be_unique_and_known() -> None:
+    """The delta names sources the caller can already resolve in the bundle."""
+
+    bundle = WebEvidenceBundle(
+        status="success",
+        mode="quick",
+        visual_intent="none",
+        operation_index=1,
+        sources=(_source("S1"),),
+        operation_source_ids=("S1",),
+    )
+
+    assert bundle.operation_source_ids == ("S1",)
+
+    with pytest.raises(ValidationError, match="duplicate operation source ID"):
+        WebEvidenceBundle(
+            status="success",
+            mode="quick",
+            visual_intent="none",
+            operation_index=1,
+            sources=(_source("S1"),),
+            operation_source_ids=("S1", "S1"),
+        )
+
+    with pytest.raises(ValidationError, match="operation source ID is not in sources"):
+        WebEvidenceBundle(
+            status="success",
+            mode="quick",
+            visual_intent="none",
+            operation_index=1,
+            sources=(_source("S1"),),
+            operation_source_ids=("S2",),
+        )
