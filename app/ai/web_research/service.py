@@ -11,10 +11,16 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, TypeVar
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from app.ai.research_budget import ResearchBudget
-from app.ai.web_query_contract import WebSearchRequest, normalize_web_search
+from app.ai.web_query_contract import (
+    WebSearchRequest,
+    bare_host,
+    host_matches,
+    normalize_web_search,
+)
 from app.core.rich_response import (
     GENERIC_IMAGE_ALT_TEXT,
     ImageRichItem,
@@ -50,11 +56,49 @@ class PreparedImage:
     #: of the publication bytes.
     preview: bytes
     preview_mime: str
+    #: Identity of the catalog entry this was prepared from, so a recomputed
+    #: window can retain it without refetching.
+    catalog_key: tuple[str, str]
 
 
 @dataclass(frozen=True)
 class ResearchCloseout:
     selected_candidate_ids: tuple[str, ...]
+
+
+_CONFIDENCE_PRIORITY = {"high": 3, "medium": 2, "low": 1}
+
+#: Longest edge at which a candidate is worth showing at all. Below it a
+#: candidate keeps its place in the catalog but loses the leading bucket.
+_ADEQUATE_EDGE = 640
+
+
+def _image_candidate_priority(
+    candidate: ProviderImageCandidate,
+    *,
+    preferred: bool,
+) -> tuple[int, int, int, int, int]:
+    """Order candidates by usable quality. Resolution adequacy dominates.
+
+    ``preferred`` sits *below* adequacy on purpose. The provider filters a
+    domain-restricted cohort strictly, so every candidate it produced is
+    preferred; if the flag led, any candidate from a restricted search would
+    outrank every candidate from an unrestricted one, and a 200x150 logo from
+    the named site would displace a 4000x3000 photo. Provenance breaks ties
+    between comparable images; it does not buy a small one a window slot.
+
+    This is a *quality* ordering and nothing more. It cannot tell a team photo
+    from a roster infographic, and a large graphic will outrank a smaller
+    photo. Matching the requested visual form is the answer model's judgement,
+    made from the pixels plus the explicit IMAGE TARGET line.
+    """
+
+    confidence = _CONFIDENCE_PRIORITY.get(str(candidate.confidence or "").lower(), 0)
+    width = candidate.width or 0
+    height = candidate.height or 0
+    adequate = int(max(width, height) >= _ADEQUATE_EDGE)
+    area = width * height
+    return (-adequate, -confidence, -int(preferred), -area, candidate.rank)
 
 
 def _fetch_order(candidate: ProviderImageCandidate) -> tuple[str, ...]:
@@ -131,6 +175,7 @@ class WebResearchService:
         retry_backoff: Callable[[int], Awaitable[None] | None] | None = None,
         image_service: Any | None = None,
         max_candidate_pool: int = 8,
+        max_candidate_catalog: int = 24,
         max_download_bytes: int = 20 * 1024 * 1024,
         max_model_bytes: int = 8 * 1024 * 1024,
         max_image_concurrency: int = 3,
@@ -144,6 +189,7 @@ class WebResearchService:
         self.retry_backoff = retry_backoff or (lambda _attempt: None)
         self.image_service = image_service
         self.max_candidate_pool = max(1, int(max_candidate_pool))
+        self.max_candidate_catalog = max(1, int(max_candidate_catalog))
         self.max_download_bytes = max(1, int(max_download_bytes))
         self.max_model_bytes = max(1, int(max_model_bytes))
         self.max_image_concurrency = max(1, int(max_image_concurrency))
@@ -179,9 +225,28 @@ class WebResearchSession:
         self.mode = mode
         self.resolver = resolver
         self.limits = ResearchLimits.for_mode(mode)
-        self.source_registry = SourceRegistry(max_sources=self.limits.max_registry_sources)
+        # Two explicit quotas, never one shared pool: text results used to be
+        # admitted first and return their full budget, which discarded every
+        # image page before the model saw one.
+        self._text_source_capacity = self.limits.max_sources
+        self._image_catalog_capacity = self.service.max_candidate_catalog
+        self.source_registry = SourceRegistry(
+            max_sources=self._text_source_capacity + self._image_catalog_capacity
+        )
+        self._admitted_text_sources = 0
+        self._admitted_image_sources = 0
+        self._image_only_source_ids: set[str] = set()
+        self._omitted_source_count = 0
         self._operation_index = 0
-        self.pending_provider_images: tuple[ProviderImageCandidate, ...] = ()
+        #: Every candidate this session has seen, best-effort ranked on demand.
+        #: Insertion-ordered on purpose: equal priority tuples fall back to the
+        #: order the providers returned them in.
+        self._candidate_catalog: dict[tuple[str, str], ProviderImageCandidate] = {}
+        self._preferred_candidate_keys: set[tuple[str, str]] = set()
+        self._prepared_by_key: dict[tuple[str, str], PreparedImage] = {}
+        self._next_candidate_index = 1
+        self._latest_image_query: str | None = None
+        self._latest_image_objective: str | None = None
         self.prepared_images: dict[str, PreparedImage] = {}
         self.reason_codes: set[str] = set()
         self._image_digests: set[str] = set()
@@ -209,13 +274,6 @@ class WebResearchSession:
     async def _search(self, request: ResearchRequest) -> WebEvidenceBundle:
         if self._visual_intent == "none" or request.visual_intent == "gallery":
             self._visual_intent = request.visual_intent
-        # The session is built before any intent is known, so image pages only
-        # get their share of the registry once a search asks for images.
-        self.source_registry.grow_capacity(
-            ResearchLimits.for_mode(
-                self.mode, visual_intent=self._visual_intent
-            ).max_registry_sources
-        )
         self._operation_index += 1
         operation_index = self._operation_index
         normalized = normalize_web_search(
@@ -296,7 +354,9 @@ class WebResearchSession:
         image_records, image_failures, image_providers = image_result
         self.budget.record_search(normalized.query, "canonical_web_evidence", scope=search_scope)
 
-        self.source_registry.admit(tuple(text_records))
+        # Image pages first, each class against its own quota. A text search
+        # that returns its full budget can no longer spend the capacity the
+        # image cohort needs, and vice versa.
         image_sources = tuple(
             ProviderSource(
                 provider=image.provider,
@@ -309,28 +369,25 @@ class WebResearchSession:
             )
             for image in image_records
         )
-        self.source_registry.admit(image_sources)
-        self.pending_provider_images = tuple(
-            image for image in image_records if self.source_registry.resolve(image.source_url)
-        )
-        unadmitted = len(image_records) - len(self.pending_provider_images)
-        capacity_failures: tuple[ResearchFailure, ...] = ()
-        if unadmitted > 0:
-            # This loss used to be invisible: the candidates never reached
-            # _prepare_images, so nothing counted or reported them. Over-supply
-            # is normal -- the provider returns more than the intent's slots --
-            # so it is counted, not raised. Losing every candidate is not.
-            self._omitted_image_count += unadmitted
-            if not self.pending_provider_images:
-                capacity_failures = (
-                    ResearchFailure(
-                        operation="image_search",
-                        provider=image_records[0].provider,
-                        code="image_source_capacity",
-                        retryable=False,
-                    ),
-                )
-        image_fetch_failures = await self._prepare_images(request)
+        image_room = max(0, self._image_catalog_capacity - self._admitted_image_sources)
+        image_admitted = self.source_registry.admit(image_sources[:image_room])
+        self._admitted_image_sources += len(image_admitted)
+        self._image_only_source_ids.update(record.source_id for record in image_admitted)
+
+        text_room = max(0, self._text_source_capacity - self._admitted_text_sources)
+        text_admitted = self.source_registry.admit(tuple(text_records)[:text_room])
+        self._admitted_text_sources += len(text_admitted)
+        for candidate in text_records:
+            record = self.source_registry.resolve(candidate.url)
+            if record is None:
+                self._omitted_source_count += 1
+            else:
+                # A page both a text search and an image cohort returned is a
+                # text source: the image cohort merely got there first.
+                self._image_only_source_ids.discard(record.source_id)
+
+        capacity_failures = self._merge_candidates(request, image_records)
+        image_fetch_failures = await self._prepare_images()
         return self._bundle(
             operation_index,
             visual_intent=request.visual_intent,
@@ -415,23 +472,128 @@ class WebResearchSession:
                 self.source_registry.mark_opened(record.source_id, snippet=candidate.snippet)
         return self._bundle(operation_index, failures=failures, providers=providers)
 
-    async def _prepare_images(self, request: ResearchRequest) -> tuple[ResearchFailure, ...]:
-        if self.service.image_service is None or not self.pending_provider_images:
-            return ()
+    def _merge_candidates(
+        self,
+        request: ResearchRequest,
+        image_records: Sequence[ProviderImageCandidate],
+    ) -> tuple[ResearchFailure, ...]:
+        """Fold one cohort into the session catalog, bounded on both ends.
 
+        Over-supply stays a counter -- providers always return more than the
+        intent's slots -- while a cohort that lost *every* candidate stays a
+        failure the model is told about.
+        """
+
+        if not image_records:
+            return ()
+        self._latest_image_query = request.image_query
+        self._latest_image_objective = request.objective
+        allowed = tuple(
+            dict.fromkeys(host for host in map(bare_host, request.include_domains) if host)
+        )
+
+        pooled = tuple(image_records)[: self.service.max_candidate_pool]
+        self._omitted_image_count += len(image_records) - len(pooled)
+        entered = 0
+        for candidate in pooled:
+            source = self.source_registry.resolve(candidate.source_url)
+            if source is None:
+                self._omitted_image_count += 1
+                continue
+            key = (str(source.url), candidate.image_url)
+            if key not in self._candidate_catalog:
+                if len(self._candidate_catalog) >= self._image_catalog_capacity:
+                    self._omitted_image_count += 1
+                    continue
+                self._candidate_catalog[key] = candidate
+            entered += 1
+            host = candidate.source_domain or urlsplit(candidate.source_url).hostname or ""
+            if allowed and any(host_matches(host, entry) for entry in allowed):
+                # The preference belongs to the request that produced this
+                # candidate. Applying it globally would let a later search
+                # naming another domain promote an unrelated older candidate.
+                self._preferred_candidate_keys.add(key)
+
+        if entered:
+            return ()
+        return (
+            ResearchFailure(
+                operation="image_search",
+                provider=image_records[0].provider,
+                code="image_source_capacity",
+                retryable=False,
+            ),
+        )
+
+    def _ranked_catalog(self) -> list[tuple[tuple[str, str], ProviderImageCandidate]]:
+        """The whole catalog, best first. Equal tuples keep insertion order."""
+
+        return sorted(
+            self._candidate_catalog.items(),
+            key=lambda item: _image_candidate_priority(
+                item[1], preferred=item[0] in self._preferred_candidate_keys
+            ),
+        )
+
+    async def _prepare_images(self) -> tuple[ResearchFailure, ...]:
+        """Recompute the active vision window over the whole catalog.
+
+        Already-prepared candidates are retained without refetching and newly
+        active ones are fetched; only once the replacements exist are evicted
+        references released, so a failed fetch costs the improvement rather
+        than the image the model already had.
+        """
+
+        if self.service.image_service is None:
+            return ()
         limit = ResearchLimits.for_mode(
             self.mode, visual_intent=self._visual_intent
         ).max_model_images
-        remaining = max(0, limit - len(self.prepared_images))
-        candidates = self.pending_provider_images[: self.service.max_candidate_pool]
-        if not remaining:
-            self._omitted_image_count += len(candidates)
+        if limit <= 0:
+            await self._retain_active(())
             return ()
 
+        failures: list[ResearchFailure] = []
+        unusable: set[tuple[str, str]] = set()
+        fetch_budget = self.service.max_candidate_pool
+        while fetch_budget > 0:
+            window = [key for key, _candidate in self._ranked_catalog() if key not in unusable][
+                :limit
+            ]
+            missing = [key for key in window if key not in self._prepared_by_key]
+            if not missing:
+                break
+            batch = missing[:fetch_budget]
+            fetch_budget -= len(batch)
+            batch_failures, rejected = await self._fetch_candidates(batch)
+            failures.extend(batch_failures)
+            if not rejected:
+                break
+            # A candidate that was attempted and did not become usable never
+            # will be, so step past it to the next ranked one.
+            unusable |= rejected
+
+        active = [key for key, _candidate in self._ranked_catalog() if key in self._prepared_by_key]
+        await self._retain_active(tuple(active[:limit]))
+        return tuple(failures)
+
+    async def _fetch_candidates(
+        self, keys: Sequence[tuple[str, str]]
+    ) -> tuple[list[ResearchFailure], set[tuple[str, str]]]:
+        """Fetch, validate, and prepare one batch. Returns failures and losers.
+
+        The loser set is every key that did not become a prepared image, for
+        any reason -- unreachable, oversized, duplicate, or never attempted
+        because the download budget ran out.
+        """
+
+        candidates = [(key, self._candidate_catalog[key]) for key in keys]
         download_lock = asyncio.Lock()
         next_candidate = 0
         reserved_bytes = 0
-        outcomes: list[tuple[int, ProviderImageCandidate, Any, str | None, str]] = []
+        outcomes: list[
+            tuple[int, tuple[str, str], ProviderImageCandidate, Any, str | None, str]
+        ] = []
         per_image_limit = max(
             1,
             int(
@@ -455,7 +617,7 @@ class WebResearchSession:
                     if next_candidate >= len(candidates) or remaining_bytes <= 0:
                         return
                     index = next_candidate
-                    candidate = candidates[index]
+                    key, candidate = candidates[index]
                     next_candidate += 1
                     allowance = min(per_image_limit, remaining_bytes)
                     reserved_bytes += allowance
@@ -487,7 +649,7 @@ class WebResearchSession:
                             failure_code = "size"
                         else:
                             self._downloaded_image_bytes += byte_size
-                    outcomes.append((index, candidate, image, failure_code, fetched_url))
+                    outcomes.append((index, key, candidate, image, failure_code, fetched_url))
 
         await asyncio.gather(
             *(
@@ -497,7 +659,10 @@ class WebResearchSession:
         )
         self._omitted_image_count += len(candidates) - len(outcomes)
         failures: list[ResearchFailure] = []
-        for _index, candidate, fetched, failure_code, fetched_url in sorted(outcomes):
+        rejected = {key for key, _candidate in candidates}
+        for _index, key, candidate, fetched, failure_code, fetched_url in sorted(
+            outcomes, key=lambda outcome: outcome[0]
+        ):
             source = self.source_registry.resolve(candidate.source_url)
             if failure_code is not None or fetched is None or source is None:
                 self._omitted_image_count += 1
@@ -518,10 +683,13 @@ class WebResearchSession:
                 self._omitted_image_count += 1
                 continue
             preview = downscale_for_model(fetched)
+            # Held previews, not active ones: during a replacement pass the
+            # outgoing image is still held, so this is conservative by up to
+            # one window. It fails safe -- the model is never sent more bytes
+            # than the budget allows.
             if (
                 self._downloaded_image_bytes > self.service.max_download_bytes
                 or self._model_image_bytes + len(preview.content) > self.service.max_model_bytes
-                or len(self.prepared_images) >= limit
             ):
                 self._omitted_image_count += 1
                 continue
@@ -535,7 +703,10 @@ class WebResearchSession:
                 cached=fetched,
                 expires_at=self.service.now() + self.service.pending_image_ttl,
             )
-            candidate_id = f"I{len(self.prepared_images) + 1}"
+            # Never derived from len(prepared_images): with eviction that would
+            # rebind a retired ID to different bytes.
+            candidate_id = f"I{self._next_candidate_index}"
+            self._next_candidate_index += 1
             delivery_url = f"/web-images/{persisted.id}"
             record = ImageCandidateRecord(
                 candidate_id=candidate_id,
@@ -549,15 +720,14 @@ class WebResearchSession:
                 title=candidate.title,
                 description=candidate.description,
                 provider=candidate.provider,
+                source_domain=candidate.source_domain,
             )
             rich_item = ImageRichItem(
                 id=f"image:web:{persisted.id}",
                 type=RichItemType.image,
                 source="image_search",
                 title=candidate.title,
-                alt_text=str(
-                    candidate.description or candidate.title or GENERIC_IMAGE_ALT_TEXT
-                ),
+                alt_text=str(candidate.description or candidate.title or GENERIC_IMAGE_ALT_TEXT),
                 payload={
                     "url": delivery_url,
                     "mime_type": fetched.media_type,
@@ -571,17 +741,46 @@ class WebResearchSession:
                     "source_id": source.source_id,
                 },
             ).model_dump(mode="json", exclude_none=True)
-            self.prepared_images[candidate_id] = PreparedImage(
+            self._prepared_by_key[key] = PreparedImage(
                 record=record,
                 reference_id=persisted.id,
                 content=fetched.content,
                 rich_item=rich_item,
                 preview=preview.content,
                 preview_mime=preview.media_type,
+                catalog_key=key,
             )
             self._image_digests.add(digest)
             self._model_image_bytes += len(preview.content)
-        return tuple(failures)
+            rejected.discard(key)
+        return failures, rejected
+
+    async def _retain_active(self, keys: Sequence[tuple[str, str]]) -> None:
+        """Make ``keys`` the active window and release everything else."""
+
+        keep = set(keys)
+        evicted = [
+            (key, prepared)
+            for key, prepared in self._prepared_by_key.items()
+            if key not in keep
+        ]
+        for key, prepared in evicted:
+            del self._prepared_by_key[key]
+            self._image_digests.discard(prepared.record.digest)
+            self._model_image_bytes -= len(prepared.preview)
+        # Insertion order is priority order, so the evidence blocks and the
+        # bundle both present the best candidates first.
+        self.prepared_images = {
+            self._prepared_by_key[key].record.candidate_id: self._prepared_by_key[key]
+            for key in keys
+        }
+        if evicted and self.service.image_service is not None:
+            await self.service.image_service.release_references(
+                [prepared.reference_id for _key, prepared in evicted],
+                user_id=UUID(self.scope.user_id),
+                conversation_id=UUID(self.scope.conversation_id),
+            )
+
 
     def model_evidence_blocks(self, *, supports_vision: bool) -> list[dict[str, Any]]:
         if not supports_vision:
@@ -735,6 +934,7 @@ class WebResearchSession:
             images=tuple(prepared.record for prepared in self.prepared_images.values()),
             failures=failures,
             providers_used=providers,
+            omitted_source_count=self._omitted_source_count,
             omitted_image_count=self._omitted_image_count,
         )
 

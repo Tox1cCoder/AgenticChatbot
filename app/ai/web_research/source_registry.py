@@ -73,32 +73,19 @@ class SourceRegistry:
     def records(self) -> tuple[SourceRecord, ...]:
         return tuple(self._by_url.values())
 
-    @property
-    def capacity(self) -> int:
-        return self._max_sources
+    def admit(self, candidates: Sequence[ProviderSource]) -> tuple[SourceRecord, ...]:
+        """Admit unknown candidates and return only what this call created.
 
-    @property
-    def free_slots(self) -> int:
-        return max(0, self._max_sources - len(self._by_url))
-
-    def grow_capacity(self, max_sources: int) -> None:
-        """Raise the admission ceiling. Never lowers it.
-
-        A session learns its visual intent from the first search that declares
-        one, after the registry already exists. Growing is safe because admitted
-        records and their IDs are append-only; shrinking would orphan IDs the
-        model has already been shown, so it is refused.
+        The delta, not the whole registry: a caller that needs every record
+        reads :attr:`records`, while a caller reporting one operation needs to
+        say what *that* operation found. Returning the registry made every tool
+        result repeat the entire turn's evidence.
         """
 
-        self._max_sources = max(self._max_sources, max(0, int(max_sources)))
-
-    def admit(self, candidates: Sequence[ProviderSource]) -> tuple[SourceRecord, ...]:
+        admitted: list[SourceRecord] = []
         for candidate in candidates:
             url = canonicalize_public_url(candidate.url)
-            if url is None:
-                continue
-            existing = self._by_url.get(url)
-            if existing is not None:
+            if url is None or url in self._by_url:
                 continue
             if len(self._by_url) >= self._max_sources:
                 continue
@@ -113,7 +100,8 @@ class SourceRegistry:
                 query_index=candidate.query_index,
             )
             self._by_url[url] = record
-        return self.records
+            admitted.append(record)
+        return tuple(admitted)
 
     def resolve(self, source_id_or_url: str) -> SourceRecord | None:
         value = str(source_id_or_url or "").strip()

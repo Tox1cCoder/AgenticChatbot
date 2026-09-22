@@ -44,17 +44,6 @@ class ResearchLimits:
     max_page_opens: int
     max_model_images: int
 
-    @property
-    def max_registry_sources(self) -> int:
-        """Total registry capacity: text pages plus the image pages' own share.
-
-        Image source pages get capacity of their own. They used to share
-        ``max_sources`` with the text results, and were admitted second, so a
-        search that returned its full quota left them nothing.
-        """
-
-        return self.max_sources + self.max_model_images
-
     @classmethod
     def for_mode(
         cls,

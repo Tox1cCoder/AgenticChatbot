@@ -126,6 +126,9 @@ class ImageCandidateRecord(FrozenModel):
     title: str | None = Field(default=None, max_length=500)
     description: str | None = Field(default=None, max_length=1000)
     provider: str = Field(min_length=1, max_length=64)
+    #: Normalized host of the page the image came from. Server-known and safe
+    #: to show the answer model as a label, unlike the retrieved title.
+    source_domain: str | None = Field(default=None, max_length=253)
 
 
 class ResearchFailure(FrozenModel):
@@ -162,10 +165,11 @@ class WebEvidenceBundle(FrozenModel):
             if image.source_id not in known_sources:
                 raise ValueError(f"image {image.candidate_id} has unknown source {image.source_id}")
 
-        source_limit = source_capacity(self.mode, self.visual_intent)
+        # No source ceiling here. Runtime capacity is session-configured as a
+        # text quota plus a candidate-catalog quota; duplicating a smaller
+        # one-cohort limit in the contract would reject valid bounded sessions.
+        # The registry is the stable citation store, not the published list.
         image_limit = image_capacity(self.mode, self.visual_intent)
-        if len(self.sources) > source_limit:
-            raise ValueError(f"source limit for {self.mode} is {source_limit}")
         if len(self.images) > image_limit:
             raise ValueError(f"image limit for {self.visual_intent} is {image_limit}")
         return self

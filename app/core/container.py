@@ -474,6 +474,7 @@ class Container(containers.DeclarativeContainer):
         WebResearchService,
         image_service=web_image_service,
         max_candidate_pool=providers.Object(settings.web_research_max_candidate_pool),
+        max_candidate_catalog=providers.Object(settings.web_research_max_candidate_catalog),
         max_download_bytes=providers.Object(settings.web_research_max_download_bytes),
         max_model_bytes=providers.Object(settings.web_research_max_model_image_bytes),
         max_image_concurrency=providers.Object(settings.web_research_image_concurrency),

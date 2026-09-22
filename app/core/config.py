@@ -1952,6 +1952,10 @@ class Settings(BaseSettings):
         description="Short-lived rollout switch for canonical web research.",
     )
     web_research_max_candidate_pool: int = Field(default=8, ge=1, le=12)
+    #: Candidates one session retains across all its image searches. The
+    #: active vision window is a small slice of this; the rest stay ranked
+    #: and available so a later search can improve a window already full.
+    web_research_max_candidate_catalog: int = Field(default=24, ge=4, le=64)
     web_research_max_download_bytes: int = Field(
         default=20 * 1024 * 1024, ge=1
     )

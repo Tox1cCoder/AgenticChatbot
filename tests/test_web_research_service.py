@@ -104,7 +104,7 @@ def test_health_is_partitioned_by_provider_configuration() -> None:
 
 
 @pytest.mark.asyncio
-async def test_valid_image_sources_are_admitted_after_text_sources() -> None:
+async def test_valid_image_sources_are_admitted_before_text_sources() -> None:
     class ImageProvider:
         name = "brave"
         health_key = "brave:key"
@@ -139,9 +139,12 @@ async def test_valid_image_sources_are_admitted_after_text_sources() -> None:
 
     bundle = await service.new_session(SCOPE, ResearchBudget(), mode="quick").search(request)
 
+    # Image pages first, each class against its own quota. Text used to be
+    # admitted first and return its full budget, which left the image cohort
+    # nothing and discarded every candidate before the model saw one.
     assert [str(source.url) for source in bundle.sources] == [
-        "https://text-source.test/a",
         "https://image-source.test/a",
+        "https://text-source.test/a",
     ]
 
 

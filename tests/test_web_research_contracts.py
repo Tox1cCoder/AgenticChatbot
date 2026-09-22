@@ -79,3 +79,48 @@ def test_delivery_url_must_be_an_opaque_protected_reference() -> None:
     payload["delivery_url"] = "https://private.example/image.jpg"
     with pytest.raises(ValidationError):
         ImageCandidateRecord.model_validate(payload)
+
+
+def test_a_bundle_may_carry_a_registry_larger_than_one_cohort() -> None:
+    """The registry is the stable citation store, not the published list.
+
+    Session capacity is a text quota plus a candidate-catalog quota, so a
+    bundle legitimately carries far more sources than one visual intent's
+    worth. The contract bounds the *active* images instead.
+    """
+
+    sources = tuple(
+        _source(f"S{index}").model_copy(update={"url": f"https://example.test/{index}"})
+        for index in range(1, 21)
+    )
+
+    bundle = WebEvidenceBundle(
+        status="success",
+        mode="quick",
+        visual_intent="figure",
+        operation_index=1,
+        sources=sources,
+        images=(_image(1),),
+    )
+
+    assert len(bundle.sources) == 20
+
+    with pytest.raises(ValidationError, match="image limit"):
+        WebEvidenceBundle(
+            status="success",
+            mode="quick",
+            visual_intent="figure",
+            operation_index=1,
+            sources=sources,
+            images=tuple(_image(index) for index in range(1, 6)),
+        )
+
+    with pytest.raises(ValidationError, match="unknown source"):
+        WebEvidenceBundle(
+            status="success",
+            mode="quick",
+            visual_intent="figure",
+            operation_index=1,
+            sources=sources,
+            images=(_image(1, source_id="S99"),),
+        )

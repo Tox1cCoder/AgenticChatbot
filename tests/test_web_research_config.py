@@ -5,6 +5,7 @@ def test_web_research_has_structural_limits_without_search_call_ceiling() -> Non
     fields = Settings.model_fields
 
     assert fields["web_research_max_candidate_pool"].default == 8
+    assert fields["web_research_max_candidate_catalog"].default == 24
     assert fields["web_research_max_download_bytes"].default == 20 * 1024 * 1024
     assert fields["web_research_max_model_image_bytes"].default == 8 * 1024 * 1024
     assert fields["web_research_image_concurrency"].default == 3

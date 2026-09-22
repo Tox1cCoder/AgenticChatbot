@@ -67,3 +67,29 @@ def test_canonicalizer_rejects_non_public_hosts() -> None:
         "https://[::1]/admin",
     ):
         assert canonicalize_public_url(url) is None
+
+
+def _provider_source(url: str) -> ProviderSource:
+    return ProviderSource(provider="test", url=url, rank=1, query_index=1)
+
+
+def test_admit_returns_only_the_current_delta() -> None:
+    registry = SourceRegistry(max_sources=3)
+    first = registry.admit((_provider_source("https://example.com/a"),))
+    second = registry.admit(
+        (
+            _provider_source("https://example.com/a"),
+            _provider_source("https://example.com/b"),
+        )
+    )
+
+    assert [record.source_id for record in first] == ["S1"]
+    assert [record.source_id for record in second] == ["S2"]
+    assert [record.source_id for record in registry.records] == ["S1", "S2"]
+
+
+def test_admit_returns_nothing_when_every_candidate_is_already_known() -> None:
+    registry = SourceRegistry(max_sources=3)
+    registry.admit((_provider_source("https://example.com/a"),))
+
+    assert registry.admit((_provider_source("https://example.com/a"),)) == ()
