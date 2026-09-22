@@ -783,7 +783,7 @@ class SpecialistFactory:
             grounded_images = ()
             grounded_sources = tuple(
                 source.model_dump(mode="json")
-                for source in web_research_session.answer_sources
+                for source in web_research_session.published_sources(resolution.source_ids)
             )
         return WorkerResult(
             dispatch_id=task.dispatch_id,
@@ -1048,7 +1048,9 @@ class SpecialistFactory:
         if web_research_session is not None:
             web_sources = tuple(
                 source.model_dump(mode="json")
-                for source in web_research_session.answer_sources
+                for source in web_research_session.published_sources(
+                    grounding.source_ids if grounding is not None else ()
+                )
             )
             if web_sources:
                 metadata["web_sources"] = list(web_sources)

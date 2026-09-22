@@ -256,5 +256,45 @@ def test_specialists_publish_the_narrowed_view_not_the_whole_registry() -> None:
     ).read_text(encoding="utf-8")
 
     assert "source_registry.records" not in specialists
-    assert specialists.count("web_research_session.answer_sources") == 3
+    assert specialists.count("web_research_session.answer_sources") == 1
+    assert specialists.count("web_research_session.published_sources(") == 2
     assert specialists.count("web_research_session.source_registry.import_records") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cited_image_page_is_published_even_with_no_active_image() -> None:
+    """A citation with no entry in the published list is a dangling [1].
+
+    ``model_context`` offers the model every admitted ``S#``, so it can cite a
+    gallery page whose candidate never entered the vision window. Grounding
+    resolves that citation and renders it as a numbered link, so the reader
+    must be given the source it points at.
+    """
+
+    session = _session(
+        tuple(
+            _candidate(
+                f"shot-{index}", width=1600, confidence="medium", host=f"gallery{index}.test"
+            )
+            for index in range(1, 9)
+        ),
+        text=("https://news1.test/a",),
+    )
+
+    await _search(session, "a concrete subject")
+    inactive = next(
+        record
+        for record in session.source_registry.records
+        if "gallery" in str(record.url)
+        and record.source_id
+        not in {p.record.source_id for p in session.prepared_images.values()}
+    )
+
+    resolution = GroundingParser(session).resolve(f"Claim [[source:{inactive.source_id}]]")
+
+    assert resolution.source_ids == (inactive.source_id,)
+    assert inactive.source_id not in {record.source_id for record in session.answer_sources}
+    published = session.published_sources(resolution.source_ids)
+    assert inactive.source_id in {record.source_id for record in published}
+    # Still narrower than the registry: only the cited page was added back.
+    assert len(published) < len(session.source_registry.records)

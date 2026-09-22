@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import inspect
+import logging
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -43,6 +44,8 @@ from .contracts import (
 from .policy import ResearchLimits
 from .providers import ProviderFailure, ProviderResolver
 from .source_registry import SourceRegistry
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -231,19 +234,32 @@ class WebResearchSession:
         # image page before the model saw one.
         self._text_source_capacity = self.limits.max_sources
         self._image_catalog_capacity = self.service.max_candidate_catalog
+        # Opens get headroom of their own. They are not counted against the
+        # text quota, and without a reserve a saturated catalog silently
+        # swallowed a deliberate read: admit dropped the URL, resolve returned
+        # None, and the page never reached the model or the transcript.
         self.source_registry = SourceRegistry(
-            max_sources=self._text_source_capacity + self._image_catalog_capacity
+            max_sources=(
+                self._text_source_capacity
+                + self._image_catalog_capacity
+                + self.limits.max_page_opens
+            )
         )
         self._admitted_text_sources = 0
         self._admitted_image_sources = 0
         self._image_only_source_ids: set[str] = set()
-        self._omitted_source_count = 0
+        self._omitted_source_urls: set[str] = set()
         self._operation_index = 0
         #: Every candidate this session has seen, best-effort ranked on demand.
         #: Insertion-ordered on purpose: equal priority tuples fall back to the
         #: order the providers returned them in.
         self._candidate_catalog: dict[tuple[str, str], ProviderImageCandidate] = {}
         self._preferred_candidate_keys: set[tuple[str, str]] = set()
+        #: Catalog keys that were attempted and did not yield a usable image.
+        #: Session-scoped, not per-search: a candidate that cannot be fetched
+        #: will not become fetchable, and retrying it every search spends a
+        #: provider round trip and counts the same loss twice.
+        self._unusable_candidate_keys: set[tuple[str, str]] = set()
         self._prepared_by_key: dict[tuple[str, str], PreparedImage] = {}
         self._next_candidate_index = 1
         self._latest_image_query: str | None = None
@@ -358,6 +374,10 @@ class WebResearchSession:
         # Image pages first, each class against its own quota. A text search
         # that returns its full budget can no longer spend the capacity the
         # image cohort needs, and vice versa.
+        # Only the candidates the catalog can actually take. A page whose
+        # candidate will never be catalogued must not consume image-source
+        # quota or become a citable S# no picture will ever back.
+        pooled_images = tuple(image_records)[: self.service.max_candidate_pool]
         image_sources = tuple(
             ProviderSource(
                 provider=image.provider,
@@ -368,7 +388,7 @@ class WebResearchSession:
                 query_index=operation_index,
                 published_at=image.published_at,
             )
-            for image in image_records
+            for image in pooled_images
         )
         image_room = max(0, self._image_catalog_capacity - self._admitted_image_sources)
         image_admitted = self.source_registry.admit(image_sources[:image_room])
@@ -381,7 +401,9 @@ class WebResearchSession:
         for candidate in text_records:
             record = self.source_registry.resolve(candidate.url)
             if record is None:
-                self._omitted_source_count += 1
+                # By distinct page: a provider that keeps returning the same
+                # page past the quota lost one source, not one per search.
+                self._omitted_source_urls.add(candidate.url)
             else:
                 # A page both a text search and an image cohort returned is a
                 # text source: the image cohort merely got there first.
@@ -570,7 +592,7 @@ class WebResearchSession:
             return ()
 
         failures: list[ResearchFailure] = []
-        unusable: set[tuple[str, str]] = set()
+        unusable = self._unusable_candidate_keys
         fetch_budget = self.service.max_candidate_pool
         while fetch_budget > 0:
             window = [key for key, _candidate in self._ranked_catalog() if key not in unusable][
@@ -586,7 +608,7 @@ class WebResearchSession:
             if not rejected:
                 break
             # A candidate that was attempted and did not become usable never
-            # will be, so step past it to the next ranked one.
+            # will be, so step past it -- for this pass and every later one.
             unusable |= rejected
 
         active = [key for key, _candidate in self._ranked_catalog() if key in self._prepared_by_key]
@@ -757,6 +779,9 @@ class WebResearchSession:
                     "source_id": source.source_id,
                 },
             ).model_dump(mode="json", exclude_none=True)
+            # ``key`` is absent by construction: it came from ``missing``,
+            # which filters out anything already prepared. Overwriting here
+            # would leak a reference and double-count ``_model_image_bytes``.
             self._prepared_by_key[key] = PreparedImage(
                 record=record,
                 reference_id=persisted.id,
@@ -791,29 +816,54 @@ class WebResearchSession:
             for key in keys
         }
         if evicted and self.service.image_service is not None:
-            await self.service.image_service.release_references(
-                [prepared.reference_id for _key, prepared in evicted],
-                user_id=UUID(self.scope.user_id),
-                conversation_id=UUID(self.scope.conversation_id),
-            )
-
+            try:
+                await self.service.image_service.release_references(
+                    [prepared.reference_id for _key, prepared in evicted],
+                    user_id=UUID(self.scope.user_id),
+                    conversation_id=UUID(self.scope.conversation_id),
+                )
+            except Exception:
+                # A database write in the middle of a successful search must
+                # not throw the search away. The state above is already
+                # mutated, so the references leak either way; the periodic
+                # expiry sweep is what actually reclaims them.
+                logger.warning(
+                    "web image reference release failed during eviction count=%d",
+                    len(evicted),
+                    exc_info=True,
+                )
 
     @property
     def answer_sources(self) -> tuple[SourceRecord, ...]:
-        """Sources worth showing a reader: text pages, opened pages, cited image pages.
+        """The published view for an answer that cited nothing image-only."""
+
+        return self.published_sources()
+
+    def published_sources(
+        self, cited_source_ids: Sequence[str] = ()
+    ) -> tuple[SourceRecord, ...]:
+        """Sources worth showing a reader.
+
+        Text pages, opened pages, image pages backing an active image, and any
+        page the answer actually cited.
 
         The registry keeps every image-cohort page so grounding can resolve any
         ``S#`` the model was offered. Most of those pages are gallery hosts
         whose candidate never entered the vision window, and publishing them
-        buries the handful of sources the answer actually rests on.
+        buries the handful of sources the answer actually rests on. But the
+        model is *offered* all of them in its evidence message, so it can cite
+        one -- and grounding renders that citation as a numbered link. Dropping
+        the cited page would leave the reader a ``[1]`` pointing at nothing.
         """
 
         active = {prepared.record.source_id for prepared in self.prepared_images.values()}
+        cited = set(cited_source_ids)
         return tuple(
             record
             for record in self.source_registry.records
             if record.source_id not in self._image_only_source_ids
             or record.source_id in active
+            or record.source_id in cited
             or record.status == "opened"
         )
 
@@ -983,7 +1033,7 @@ class WebResearchSession:
             operation_source_ids=operation_source_ids,
             failures=failures,
             providers_used=providers,
-            omitted_source_count=self._omitted_source_count,
+            omitted_source_count=len(self._omitted_source_urls),
             omitted_image_count=self._omitted_image_count,
         )
 

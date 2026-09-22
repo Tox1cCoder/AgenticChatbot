@@ -286,3 +286,20 @@ async def test_malformed_payload_has_a_bounded_failure() -> None:
 
     assert raised.value.code == "invalid_response"
     assert raised.value.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_the_probe_uses_the_bare_host_not_the_www_form() -> None:
+    """``site:www.t1.gg`` is narrower than the restriction the adapter enforces.
+
+    ``host_matches`` accepts ``t1.gg`` and every subdomain, so probing the www
+    form would ask Brave for less than the request actually allows.
+    """
+
+    tool = _Tool(_json("brave_images_mixed_domains.json"), _json("brave_images_t1_official.json"))
+
+    await BraveImageSearchProvider(tool).search(
+        _t1_request(include_domains=("https://www.T1.gg/",))
+    )
+
+    assert tool.calls[1]["query"] == f"{T1_IMAGE_QUERY} site:t1.gg"

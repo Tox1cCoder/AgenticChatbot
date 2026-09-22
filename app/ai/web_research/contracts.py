@@ -36,11 +36,12 @@ def image_capacity(mode: ResearchMode, visual_intent: VisualIntent) -> int:
 
 
 def source_capacity(mode: ResearchMode, visual_intent: VisualIntent) -> int:
-    """Total source records admissible, text pages plus image pages.
+    """Text sources one mode may accumulate, plus that intent's image share.
 
-    Image source pages are additive rather than shared. Sharing one budget let a
-    text search that returned its full quota consume every slot before the first
-    image page was offered, which discarded the whole image result set.
+    Only ``ResearchLimits.for_mode`` still calls this, and always with
+    ``visual_intent="none"`` -- so in practice it returns the text budget. The
+    session owns registry capacity now: a text quota, a candidate-catalog
+    quota, and headroom for page opens, none of which this function can see.
     """
 
     return _TEXT_SOURCE_LIMITS[mode] + image_capacity(mode, visual_intent)

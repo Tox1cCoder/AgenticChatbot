@@ -529,3 +529,114 @@ async def test_a_candidate_label_names_its_dimensions_and_domain() -> None:
     assert blocks[0]["text"].startswith(
         "Image candidate I1; source S1; 1920x1080; domain t1.gg."
     )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_reference_release_does_not_lose_the_search() -> None:
+    """Eviction cleanup is best effort; the TTL sweep is the real backstop.
+
+    The release is a database write in the middle of a successful search. If
+    it can throw the search away, a turn loses evidence it already paid the
+    budget for -- and the references leak anyway, because the state was
+    mutated before the await.
+    """
+
+    class HostileRelease(RecordingImageService):
+        async def release_references(self, ids, **_scope):
+            raise RuntimeError("database unavailable")
+
+    session, intent = _scripted_session(
+        _cards_and_photo(),
+        (_candidate("official", width=1920, height=1080, rank=1, confidence="high", host="t1.gg"),),
+        image_service=HostileRelease(),
+    )
+
+    await _search(session, intent, query="the subject")
+    bundle = await _search(session, intent, query="the official subject", domains=("t1.gg",))
+
+    assert (bundle.images[0].width, bundle.images[0].height) == (1920, 1080)
+    assert "I4" not in session.prepared_images
+
+
+@pytest.mark.asyncio
+async def test_a_candidate_that_cannot_be_fetched_is_not_retried_every_search() -> None:
+    """Omitted means "never offered", so it is counted once, not per search."""
+
+    dead = _candidate("dead", width=1920, height=1080, rank=1, confidence="high")
+    image_service = RecordingImageService(failing={dead.image_url})
+    session, intent = _scripted_session(
+        (dead, *_cards_and_photo()),
+        (_candidate("late", width=800, height=600, rank=1, confidence="medium"),),
+        image_service=image_service,
+    )
+
+    first = await _search(session, intent, query="the subject")
+    second = await _search(session, intent, query="a later subject", domains=("gallery.test",))
+
+    assert image_service.fetched.count(dead.image_url) == 1
+    assert second.omitted_image_count == first.omitted_image_count
+    assert [failure.code for failure in second.failures] == []
+
+
+@pytest.mark.asyncio
+async def test_only_pooled_candidates_take_image_source_capacity() -> None:
+    """A page whose candidate can never be catalogued must not become a citable S#."""
+
+    _session, bundle = await _run(text_count=5, image_count=12)
+    image_pages = [
+        source for source in bundle.sources if "gallery" in str(source.url)
+    ]
+
+    assert len(image_pages) == 8, "only max_candidate_pool candidates reach the catalog"
+
+
+@pytest.mark.asyncio
+async def test_a_deliberate_open_still_fits_once_the_catalog_is_full() -> None:
+    """Registry capacity reserves headroom for the opens the mode allows.
+
+    Without it a saturated catalog silently swallowed a fresh ``web_open``:
+    admit dropped the URL, resolve returned None, and the deliberate read
+    never reached the model or the transcript.
+    """
+
+    class Opener:
+        name = "tavily"
+        health_key = "tavily:test"
+
+        async def open(self, urls, question, *, query_index: int):
+            return tuple(
+                ProviderSource(
+                    provider="tavily",
+                    url=url,
+                    title="Opened",
+                    snippet="the deliberate read",
+                    rank=rank,
+                    query_index=query_index,
+                )
+                for rank, url in enumerate(urls, start=1)
+            )
+
+    service = WebResearchService(
+        resolver=ProviderResolver(
+            text=(SaturatingText(5),), images=(UnrelatedImages(8),), openers=(Opener(),)
+        ),
+        image_service=RecordingImageService(),
+        max_candidate_catalog=8,
+        now=lambda: datetime(2026, 9, 16, tzinfo=timezone.utc),
+    )
+    session = service.new_session(_scope(), ResearchBudget(), mode="quick")
+    await session.search(
+        ResearchRequest(
+            query="a concrete subject",
+            objective="show the subject",
+            mode="quick",
+            visual_intent="figure",
+            image_query="the subject",
+        )
+    )
+    assert len(session.source_registry.records) == 5 + 8
+
+    bundle = await session.open(["https://fresh-page.test/article"], "What does it say?")
+
+    assert [item.source_id for item in bundle.sources if item.status == "opened"] == ["S14"]
+    assert bundle.operation_source_ids == ("S14",)

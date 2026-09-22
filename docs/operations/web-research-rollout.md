@@ -78,6 +78,12 @@ for one operation (an agentic open of 4 pages) is 12,000 characters, under
 `tool_result_offload_threshold_chars` (16,000), so a deep read stays in the
 transcript instead of being offloaded to a blob.
 
+A search snippet now lives only in the tool transcript; the synthetic evidence
+message carries the `S#` mapping without repeating it. A deliberately opened
+page is protected by a 1,500-character excerpt in that message, but a search
+snippet is not, so text evidence depends on tool messages surviving later
+trimming or summarisation.
+
 ## Ordering is quality-only
 
 Candidate ordering uses resolution adequacy (640px longest edge), provider

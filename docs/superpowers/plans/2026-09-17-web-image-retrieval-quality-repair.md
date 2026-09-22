@@ -939,6 +939,32 @@ Use `superpowers:verification-before-completion`, then `superpowers:finishing-a-
   rank-only ordering too; all five were mutation-checked against a
   rank-only `_image_candidate_priority` and a renamed `IMAGE TARGET` line.
 
+## Review findings applied after Task 5
+
+A review of `685c1d74..f4633bea` found nine issues; eight were fixed with a
+regression test each, one was declined.
+
+- An unguarded `release_references` in `_retain_active` let a database write
+  failure throw away an otherwise successful search. Now best effort.
+- `unusable` was per-call, so a candidate that could not be fetched was
+  refetched on every later search and counted in `omitted_image_count` twice.
+  Promoted to session state, which is what the counter's own definition says.
+- `answer_sources` could omit a page the answer visibly *cited*: the model is
+  offered every admitted `S#`, so it can cite an image page whose candidate
+  never entered the window. `published_sources(cited_source_ids)` adds those
+  back; `answer_sources` remains the no-citations view.
+- The registry had no headroom for `web_open`, so a saturated catalog silently
+  swallowed a deliberate read. Capacity is now text + catalog + `max_page_opens`.
+  The plan's "Known gaps" entry reasoned only about the opposite direction.
+- The `site:` probe kept a `www.` prefix that `host_matches` strips, asking
+  Brave for strictly less than the restriction allowed.
+- Image source pages were admitted for candidates beyond `max_candidate_pool`,
+  which could never enter the catalog.
+- `_omitted_source_count` counted events rather than distinct lost pages.
+- Declined: adding a replacement absolute source cap to `WebEvidenceBundle`.
+  The runtime ceiling is session-configured and the registry is its only
+  producer; a second invented number would be the thing that goes stale.
+
 ## Known gaps this plan deliberately leaves open
 
 - `ResearchBudget.reserve_image_search`, `may_image_search`, and `record_image_search` have no production callers, so `research_max_image_searches_per_turn` bounds nothing. Wiring it is separate work; Task 2 avoids depending on it.

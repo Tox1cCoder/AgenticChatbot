@@ -207,7 +207,11 @@ class BraveImageSearchProvider:
         records = self._candidates(payload, allowed=allowed)
 
         if allowed and len(records) < _BRAVE_IMAGE_COUNT:
-            probe = {**args, "query": f"{query} site:{allowed[0]}"}
+            # The bare host, because ``host_matches`` accepts the apex and every
+            # subdomain: probing ``site:www.t1.gg`` would ask Brave for strictly
+            # less than the restriction actually allows.
+            probe_host = allowed[0].removeprefix("www.")
+            probe = {**args, "query": f"{query} site:{probe_host}"}
             try:
                 extra = await _payload(self.tool, probe, provider=self.name)
             except ProviderFailure as exc:
@@ -216,7 +220,7 @@ class BraveImageSearchProvider:
                 logger.warning(
                     "brave image domain probe failed provider=%s domain=%s code=%s",
                     self.name,
-                    allowed[0],
+                    probe_host,
                     exc.code,
                 )
             else:
