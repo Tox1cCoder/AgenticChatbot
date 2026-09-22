@@ -26,7 +26,13 @@ WEB_SEARCH_DESCRIPTION = (
     "identity art, photo, diagram, map, or chart to inspect. Resolve pronouns "
     "from the conversation and add a version or year when appearance changes. "
     "Validated candidates are shown privately on the next model call; no image "
-    "is published unless selected with [[image:I#]]."
+    "is published unless selected with [[image:I#]].\n\n"
+    "Each result lists only the sources that search newly admitted, with "
+    "new_source_count and total_source_count. An empty list with a non-zero "
+    "total means this search added nothing to evidence you already hold, not "
+    "that the web is empty. If failures reports source_quota_exhausted, this "
+    "turn's source budget is full: answer from the sources you already have "
+    "instead of searching again."
 )
 
 WEB_OPEN_DESCRIPTION = (

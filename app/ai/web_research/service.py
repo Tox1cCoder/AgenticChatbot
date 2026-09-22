@@ -307,6 +307,33 @@ class WebResearchSession:
             now=self.service.now(),
             configured_max_results=self.limits.max_sources,
         )
+        # The text quota is per turn, not per search. Once it is full every
+        # later search returns results the registry silently drops, and an
+        # empty delta reported as ``status=success, failures=[]`` is
+        # indistinguishable from a provider that genuinely found nothing -- so
+        # the model rewords, searches again, and finally answers with no
+        # citation because it believes it has no evidence. Name it instead.
+        text_room = max(0, self._text_source_capacity - self._admitted_text_sources)
+        quota_failures: tuple[ResearchFailure, ...] = ()
+        if text_room == 0:
+            quota_failures = (
+                ResearchFailure(
+                    operation="search",
+                    provider="server",
+                    code="source_quota_exhausted",
+                    retryable=False,
+                ),
+            )
+            if request.visual_intent == "none":
+                # Nothing this operation could do would reach the model, so
+                # the provider round trip is pure latency. A visual search
+                # still runs: only the text half is exhausted.
+                return self._bundle(
+                    operation_index,
+                    visual_intent=request.visual_intent,
+                    failures=quota_failures,
+                )
+
         search_scope = (
             normalized.freshness,
             normalized.start_date,
@@ -395,7 +422,6 @@ class WebResearchSession:
         self._admitted_image_sources += len(image_admitted)
         self._image_only_source_ids.update(record.source_id for record in image_admitted)
 
-        text_room = max(0, self._text_source_capacity - self._admitted_text_sources)
         text_admitted = self.source_registry.admit(tuple(text_records)[:text_room])
         self._admitted_text_sources += len(text_admitted)
         for candidate in text_records:
@@ -421,6 +447,7 @@ class WebResearchSession:
                 *text_failures,
                 *image_failures,
                 *gate_failures,
+                *quota_failures,
                 *capacity_failures,
                 *image_fetch_failures,
             ),

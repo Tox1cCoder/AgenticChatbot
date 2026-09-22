@@ -84,6 +84,23 @@ page is protected by a 1,500-character excerpt in that message, but a search
 snippet is not, so text evidence depends on tool messages surviving later
 trimming or summarisation.
 
+### When a search adds nothing
+
+The text quota is **per turn**, not per search. Once it is full, a further
+`web_search` cannot admit anything, so the session refuses it before spending a
+provider round trip and reports
+`failures: [{operation: "search", code: "source_quota_exhausted"}]` with
+`status: partial`. A visual search still runs — only the text half is
+exhausted, and the image cohort has its own quota.
+
+This exists because an empty delta reported as `status: success, failures: []`
+is indistinguishable from a provider that genuinely found nothing. Between
+2026-09-17 and 2026-09-22 it was reported exactly that way, and the observed
+result was a model that reworded and re-searched up to eight times and then
+answered citing nothing, which `WebEvidencePolicy` rejects as
+`missing_web_citation`. If you see that failure together with a long run of
+`web_search` calls, check the quota signal first.
+
 ## Ordering is quality-only
 
 Candidate ordering uses resolution adequacy (640px longest edge), provider

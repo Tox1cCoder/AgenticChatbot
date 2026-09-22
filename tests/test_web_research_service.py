@@ -269,3 +269,107 @@ async def test_open_rejects_private_urls_before_provider_call() -> None:
 
     assert opener.calls == 0
     assert bundle.failures[0].code == "invalid_source"
+
+
+class FreshTextProvider:
+    """Five brand-new, on-topic results every search, as Tavily really behaves."""
+
+    name = "tavily"
+    health_key = "tavily:key"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def search(self, _request, *, query_index: int):
+        self.calls += 1
+        return tuple(
+            ProviderSource(
+                provider="tavily",
+                url=f"https://search{self.calls}-{rank}.test/article",
+                title=f"Result {self.calls}.{rank}",
+                snippet="relevant evidence",
+                rank=rank,
+                query_index=query_index,
+            )
+            for rank in range(1, 6)
+        )
+
+
+def _text_request(query: str) -> ResearchRequest:
+    return ResearchRequest(query=query, objective="identify the current roster", mode="quick")
+
+
+@pytest.mark.asyncio
+async def test_an_exhausted_text_quota_is_named_not_reported_as_an_empty_result() -> None:
+    """An empty delta must not read as "the provider found nothing".
+
+    The text quota is per turn. Once it is full every later search admits
+    nothing, and reporting that as ``status=success, sources=[], failures=[]``
+    is indistinguishable from a search that genuinely found nothing -- so the
+    model rewords and searches again, and again, and finally answers with no
+    citation because it believes it has no evidence.
+    """
+
+    text = FreshTextProvider()
+    service = WebResearchService(
+        resolver=ProviderResolver(text=(text,)),
+        now=lambda: datetime(2026, 9, 22, tzinfo=timezone.utc),
+    )
+    session = service.new_session(SCOPE, ResearchBudget(), mode="quick")
+
+    first = await session.search(_text_request("current T1 League of Legends roster"))
+    second = await session.search(_text_request("T1 2026 starting lineup announcement"))
+
+    assert len(first.operation_source_ids) == 5
+    assert first.failures == ()
+    assert [failure.code for failure in second.failures] == ["source_quota_exhausted"]
+    assert second.operation_source_ids == ()
+    # The wasted provider round trip is the other half of the cost: a search
+    # that cannot admit anything must not spend one.
+    assert text.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_saturated_text_quota_still_lets_an_image_search_run() -> None:
+    """Only the text half is exhausted; a visual search can still contribute."""
+
+    text = FreshTextProvider()
+
+    class OneImage:
+        name = "brave"
+        health_key = "brave:key"
+
+        async def search(self, _request):
+            return (
+                ProviderImageCandidate(
+                    provider="brave",
+                    image_url="https://cdn.test/photo.png",
+                    source_url="https://gallery.test/page",
+                    rank=1,
+                    width=1920,
+                    height=1080,
+                    confidence="high",
+                    source_domain="gallery.test",
+                ),
+            )
+
+    service = WebResearchService(
+        resolver=ProviderResolver(text=(text,), images=(OneImage(),)),
+        now=lambda: datetime(2026, 9, 22, tzinfo=timezone.utc),
+    )
+    session = service.new_session(SCOPE, ResearchBudget(), mode="quick")
+
+    await session.search(_text_request("current T1 League of Legends roster"))
+    visual = await session.search(
+        ResearchRequest(
+            query="T1 official team photograph",
+            objective="show the team",
+            mode="quick",
+            visual_intent="figure",
+            image_query="T1 official team photo",
+        )
+    )
+
+    assert "source_quota_exhausted" in [failure.code for failure in visual.failures]
+    assert visual.operation_source_ids == ("S6",), "the image page still gets admitted"
+    assert text.calls == 2, "the text provider still runs; images share the operation"
