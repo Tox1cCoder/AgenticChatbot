@@ -1568,12 +1568,18 @@ class Settings(BaseSettings):
     )
 
     enable_user_memory_tools: bool = Field(
-        default=False,
-        description="Enable explicit agent-editable user memory tools.",
+        default=True,
+        description=(
+            "Enable agent-editable long-term user memory: the remember/list/forget "
+            "tools, and injection of saved memories into the system prompt."
+        ),
     )
     user_memory_max_prompt_items: int = Field(
         default=20,
-        description="Maximum user memory items exposed to agents when memory tools are enabled.",
+        description=(
+            "Maximum saved memories injected into the system prompt each turn. "
+            "Newest first; 0 disables injection while leaving the tools bound."
+        ),
     )
 
     # Per-Agent Tool Allowlists

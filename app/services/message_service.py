@@ -3928,7 +3928,8 @@ class MessageService(IMessageService):
                 conversation.persona_prompt if conversation else None
             )
         else:
-            sanitized_persona = self.project_context_service.resolve_system_instruction(
+            # Async twin: this runs on the event loop before the first token.
+            sanitized_persona = await self.project_context_service.aresolve_system_instruction(
                 conversation
             )
         planning_context = await self._prepare_planning_context(

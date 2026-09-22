@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import delete, func, select, update
 
 from app.core.config import settings
+from app.database.async_session import AsyncSessionLocal
 from app.database.database import Database
 from app.models.conversation import Conversation
 from app.models.custom_agent import ConversationCustomAgent, CustomAgent
@@ -52,7 +53,10 @@ def repo_env():
             )
         s.commit()
 
-    repository = ProjectRepository(session_factory=sf)
+    repository = ProjectRepository(
+        session_factory=sf,
+        async_session_factory=AsyncSessionLocal,
+    )
     try:
         yield repository, sf, owner_id, other_id, agent_a, agent_b
     finally:
@@ -270,3 +274,21 @@ def test_conversation_counts_excludes_soft_deleted(repo_env):
         s.commit()
 
     assert repository.conversation_counts(owner_id) == {project.id: 1}
+
+
+class TestAsyncTwin:
+    """``aget_owned`` is what the streaming turn calls; drift there would make
+    project instructions differ between the resume path and the hot path."""
+
+    @pytest.mark.selector_event_loop
+    async def test_aget_owned_matches_sync_get_owned(self, repo_env):
+        repository, _sf, owner_id, other_id, _a, _b = repo_env
+        project = repository.create(owner_id, {"name": "P", "instructions": "rules"})
+
+        expected = repository.get_owned(owner_id, project.id)
+        actual = await repository.aget_owned(owner_id, project.id)
+        assert actual is not None and expected is not None
+        assert actual.instructions == expected.instructions == "rules"
+
+        assert repository.get_owned(other_id, project.id) is None
+        assert await repository.aget_owned(other_id, project.id) is None

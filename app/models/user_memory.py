@@ -16,6 +16,14 @@ class UserMemory(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    # NULL means "global": saved from a conversation that belongs to no
+    # project. Recall matches this project OR NULL, so a project sees its own
+    # memories plus the global ones and never another project's.
+    project_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("projects.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     content = Column(Text, nullable=False)
     source = Column(String(255), nullable=False)
     created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
@@ -30,4 +38,4 @@ class UserMemory(Base):
     user = relationship("User", backref="memories")
 
     def __repr__(self) -> str:
-        return f"<UserMemory(id={self.id}, user_id={self.user_id})>"
+        return f"<UserMemory(id={self.id}, user_id={self.user_id}, project_id={self.project_id})>"

@@ -55,12 +55,18 @@ def _message_row(*, conversation_id, sender: int, content: str) -> SimpleNamespa
 class _StubResolver:
     """Minimal stand-in for ProjectContextService: ignores the conversation
     it is given and always returns the same fixed instruction, so these
-    tests only need to prove the value flows through unmodified."""
+    tests only need to prove the value flows through unmodified.
+
+    Both twins are provided: the streaming turn awaits the async one so the
+    lookups do not block the event loop."""
 
     def __init__(self, value: str) -> None:
         self.value = value
 
     def resolve_system_instruction(self, conversation):
+        return self.value
+
+    async def aresolve_system_instruction(self, conversation):
         return self.value
 
 
@@ -228,6 +234,19 @@ async def test_resume_message_creation_stream_persists_the_wired_instruction():
 # tests/test_workflow_concurrency.py: read the container's own source and
 # assert the wiring keyword is actually present in the right provider block.
 # ---------------------------------------------------------------------------
+
+
+def test_the_streaming_turn_awaits_the_async_resolver():
+    """The sync resolver takes a sync engine checkout. Calling it from
+    ``_build_user_message_workflow_request`` blocks the event loop before the
+    first token for every project or memory conversation, which is what
+    tests/test_preflight_has_no_blocking_db.py forbids."""
+    import inspect
+
+    source = inspect.getsource(MessageService._build_user_message_workflow_request)
+
+    assert "await self.project_context_service.aresolve_system_instruction" in source
+    assert "self.project_context_service.resolve_system_instruction" not in source
 
 
 def test_the_container_wires_project_context_service_into_message_service():

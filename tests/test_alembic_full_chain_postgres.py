@@ -23,7 +23,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _SCRATCH_DATABASE_PREFIX = "chatbot_migration_smoke_"
 _SCRATCH_DATABASE_RE = re.compile(r"chatbot_migration_smoke_[0-9a-f]{32}")
 _OLD_HEAD = "a4b5c6d7e8f9"
-_HEAD = "9a8b7c6d5e4f"
+_HEAD = "9778bb07ea35"
 #: Not "head minus one". ``_assert_previous_head_schema`` describes the schema
 #: at *this* revision specifically — it asserts, among other things, that
 #: ``document_index_generations`` does not exist yet — so advancing it with each

@@ -408,6 +408,34 @@ embedding migration" below).
 
 `MEMORY_MAX_MESSAGES`, `CHAT_HISTORY_MAX_MESSAGES` / `_TOKENS`, `RAG_HISTORY_MAX_*`, `SEARCH_HISTORY_MAX_*`, `PLANNING_HISTORY_MAX_*`.
 
+### Long-term user memory
+
+Distinct from conversation compaction, which never crosses a conversation
+boundary. Long-term memory is **scoped to a project**: a fact saved in one
+conversation is recalled in every other conversation of the same project, and
+in no other project. A save made outside any project is global and visible
+everywhere; a conversation outside any project sees only global memories.
+
+Recall does not depend on the model choosing to call a tool. Saved memories are
+loaded in `ProjectContextService` — the one place a conversation's system
+instruction is assembled — and appended to it, after the project instructions
+and persona, fenced in a `BEGIN_UNTRUSTED_USER_MEMORY` block. The fence matters:
+remembered text is user-authored content replayed into a later system prompt, so
+it is marked as reference data rather than instructions.
+
+Writes are explicit. `remember_memory` fires when the user asks; prompt guidance
+tells the model to *offer* rather than save silently when a durable fact is
+mentioned in passing. Nothing is extracted automatically.
+
+Both lookups have async twins (`aget_owned`, `alist_for_user`) because the
+streaming turn assembles its system instruction on the event loop before the
+first token — see `tests/test_preflight_has_no_blocking_db.py`.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `ENABLE_USER_MEMORY_TOOLS` | `true` | Binds remember/list/forget and enables prompt injection. |
+| `USER_MEMORY_MAX_PROMPT_ITEMS` | `20` | Memories injected per turn, newest first. `0` keeps the tools but stops injection. |
+
 ### Durable conversation compaction
 
 Prompt memory is built in one place — `app.ai.history.ConversationHistoryProvider` — and combines a durable per-conversation compacted-memory record in PostgreSQL with transcript rows after its numeric message-sequence cursor. Request preflight uses the same provider-aware token counter as the background compactor and can request durable work or, at the hard boundary, run one bounded synchronous compaction attempt.
@@ -527,7 +555,7 @@ The server accepts either a fully-formed URL (`REDIS_URL`) or a hostname + conve
 
 ## Database Migrations
 
-Migrations are Alembic-managed (single head, currently `9a8b7c6d5e4f`). They are applied **automatically** at application startup via `app.database.migrations.upgrade_database` inside the lifespan hook, so manual migration is only required for dev or out-of-process tooling:
+Migrations are Alembic-managed (single head, currently `9778bb07ea35`). They are applied **automatically** at application startup via `app.database.migrations.upgrade_database` inside the lifespan hook, so manual migration is only required for dev or out-of-process tooling:
 
 ```bash
 alembic upgrade head

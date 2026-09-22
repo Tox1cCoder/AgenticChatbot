@@ -487,6 +487,7 @@ class Container(containers.DeclarativeContainer):
     user_memory_repository = providers.Factory(
         UserMemoryRepository,
         session_factory=db.provided.session,
+        async_session_factory=db.provided.async_session,
     )
 
     hitl_interrupt_repository = providers.Factory(
@@ -667,6 +668,7 @@ class Container(containers.DeclarativeContainer):
     project_context_service = providers.Factory(
         ProjectContextService,
         project_repository=project_repository,
+        user_memory_repository=user_memory_repository,
     )
 
     conversation_service: providers.Provider[IConversationService] = providers.Factory(

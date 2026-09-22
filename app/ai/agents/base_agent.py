@@ -44,7 +44,12 @@ from ..deferred_tool_binding import (
 from ..image_context import build_multimodal_content, has_image_parts
 from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
 from ..model_context import build_context_window_usage, resolve_model_context_window
-from ..prompts import MARKDOWN_CURRENCY_GUIDANCE, TOOL_CONTEXT_SUFFIX, TOOL_EXPLORATION_SUFFIX
+from ..prompts import (
+    MARKDOWN_CURRENCY_GUIDANCE,
+    TOOL_CONTEXT_SUFFIX,
+    TOOL_EXPLORATION_SUFFIX,
+    USER_MEMORY_SUFFIX,
+)
 from ..request_budget import (
     BudgetConfig,
     BudgetResult,
@@ -558,7 +563,9 @@ class BaseAgent(ABC):
                 memory_repository = None
             if memory_repository is not None:
                 for tool in create_user_memory_tools(
-                    repository=memory_repository, user_id=str(user_id)
+                    repository=memory_repository,
+                    user_id=str(user_id),
+                    conversation_id=str(conversation_id) if conversation_id else None,
                 ):
                     _add_internal(tool)
 
@@ -1949,6 +1956,11 @@ class BaseAgent(ABC):
 
         # Append shared tool-usage guidance.
         system_prompt = f"{system_prompt}{TOOL_EXPLORATION_SUFFIX}"
+
+        # Only describe memory when the tools are actually bound; otherwise the
+        # model is told about capabilities it cannot reach.
+        if getattr(settings, "enable_user_memory_tools", False) and user_id:
+            system_prompt = f"{system_prompt}{USER_MEMORY_SUFFIX}"
 
         # Append delegation instructions only when the tool is actually bound.
         hand_off_prompt_enabled = bool(_.get("include_hand_off"))

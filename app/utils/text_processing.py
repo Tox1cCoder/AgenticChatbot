@@ -139,27 +139,43 @@ CONVERSATION_INSTRUCTION_HEADER = (
 def compose_system_instruction(
     project_instructions: str | None,
     persona_prompt: str | None,
+    user_memory: str | None = None,
 ) -> str | None:
-    """Combine a project's instructions with a conversation's persona.
+    """Combine a project's instructions, a conversation's persona, and memory.
 
-    Each part is sanitized independently against its own
+    Each instruction part is sanitized independently against its own
     8000-character cap. Composing first and truncating after would
     silently discard the persona, because the project text leads —
     never call :func:`sanitize_persona` on the value returned here.
 
-    Headers are added only when both parts are present, so a
-    conversation with no project renders byte-identically to how it
-    rendered before projects existed.
+    ``user_memory`` is pre-fenced untrusted reference data, not an
+    instruction, so it is appended verbatim and last, and it never
+    causes the instruction headers to appear. It deliberately skips
+    :func:`sanitize_persona`: that function is for authored prompts,
+    and stripping the fence would turn remembered text into standing
+    instructions.
+
+    Headers are added only when both instruction parts are present, so
+    a conversation with no project and no memory renders
+    byte-identically to how it rendered before projects existed.
     """
     project = sanitize_persona(project_instructions)
     persona = sanitize_persona(persona_prompt)
 
     if project and persona:
-        return (
+        instructions = (
             f"{PROJECT_INSTRUCTION_HEADER}\n{project}\n\n"
             f"{CONVERSATION_INSTRUCTION_HEADER}\n{persona}"
         )
-    return project or persona
+    else:
+        instructions = project or persona
+
+    memory = (user_memory or "").strip()
+    if not memory:
+        return instructions
+    if not instructions:
+        return memory
+    return f"{instructions}\n\n{memory}"
 
 
 def fix_markdown_code_blocks(text: str) -> str:

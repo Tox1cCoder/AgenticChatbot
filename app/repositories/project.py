@@ -42,19 +42,33 @@ class ProjectRepository(RepositorySessionMixin):
                 session.expunge(project)
             return projects
 
-    def get_owned(self, owner_id: UUID, project_id: UUID) -> Project | None:
-        """A live project if it exists and belongs to ``owner_id``."""
-        with self.session_factory() as session:
-            project = session.execute(
-                select(Project).where(
-                    Project.id == project_id,
-                    Project.owner_id == owner_id,
-                    Project.deleted_at.is_(None),
-                )
-            ).scalar_one_or_none()
+    @staticmethod
+    def _get_owned_work(owner_id: UUID, project_id: UUID):
+        statement = select(Project).where(
+            Project.id == project_id,
+            Project.owner_id == owner_id,
+            Project.deleted_at.is_(None),
+        )
+
+        def work(session: Any) -> Project | None:
+            project = session.execute(statement).scalar_one_or_none()
             if project is not None:
                 session.expunge(project)
             return project
+
+        return work
+
+    def get_owned(self, owner_id: UUID, project_id: UUID) -> Project | None:
+        """A live project if it exists and belongs to ``owner_id``."""
+        return self._run(self._get_owned_work(owner_id, project_id))
+
+    async def aget_owned(self, owner_id: UUID, project_id: UUID) -> Project | None:
+        """Async twin of :meth:`get_owned`.
+
+        Resolving a conversation's system instruction happens before the first
+        token, where a sync engine checkout would block the event loop.
+        """
+        return await self._arun(self._get_owned_work(owner_id, project_id))
 
     def get_live(self, project_id: UUID) -> Project | None:
         """A live project regardless of owner.
