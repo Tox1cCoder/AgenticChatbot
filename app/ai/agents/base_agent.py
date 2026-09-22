@@ -36,6 +36,7 @@ from ..client_runtime_tools import (
     get_client_runtime_tools,
 )
 from ..context_overflow import is_context_overflow_error, prepare_aggressive_context_retry
+from ..conversation_search_tools import create_conversation_search_tools
 from ..deferred_tool_binding import (
     build_deferred_tool_list,
     ordinary_excluded_tool_names,
@@ -45,6 +46,7 @@ from ..image_context import build_multimodal_content, has_image_parts
 from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
 from ..model_context import build_context_window_usage, resolve_model_context_window
 from ..prompts import (
+    CONVERSATION_SEARCH_SUFFIX,
     MARKDOWN_CURRENCY_GUIDANCE,
     TOOL_CONTEXT_SUFFIX,
     TOOL_EXPLORATION_SUFFIX,
@@ -564,6 +566,22 @@ class BaseAgent(ABC):
             if memory_repository is not None:
                 for tool in create_user_memory_tools(
                     repository=memory_repository,
+                    user_id=str(user_id),
+                    conversation_id=str(conversation_id) if conversation_id else None,
+                ):
+                    _add_internal(tool)
+
+        if getattr(settings, "enable_conversation_search_tools", False) and user_id:
+            try:
+                from ...core.container import Container
+
+                search_repository = Container().conversation_search_repository()
+            except Exception as exc:
+                logger.debug("Conversation search repository unavailable: %s", exc)
+                search_repository = None
+            if search_repository is not None:
+                for tool in create_conversation_search_tools(
+                    repository=search_repository,
                     user_id=str(user_id),
                     conversation_id=str(conversation_id) if conversation_id else None,
                 ):
@@ -1961,6 +1979,9 @@ class BaseAgent(ABC):
         # model is told about capabilities it cannot reach.
         if getattr(settings, "enable_user_memory_tools", False) and user_id:
             system_prompt = f"{system_prompt}{USER_MEMORY_SUFFIX}"
+
+        if getattr(settings, "enable_conversation_search_tools", False) and user_id:
+            system_prompt = f"{system_prompt}{CONVERSATION_SEARCH_SUFFIX}"
 
         # Append delegation instructions only when the tool is actually bound.
         hand_off_prompt_enabled = bool(_.get("include_hand_off"))

@@ -1581,6 +1581,14 @@ class Settings(BaseSettings):
             "Newest first; 0 disables injection while leaving the tools bound."
         ),
     )
+    enable_conversation_search_tools: bool = Field(
+        default=True,
+        description=(
+            "Let an agent search and read the project's earlier conversations. "
+            "Separate from user memory: this replays transcript text rather than "
+            "facts the user asked to keep."
+        ),
+    )
 
     # Per-Agent Tool Allowlists
     # Empty list means bind all available tools; non-empty list restricts to specified tools/servers

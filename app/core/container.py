@@ -42,6 +42,7 @@ from app.repositories.agent_model_config import AgentModelConfigRepository
 from app.repositories.chat_image import ChatImageRepository
 from app.repositories.conversation import ConversationRepository
 from app.repositories.conversation_compaction import ConversationCompactionRepository
+from app.repositories.conversation_search import ConversationSearchRepository
 from app.repositories.custom_agent import CustomAgentRepository
 from app.repositories.document import DocumentRepository
 from app.repositories.document_chunk import DocumentChunkRepository
@@ -486,6 +487,12 @@ class Container(containers.DeclarativeContainer):
 
     user_memory_repository = providers.Factory(
         UserMemoryRepository,
+        session_factory=db.provided.session,
+        async_session_factory=db.provided.async_session,
+    )
+
+    conversation_search_repository = providers.Factory(
+        ConversationSearchRepository,
         session_factory=db.provided.session,
         async_session_factory=db.provided.async_session,
     )

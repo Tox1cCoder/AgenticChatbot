@@ -435,6 +435,20 @@ first token — see `tests/test_preflight_has_no_blocking_db.py`.
 |---|---|---|
 | `ENABLE_USER_MEMORY_TOOLS` | `true` | Binds remember/list/forget and enables prompt injection. |
 | `USER_MEMORY_MAX_PROMPT_ITEMS` | `20` | Memories injected per turn, newest first. `0` keeps the tools but stops injection. |
+| `ENABLE_CONVERSATION_SEARCH_TOOLS` | `true` | Binds `search_past_conversations` / `read_past_conversation`. |
+
+Saved memory answers "what was I told to remember". Conversation search answers
+"what did we actually talk about", without anything having been saved first:
+`search_past_conversations` runs a PostgreSQL full-text query over the project's
+own conversations and `read_past_conversation` returns a bounded transcript.
+Both are scoped by the same rule as memory, both enforce ownership in SQL, and
+both fence their output in a `BEGIN_UNTRUSTED_PAST_CONVERSATION` block.
+
+Search uses the `'simple'` text-search configuration, matching
+`idx_document_chunks_content_simple_fts`: no stemming, so Vietnamese and English
+behave alike. Query terms are OR-ed rather than AND-ed — `websearch_to_tsquery`
+requires every term by default, which makes a natural-language question match
+nothing — and results are ordered by `ts_rank_cd`.
 
 ### Durable conversation compaction
 
@@ -555,7 +569,7 @@ The server accepts either a fully-formed URL (`REDIS_URL`) or a hostname + conve
 
 ## Database Migrations
 
-Migrations are Alembic-managed (single head, currently `9778bb07ea35`). They are applied **automatically** at application startup via `app.database.migrations.upgrade_database` inside the lifespan hook, so manual migration is only required for dev or out-of-process tooling:
+Migrations are Alembic-managed (single head, currently `de19068933b7`). They are applied **automatically** at application startup via `app.database.migrations.upgrade_database` inside the lifespan hook, so manual migration is only required for dev or out-of-process tooling:
 
 ```bash
 alembic upgrade head
