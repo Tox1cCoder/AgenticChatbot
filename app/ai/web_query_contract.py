@@ -217,13 +217,28 @@ def _normalize_domains(domains: list[str]) -> tuple[str, ...]:
 
     normalized: list[str] = []
     for raw in domains:
-        host = _bare_host(raw)
+        host = bare_host(raw)
         if host and host not in normalized:
             normalized.append(host)
     return tuple(normalized[:_MAX_DOMAINS])
 
 
-def _bare_host(raw: str) -> str:
+def host_matches(host: str, allowed: str) -> bool:
+    """Whether ``host`` is ``allowed`` or one of its subdomains.
+
+    Both sides are normalized, because neither can be trusted to arrive as a
+    bare host: the allowed entry carries whatever the model typed, and the
+    result host comes from a provider payload.
+    """
+
+    normalized = bare_host(host).rstrip(".")
+    target = bare_host(allowed).removeprefix("www.").rstrip(".")
+    if not normalized or not target:
+        return False
+    return normalized == target or normalized.endswith(f".{target}")
+
+
+def bare_host(raw: str) -> str:
     candidate = unicodedata.normalize("NFKC", str(raw or "")).strip().lower()
     if not candidate:
         return ""
@@ -248,6 +263,8 @@ __all__ = [
     "NormalizedWebSearch",
     "WebQueryError",
     "WebSearchRequest",
+    "bare_host",
+    "host_matches",
     "normalize_web_search",
     "tavily_search_args",
 ]

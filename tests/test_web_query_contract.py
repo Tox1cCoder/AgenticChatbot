@@ -18,6 +18,8 @@ from app.ai.web_query_contract import (
     WEB_QUERY_MAX_CHARS,
     WebQueryError,
     WebSearchRequest,
+    bare_host,
+    host_matches,
     normalize_web_search,
     tavily_search_args,
 )
@@ -363,3 +365,23 @@ def test_normalization_rejects_an_overlong_query_from_a_caller_without_the_schem
 
     with pytest.raises(WebQueryError, match="characters"):
         _normalize(request)
+
+
+def test_bare_host_reduces_any_written_form_to_a_comparable_host():
+    assert bare_host("https://T1.gg/roster?x=1") == "t1.gg"
+    assert bare_host("WWW.T1.GG") == "www.t1.gg"
+    assert bare_host("") == ""
+
+
+def test_host_matches_normalizes_both_sides_and_accepts_subdomains():
+    assert host_matches("www.t1.gg", "t1.gg") is True
+    assert host_matches("t1.gg", "https://www.t1.gg/") is True
+    assert host_matches("not-t1.gg", "t1.gg") is False
+    assert host_matches("", "t1.gg") is False
+    assert host_matches("t1.gg", "") is False
+
+
+def test_host_matches_accepts_an_allowed_entry_the_model_wrote_as_a_url():
+    """A model sends whatever it typed; the comparison must not care."""
+
+    assert host_matches("https://cdn.t1.gg/news/photo.jpg", "https://T1.gg/") is True

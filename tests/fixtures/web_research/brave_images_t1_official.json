@@ -1,0 +1,50 @@
+{
+  "query": "T1 League of Legends current roster full team official team photo site:t1.gg",
+  "query_metadata": {
+    "original": "T1 League of Legends current roster full team official team photo site:t1.gg",
+    "altered": null,
+    "spellcheck_off": false,
+    "show_strict_warning": false
+  },
+  "safety": {
+    "might_be_offensive": false
+  },
+  "provider": "brave_image_search",
+  "images": [
+    {
+      "url": "https://imgs.search.brave.com/t1-official-hero/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "provider": "brave_image_search",
+      "result_rank": 1,
+      "confidence": "high",
+      "source_url": "https://www.t1.gg/en/teams/league-of-legends",
+      "thumbnail_url": "https://imgs.search.brave.com/t1-official-hero/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "original_image_url": "https://cdn.t1.gg/teams/lol-2026-official-team-photo.jpg",
+      "title": "T1 League of Legends official team photo",
+      "description": "T1 League of Legends official team photo",
+      "source_domain": "www.t1.gg",
+      "width": 1920,
+      "height": 1080,
+      "thumbnail_width": 500,
+      "thumbnail_height": 281,
+      "page_fetched": "2026-09-15T08:12:03Z"
+    },
+    {
+      "url": "https://imgs.search.brave.com/t1-team-photo/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "provider": "brave_image_search",
+      "result_rank": 2,
+      "confidence": "high",
+      "source_url": "https://t1.gg/en/news/2026-roster-announcement",
+      "thumbnail_url": "https://imgs.search.brave.com/t1-team-photo/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "original_image_url": "https://cdn.t1.gg/news/2026-roster-team-photo.jpg",
+      "title": "T1 2026 team photo",
+      "description": "T1 2026 team photo",
+      "source_domain": "t1.gg",
+      "width": 1200,
+      "height": 675,
+      "thumbnail_width": 500,
+      "thumbnail_height": 281,
+      "page_fetched": "2026-09-14T23:30:49Z"
+    }
+  ],
+  "total_results": 2
+}

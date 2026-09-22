@@ -1,0 +1,84 @@
+{
+  "query": "T1 League of Legends current roster full team official team photo",
+  "query_metadata": {
+    "original": "T1 League of Legends current roster full team official team photo",
+    "altered": null,
+    "spellcheck_off": false,
+    "show_strict_warning": false
+  },
+  "safety": {
+    "might_be_offensive": false
+  },
+  "provider": "brave_image_search",
+  "images": [
+    {
+      "url": "https://imgs.search.brave.com/reddit-thumb-1/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "provider": "brave_image_search",
+      "result_rank": 1,
+      "confidence": "medium",
+      "source_url": "https://www.reddit.com/r/leagueoflegends/comments/abc/t1_roster/",
+      "thumbnail_url": "https://imgs.search.brave.com/reddit-thumb-1/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "original_image_url": "https://preview.redd.it/t1-roster-card.jpg",
+      "title": "T1 roster card",
+      "description": "T1 roster card",
+      "source_domain": "www.reddit.com",
+      "width": 140,
+      "height": 140,
+      "thumbnail_width": 140,
+      "thumbnail_height": 140,
+      "page_fetched": "2026-09-14T23:30:49Z"
+    },
+    {
+      "url": "https://imgs.search.brave.com/t1-team-photo/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "provider": "brave_image_search",
+      "result_rank": 2,
+      "confidence": "high",
+      "source_url": "https://t1.gg/en/news/2026-roster-announcement",
+      "thumbnail_url": "https://imgs.search.brave.com/t1-team-photo/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "original_image_url": "https://cdn.t1.gg/news/2026-roster-team-photo.jpg",
+      "title": "T1 2026 team photo",
+      "description": "T1 2026 team photo",
+      "source_domain": "t1.gg",
+      "width": 1200,
+      "height": 675,
+      "thumbnail_width": 500,
+      "thumbnail_height": 281,
+      "page_fetched": "2026-09-14T23:30:49Z"
+    },
+    {
+      "url": "https://imgs.search.brave.com/reddit-thumb-2/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "provider": "brave_image_search",
+      "result_rank": 3,
+      "confidence": "low",
+      "source_url": "https://www.reddit.com/r/leagueoflegends/comments/def/t1_players/",
+      "thumbnail_url": "https://imgs.search.brave.com/reddit-thumb-2/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "original_image_url": "https://preview.redd.it/t1-players-card.jpg",
+      "title": "T1 players",
+      "description": "T1 players",
+      "source_domain": "www.reddit.com",
+      "width": 140,
+      "height": 140,
+      "thumbnail_width": 140,
+      "thumbnail_height": 140,
+      "page_fetched": "2026-09-14T23:30:49Z"
+    },
+    {
+      "url": "https://imgs.search.brave.com/dotesports-thumb/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "provider": "brave_image_search",
+      "result_rank": 4,
+      "confidence": "medium",
+      "source_url": "https://dotesports.com/league-of-legends/news/t1-roster",
+      "thumbnail_url": "https://imgs.search.brave.com/dotesports-thumb/rs:fit:500:0:1:0/g:ce/ELIDED",
+      "original_image_url": "https://cdn.dotesports.com/t1-roster-graphic.jpg",
+      "title": "T1 roster graphic",
+      "description": "T1 roster graphic",
+      "source_domain": "dotesports.com",
+      "width": 800,
+      "height": 450,
+      "thumbnail_width": 500,
+      "thumbnail_height": 281,
+      "page_fetched": "2026-09-14T23:30:49Z"
+    }
+  ],
+  "total_results": 4
+}

@@ -106,6 +106,12 @@ class ProviderImageCandidate(FrozenModel):
     height: int | None = Field(default=None, ge=1)
     rank: int = Field(ge=1)
     published_at: datetime | None = None
+    #: The provider's own relevance grading, carried verbatim and lowercased.
+    #: Deliberately not an enum: Brave's vocabulary may grow, and the session
+    #: ranking maps only the values it knows, treating the rest as unknown.
+    confidence: str | None = Field(default=None, max_length=32)
+    #: Host of the page the image was found on, for provenance comparison.
+    source_domain: str | None = Field(default=None, max_length=253)
 
 
 class ImageCandidateRecord(FrozenModel):

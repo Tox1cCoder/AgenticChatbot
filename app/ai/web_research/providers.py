@@ -3,14 +3,24 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 from app.ai.tool_result_rendering import provider_result_text
-from app.ai.web_query_contract import NormalizedWebSearch, tavily_search_args
+from app.ai.web_query_contract import (
+    NormalizedWebSearch,
+    bare_host,
+    host_matches,
+    tavily_search_args,
+)
 
 from .contracts import ProviderImageCandidate, ProviderSource, ResearchRequest
+from .source_registry import canonicalize_public_url
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderFailure(RuntimeError):
@@ -150,6 +160,27 @@ def _longest_edge(width: Any, height: Any) -> int | None:
     return max(values) if values else None
 
 
+#: Results asked of Brave per call. Also the threshold below which a
+#: domain-restricted search earns its one supplemental probe.
+_BRAVE_IMAGE_COUNT = 10
+
+
+def _brave_locale(locale: str | None) -> dict[str, str]:
+    """Split a BCP-47 hint into Brave's own two arguments.
+
+    Anything that is not a two-letter subtag is dropped rather than guessed:
+    forwarding a bad ``country`` narrows the search to nothing.
+    """
+
+    parts = str(locale or "").replace("_", "-").split("-")
+    args: dict[str, str] = {}
+    if parts and len(parts[0]) == 2:
+        args["search_lang"] = parts[0].lower()
+    if len(parts) > 1 and len(parts[1]) == 2:
+        args["country"] = parts[1].upper()
+    return args
+
+
 class BraveImageSearchProvider:
     name = "brave"
 
@@ -159,11 +190,43 @@ class BraveImageSearchProvider:
 
     async def search(self, request: ResearchRequest) -> tuple[ProviderImageCandidate, ...]:
         query = str(request.image_query or request.query).strip()
-        payload = await _payload(
-            self.tool,
-            {"query": query, "count": 10, "safesearch": "strict"},
-            provider=self.name,
+        args: dict[str, Any] = {
+            "query": query,
+            "count": _BRAVE_IMAGE_COUNT,
+            "safesearch": "strict",
+        }
+        args.update(_brave_locale(request.locale))
+        payload = await _payload(self.tool, args, provider=self.name)
+
+        # ``include_domains`` carries whatever the model typed -- often a full
+        # URL. Normalize once here; every later comparison and the probe query
+        # use the bare host, never the raw entry.
+        allowed = tuple(
+            dict.fromkeys(host for host in map(bare_host, request.include_domains) if host)
         )
+        records = self._candidates(payload, allowed=allowed)
+
+        if allowed and len(records) < _BRAVE_IMAGE_COUNT:
+            probe = {**args, "query": f"{query} site:{allowed[0]}"}
+            try:
+                extra = await _payload(self.tool, probe, provider=self.name)
+            except ProviderFailure as exc:
+                # The broad call already produced usable allowed-domain results;
+                # losing the supplement must not lose them too.
+                logger.warning(
+                    "brave image domain probe failed provider=%s domain=%s code=%s",
+                    self.name,
+                    allowed[0],
+                    exc.code,
+                )
+            else:
+                records.extend(self._candidates(extra, allowed=allowed))
+
+        return _deduplicate_candidates(records)
+
+    def _candidates(
+        self, payload: dict[str, Any], *, allowed: tuple[str, ...]
+    ) -> list[ProviderImageCandidate]:
         records: list[ProviderImageCandidate] = []
         for fallback_rank, raw in enumerate(payload.get("images") or (), start=1):
             if not isinstance(raw, dict):
@@ -171,6 +234,13 @@ class BraveImageSearchProvider:
             image_url, preview_url = _brave_renditions(raw)
             source_url = raw.get("source_url") or raw.get("page_url")
             if not image_url or not source_url:
+                continue
+            host = str(
+                raw.get("source_domain") or urlsplit(str(source_url)).hostname or ""
+            )
+            if allowed and not any(host_matches(host, entry) for entry in allowed):
+                # include_domains is a restriction, not a preference: a
+                # disallowed result is dropped, never returned as a fallback.
                 continue
             records.append(
                 ProviderImageCandidate(
@@ -186,9 +256,30 @@ class BraveImageSearchProvider:
                     height=raw.get("height"),
                     rank=max(1, int(raw.get("result_rank") or fallback_rank)),
                     published_at=_datetime(raw.get("published_at")),
+                    confidence=str(raw["confidence"]).lower() if raw.get("confidence") else None,
+                    source_domain=host or None,
                 )
             )
-        return tuple(records)
+        return records
+
+
+def _deduplicate_candidates(
+    records: Sequence[ProviderImageCandidate],
+) -> tuple[ProviderImageCandidate, ...]:
+    """Collapse the broad call and the probe on their overlap, first wins."""
+
+    seen: set[tuple[str, str]] = set()
+    unique: list[ProviderImageCandidate] = []
+    for record in records:
+        key = (
+            canonicalize_public_url(record.source_url) or record.source_url,
+            record.image_url,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(record)
+    return tuple(unique)
 
 
 class TavilyPageOpenProvider:
