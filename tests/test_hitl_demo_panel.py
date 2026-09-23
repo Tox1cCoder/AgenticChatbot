@@ -85,6 +85,23 @@ def test_demo_renders_per_server_and_per_tool_controls():
     assert "qualified_tool_options" in src  # duplicate tool names select by server::tool
 
 
+@pytest.mark.parametrize(
+    ("rule", "next_rule"),
+    [(None, True), (True, False), (False, None)],
+)
+def test_server_approval_button_cycles_back_to_the_default(rule, next_rule):
+    """No rule is not "off": with no rule, tools that change the machine still ask first."""
+    import demo
+
+    assert demo._next_server_approval_rule(rule) == next_rule
+
+
+def test_server_with_no_approval_rule_is_not_shown_as_off():
+    import demo
+
+    assert demo._server_approval_label(None) != demo._server_approval_label(False)
+
+
 def test_demo_renders_per_skill_command_hitl_controls():
     src = _demo_source()
     compact = "".join(src.split())

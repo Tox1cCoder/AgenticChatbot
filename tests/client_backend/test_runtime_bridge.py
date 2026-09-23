@@ -740,3 +740,54 @@ def test_the_reserved_resource_request_is_accepted_by_validation():
 
     assert accepted is None
     assert mismatched is not None and "mismatch" in mismatched
+
+
+def _bridge_that_stops_after_connecting(monkeypatch, *, elevated: bool, allow_elevated: bool):
+    """A bridge whose local runtime and WebSocket are inert, so only registration is real."""
+
+    monkeypatch.setattr(runtime_bridge_module, "is_process_elevated", lambda: elevated)
+    monkeypatch.setattr(
+        runtime_bridge_module.client_settings, "allow_elevated_runtime", allow_elevated
+    )
+    server_client = _ServerClientStub()
+    bridge = RuntimeBridgeService(server_client=server_client, mcp_scope=_MCP_SCOPE)
+
+    async def no_local_runtime():
+        return None
+
+    async def connect_once():
+        bridge._stop_requested = True
+
+    monkeypatch.setattr(bridge, "_initialize_local_runtime", no_local_runtime)
+    monkeypatch.setattr(bridge, "_connect_and_serve", connect_once)
+    return bridge, server_client
+
+
+@pytest.mark.asyncio
+async def test_elevated_sidecar_refuses_to_offer_its_tools(monkeypatch):
+    bridge, server_client = _bridge_that_stops_after_connecting(
+        monkeypatch, elevated=True, allow_elevated=False
+    )
+
+    started = await bridge.start(wait_for_connection=False)
+    if bridge._runtime_task is not None:
+        await bridge._runtime_task
+
+    assert started is False
+    assert server_client.register_calls == []
+    state = bridge.get_runtime_state()
+    assert state.status == RuntimeStatus.ERROR
+    assert "administrator" in (state.error_message or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_elevated_sidecar_registers_when_the_user_opts_in(monkeypatch):
+    bridge, server_client = _bridge_that_stops_after_connecting(
+        monkeypatch, elevated=True, allow_elevated=True
+    )
+
+    started = await bridge.start(wait_for_connection=False)
+    await bridge._runtime_task
+
+    assert started is True
+    assert len(server_client.register_calls) == 1

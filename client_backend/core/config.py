@@ -237,6 +237,13 @@ class ClientSettings(BaseSettings):
         default=False,
         description="Opt in to binding the sidecar off loopback. Exposes local tools.",
     )
+    allow_elevated_runtime: bool = Field(
+        default=False,
+        description=(
+            "Opt in to offering local tools while the sidecar runs as administrator. "
+            "Every dispatched command then runs with administrator rights."
+        ),
+    )
 
     # Logging
     log_level: str = Field(

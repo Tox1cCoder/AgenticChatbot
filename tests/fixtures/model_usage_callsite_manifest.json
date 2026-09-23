@@ -331,7 +331,7 @@
   },
   {
     "file": "client_backend/services/local_mcp_manager.py",
-    "function": "LocalMCPManager._call_tool_once",
+    "function": "LocalMCPManager._invoke",
     "call_chain": "tool.ainvoke",
     "disposition": "non_provider_tool_dispatch"
   },

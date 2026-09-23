@@ -29,6 +29,7 @@ from app.schemas.runtime_protocol import (
 from client_backend import __version__
 from client_backend.core.config import client_settings
 from client_backend.core.logging import get_logger
+from client_backend.core.privileges import is_process_elevated
 from client_backend.core.security import generate_device_identifier
 from client_backend.schemas.mcp_config import MCPProfileScope
 from client_backend.schemas.runtime import (
@@ -172,6 +173,24 @@ class RuntimeBridgeService:
                 status=RuntimeStatus.DISCONNECTED,
                 device_info=self.get_device_info(),
                 error_message="Server authentication required before starting runtime bridge.",
+            )
+            return False
+
+        if is_process_elevated() and not client_settings.allow_elevated_runtime:
+            # Registering would let the server dispatch commands that run as
+            # administrator. The tools stay offline until the sidecar is
+            # restarted without elevation, or the user explicitly opts in.
+            message = (
+                "The client is running as administrator, so local tools are not offered. "
+                "Restart it without administrator rights, or set "
+                "CLIENT_ALLOW_ELEVATED_RUNTIME=true to accept that every command runs "
+                "with administrator rights."
+            )
+            logger.error(message)
+            self._set_state(
+                status=RuntimeStatus.ERROR,
+                device_info=self.get_device_info(),
+                error_message=message,
             )
             return False
 

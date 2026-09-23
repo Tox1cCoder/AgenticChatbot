@@ -159,6 +159,44 @@ Reconciling `outcome_unknown` rows is an operator task with no code path:
 see "Reconciling `outcome_unknown`" in
 [`routing-v2-rollout.md`](routing-v2-rollout.md).
 
+## Client MCP servers on the device
+
+The sidecar keeps one long-lived session per enabled MCP server, so a server
+keeps its state between calls: a process Desktop Commander starts can be read,
+written to, and stopped by later calls. A timed-out call leaves the session
+open. A server that exits while idle is restarted for the next call, and that
+call is sent to the new server, because the request never reached the old one.
+A connection that closes *during* a call is reported, not repeated, since the
+call may already have had its effect. Reloading MCP servers or stopping the
+sidecar ends every server and, through its kill-on-close job, every process
+those servers started.
+
+Desktop Commander is recognized by `desktop-commander` in its command or
+arguments and is launched hardened (`client_backend/services/desktop_commander_policy.py`):
+
+- an unpinned or ranged `@wonderwhy-er/desktop-commander` spec runs the pinned
+  `PINNED_VERSION`; an exact version the user configured is kept. Bump the pin
+  deliberately. The first launch of a new version is a full `npx` install, and
+  an interrupted install leaves a broken `npm-cache/_npx/<hash>` folder that
+  fails every later launch with `ENOENT package.json` until it is removed;
+- `DESKTOP_COMMANDER_DISABLE_TELEMETRY=1` unless the user set it, and
+  `--no-onboarding`;
+- `set_config_value`, `get_recent_tool_calls`, `get_usage_stats`, and
+  `give_feedback_to_desktop_commander` are not offered and cannot be called;
+- every tool not on the read-only list, including tools a later release adds,
+  is published with `mutation: true`. The server gates mutations for approval
+  unless the user's per-server or per-tool rule for that device says otherwise,
+  and runs them through mutation receipts.
+
+Desktop Commander's `allowedDirectories` and `blockedCommands` live in
+`~/.claude-server-commander/config.json`, which every Desktop Commander client
+of that OS user shares. The sidecar does not write it, and neither setting
+confines shell commands.
+
+A sidecar running as administrator does not register its tools unless
+`CLIENT_ALLOW_ELEVATED_RUNTIME=true`, because every dispatched command would
+run with administrator rights.
+
 ## There is no unbounded exception any more
 
 `_DISABLE_OUTER_TIMEOUT_ALLOWLIST` is **empty**. Every interactive tool call is
@@ -195,7 +233,7 @@ in
 Run the focused policy and runtime tests after configuration or code changes:
 
 ```powershell
-.venv\Scripts\python.exe -m pytest tests/test_tool_execution_policy.py tests/test_tool_error_policy.py tests/test_tool_execution_recovery.py tests/test_tool_execution_rendering.py tests/test_client_invocation_isolation.py tests/test_skills_tool.py tests/test_tool_execution_receipt_service.py tests/test_mcp_adapter_utils.py tests/client_backend/test_runtime_bridge.py -q
+.venv\Scripts\python.exe -m pytest tests/test_tool_execution_policy.py tests/test_tool_error_policy.py tests/test_tool_execution_recovery.py tests/test_tool_execution_rendering.py tests/test_client_invocation_isolation.py tests/test_skills_tool.py tests/test_tool_execution_receipt_service.py tests/test_mcp_adapter_utils.py tests/client_backend/test_runtime_bridge.py tests/client_backend/test_local_mcp_manager_sessions.py tests/client_backend/test_desktop_commander_policy.py tests/test_client_mcp_mutation_approval.py -q
 ```
 
 The durable half needs a dedicated PostgreSQL database, because the atomicity

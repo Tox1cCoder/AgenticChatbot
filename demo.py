@@ -4704,6 +4704,27 @@ def _mcp_server_is_removable(server: dict[str, Any]) -> bool:
     return str(server.get("source") or "").strip().lower() == "custom"
 
 
+_SERVER_APPROVAL_HELP = (
+    "DEFAULT: tools that change this machine (writing files, running commands) ask "
+    "first; read-only tools run. ON: every tool from this server asks. OFF: no tool "
+    "asks. Click to cycle."
+)
+
+
+def _server_approval_label(rule: bool | None) -> str:
+    """Button label for one server's approval rule; ``None`` means no rule is saved."""
+    if rule is None:
+        return "Approval: DEFAULT"
+    return "Approval: ON" if rule else "Approval: OFF"
+
+
+def _next_server_approval_rule(rule: bool | None) -> bool | None:
+    """DEFAULT -> ON -> OFF -> DEFAULT, so an explicit OFF can always be undone."""
+    if rule is None:
+        return True
+    return False if rule else None
+
+
 def get_mcp_tools(server_name: str | None = None) -> dict[str, Any] | None:
     """Fetch MCP tools, optionally scoped to one server.
 
@@ -9393,20 +9414,21 @@ def render_tools_tab():
                         st.caption("Built-in — use Disable")
 
                 with col4:
-                    server_gated = bool(hitl_servers.get(server_name, False))
-                    approval_label = "Approval: ON" if server_gated else "Approval: OFF"
+                    approval_rule = hitl_servers.get(server_name)
                     if st.button(
-                        approval_label,
+                        _server_approval_label(approval_rule),
                         key=f"hitl_server_{server_name}",
-                        help="Require human approval for all tools from this server",
+                        help=_SERVER_APPROVAL_HELP,
                     ):
+                        next_rule = _next_server_approval_rule(approval_rule)
                         with st.spinner("Updating approval rule..."):
-                            if (
-                                set_hitl_setting(
-                                    "client_mcp", "server", server_name, not server_gated
+                            if next_rule is None:
+                                result = clear_hitl_setting("client_mcp", "server", server_name)
+                            else:
+                                result = set_hitl_setting(
+                                    "client_mcp", "server", server_name, next_rule
                                 )
-                                is not None
-                            ):
+                            if result is not None:
                                 st.rerun()
 
                 st.markdown("---")

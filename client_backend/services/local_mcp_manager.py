@@ -1,4 +1,10 @@
-"""Device-scoped local MCP runtime backed exclusively by schema-v2 storage."""
+"""Device-scoped local MCP runtime backed exclusively by schema-v2 storage.
+
+Each enabled server runs as one long-lived session for as long as the manager
+is initialized. A server keeps state between calls -- Desktop Commander tracks
+the processes it started so a later call can read or stop them -- and a
+per-call session would discard that state along with the server process.
+"""
 
 from __future__ import annotations
 
@@ -7,8 +13,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+import anyio
+from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
+from mcp.shared.exceptions import McpError
+from mcp.types import CONNECTION_CLOSED
 
 from app.core.mcp_adapter_utils import (
     build_mcp_server_entry,
@@ -18,6 +28,12 @@ from app.core.mcp_adapter_utils import (
 from client_backend.core.logging import get_logger
 from client_backend.core.security import generate_device_identifier
 from client_backend.schemas.mcp_config import MCPProfileScope
+from client_backend.services.desktop_commander_policy import (
+    harden_launch,
+    is_desktop_commander,
+    is_hidden_tool,
+    is_mutating_tool,
+)
 from client_backend.services.mcp_config_migration import prepare_mcp_config_store
 from client_backend.services.mcp_config_store import EffectiveMCPServer, MCPConfigStore
 from client_backend.services.upstream_auth import get_upstream_auth_service
@@ -33,6 +49,8 @@ class MCPTool:
     description: str
     server_name: str
     input_schema: dict[str, Any]
+    # Mutations are gated for human approval by the server.
+    mutation: bool = False
 
     @property
     def qualified_id(self) -> str:
@@ -90,6 +108,93 @@ def _terminal_exception_message(exc: BaseException) -> str:
     return message or current.__class__.__name__
 
 
+# Sending on a closed transport fails before the request leaves this process,
+# so the server never saw it and a fresh session may carry it instead.
+_UNSENT_REQUEST_ERRORS = (anyio.ClosedResourceError, anyio.BrokenResourceError)
+
+_SESSION_STOP_TIMEOUT_SECONDS = 10.0
+
+
+class _ServerSession:
+    """One long-lived MCP session, held open by the task that opened it.
+
+    anyio requires a transport's cancel scope to be exited by the task that
+    entered it, so a dedicated task owns the ``async with`` and callers only
+    send requests through the tools it loaded. Closing the session ends the
+    server process and, through its kill-on-close job, everything it started.
+    """
+
+    def __init__(self, client: MultiServerMCPClient, server_name: str):
+        self._client = client
+        self._server_name = server_name
+        self._stop_requested = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+        self._opened = False
+        self.tools: dict[str, BaseTool] = {}
+        self.alive = False
+
+    async def start(self) -> list[BaseTool]:
+        """Open the session and return the tools the server advertises."""
+
+        ready: asyncio.Future[list[BaseTool]] = asyncio.get_running_loop().create_future()
+        self._task = asyncio.create_task(
+            self._hold_open(ready),
+            name=f"mcp-session:{self._server_name}",
+        )
+        self._task.add_done_callback(self._log_unexpected_exit)
+        try:
+            loaded = await ready
+        except BaseException:
+            await self.stop()
+            raise
+        self.alive = True
+        return loaded
+
+    async def stop(self) -> None:
+        """Close the session, cancelling it if the server will not exit."""
+
+        self.alive = False
+        self._stop_requested.set()
+        task = self._task
+        if task is None:
+            return
+        done, _ = await asyncio.wait({task}, timeout=_SESSION_STOP_TIMEOUT_SECONDS)
+        if not done:
+            logger.warning(
+                "MCP server '%s' did not close within %.0fs; cancelling its session",
+                self._server_name,
+                _SESSION_STOP_TIMEOUT_SECONDS,
+            )
+            task.cancel()
+            await asyncio.wait({task})
+
+    async def _hold_open(self, ready: asyncio.Future[list[BaseTool]]) -> None:
+        try:
+            async with self._client.session(self._server_name) as session:
+                ready.set_result(list(await load_mcp_tools(session)))
+                self._opened = True
+                await self._stop_requested.wait()
+        except BaseException as exc:
+            if not ready.done():
+                if isinstance(exc, asyncio.CancelledError):
+                    ready.cancel()
+                else:
+                    ready.set_exception(exc)
+            raise
+        finally:
+            self.alive = False
+
+    def _log_unexpected_exit(self, task: asyncio.Task[None]) -> None:
+        # A failure before the session opened is raised to ``start``'s caller.
+        if task.cancelled() or task.exception() is None or not self._opened:
+            return
+        logger.warning(
+            "MCP server '%s' session ended with an error: %s",
+            self._server_name,
+            _terminal_exception_message(task.exception()),
+        )
+
+
 class LocalMCPManager:
     """Runs MCP servers for exactly one authenticated user/device scope."""
 
@@ -98,6 +203,11 @@ class LocalMCPManager:
         self.scope = store.scope
         self.servers: dict[str, MCPServerRuntime] = {}
         self._client: MultiServerMCPClient | None = None
+        self._sessions: dict[str, _ServerSession] = {}
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        # Two overlapping initializations would each start every server and
+        # the loser's processes would outlive the manager that forgot them.
+        self._init_lock = asyncio.Lock()
         self._initialized = False
 
     @property
@@ -107,9 +217,12 @@ class LocalMCPManager:
         return self.store.profile_path
 
     async def initialize(self, server_names: set[str] | None = None) -> None:
-        if self._initialized:
-            return
+        async with self._init_lock:
+            if self._initialized:
+                return
+            await self._initialize_locked(server_names)
 
+    async def _initialize_locked(self, server_names: set[str] | None) -> None:
         configs = [
             config
             for config in self.store.list_effective_servers()
@@ -139,7 +252,7 @@ class LocalMCPManager:
             return
 
         for config in configs:
-            await self._load_server_tools(config.name)
+            await self._start_server(config.name)
 
         self._initialized = True
         logger.info(
@@ -154,12 +267,15 @@ class LocalMCPManager:
     ) -> dict[str, dict[str, Any]]:
         result: dict[str, dict[str, Any]] = {}
         for config in configs:
+            args, env = config.args, config.env
+            if is_desktop_commander(config.command, args):
+                args, env = harden_launch(args, env)
             entry = build_mcp_server_entry(
                 transport=config.transport,
                 command=config.command,
-                args=config.args,
+                args=args,
                 cwd=config.cwd,
-                env=config.env,
+                env=env,
                 url=config.url,
                 headers=config.headers,
             )
@@ -167,47 +283,93 @@ class LocalMCPManager:
                 result[config.name] = entry
         return result
 
-    async def _load_server_tools(self, server_name: str) -> list[MCPTool]:
-        runtime = self.servers.get(server_name)
-        if runtime is None or self._client is None:
-            return []
+    async def _start_server(self, server_name: str) -> None:
+        """Start one server during initialization, recording rather than raising a failure."""
+
         try:
-            async with self._client.session(server_name) as session:
-                loaded_tools = list(await load_mcp_tools(session))
-            records = self._tool_records_from_loaded_tools(server_name, loaded_tools)
-            runtime.mark_running(records)
-            logger.info("Loaded %d MCP tools from '%s'", len(records), server_name)
-            return records
+            await self._live_session(server_name)
+        except Exception as exc:
+            logger.error(
+                "Failed to start MCP server '%s': %s",
+                server_name,
+                _terminal_exception_message(exc),
+                exc_info=True,
+            )
+
+    async def _live_session(self, server_name: str) -> _ServerSession:
+        """Return the server's open session, starting a new one if it has died."""
+
+        lock = self._session_locks.setdefault(server_name, asyncio.Lock())
+        async with lock:
+            session = self._sessions.get(server_name)
+            if session is not None and session.alive:
+                return session
+            if session is not None:
+                await session.stop()
+                self._sessions.pop(server_name, None)
+            return await self._open_session(server_name)
+
+    async def _open_session(self, server_name: str) -> _ServerSession:
+        runtime = self.servers[server_name]
+        if self._client is None:
+            raise RuntimeError(runtime.error_message or "MCP client is not initialized")
+
+        session = _ServerSession(self._client, server_name)
+        try:
+            loaded_tools = await session.start()
         except Exception as exc:
             message = _terminal_exception_message(exc)
             runtime.mark_error(message)
-            logger.error(
-                "Failed to load MCP server '%s': %s",
-                server_name,
-                message,
-                exc_info=True,
-            )
-            return []
+            raise RuntimeError(f"MCP server '{server_name}' failed to start: {message}") from exc
+
+        desktop_commander = is_desktop_commander(runtime.config.command, runtime.config.args)
+        named_tools = {
+            clean_mcp_tool_name(str(getattr(tool, "name", "") or ""), server_name=server_name): tool
+            for tool in loaded_tools
+        }
+        session.tools = {
+            name: tool
+            for name, tool in named_tools.items()
+            if not (desktop_commander and is_hidden_tool(name))
+        }
+        records = self._tool_records_from_loaded_tools(
+            server_name,
+            list(session.tools.values()),
+            desktop_commander=desktop_commander,
+        )
+        runtime.mark_running(records)
+        self._sessions[server_name] = session
+        logger.info("Started MCP server '%s' with %d tools", server_name, len(records))
+        return session
 
     @staticmethod
     def _tool_records_from_loaded_tools(
         server_name: str,
         loaded_tools: list[Any],
+        *,
+        desktop_commander: bool = False,
     ) -> list[MCPTool]:
-        return [
-            MCPTool(
-                name=clean_mcp_tool_name(
-                    str(getattr(tool, "name", "") or "unknown"),
-                    server_name=server_name,
-                ),
-                description=str(getattr(tool, "description", "") or ""),
+        records = []
+        for tool in loaded_tools:
+            name = clean_mcp_tool_name(
+                str(getattr(tool, "name", "") or "unknown"),
                 server_name=server_name,
-                input_schema=sanitize_mcp_schema(getattr(tool, "args_schema", None)),
             )
-            for tool in loaded_tools
-        ]
+            records.append(
+                MCPTool(
+                    name=name,
+                    description=str(getattr(tool, "description", "") or ""),
+                    server_name=server_name,
+                    input_schema=sanitize_mcp_schema(getattr(tool, "args_schema", None)),
+                    mutation=desktop_commander and is_mutating_tool(name),
+                )
+            )
+        return records
 
     async def shutdown(self) -> None:
+        sessions = list(self._sessions.values())
+        self._sessions.clear()
+        await asyncio.gather(*(session.stop() for session in sessions))
         for runtime in self.servers.values():
             runtime.mark_stopped()
         self.servers.clear()
@@ -235,6 +397,7 @@ class LocalMCPManager:
                 "server_name": tool.server_name,
                 "qualified_id": tool.qualified_id,
                 "input_schema": tool.input_schema,
+                "mutation": tool.mutation,
             }
             for tool in self.get_all_tools()
         ]
@@ -251,58 +414,48 @@ class LocalMCPManager:
         qualified_tool_id: str,
         arguments: dict[str, Any],
         timeout: float = 30.0,
-    ) -> dict[str, Any]:
+    ) -> Any:
         if not self._initialized:
             await self.initialize()
         if "::" not in qualified_tool_id:
             raise ValueError(f"Invalid qualified tool ID: {qualified_tool_id}")
 
-        server_name, _ = qualified_tool_id.split("::", 1)
-        runtime = self.servers.get(server_name)
-        if runtime is None:
+        server_name, tool_name = qualified_tool_id.split("::", 1)
+        if server_name not in self.servers:
             raise ValueError(f"MCP server not found: {server_name}")
-        if not runtime.is_running():
-            raise RuntimeError(runtime.error_message or f"MCP server {server_name} is not running")
 
+        session = await self._live_session(server_name)
         try:
-            return await self._call_tool_once(
-                server_name,
-                qualified_tool_id,
-                arguments,
-                timeout,
-            )
-        except Exception:
-            await self._load_server_tools(server_name)
-            raise
+            return await self._invoke(session, qualified_tool_id, tool_name, arguments, timeout)
+        except _UNSENT_REQUEST_ERRORS:
+            # The server died while idle and this request never reached it, so
+            # a fresh server can carry it without repeating any effect.
+            logger.info("MCP server '%s' had exited; restarting it for this call", server_name)
+            session = await self._live_session(server_name)
+            return await self._invoke(session, qualified_tool_id, tool_name, arguments, timeout)
 
-    async def _call_tool_once(
-        self,
-        server_name: str,
+    @staticmethod
+    async def _invoke(
+        session: _ServerSession,
         qualified_tool_id: str,
+        tool_name: str,
         arguments: dict[str, Any],
         timeout: float,
     ) -> Any:
-        if self._client is None:
-            raise RuntimeError("MCP client is not initialized")
-        _, tool_name = qualified_tool_id.split("::", 1)
-        async with self._client.session(server_name) as session:
-            loaded_tools = list(await load_mcp_tools(session))
-            runtime = self.servers.get(server_name)
-            if runtime is not None:
-                runtime.mark_running(
-                    self._tool_records_from_loaded_tools(server_name, loaded_tools)
-                )
-            for tool in loaded_tools:
-                loaded_name = clean_mcp_tool_name(
-                    str(getattr(tool, "name", "") or ""),
-                    server_name=server_name,
-                )
-                if loaded_name == tool_name:
-                    return await asyncio.wait_for(
-                        tool.ainvoke(arguments),
-                        timeout=timeout,
-                    )
-        raise ValueError(f"MCP tool not found: {qualified_tool_id}")
+        tool = session.tools.get(tool_name)
+        if tool is None:
+            raise ValueError(f"MCP tool not found: {qualified_tool_id}")
+        try:
+            return await asyncio.wait_for(tool.ainvoke(arguments), timeout=timeout)
+        except McpError as exc:
+            # The connection closed after the request was sent: it may have run,
+            # so it is reported rather than repeated, and the next call restarts.
+            if exc.error.code == CONNECTION_CLOSED:
+                session.alive = False
+            raise
+        except _UNSENT_REQUEST_ERRORS:
+            session.alive = False
+            raise
 
 
 def resolve_current_mcp_scope() -> MCPProfileScope:
