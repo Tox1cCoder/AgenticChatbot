@@ -22,6 +22,7 @@ from client_backend.services.sandbox.account import (
     generate_password,
     save_credentials,
 )
+from client_backend.services.sandbox.path_resolution import revoke_path_resolution
 
 _USERS_GROUP_SID = "S-1-5-32-545"
 # Windows caps a local account's description at 48 characters.
@@ -72,8 +73,13 @@ def provision_account() -> SandboxCredentials:
 
 
 def remove_account() -> None:
-    """Delete the account and its profile folder. Files it wrote elsewhere remain."""
+    """Delete the account and its profile folder. Files it wrote elsewhere remain.
 
+    Its read-attributes entries on profile folders go first, while the SID
+    they name still belongs to an account.
+    """
+
+    revoke_path_resolution()
     _run_powershell(_REMOVE_SCRIPT, stdin="")
     forget_credentials()
 

@@ -136,18 +136,23 @@ async def test_sandbox_mode_off_ignores_an_existing_account(tmp_path, monkeypatc
     assert (sandbox, problem, prepared) == (None, None, [])
 
 
-def test_workspace_inside_the_user_profile_is_refused(tmp_path, monkeypatch):
-    """PowerShell cannot start in a folder whose parents the account cannot read,
-    and falls back to the drive root: commands meant for the project would run
-    in C:\\ instead."""
+def test_workspace_inside_the_user_profile_is_made_resolvable(tmp_path, monkeypatch):
+    """PowerShell cannot start in a folder whose parents the account cannot read;
+    it falls back to C:\\. A workspace under the profile therefore gets its
+    in-between folders made resolvable, and becomes the start folder."""
     from client_backend.core.config import client_settings
 
-    home = tmp_path / "home"
-    (home / "Documents" / "project").mkdir(parents=True)
-    monkeypatch.setattr(launch.Path, "home", classmethod(lambda cls: home))
-    monkeypatch.setattr(client_settings, "workspace_roots", [str(home / "Documents" / "project")])
+    root = tmp_path / "home" / "Documents" / "project"
+    root.mkdir(parents=True)
+    granted, resolvable = [], []
+    monkeypatch.setattr(client_settings, "workspace_roots", [str(root)])
     monkeypatch.setattr(launch, "install_desktop_commander", lambda: tmp_path / "dc.js")
     monkeypatch.setattr(launch, "node_executable", lambda: tmp_path / "node.exe")
+    monkeypatch.setattr(launch, "ensure_workspace_access", granted.append)
+    monkeypatch.setattr(launch, "grant_path_resolution", resolvable.append)
 
-    with pytest.raises(launch.SandboxRuntimeError, match="outside"):
-        launch.prepare_sandbox_launch()
+    prepared = launch.prepare_sandbox_launch()
+
+    assert granted == [root]
+    assert resolvable == [root]
+    assert prepared.cwd == root

@@ -258,12 +258,25 @@ Details:
   that cannot be prepared, keeps Desktop Commander **off** with an error. It
   never falls back to the user's full rights.
 
-**Workspace roots must be outside the user's profile** (for example
-`C:\Workspaces\<project>`, not `Documents\...`). PowerShell checks every folder
-on the way to its start folder, cannot read the profile's, and silently starts
-at `C:\`; a root inside the profile is therefore refused. Supporting such roots
-would need a read-attributes permission on each folder between the profile and
-the root, a change to the user's profile that has not been approved.
+**Workspace roots inside the user's profile** (for example
+`Documents\<project>`) work, with one narrow change to the profile.
+
+- Why a change is needed: PowerShell and node read the attributes of every
+  folder on the way to a path. Without them, PowerShell silently starts at
+  `C:\`, which ran a `git init` there during testing.
+- What the change is: each folder strictly between the profile and the root
+  (for `Documents\Code Practice\project`: `Documents` and `Code Practice`)
+  gets one entry for the account, read attributes and synchronize (`0x100080`),
+  on that folder alone. That entry cannot list the folder or read its files.
+- How it is applied (`client_backend/services/sandbox/path_resolution.py`):
+  - through `SetFileSecurity` with auto-inheritance requested. That changes
+    only the folder named and keeps its `AI` mark. Never use `icacls` for
+    this: it re-stamps every file below, and on a profile it takes minutes;
+  - the SID and folders are recorded, so `sandbox remove` takes the entries
+    out, before deleting the account, and restores each folder exactly.
+
+For comparison, Codex's Windows sandbox grants its group read access to all
+of `Documents` and `AppData`.
 
 A custom MCP server configured as `python -m some.module` has its module name
 rewritten into a path by `MCPConfigStore._resolve_custom_value` (the dot looks

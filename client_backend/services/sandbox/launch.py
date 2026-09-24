@@ -19,6 +19,7 @@ import client_backend
 from client_backend.core.config import client_settings
 from client_backend.services.desktop_commander_policy import NO_ONBOARDING_FLAG
 from client_backend.services.sandbox.account import load_credentials
+from client_backend.services.sandbox.path_resolution import grant_path_resolution
 from client_backend.services.sandbox.runtime import (
     SandboxRuntimeError,
     ensure_runtime_root,
@@ -81,17 +82,10 @@ def prepare_sandbox_launch() -> SandboxLaunch:
     entry = install_desktop_commander()
     node = node_executable()
     roots = [Path(root) for root in client_settings.workspace_roots]
-    home = Path.home().resolve()
-    for root in roots:
-        if root.resolve().is_relative_to(home):
-            # PowerShell cannot start in a folder whose parents the account
-            # cannot read, and silently starts at the drive root instead.
-            raise SandboxRuntimeError(
-                f"Workspace {root} is inside your user profile, which the sandbox account "
-                "cannot see into. Use a workspace folder outside it, for example "
-                "C:\\Workspaces\\<project>."
-            )
     for root in roots:
         ensure_workspace_access(root)
+        # Without this, PowerShell cannot start in a root under the user's
+        # profile and silently starts at the drive root instead.
+        grant_path_resolution(root)
     cwd = roots[0] if roots else ensure_runtime_root()
     return SandboxLaunch(node=node, desktop_commander=entry, cwd=cwd)

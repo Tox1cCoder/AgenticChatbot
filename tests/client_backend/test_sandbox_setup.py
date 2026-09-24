@@ -68,3 +68,20 @@ def test_removing_the_account_forgets_its_credentials(profile, powershell):
     setup.remove_account()
 
     assert account.load_credentials() is None
+
+
+def test_folder_entries_are_revoked_before_the_account_is_deleted(profile, monkeypatch):
+    """Once the account is deleted its entries point at an orphan SID; they are
+    taken out first, while everything about them is still known."""
+    order = []
+
+    def fake_run(argv, **kwargs):
+        order.append("delete account")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(setup.subprocess, "run", fake_run)
+    monkeypatch.setattr(setup, "revoke_path_resolution", lambda: order.append("revoke"))
+
+    setup.remove_account()
+
+    assert order == ["revoke", "delete account"]
