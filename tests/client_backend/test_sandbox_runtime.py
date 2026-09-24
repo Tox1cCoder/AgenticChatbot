@@ -81,6 +81,42 @@ def test_runtime_folder_name_cannot_be_guessed_in_advance(profile, program_data,
     assert first != second
 
 
+def test_folders_the_user_runs_unseen_are_protected(tmp_path):
+    """Git hooks and environments run as the user, and git review never shows
+    them: a changed hook or a planted .pth file is a way out of the sandbox."""
+    (tmp_path / ".git" / "hooks").mkdir(parents=True)
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / ".venv" / "pyvenv.cfg").write_text("home = C:/Python", encoding="utf-8")
+    (tmp_path / "envs" / "conda-meta").mkdir(parents=True)
+    (tmp_path / "src").mkdir()
+
+    protected = runtime.protected_paths(tmp_path)
+
+    assert set(protected) == {tmp_path / ".git", tmp_path / ".venv", tmp_path / "envs"}
+
+
+def test_the_sidecars_own_interpreter_is_protected_wherever_it_sits(tmp_path, monkeypatch):
+    interpreter = tmp_path / "tools" / "python-runtime"
+    interpreter.mkdir(parents=True)
+    monkeypatch.setattr(runtime.sys, "prefix", str(interpreter))
+
+    assert interpreter in runtime.protected_paths(tmp_path)
+
+
+def test_a_workspace_holding_a_protected_folder_is_refused_not_granted(tmp_path, monkeypatch):
+    """Granting is inherited by everything below, so a workspace containing .git
+    or an environment cannot be opened without also opening those. It fails
+    closed: refuse, and never run icacls on it."""
+    (tmp_path / ".git" / "hooks").mkdir(parents=True)
+    grants = []
+    monkeypatch.setattr(runtime, "grant_workspace_access", lambda *a, **k: grants.append(a))
+
+    with pytest.raises(runtime.SandboxRuntimeError, match=r"\.git"):
+        runtime.ensure_workspace_access(tmp_path, principal=USERS_GROUP)
+
+    assert grants == []
+
+
 def test_granting_a_missing_folder_says_which_folder(tmp_path):
     missing = tmp_path / "gone"
 

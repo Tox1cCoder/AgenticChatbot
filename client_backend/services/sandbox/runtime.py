@@ -18,6 +18,7 @@ import os
 import secrets
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from client_backend.core.config import client_settings
@@ -33,6 +34,7 @@ __all__ = [
     "grant_workspace_access",
     "install_desktop_commander",
     "node_executable",
+    "protected_paths",
 ]
 
 _SYSTEM_SID = "*S-1-5-18"
@@ -50,22 +52,75 @@ def grant_workspace_access(folder: Path, principal: str = SANDBOX_USERNAME) -> N
 
 
 def ensure_workspace_access(folder: Path, principal: str = SANDBOX_USERNAME) -> None:
-    """Grant workspace access unless ``folder`` already has it.
+    """Grant the account write access to ``folder``, or refuse if that is unsafe.
+
+    A grant is inherited by everything below, so it would also hand the account
+    the folders in ``protected_paths``: the sidecar's own environment and the
+    repository's ``.git``, both of which run code as the user. There is no
+    partial grant here -- carving those back out needs deny rules that the
+    environment's safety layer blocks -- so a workspace that contains one is
+    refused rather than opened up. Fails closed: the caller keeps Desktop
+    Commander off instead of granting an escape.
 
     Granting again is not free: Windows stamps the permission onto every file
-    below the folder anew, which on a large project is slow on every start.
+    below anew, which on a large project is slow, so an existing grant is left
+    in place.
+    """
+
+    protected = protected_paths(folder)
+    if protected:
+        names = ", ".join(sorted(str(path.relative_to(folder)) for path in protected))
+        raise SandboxRuntimeError(
+            f"Workspace {folder} contains folders the sandbox must not be able to change "
+            f"({names}): they run code as you (git hooks, a Python environment). Point "
+            "CLIENT_WORKSPACE_ROOTS at a subfolder without them, or a separate checkout "
+            "that does not hold the sidecar's environment."
+        )
+    if not _has_write_grant(folder, principal):
+        grant_workspace_access(folder, principal)
+
+
+def protected_paths(folder: Path) -> list[Path]:
+    """Folders under a workspace that must never become writable by the account.
+
+    Each holds something the user runs as themselves and that a diff review
+    never shows: repository hooks and config in ``.git``, and Python
+    environments (``pyvenv.cfg`` or ``conda-meta``), where one planted ``.pth``
+    file runs on the environment's next start -- the sidecar's own interpreter
+    above all.
+    """
+
+    found: list[Path] = []
+    if (folder / ".git").is_dir():
+        found.append(folder / ".git")
+    if folder.is_dir():
+        for child in sorted(folder.iterdir()):
+            if child.is_dir() and (
+                (child / "pyvenv.cfg").is_file() or (child / "conda-meta").is_dir()
+            ):
+                found.append(child)
+    interpreter = Path(sys.prefix).resolve()
+    target = folder.resolve()
+    if interpreter.is_relative_to(target) and interpreter != target and interpreter not in found:
+        found.append(interpreter)
+    return found
+
+
+def _has_write_grant(folder: Path, principal: str) -> bool:
+    """Whether icacls already shows an inheritable write grant for ``principal``.
+
+    icacls prints ``DOMAIN\\name:(flags)``; an entry inherited from a granted
+    parent counts too.
     """
 
     completed = subprocess.run(
         ["icacls", str(folder)], capture_output=True, text=True, check=False
     )
-    # icacls prints DOMAIN\name:(flags); an inherited grant from a granted
-    # parent counts too.
     marker = f"\\{principal}:".lower()
-    for line in completed.stdout.lower().splitlines():
-        if marker in line and "(oi)(ci)" in line and ("(m)" in line or "(f)" in line):
-            return
-    grant_workspace_access(folder, principal)
+    return any(
+        marker in line and "(oi)(ci)" in line and ("(m)" in line or "(f)" in line)
+        for line in completed.stdout.lower().splitlines()
+    )
 
 
 def ensure_runtime_root(principal: str = SANDBOX_USERNAME) -> Path:

@@ -278,6 +278,17 @@ Details:
 For comparison, Codex's Windows sandbox grants its group read access to all
 of `Documents` and `AppData`.
 
+**A workspace root that itself contains `.git`, a Python environment
+(`pyvenv.cfg` or `conda-meta`), or the sidecar's own interpreter is refused.**
+A grant is inherited by everything below it, so opening such a root would also
+hand the account those folders, and each runs code as the user: a planted git
+hook or config runs on the next git command, a planted `.pth` on the
+environment's next start, neither shown by a diff review. Carving them back out
+needs deny rules the environment's safety layer blocks, so the sidecar fails
+closed: it keeps Desktop Commander off, with a message, rather than grant an
+escape. Point `CLIENT_WORKSPACE_ROOTS` at a subfolder without those, or a
+separate checkout that does not hold the sidecar's environment.
+
 A custom MCP server configured as `python -m some.module` has its module name
 rewritten into a path by `MCPConfigStore._resolve_custom_value` (the dot looks
 like a file extension). This is a separate, pre-existing bug.
