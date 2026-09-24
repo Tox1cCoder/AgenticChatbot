@@ -5352,6 +5352,18 @@ def add_mcp_server_from_url(url_config: dict[str, Any]) -> bool:
     return response.get("success", False) if response else False
 
 
+def get_sandbox_mode() -> dict[str, Any] | None:
+    """Fetch the device sandbox mode and whether the sandbox account is set up."""
+    response = make_api_request("GET", "/mcp/sandbox")
+    return response.get("data") if response else None
+
+
+def set_sandbox_mode(mode: str) -> dict[str, Any] | None:
+    """Switch the device sandbox mode; the sidecar restarts Desktop Commander."""
+    response = make_api_request("PUT", "/mcp/sandbox", {"mode": mode})
+    return response.get("data") if response else None
+
+
 # ── Skills API helpers ─────────────────────────────────────────
 
 
@@ -9047,10 +9059,46 @@ def _render_mcp_tool_tester(selected_tool: dict[str, Any], qualified_id: str) ->
             st.rerun()
 
 
+def _render_sandbox_switch() -> None:
+    """The per-device sandbox on/off switch for Desktop Commander.
+
+    On runs Desktop Commander as the isolated KaniSandbox account in a managed
+    workspace; off runs it as the signed-in user, in their own environment.
+    Flipping it asks the sidecar to restart Desktop Commander under the new
+    identity.
+    """
+    sandbox = get_sandbox_mode()
+    if sandbox is None:
+        return
+
+    is_on = sandbox.get("mode") == "workspace"
+    chosen_on = st.toggle(
+        "Sandbox mode — run Desktop Commander as an isolated account",
+        value=is_on,
+        help=(
+            "On: commands run as a separate Windows account (KaniSandbox) confined to a "
+            "managed workspace. Off: they run as you, in your normal environment."
+        ),
+    )
+    if chosen_on != is_on:
+        with st.spinner("Switching sandbox mode and restarting Desktop Commander..."):
+            if set_sandbox_mode("workspace" if chosen_on else "off") is not None:
+                st.rerun()
+
+    if chosen_on and not sandbox.get("accountReady", False):
+        st.warning(
+            "Sandbox is on, but the KaniSandbox account is not set up, so Desktop Commander "
+            "stays off. Set it up with: `python -m client_backend sandbox setup`",
+            icon=":material/warning:",
+        )
+
+
 def render_tools_tab():
     """Render the MCP Tools management and testing interface"""
     st.markdown("# :material/extension: MCP Tools Management")
     st.markdown("Discover and test Model Context Protocol (MCP) tools available to the chatbot.")
+
+    _render_sandbox_switch()
 
     if st.button("Refresh", icon=":material/refresh:", width="stretch"):
         st.rerun()

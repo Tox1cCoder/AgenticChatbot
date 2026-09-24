@@ -25,7 +25,6 @@ from app.core.mcp_adapter_utils import (
     clean_mcp_tool_name,
     sanitize_mcp_schema,
 )
-from client_backend.core.config import client_settings
 from client_backend.core.logging import get_logger
 from client_backend.core.security import generate_device_identifier
 from client_backend.schemas.mcp_config import MCPProfileScope
@@ -40,6 +39,7 @@ from client_backend.services.mcp_config_migration import prepare_mcp_config_stor
 from client_backend.services.mcp_config_store import EffectiveMCPServer, MCPConfigStore
 from client_backend.services.sandbox import launch
 from client_backend.services.sandbox.launch import SandboxLaunch
+from client_backend.services.sandbox.mode import read_sandbox_mode
 from client_backend.services.upstream_auth import get_upstream_auth_service
 
 logger = get_logger(__name__)
@@ -288,7 +288,8 @@ class LocalMCPManager:
 
         if not any(is_desktop_commander(config.command, config.args) for config in configs):
             return None, None
-        if client_settings.sandbox_mode != "workspace":
+        # The device override (the app switch) wins over CLIENT_SANDBOX_MODE.
+        if read_sandbox_mode() != "workspace":
             return None, None
         if not launch.sandbox_is_set_up():
             return None, (

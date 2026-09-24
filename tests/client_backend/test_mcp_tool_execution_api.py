@@ -212,3 +212,57 @@ def test_server_info_running_server_reports_no_error():
     assert info["running"] is True
     assert info["error"] is None
     assert info["toolCount"] == 1
+
+
+async def _noop_async(sink, *args):
+    sink.append(args)
+
+
+@pytest.fixture
+def sandbox_profile(tmp_path, monkeypatch):
+    from client_backend.core.config import client_settings
+
+    monkeypatch.setattr(client_settings, "profile_root", str(tmp_path))
+    return tmp_path
+
+
+@pytest.mark.asyncio
+async def test_get_sandbox_reports_mode_and_account_readiness(monkeypatch, sandbox_profile):
+    from client_backend.core.config import client_settings
+
+    monkeypatch.setattr(client_settings, "sandbox_mode", "off")
+    monkeypatch.setattr(mcp_api.sandbox_launch, "sandbox_is_set_up", lambda: True)
+
+    response = await mcp_api.get_sandbox_mode_endpoint(_session())
+    body = json.loads(response.body)
+
+    assert body["data"] == {"mode": "off", "accountReady": True}
+
+
+@pytest.mark.asyncio
+async def test_put_sandbox_persists_the_mode_and_restarts(monkeypatch, sandbox_profile):
+    from client_backend.services.sandbox.mode import read_sandbox_mode
+
+    reloaded = []
+    monkeypatch.setattr(mcp_api, "_reload_manager", lambda scope: _noop_async(reloaded, scope))
+    monkeypatch.setattr(
+        mcp_api,
+        "_refresh_runtime_bridge_catalogs_if_connected",
+        lambda scope: _noop_async([], scope),
+    )
+    monkeypatch.setattr(mcp_api.sandbox_launch, "sandbox_is_set_up", lambda: True)
+
+    response = await mcp_api.set_sandbox_mode_endpoint({"mode": "workspace"}, _session())
+    body = json.loads(response.body)
+
+    assert read_sandbox_mode() == "workspace"
+    assert body["data"]["mode"] == "workspace"
+    assert reloaded, "Desktop Commander must be restarted so the new mode takes effect"
+
+
+@pytest.mark.asyncio
+async def test_put_sandbox_rejects_an_unknown_mode(monkeypatch, sandbox_profile):
+    with pytest.raises(HTTPException) as excinfo:
+        await mcp_api.set_sandbox_mode_endpoint({"mode": "banana"}, _session())
+
+    assert excinfo.value.status_code == 422

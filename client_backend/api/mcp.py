@@ -29,6 +29,8 @@ from client_backend.services.mcp_config_store import (
     MCPConfigStore,
 )
 from client_backend.services.runtime_bridge import get_runtime_bridge
+from client_backend.services.sandbox import launch as sandbox_launch
+from client_backend.services.sandbox.mode import read_sandbox_mode, write_sandbox_mode
 
 
 def _catalog_version(tools: list[dict[str, Any]]) -> str:
@@ -431,6 +433,44 @@ async def toggle_mcp_server(
     state = "enabled" if enabled else "disabled"
     message = f"MCP server '{server_name}' {state} successfully"
     return make_api_response(success=True, message=message, data={"message": message})
+
+
+def _sandbox_state() -> dict[str, Any]:
+    return {"mode": read_sandbox_mode(), "accountReady": sandbox_launch.sandbox_is_set_up()}
+
+
+@router.get("/sandbox")
+async def get_sandbox_mode_endpoint(
+    session: LocalSessionPayload = Depends(require_local_session),
+):
+    """The sandbox mode in effect on this device, and whether the account exists."""
+    return make_api_response(
+        success=True,
+        message="Sandbox mode retrieved successfully",
+        data=_sandbox_state(),
+    )
+
+
+@router.put("/sandbox")
+async def set_sandbox_mode_endpoint(
+    payload: dict[str, Any],
+    session: LocalSessionPayload = Depends(require_local_session),
+):
+    """Set the device sandbox mode and restart Desktop Commander under it."""
+    try:
+        mode = write_sandbox_mode(str(payload.get("mode", "")))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    scope = _scope(session)
+    # Desktop Commander runs under the identity chosen at launch, so it has to
+    # be restarted for the new mode to take effect.
+    await _reload_manager(scope)
+    await _refresh_runtime_bridge_catalogs_if_connected(scope)
+    return make_api_response(
+        success=True,
+        message=f"Sandbox mode set to {mode}",
+        data=_sandbox_state(),
+    )
 
 
 @router.get("/tools")

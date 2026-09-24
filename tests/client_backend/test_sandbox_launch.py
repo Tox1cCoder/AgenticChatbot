@@ -136,6 +136,24 @@ async def test_sandbox_mode_off_ignores_an_existing_account(tmp_path, monkeypatc
     assert (sandbox, problem, prepared) == (None, None, [])
 
 
+async def test_device_override_off_beats_the_configured_workspace(
+    tmp_path, monkeypatch, workspace_mode
+):
+    """The app switch writes a device override; the manager must honor it over
+    CLIENT_SANDBOX_MODE, so turning the sandbox off in the app really turns it
+    off even though the configured default is workspace."""
+    from client_backend.core.config import client_settings
+    from client_backend.services.sandbox import mode as sandbox_mode
+
+    monkeypatch.setattr(client_settings, "profile_root", str(tmp_path))
+    sandbox_mode.write_sandbox_mode("off")
+
+    store = _store(tmp_path, {"desktop-commander": dict(_DESKTOP_COMMANDER)})
+    sandbox, problem = await LocalMCPManager._prepare_sandbox(store.list_effective_servers())
+
+    assert (sandbox, problem) == (None, None)
+
+
 def test_workspace_inside_the_user_profile_is_made_resolvable(tmp_path, monkeypatch):
     """PowerShell cannot start in a folder whose parents the account cannot read;
     it falls back to C:\\. A workspace under the profile therefore gets its

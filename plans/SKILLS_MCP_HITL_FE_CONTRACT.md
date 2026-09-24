@@ -148,7 +148,8 @@ Two independent inventories with the same route shapes:
 Routes (both): `GET /servers`, `GET /servers/{name}`, `POST /servers`,
 `POST /servers/from-url`, `DELETE /servers/{name}`,
 `PATCH /servers/{name}/toggle?enabled=`, `GET /tools?serverName=`,
-`GET /tools/{toolName}`, `POST /tools/{toolName}/execute`.
+`GET /tools/{toolName}`, `POST /tools/{toolName}/execute`. The sidecar
+inventory also has `GET /sandbox` and `PUT /sandbox` (Sandbox mode, below).
 
 `GET /mcp/servers` → `data`:
 
@@ -178,10 +179,27 @@ an **enabled** server actually started:
 - `enabled: false` — the operator disabled it; `running` is `false` and `error`
   is `null`.
 
-The sandbox itself has no FE surface: `CLIENT_SANDBOX_MODE` and the managed
-workspace are operator configuration (an env var and the
-`python -m client_backend sandbox` CLI). The only FE-visible effect is the
-`running`/`error` pair above.
+### Sandbox mode (device-local switch)
+
+Desktop Commander can run either as the signed-in user or as an isolated
+Windows account (`KaniSandbox`) confined to a managed workspace. Two routes on
+the sidecar read and set this per device:
+
+- `GET /mcp/sandbox` → `data`: `{ "mode": "off" | "workspace", "accountReady": bool }`
+- `PUT /mcp/sandbox` with `{ "mode": "off" | "workspace" }` → same `data` shape.
+  An unknown `mode` is HTTP 422. Setting it restarts Desktop Commander under the
+  new identity, so its `running`/`toolCount` in `GET /mcp/servers` change on the
+  next read; refetch the server list after a successful `PUT`.
+
+`mode` is `workspace` when the sandbox is on. `accountReady` is `false` when the
+`KaniSandbox` account has not been set up (`python -m client_backend sandbox
+setup`); surface that as "sandbox on, but not set up" — with `workspace` and
+`accountReady:false`, Desktop Commander stays **off** and its server row carries
+the reason in `error`. The switch is per device and is not synced to the user's
+other machines. `CLIENT_SANDBOX_MODE` remains the default when no device switch
+has been set. The managed workspace's location and the account itself stay
+operator-managed (env var and the `sandbox` CLI); the FE only reads and flips
+`mode`.
 
 `GET /mcp/tools` → `data`:
 
