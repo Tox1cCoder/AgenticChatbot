@@ -99,6 +99,7 @@ def test_status_shows_the_managed_workspace_when_no_root_is_configured(
     out = capsys.readouterr().out
     assert "Managed workspace" in out
     assert str(profile / "workspace") in out
+    assert (profile / "workspace").is_dir()
 
 
 def test_status_lists_configured_roots_instead(profile, monkeypatch, capsys):

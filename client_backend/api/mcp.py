@@ -207,6 +207,11 @@ def _server_info(
         "enabled": server.enabled,
         "description": server.description,
         "toolCount": tool_count,
+        # Surface why an enabled server has no tools: a sandbox that could not be
+        # prepared, or a start failure, is held in the runtime's error_message.
+        # Without this the client can only show "enabled, 0 tools" and no reason.
+        "running": bool(runtime and runtime.is_running()),
+        "error": runtime.error_message if runtime else None,
         "config": config,
     }
 

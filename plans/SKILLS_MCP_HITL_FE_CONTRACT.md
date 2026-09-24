@@ -156,12 +156,32 @@ Routes (both): `GET /servers`, `GET /servers/{name}`, `POST /servers`,
 {
   "servers": [
     { "name": "desktop_commander", "transport": "stdio", "enabled": true,
-      "description": "…", "toolCount": 12, "config": {} }
+      "description": "…", "toolCount": 12, "running": true, "error": null,
+      "config": {} }
   ],
   "totalCount": 1,
   "enabledCount": 1
 }
 ```
+
+`running` and `error` (both also on `GET /mcp/servers/{name}`) tell you whether
+an **enabled** server actually started:
+
+- `running: true` — the server is up. `toolCount` is live and `error` is `null`.
+- `running: false` with a non-null `error` — enabled but not started, and
+  `error` says why; render the reason rather than treating it as a crash. The
+  common case is Desktop Commander under the sandbox: with
+  `CLIENT_SANDBOX_MODE=workspace`, if the `KaniSandbox` account is not set up or
+  the runtime cannot be prepared, Desktop Commander stays **off** — it never
+  falls back to the user's full rights — and `error` explains what to do (for
+  example, run `sandbox setup`). Show it as "off — <reason>".
+- `enabled: false` — the operator disabled it; `running` is `false` and `error`
+  is `null`.
+
+The sandbox itself has no FE surface: `CLIENT_SANDBOX_MODE` and the managed
+workspace are operator configuration (an env var and the
+`python -m client_backend sandbox` CLI). The only FE-visible effect is the
+`running`/`error` pair above.
 
 `GET /mcp/tools` → `data`:
 

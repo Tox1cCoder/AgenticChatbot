@@ -165,3 +165,50 @@ async def test_execute_rejects_mismatched_server_and_qualified_identity(monkeypa
 
     assert exc_info.value.status_code == 404
     assert manager.calls == []
+
+
+def _server(name: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        name=name,
+        source="builtin",
+        transport="stdio",
+        enabled=True,
+        description="",
+        command="npx",
+        args=[],
+        cwd=None,
+        env={},
+    )
+
+
+def test_server_info_surfaces_why_an_enabled_server_has_no_tools():
+    """A sandbox that could not be prepared holds its reason in error_message;
+    the status payload must carry it, or the client shows 'enabled, 0 tools'
+    with no explanation."""
+    runtime = SimpleNamespace(
+        tools=[],
+        error_message="Sandbox mode is on but the account is not set up",
+        is_running=lambda: False,
+    )
+    manager = SimpleNamespace(servers={"desktop-commander": runtime})
+
+    info = mcp_api._server_info(_server("desktop-commander"), manager)
+
+    assert info["running"] is False
+    assert info["toolCount"] == 0
+    assert "not set up" in info["error"]
+
+
+def test_server_info_running_server_reports_no_error():
+    runtime = SimpleNamespace(
+        tools=[SimpleNamespace()],
+        error_message=None,
+        is_running=lambda: True,
+    )
+    manager = SimpleNamespace(servers={"alpha": runtime})
+
+    info = mcp_api._server_info(_server("alpha"), manager)
+
+    assert info["running"] is True
+    assert info["error"] is None
+    assert info["toolCount"] == 1
