@@ -213,6 +213,62 @@ A sidecar running as administrator does not register its tools unless
 `CLIENT_ALLOW_ELEVATED_RUNTIME=true`, because every dispatched command would
 run with administrator rights.
 
+## Sandbox account (Windows)
+
+`CLIENT_SANDBOX_MODE=workspace` runs Desktop Commander as a separate local
+account, `KaniSandbox`, instead of the signed-in user. It is off by default.
+
+Set up the account once, with one administrator prompt. `remove` deletes the
+account and its profile folder; `status` checks that Windows still accepts it.
+
+```powershell
+.venv\Scripts\python.exe -m client_backend sandbox setup
+.venv\Scripts\python.exe -m client_backend sandbox status
+.venv\Scripts\python.exe -m client_backend sandbox remove
+```
+
+What the account can reach, verified on a real machine:
+
+| | |
+|---|---|
+| The user's profile (keys, browser data, the sidecar's own secrets, DPAPI data) | No: Windows denies it |
+| Files outside the workspace roots | No |
+| `CLIENT_WORKSPACE_ROOTS` folders | Read and write |
+| Desktop Commander's runtime | Read and run only |
+| Creating *new* files where every account may (drive root, Public folders, ProgramData) | Yes. Windows allows this for every account; the same caveat applies to Codex's sandbox |
+
+Details:
+
+- The account is visible on the sign-in screen and says what it is for. A
+  hidden, tool-created account looks like a backdoor, to the user and to
+  antivirus software.
+- Its password is generated and stored DPAPI-encrypted under the signed-in
+  user, and is passed to PowerShell on stdin, never on a command line.
+- Desktop Commander runs from a pinned install in `C:\ProgramData\KaniDesktop-runtime-<random>`.
+  That folder is created exclusively (any account may create folders in
+  ProgramData, so a pre-created one would belong to its maker) and locked:
+  full control for SYSTEM, Administrators and the user, read and run for the
+  account.
+  - It is installed with `npm install --ignore-scripts`, because Desktop
+    Commander's install hook sends telemetry regardless of the telemetry
+    setting. The Markdown-to-PDF feature loses its Chromium download.
+- `git` gets `safe.directory=*` inside the sandbox, because workspace files
+  belong to the user.
+- Once the mode is `workspace`, a missing or broken account, or a runtime
+  that cannot be prepared, keeps Desktop Commander **off** with an error. It
+  never falls back to the user's full rights.
+
+**Workspace roots must be outside the user's profile** (for example
+`C:\Workspaces\<project>`, not `Documents\...`). PowerShell checks every folder
+on the way to its start folder, cannot read the profile's, and silently starts
+at `C:\`; a root inside the profile is therefore refused. Supporting such roots
+would need a read-attributes permission on each folder between the profile and
+the root, a change to the user's profile that has not been approved.
+
+A custom MCP server configured as `python -m some.module` has its module name
+rewritten into a path by `MCPConfigStore._resolve_custom_value` (the dot looks
+like a file extension). This is a separate, pre-existing bug.
+
 ## Client tool requests on the bridge
 
 The sidecar runs each request in its own task, up to

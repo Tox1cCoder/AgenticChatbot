@@ -25,6 +25,7 @@ from app.core.mcp_adapter_utils import (
     clean_mcp_tool_name,
     sanitize_mcp_schema,
 )
+from client_backend.core.config import client_settings
 from client_backend.core.logging import get_logger
 from client_backend.core.security import generate_device_identifier
 from client_backend.schemas.mcp_config import MCPProfileScope
@@ -37,6 +38,8 @@ from client_backend.services.desktop_commander_policy import (
 )
 from client_backend.services.mcp_config_migration import prepare_mcp_config_store
 from client_backend.services.mcp_config_store import EffectiveMCPServer, MCPConfigStore
+from client_backend.services.sandbox import launch
+from client_backend.services.sandbox.launch import SandboxLaunch
 from client_backend.services.upstream_auth import get_upstream_auth_service
 
 logger = get_logger(__name__)
@@ -230,7 +233,16 @@ class LocalMCPManager:
             if config.enabled and (server_names is None or config.name in server_names)
         ]
         self.servers = {config.name: MCPServerRuntime(config) for config in configs}
-        server_config = self._build_server_config(configs)
+        sandbox, sandbox_problem = await self._prepare_sandbox(configs)
+        server_config = self._build_server_config(configs, sandbox=sandbox)
+        withheld: set[str] = set()
+        if sandbox_problem is not None:
+            # Never fall back to the user's full rights once the sandbox exists.
+            for config in configs:
+                if is_desktop_commander(config.command, config.args):
+                    server_config.pop(config.name, None)
+                    self.servers[config.name].mark_error(sandbox_problem)
+                    withheld.add(config.name)
         logger.info(
             "Initializing MCP manager for user=%s device=%s with %d enabled servers",
             self.scope.user_id,
@@ -253,7 +265,8 @@ class LocalMCPManager:
             return
 
         for config in configs:
-            await self._start_server(config.name)
+            if config.name not in withheld:
+                await self._start_server(config.name)
 
         self._initialized = True
         logger.info(
@@ -263,14 +276,49 @@ class LocalMCPManager:
         )
 
     @staticmethod
+    async def _prepare_sandbox(
+        configs: list[EffectiveMCPServer],
+    ) -> tuple[SandboxLaunch | None, str | None]:
+        """How to launch Desktop Commander sandboxed, or why it cannot be.
+
+        Returns ``(None, None)`` when sandbox mode is off (or there is no
+        Desktop Commander), so it launches as configured. Once the mode is on,
+        a missing or broken sandbox keeps it off instead.
+        """
+
+        if not any(is_desktop_commander(config.command, config.args) for config in configs):
+            return None, None
+        if client_settings.sandbox_mode != "workspace":
+            return None, None
+        if not launch.sandbox_is_set_up():
+            return None, (
+                "Sandbox mode is on but the sandbox account is not set up, so Desktop "
+                "Commander stays off rather than running with your full rights. Run: "
+                "python -m client_backend sandbox setup"
+            )
+        try:
+            return await asyncio.to_thread(launch.prepare_sandbox_launch), None
+        except (launch.SandboxRuntimeError, OSError) as exc:
+            return None, (
+                f"The sandbox account is set up but could not be prepared: {exc}. Desktop "
+                "Commander stays off rather than running with your full rights. Check it "
+                "with: python -m client_backend sandbox status"
+            )
+
+    @staticmethod
     def _build_server_config(
         configs: list[EffectiveMCPServer],
+        *,
+        sandbox: SandboxLaunch | None = None,
     ) -> dict[str, dict[str, Any]]:
         result: dict[str, dict[str, Any]] = {}
         for config in configs:
             args, env = config.args, config.env
             if is_desktop_commander(config.command, args):
                 args, env = harden_launch(args, env)
+                if sandbox is not None:
+                    result[config.name] = sandbox.mcp_entry(env)
+                    continue
             entry = build_mcp_server_entry(
                 transport=config.transport,
                 command=config.command,

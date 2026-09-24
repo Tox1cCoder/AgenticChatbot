@@ -10,6 +10,7 @@ import platform
 import secrets
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
@@ -134,6 +135,15 @@ class ClientSettings(BaseSettings):
     tool_call_timeout_seconds: int = Field(
         default=60,
         description="Default timeout for client-side tool dispatch when the request omits one.",
+    )
+    sandbox_mode: Literal["off", "workspace"] = Field(
+        default="off",
+        description=(
+            "'workspace' runs Desktop Commander as the KaniSandbox account (see "
+            "'python -m client_backend sandbox setup'), confined to workspace_roots. If "
+            "the account is missing or broken, Desktop Commander stays off rather than "
+            "running with the user's full rights. 'off' runs it as the signed-in user."
+        ),
     )
     max_concurrent_tool_calls: int = Field(
         default=4,

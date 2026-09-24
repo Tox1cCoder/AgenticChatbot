@@ -72,7 +72,28 @@ def _build_parser() -> argparse.ArgumentParser:
             help="Override the stable installation identifier",
         )
 
+    sandbox_parser = subparsers.add_parser(
+        "sandbox",
+        help="Manage the local account the assistant's commands run as",
+    )
+    sandbox_subparsers = sandbox_parser.add_subparsers(dest="sandbox_command", required=True)
+    for name, help_text in (
+        ("setup", "Create the account, or give it a new password (asks for admin rights)"),
+        ("remove", "Delete the account and its profile folder (asks for admin rights)"),
+        ("status", "Report whether the account is set up and usable"),
+    ):
+        command_parser = sandbox_subparsers.add_parser(name, help=help_text)
+        if name != "status":
+            # Set by the relaunch through the administrator prompt; not for people.
+            command_parser.add_argument("--elevated", action="store_true", help=argparse.SUPPRESS)
+
     return parser
+
+
+def _run_sandbox(args: argparse.Namespace) -> int:
+    from client_backend.services.sandbox import commands
+
+    return commands.run(args.sandbox_command, elevated=getattr(args, "elevated", False))
 
 
 def _run_doctor(args: argparse.Namespace) -> int:
@@ -259,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_doctor(args)
     if args.command == "mcp":
         return _run_mcp(args)
+    if args.command == "sandbox":
+        return _run_sandbox(args)
 
     parser.print_help()
     return 1

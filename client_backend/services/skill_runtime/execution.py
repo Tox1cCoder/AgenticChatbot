@@ -18,6 +18,9 @@ import jsonschema
 
 from client_backend.core.config import client_settings
 from client_backend.core.paths import PathSecurityError, is_under_root, validate_workspace_path
+from client_backend.core.windows_job import (
+    JobExtendedLimitInformation as _JobExtendedLimitInformation,
+)
 from client_backend.services.local_skills_registry import LocalSkillsRegistry, get_skills_registry
 from client_backend.services.skill_runtime.audit import SkillAuditWriter, new_audit_id
 from client_backend.services.skill_runtime.environment import SkillEnvironmentManager
@@ -77,42 +80,6 @@ _ENV_PASSTHROUGH_NAMES = frozenset(
         "OS",
     }
 )
-
-
-class _JobBasicLimitInformation(ctypes.Structure):
-    _fields_ = [
-        ("per_process_user_time_limit", ctypes.c_int64),
-        ("per_job_user_time_limit", ctypes.c_int64),
-        ("limit_flags", ctypes.c_ulong),
-        ("minimum_working_set_size", ctypes.c_size_t),
-        ("maximum_working_set_size", ctypes.c_size_t),
-        ("active_process_limit", ctypes.c_ulong),
-        ("affinity", ctypes.c_size_t),
-        ("priority_class", ctypes.c_ulong),
-        ("scheduling_class", ctypes.c_ulong),
-    ]
-
-
-class _IoCounters(ctypes.Structure):
-    _fields_ = [
-        ("read_operation_count", ctypes.c_uint64),
-        ("write_operation_count", ctypes.c_uint64),
-        ("other_operation_count", ctypes.c_uint64),
-        ("read_transfer_count", ctypes.c_uint64),
-        ("write_transfer_count", ctypes.c_uint64),
-        ("other_transfer_count", ctypes.c_uint64),
-    ]
-
-
-class _JobExtendedLimitInformation(ctypes.Structure):
-    _fields_ = [
-        ("basic_limit_information", _JobBasicLimitInformation),
-        ("io_info", _IoCounters),
-        ("process_memory_limit", ctypes.c_size_t),
-        ("job_memory_limit", ctypes.c_size_t),
-        ("peak_process_memory_used", ctypes.c_size_t),
-        ("peak_job_memory_used", ctypes.c_size_t),
-    ]
 
 
 class _WindowsKillJob:
