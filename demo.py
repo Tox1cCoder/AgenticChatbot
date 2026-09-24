@@ -9373,14 +9373,20 @@ def render_tools_tab():
             for server in servers:
                 server_name = server.get("name", "Unknown")
                 enabled = server.get("enabled", False)
+                running = server.get("running", False)
+                error = str(server.get("error") or "").strip()
                 tool_count = server.get("toolCount", 0)
                 transport = server.get("transport", "unknown")
                 description = server.get("description", "No description")
                 is_removable = _mcp_server_is_removable(server)
                 kind_label = "Custom" if is_removable else "Built-in"
 
-                status_icon = ":material/check_circle:" if enabled else ":material/cancel:"
-                status_text = "Enabled" if enabled else "Disabled"
+                if not enabled:
+                    status_icon, status_text = ":material/cancel:", "Disabled"
+                elif running:
+                    status_icon, status_text = ":material/check_circle:", "Running"
+                else:
+                    status_icon, status_text = ":material/error:", "Off"
 
                 col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
 
@@ -9393,6 +9399,12 @@ def render_tools_tab():
                     - {description if description else "No description available"}
                     """
                     )
+                    # An enabled server that did not start carries the reason
+                    # (for example a sandbox that could not be prepared, so
+                    # Desktop Commander stays off). Show it, so "Off, 0 tools"
+                    # is never left unexplained.
+                    if enabled and not running and error:
+                        st.warning(error, icon=":material/info:")
 
                 with col2:
                     toggle_label = "Disable" if enabled else "Enable"
