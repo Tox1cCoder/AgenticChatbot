@@ -77,3 +77,37 @@ def test_declined_elevation_changes_nothing(profile, monkeypatch, capsys):
 def test_status_before_setup_says_it_is_not_set_up(profile, capsys):
     assert cli.main(["sandbox", "status"]) == 1
     assert "not set up" in capsys.readouterr().out.lower()
+
+
+def _pretend_account_is_usable(monkeypatch) -> None:
+    from client_backend.services.sandbox.account import SandboxCredentials
+
+    creds = SandboxCredentials("KaniSandbox", "x")
+    monkeypatch.setattr(commands, "load_credentials", lambda: creds)
+    monkeypatch.setattr(commands, "logon_problem", lambda *args: None)
+
+
+def test_status_shows_the_managed_workspace_when_no_root_is_configured(
+    profile, monkeypatch, capsys
+):
+    from client_backend.core.config import client_settings
+
+    monkeypatch.setattr(client_settings, "workspace_roots", [])
+    _pretend_account_is_usable(monkeypatch)
+
+    assert cli.main(["sandbox", "status"]) == 0
+    out = capsys.readouterr().out
+    assert "Managed workspace" in out
+    assert str(profile / "workspace") in out
+
+
+def test_status_lists_configured_roots_instead(profile, monkeypatch, capsys):
+    from client_backend.core.config import client_settings
+
+    monkeypatch.setattr(client_settings, "workspace_roots", [r"C:\work\project"])
+    _pretend_account_is_usable(monkeypatch)
+
+    assert cli.main(["sandbox", "status"]) == 0
+    out = capsys.readouterr().out
+    assert r"C:\work\project" in out
+    assert "Managed workspace" not in out

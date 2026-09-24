@@ -22,11 +22,11 @@ from client_backend.services.sandbox.account import load_credentials
 from client_backend.services.sandbox.path_resolution import grant_path_resolution
 from client_backend.services.sandbox.runtime import (
     SandboxRuntimeError,
-    ensure_runtime_root,
     ensure_workspace_access,
     install_desktop_commander,
     node_executable,
 )
+from client_backend.services.sandbox.workspace import ensure_managed_workspace
 
 __all__ = [
     "SandboxLaunch",
@@ -82,10 +82,16 @@ def prepare_sandbox_launch() -> SandboxLaunch:
     entry = install_desktop_commander()
     node = node_executable()
     roots = [Path(root) for root in client_settings.workspace_roots]
+    if not roots:
+        # No workspace configured: give the account a clean one it may write,
+        # under the profile, rather than the read-only runtime folder, where it
+        # can create nothing. A configured root is used as-is (and still
+        # refused by ensure_workspace_access if it holds a .git or environment).
+        roots = [ensure_managed_workspace()]
     for root in roots:
         ensure_workspace_access(root)
         # Without this, PowerShell cannot start in a root under the user's
         # profile and silently starts at the drive root instead.
         grant_path_resolution(root)
-    cwd = roots[0] if roots else ensure_runtime_root()
+    cwd = roots[0]
     return SandboxLaunch(node=node, desktop_commander=entry, cwd=cwd)

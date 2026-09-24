@@ -140,8 +140,10 @@ class ClientSettings(BaseSettings):
         default="off",
         description=(
             "'workspace' runs Desktop Commander as the KaniSandbox account (see "
-            "'python -m client_backend sandbox setup'), confined to workspace_roots. If "
-            "the account is missing or broken, Desktop Commander stays off rather than "
+            "'python -m client_backend sandbox setup'), confined to workspace_roots. When "
+            "workspace_roots is empty it works in a managed workspace under the profile "
+            "('<profile_root>/workspace'), a clean folder holding no .git or environment. "
+            "If the account is missing or broken, Desktop Commander stays off rather than "
             "running with the user's full rights. 'off' runs it as the signed-in user."
         ),
     )

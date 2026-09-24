@@ -80,7 +80,27 @@ def _status() -> int:
         print(f"The sandbox account {credentials.username} cannot be used: {problem}")
         return 1
     print(f"The sandbox account {credentials.username} is set up and usable.")
+    _print_workspace()
     return 0
+
+
+def _print_workspace() -> None:
+    """Where Desktop Commander works in workspace mode, so source can be put there."""
+
+    from client_backend.services.sandbox.workspace import managed_workspace_root
+
+    roots = client_settings.workspace_roots
+    if roots:
+        print("Workspace roots (CLIENT_WORKSPACE_ROOTS):")
+        for root in roots:
+            print(f"  {root}")
+        return
+    print("Managed workspace (used when CLIENT_WORKSPACE_ROOTS is empty):")
+    print(f"  {managed_workspace_root()}")
+    print(
+        "  Copy a project's source here -- without .git or a virtual environment -- to work "
+        "on it, then review the changes and apply them back to the real repository yourself."
+    )
 
 
 def _result_path() -> Path:

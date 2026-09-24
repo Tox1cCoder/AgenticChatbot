@@ -156,3 +156,26 @@ def test_workspace_inside_the_user_profile_is_made_resolvable(tmp_path, monkeypa
     assert granted == [root]
     assert resolvable == [root]
     assert prepared.cwd == root
+
+
+def test_no_configured_root_falls_back_to_the_managed_workspace(tmp_path, monkeypatch):
+    """With CLIENT_WORKSPACE_ROOTS empty, the account gets a clean managed
+    workspace it may write -- not the read-only runtime folder, where it could
+    create nothing."""
+    from client_backend.core.config import client_settings
+
+    monkeypatch.setattr(client_settings, "profile_root", str(tmp_path / "profile"))
+    monkeypatch.setattr(client_settings, "workspace_roots", [])
+    granted, resolvable = [], []
+    monkeypatch.setattr(launch, "install_desktop_commander", lambda: tmp_path / "dc.js")
+    monkeypatch.setattr(launch, "node_executable", lambda: tmp_path / "node.exe")
+    monkeypatch.setattr(launch, "ensure_workspace_access", granted.append)
+    monkeypatch.setattr(launch, "grant_path_resolution", resolvable.append)
+
+    prepared = launch.prepare_sandbox_launch()
+
+    managed = tmp_path / "profile" / "workspace"
+    assert prepared.cwd == managed
+    assert managed.is_dir()
+    assert granted == [managed]
+    assert resolvable == [managed]

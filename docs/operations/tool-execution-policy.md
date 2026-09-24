@@ -233,7 +233,7 @@ What the account can reach, verified on a real machine:
 |---|---|
 | The user's profile (keys, browser data, the sidecar's own secrets, DPAPI data) | No: Windows denies it |
 | Files outside the workspace roots | No |
-| `CLIENT_WORKSPACE_ROOTS` folders | Read and write |
+| `CLIENT_WORKSPACE_ROOTS` folders, or the managed workspace when that is empty | Read and write |
 | Desktop Commander's runtime | Read and run only |
 | Creating *new* files where every account may (drive root, Public folders, ProgramData) | Yes. Windows allows this for every account; the same caveat applies to Codex's sandbox |
 
@@ -257,6 +257,27 @@ Details:
 - Once the mode is `workspace`, a missing or broken account, or a runtime
   that cannot be prepared, keeps Desktop Commander **off** with an error. It
   never falls back to the user's full rights.
+
+**The managed workspace (the default).** When `CLIENT_WORKSPACE_ROOTS` is
+empty, the account works in `<profile_root>/workspace`
+(`%LOCALAPPDATA%\KaniDesktop\workspace`) -- a clean folder the sidecar creates
+and the account may write. This is the supported production setup: the folder
+never holds a `.git` or an environment, so the guard below always permits it,
+and it sits next to, but cannot read, the profile's `sandbox/` folder that
+holds the account's DPAPI-encrypted credentials (the account gets read
+attributes on the folders on the path, never the right to list them). Before
+the default was added, workspace mode with no configured root gave the account
+a read-only cwd, where it could create nothing. `sandbox status` prints the
+effective workspace.
+
+To work on a project inside the sandbox, copy its source into the managed
+workspace **without** its `.git` or virtual environment, let the model work,
+then review the changes and apply them back to the real repository yourself.
+The account never touches the repository, so it can never plant a git hook or a
+`.pth` file that would later run as you. If instead you want the model to edit a
+repository in place and run `git` itself, use `CLIENT_SANDBOX_MODE=off`: Desktop
+Commander then runs as you, under the approval gate, the way Claude Code works
+on Windows.
 
 **Workspace roots inside the user's profile** (for example
 `Documents\<project>`) work, with one narrow change to the profile.
