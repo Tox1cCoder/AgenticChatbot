@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -12,6 +11,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 
 from app.core.config import settings
 from app.services.client_device_service import ClientDeviceService
+from shared.runtime_results import cap_tool_result
 
 from .client_runtime_errors import client_runtime_error_from_response
 from .text_normalization import sanitize_identifier
@@ -184,12 +184,6 @@ def get_exposed_client_tool_name(
     return None
 
 
-def _format_tool_result(result: Any) -> str:
-    if isinstance(result, str):
-        return result
-    return json.dumps(result, indent=2, ensure_ascii=False, default=str)
-
-
 # Model-facing guard errors. FR-2: mention only this chat session's client,
 # never device identifiers or the existence of other clients.
 _ERR_TOOL_NOT_THIS_SESSION = (
@@ -214,7 +208,7 @@ def _build_tool(
     bound_session_id: str,
     bound_catalog_version: int,
 ) -> BaseTool:
-    async def _dispatch_client_tool(**kwargs: Any) -> str:
+    async def _dispatch_client_tool(**kwargs: Any) -> Any:
         # Guard failures return tool error results instead of raising (FR-4)
         # so the model can explain the situation and the turn completes.
         ctx = get_tool_context()
@@ -291,7 +285,16 @@ def _build_tool(
         if not response.get("success", False):
             raise client_runtime_error_from_response(response)
 
-        return _format_tool_result(response.get("result"))
+        # Returned as the sidecar sent it -- usually MCP content blocks -- so
+        # rendering reads the text out of them and never shows the model a
+        # JSON envelope or an image's base64. The sidecar caps its reply to
+        # these budgets; the cap is repeated for an older sidecar that did not.
+        result, _ = cap_tool_result(
+            response.get("result"),
+            max_text_bytes=settings.client_runtime_max_tool_result_size_bytes,
+            max_media_bytes=settings.client_runtime_max_tool_result_media_bytes,
+        )
+        return result
 
     description = (
         f"[Client device tool] {spec.description} "

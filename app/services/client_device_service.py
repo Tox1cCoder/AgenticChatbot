@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.client_device import ClientDevice, DeviceStatus
 from app.repositories.client_device import ClientDeviceRepository
-from app.schemas.runtime_protocol import ToolDispatchRequest
+from app.schemas.runtime_protocol import RUNTIME_MAX_MESSAGE_BYTES, ToolDispatchRequest
 from app.services.client_runtime_store import (
     DeviceSessionRecord,
     get_client_runtime_store,
@@ -121,7 +121,18 @@ class ClientDeviceService:
                 else session.tool_catalog_version
             ),
             mutation_approved=mutation_approved,
+            max_result_text_bytes=settings.client_runtime_max_tool_result_size_bytes,
+            max_result_media_bytes=settings.client_runtime_max_tool_result_media_bytes,
         )
+        request_bytes = len(request.model_dump_json())
+        if request_bytes > RUNTIME_MAX_MESSAGE_BYTES:
+            # Sending it would make the device drop the whole connection, and
+            # every other call in flight with it.
+            raise ValueError(
+                f"Tool arguments are too large to send to the device ({request_bytes:,} "
+                f"bytes; the limit is {RUNTIME_MAX_MESSAGE_BYTES:,}). Send the content "
+                "in smaller parts."
+            )
         return await get_client_runtime_store().dispatch_request(
             session,
             request,

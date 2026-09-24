@@ -460,6 +460,84 @@ async def test_a_decided_mutation_leaves_the_flag_alone(monkeypatch):
     assert middleware.mutation_outcome_unknown is False
 
 
+class _ReceiptLedger:
+    """Receipt repository that remembers the last state it was told."""
+
+    def __init__(self) -> None:
+        self.status: str | None = None
+
+    async def areserve(self, *, scope, key):
+        from app.models.tool_execution_receipt import ReceiptStatus
+        from app.services.tool_execution_receipt_service import ReceiptRecord
+
+        return ReceiptRecord(execution_key=key, status=ReceiptStatus.RESERVED, fresh=True)
+
+    async def afail(self, *, key, error_code):
+        self.status = "failed"
+
+    async def amark_outcome_unknown(self, *, key):
+        self.status = "outcome_unknown"
+
+    async def acomplete(self, *, key, result, provider_receipt_id):
+        self.status = "completed"
+
+
+def _failing_execution(monkeypatch, artifact_detail: dict) -> None:
+    from app.ai.workflow import middleware as middleware_module
+
+    async def fake_execute(**kwargs):
+        return (
+            [{"tool_call_id": "call-1", "name": "do_thing", "content": "timed out"}],
+            [{"tool_call_id": "call-1", "tool": "do_thing", "status": "error", **artifact_detail}],
+            [],
+        )
+
+    monkeypatch.setattr(middleware_module, "execute_tool_calls", fake_execute)
+    monkeypatch.setattr(
+        middleware_module, "resolve_call_identity", lambda call, **kwargs: _mutation_identity()
+    )
+
+
+async def test_a_mutation_that_may_have_run_is_not_left_retryable(monkeypatch):
+    """A timeout or lost connection after dispatch may hide a completed effect."""
+    from uuid import uuid4
+
+    from app.ai.workflow.middleware import MUTATION_OUTCOME_UNKNOWN_TEXT
+    from app.services.tool_execution_receipt_service import ToolExecutionReceiptService
+
+    ledger = _ReceiptLedger()
+    _failing_execution(monkeypatch, {"outcome_unknown": True})
+    service = ToolExecutionReceiptService(repository=ledger)
+    middleware = ToolExecutionMiddleware(
+        scope=_mutating_scope(service.execute_mutation, uuid4()), tool_factory=_no_tools
+    )
+
+    message = await middleware.awrap_tool_call(_tool_request(), _unused_handler)
+
+    assert ledger.status == "outcome_unknown"
+    assert message.content == MUTATION_OUTCOME_UNKNOWN_TEXT
+    assert middleware.mutation_outcome_unknown is True
+
+
+async def test_a_mutation_that_certainly_failed_stays_retryable(monkeypatch):
+    from uuid import uuid4
+
+    from app.services.tool_execution_receipt_service import ToolExecutionReceiptService
+
+    ledger = _ReceiptLedger()
+    _failing_execution(monkeypatch, {})
+    service = ToolExecutionReceiptService(repository=ledger)
+    middleware = ToolExecutionMiddleware(
+        scope=_mutating_scope(service.execute_mutation, uuid4()), tool_factory=_no_tools
+    )
+
+    message = await middleware.awrap_tool_call(_tool_request(), _unused_handler)
+
+    assert ledger.status == "failed"
+    assert message.content == "timed out"
+    assert middleware.mutation_outcome_unknown is False
+
+
 def _mutation_identity():
     """A call identity the receipt path accepts as a mutation."""
     return SimpleNamespace(

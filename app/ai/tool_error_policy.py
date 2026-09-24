@@ -8,6 +8,7 @@ from typing import Any
 from anyio import BrokenResourceError, ClosedResourceError
 
 from .client_runtime_errors import (
+    OUTCOME_UNKNOWN_CODES,
     ClientRuntimeToolError,
     classify_client_runtime_error_code,
 )
@@ -235,6 +236,18 @@ def classify_tool_error(
     )
 
 
+def outcome_may_have_happened(exception: BaseException) -> bool:
+    """Whether a failed call might still have had its effect.
+
+    A timeout stops the waiting, not the work: the runner abandons a call at
+    its deadline, and the device may have finished it. A device failure counts
+    only when its code says the tool could have run.
+    """
+    if isinstance(exception, ClientRuntimeToolError):
+        return exception.context.code in OUTCOME_UNKNOWN_CODES
+    return isinstance(exception, TimeoutError)
+
+
 def build_tool_error_payloads(
     summary: ToolErrorSummary,
     *,
@@ -269,4 +282,8 @@ def build_tool_error_payloads(
         artifact_detail["runtime_error_context"] = exception.context.model_dump(mode="json")
     if terminal_output is not None:
         artifact_detail["skill_terminal_error"] = True
+    if outcome_may_have_happened(exception):
+        # Read by the mutation receipt path, which must not record such a call
+        # as a clean failure that a replay may repeat.
+        artifact_detail["outcome_unknown"] = True
     return model_content, artifact_detail

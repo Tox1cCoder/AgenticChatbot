@@ -9,6 +9,27 @@ RUNTIME_MESSAGE_TOOL_RESULT = "tool_result"
 RUNTIME_MESSAGE_HEARTBEAT = "heartbeat"
 RUNTIME_MESSAGE_ERROR = "error"
 RUNTIME_MESSAGE_ACK = "ack"
+RUNTIME_MESSAGE_CANCEL = "cancel"
+
+# Error codes for failures around a tool rather than inside it. They tell the
+# server whether the tool could have run: a mutation that might have run must
+# not be repeated blindly.
+RUNTIME_ERROR_REQUEST_REJECTED = "SESSION_REQUEST_REJECTED"  # never ran
+RUNTIME_ERROR_NOT_STARTED = "TIMEOUT_NOT_STARTED"  # never ran
+RUNTIME_ERROR_EXECUTION_TIMEOUT = "TIMEOUT_CLIENT_EXECUTION"  # may have run
+RUNTIME_ERROR_TOOL_CONNECTION_LOST = "TOOL_CONNECTION_LOST"  # may have run
+RUNTIME_ERROR_DEVICE_DISCONNECTED = "DEVICE_DISCONNECTED"  # may have run
+
+# Largest single WebSocket message either side accepts. It matches uvicorn's
+# default ``ws_max_size`` on the server; the sidecar sets the same limit on
+# its client, whose library default (1 MiB) would otherwise drop the whole
+# connection on one large tool argument.
+RUNTIME_MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+
+# Result budgets a sidecar applies when a request does not carry its own:
+# text and structured content, and the decoded size of image and audio data.
+DEFAULT_MAX_RESULT_TEXT_BYTES = 1024 * 1024
+DEFAULT_MAX_RESULT_MEDIA_BYTES = 5 * 1024 * 1024
 
 
 class RuntimeErrorContext(BaseModel):
@@ -43,6 +64,10 @@ class ToolDispatchRequest(BaseModel):
     # mutation only when this is True and STILL re-validates session/catalog/
     # tool_instance regardless of this flag.
     mutation_approved: bool = False
+    # Budgets the sidecar caps the result to before replying (see
+    # ``shared.runtime_results``). The server sends its configured values.
+    max_result_text_bytes: int = Field(default=DEFAULT_MAX_RESULT_TEXT_BYTES, gt=0)
+    max_result_media_bytes: int = Field(default=DEFAULT_MAX_RESULT_MEDIA_BYTES, ge=0)
 
 
 class ToolDispatchResult(BaseModel):
@@ -80,12 +105,26 @@ class RuntimeAckMessage(BaseModel):
     message_id: str | None = None
 
 
+class RuntimeCancelMessage(BaseModel):
+    """Server to sidecar: stop a request the server no longer waits for.
+
+    Sent when the server times out or the user stops the turn. A request that
+    has not started never starts. One that is running is cancelled, which ends
+    a skill command's process but only stops waiting on an MCP tool: MCP gives
+    the sidecar no way to stop work a server has already begun.
+    """
+
+    type: Literal["cancel"] = RUNTIME_MESSAGE_CANCEL
+    request_id: str
+
+
 RuntimeMessage: TypeAlias = Annotated[
     ToolDispatchRequest
     | ToolDispatchResult
     | RuntimeHeartbeatMessage
     | RuntimeErrorMessage
-    | RuntimeAckMessage,
+    | RuntimeAckMessage
+    | RuntimeCancelMessage,
     Field(discriminator="type"),
 ]
 

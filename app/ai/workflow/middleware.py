@@ -479,8 +479,12 @@ class ToolExecutionMiddleware(AgentMiddleware):
             return await self._execute(call, tool_map)
 
         async def invoke(**_: Any) -> NormalizedToolResult:
-            message = await self._execute(call, tool_map)
+            message, artifacts = await self._run(call, tool_map)
             if message.status == "error":
+                if _outcome_unknown(artifacts):
+                    # It timed out or lost its connection after it was sent, so
+                    # the effect may have happened; the receipt must say so.
+                    raise MutationOutcomeUnknown(str(call.get("id") or ""))
                 # A recorded failure means the provider never accepted the
                 # call, so a later replay is free to try again.
                 raise _MutationRejected(str(message.content or ""))
@@ -518,6 +522,13 @@ class ToolExecutionMiddleware(AgentMiddleware):
 
     async def _execute(self, call: dict[str, Any], tool_map: dict[str, Any]) -> ToolMessage:
         """Run one call through the product's execution pipeline."""
+        message, _ = await self._run(call, tool_map)
+        return message
+
+    async def _run(
+        self, call: dict[str, Any], tool_map: dict[str, Any]
+    ) -> tuple[ToolMessage, list[dict[str, Any]]]:
+        """Run one call, returning its message and the artifacts it produced."""
         self._scope.worker_event("start", call)
         with self._scope.execution_context():
             outputs, artifacts, images = await execute_tool_calls(
@@ -536,12 +547,13 @@ class ToolExecutionMiddleware(AgentMiddleware):
         output = outputs[0] if outputs else {}
         status = "error" if _is_error(artifacts) else "success"
         self._scope.worker_event("end", call, status=status)
-        return ToolMessage(
+        message = ToolMessage(
             content=str(output.get("content") or ""),
             tool_call_id=str(output.get("tool_call_id") or call.get("id") or ""),
             name=str(output.get("name") or call.get("name") or "tool"),
             status=status,
         )
+        return message, artifacts
 
 
 class _MutationRejected(RuntimeError):
@@ -561,6 +573,12 @@ def _returns_control_command(tool: Any) -> bool:
 def _is_error(artifacts: list[dict[str, Any]]) -> bool:
     return any(
         isinstance(artifact, dict) and artifact.get("status") == "error" for artifact in artifacts
+    )
+
+
+def _outcome_unknown(artifacts: list[dict[str, Any]]) -> bool:
+    return any(
+        isinstance(artifact, dict) and artifact.get("outcome_unknown") for artifact in artifacts
     )
 
 

@@ -197,6 +197,56 @@ A sidecar running as administrator does not register its tools unless
 `CLIENT_ALLOW_ELEVATED_RUNTIME=true`, because every dispatched command would
 run with administrator rights.
 
+## Client tool requests on the bridge
+
+The sidecar runs each request in its own task, up to
+`CLIENT_MAX_CONCURRENT_TOOL_CALLS` (default 4) at once. A request's budget
+starts when it arrives, so time spent waiting for a slot counts: a request
+whose deadline passes before it gets a slot is answered `TIMEOUT_NOT_STARTED`
+and never runs. Before this, requests ran one at a time with a budget that
+started late, so a queued command could still run after the server had
+reported it timed out.
+
+When the server stops waiting -- its response deadline passes, or the user
+presses Stop -- it withdraws the request. A request still queued is removed
+(Redis `LREM`, or skipped by the in-memory store) and never reaches the
+device; one the device already has is followed by a `cancel` message. A
+cancelled skill command's process tree is killed. A cancelled MCP call only
+stops being waited for, because MCP gives the sidecar no way to stop work a
+server has begun; a Desktop Commander process started that way keeps running
+and can be read or stopped by later calls.
+
+Sidecar error codes say whether the tool could have run:
+
+| Code | Ran? |
+|---|---|
+| `SESSION_REQUEST_REJECTED` | No: the request no longer matched the session catalog. |
+| `TIMEOUT_NOT_STARTED` | No: the deadline passed while waiting for a slot. |
+| `TIMEOUT_CLIENT_EXECUTION` | Maybe: the device stopped waiting mid-call. |
+| `TOOL_CONNECTION_LOST` | Maybe: the MCP server exited mid-call. |
+| `DEVICE_DISCONNECTED` | Maybe: the device dropped off the bridge. |
+
+Those three "maybe" codes, and any timeout, mark the error artifact
+`outcome_unknown`. For a mutation the receipt becomes `outcome_unknown`, the
+model is told not to retry, and the turn is not offered Continue. Other
+failures are recorded as `failed`, which a replay may retry.
+
+Results are capped on the device before they cross the bridge, with budgets
+the server sends in each request:
+
+| Setting (server) | Default | Applies to |
+|---|---:|---|
+| `CLIENT_RUNTIME_MAX_TOOL_RESULT_SIZE_BYTES` | 1 MiB | Text and structured content, as sent. The middle is cut and marked; the beginning and end are kept. |
+| `CLIENT_RUNTIME_MAX_TOOL_RESULT_MEDIA_BYTES` | 5 MiB | Decoded images and audio in one result. Media over the budget is dropped whole with a note, never cut. |
+
+The text budget bounds transport and storage, not what the model reads:
+output over `TOOL_RESULT_OFFLOAD_THRESHOLD_CHARS` (16,000) is offloaded to a
+blob with a 4,000-character preview either way. The server repeats the cap for
+an older sidecar that does not apply it. Both sides accept WebSocket messages
+up to 16 MiB (`RUNTIME_MAX_MESSAGE_BYTES`, matching uvicorn's `ws_max_size`
+default); tool arguments larger than that are refused before dispatch with an
+error the model can act on, instead of dropping the device's connection.
+
 ## There is no unbounded exception any more
 
 `_DISABLE_OUTER_TIMEOUT_ALLOWLIST` is **empty**. Every interactive tool call is
@@ -233,7 +283,7 @@ in
 Run the focused policy and runtime tests after configuration or code changes:
 
 ```powershell
-.venv\Scripts\python.exe -m pytest tests/test_tool_execution_policy.py tests/test_tool_error_policy.py tests/test_tool_execution_recovery.py tests/test_tool_execution_rendering.py tests/test_client_invocation_isolation.py tests/test_skills_tool.py tests/test_tool_execution_receipt_service.py tests/test_mcp_adapter_utils.py tests/client_backend/test_runtime_bridge.py tests/client_backend/test_local_mcp_manager_sessions.py tests/client_backend/test_desktop_commander_policy.py tests/test_client_mcp_mutation_approval.py -q
+.venv\Scripts\python.exe -m pytest tests/test_tool_execution_policy.py tests/test_tool_error_policy.py tests/test_tool_execution_recovery.py tests/test_tool_execution_rendering.py tests/test_client_invocation_isolation.py tests/test_skills_tool.py tests/test_tool_execution_receipt_service.py tests/test_mcp_adapter_utils.py tests/client_backend/test_runtime_bridge.py tests/client_backend/test_local_mcp_manager_sessions.py tests/client_backend/test_desktop_commander_policy.py tests/test_client_mcp_mutation_approval.py tests/client_backend/test_runtime_bridge_dispatch.py tests/test_client_runtime_cancel.py tests/test_client_tool_results.py tests/test_runtime_result_limits.py -q
 ```
 
 The durable half needs a dedicated PostgreSQL database, because the atomicity

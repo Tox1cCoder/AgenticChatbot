@@ -29,6 +29,7 @@ from app.schemas.runtime_protocol import (
     RuntimeAckMessage,
     RuntimeErrorContext,
     RuntimeErrorMessage,
+    ToolDispatchRequest,
     ToolDispatchResult,
 )
 from app.services.client_device_service import ClientDeviceService, DeviceSession
@@ -225,11 +226,15 @@ class DeviceRuntimeGateway:
                 await self.send_message(request.model_dump(mode="json"))
             except Exception as exc:
                 logger.error(
-                    "Failed forwarding queued runtime request %s to device %s: %s",
+                    "Failed forwarding queued runtime %s %s to device %s: %s",
+                    request.type,
                     request.request_id,
                     self.device_id,
                     exc,
                 )
+                if not isinstance(request, ToolDispatchRequest):
+                    # Nobody waits on a cancel; there is no result to fail.
+                    continue
                 await store.publish_result(
                     ToolDispatchResult(
                         request_id=request.request_id,

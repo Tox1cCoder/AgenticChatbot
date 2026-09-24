@@ -4,9 +4,26 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
-from app.schemas.runtime_protocol import RuntimeErrorContext
+from app.schemas.runtime_protocol import (
+    RUNTIME_ERROR_DEVICE_DISCONNECTED,
+    RUNTIME_ERROR_EXECUTION_TIMEOUT,
+    RUNTIME_ERROR_TOOL_CONNECTION_LOST,
+    RuntimeErrorContext,
+)
 
 UNKNOWN_RUNTIME_ERROR = "UNKNOWN_RUNTIME_ERROR"
+
+# Failures reported after the device may already have carried out the call:
+# it stopped waiting, lost the tool's server mid-call, or dropped off the
+# bridge. Every other code means the tool either never ran or reported its own
+# failure.
+OUTCOME_UNKNOWN_CODES = frozenset(
+    {
+        RUNTIME_ERROR_EXECUTION_TIMEOUT,
+        RUNTIME_ERROR_TOOL_CONNECTION_LOST,
+        RUNTIME_ERROR_DEVICE_DISCONNECTED,
+    }
+)
 
 ClientRuntimeErrorKind = Literal[
     "validation",

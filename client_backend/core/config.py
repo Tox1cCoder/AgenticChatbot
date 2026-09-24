@@ -135,6 +135,14 @@ class ClientSettings(BaseSettings):
         default=60,
         description="Default timeout for client-side tool dispatch when the request omits one.",
     )
+    max_concurrent_tool_calls: int = Field(
+        default=4,
+        ge=1,
+        description=(
+            "Tool requests from the server that run at once. Others wait for a slot "
+            "inside their own deadline and are refused, unstarted, when it passes."
+        ),
+    )
 
     # Runtime Configuration
     heartbeat_interval_seconds: int = Field(

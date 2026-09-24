@@ -331,3 +331,32 @@ def test_skill_terminal_output_requires_nonempty_runtime_message():
 
     assert "untrusted_terminal_output" not in json.loads(model_content)
     assert "skill_terminal_error" not in artifact_detail
+
+
+def _client_error(code: str):
+    from app.ai.client_runtime_errors import ClientRuntimeToolError
+
+    return ClientRuntimeToolError(RuntimeErrorContext(message="failed", code=code))
+
+
+@pytest.mark.parametrize(
+    ("exception", "may_have_run"),
+    [
+        (_client_error("TIMEOUT_CLIENT_EXECUTION"), True),
+        (_client_error("TOOL_CONNECTION_LOST"), True),
+        (_client_error("DEVICE_DISCONNECTED"), True),
+        (TimeoutError("no reply from the device"), True),
+        (_client_error("TIMEOUT_NOT_STARTED"), False),
+        (_client_error("SESSION_REQUEST_REJECTED"), False),
+        (_client_error("PERMISSION_DENIED"), False),
+        (ValueError("bad path"), False),
+    ],
+)
+def test_error_artifact_says_whether_the_call_may_have_run(exception, may_have_run):
+    summary = classify_tool_error(exception, tool_name="t", timeout_seconds=30, attempts=1)
+
+    _, artifact = build_tool_error_payloads(
+        summary, tool_name="t", exception=exception, policy_retry_allowed=False
+    )
+
+    assert artifact.get("outcome_unknown", False) is may_have_run

@@ -18,8 +18,17 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any
 
+from mcp.shared.exceptions import McpError
+from mcp.types import CONNECTION_CLOSED
+
 from app.schemas.runtime_protocol import (
+    RUNTIME_ERROR_EXECUTION_TIMEOUT,
+    RUNTIME_ERROR_NOT_STARTED,
+    RUNTIME_ERROR_REQUEST_REJECTED,
+    RUNTIME_ERROR_TOOL_CONNECTION_LOST,
+    RUNTIME_MAX_MESSAGE_BYTES,
     RuntimeAckMessage,
+    RuntimeCancelMessage,
     RuntimeErrorMessage,
     RuntimeHeartbeatMessage,
     RuntimeMessage,
@@ -59,6 +68,7 @@ from client_backend.services.skill_runtime.resources import (
     read_skill_resource,
 )
 from client_backend.services.skill_runtime.secrets import SkillSecretStore
+from shared.runtime_results import cap_tool_result
 from shared.skills.errors import SkillRuntimeError
 
 
@@ -82,6 +92,14 @@ logger = get_logger(__name__)
 
 class ClientExecutionTimeoutError(TimeoutError):
     """The complete client runtime operation exceeded its execution deadline."""
+
+
+class ToolRequestRejectedError(ValueError):
+    """The request no longer matches this session's catalog; nothing ran."""
+
+
+class ToolRequestNotStartedError(TimeoutError):
+    """The request's deadline passed while it waited for a slot; nothing ran."""
 
 
 def _consume_task_exception(task: asyncio.Task[Any]) -> None:
@@ -121,6 +139,10 @@ class RuntimeBridgeService:
         self._tool_catalog_version: int = 0  # Mirrors server-side catalog version counter
         # Last synced catalog keyed by qualified_id for validation
         self._current_tool_catalog: dict[str, dict] = {}
+        # Each tool request runs in its own task, keyed by request id so a
+        # cancel from the server can reach it.
+        self._inflight_requests: dict[str, asyncio.Task[None]] = {}
+        self._tool_slots = asyncio.Semaphore(client_settings.max_concurrent_tool_calls)
         self._state = RuntimeState(
             status=RuntimeStatus.DISCONNECTED,
             device_info=self.get_device_info(),
@@ -311,7 +333,28 @@ class RuntimeBridgeService:
         if isinstance(exc, ClientExecutionTimeoutError):
             return RuntimeErrorContext(
                 message="Client runtime operation timed out.",
-                code="TIMEOUT_CLIENT_EXECUTION",
+                code=RUNTIME_ERROR_EXECUTION_TIMEOUT,
+                detail=detail or None,
+            )
+
+        if isinstance(exc, ToolRequestRejectedError):
+            return RuntimeErrorContext(
+                message=str(exc),
+                code=RUNTIME_ERROR_REQUEST_REJECTED,
+                detail=detail or None,
+            )
+
+        if isinstance(exc, ToolRequestNotStartedError):
+            return RuntimeErrorContext(
+                message="The device was busy until the request's deadline; it did not run.",
+                code=RUNTIME_ERROR_NOT_STARTED,
+                detail=detail or None,
+            )
+
+        if isinstance(exc, McpError) and exc.error.code == CONNECTION_CLOSED:
+            return RuntimeErrorContext(
+                message="The tool's server exited while running the call; it may have run.",
+                code=RUNTIME_ERROR_TOOL_CONNECTION_LOST,
                 detail=detail or None,
             )
 
@@ -453,7 +496,8 @@ class RuntimeBridgeService:
             )
         )
 
-        async with websocket_connect(websocket_url) as websocket:
+        connection = websocket_connect(websocket_url, max_size=RUNTIME_MAX_MESSAGE_BYTES)
+        async with connection as websocket:
             self._websocket = websocket
 
             raw_message = await asyncio.wait_for(
@@ -487,6 +531,9 @@ class RuntimeBridgeService:
                         await self._heartbeat_task
                     self._heartbeat_task = None
                 self._websocket = None
+                # The server has already failed these requests as disconnected,
+                # and their replies have no connection to travel on.
+                await self._cancel_inflight_requests()
 
     def _build_websocket_url(self) -> str:
         base = self._websocket_base_url.rstrip("/")
@@ -510,7 +557,11 @@ class RuntimeBridgeService:
 
     async def _handle_server_message(self, message: RuntimeMessage) -> None:
         if isinstance(message, ToolDispatchRequest):
-            await self._handle_tool_request(message)
+            self._start_tool_request(message)
+            return
+
+        if isinstance(message, RuntimeCancelMessage):
+            self._cancel_tool_request(message.request_id)
             return
 
         if isinstance(message, RuntimeAckMessage):
@@ -622,37 +673,68 @@ class RuntimeBridgeService:
 
         return None
 
+    def _start_tool_request(self, request: ToolDispatchRequest) -> None:
+        """Run one request in its own task.
+
+        Awaiting it inline would hold up every later message behind a slow
+        command -- including other requests, whose server deadlines keep
+        running, and a cancel for the very command that is running.
+        """
+        task = asyncio.create_task(
+            self._handle_tool_request(request),
+            name=f"tool-request:{request.request_id}",
+        )
+        self._inflight_requests[request.request_id] = task
+        task.add_done_callback(
+            lambda done, request_id=request.request_id: self._forget_request(request_id, done)
+        )
+
+    def _forget_request(self, request_id: str, task: asyncio.Task[None]) -> None:
+        if self._inflight_requests.get(request_id) is task:
+            del self._inflight_requests[request_id]
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning(
+                "Tool request %s could not report its result: %s",
+                request_id,
+                task.exception(),
+            )
+
+    def _cancel_tool_request(self, request_id: str) -> None:
+        task = self._inflight_requests.get(request_id)
+        if task is not None:
+            task.cancel()
+
+    async def _cancel_inflight_requests(self) -> None:
+        tasks = list(self._inflight_requests.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     async def _handle_tool_request(self, request: ToolDispatchRequest) -> None:
+        """Run one request and reply, unless the server cancelled it.
+
+        A cancelled request gets no reply: the server stopped waiting before it
+        sent the cancel.
+        """
         started_at = datetime.now(timezone.utc)
+        # The budget runs from arrival, not from the start of execution: time
+        # spent waiting for a slot is time the server is already counting.
+        deadline = asyncio.get_running_loop().time() + float(request.timeout_seconds)
 
         try:
-            validation_error = self._validate_tool_request(request)
-            if validation_error:
-                raise ValueError(f"Tool request rejected: {validation_error}")
-
-            task = asyncio.create_task(self._execute_tool_request(request))
-            try:
-                done, _ = await asyncio.wait(
-                    {task},
-                    timeout=float(request.timeout_seconds),
-                )
-            except asyncio.CancelledError:
-                task.cancel()
-                task.add_done_callback(_consume_task_exception)
-                raise
-            if not done:
-                task.cancel()
-                task.add_done_callback(_consume_task_exception)
-                raise ClientExecutionTimeoutError(
-                    f"Client runtime execution exceeded {request.timeout_seconds}s"
-                )
-            result = task.result()
+            result = await self._run_before_deadline(request, deadline)
+            result, truncated = cap_tool_result(
+                result,
+                max_text_bytes=request.max_result_text_bytes,
+                max_media_bytes=request.max_result_media_bytes,
+            )
             duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
             payload = ToolDispatchResult(
                 request_id=request.request_id,
                 success=True,
                 result=result,
                 execution_time_ms=duration_ms,
+                truncated=truncated,
             )
         except Exception as exc:
             duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
@@ -673,6 +755,40 @@ class RuntimeBridgeService:
             )
 
         await self._send_runtime_message(payload)
+
+    async def _run_before_deadline(self, request: ToolDispatchRequest, deadline: float) -> Any:
+        validation_error = self._validate_tool_request(request)
+        if validation_error:
+            raise ToolRequestRejectedError(f"Tool request rejected: {validation_error}")
+
+        loop = asyncio.get_running_loop()
+        try:
+            await asyncio.wait_for(self._tool_slots.acquire(), timeout=deadline - loop.time())
+        except TimeoutError:
+            raise ToolRequestNotStartedError(request.request_id) from None
+        try:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise ToolRequestNotStartedError(request.request_id)
+            return await self._execute_within(request, remaining)
+        finally:
+            self._tool_slots.release()
+
+    async def _execute_within(self, request: ToolDispatchRequest, seconds: float) -> Any:
+        task = asyncio.create_task(self._execute_tool_request(request))
+        try:
+            done, _ = await asyncio.wait({task}, timeout=seconds)
+        except asyncio.CancelledError:
+            task.cancel()
+            task.add_done_callback(_consume_task_exception)
+            raise
+        if not done:
+            task.cancel()
+            task.add_done_callback(_consume_task_exception)
+            raise ClientExecutionTimeoutError(
+                f"Client runtime execution exceeded {request.timeout_seconds}s"
+            )
+        return task.result()
 
     async def _execute_tool_request(self, request: ToolDispatchRequest) -> Any:
         qualified_tool_id = request.qualified_tool_id

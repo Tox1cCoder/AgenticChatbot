@@ -28,10 +28,17 @@ except ImportError:  # pragma: no cover - exercised in environments without redi
 
 from app.core.config import settings
 from app.schemas.runtime_protocol import (
+    RUNTIME_ERROR_DEVICE_DISCONNECTED,
+    RuntimeCancelMessage,
     RuntimeErrorContext,
     ToolDispatchRequest,
     ToolDispatchResult,
+    parse_runtime_message,
 )
+
+# What a device's request queue carries: requests, and cancels for requests
+# the server stopped waiting for after the device already had them.
+DeviceQueueMessage = ToolDispatchRequest | RuntimeCancelMessage
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +49,7 @@ _REQUEST_QUEUE_KEY_PREFIX = "client-runtime:request-queue"
 _RESULT_QUEUE_KEY_PREFIX = "client-runtime:result-queue"
 _PENDING_REQUESTS_KEY_PREFIX = "client-runtime:pending-requests"
 _REQUEST_DEVICE_KEY_PREFIX = "client-runtime:request-device"
+_WITHDRAWN_REQUEST_KEY_PREFIX = "client-runtime:withdrawn-request"
 _RESULT_TTL_SECONDS = 300
 
 
@@ -92,7 +100,7 @@ def _disconnect_result(request_id: str, reason: str) -> ToolDispatchResult:
         error=reason,
         error_context=RuntimeErrorContext(
             message=reason,
-            code="DEVICE_DISCONNECTED",
+            code=RUNTIME_ERROR_DEVICE_DISCONNECTED,
         ),
         execution_time_ms=0,
     )
@@ -238,7 +246,7 @@ class BaseClientRuntimeStore:
         device_id: UUID,
         *,
         timeout_seconds: int = 1,
-    ) -> ToolDispatchRequest | None:
+    ) -> DeviceQueueMessage | None:
         raise NotImplementedError
 
     async def publish_result(self, result: ToolDispatchResult) -> None:
@@ -262,15 +270,18 @@ class InMemoryClientRuntimeStore(BaseClientRuntimeStore):
         self._issued_session_ids: dict[str, tuple[str, float]] = {}
         self._sessions: dict[str, DeviceSessionRecord] = {}
         self._user_devices: dict[str, set[str]] = {}
-        self._request_queues: dict[str, asyncio.Queue[ToolDispatchRequest]] = {}
+        self._request_queues: dict[str, asyncio.Queue[DeviceQueueMessage]] = {}
         self._result_futures: dict[str, asyncio.Future[ToolDispatchResult]] = {}
         self._request_devices: dict[str, str] = {}
+        # An asyncio.Queue cannot remove an item, so a withdrawn request is
+        # skipped when taken. The cancel queued after it clears the mark.
+        self._withdrawn_request_ids: set[str] = set()
 
     @staticmethod
     def _device_key(device_id: UUID) -> str:
         return str(device_id)
 
-    def _get_queue(self, device_id: UUID) -> asyncio.Queue[ToolDispatchRequest]:
+    def _get_queue(self, device_id: UUID) -> asyncio.Queue[DeviceQueueMessage]:
         key = self._device_key(device_id)
         with self._lock:
             queue = self._request_queues.get(key)
@@ -398,6 +409,9 @@ class InMemoryClientRuntimeStore(BaseClientRuntimeStore):
 
         try:
             result = await asyncio.wait_for(future, timeout=timeout_seconds)
+        except (TimeoutError, asyncio.CancelledError):
+            self._withdraw(session.device_id, request.request_id)
+            raise
         finally:
             with self._lock:
                 self._result_futures.pop(request.request_id, None)
@@ -405,17 +419,34 @@ class InMemoryClientRuntimeStore(BaseClientRuntimeStore):
 
         return result.model_dump(mode="json")
 
+    def _withdraw(self, device_id: UUID, request_id: str) -> None:
+        """Keep an abandoned request from running: skip it, and cancel it on the device."""
+        with self._lock:
+            self._withdrawn_request_ids.add(request_id)
+        self._get_queue(device_id).put_nowait(RuntimeCancelMessage(request_id=request_id))
+
     async def get_next_request(
         self,
         device_id: UUID,
         *,
         timeout_seconds: int = 1,
-    ) -> ToolDispatchRequest | None:
+    ) -> DeviceQueueMessage | None:
         queue = self._get_queue(device_id)
-        try:
-            return await asyncio.wait_for(queue.get(), timeout=timeout_seconds)
-        except asyncio.TimeoutError:
-            return None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while True:
+            try:
+                message = await asyncio.wait_for(
+                    queue.get(), timeout=max(0.0, deadline - loop.time())
+                )
+            except asyncio.TimeoutError:
+                return None
+            with self._lock:
+                if isinstance(message, RuntimeCancelMessage):
+                    self._withdrawn_request_ids.discard(message.request_id)
+                    return message
+                if message.request_id not in self._withdrawn_request_ids:
+                    return message
 
     async def publish_result(self, result: ToolDispatchResult) -> None:
         with self._lock:
@@ -456,6 +487,8 @@ class InMemoryClientRuntimeStore(BaseClientRuntimeStore):
                 request = queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+            if not isinstance(request, ToolDispatchRequest):
+                continue
             await self.publish_result(
                 ToolDispatchResult(
                     request_id=request.request_id,
@@ -540,6 +573,10 @@ class RedisClientRuntimeStore(BaseClientRuntimeStore):
     @staticmethod
     def _request_device_key(request_id: str) -> str:
         return f"{_REQUEST_DEVICE_KEY_PREFIX}:{request_id}"
+
+    @staticmethod
+    def _withdrawn_key(request_id: str) -> str:
+        return f"{_WITHDRAWN_REQUEST_KEY_PREFIX}:{request_id}"
 
     async def issue_runtime_session_id(self, device_id: UUID, session_id: str) -> None:
         await self._async.set(
@@ -648,6 +685,7 @@ class RedisClientRuntimeStore(BaseClientRuntimeStore):
         timeout_seconds: float,
     ) -> dict[str, Any]:
         tracking_ttl = _request_tracking_ttl_seconds(timeout_seconds)
+        queued_payload = request.model_dump_json()
         pipeline = self._async.pipeline()
         pipeline.sadd(self._pending_requests_key(session.device_id), request.request_id)
         pipeline.expire(self._pending_requests_key(session.device_id), tracking_ttl)
@@ -656,13 +694,12 @@ class RedisClientRuntimeStore(BaseClientRuntimeStore):
             str(session.device_id),
             ex=tracking_ttl,
         )
-        pipeline.rpush(
-            self._request_queue_key(session.device_id),
-            request.model_dump_json(),
-        )
-        await pipeline.execute()
+        pipeline.rpush(self._request_queue_key(session.device_id), queued_payload)
 
         try:
+            # Inside the try: a Stop that lands while the push is on the wire
+            # must still withdraw it, because Redis applies the push anyway.
+            await pipeline.execute()
             item = await self._async.blpop(
                 self._result_queue_key(request.request_id),
                 timeout=timeout_seconds,
@@ -674,23 +711,55 @@ class RedisClientRuntimeStore(BaseClientRuntimeStore):
             _, payload = item
             parsed = ToolDispatchResult.model_validate_json(payload)
             return parsed.model_dump(mode="json")
+        except (TimeoutError, asyncio.CancelledError):
+            # Shielded: a second cancellation must not leave the request queued.
+            await asyncio.shield(
+                self._withdraw(session.device_id, request.request_id, queued_payload)
+            )
+            raise
         finally:
             await self._clear_pending_request(request.request_id)
+
+    async def _withdraw(self, device_id: UUID, request_id: str, queued_payload: str) -> None:
+        """Keep an abandoned request from running on the device.
+
+        LREM is atomic against the gateway's BLPOP: either the request is
+        removed while still queued, or the gateway already took it and a
+        cancel follows it down the same queue. The marker covers the third
+        case -- a push interrupted on the wire that Redis applies after this
+        LREM ran -- because the gateway checks it before delivering.
+        """
+        queue_key = self._request_queue_key(device_id)
+        pipeline = self._async.pipeline()
+        pipeline.set(self._withdrawn_key(request_id), "1", ex=_RESULT_TTL_SECONDS)
+        pipeline.lrem(queue_key, 1, queued_payload)
+        _, removed = await pipeline.execute()
+        if removed:
+            return
+        await self._async.rpush(
+            queue_key, RuntimeCancelMessage(request_id=request_id).model_dump_json()
+        )
 
     async def get_next_request(
         self,
         device_id: UUID,
         *,
         timeout_seconds: int = 1,
-    ) -> ToolDispatchRequest | None:
-        item = await self._async.blpop(
-            self._request_queue_key(device_id),
-            timeout=timeout_seconds,
-        )
-        if item is None:
-            return None
-        _, payload = item
-        return ToolDispatchRequest.model_validate_json(payload)
+    ) -> DeviceQueueMessage | None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while (remaining := deadline - loop.time()) > 0:
+            # BLPOP treats a zero timeout as "wait forever".
+            item = await self._async.blpop(self._request_queue_key(device_id), timeout=remaining)
+            if item is None:
+                return None
+            _, payload = item
+            message = parse_runtime_message(json.loads(payload))
+            if isinstance(message, RuntimeCancelMessage):
+                return message
+            if not await self._async.exists(self._withdrawn_key(message.request_id)):
+                return message
+        return None
 
     async def publish_result(self, result: ToolDispatchResult) -> None:
         key = self._result_queue_key(result.request_id)

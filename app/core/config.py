@@ -1947,9 +1947,22 @@ class Settings(BaseSettings):
     )
     client_runtime_max_tool_result_size_bytes: int = Field(
         default=1048576,
-        description="Maximum size in bytes for tool results returned from client "
-        "devices (1MB default). "
-        "Results exceeding this are truncated with a warning.",
+        gt=0,
+        description=(
+            "Sent size limit for the text and structured part of a client device tool "
+            "result (1 MiB). The device keeps the beginning and end of longer text. "
+            "Output above tool_result_offload_threshold_chars is offloaded anyway, so "
+            "this bounds transport and storage, not what the model reads inline."
+        ),
+    )
+    client_runtime_max_tool_result_media_bytes: int = Field(
+        default=5 * 1024 * 1024,
+        ge=0,
+        description=(
+            "Decoded size limit for all images and audio in one client device tool "
+            "result (5 MiB, enough for a full-resolution screenshot). Media over the "
+            "limit is dropped whole and replaced by a note, never cut."
+        ),
     )
 
     # Inline Rich Response Configuration
