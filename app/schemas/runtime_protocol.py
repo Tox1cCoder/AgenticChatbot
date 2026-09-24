@@ -19,6 +19,7 @@ RUNTIME_ERROR_NOT_STARTED = "TIMEOUT_NOT_STARTED"  # never ran
 RUNTIME_ERROR_EXECUTION_TIMEOUT = "TIMEOUT_CLIENT_EXECUTION"  # may have run
 RUNTIME_ERROR_TOOL_CONNECTION_LOST = "TOOL_CONNECTION_LOST"  # may have run
 RUNTIME_ERROR_DEVICE_DISCONNECTED = "DEVICE_DISCONNECTED"  # may have run
+RUNTIME_ERROR_SENSITIVE_PATH = "PERMISSION_SENSITIVE_PATH"  # never ran
 
 # Largest single WebSocket message either side accepts. It matches uvicorn's
 # default ``ws_max_size`` on the server; the sidecar sets the same limit on

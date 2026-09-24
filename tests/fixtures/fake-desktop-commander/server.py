@@ -11,15 +11,45 @@ mcp = FastMCP("Fake Desktop Commander")
 
 
 @mcp.tool()
-def read_file(path: str) -> str:
+def read_file(path: str, isUrl: bool = False) -> str:  # noqa: N803 - Desktop Commander's name
     """Pretend to read a file."""
     return f"contents of {path}"
+
+
+@mcp.tool()
+def read_multiple_files(paths: list[str]) -> str:
+    """Pretend to read several files."""
+    return f"contents of {len(paths)} files"
 
 
 @mcp.tool()
 def write_file(path: str, content: str) -> str:
     """Pretend to write a file."""
     return f"wrote {len(content)} characters to {path}"
+
+
+@mcp.tool()
+def edit_block(file_path: str, old_string: str, new_string: str) -> str:
+    """Pretend to edit a file."""
+    return f"edited {file_path}"
+
+
+@mcp.tool()
+def move_file(source: str, destination: str) -> str:
+    """Pretend to move a file."""
+    return f"moved {source} to {destination}"
+
+
+@mcp.tool()
+def list_directory(path: str) -> str:
+    """Pretend to list a folder."""
+    return f"listing of {path}"
+
+
+@mcp.tool()
+def start_search(path: str, pattern: str, includeHidden: bool = False) -> str:  # noqa: N803
+    """Pretend to search a folder."""
+    return f"searching {path} for {pattern}"
 
 
 @mcp.tool()

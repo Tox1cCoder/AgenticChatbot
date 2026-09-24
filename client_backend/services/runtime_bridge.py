@@ -25,6 +25,7 @@ from app.schemas.runtime_protocol import (
     RUNTIME_ERROR_EXECUTION_TIMEOUT,
     RUNTIME_ERROR_NOT_STARTED,
     RUNTIME_ERROR_REQUEST_REJECTED,
+    RUNTIME_ERROR_SENSITIVE_PATH,
     RUNTIME_ERROR_TOOL_CONNECTION_LOST,
     RUNTIME_MAX_MESSAGE_BYTES,
     RuntimeAckMessage,
@@ -50,6 +51,7 @@ from client_backend.schemas.runtime import (
     ToolDispatchRequest,
     ToolDispatchResult,
 )
+from client_backend.services.desktop_commander_policy import SensitivePathError
 from client_backend.services.local_mcp_manager import (
     get_mcp_manager,
     resolve_current_mcp_scope,
@@ -348,6 +350,13 @@ class RuntimeBridgeService:
             return RuntimeErrorContext(
                 message="The device was busy until the request's deadline; it did not run.",
                 code=RUNTIME_ERROR_NOT_STARTED,
+                detail=detail or None,
+            )
+
+        if isinstance(exc, SensitivePathError):
+            return RuntimeErrorContext(
+                message=str(exc),
+                code=RUNTIME_ERROR_SENSITIVE_PATH,
                 detail=detail or None,
             )
 

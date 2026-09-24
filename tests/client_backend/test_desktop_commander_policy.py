@@ -94,6 +94,18 @@ def test_onboarding_flag_is_not_repeated(tmp_path):
     assert entry["args"].count("--no-onboarding") == 1
 
 
+def test_desktop_commander_commands_do_not_wait_for_input_nobody_can_give(tmp_path):
+    entry = _launch_entry(
+        tmp_path,
+        {"command": "npx", "args": ["-y", "@wonderwhy-er/desktop-commander@latest"]},
+    )
+
+    # git fails at once instead of waiting for credentials; npx proceeds
+    # instead of stopping at "Ok to proceed?".
+    assert entry["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    assert entry["env"]["npm_config_yes"] == "true"
+
+
 def test_telemetry_setting_chosen_by_the_user_is_kept(tmp_path):
     entry = _launch_entry(
         tmp_path,
@@ -157,7 +169,16 @@ async def test_desktop_commander_tools_are_mutations_unless_known_read_only(desk
         tool["name"]: tool["mutation"] for tool in desktop_commander.get_tool_catalog()["tools"]
     }
 
-    assert flags == {"read_file": False, "write_file": True, "unreleased_tool": True}
+    assert flags == {
+        "read_file": False,
+        "read_multiple_files": False,
+        "list_directory": False,
+        "start_search": False,
+        "write_file": True,
+        "edit_block": True,
+        "move_file": True,
+        "unreleased_tool": True,
+    }
 
 
 async def test_other_servers_tools_are_not_flagged_as_mutations(tmp_path):
@@ -174,3 +195,90 @@ async def test_other_servers_tools_are_not_flagged_as_mutations(tmp_path):
 
     assert catalog
     assert {tool["mutation"] for tool in catalog} == {False}
+
+
+@pytest.fixture
+def machine(tmp_path, monkeypatch):
+    """A home folder, app-data folders, a project, and a sidecar profile under tmp.
+
+    The guard only computes paths from these; nothing here is ever read.
+    """
+    from client_backend.core.config import client_settings
+
+    home = tmp_path / "home"
+    roaming, local = home / "AppData" / "Roaming", home / "AppData" / "Local"
+    project = tmp_path / "project"
+    profile = local / "KaniDesktop"
+    for folder in (home / ".ssh", roaming, local, project, profile):
+        folder.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("APPDATA", str(roaming))
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setattr(client_settings, "profile_root", str(profile))
+    return {"home": home, "project": project, "profile": profile}
+
+
+def _fill(value, machine):
+    if isinstance(value, list):
+        return [_fill(item, machine) for item in value]
+    if isinstance(value, str):
+        return value.format(**{name: str(path) for name, path in machine.items()})
+    return value
+
+
+async def _call(manager, tool, arguments, machine):
+    filled = {key: _fill(value, machine) for key, value in arguments.items()}
+    return await manager.call_tool(f"desktop-commander::{tool}", filled, timeout=10)
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("read_file", {"path": "{home}/.ssh/id_rsa"}),
+        ("read_file", {"path": "{project}/.env"}),
+        ("read_file", {"path": "{project}/certs/server.pem"}),
+        ("read_file", {"path": "{home}/AppData/Local/Google/Chrome/User Data/Default/Cookies"}),
+        ("read_file", {"path": "{home}/AppData/Roaming/Microsoft/Credentials/blob"}),
+        ("read_file", {"path": "{profile}/credentials.json"}),
+        ("read_file", {"path": "{home}/.claude-server-commander/config.json"}),
+        ("read_multiple_files", {"paths": ["{project}/README.md", "{home}/.aws/credentials"]}),
+        ("write_file", {"path": "{home}/.ssh/authorized_keys", "content": "ssh-ed25519 AAAA"}),
+        ("edit_block", {"file_path": "{project}/.env.local", "old_string": "a", "new_string": "b"}),
+        ("move_file", {"source": "{project}/notes.txt", "destination": "{home}/.ssh/notes"}),
+        ("list_directory", {"path": "{home}/.ssh"}),
+        ("start_search", {"path": "{home}/.ssh", "pattern": "KEY"}),
+        ("start_search", {"path": "{home}", "pattern": "PRIVATE KEY", "includeHidden": True}),
+    ],
+)
+async def test_desktop_commander_cannot_touch_credential_locations(
+    desktop_commander, machine, tool, arguments
+):
+    with pytest.raises(PermissionError):
+        await _call(desktop_commander, tool, arguments, machine)
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("read_file", {"path": "{project}/README.md"}),
+        ("read_file", {"path": "{project}/.env.example"}),
+        ("read_file", {"path": "https://example.com/.env", "isUrl": True}),
+        ("list_directory", {"path": "{home}"}),
+        ("start_search", {"path": "{home}", "pattern": "TODO"}),
+    ],
+)
+async def test_ordinary_locations_stay_usable(desktop_commander, machine, tool, arguments):
+    assert await _call(desktop_commander, tool, arguments, machine)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="directory junctions are Windows-only")
+async def test_a_link_into_a_credential_folder_is_followed(desktop_commander, machine):
+    import _winapi
+
+    link = machine["project"] / "keys"
+    _winapi.CreateJunction(str(machine["home"] / ".ssh"), str(link))
+
+    # "config" is not a key-file name, so only following the link can refuse it.
+    with pytest.raises(PermissionError):
+        await _call(desktop_commander, "read_file", {"path": str(link / "config")}, machine)

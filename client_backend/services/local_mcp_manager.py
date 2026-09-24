@@ -33,6 +33,7 @@ from client_backend.services.desktop_commander_policy import (
     is_desktop_commander,
     is_hidden_tool,
     is_mutating_tool,
+    refuse_sensitive_paths,
 )
 from client_backend.services.mcp_config_migration import prepare_mcp_config_store
 from client_backend.services.mcp_config_store import EffectiveMCPServer, MCPConfigStore
@@ -421,8 +422,11 @@ class LocalMCPManager:
             raise ValueError(f"Invalid qualified tool ID: {qualified_tool_id}")
 
         server_name, tool_name = qualified_tool_id.split("::", 1)
-        if server_name not in self.servers:
+        runtime = self.servers.get(server_name)
+        if runtime is None:
             raise ValueError(f"MCP server not found: {server_name}")
+        if is_desktop_commander(runtime.config.command, runtime.config.args):
+            refuse_sensitive_paths(tool_name, arguments)
 
         session = await self._live_session(server_name)
         try:

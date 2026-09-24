@@ -181,6 +181,22 @@ arguments and is launched hardened (`client_backend/services/desktop_commander_p
   fails every later launch with `ENOENT package.json` until it is removed;
 - `DESKTOP_COMMANDER_DISABLE_TELEMETRY=1` unless the user set it, and
   `--no-onboarding`;
+- a non-interactive environment for the commands it runs: `GIT_TERMINAL_PROMPT=0`
+  (git fails instead of waiting for credentials) and `npm_config_yes=true`
+  (npx does not stop at "Ok to proceed?");
+- its file tools are refused, with `PERMISSION_SENSITIVE_PATH`, on credential
+  locations, links followed:
+  - folders: `~/.ssh`, `~/.aws`, `~/.azure`, `~/.gnupg`, `~/.kube`,
+    `~/.docker`, gcloud and gh config, `~/.claude`, `~/.claude-server-commander`;
+  - credential files: `~/.git-credentials`, `.npmrc`, `.pypirc`, `.netrc`;
+  - browser profile folders and Windows credential stores;
+  - the sidecar's own profile;
+  - any `.env`/`.env.*` (templates such as `.env.example` are allowed) and any
+    key file (`*.pem`, `*.key`, `*.pfx`, `id_rsa`...).
+
+  A search including hidden files is refused under a folder that contains one
+  of these. This guards the read tools, which are not approval-gated; it is
+  not a boundary, because an approved shell command can still reach the files;
 - `set_config_value`, `get_recent_tool_calls`, `get_usage_stats`, and
   `give_feedback_to_desktop_commander` are not offered and cannot be called;
 - every tool not on the read-only list, including tools a later release adds,

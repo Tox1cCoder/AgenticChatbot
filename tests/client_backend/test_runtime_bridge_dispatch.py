@@ -218,6 +218,28 @@ async def test_tool_server_lost_mid_call_is_reported_as_possibly_run(monkeypatch
     assert sent[0].error_context.code == "TOOL_CONNECTION_LOST"
 
 
+async def test_refused_credential_path_is_reported_as_a_permission_denial(monkeypatch):
+    from client_backend.services.desktop_commander_policy import SensitivePathError
+
+    bridge = _bridge(monkeypatch)
+    sent = []
+
+    async def execute(_request):
+        raise SensitivePathError("Desktop Commander may not use '~/.ssh/config'")
+
+    async def capture(payload):
+        sent.append(payload)
+
+    monkeypatch.setattr(bridge, "_execute_tool_request", execute)
+    monkeypatch.setattr(bridge, "_send_runtime_message", capture)
+
+    await bridge._handle_tool_request(_request("secret"))
+
+    # PERMISSION_ codes classify as permission errors on the server: not
+    # retryable, with a hint to ask the user rather than try again.
+    assert sent[0].error_context.code == "PERMISSION_SENSITIVE_PATH"
+
+
 async def test_oversized_result_is_capped_and_marked_truncated(monkeypatch):
     bridge = _bridge(monkeypatch)
     sent = []
