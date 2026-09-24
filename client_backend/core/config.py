@@ -220,8 +220,9 @@ class ClientSettings(BaseSettings):
         description="How long a projected skill catalog may be reused without rescanning.",
     )
 
-    # Security
+    # Security. repr=False: tracebacks and test failures print the settings object.
     local_session_secret: str = Field(
+        repr=False,
         default="",
         description="Secret key for local session tokens. Auto-generated if empty.",
     )

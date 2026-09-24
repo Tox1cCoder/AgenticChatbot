@@ -225,8 +225,12 @@ class Settings(BaseSettings):
         # rather than failing hard on startup after the Phase 9 cleanup.
         "extra": "ignore",
     }
+    # Every field holding a key, password, or credential-bearing URL sets
+    # repr=False: tracebacks and test failures print the settings object.
+
     # Database settings
     database_url: str = Field(
+        repr=False,
         default="postgresql://localhost:5432/chatbot",
         description="Database URL for PostgreSQL connection",
     )
@@ -264,6 +268,7 @@ class Settings(BaseSettings):
 
     # Security
     secret_key: str = Field(
+        repr=False,
         default="",
         description="Secret key for security",
     )
@@ -288,18 +293,22 @@ class Settings(BaseSettings):
 
     # LLM API Keys
     gemini_api_key: str = Field(
+        repr=False,
         default="",
         description="Gemini API Key",
     )
     tavily_api_key: str = Field(
+        repr=False,
         default="",
         description="Tavily API Key for web search",
     )
     smithery_api_key: str = Field(
+        repr=False,
         default="",
         description="Smithery API Key for MCP server access",
     )
     brave_search_api_key: str = Field(
+        repr=False,
         default="",
         description="Brave Search API Key for image search (X-Subscription-Token)",
     )
@@ -372,6 +381,7 @@ class Settings(BaseSettings):
 
     # Multi-Provider Configuration
     model_encryption_key: str = Field(
+        repr=False,
         default="",
         description=(
             "Fernet encryption key for storing provider API keys (32 url-safe base64-encoded bytes)"
@@ -392,6 +402,7 @@ class Settings(BaseSettings):
 
     # LangSmith Configuration
     langsmith_api_key: str = Field(
+        repr=False,
         default="",
         description="LangSmith API Key for tracing and observability",
     )
@@ -797,6 +808,7 @@ class Settings(BaseSettings):
         description="Base delay for exponential failed-write retry backoff",
     )
     model_usage_user_hash_secret: str = Field(
+        repr=False,
         default="",
         description="Secret keying the per-user hash for model-usage identity",
     )
@@ -920,6 +932,7 @@ class Settings(BaseSettings):
 
     # Redis Configuration
     redis_url: str = Field(
+        repr=False,
         default="",
         description="Redis connection URL used for widget runtime state, HITL timeout "
         "tracking, and other shared-state features. "
@@ -927,16 +940,19 @@ class Settings(BaseSettings):
         "Falls back to celery_broker_url if blank.",
     )
     redis_password: str = Field(
+        repr=False,
         default="",
         description="Optional Redis password convenience variable for local Docker setups. "
         "When set, it is automatically injected into redis:// and rediss:// URLs that "
         "omit credentials.",
     )
     celery_broker_url: str = Field(
+        repr=False,
         default="redis://localhost:6379/0",
         description="Celery broker URL",
     )
     celery_result_backend: str = Field(
+        repr=False,
         default="redis://localhost:6379/0",
         description="Celery result backend URL",
     )
