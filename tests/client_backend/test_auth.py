@@ -199,6 +199,146 @@ async def test_restore_rejects_switching_active_user_without_logout(monkeypatch)
     assert restore_calls == []
 
 
+class _RefreshAuthStub:
+    def __init__(self) -> None:
+        self.refresh_calls = 0
+
+    def is_authenticated(self) -> bool:
+        return True
+
+    def get_current_refresh_token(self) -> str:
+        return "active-refresh-token"
+
+    def get_current_user_id(self) -> str:
+        return "user-123"
+
+    async def refresh(self) -> TokenPair:
+        self.refresh_calls += 1
+        return TokenPair(access_token="new-access", refresh_token="active-refresh-token")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authorization", [None, "", "Bearer wrong", "Bearer ümlaut"])
+async def test_refresh_requires_the_active_refresh_token(monkeypatch, authorization):
+    """Without the header, any local process could mint fresh tokens here."""
+    stub = _RefreshAuthStub()
+    monkeypatch.setattr(auth_api, "get_upstream_auth_service", lambda: stub)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth_api.refresh(authorization=authorization)
+
+    assert exc_info.value.status_code == 401
+    assert stub.refresh_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_accepts_the_active_refresh_token(monkeypatch):
+    stub = _RefreshAuthStub()
+
+    class _BridgeStub:
+        def get_registered_device_id(self) -> str:
+            return "device-id-123"
+
+        def get_device_identifier(self) -> str:
+            return "device-identifier-123"
+
+    monkeypatch.setattr(auth_api, "get_upstream_auth_service", lambda: stub)
+    monkeypatch.setattr(auth_api, "get_runtime_bridge", lambda: _BridgeStub())
+
+    result = await auth_api.refresh(authorization="Bearer active-refresh-token")
+
+    assert result["data"]["accessToken"] == "new-access"
+    assert stub.refresh_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_require_local_session_rejects_non_ascii_bearer_with_401(monkeypatch):
+    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials="tökén")
+    monkeypatch.setattr(
+        auth_module,
+        "get_upstream_auth_service",
+        lambda: _AuthStub("user-123", access_token="upstream-access-token"),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth_module.require_local_session(credentials)
+
+    assert exc_info.value.status_code == 401
+
+
+@pytest.mark.parametrize("hostile", ["..", "../../outside", "..\\..\\outside", "a/b", " "])
+def test_profile_paths_refuse_a_user_id_that_is_not_one_component(hostile):
+    """/auth/restore and unverified JWT claims both reach this with raw input."""
+    from client_backend.core.paths import get_profile_subdir, profile_subdir_path
+
+    with pytest.raises(ValueError):
+        profile_subdir_path(hostile, "session")
+    with pytest.raises(ValueError):
+        get_profile_subdir(hostile, "session")
+
+
+@pytest.mark.asyncio
+async def test_restore_of_a_traversing_user_id_touches_nothing(tmp_path, monkeypatch):
+    from client_backend.core.config import client_settings
+    from client_backend.services.upstream_auth import UpstreamAuthService
+
+    class _ClientStub:
+        base_url = "http://server.test"
+
+        def set_tokens(self, tokens):
+            raise AssertionError("no tokens may be loaded for a malformed id")
+
+    monkeypatch.setattr(client_settings, "profile_root", str(tmp_path / "profile"))
+    outside = tmp_path / "outside" / "session"
+
+    restored = await UpstreamAuthService(server_client=_ClientStub()).restore_session(
+        "../../outside"
+    )
+
+    assert restored is False
+    assert not outside.exists()
+
+
+@pytest.mark.asyncio
+async def test_rejected_restore_does_not_leave_dead_tokens_on_the_client(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    from client_backend.core.config import client_settings
+    from client_backend.services.server_api import AuthenticationError
+    from client_backend.services.upstream_auth import StoredCredentials, UpstreamAuthService
+
+    class _ClientStub:
+        base_url = "http://server.test"
+
+        def __init__(self) -> None:
+            self.tokens = None
+
+        def set_tokens(self, tokens):
+            self.tokens = tokens
+
+        def get_tokens(self):
+            return self.tokens
+
+        async def refresh_token(self):
+            raise AuthenticationError("refresh rejected", status_code=401)
+
+    monkeypatch.setattr(client_settings, "profile_root", str(tmp_path / "profile"))
+    client = _ClientStub()
+    service = UpstreamAuthService(server_client=client)
+    service._save_credentials(
+        StoredCredentials(
+            user_id="user-123",
+            username="user@example.com",
+            tokens=TokenPair(access_token="dead-access", refresh_token="dead-refresh"),
+            stored_at=datetime.now(timezone.utc),
+            server_url=client.base_url,
+        )
+    )
+
+    assert await service.restore_session("user-123") is False
+    assert client.get_tokens() is None
+
+
 def test_augment_auth_response_restores_user_context_for_refresh(monkeypatch):
     class _AuthServiceStub:
         def get_current_user_id(self) -> str:

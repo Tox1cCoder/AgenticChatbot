@@ -102,7 +102,11 @@ async def require_local_session(
         )
 
     current_access_token = auth_service.get_current_access_token()
-    if current_access_token and secrets.compare_digest(raw_token, current_access_token):
+    # Bytes, not str: compare_digest raises TypeError on non-ASCII str, which
+    # would turn a junk header into a 500 instead of a 401.
+    if current_access_token and secrets.compare_digest(
+        raw_token.encode("utf-8"), current_access_token.encode("utf-8")
+    ):
         return _build_compat_session_payload(str(current_user_id))
 
     raise HTTPException(

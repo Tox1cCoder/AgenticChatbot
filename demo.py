@@ -2643,7 +2643,11 @@ def sanitize_message_content(content: str) -> str:
     # Restore LaTeX with proper KaTeX delimiters
     # KaTeX will render content between \( \) for inline and \[ \] for display
     for placeholder, math_info in math_expressions.items():
-        latex_content = math_info["content"]
+        # Math is lifted out before sanitization, so it must be escaped on the
+        # way back in: "$<img src=x onerror=...>$" would otherwise reach
+        # st.markdown(unsafe_allow_html=True) as live markup and read the auth
+        # token from localStorage. Escaped text still reads the same to KaTeX.
+        latex_content = html.escape(math_info["content"])
         if math_info["type"] == "display":
             # Display math: use \[ \] delimiters
             latex_html = f"\\[{latex_content}\\]"

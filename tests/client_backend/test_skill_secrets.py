@@ -44,6 +44,35 @@ def test_secret_bindings_are_encrypted_and_namespaced_by_skill(tmp_path, monkeyp
         client_settings.profile_root = original
 
 
+def test_an_interrupted_write_keeps_the_existing_bindings(tmp_path, monkeypatch):
+    """A torn write must not read back as "no secrets" and drop every binding."""
+    import os
+    import pathlib
+
+    original = _configure_profile(tmp_path, monkeypatch)
+    try:
+        store = SkillSecretStore()
+        store.set_for_skill("calendar", "ACCESS_TOKEN", "kept")
+
+        def torn_write_text(self, data, *args, **kwargs):
+            with open(self, "w", encoding="utf-8") as handle:
+                handle.write(data[: len(data) // 2])
+            raise OSError(28, "No space left on device")
+
+        def failed_replace(*_args, **_kwargs):
+            raise OSError(28, "No space left on device")
+
+        with monkeypatch.context() as patched:
+            patched.setattr(pathlib.Path, "write_text", torn_write_text)
+            patched.setattr(os, "replace", failed_replace)
+            with pytest.raises(OSError):
+                store.set_for_skill("calendar", "OTHER", "new")
+
+        assert store.get_for_skill("calendar") == {"ACCESS_TOKEN": "kept"}
+    finally:
+        client_settings.profile_root = original
+
+
 def test_set_for_skill_strips_pasted_whitespace(tmp_path, monkeypatch):
     original = _configure_profile(tmp_path, monkeypatch)
     try:

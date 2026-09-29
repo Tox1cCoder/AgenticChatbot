@@ -14,6 +14,11 @@ from client_backend.services.runtime_bridge import get_runtime_bridge
 
 router = APIRouter(tags=["proxy"])
 
+# Multi-method paths are declared with one stacked decorator per method rather
+# than ``api_route(methods=[...])``: FastAPI derives one operation id per route,
+# so a multi-method route published the same id for every method and the OpenAPI
+# build warned about each one. Paths and handlers are unchanged.
+
 
 def _params_with_active_device(request: Request):
     params = [
@@ -64,7 +69,8 @@ async def proxy_user(
     return await proxy_server_request(request, upstream_path=f"/users/{user_id}")
 
 
-@router.api_route("/providers", methods=["GET", "POST"])
+@router.get("/providers")
+@router.post("/providers")
 async def proxy_providers(
     request: Request,
     _session: LocalSessionPayload = Depends(require_local_session),
@@ -72,7 +78,9 @@ async def proxy_providers(
     return await proxy_server_request(request, upstream_path="/providers")
 
 
-@router.api_route("/hitl/settings", methods=["GET", "POST", "DELETE"])
+@router.get("/hitl/settings")
+@router.post("/hitl/settings")
+@router.delete("/hitl/settings")
 async def proxy_hitl_settings(
     request: Request,
     _session: LocalSessionPayload = Depends(require_local_session),
@@ -96,7 +104,8 @@ async def proxy_hitl_interrupt(
     )
 
 
-@router.api_route("/providers/{provider_type}", methods=["GET", "DELETE"])
+@router.get("/providers/{provider_type}")
+@router.delete("/providers/{provider_type}")
 async def proxy_provider(
     provider_type: str,
     request: Request,
@@ -129,7 +138,8 @@ async def proxy_provider_models(
     )
 
 
-@router.api_route("/model-config", methods=["GET", "PATCH"])
+@router.get("/model-config")
+@router.patch("/model-config")
 async def proxy_model_config(
     request: Request,
     _session: LocalSessionPayload = Depends(require_local_session),
@@ -153,7 +163,8 @@ async def proxy_model_config_reset(
     return await proxy_server_request(request, upstream_path="/model-config/reset")
 
 
-@router.api_route("/custom-agents", methods=["GET", "POST"])
+@router.get("/custom-agents")
+@router.post("/custom-agents")
 async def proxy_custom_agents(
     request: Request,
     _session: LocalSessionPayload = Depends(require_local_session),
@@ -177,7 +188,9 @@ async def proxy_custom_agents_options(
     )
 
 
-@router.api_route("/custom-agents/{custom_agent_id}", methods=["GET", "PATCH", "DELETE"])
+@router.get("/custom-agents/{custom_agent_id}")
+@router.patch("/custom-agents/{custom_agent_id}")
+@router.delete("/custom-agents/{custom_agent_id}")
 async def proxy_custom_agent(
     custom_agent_id: str,
     request: Request,
@@ -190,7 +203,8 @@ async def proxy_custom_agent(
     )
 
 
-@router.api_route("/ai/custom-agents", methods=["GET", "POST"])
+@router.get("/ai/custom-agents")
+@router.post("/ai/custom-agents")
 async def proxy_ai_custom_agents(
     request: Request,
     _session: LocalSessionPayload = Depends(require_local_session),
@@ -214,7 +228,9 @@ async def proxy_ai_custom_agents_options(
     )
 
 
-@router.api_route("/ai/custom-agents/{custom_agent_id}", methods=["GET", "PATCH", "DELETE"])
+@router.get("/ai/custom-agents/{custom_agent_id}")
+@router.patch("/ai/custom-agents/{custom_agent_id}")
+@router.delete("/ai/custom-agents/{custom_agent_id}")
 async def proxy_ai_custom_agent(
     custom_agent_id: str,
     request: Request,
@@ -227,7 +243,8 @@ async def proxy_ai_custom_agent(
     )
 
 
-@router.api_route("/conversations/{conversation_id}/custom-agents", methods=["GET", "PUT"])
+@router.get("/conversations/{conversation_id}/custom-agents")
+@router.put("/conversations/{conversation_id}/custom-agents")
 async def proxy_conversation_custom_agents(
     conversation_id: str,
     request: Request,
@@ -239,7 +256,8 @@ async def proxy_conversation_custom_agents(
     )
 
 
-@router.api_route("/ai/conversations/{conversation_id}/custom-agents", methods=["GET", "PUT"])
+@router.get("/ai/conversations/{conversation_id}/custom-agents")
+@router.put("/ai/conversations/{conversation_id}/custom-agents")
 async def proxy_ai_conversation_custom_agents(
     conversation_id: str,
     request: Request,
@@ -251,7 +269,8 @@ async def proxy_ai_conversation_custom_agents(
     )
 
 
-@router.api_route("/messages/{message_id}/feedbacks", methods=["GET", "POST"])
+@router.get("/messages/{message_id}/feedbacks")
+@router.post("/messages/{message_id}/feedbacks")
 async def proxy_message_feedbacks(
     message_id: str,
     request: Request,
@@ -297,7 +316,8 @@ async def proxy_message_feedback_update(
     )
 
 
-@router.api_route("/conversations/{conversation_id}/task-plans", methods=["GET", "POST"])
+@router.get("/conversations/{conversation_id}/task-plans")
+@router.post("/conversations/{conversation_id}/task-plans")
 async def proxy_conversation_task_plans(
     conversation_id: str,
     request: Request,
@@ -333,7 +353,9 @@ async def proxy_conversation_planning_status(
     )
 
 
-@router.api_route("/task-plans/{task_id}", methods=["GET", "PATCH", "DELETE"])
+@router.get("/task-plans/{task_id}")
+@router.patch("/task-plans/{task_id}")
+@router.delete("/task-plans/{task_id}")
 async def proxy_task_plan(
     task_id: str,
     request: Request,
@@ -351,7 +373,8 @@ async def proxy_task_plan_complete(
     return await proxy_server_request(request, upstream_path=f"/task-plans/{task_id}/complete")
 
 
-@router.api_route("/ai/conversations", methods=["GET", "POST"])
+@router.get("/ai/conversations")
+@router.post("/ai/conversations")
 async def proxy_ai_conversations(
     request: Request,
     _session: LocalSessionPayload = Depends(require_local_session),
@@ -359,7 +382,9 @@ async def proxy_ai_conversations(
     return await proxy_server_request(request, upstream_path="/ai/conversations")
 
 
-@router.api_route("/ai/conversations/{conversation_id}", methods=["GET", "PATCH", "DELETE"])
+@router.get("/ai/conversations/{conversation_id}")
+@router.patch("/ai/conversations/{conversation_id}")
+@router.delete("/ai/conversations/{conversation_id}")
 async def proxy_ai_conversation(
     conversation_id: str,
     request: Request,

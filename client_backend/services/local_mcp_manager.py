@@ -214,12 +214,6 @@ class LocalMCPManager:
         self._init_lock = asyncio.Lock()
         self._initialized = False
 
-    @property
-    def config_path(self):
-        """Return the canonical v2 profile path for diagnostics."""
-
-        return self.store.profile_path
-
     async def initialize(self, server_names: set[str] | None = None) -> None:
         async with self._init_lock:
             if self._initialized:

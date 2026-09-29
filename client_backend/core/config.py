@@ -411,16 +411,6 @@ class ClientSettings(BaseSettings):
                 )
         return origins
 
-    def get_profile_path(self, *subpaths: str) -> Path:
-        """Get a path within the profile directory."""
-        return Path(self.profile_root).joinpath(*subpaths)
-
-    def get_mcp_config_path(self) -> Path:
-        """Get the effective MCP config file path."""
-        if self.mcp_config_path:
-            return Path(self.mcp_config_path)
-        return self.get_profile_path("mcp_config.json")
-
 
 @lru_cache
 def get_client_settings() -> ClientSettings:

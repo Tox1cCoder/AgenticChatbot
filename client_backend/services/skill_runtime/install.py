@@ -224,14 +224,7 @@ class SkillBundleInstaller:
 
     async def preview(self, source: str | Path | DiscoveredSkill) -> dict:
         skill, shape = await self._load_source(source)
-        setup = await asyncio.to_thread(self._environment.preview, skill)
-        return {
-            "name": skill.name,
-            "source_hash": skill.source_hash,
-            "bundle_shape": shape,
-            "executable_assets": dict(skill.executable_assets),
-            "setup": setup,
-        }
+        return await self._build_preview(skill, shape)
 
     async def install(
         self,
@@ -245,22 +238,12 @@ class SkillBundleInstaller:
     ) -> dict:
         """Install or replace one skill bundle atomically.
 
-        Args:
-            source: Directory holding exactly one discoverable ``SKILL.md``.
-            expected_source_hash: Hash the caller previewed; binds this request
-                to content the user actually saw.
-            approve_setup: Explicit authorization to run project build code.
-            replace_source_hash: Required to overwrite an existing skill, and must
-                equal that skill's current hash. Its absence means "new install",
-                so a name collision is a conflict rather than a silent overwrite.
-            source_kind: Provenance recorded in install metadata. ``"upload"``
-                omits the source path, which points into upload staging.
-            observer: Optional cooperative lifecycle hook used by the async
-                operation service for phase reporting and cancellation.
-
-        Returns:
-            ``name``, ``install_id``, ``source_hash``, ``runtime_status``, and
-            ``action`` (``"installed"`` or ``"updated"``).
+        ``expected_source_hash`` binds the request to content the user previewed.
+        ``replace_source_hash`` is required to overwrite an existing skill and must
+        equal its current hash; its absence means "new install", so a name
+        collision is a conflict rather than a silent overwrite. ``source_kind``
+        ``"upload"`` omits the source path from install metadata, because that
+        path points into upload staging.
         """
         from client_backend.services.skill_runtime.transactions import (
             SkillInstallTransaction,

@@ -16,7 +16,11 @@ path arrives from a model:
 * only regular files are read, with a size cap, so a device node or a huge asset
   cannot be pulled into a prompt; and
 * content must decode as UTF-8 text -- binary assets ship and run, they do not
-  get read into the conversation.
+  get read into the conversation; and
+* hidden files and credential files are never read, because what is read goes to
+  the model and the server: a skill's ``.env``, a cached login session
+  (``.take100-session.json``), or a Google ``token.json`` sits in its bundle as a
+  regular text file and would otherwise be one tool call from leaving the device.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from client_backend.core.paths import is_under_root
+from client_backend.services.desktop_commander_policy import is_secret_file_name
 from shared.skills.commands import is_link_like
 
 # A companion document is prose. This bounds one read, not the bundle: a larger
@@ -40,6 +45,8 @@ MAX_LISTED_RESOURCES = 200
 # prepared runtime, none of which are authored content.
 _EXCLUDED_NAMES = frozenset({"install.json"})
 _EXCLUDED_DIRS = frozenset({"__pycache__", ".git", ".venv", "node_modules"})
+# OAuth client and token files as Google's API libraries write them by default.
+_CREDENTIAL_FILE_NAMES = frozenset({"credentials.json", "token.json"})
 
 
 class SkillResourceError(Exception):
@@ -82,6 +89,13 @@ def _normalize_resource_path(resource_path: str) -> str:
     return relative.as_posix()
 
 
+def _names_a_credential(relative: Path) -> bool:
+    if any(part.startswith(".") for part in relative.parts):
+        return True
+    name = relative.name
+    return is_secret_file_name(name) or name.casefold() in _CREDENTIAL_FILE_NAMES
+
+
 def _reject_link_components(root: Path, relative: Path) -> None:
     current = root
     for part in relative.parts:
@@ -99,6 +113,11 @@ def _read_policy_resource(bundle_root: Path, resource_path: str) -> _ReadableRes
         name.casefold() for name in _EXCLUDED_DIRS
     }.intersection(folded_parts):
         raise SkillResourceError(f"'{candidate}' is not readable content.")
+    if _names_a_credential(relative):
+        raise SkillResourceError(
+            f"'{candidate}' is a hidden or credential file, which is never read into "
+            "the conversation."
+        )
 
     _reject_link_components(root, relative)
     target = (root / relative).resolve()

@@ -98,6 +98,12 @@ class SensitivePathError(PermissionError):
     """Desktop Commander was asked to touch a credential location."""
 
 
+def is_secret_file_name(name: str) -> bool:
+    """Whether a file name is a secrets or key file (``.env.example`` and the like excepted)."""
+
+    return bool(_SECRET_FILE_NAME.match(name)) and not name.lower().endswith(_TEMPLATE_SUFFIXES)
+
+
 def is_desktop_commander(command: str | None, args: Sequence[str]) -> bool:
     """Whether a launch runs Desktop Commander, through npx, node, or its binary."""
 
@@ -142,9 +148,7 @@ def refuse_sensitive_paths(tool_name: str, arguments: Mapping[str, Any]) -> None
         path = _resolve(raw)
         if any(_is_within(path, folder) for folder in folders):
             raise SensitivePathError(_refusal(raw, "it is inside a credential folder"))
-        if _SECRET_FILE_NAME.match(path.name) and not path.name.lower().endswith(
-            _TEMPLATE_SUFFIXES
-        ):
+        if is_secret_file_name(path.name):
             raise SensitivePathError(_refusal(raw, "it is a secrets or key file"))
 
     if tool_name == "start_search" and arguments.get("includeHidden"):

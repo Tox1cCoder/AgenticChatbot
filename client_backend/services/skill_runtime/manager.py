@@ -33,16 +33,6 @@ COMMAND_INPUT_SCHEMA = {
     "additionalProperties": False,
 }
 
-REPAIR_HINT_TYPES = frozenset(
-    {
-        "setup_skill",
-        "rebuild_skill_runtime",
-        "inspect_setup_failure",
-        "permission_required",
-    }
-)
-
-
 @dataclass
 class SkillReadiness:
     """Whether a bundle can currently service its fixed command tool."""

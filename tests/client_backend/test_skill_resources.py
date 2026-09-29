@@ -214,6 +214,29 @@ def test_manifest_cache_is_bound_to_the_installed_source_hash(bundle):
     assert "new.md" in new_hash.paths
 
 
+@pytest.mark.parametrize(
+    "relative",
+    [
+        ".env",
+        ".take100-session.json",
+        "config/.credentials",
+        "keys/server.pem",
+        "id_rsa",
+        "token.json",
+        "Credentials.JSON",
+    ],
+)
+def test_hidden_and_credential_files_are_neither_listed_nor_read(bundle, relative):
+    """What is read goes to the model; a bundle's secrets must stay on the device."""
+    target = bundle / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("SECRET_VALUE=do-not-leak", encoding="utf-8")
+
+    with pytest.raises(SkillResourceError, match="credential"):
+        read_skill_resource(bundle, relative)
+    assert relative not in list_skill_resources(bundle).paths
+
+
 def test_cache_directories_are_neither_listed_nor_read(bundle):
     cache = bundle / "__pycache__"
     cache.mkdir()

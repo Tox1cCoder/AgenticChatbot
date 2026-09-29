@@ -2,6 +2,7 @@
 Local skills management endpoints with server-compatible response envelopes.
 """
 
+import asyncio
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
@@ -315,7 +316,8 @@ async def list_installed_skills(
 ):
     """List installed local skill bundles (device-local view; may include local paths)."""
     installer = get_skill_installer()
-    installed = installer.list_installed()
+    # Hashes every installed bundle; on the event loop that stalls every request.
+    installed = await asyncio.to_thread(installer.list_installed)
     return make_api_response(
         success=True,
         message="Installed skill bundles retrieved",

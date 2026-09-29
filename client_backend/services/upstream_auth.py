@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from client_backend.core.config import client_settings
 from client_backend.core.logging import get_logger
-from client_backend.core.paths import get_profile_subdir
+from client_backend.core.paths import profile_subdir_path
 from client_backend.core.security import decrypt_local_secret, encrypt_local_secret
 from client_backend.services.server_api import (
     AuthenticationError,
@@ -53,9 +53,9 @@ class UpstreamAuthService:
         self._credentials: StoredCredentials | None = None
 
     def _get_credentials_path(self, user_id: str) -> Path:
-        """Get the path to store credentials for a user."""
-        session_dir = get_profile_subdir(user_id, "session")
-        return session_dir / "credentials.json"
+        # Resolution only: a read must not create a directory for an id that
+        # arrived in a query string. _save_credentials creates the parent.
+        return profile_subdir_path(user_id, "session") / "credentials.json"
 
     def _save_credentials(self, credentials: StoredCredentials) -> None:
         """
@@ -75,8 +75,11 @@ class UpstreamAuthService:
         logger.debug(f"Saved credentials for user {credentials.user_id}")
 
     def _load_credentials(self, user_id: str) -> StoredCredentials | None:
-        """Load credentials from disk."""
-        path = self._get_credentials_path(user_id)
+        try:
+            path = self._get_credentials_path(user_id)
+        except ValueError:
+            logger.warning("Refusing to load credentials for a malformed user id")
+            return None
         if not path.exists():
             return None
 
@@ -102,19 +105,6 @@ class UpstreamAuthService:
             logger.debug(f"Cleared credentials for user {user_id}")
 
     async def login(self, email: str, password: str) -> TokenPair:
-        """
-        Login to the upstream server.
-
-        Args:
-            email: User email.
-            password: User password.
-
-        Returns:
-            The normalized active token pair.
-
-        Raises:
-            AuthenticationError: If login fails.
-        """
         tokens = await self._client.login(email, password)
         if not tokens.user_id:
             raise AuthenticationError("Login succeeded but no user ID was returned by the server")
@@ -151,15 +141,7 @@ class UpstreamAuthService:
         return OperationResult(message="Successfully logged out. Please discard your tokens.")
 
     async def restore_session(self, user_id: str) -> bool:
-        """
-        Restore a session from stored credentials.
-
-        Args:
-            user_id: The user ID to restore.
-
-        Returns:
-            True if session was restored successfully.
-        """
+        """Restore a session from stored credentials; True when it is usable."""
         credentials = self._load_credentials(user_id)
         if not credentials:
             logger.debug(f"No stored credentials for user {user_id}")
@@ -173,7 +155,7 @@ class UpstreamAuthService:
             )
             return False
 
-        # Set tokens and try to refresh
+        previous_tokens = self._client.get_tokens()
         self._client.set_tokens(credentials.tokens)
 
         try:
@@ -199,6 +181,9 @@ class UpstreamAuthService:
             # credentials are dead, so clear them and require a fresh login.
             logger.warning(f"Stored credentials rejected during restore: {e}")
             self._clear_credentials(user_id)
+            # The shared client must not keep bearing tokens the server just
+            # rejected; every later request would carry them.
+            self._client.set_tokens(previous_tokens)
             return False
         except (ServerConnectionError, ServerAPIError) as e:
             # Transient failure (server unreachable, timeout, 5xx). Do NOT wipe the
@@ -213,30 +198,6 @@ class UpstreamAuthService:
             self._credentials = credentials
             self._current_user_id = user_id
             return True
-
-    async def refresh_if_needed(self) -> bool:
-        """
-        Refresh tokens if they're about to expire.
-
-        Returns:
-            True if refresh was performed.
-        """
-        if not self._credentials:
-            return False
-
-        # For now, just try to refresh
-        # TODO: Add token expiry checking
-        try:
-            await self._client.refresh_token()
-            new_tokens = self._client.get_tokens()
-            if new_tokens is None:
-                raise AuthenticationError("Token refresh did not yield active credentials")
-            self._credentials.tokens = new_tokens
-            self._credentials.stored_at = datetime.now(timezone.utc)
-            self._save_credentials(self._credentials)
-            return True
-        except AuthenticationError:
-            return False
 
     async def refresh(self) -> TokenPair:
         """Refresh the current upstream access token and persist the new value."""

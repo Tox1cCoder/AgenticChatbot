@@ -254,12 +254,7 @@ class LocalSkillsRegistry:
         logger.info(f"Skills registry initialized with {len(self.skills)} skills")
 
     async def scan_skills(self) -> int:
-        """
-        Scan the skill root for SKILL.md files.
-
-        Returns:
-            Number of skills discovered.
-        """
+        """Scan the skill root for SKILL.md files and return how many were loaded."""
         discovered = 0
         discovered_skills: dict[str, SkillMetadata] = {}
         root = self.skill_root
@@ -322,13 +317,7 @@ class LocalSkillsRegistry:
 
         Falls back to directory-name / first-line heuristics only when no valid
         front matter is present, preserving compatibility with plain markdown skills.
-
-        Args:
-            skill_file: Path to the SKILL.md file.
-            scan_root: Configured root that discovered the skill.
-
-        Returns:
-            SkillMetadata if loaded successfully, None otherwise.
+        Returns None for a document that cannot be loaded safely.
         """
         try:
             resolved_scan_root = (scan_root or skill_file.parent).resolve()
@@ -497,35 +486,6 @@ class LocalSkillsRegistry:
     def _compute_source_hash(bundle_root: Path) -> str:
         return compute_skill_bundle_hash(bundle_root, link_checker=is_link_like)
 
-    async def reload_skill(self, skill_name: str) -> bool:
-        """
-        Reload a specific skill from disk.
-
-        Args:
-            skill_name: Name of the skill to reload.
-
-        Returns:
-            True if reloaded successfully.
-        """
-        skill = self.skills.get(skill_name)
-        if not skill:
-            logger.warning(f"Skill not found: {skill_name}")
-            return False
-
-        try:
-            new_skill = await self._load_skill(skill.path, skill.bundle_root)
-            if new_skill:
-                # Preserve enabled state
-                new_skill.enabled = skill.enabled
-                self.skills[skill_name] = new_skill
-                logger.info(f"Reloaded skill: {skill_name}")
-                return True
-
-        except Exception as e:
-            logger.error(f"Failed to reload skill {skill_name}: {e}")
-
-        return False
-
     def get_skill(self, skill_name: str) -> SkillMetadata | None:
         return self.skills.get(skill_name)
 
@@ -545,25 +505,8 @@ class LocalSkillsRegistry:
         logger.info(f"Skill {skill_name} {'enabled' if enabled else 'disabled'}")
         return True
 
-    def bulk_set_enabled(self, skill_states: dict[str, bool]) -> int:
-        count = 0
-        for skill_name, enabled in skill_states.items():
-            if self.set_skill_enabled(skill_name, enabled):
-                count += 1
-        if count:
-            self._persist_skill_state()
-        return count
-
     def get_skill_catalog(self, include_content: bool = True) -> dict:
-        """
-        Generate a skill catalog for syncing to the server.
-
-        Args:
-            include_content: Whether to include skill content (for enabled skills).
-
-        Returns:
-            Skill catalog dictionary.
-        """
+        """Build the catalog synced to the server; content only for enabled skills."""
         skills_list = []
 
         for skill in self.skills.values():
@@ -578,57 +521,8 @@ class LocalSkillsRegistry:
             "enabled_count": len(self.get_enabled_skills()),
         }
 
-    def search_skills(
-        self,
-        query: str,
-        enabled_only: bool = False,
-    ) -> list[SkillMetadata]:
-        """
-        Search skills by name, description, or tags.
-
-        Args:
-            query: Search query string.
-            enabled_only: Only return enabled skills.
-
-        Returns:
-            List of matching SkillMetadata objects.
-        """
-        query_lower = query.lower()
-        results = []
-
-        skills_to_search = self.get_enabled_skills() if enabled_only else self.get_all_skills()
-
-        for skill in skills_to_search:
-            if (
-                query_lower in skill.name.lower()
-                or query_lower in skill.description.lower()
-                or any(query_lower in tag.lower() for tag in skill.tags)
-            ):
-                results.append(skill)
-
-        return results
-
-    def get_skills_by_category(self, category: str) -> list[SkillMetadata]:
-        return [
-            skill
-            for skill in self.skills.values()
-            if skill.category and skill.category.lower() == category.lower()
-        ]
-
-    def get_categories(self) -> set[str]:
-        categories = set()
-        for skill in self.skills.values():
-            if skill.category:
-                categories.add(skill.category)
-        return categories
-
     async def refresh(self) -> int:
-        """
-        Refresh the registry by rescanning all skill roots.
-
-        Returns:
-            Number of newly discovered skills.
-        """
+        """Rescan the skill root and return how many more skills there are than before."""
         logger.info("Refreshing skills registry...")
         self.skill_root = self._resolve_skill_root()
 

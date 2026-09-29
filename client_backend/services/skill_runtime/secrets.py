@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
-import os
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -15,6 +13,7 @@ from client_backend.core.security import (
     decrypt_local_secret,
     encrypt_local_secret,
 )
+from client_backend.services.skill_runtime.state import atomic_write_json
 from client_backend.services.upstream_auth import get_upstream_auth_service
 from shared.skills.front_matter import is_valid_secret_name
 
@@ -140,8 +139,6 @@ class SkillSecretStore:
     ) -> None:
         payload = {"version": _STORAGE_VERSION, "skills": bindings}
         envelope = encrypt_local_secret(json.dumps(payload).encode("utf-8"))
-        path = self._secrets_path(user_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(envelope), encoding="utf-8")
-        with contextlib.suppress(OSError):
-            os.chmod(path, 0o600)
+        # Atomic: _read_bindings treats an unreadable file as "no secrets", so a
+        # write torn by a crash or a full disk would silently drop every binding.
+        atomic_write_json(self._secrets_path(user_id), envelope)

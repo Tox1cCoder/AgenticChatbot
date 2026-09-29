@@ -2,7 +2,6 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -74,27 +73,6 @@ class RuntimeState(BaseModel):
     error_message: str | None = None
 
 
-class ToolCatalogEntry(BaseModel):
-    """Entry in the local tool catalog."""
-
-    name: str
-    description: str
-    origin: str = Field(description="Tool origin: 'native', 'mcp'")
-    server_name: str | None = Field(default=None, description="MCP server name if origin is 'mcp'")
-    qualified_id: str = Field(description="Fully qualified tool identifier")
-    input_schema: dict[str, Any] = Field(
-        default_factory=dict, description="JSON Schema for tool input"
-    )
-
-
-class ToolCatalog(BaseModel):
-    """Catalog of locally available tools."""
-
-    tools: list[ToolCatalogEntry]
-    generated_at: datetime
-    version: str
-
-
 class DeviceRegistrationResult(BaseModel):
     """Normalized result returned after registering a client runtime device."""
 
@@ -121,8 +99,6 @@ __all__ = [
     "RuntimeErrorContext",
     "RuntimeState",
     "RuntimeStatus",
-    "ToolCatalog",
-    "ToolCatalogEntry",
     "ToolDispatchRequest",
     "ToolDispatchResult",
 ]

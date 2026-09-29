@@ -5,6 +5,7 @@ This module provides an async HTTP client wrapper for all server API calls.
 """
 
 import contextlib
+import json
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any, TypeVar
@@ -235,19 +236,6 @@ class ServerAPIClient:
         token once and replay the request, so a normally-expired access token does
         not surface as an error to the caller. The ``/auth/*`` endpoints are excluded
         (they carry their own credentials and must not recurse through refresh).
-
-        Args:
-            method: HTTP method (GET, POST, PUT, DELETE, etc.)
-            path: API path (e.g., "/api/conversations")
-            **kwargs: Additional arguments passed to httpx
-
-        Returns:
-            Parsed JSON response.
-
-        Raises:
-            ServerConnectionError: If the server is unreachable.
-            AuthenticationError: If authentication fails (and refresh could not recover it).
-            ServerAPIError: For other server errors.
         """
         response = await self.request_response(method, path, **kwargs)
         if (
@@ -298,14 +286,6 @@ class ServerAPIClient:
         Uses an unbounded read timeout because the server's AI SDK streaming
         endpoint does not emit heartbeats during tool execution.  The
         connection stays alive until the server sends ``[DONE]`` or closes.
-
-        Args:
-            path: API path for the SSE endpoint.
-            method: HTTP method (usually POST).
-            **kwargs: Additional arguments passed to httpx.
-
-        Yields:
-            Parsed SSE event data.
         """
         client = await self._get_client()
         headers = dict(kwargs.pop("headers", {}))
@@ -345,8 +325,6 @@ class ServerAPIClient:
                         if data.strip() == "[DONE]":
                             break
                         try:
-                            import json
-
                             parsed = json.loads(data)
                         except Exception:
                             proxied += 1
@@ -414,16 +392,6 @@ class ServerAPIClient:
     # ── Authentication Methods ──────────────────────────────────────────
 
     async def login(self, email: str, password: str) -> TokenPair:
-        """
-        Authenticate with the server.
-
-        Args:
-            email: User email.
-            password: User's password.
-
-        Returns:
-            The normalized active token pair.
-        """
         response = await self.post(
             "/auth/login",
             json={"email": email, "password": password},
@@ -443,15 +411,6 @@ class ServerAPIClient:
         return self._tokens
 
     async def refresh_token(self) -> TokenPair:
-        """
-        Refresh the access token using the refresh token.
-
-        Returns:
-            The normalized active token pair.
-
-        Raises:
-            AuthenticationError: If refresh fails.
-        """
         if not self._tokens or not self._tokens.refresh_token:
             raise AuthenticationError("No refresh token available")
 
@@ -513,26 +472,10 @@ class ServerAPIClient:
         """Check if we have valid tokens."""
         return self._tokens is not None
 
-    # ── Conversation Methods ────────────────────────────────────────────
-
     # ── Message Methods ─────────────────────────────────────────────────
 
-    async def create_message(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Create a message."""
-        return await self.post("/messages/", json=payload)
-
     async def get_message(self, message_id: str) -> dict[str, Any]:
-        """Fetch a specific message."""
         return await self.get(f"/messages/{message_id}")
-
-    async def list_user_messages(
-        self,
-        *,
-        page: int = 1,
-        limit: int = 50,
-    ) -> dict[str, Any]:
-        """List user messages."""
-        return await self.get("/messages/", params={"page": page, "limit": limit})
 
     async def stream_message(
         self,
@@ -540,17 +483,6 @@ class ServerAPIClient:
         content: str,
         device_id: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """
-        Send a message and stream the response.
-
-        Args:
-            conversation_id: The conversation ID.
-            content: The message content.
-            device_id: Optional device ID for tool dispatch context.
-
-        Yields:
-            SSE events from the server.
-        """
         # The AI SDK route expects the canonical ``{"messages": [...]}``
         # payload; the server picks the latest user message and relies on
         # server-side memory for prior turns. Sending the raw ``{"content":
@@ -774,35 +706,6 @@ class ServerAPIClient:
             files={"file": (filename, content, content_type)},
         )
         return await self._handle_response(response)
-
-    async def upload_document(
-        self,
-        conversation_id: str,
-        file_path: str,
-        filename: str | None = None,
-    ) -> dict[str, Any]:
-        """
-        Upload a document to a conversation.
-
-        Args:
-            conversation_id: The conversation ID.
-            file_path: Local path to the file.
-            filename: Optional override for the filename.
-
-        Returns:
-            Document metadata from the server.
-        """
-        from pathlib import Path
-
-        path = Path(file_path)
-        if not path.exists():
-            raise FileNotFoundError(f"File not found: {file_path}")
-
-        return await self.upload_document_bytes(
-            conversation_id=conversation_id,
-            filename=filename or path.name,
-            content=path.read_bytes(),
-        )
 
 
 # Global client instance

@@ -1,5 +1,4 @@
 import os
-import time
 from typing import Any
 
 import requests
@@ -150,101 +149,6 @@ def _render_batch_upload_outcome(upload_result: dict[str, Any]) -> None:
             st.caption(f"- {item.get('filename')} — {label}: {item.get('message') or ''}")
 
 
-def poll_document_status(document_id: str):
-    """
-    Poll document status and display real-time updates
-
-    Args:
-        document_id: ID of the document to monitor
-    """
-    status_placeholder = st.empty()
-    start_time = time.time()
-    max_wait_time = 300
-    poll_interval = 3
-
-    try:
-        while True:
-            elapsed_time = time.time() - start_time
-
-            # Check timeout
-            if elapsed_time > max_wait_time:
-                status_placeholder.warning("Processing timeout - please refresh manually")
-                break
-
-            # Get current status
-            doc_status = get_document_status(document_id)
-
-            if doc_status:
-                status_code = doc_status.get("status")
-                filename = doc_status.get("filename", "Unknown")
-
-                # Status: 1=Processing, 2=Ready, 3=Failed
-                if status_code == 1:
-                    status_placeholder.info(
-                        f"Processing '{filename}'... ({int(elapsed_time)}s elapsed)",
-                        icon=":material/schedule:",
-                    )
-                elif status_code == 2:
-                    status_placeholder.success(
-                        f"'{filename}' is ready! Processing completed in {int(elapsed_time)}s",
-                        icon=":material/check_circle:",
-                    )
-                    time.sleep(2)  # Show success message briefly
-                    status_placeholder.empty()
-                    break
-                elif status_code == 3:
-                    status_placeholder.error(
-                        f"'{filename}' processing failed", icon=":material/cancel:"
-                    )
-                    break
-                else:
-                    status_placeholder.warning(
-                        f"Unknown status for '{filename}'", icon=":material/help:"
-                    )
-                    break
-            else:
-                status_placeholder.warning(
-                    "Unable to fetch document status", icon=":material/warning:"
-                )
-                break
-
-            # Wait before next poll
-            time.sleep(poll_interval)
-
-    except Exception as e:
-        status_placeholder.error(f"Error monitoring status: {str(e)}")
-
-
-def get_document_status(document_id: str) -> dict[str, Any] | None:
-    """
-    Get status of a single document
-
-    Args:
-        document_id: ID of the document
-
-    Returns:
-        Dict containing document info or None if failed
-    """
-    try:
-        headers = {}
-        if st.session_state.get("auth_token"):
-            headers["Authorization"] = f"Bearer {st.session_state.auth_token}"
-
-        response = get_http_session().get(
-            f"{API_BASE_URL}/documents/{document_id}",
-            headers=headers,
-            timeout=REQUEST_TIMEOUT,
-        )
-
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return None
-
-    except Exception:
-        return None
-
-
 @st.cache_data(show_spinner=False, ttl=10, max_entries=200)
 def _cached_conversation_documents(
     conversation_id: str, auth_token: str, cache_version: int
@@ -284,80 +188,6 @@ def get_uploaded_documents() -> dict[str, Any]:
     except Exception as e:
         st.error(f"Error fetching documents: {str(e)}")
         return {}
-
-
-def render_document_list():
-    """Render list of uploaded documents for current conversation with status"""
-    # Only show document list if a conversation is selected
-    if (
-        st.session_state.get("current_conversation_id")
-        and st.session_state.current_conversation_id != "pending_new"
-    ):
-        with st.expander(":material/menu_book: Conversation Documents", expanded=False):
-            # Add refresh button
-            if st.button("Refresh Status", icon=":material/refresh:", key="refresh_docs"):
-                st.cache_data.clear()
-                st.rerun()
-
-            docs_response = get_uploaded_documents()
-
-            if docs_response and docs_response.get("data"):
-                doc_list = docs_response.get("data", {})
-                documents = doc_list.get("documents", [])
-
-                if documents:
-                    st.caption(f"Total: {doc_list.get('total', 0)} document(s)")
-
-                    for doc in documents:
-                        # Status mapping
-                        status_map = {
-                            1: {
-                                "icon": ":material/schedule:",
-                                "text": "Processing",
-                                "color": "orange",
-                            },
-                            2: {
-                                "icon": ":material/check_circle:",
-                                "text": "Ready",
-                                "color": "green",
-                            },
-                            3: {
-                                "icon": ":material/cancel:",
-                                "text": "Failed",
-                                "color": "red",
-                            },
-                        }
-
-                        status_info = status_map.get(
-                            doc.get("status"),
-                            {
-                                "icon": ":material/help:",
-                                "text": "Unknown",
-                                "color": "gray",
-                            },
-                        )
-
-                        col1, col2, col3 = st.columns([3, 1, 1])
-                        with col1:
-                            st.markdown(f"{status_info['icon']} {doc.get('filename', 'Unknown')}")
-                            st.caption(f"Uploaded: {doc.get('upload_time', 'N/A')[:16]}")
-                        with col2:
-                            st.markdown(f":{status_info['color']}[**{status_info['text']}**]")
-                        with col3:
-                            if st.button(
-                                "Delete",
-                                icon=":material/delete:",
-                                key=f"del_{doc.get('id')}",
-                                help="Delete document",
-                            ) and delete_document(doc.get("id")):
-                                st.cache_data.clear()
-                                st.rerun()
-
-                        st.divider()
-                else:
-                    st.info("No documents in this conversation")
-            else:
-                st.info("No documents uploaded yet")
 
 
 def delete_document(document_id: str) -> bool:

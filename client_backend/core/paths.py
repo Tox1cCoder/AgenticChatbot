@@ -19,15 +19,7 @@ class PathSecurityError(Exception):
 
 
 def normalize_path(path: str | Path, base_dir: str | Path | None = None) -> Path:
-    """
-    Normalize a path to an absolute, resolved form.
-
-    Args:
-        path: The path to normalize.
-
-    Returns:
-        The normalized absolute path.
-    """
+    """Resolve ``path`` to an absolute path; relative paths are taken from ``base_dir`` or cwd."""
     p = Path(path).expanduser()
     if not p.is_absolute():
         base = Path(base_dir).expanduser() if base_dir is not None else Path.cwd()
@@ -36,16 +28,7 @@ def normalize_path(path: str | Path, base_dir: str | Path | None = None) -> Path
 
 
 def is_under_root(path: Path, root: Path) -> bool:
-    """
-    Check if a path is under a given root directory.
-
-    Args:
-        path: The path to check.
-        root: The root directory.
-
-    Returns:
-        True if path is under root, False otherwise.
-    """
+    """Report whether ``path`` resolves inside ``root`` (both resolved first)."""
     try:
         path.resolve().relative_to(root.resolve())
         return True
@@ -54,18 +37,7 @@ def is_under_root(path: Path, root: Path) -> bool:
 
 
 def validate_workspace_path(path: str | Path) -> Path:
-    """
-    Normalize a local path and optionally enforce workspace roots.
-
-    Args:
-        path: The path to validate.
-
-    Returns:
-        The normalized path if valid.
-
-    Raises:
-        PathSecurityError: If workspace roots are configured and the path is outside them.
-    """
+    """Normalize a local path; when workspace roots are configured, require it inside one."""
     normalized = normalize_path(path)
     workspace_roots = client_settings.workspace_roots
 
@@ -84,98 +56,26 @@ def validate_workspace_path(path: str | Path) -> Path:
 
 
 def sanitize_filename(filename: str) -> str:
-    """
-    Sanitize a filename for safe storage.
-
-    Args:
-        filename: The filename to sanitize.
-
-    Returns:
-        A sanitized filename safe for filesystem storage.
-    """
-    # Remove path separators
+    """Reduce ``filename`` to one safe, non-hidden component of at most 255 characters."""
     name = os.path.basename(filename)
-
-    # Replace dangerous characters
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
 
-    # Limit length
     if len(name) > 255:
         base, ext = os.path.splitext(name)
         name = base[: 255 - len(ext)] + ext
 
-    # Handle empty or dot-only names
     if not name or name.startswith("."):
         name = "_" + name
 
     return name
 
 
-def to_posix_path(path: str | Path) -> str:
-    """
-    Convert a path to POSIX format for cross-platform compatibility.
-
-    Args:
-        path: The path to convert.
-
-    Returns:
-        The path in POSIX format (forward slashes).
-    """
-    return str(Path(path).as_posix())
-
-
 def make_relative_to_root(path: Path, root: Path) -> str:
-    """
-    Make a path relative to a root for safe audit logging.
-
-    Args:
-        path: The path to make relative.
-        root: The root directory.
-
-    Returns:
-        The relative path string, or the original path if not under root.
-    """
+    """Return ``path`` relative to ``root`` for messages, or unchanged if it is outside."""
     try:
         return str(path.resolve().relative_to(root.resolve()))
     except ValueError:
         return str(path)
-
-
-def profile_subdir_path(user_id: str, subdir: str) -> Path:
-    """
-    Resolve a user-specific profile subdirectory without touching the filesystem.
-
-    The structure follows: {profile_root}/{server_hash}/{user_id}/{subdir}
-
-    Use this from read paths. Callers that are about to write should use
-    :func:`get_profile_subdir`, which also creates the directory.
-
-    Args:
-        user_id: The user's ID.
-        subdir: The subdirectory name (e.g., "session", "mcp", "skills").
-
-    Returns:
-        The path to the subdirectory, whether or not it exists.
-    """
-    server_hash = hashlib.sha256(client_settings.server_api_base_url.encode()).hexdigest()[:12]
-
-    return Path(client_settings.profile_root) / server_hash / user_id / subdir
-
-
-def get_profile_subdir(user_id: str, subdir: str) -> Path:
-    """
-    Get a user-specific profile subdirectory, creating it if needed.
-
-    Args:
-        user_id: The user's ID.
-        subdir: The subdirectory name (e.g., "session", "mcp", "skills").
-
-    Returns:
-        The path to the subdirectory, created if it doesn't exist.
-    """
-    path = profile_subdir_path(user_id, subdir)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
 
 
 def _validate_profile_component(value: str, label: str) -> str:
@@ -191,6 +91,34 @@ def _validate_profile_component(value: str, label: str) -> str:
     return normalized
 
 
+def profile_subdir_path(user_id: str, subdir: str) -> Path:
+    """
+    Resolve a user-specific profile subdirectory without touching the filesystem.
+
+    The structure follows: {profile_root}/{server_hash}/{user_id}/{subdir}
+
+    Use this from read paths. Callers that are about to write should use
+    :func:`get_profile_subdir`, which also creates the directory.
+
+    ``user_id`` reaches here from a query string (``/auth/restore``) and from the
+    unverified ``sub`` claim of a presented bearer token, so it is validated as a
+    single path component: ``..\\..\\x`` would otherwise create, read, and delete
+    ``session/credentials.json`` anywhere the user can write.
+    """
+    safe_user_id = _validate_profile_component(user_id, "user_id")
+    safe_subdir = _validate_profile_component(subdir, "subdir")
+    server_hash = hashlib.sha256(client_settings.server_api_base_url.encode()).hexdigest()[:12]
+
+    return Path(client_settings.profile_root) / server_hash / safe_user_id / safe_subdir
+
+
+def get_profile_subdir(user_id: str, subdir: str) -> Path:
+    """Like :func:`profile_subdir_path`, but create the directory first."""
+    path = profile_subdir_path(user_id, subdir)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def get_device_profile_subdir(
     user_id: str,
     device_identifier: str,
@@ -198,10 +126,9 @@ def get_device_profile_subdir(
 ) -> Path:
     """Return a profile directory isolated to one installation identity."""
 
-    safe_user_id = _validate_profile_component(user_id, "user_id")
     safe_device_id = _validate_profile_component(device_identifier, "device_identifier")
     safe_subdir = _validate_profile_component(subdir, "subdir")
-    path = get_profile_subdir(safe_user_id, "devices") / safe_device_id / safe_subdir
+    path = get_profile_subdir(user_id, "devices") / safe_device_id / safe_subdir
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -250,12 +177,7 @@ def get_skill_runtimes_root(user_id: str) -> Path:
 
 
 def _user_skills_root(user_id: str) -> Path:
-    """Resolve one user's profile skill directory from a validated path component.
-
-    The upload/operation/lock helpers below are reached with a user id that
-    arrived over HTTP, so the component is validated here rather than trusted.
-    """
-    return profile_subdir_path(_validate_profile_component(user_id, "user_id"), "skills")
+    return profile_subdir_path(user_id, "skills")
 
 
 def get_skill_uploads_root(user_id: str) -> Path:

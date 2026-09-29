@@ -30,6 +30,7 @@ from client_backend.api.skills import router as skills_router
 from client_backend.api.web_images import router as web_images_router
 from client_backend.core.config import client_settings, initialize_client_environment
 from client_backend.core.logging import get_logger, setup_logging
+from client_backend.services.local_mcp_manager import shutdown_mcp_manager
 from client_backend.services.local_skills_registry import initialize_skills_registry
 from client_backend.services.runtime_bridge import get_runtime_bridge
 from client_backend.services.server_api import close_server_client
@@ -71,6 +72,10 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # noqa: BLE001 - shutdown must continue regardless
         logger.warning("Skill installation shutdown failed: %s", exc)
     await get_runtime_bridge().stop()
+    # The bridge stops only the scope it resolved. Managers the /mcp routes
+    # started for a session the bridge never used would otherwise keep their
+    # server processes (Desktop Commander, npx) running past shutdown.
+    await shutdown_mcp_manager()
     await close_server_client()
 
 

@@ -53,18 +53,7 @@ def create_local_session_token(
     device_identifier: str,
     device_id: str | None = None,
 ) -> str:
-    """
-    Create a local session token for UI to client backend communication.
-
-    Args:
-        user_id: The local user identifier.
-        server_user_id: The server-side user ID.
-        device_identifier: Stable installation identifier.
-        device_id: Server-assigned device UUID when available.
-
-    Returns:
-        A signed JWT token for local session.
-    """
+    """Sign a local session JWT the UI presents to this sidecar."""
     now = datetime.now(timezone.utc)
     expires = now + timedelta(minutes=client_settings.local_session_expire_minutes)
 
@@ -86,18 +75,7 @@ def create_local_session_token(
 
 
 def verify_local_session_token(token: str) -> LocalSessionPayload:
-    """
-    Verify and decode a local session token.
-
-    Args:
-        token: The JWT token to verify.
-
-    Returns:
-        The decoded session payload.
-
-    Raises:
-        LocalSessionError: If the token is invalid or expired.
-    """
+    """Decode a local session JWT, raising ``LocalSessionError`` if invalid or expired."""
     try:
         payload = jwt.decode(
             token,
@@ -130,9 +108,6 @@ def generate_device_identifier(config_dir: Path | str | None = None) -> str:
     installations on the same machine are distinct devices. It is generated
     once on first run and persisted in the installation's profile directory
     (or ``config_dir`` when given).
-
-    Returns:
-        A device identifier string.
     """
     root = Path(config_dir) if config_dir is not None else Path(client_settings.profile_root)
     identity_path = root / DEVICE_IDENTITY_FILENAME
@@ -302,67 +277,3 @@ def decrypt_local_secret(payload: dict[str, Any]) -> bytes:
         return _decrypt_with_fernet(ciphertext)
 
     raise LocalSecretStorageError(f"Unsupported local secret encryption mode: {encryption}")
-
-
-def redact_path_for_audit(path: str, workspace_roots: list[str] | None = None) -> str:
-    """
-    Redact a path for safe audit logging.
-
-    Replaces user home directories and workspace roots with tokens.
-
-    Args:
-        path: The path to redact.
-        workspace_roots: Optional list of workspace roots to redact.
-
-    Returns:
-        The redacted path string.
-    """
-    from pathlib import Path
-
-    result = path
-
-    # Redact home directory
-    home = str(Path.home())
-    if result.startswith(home):
-        result = "~" + result[len(home) :]
-
-    # Redact workspace roots
-    roots = workspace_roots or client_settings.workspace_roots
-    for i, root in enumerate(roots):
-        root_str = str(Path(root).resolve())
-        if result.startswith(root_str):
-            result = f"$WORKSPACE_{i}" + result[len(root_str) :]
-            break
-
-    return result
-
-
-def redact_env_for_audit(env: dict[str, str]) -> dict[str, str]:
-    """
-    Redact environment variables for safe audit logging.
-
-    Args:
-        env: Environment variables dictionary.
-
-    Returns:
-        A copy with sensitive values redacted.
-    """
-    sensitive_patterns = [
-        "KEY",
-        "SECRET",
-        "TOKEN",
-        "PASSWORD",
-        "CREDENTIAL",
-        "AUTH",
-        "API_KEY",
-    ]
-
-    redacted = {}
-    for key, value in env.items():
-        key_upper = key.upper()
-        if any(pattern in key_upper for pattern in sensitive_patterns):
-            redacted[key] = "[REDACTED]"
-        else:
-            redacted[key] = value
-
-    return redacted

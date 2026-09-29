@@ -117,15 +117,7 @@ def _tool_payload(tool: Any) -> dict[str, Any]:
 def _manager_tool_lookup(manager: LocalMCPManager) -> dict[str, list[dict[str, Any]]]:
     lookup: dict[str, list[dict[str, Any]]] = {}
     for tool in manager.get_all_tools():
-        lookup.setdefault(tool.name, []).append(
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "argsSchema": tool.input_schema,
-                "serverName": tool.server_name,
-                "qualifiedId": tool.qualified_id,
-            }
-        )
+        lookup.setdefault(tool.name, []).append(_tool_payload(tool))
     return lookup
 
 

@@ -5,6 +5,7 @@ These endpoints preserve the current server contract for the desktop UI while
 also maintaining the local runtime bridge and local-session support.
 """
 
+import secrets
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Response, status
@@ -195,7 +196,10 @@ async def refresh(authorization: str | None = Header(default=None)) -> dict[str,
     Refresh the current upstream access token.
 
     The local backend continues to own upstream tokens, so the current active
-    session is refreshed and the server's wrapped response is returned.
+    session is refreshed and the server's wrapped response is returned. The
+    caller must present the active refresh token: the response carries fresh
+    access, refresh, and local-session tokens, so an omitted header must not
+    mean "skip the check" for any local process that can reach this port.
     """
     auth_service = get_upstream_auth_service()
     if not auth_service.is_authenticated():
@@ -205,13 +209,17 @@ async def refresh(authorization: str | None = Header(default=None)) -> dict[str,
         )
 
     current_refresh_token = auth_service.get_current_refresh_token()
-    if authorization and current_refresh_token:
-        expected = f"Bearer {current_refresh_token}"
-        if authorization.strip() != expected:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Refresh token does not match the active local session",
-            )
+    if not authorization or not current_refresh_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh requires the active refresh token as a Bearer credential",
+        )
+    presented = authorization.strip().encode("utf-8")
+    if not secrets.compare_digest(presented, f"Bearer {current_refresh_token}".encode()):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token does not match the active local session",
+        )
 
     try:
         tokens = await auth_service.refresh()

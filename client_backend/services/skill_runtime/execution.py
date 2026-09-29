@@ -19,7 +19,9 @@ import jsonschema
 from client_backend.core.config import client_settings
 from client_backend.core.paths import PathSecurityError, is_under_root, validate_workspace_path
 from client_backend.core.windows_job import (
-    JobExtendedLimitInformation as _JobExtendedLimitInformation,
+    EXTENDED_LIMIT_INFORMATION,
+    KILL_ON_JOB_CLOSE,
+    JobExtendedLimitInformation,
 )
 from client_backend.services.local_skills_registry import LocalSkillsRegistry, get_skills_registry
 from client_backend.services.skill_runtime.audit import SkillAuditWriter, new_audit_id
@@ -85,8 +87,6 @@ _ENV_PASSTHROUGH_NAMES = frozenset(
 class _WindowsKillJob:
     """A kill-on-close Windows Job Object containing one command tree."""
 
-    _KILL_ON_JOB_CLOSE = 0x2000
-    _EXTENDED_LIMIT_INFORMATION = 9
     _PROCESS_TERMINATE = 0x0001
     _PROCESS_SET_QUOTA = 0x0100
 
@@ -122,11 +122,11 @@ class _WindowsKillJob:
             raise ctypes.WinError(ctypes.get_last_error())
         process_handle = None
         try:
-            limits = _JobExtendedLimitInformation()
-            limits.basic_limit_information.limit_flags = cls._KILL_ON_JOB_CLOSE
+            limits = JobExtendedLimitInformation()
+            limits.basic_limit_information.limit_flags = KILL_ON_JOB_CLOSE
             if not kernel32.SetInformationJobObject(
                 job,
-                cls._EXTENDED_LIMIT_INFORMATION,
+                EXTENDED_LIMIT_INFORMATION,
                 ctypes.byref(limits),
                 ctypes.sizeof(limits),
             ):
