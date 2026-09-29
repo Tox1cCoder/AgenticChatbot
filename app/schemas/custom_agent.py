@@ -229,14 +229,6 @@ class ConversationCustomAgentsUpdate(_CamelModel):
         return value
 
 
-class ConversationCustomAgentRead(_CamelModel):
-    model_config = ConfigDict(from_attributes=True, alias_generator=to_camel, populate_by_name=True)
-
-    custom_agent_id: UUID
-    agent_order: int
-    custom_agent: CustomAgentRead | None = None
-
-
 # --------------------------------------------------------------------------- #
 # Options (selectable providers/tools/skills for the current request context)
 # --------------------------------------------------------------------------- #

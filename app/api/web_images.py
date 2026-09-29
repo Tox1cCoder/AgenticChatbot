@@ -5,7 +5,6 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from app.core.auth import get_current_user_id
-from app.core.container import Container
 from app.repositories.web_image_reference import WebImageReferenceRepository
 from app.services.web_image_service import (
     WebImageRejected,
@@ -16,12 +15,25 @@ from app.services.web_image_service import (
 router = APIRouter(prefix="/web-images", tags=["web-images"])
 
 
+def _container():
+    """The process-wide container, not a fresh ``Container()``.
+
+    A fresh declarative container rebuilds its ``Database`` singleton and its
+    ``WebImageService`` singleton, so a per-request one opened a new engine and
+    pool on every image read. Imported lazily for the reason given in
+    ``app.api.tool_result_blobs``.
+    """
+    from app.core.container import get_container
+
+    return get_container()
+
+
 def _get_repository() -> WebImageReferenceRepository:
-    return Container().web_image_reference_repository()
+    return _container().web_image_reference_repository()
 
 
 def _get_service() -> WebImageService:
-    return Container().web_image_service()
+    return _container().web_image_service()
 
 
 @router.get("/{image_id}")

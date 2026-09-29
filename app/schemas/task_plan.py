@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from app.models.enums import TaskStatus
 from app.utils.case_conversion import to_camel_case as to_camel
@@ -43,6 +43,16 @@ class TaskPlanUpdate(BaseModel):
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
+    @field_validator("description", "status")
+    @classmethod
+    def _not_nullable(cls, value: Any, info: ValidationInfo) -> Any:
+        # Both columns are NOT NULL. Updates apply ``exclude_unset``, so omitting
+        # a field is a no-op, but an explicit null reached the column and failed
+        # as an IntegrityError (500). Validators skip omitted fields.
+        if value is None:
+            raise ValueError(f"{info.field_name} cannot be null; omit it to leave it unchanged")
+        return value
+
 
 class TaskPlanRead(BaseModel):
     """Schema for reading a task plan (API response)."""
@@ -63,23 +73,6 @@ class TaskPlanRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None = Field(None, description="Timestamp when the task was completed")
-
-
-class TaskPlanInDB(BaseModel):
-    """Internal schema matching database structure."""
-
-    model_config = ConfigDict(from_attributes=True, alias_generator=to_camel, populate_by_name=True)
-
-    id: UUID
-    conversation_id: UUID
-    task_order: int
-    description: str
-    status: TaskStatus
-
-    task_metadata: dict[str, Any] | None = Field(default_factory=dict)
-    created_at: datetime
-    updated_at: datetime
-    completed_at: datetime | None = None
 
 
 class TaskPlanGenerateRequest(BaseModel):

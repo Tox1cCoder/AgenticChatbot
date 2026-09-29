@@ -13,13 +13,11 @@ from app.schemas.document import (
 )
 from app.schemas.feedback import (
     FeedbackCreate,
-    FeedbackInDB,
     FeedbackRead,
     FeedbackUpdate,
 )
 from app.schemas.message import (
     MessageCreate,
-    MessageInDB,
     MessageRead,
     MessageUpdate,
 )
@@ -48,7 +46,6 @@ from app.schemas.task_plan import (
     PlanningStatusResponse,
     TaskPlanCreate,
     TaskPlanGenerateRequest,
-    TaskPlanInDB,
     TaskPlanManualCreateRequest,
     TaskPlanRead,
     TaskPlanUpdate,
@@ -75,12 +72,10 @@ __all__ = [
     "MessageCreate",
     "MessageUpdate",
     "MessageRead",
-    "MessageInDB",
     # Feedback schemas
     "FeedbackCreate",
     "FeedbackUpdate",
     "FeedbackRead",
-    "FeedbackInDB",
     # Document schemas
     "DocumentCreate",
     "DocumentResponse",
@@ -91,7 +86,6 @@ __all__ = [
     "TaskPlanCreate",
     "TaskPlanUpdate",
     "TaskPlanRead",
-    "TaskPlanInDB",
     "TaskPlanGenerateRequest",
     "TaskPlanManualCreateRequest",
     "PlanningStatusResponse",

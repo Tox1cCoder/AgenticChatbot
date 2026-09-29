@@ -21,14 +21,11 @@ from app.core.config import settings
 from app.database.session import get_db
 from app.models.user import User
 from app.schemas.runtime_protocol import (
-    RUNTIME_MESSAGE_ACK,
     RUNTIME_MESSAGE_ERROR,
     RUNTIME_MESSAGE_HEARTBEAT,
-    RUNTIME_MESSAGE_TOOL_REQUEST,
     RUNTIME_MESSAGE_TOOL_RESULT,
     RuntimeAckMessage,
     RuntimeErrorContext,
-    RuntimeErrorMessage,
     ToolDispatchRequest,
     ToolDispatchResult,
 )
@@ -40,27 +37,14 @@ router = APIRouter(prefix="/device-runtime", tags=["device-runtime"])
 
 
 class WebSocketMessage:
-    """Base message structure for WebSocket communication."""
+    """Message types the gateway reads from a device, and the ack it sends back."""
 
-    TYPE_TOOL_REQUEST = RUNTIME_MESSAGE_TOOL_REQUEST
     TYPE_TOOL_RESULT = RUNTIME_MESSAGE_TOOL_RESULT
     TYPE_HEARTBEAT = RUNTIME_MESSAGE_HEARTBEAT
     TYPE_ERROR = RUNTIME_MESSAGE_ERROR
-    TYPE_ACK = RUNTIME_MESSAGE_ACK
-
-    @staticmethod
-    def heartbeat() -> dict:
-        """Create a heartbeat message."""
-        return {"type": RUNTIME_MESSAGE_HEARTBEAT}
-
-    @staticmethod
-    def error(message: str, code: str | None = None) -> dict:
-        """Create an error message."""
-        return RuntimeErrorMessage(message=message, code=code).model_dump(mode="json")
 
     @staticmethod
     def ack(message_id: str | None = None) -> dict:
-        """Create an acknowledgment message."""
         return RuntimeAckMessage(message_id=message_id).model_dump(mode="json")
 
 
@@ -87,12 +71,6 @@ class DeviceRuntimeGateway:
         self._dispatch_task: asyncio.Task | None = None
 
     async def send_message(self, message: dict) -> None:
-        """
-        Send a message to the device.
-
-        Args:
-            message: The message dictionary to send.
-        """
         async with self._send_lock:
             try:
                 await self.websocket.send_json(message)
@@ -101,12 +79,7 @@ class DeviceRuntimeGateway:
                 raise
 
     async def receive_message(self) -> dict | None:
-        """
-        Receive a message from the device.
-
-        Returns:
-            The message dictionary, or None on error.
-        """
+        """Return the next device message, or None once the socket is unusable."""
         try:
             data = await self.websocket.receive_text()
             return json.loads(data)
@@ -158,17 +131,10 @@ class DeviceRuntimeGateway:
             await self._cleanup()
 
     async def _handle_heartbeat(self, message: dict) -> None:
-        """Handle heartbeat message from device."""
         await self.service.update_heartbeat(self.device_id)
         await self.send_message(WebSocketMessage.ack())
 
     async def _handle_tool_result(self, message: dict) -> None:
-        """
-        Handle tool result message from device.
-
-        Args:
-            message: The tool result message.
-        """
         try:
             payload = ToolDispatchResult.model_validate(message)
         except Exception as exc:
@@ -189,11 +155,9 @@ class DeviceRuntimeGateway:
         await self.send_message(WebSocketMessage.ack(request_id))
 
     async def _handle_error(self, message: dict) -> None:
-        """Handle error message from device."""
         logger.error(f"Device {self.device_id} error: {message.get('message')}")
 
     async def _cleanup(self) -> None:
-        """Cleanup when connection closes."""
         self._running = False
         await self.service.end_session(
             self.device_id,
@@ -261,22 +225,11 @@ class DeviceRuntimeGateway:
         arguments: dict[str, Any],
         timeout_seconds: float = 30.0,
     ) -> dict:
-        """
-        Dispatch a tool call to the device and wait for the result.
+        """Dispatch a tool call to the device and wait for the result.
 
-        Args:
-            request_id: Unique request identifier.
-            tool_name: The tool name.
-            qualified_tool_id: Fully qualified tool ID.
-            arguments: Tool arguments.
-            timeout_seconds: Timeout for the call.
-
-        Returns:
-            The tool result message.
-
-        Raises:
-            TimeoutError: If the tool call times out.
-            RuntimeError: If the tool call fails.
+        ``timeout_seconds`` bounds both the execution and the response wait.
+        ``request_id`` is accepted for call-site compatibility; the service
+        mints its own.
         """
         return await ClientDeviceService.dispatch_tool_call(
             user_id=str(self.session.user_id),
@@ -292,7 +245,7 @@ class DeviceRuntimeGateway:
 
 @router.websocket("/{device_id}/connect")
 async def device_runtime_connect(
-    device_id: str,
+    device_id: UUID,
     session_id: str,
     websocket: WebSocket,
     db: Session = Depends(get_db),
@@ -300,16 +253,14 @@ async def device_runtime_connect(
     """
     WebSocket endpoint for device runtime connection.
 
-    Args:
-        device_id: The device UUID.
-        session_id: The session ID from registration.
-        websocket: The WebSocket connection.
+    ``session_id`` is the one issued at registration; a malformed device id is
+    refused by path validation instead of raising before the handshake.
     """
     if not settings.enable_client_runtime_bridge:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
-    device_uuid = UUID(device_id)
+    device_uuid = device_id
     service = ClientDeviceService(db)
 
     # Verify device exists
@@ -339,11 +290,11 @@ async def device_runtime_connect(
                 current_session_id=session_id,
             )
             if expired:
+                # The session id is the socket's bearer credential; never log it.
                 logger.info(
-                    "Expired %d stale interrupt(s) on device reconnect device=%s session=%s",
+                    "Expired %d stale interrupt(s) on device reconnect device=%s",
                     expired,
-                    device_id,
-                    session_id,
+                    device_uuid,
                 )
         except Exception as _exc:
             logger.warning("Interrupt invalidation failed on connect: %s", _exc)

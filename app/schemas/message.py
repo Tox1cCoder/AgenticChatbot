@@ -207,21 +207,6 @@ class InterruptResumeRequest(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
-class MessageInDB(BaseModel):
-    model_config = ConfigDict(from_attributes=True, alias_generator=to_camel, populate_by_name=True)
-
-    id: UUID
-    created_at: datetime
-    updated_at: datetime
-    deleted_at: datetime | None
-    conversation_id: UUID
-    sender: int = Field(..., description="Message sender: 1=user, 2=assistant, 3=system")
-    content: str = Field(..., description="Message content")
-    message_metadata: dict[str, Any] | None = Field(
-        default_factory=dict, description="Message metadata including persona used"
-    )
-
-
 class StopGenerationRequest(BaseModel):
     """Request to stop an in-flight streaming generation.
 
@@ -305,21 +290,5 @@ class GenerationSnapshotResponse(BaseModel):
     continuation_block_reason: str | None = None
     assistant_message_id: UUID | None = None
     terminal_reason: str | None = None
-
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
-
-
-class StopGenerationResponse(BaseModel):
-    """Response from the stop generation endpoint."""
-
-    status: str = Field(..., description="'cancelled', 'stop_requested' or 'not_inflight'")
-    message: dict[str, Any] | None = Field(
-        default=None,
-        description="Persisted assistant message (partial or final), if available",
-    )
-    generation: GenerationSnapshotResponse | None = Field(
-        default=None,
-        description="Durable lifecycle snapshot; the field a client should read",
-    )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)

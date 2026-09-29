@@ -98,7 +98,6 @@ class SkillCatalogUpdateResponse(BaseModel):
 
 
 def get_device_service(db: Session = Depends(get_db)) -> ClientDeviceService:
-    """Dependency to get the device service."""
     return ClientDeviceService(db)
 
 
@@ -211,7 +210,7 @@ async def list_my_devices(
 
 @router.put("/{device_id}/tool-catalog", response_model=ToolCatalogUpdateResponse)
 async def update_tool_catalog(
-    device_id: str,
+    device_id: UUID,
     request: ToolCatalogUpdateRequest,
     user: User = Depends(get_current_user),
     service: ClientDeviceService = Depends(get_device_service),
@@ -221,15 +220,14 @@ async def update_tool_catalog(
 
     The client sends a sanitized catalog of available tools (native and MCP).
     """
-    device_uuid = UUID(device_id)
-    if request.device_id != device_uuid:
+    if request.device_id != device_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Request device_id does not match path device_id",
         )
 
     # Verify device ownership
-    session = service.get_active_session(device_uuid)
+    session = service.get_active_session(device_id)
     if not session or session.user_id != user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -237,7 +235,7 @@ async def update_tool_catalog(
         )
 
     # Update catalog
-    success = await service.update_tool_catalog(device_uuid, request.catalog)
+    success = await service.update_tool_catalog(device_id, request.catalog)
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -252,7 +250,7 @@ async def update_tool_catalog(
 
 @router.put("/{device_id}/skill-catalog", response_model=SkillCatalogUpdateResponse)
 async def update_skill_catalog(
-    device_id: str,
+    device_id: UUID,
     request: SkillCatalogUpdateRequest,
     user: User = Depends(get_current_user),
     service: ClientDeviceService = Depends(get_device_service),
@@ -262,15 +260,14 @@ async def update_skill_catalog(
 
     The client sends a catalog of available local skills.
     """
-    device_uuid = UUID(device_id)
-    if request.device_id != device_uuid:
+    if request.device_id != device_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Request device_id does not match path device_id",
         )
 
     # Verify device ownership
-    session = service.get_active_session(device_uuid)
+    session = service.get_active_session(device_id)
     if not session or session.user_id != user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -278,7 +275,7 @@ async def update_skill_catalog(
         )
 
     # Update catalog
-    success = await service.update_skill_catalog(device_uuid, request.catalog)
+    success = await service.update_skill_catalog(device_id, request.catalog)
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -293,15 +290,14 @@ async def update_skill_catalog(
 
 @router.get("/{device_id}")
 async def get_device_info(
-    device_id: str,
+    device_id: UUID,
     user: User = Depends(get_current_user),
     service: ClientDeviceService = Depends(get_device_service),
 ) -> DeviceInfoResponse:
     """
     Get information about a specific device.
     """
-    device_uuid = UUID(device_id)
-    device = service.repository.get_by_id(device_uuid)
+    device = service.repository.get_by_id(device_id)
 
     if not device or device.user_id != user.id:
         raise HTTPException(

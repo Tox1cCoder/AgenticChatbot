@@ -11,21 +11,17 @@ Allows users to store provider/model/temperature selection for:
 from typing import Any
 
 from fastapi import APIRouter, Depends, status
-from pydantic import BaseModel, ConfigDict, Field, RootModel
+from pydantic import Field, RootModel
 
+from app.api.providers import CamelModel, ProviderModelOption
 from app.core.auth import get_current_user
 from app.core.dependency_injection import AppAutoInjector
 from app.models.user import User
 from app.schemas.responses import ApiResponse
 from app.services.model_config_service import ModelConfigService
 from app.utils.api_error_helpers import translate_service_errors
-from app.utils.case_conversion import to_camel_case as to_camel
 
 router = APIRouter(prefix="/model-config", tags=["model-config"])
-
-
-class CamelModel(BaseModel):
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
 class AgentModelConfigPatch(CamelModel):
@@ -62,32 +58,6 @@ class ModelConfigUpdateRequest(RootModel[dict[str, AgentModelConfigPatch]]):
         "chat": {"provider": "openai", "model": "gpt-4o", "temperature": 0.7}
       }
     """
-
-
-class ReasoningControlOption(CamelModel):
-    supported: bool = False
-    parameter_name: str | None = None
-    display_label: str = "Reasoning"
-    levels: list[str] = Field(default_factory=list)
-    default_level: str | None = None
-    source: str = "unknown"
-
-
-class ProviderModelOption(CamelModel):
-    id: str
-    display_name: str
-    provider_type: str
-    supports_vision: bool = False
-    supports_tool_calling: bool = False
-    supports_streaming: bool = False
-    supports_reasoning: bool = False
-    reasoning_control: ReasoningControlOption = Field(default_factory=ReasoningControlOption)
-    recommended: bool = False
-    context_window_tokens: int | None = None
-    max_input_tokens: int | None = None
-    max_output_tokens: int | None = None
-    context_window_source: str | None = None
-    context_window_known: bool | None = None
 
 
 class ProviderOptionsSnapshot(CamelModel):

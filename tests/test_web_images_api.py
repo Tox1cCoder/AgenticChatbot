@@ -102,6 +102,15 @@ def test_web_image_failure_is_generic_and_bounded(client_and_state, error, expec
     assert "upstream" not in response.text.lower()
 
 
+def test_web_image_dependencies_reuse_the_process_container():
+    # A fresh Container() per request built a new engine, pool and fetcher every read.
+    from app.core.container import get_container
+
+    assert _get_service() is _get_service()
+    assert _get_service() is get_container().web_image_service()
+    assert type(_get_repository()) is type(get_container().web_image_reference_repository())
+
+
 def test_main_application_registers_web_image_route():
     from app.main import app
 

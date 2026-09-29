@@ -1,4 +1,3 @@
-from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -22,13 +21,6 @@ class DocumentImageBase(BaseModel):
 
 class DocumentImageCreate(DocumentImageBase):
     pass
-
-
-class DocumentImageRead(DocumentImageBase):
-    model_config = ConfigDict(from_attributes=True, alias_generator=to_camel, populate_by_name=True)
-
-    id: UUID
-    created_at: datetime
 
 
 class DocumentImageUpdate(BaseModel):

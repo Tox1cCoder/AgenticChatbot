@@ -40,6 +40,18 @@ def test_get_image_returns_bytes(client_and_state):
     assert resp.status_code == 200
     assert resp.content == b"PNGBYTES"
     assert resp.headers["content-type"].startswith("image/png")
+    # Uploader-declared image/* includes SVG; opened directly it must stay inert.
+    assert resp.headers["x-content-type-options"] == "nosniff"
+    assert resp.headers["content-security-policy"] == "default-src 'none'"
+
+
+def test_image_dependencies_reuse_the_process_container():
+    # A fresh Container() per request built a new engine and pool every read.
+    from app.core.container import get_container
+
+    assert _get_service() is _get_service()
+    assert _get_service() is get_container().chat_image_service()
+    assert type(_get_repository()) is type(get_container().chat_image_repository())
 
 
 def test_get_unknown_image_404(client_and_state):

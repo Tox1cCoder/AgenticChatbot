@@ -1,7 +1,8 @@
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from app.models.enums import PlanLifecycle
 from app.schemas.custom_agent import CustomAgentRead
@@ -40,6 +41,17 @@ class ConversationUpdate(BaseModel):
     )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    @field_validator("title", "planning_mode_enabled")
+    @classmethod
+    def _not_nullable(cls, value: Any, info: ValidationInfo) -> Any:
+        # Both columns are NOT NULL. Updates apply ``exclude_unset``, so omitting
+        # a field is a no-op, but an explicit null reached the column and failed
+        # as an IntegrityError (500). Validators skip omitted fields.
+        # ``persona_prompt`` stays nullable: null clears it.
+        if value is None:
+            raise ValueError(f"{info.field_name} cannot be null; omit it to leave it unchanged")
+        return value
 
 
 class ConversationRead(BaseModel):

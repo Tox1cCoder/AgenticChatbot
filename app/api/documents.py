@@ -1,4 +1,3 @@
-import contextlib
 import logging
 from collections.abc import Iterable
 from pathlib import Path
@@ -9,6 +8,7 @@ from fastapi import (
     APIRouter,
     File,
     Form,
+    Query,
     Response,
     UploadFile,
     status,
@@ -104,7 +104,7 @@ async def _stage_create_and_enqueue_document(
             if updated is not None:
                 document = updated
 
-        with contextlib.suppress(Exception):
+        try:
             await get_event_bus().emit(
                 DocumentEvent.UPLOAD_STARTED,
                 DocumentEventData(
@@ -116,6 +116,9 @@ async def _stage_create_and_enqueue_document(
                     metadata={"task_id": task_info.get("task_id")},
                 ),
             )
+        except Exception:
+            # Best-effort telemetry: the document is created and queued either way.
+            logger.debug("Event emission failed for UPLOAD_STARTED", exc_info=True)
 
         return DocumentUploadFileResult(
             filename=display_name,
@@ -158,8 +161,10 @@ def _safe_unlink(path: Path) -> None:
     try:
         if path.is_file():
             path.unlink()
-    except Exception:
-        pass
+    except OSError:
+        # Never mask the rejection being returned; an orphaned staging file is
+        # an operator problem worth a log line, not a request failure.
+        logger.warning("Could not remove staged upload %s", path, exc_info=True)
 
 
 async def _upload_documents_batch(
@@ -429,8 +434,10 @@ async def get_conversation_documents(
     document_service: IDocumentService,
     current_user_id: UUID,
     conversation_id: UUID,
-    page: int = 1,
-    page_size: int = 20,
+    # Bounded: page_size=0 divided by zero computing total_pages and page<1
+    # produced a negative OFFSET, both surfacing as 500s.
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
 ) -> ApiResponse[dict[str, Any]]:
     """Get documents for a conversation with pagination"""
     # Validate conversation access

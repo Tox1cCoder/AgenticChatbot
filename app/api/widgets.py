@@ -108,6 +108,26 @@ def _message_metadata_contains_widget(metadata: Any, widget_id: str) -> bool:
     return False
 
 
+def _widget_messages_statement(user_id: UUID, widget_id: str):
+    """The caller's own messages whose metadata mentions ``widget_id``.
+
+    ``widget_id`` comes from the URL, so its LIKE wildcards are escaped: raw,
+    an id of ``%`` or ``_`` matched every message with metadata instead of the
+    one widget. Owner scoping is the ``has(owner_id=...)`` predicate.
+    """
+    return (
+        select(Message)
+        .join(Message.conversation)
+        .where(
+            Message.conversation.has(owner_id=user_id),
+            Message.message_metadata.is_not(None),
+            cast(Message.message_metadata, Text).icontains(widget_id, autoescape=True),
+        )
+        .order_by(Message.created_at.desc())
+        .limit(25)
+    )
+
+
 def _iter_widget_messages_for_user(user_id: UUID, widget_id: str) -> list[Message]:
     repository = _get_container().message_repository()
     session_factory = getattr(repository, "session_factory", None)
@@ -115,17 +135,7 @@ def _iter_widget_messages_for_user(user_id: UUID, widget_id: str) -> list[Messag
         return []
 
     with session_factory() as session:
-        statement = (
-            select(Message)
-            .join(Message.conversation)
-            .where(
-                Message.conversation.has(owner_id=user_id),
-                Message.message_metadata.is_not(None),
-                cast(Message.message_metadata, Text).ilike(f"%{widget_id}%"),
-            )
-            .order_by(Message.created_at.desc())
-            .limit(25)
-        )
+        statement = _widget_messages_statement(user_id, widget_id)
         return list(session.execute(statement).scalars().all())
 
 
@@ -377,8 +387,11 @@ async def _ping_loop(websocket: WebSocket, send_lock: asyncio.Lock) -> None:
                 },
                 send_lock,
             )
-    except (asyncio.CancelledError, Exception):
-        pass
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # A failed send means the socket is gone; the receive loop owns cleanup.
+        logger.debug("Widget ping loop stopped", exc_info=True)
 
 
 async def _watch_widget_updates(

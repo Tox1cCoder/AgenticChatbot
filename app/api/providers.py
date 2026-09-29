@@ -66,6 +66,8 @@ class ReasoningControlOption(CamelModel):
     source: str = "unknown"
 
 
+# Also the model shape inside ``/model-config/options``: ``app.api.model_config``
+# imports this class rather than keeping a second copy in sync by hand.
 class ProviderModelOption(CamelModel):
     id: str
     display_name: str

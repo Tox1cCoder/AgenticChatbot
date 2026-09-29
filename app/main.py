@@ -277,7 +277,6 @@ async def _terminalize_own_generations() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan context manager for startup and shutdown events."""
     global _client_runtime_cleanup_task
     # Startup
     _ensure_selector_event_loop()
@@ -330,8 +329,6 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    """Create and configure FastAPI application"""
-
     container = get_container()
 
     setup_auto_injection(container)
@@ -463,90 +460,105 @@ async def health_check():
     return {"status": "healthy", "message": "OK", **resolve_build_info()}
 
 
-@app.get("/health/celery")
-async def health_check_celery():
-    """Check Celery worker health"""
-    try:
-        # Use Celery inspect API to check active workers
-        inspect = celery_app.control.inspect()
-        active_workers = inspect.active()
+# The three dependency probes below are synchronous network clients. They run
+# in a worker thread: on the event loop, Celery's inspect broadcast alone
+# stalled every other request for its whole reply timeout.
 
-        if active_workers:
-            worker_names = list(active_workers.keys())
-            return {
-                "status": "healthy",
-                "workers": worker_names,
-                "worker_count": len(worker_names),
-                "message": f"{len(worker_names)} Celery worker(s) active",
-            }
-        else:
-            return {
-                "status": "unhealthy",
-                "workers": [],
-                "worker_count": 0,
-                "message": "No active Celery workers found",
-            }
+
+def _probe_celery() -> dict[str, Any]:
+    try:
+        active_workers = celery_app.control.inspect().active()
     except Exception as e:
         return {
             "status": "unhealthy",
             "error": str(e),
             "message": "Failed to connect to Celery",
         }
+    if not active_workers:
+        return {
+            "status": "unhealthy",
+            "workers": [],
+            "worker_count": 0,
+            "message": "No active Celery workers found",
+        }
+    worker_names = list(active_workers.keys())
+    return {
+        "status": "healthy",
+        "workers": worker_names,
+        "worker_count": len(worker_names),
+        "message": f"{len(worker_names)} Celery worker(s) active",
+    }
 
 
-@app.get("/health/redis")
-async def health_check_redis():
-    """Check Redis connection health"""
+def _probe_redis() -> dict[str, Any]:
+    redis_client = None
     try:
         redis_client = Redis.from_url(settings.celery_broker_url, decode_responses=True)
-
-        response = redis_client.ping()
-
-        if response:
-            redis_client.close()
+        if redis_client.ping():
             return {"status": "healthy", "message": "Redis connection successful"}
-        else:
-            redis_client.close()
-            return {"status": "unhealthy", "message": "Redis ping failed"}
+        return {"status": "unhealthy", "message": "Redis ping failed"}
     except Exception as e:
         return {
             "status": "unhealthy",
             "error": str(e),
             "message": "Failed to connect to Redis",
         }
+    finally:
+        if redis_client is not None:
+            redis_client.close()
 
 
-@app.get("/health/qdrant")
-async def health_check_qdrant():
+def _probe_qdrant() -> dict[str, Any]:
+    client = None
     try:
         from qdrant_client import QdrantClient
 
         client = QdrantClient(url=settings.qdrant_url)
         collections = client.get_collections()
-
         collection_exists = any(
             c.name == settings.qdrant_collection_name for c in collections.collections
         )
-
-        if collection_exists:
-            info = client.get_collection(settings.qdrant_collection_name)
-            return {
-                "status": "healthy",
-                "collection": settings.qdrant_collection_name,
-                "vectors_count": info.vectors_count,
-                "message": "Qdrant connection successful",
-            }
-        else:
+        if not collection_exists:
             return {
                 "status": "unhealthy",
                 "message": f"Collection '{settings.qdrant_collection_name}' not found",
             }
+        info = client.get_collection(settings.qdrant_collection_name)
+        return {
+            "status": "healthy",
+            "collection": settings.qdrant_collection_name,
+            # qdrant-client removed ``CollectionInfo.vectors_count``; reading it
+            # raised, so a reachable Qdrant always reported "Failed to connect"
+            # and /health/all was permanently degraded. One vector per point.
+            "vectors_count": info.points_count,
+            "message": "Qdrant connection successful",
+        }
     except Exception as e:
         return {
             "status": "unhealthy",
             "error": str(e),
             "message": "Failed to connect to Qdrant",
         }
+    finally:
+        if client is not None:
+            client.close()
+
+
+@app.get("/health/celery")
+async def health_check_celery():
+    """Check Celery worker health"""
+    return await asyncio.to_thread(_probe_celery)
+
+
+@app.get("/health/redis")
+async def health_check_redis():
+    """Check Redis connection health"""
+    return await asyncio.to_thread(_probe_redis)
+
+
+@app.get("/health/qdrant")
+async def health_check_qdrant():
+    return await asyncio.to_thread(_probe_qdrant)
 
 
 @app.get("/health/all")

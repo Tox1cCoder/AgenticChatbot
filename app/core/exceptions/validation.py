@@ -1,15 +1,9 @@
-"""
-Validation-related exception classes
-"""
-
 from fastapi import status
 
 from .http import CustomHTTPException
 
 
 class ValidationException(CustomHTTPException):
-    """Validation-related exceptions"""
-
     def __init__(self, detail: str = "Validation failed", error_code: str = "VALIDATION_ERROR"):
         super().__init__(
             # Starlette's symbolic name differs across the supported range.
@@ -20,8 +14,6 @@ class ValidationException(CustomHTTPException):
 
 
 class FileValidationError(CustomHTTPException):
-    """Exception raised when file validation fails"""
-
     def __init__(
         self,
         detail: str = "File validation failed",

@@ -87,6 +87,8 @@ async def get_conversations(
     latest_messages: int = Query(
         3,
         alias="latestMessages",
+        ge=0,
+        le=100,
         description="Number of latest messages to include",
     ),
     search: str | None = Query(

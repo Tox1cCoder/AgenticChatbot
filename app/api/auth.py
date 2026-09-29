@@ -17,6 +17,7 @@ from app.schemas.responses.token_response import (
 from app.schemas.user import UserCreate, UserRead
 from app.services.jwt_service import JwtService
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
 
@@ -67,9 +68,9 @@ async def refresh_token(
 async def logout(
     current_user_id: UUID,
 ) -> ApiResponse[Any]:
-    """Logout endpoint with token invalidation"""
+    """Acknowledge a logout. Tokens are stateless and stay valid until they expire."""
 
-    logging.info(f"User {current_user_id} logged out successfully")
+    logger.info("User %s logged out", current_user_id)
 
     return ApiResponse(
         success=True,

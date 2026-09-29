@@ -5,7 +5,7 @@ from .custom_agent import (
     CustomAgentNotFoundError,
     CustomAgentValidationError,
 )
-from .http import CustomHTTPException, DocumentProcessingError
+from .http import CustomHTTPException
 from .mcp import (
     MCPException,
     ServerConfigurationError,
@@ -13,7 +13,7 @@ from .mcp import (
     ToolExecutionError,
     ToolNotFoundError,
 )
-from .planning import PauseReason, PlanExecutionPausedException
+from .planning import PauseReason
 from .project import (
     ProjectConversationNotFoundError,
     ProjectForbiddenError,
@@ -32,13 +32,11 @@ __all__ = [
     "ValidationException",
     "FileValidationError",
     "ResourceNotFoundException",
-    "DocumentProcessingError",
     "MCPException",
     "ServerNotFoundError",
     "ToolNotFoundError",
     "ToolExecutionError",
     "ServerConfigurationError",
-    "PlanExecutionPausedException",
     "PauseReason",
     "SkillNotFoundError",
     "CustomAgentValidationError",
