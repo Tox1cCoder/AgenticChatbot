@@ -34,7 +34,7 @@ from ..skill_resolver import list_resolved_skills
 from ..skills_tool import create_activate_skill_tool, create_read_skill_resource_tool
 from ..tool_scope import is_client_only_scope
 from ..tool_search_tool import create_tool_search_tool_for_custom_agent
-from .base_agent import BaseAgent
+from .base_agent import BaseAgent, has_tool_context
 
 if TYPE_CHECKING:
     from ...usage.recorder import ModelUsageRecorder
@@ -361,19 +361,6 @@ class CustomAgent(BaseAgent):
         return tools
 
 
-def _has_tool_context(messages: list) -> bool:
-    """Whether this turn already carries tool results."""
-    for message in messages or []:
-        if getattr(message, "type", None) == "tool":
-            return True
-        if getattr(message, "tool_calls", None):
-            return True
-        additional = getattr(message, "additional_kwargs", None)
-        if isinstance(additional, dict) and additional.get("tool_calls"):
-            return True
-    return False
-
-
 def build_custom_specialist_definition(agent: CustomAgent) -> SpecialistDefinition:
     """Declare one attached custom agent as a per-invocation specialist.
 
@@ -386,7 +373,7 @@ def build_custom_specialist_definition(agent: CustomAgent) -> SpecialistDefiniti
     async def system_prompt_factory(request) -> str:
         return agent._build_system_prompt(
             request.persona,
-            _has_tool_context(request.messages),
+            has_tool_context(request.messages),
             user_id=request.user_id,
             device_id=request.device_id,
             **request.extras.get("system_prompt_kwargs", {}),

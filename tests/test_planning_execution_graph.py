@@ -183,6 +183,16 @@ def test_parent_context_is_server_built_and_bounded():
     assert "objective" not in context
 
 
+def test_parent_context_carries_the_todo_text_under_its_real_key():
+    """Todos store their text as ``description``; reading ``content`` blanked it."""
+    state = _state(todos=[{"id": "todo-1", "status": "pending", "description": "write it"}])
+    state["messages"] = [AIMessage(content="", tool_calls=[_tool_call([_proposal("t1")])])]
+
+    dispatch = _validate(_tool_call([_proposal("t1")]), state)
+
+    assert dispatch.tasks[0].parent_context["todos"][0]["content"] == "write it"
+
+
 # ----------------------------------------------------------------------
 # all-or-nothing rejection
 # ----------------------------------------------------------------------

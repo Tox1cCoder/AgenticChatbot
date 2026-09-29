@@ -126,14 +126,6 @@ class RoutingInventory(BaseModel):
             if descriptor.enabled and descriptor.attached
         )
 
-    def reachable_from(self, agent_id: str | None) -> tuple[AgentDescriptor, ...]:
-        """Handoff targets available to ``agent_id`` (everything but itself)."""
-        return tuple(
-            descriptor
-            for descriptor in self.agents
-            if descriptor.enabled and descriptor.attached and descriptor.agent_id != agent_id
-        )
-
 
 def _base_descriptor(agent_id: str, *, enabled: bool = True) -> AgentDescriptor:
     return AgentDescriptor(

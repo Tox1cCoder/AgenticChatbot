@@ -11,6 +11,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from app.ai.utils import coerce_response_text
 from app.ai.workflow.inventory import RoutingInventory, build_routing_inventory
 from app.ai.workflow.routing import RoutingContextRequest
 
@@ -63,8 +64,7 @@ class WorkflowRuntimeContext:
         message_text = ""
         for message in reversed(messages):
             if getattr(message, "type", None) == "human":
-                content = getattr(message, "content", "")
-                message_text = content if isinstance(content, str) else str(content)
+                message_text = coerce_response_text(getattr(message, "content", ""))
                 break
 
         planning = {

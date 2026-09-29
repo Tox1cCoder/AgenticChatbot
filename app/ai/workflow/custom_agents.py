@@ -168,18 +168,6 @@ class CustomAgentsMixin:
         context["agents_invoked"] = trail
         state["context"] = context
 
-    def _custom_agent_descriptors(self, state: GraphState) -> list[dict[str, Any]]:
-        """Attached custom agents as router descriptors (runtime id, name, etc.)."""
-        return [
-            {
-                "runtime_agent_id": entry.get("runtime_agent_id") or runtime_id,
-                "name": entry.get("name"),
-                "description": entry.get("description"),
-                "agent_order": entry.get("agent_order", 0),
-            }
-            for runtime_id, entry in GraphStateView(state).custom_agents().items()
-        ]
-
     def _build_custom_agent(
         self, state: GraphState, runtime_agent_id: str | None
     ) -> CustomAgent | None:

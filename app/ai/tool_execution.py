@@ -7,7 +7,7 @@ import math
 import time
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from anyio import ClosedResourceError
 from langgraph.errors import GraphBubbleUp
@@ -44,9 +44,6 @@ from .tool_result_rendering import normalize_tool_result_for_rendering
 from .tool_scope import is_client_only_scope
 from .tool_search_tool import create_tool_search_tool
 from .utils import make_json_safe, normalize_tool_call
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -748,10 +745,7 @@ async def ensure_agent_tool_map(
 
     # Add client runtime tools (device-scoped, separate from server MCP tools)
     if not manages_client_tools and hasattr(agent, "_get_client_runtime_tools"):
-        try:
-            remote_tools = agent._get_client_runtime_tools(user_id=user_id, device_id=device_id)
-        except TypeError:
-            remote_tools = agent._get_client_runtime_tools(user_id=user_id, device_id=device_id)
+        remote_tools = agent._get_client_runtime_tools(user_id=user_id, device_id=device_id)
         existing_names = {getattr(t, "name", None) for t in tools}
         for tool in remote_tools:
             tool_name = getattr(tool, "name", None)
@@ -1824,13 +1818,13 @@ async def execute_tool_calls(
                 if canonical_tool_name == "brave_image_search"
                 else result
             )
+            structured_error = _structured_tool_error(public_result)
             normalized_result = normalize_tool_result_for_rendering(
                 public_result,
                 tool_name=tool_name,
-                error=_structured_tool_error(public_result),
+                error=structured_error,
             )
             result_text = normalized_result.model_content
-            structured_error = _structured_tool_error(public_result)
 
             outputs.append(
                 {

@@ -132,6 +132,24 @@ async def test_context_includes_state_without_selecting_from_it():
     assert not hasattr(builder, "select_agent")
 
 
+async def test_a_failing_skill_provider_degrades_to_no_skills_without_widening_scope():
+    """A TypeError used to trigger a retry without ``allowed_skill_refs``.
+
+    That retry widened a custom agent's skill scope, and its own failure escaped
+    the handler and failed routing for the whole turn.
+    """
+    calls: list[dict] = []
+
+    def provider(**kwargs):
+        calls.append(kwargs)
+        raise TypeError("provider bug")
+
+    context = await _builder(skill_summary_provider=provider).build(_request())
+
+    assert context.skills == ()
+    assert all("allowed_skill_refs" in call for call in calls)
+
+
 async def test_context_preserves_original_language_message():
     builder = _builder()
     context = await builder.build(_request(message="この文書を要約して"))

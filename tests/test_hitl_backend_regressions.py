@@ -106,6 +106,33 @@ async def test_auto_resume_returns_followup_planning_or_rag_interrupt(pending_no
     assert await workflow.resume("thread-1", user_input="continue") is expected
 
 
+@pytest.mark.asyncio
+async def test_plain_resume_never_answers_a_pending_approval():
+    """``resume`` used to approve every tool call in the last AIMessage.
+
+    A gated tool may only run on a human decision, so a turn waiting on one is
+    refused and the graph is never invoked.
+    """
+    from langchain_core.messages import AIMessage
+
+    workflow = graph_module.MultiAgentWorkflow.__new__(graph_module.MultiAgentWorkflow)
+    workflow.checkpointer = object()
+    snapshot = _paused_snapshot("chat_agent")
+    snapshot.values["messages"] = [
+        AIMessage(content="", tool_calls=[{"id": "call-1", "name": "write", "args": {}}])
+    ]
+    workflow.graph = SimpleNamespace(
+        aget_state=AsyncMock(return_value=snapshot),
+        ainvoke=AsyncMock(return_value={}),
+    )
+    workflow._build_graph_config = lambda _thread_id: {}
+
+    with pytest.raises(ValueError, match="tool approval"):
+        await workflow.resume("thread-1")
+
+    workflow.graph.ainvoke.assert_not_awaited()
+
+
 def test_server_mcp_qualified_id_is_not_client_runtime_provenance():
     provenance = {
         "tool_origin": "server_mcp",

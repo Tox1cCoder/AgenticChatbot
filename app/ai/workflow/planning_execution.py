@@ -52,6 +52,7 @@ from app.ai.workflow.contracts import (
     WorkerTask,
 )
 from app.ai.workflow.inventory import RoutingInventory
+from app.ai.workflow.middleware import _stream_writer
 from app.ai.workflow.specialists import UnavailableSpecialist
 from app.core.rich_response import strip_inline_rich_markers
 from app.observability.routing import get_routing_metrics_recorder
@@ -242,7 +243,8 @@ def _build_parent_context(
                 {
                     "id": str(todo.get("id") or ""),
                     "status": str(todo.get("status") or ""),
-                    "content": str(todo.get("content") or ""),
+                    # Todos carry their text as ``description`` (see todo_actions).
+                    "content": str(todo.get("description") or todo.get("content") or ""),
                 }
             )
 
@@ -1254,16 +1256,6 @@ def _last_ai_text(state: Mapping[str, Any]) -> str:
         if text.strip():
             return text
     return ""
-
-
-def _stream_writer() -> Callable[[dict[str, Any]], None] | None:
-    """The live custom-event writer, when there is a run to write into."""
-    try:
-        from langgraph.config import get_stream_writer
-
-        return get_stream_writer()
-    except (RuntimeError, ImportError):  # pragma: no cover - outside a run
-        return None
 
 
 async def _maybe_await(value: Any) -> Any:

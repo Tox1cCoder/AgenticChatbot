@@ -15,7 +15,7 @@ from ..image_context import build_multimodal_content, normalize_image_attachment
 from ..prompts import CHAT_SYSTEM_PROMPT, build_chat_prompt
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..utils import coerce_response_text
-from .base_agent import BaseAgent
+from .base_agent import BaseAgent, has_tool_context
 
 logger = logging.getLogger(__name__)
 
@@ -318,26 +318,6 @@ class ChatAgent(BaseAgent):
             operation=operation,
         )
 
-    async def cleanup(self):
-        await super().cleanup()
-
-
-def _has_tool_context(messages: list) -> bool:
-    """Whether this turn already carries tool results.
-
-    Prompts differ before and after tools have run, so the flag is computed
-    from the messages rather than tracked as loop state.
-    """
-    for message in messages or []:
-        if getattr(message, "type", None) == "tool":
-            return True
-        if getattr(message, "tool_calls", None):
-            return True
-        additional = getattr(message, "additional_kwargs", None)
-        if isinstance(additional, dict) and additional.get("tool_calls"):
-            return True
-    return False
-
 
 def build_chat_specialist_definition(agent: "ChatAgent") -> "SpecialistDefinition":
     """Declare chat_agent as configuration for a ``create_agent`` subgraph.
@@ -350,7 +330,7 @@ def build_chat_specialist_definition(agent: "ChatAgent") -> "SpecialistDefinitio
     async def system_prompt_factory(request) -> str:
         return agent._build_system_prompt(
             request.persona,
-            _has_tool_context(request.messages),
+            has_tool_context(request.messages),
             user_id=request.user_id,
             device_id=request.device_id,
             **request.extras.get("system_prompt_kwargs", {}),

@@ -119,6 +119,24 @@ async def test_auto_continue_resumes_from_whatever_epoch_the_turn_reached():
 
 
 @pytest.mark.asyncio
+async def test_auto_continue_never_rolls_over_an_undecidable_side_effect():
+    """A mutation whose outcome is unknown blocks Continue; auto must not bypass it.
+
+    The next epoch's calls carry new ids, so a receipt cannot dedupe a replay:
+    rolling over could perform the side effect a second time.
+    """
+    outcome = _outcome()
+    outcome.response.metadata["mutation_outcome_unknown"] = True
+    interrupt = _Interrupt()
+    node = make_continuation_pause_node(interrupt_fn=interrupt, auto_continue=True)
+
+    await node(_paused_state(agent_outcome=outcome))
+
+    assert len(interrupt.calls) == 1, "the turn rolled over without the block check"
+    assert interrupt.calls[0]["mutation_outcome_unknown"] is True
+
+
+@pytest.mark.asyncio
 async def test_asking_is_still_what_happens_when_auto_continue_is_off():
     """The pause is not deleted, only skipped -- the flag must restore it."""
     interrupt = _Interrupt()

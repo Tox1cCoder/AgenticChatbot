@@ -48,9 +48,13 @@ class TransitionResolver:
         # Attached custom agents are per-request, so the live turn inventory
         # wins over the one captured when the graph was compiled. Judging a
         # handoff against a stale inventory would let a detached agent through.
-        inventory = getattr(getattr(runtime, "context", None), "inventory", None)
-        if isinstance(inventory, RoutingInventory):
-            self._inventory = inventory
+        # It stays local: this resolver is shared by every concurrent turn, and
+        # storing it on ``self`` let one user's attached agents judge the next
+        # turn that arrived without a context.
+        live_inventory = getattr(getattr(runtime, "context", None), "inventory", None)
+        inventory = (
+            live_inventory if isinstance(live_inventory, RoutingInventory) else self._inventory
+        )
 
         pending = state.get("pending_transition")
         if not isinstance(pending, PendingTransition):
@@ -72,7 +76,7 @@ class TransitionResolver:
 
         active_agent_id = state.get("active_agent_id")
         try:
-            self._validate(pending, state, active_agent_id)
+            self._validate(pending, state, active_agent_id, inventory)
         except TransitionRejection as rejection:
             get_routing_metrics_recorder().transition_rejected(reason=rejection.reason)
             return self._reject(pending, active_agent_id, rejection)
@@ -103,7 +107,7 @@ class TransitionResolver:
                 "pending_transition": None,
                 "execution_phase": "executing",
             },
-            goto=self._inventory.resolve_node(pending.to_agent_id),
+            goto=inventory.resolve_node(pending.to_agent_id),
         )
 
     # -- validation ------------------------------------------------------
@@ -113,6 +117,7 @@ class TransitionResolver:
         pending: PendingTransition,
         state: dict[str, Any],
         active_agent_id: Any,
+        inventory: RoutingInventory,
     ) -> None:
         if not pending.tool_call_id.strip():
             raise TransitionRejection(
@@ -133,7 +138,7 @@ class TransitionResolver:
                 "self_target", f"'{pending.to_agent_id}' is already the active agent."
             )
 
-        if not self._inventory.is_routable(pending.to_agent_id):
+        if not inventory.is_routable(pending.to_agent_id):
             raise TransitionRejection(
                 "unreachable_target",
                 f"'{pending.to_agent_id}' is not a reachable target for {active_agent_id}.",

@@ -661,3 +661,63 @@ async def test_a_carried_budget_resumes_rather_than_restarting():
     assert result.execution_budget["execution_epoch"] == 1
     assert result.execution_budget["turn_tool_calls"] == 6
     assert result.execution_budget["turn_model_calls"] == 6
+
+
+# ----------------------------------------------------------------------
+# approval policy
+# ----------------------------------------------------------------------
+
+
+async def test_rag_never_runs_a_tool_the_approval_policy_gates(monkeypatch):
+    """RAG has no approval interrupt, so a gated call is answered, not run.
+
+    It used to execute every non-search call directly, which ran mutations and
+    Require-rule client tools without the human the policy demands.
+    """
+    import app.ai.tool_execution as tool_execution
+    import app.ai.workflow.middleware as middleware
+    from app.ai.workflow.rag_execution import RAG_APPROVAL_REFUSAL_TEXT
+
+    tool_map = {
+        "delete_file": SimpleNamespace(name="delete_file", metadata={"mutation": True}),
+        "read_file": SimpleNamespace(name="read_file", metadata={}),
+    }
+    executed: list[str] = []
+
+    async def _tool_map(*_args, **_kwargs):
+        return tool_map
+
+    async def _execute(*, tool_calls, **_kwargs):
+        executed.extend(call["name"] for call in tool_calls)
+        outputs = [
+            {"tool_call_id": call["id"], "name": call["name"], "content": "ok"}
+            for call in tool_calls
+        ]
+        return outputs, [], []
+
+    async def _no_manager():
+        return None
+
+    monkeypatch.setattr(tool_execution, "ensure_agent_tool_map", _tool_map)
+    monkeypatch.setattr(tool_execution, "execute_tool_calls", _execute)
+    monkeypatch.setattr(middleware, "_mcp_manager", _no_manager)
+    runtime = ProductionRagRuntime(
+        rag_agent=SimpleNamespace(),
+        agent_lookup=lambda _request: SimpleNamespace(tool_state_key="rag"),
+        settings=SimpleNamespace(),
+    )
+
+    outcome = await runtime.execute_tools(
+        _request(hitl_policy={"master_enabled": True}),
+        tool_calls=[
+            {"name": "delete_file", "id": "call-1", "args": {"path": "a.txt"}},
+            {"name": "read_file", "id": "call-2", "args": {"path": "b.txt"}},
+        ],
+        iteration=0,
+    )
+
+    assert executed == ["read_file"]
+    by_id = {message.tool_call_id: message for message in outcome.tool_messages}
+    assert by_id["call-1"].content == RAG_APPROVAL_REFUSAL_TEXT
+    assert by_id["call-1"].status == "error"
+    assert by_id["call-2"].status == "success"

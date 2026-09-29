@@ -6,7 +6,7 @@ from langchain_core.messages import HumanMessage
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..prompts import SEARCH_SYSTEM_PROMPT, build_search_prompt
 from ..schemas import AgentMessage, AgentResponse, AgentType
-from .base_agent import BaseAgent
+from .base_agent import BaseAgent, has_tool_context
 
 logger = logging.getLogger(__name__)
 
@@ -88,26 +88,6 @@ class SearchAgent(BaseAgent):
     ) -> AgentResponse:
         return await self.invoke_model(message, conversation_id)
 
-    async def cleanup(self):
-        await super().cleanup()
-
-
-def _has_tool_context(messages: list) -> bool:
-    """Whether this turn already carries tool results.
-
-    Prompts differ before and after tools have run, so the flag is computed
-    from the messages rather than tracked as loop state.
-    """
-    for message in messages or []:
-        if getattr(message, "type", None) == "tool":
-            return True
-        if getattr(message, "tool_calls", None):
-            return True
-        additional = getattr(message, "additional_kwargs", None)
-        if isinstance(additional, dict) and additional.get("tool_calls"):
-            return True
-    return False
-
 
 def build_search_specialist_definition(agent: "SearchAgent") -> "SpecialistDefinition":
     """Declare search_agent as configuration for a ``create_agent`` subgraph.
@@ -120,7 +100,7 @@ def build_search_specialist_definition(agent: "SearchAgent") -> "SpecialistDefin
     async def system_prompt_factory(request) -> str:
         return agent._build_system_prompt(
             request.persona,
-            _has_tool_context(request.messages),
+            has_tool_context(request.messages),
             user_id=request.user_id,
             device_id=request.device_id,
             **request.extras.get("system_prompt_kwargs", {}),

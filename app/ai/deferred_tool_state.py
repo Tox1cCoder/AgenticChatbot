@@ -1116,19 +1116,6 @@ class DeferredToolState:
             self._last_sweep = _now()
         return count
 
-    def get_stats(self) -> dict[str, int]:
-        """Counters for diagnostics and capacity monitoring."""
-        with self._lock:
-            server_tools = sum(len(ts) for ts in self._conversation_tools.values())
-            client_tools = sum(len(s) for s in self._client_tool_scopes.values())
-            return {
-                "conversation_count": len(self._conversation_tools),
-                "client_scope_count": len(self._client_tool_scopes),
-                "total_server_tools": server_tools,
-                "total_client_tools": client_tools,
-                "total_loaded_tools": server_tools + client_tools,
-            }
-
 
 _state_instance: DeferredToolState | None = None
 _state_lock = Lock()

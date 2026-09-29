@@ -783,29 +783,33 @@ class ProductionRagRuntime:
                 if agent is not None
                 else {}
             )
-            with tool_execution_context(
-                request.conversation_id,
-                request.user_id,
-                _agent_key(agent),
-                request.device_id,
-                rich_response_capable=True,
-                logical_turn_id=request.logical_turn_id,
-            ):
-                outputs, produced_artifacts, produced_images = await execute_tool_calls(
-                    tool_calls=non_search,
-                    tool_map=tool_map,
-                    capture_images=True,
-                    device_id=request.device_id,
-                    agent=agent,
-                    conversation_id=request.conversation_id,
-                    user_id=request.user_id,
-                )
+            runnable, refused = await _split_gated_calls(request, non_search, tool_map)
+            non_search_outputs.update(refused)
+            outputs: list[dict[str, Any]] = []
+            if runnable:
+                with tool_execution_context(
+                    request.conversation_id,
+                    request.user_id,
+                    _agent_key(agent),
+                    request.device_id,
+                    rich_response_capable=True,
+                    logical_turn_id=request.logical_turn_id,
+                ):
+                    outputs, produced_artifacts, produced_images = await execute_tool_calls(
+                        tool_calls=runnable,
+                        tool_map=tool_map,
+                        capture_images=True,
+                        device_id=request.device_id,
+                        agent=agent,
+                        conversation_id=request.conversation_id,
+                        user_id=request.user_id,
+                    )
+                artifacts.extend(produced_artifacts)
+                images.extend(produced_images)
             for output in outputs:
                 call_id = str(output.get("tool_call_id") or "")
                 if call_id:
                     non_search_outputs[call_id] = output
-            artifacts.extend(produced_artifacts)
-            images.extend(produced_images)
 
         for call in normalized:
             call_id = str(call.get("id") or "")
@@ -833,7 +837,7 @@ class ProductionRagRuntime:
                         content=fitted,
                         tool_call_id=call_id,
                         name=name,
-                        status="error" if stored is None else "success",
+                        status="error" if stored is None or stored.get("refused") else "success",
                     )
                 )
                 if omitted:
@@ -886,6 +890,49 @@ class ProductionRagRuntime:
             return
         metadata = getattr(response, "metadata", None)
         scope.turn_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+
+
+#: What the model reads for a call RAG refused because it needs a human. RAG
+#: cannot pause for approval, so the call is answered rather than run.
+RAG_APPROVAL_REFUSAL_TEXT = (
+    "This tool requires the user's approval, which cannot be requested while "
+    "answering from documents. It was not run. Answer without it, or tell the "
+    "user which action needs their approval."
+)
+
+
+async def _split_gated_calls(
+    request: RagExecutionRequest,
+    calls: list[dict[str, Any]],
+    tool_map: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Separate calls that may run from those the approval policy gates.
+
+    The RAG graph has no approval interrupt, so a gated call is refused in band
+    instead of executed: running it would bypass the policy every specialist
+    enforces through ``ToolApprovalMiddleware``.
+    """
+    from app.ai.hitl_config import calls_requiring_approval, policy_from_context
+    from app.ai.workflow.middleware import _mcp_manager
+
+    policy = policy_from_context({"hitl_policy": request.hitl_policy})
+    gated_ids = calls_requiring_approval(
+        calls, policy=policy, tool_map=tool_map, mcp_manager=await _mcp_manager()
+    )
+    if not gated_ids:
+        return calls, {}
+    logger.info("RAG refused %d tool call(s) that require approval", len(gated_ids))
+    refused = {
+        call_id: {
+            "tool_call_id": call_id,
+            "name": str(call.get("name") or "tool"),
+            "content": RAG_APPROVAL_REFUSAL_TEXT,
+            "refused": True,
+        }
+        for call in calls
+        if (call_id := str(call.get("id") or "")) in gated_ids
+    }
+    return [call for call in calls if str(call.get("id") or "") not in gated_ids], refused
 
 
 def _turn_metadata(scope: RagInvocationScope | None) -> dict[str, Any]:

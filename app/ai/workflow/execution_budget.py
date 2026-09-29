@@ -109,9 +109,8 @@ class ExecutionBudgetLimits(BaseModel):
     def from_settings(cls, settings: Any) -> ExecutionBudgetLimits:
         """Read the ladder, tolerating a settings object that lacks a field.
 
-        Partial settings doubles are the established pattern in this codebase
-        (``SpecialistFactory._limit`` reads them the same way), and a test that
-        cares about one limit should not have to declare five. The real
+        Partial settings doubles are the established pattern in this codebase,
+        and a test that cares about one limit should not have to declare five. The real
         ``Settings`` always carries all of them, and its cross-field validator
         is what guarantees each hard rung sits above its soft one --
         ``test_the_defaults_match_the_settings_declaration`` pins these

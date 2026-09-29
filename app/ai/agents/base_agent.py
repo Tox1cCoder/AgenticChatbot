@@ -233,6 +233,22 @@ def _normalized_usage_from_token_breakdown(
     return NormalizedUsage(source="unavailable")
 
 
+def has_tool_context(messages: list) -> bool:
+    """Whether this turn already carries tool results.
+
+    Prompts differ before and after tools have run, so the flag is computed
+    from the messages rather than tracked as loop state.
+    """
+    for message in messages or []:
+        if getattr(message, "type", None) == "tool":
+            return True
+        if getattr(message, "tool_calls", None):
+            return True
+        additional = getattr(message, "additional_kwargs", None)
+        if isinstance(additional, dict) and additional.get("tool_calls"):
+            return True
+    return False
+
 
 def _finish_reason(response: Any) -> str | None:
     """The provider's stop reason, wherever the adapter put it.

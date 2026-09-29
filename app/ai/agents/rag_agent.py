@@ -10,12 +10,6 @@ from uuid import UUID
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from qdrant_client import QdrantClient
-from qdrant_client.models import (
-    FieldCondition,
-    Filter,
-    FilterSelector,
-    MatchValue,
-)
 from sqlalchemy import func
 
 from ...core.config import Settings, settings
@@ -499,9 +493,6 @@ class RAGAgent(BaseAgent):
     async def initialize(self):
         return True
 
-    async def cleanup(self):
-        await super().cleanup()
-
     def get_status(self) -> dict:
         try:
             collections = self.qdrant_client.get_collections()
@@ -526,57 +517,6 @@ class RAGAgent(BaseAgent):
                 "status": "error",
                 "error": str(e),
             }
-
-    async def delete_document_vectors(self, document_id: str) -> dict:
-        try:
-            # Delete associated images from database and filesystem
-            images_deleted = 0
-
-            image_repo = DocumentImageRepository(SessionLocal)
-
-            # Get image paths before deletion
-            image_paths = image_repo.get_image_paths_by_document_id(UUID(document_id))
-
-            # Delete from database
-            images_deleted = image_repo.delete_by_document_id(UUID(document_id))
-
-            # Delete image files from filesystem
-            for image_path in image_paths:
-                # Resolve relative paths to absolute paths
-                path_obj = Path(image_path)
-                if not path_obj.is_absolute():
-                    path_obj = Path.cwd() / path_obj
-
-                if path_obj.exists():
-                    path_obj.unlink()
-
-            # Delete document image folder if empty
-            doc_image_folder = Path(settings.document_images_storage_path) / document_id
-            if doc_image_folder.exists() and not any(doc_image_folder.iterdir()):
-                doc_image_folder.rmdir()
-
-            # Delete vectors from Qdrant
-            delete_filter = Filter(
-                must=[FieldCondition(key="document_id", match=MatchValue(value=document_id))]
-            )
-
-            result = self.qdrant_client.delete(
-                collection_name=self.collection_name,
-                points_selector=FilterSelector(filter=delete_filter),
-            )
-
-            return {
-                "success": True,
-                "document_id": document_id,
-                "images_deleted": images_deleted,
-                "message": (
-                    f"Vectors and {images_deleted} images deleted for document {document_id}"
-                ),
-                "operation_result": str(result),
-            }
-        except Exception as e:
-            logger.error("Error deleting vectors for document %s", document_id, exc_info=True)
-            return {"success": False, "document_id": document_id, "error": str(e)}
 
     # === Agentic RAG Content Retrieval Methods ===
 
@@ -1422,7 +1362,9 @@ class RAGAgent(BaseAgent):
                 agent_id="rag_agent",
                 message=AgentMessage(
                     role=MessageRole.ASSISTANT,
-                    content=f"Error during document exploration: {e}",
+                    # The answer text is published and persisted; provider
+                    # exception text (URLs, request ids) stays in the log.
+                    content=f"Error during document exploration ({type(e).__name__}).",
                 ),
                 metadata=error_metadata,
                 error=str(e),

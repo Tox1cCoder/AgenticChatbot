@@ -191,6 +191,30 @@ async def test_custom_target_routes_to_resolved_node_name():
     assert command.goto == "custom_agent"
 
 
+async def test_one_turns_live_inventory_never_judges_another_turn():
+    """The resolver is shared by every turn; a live inventory must stay local.
+
+    It used to be stored on the resolver, so a turn arriving without a runtime
+    context was judged against the previous turn's attached custom agents.
+    """
+    from types import SimpleNamespace
+
+    resolver = _resolver(_inventory())
+    other_users = _inventory(
+        {"custom_agent:theirs": {"runtime_agent_id": "custom_agent:theirs", "name": "Theirs"}}
+    )
+    first = _routed_state()
+    first["pending_transition"] = _pending(target="search_agent")
+    await resolver(first, SimpleNamespace(context=SimpleNamespace(inventory=other_users)))
+
+    second = _routed_state()
+    second["pending_transition"] = _pending(target="custom_agent:theirs", call_id="call-2")
+    command = await resolver(second)
+
+    assert "active_agent_id" not in command.update
+    assert "Hand-off refused" in command.update["messages"][0].content
+
+
 @pytest.mark.parametrize(
     "case", ["self", "cycle", "detached", "unknown", "over_depth", "source_mismatch"]
 )

@@ -9,10 +9,6 @@ A wrapper does three things and nothing else:
 Wrappers have no static outgoing edges, so the parent graph's dynamic routing
 is the only thing that decides what runs next. No wrapper appends the terminal
 public ``AIMessage`` and no wrapper reaches ``END`` — ``finalize`` owns both.
-
-The execution *internals* behind these wrappers are the pre-v2 agent loops.
-Task 5 of the cutover replaces those internals with per-invocation
-``create_agent`` subgraphs without changing this contract.
 """
 
 from __future__ import annotations
@@ -29,6 +25,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
+from app.ai.hitl_config import policy_from_context
 from app.ai.research_budget import get_research_budget
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from app.ai.tool_context import rich_response_capable_from_context
@@ -82,7 +79,6 @@ HARD_LIMIT_PARTIAL_TEXT = (
 )
 
 __all__ = [
-    "FINALIZE_OWNS_TERMINAL_MESSAGE",
     "PLANNING_AGENT_ID",
     "ModelCallLimitExceededError",
     "SpecialistBuild",
@@ -93,9 +89,7 @@ __all__ = [
     "ToolCallLimitExceededError",
     "UnavailableSpecialist",
     "build_worker_request",
-    "make_specialist_wrapper",
     "make_subgraph_specialist_wrapper",
-    "make_tool_stage_wrapper",
     "planning_worker_run_config",
     "resolve_node_for_agent_id",
 ]
@@ -103,13 +97,6 @@ __all__ = [
 
 class UnavailableSpecialist(KeyError):
     """No definition exists for the requested agent in this request's scope."""
-
-
-# Turn-scoped context flag telling the pre-v2 ``_finalize_agent_response`` path
-# that the parent finalizer owns the terminal public message.
-FINALIZE_OWNS_TERMINAL_MESSAGE = "v2_finalize_owns_terminal_message"
-
-SpecialistCallable = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 def planning_worker_run_config(
@@ -127,9 +114,6 @@ def planning_worker_run_config(
     }
 
 
-StageRouter = Callable[[dict[str, Any]], Any]
-
-
 def resolve_node_for_agent_id(agent_id: str | None) -> str | None:
     """Map an agent ID onto its graph node without consulting the inventory.
 
@@ -142,169 +126,6 @@ def resolve_node_for_agent_id(agent_id: str | None) -> str | None:
     if agent_id.startswith(CUSTOM_AGENT_PREFIX):
         return CUSTOM_AGENT_NODE
     return BASE_AGENT_NODE_OVERRIDES.get(agent_id, agent_id)
-
-
-def _with_finalizer_ownership(state: dict[str, Any]) -> dict[str, Any]:
-    working = dict(state)
-    context = dict(working.get("context") or {})
-    context[FINALIZE_OWNS_TERMINAL_MESSAGE] = True
-    working["context"] = context
-    return working
-
-
-def _response_outcome(
-    agent_id: str, response: AgentResponse, state: dict[str, Any] | None = None
-) -> ResponseOutcome:
-    """Build a server-owned outcome from a specialist response.
-
-    Provenance is assembled from runtime records only. Model text can never
-    declare its own evidence, artifacts, images, or validation authority.
-    """
-    artifacts = tuple(
-        artifact for artifact in (response.tool_artifacts or []) if isinstance(artifact, dict)
-    )
-    metadata = response.metadata or {}
-    images = tuple(image for image in (metadata.get("images") or []) if isinstance(image, dict))
-    return ResponseOutcome(
-        agent_id=agent_id,
-        response=response,
-        provenance=OutcomeProvenance(
-            artifacts=artifacts, images=images, evidence=_recorded_evidence(state)
-        ),
-    )
-
-
-def _recorded_evidence(state: dict[str, Any] | None) -> tuple[dict[str, Any], ...]:
-    """The evidence records this turn's own tool calls produced.
-
-    A citation selects the grounding policy, so an answer that legitimately
-    cites ``[E1]`` is rejected as invented unless the ids the runtime actually
-    retrieved travel with it. They live on the tool artifacts, which is the
-    same place the grounded-answer gate reads them from.
-    """
-    context = (state or {}).get("context")
-    if not isinstance(context, dict):
-        return ()
-    records: list[dict[str, Any]] = []
-    for artifact in context.get("tool_artifacts") or ():
-        if not isinstance(artifact, dict):
-            continue
-        evidence = artifact.get("rag_evidence")
-        if not isinstance(evidence, dict):
-            continue
-        for record in evidence.get("records") or ():
-            if isinstance(record, dict) and record.get("evidence_id"):
-                records.append(record)
-    return tuple(records)
-
-
-def _carry_forward(state: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
-    """Project a legacy node's mutated state back onto the v2 update.
-
-    Only keys the v2 state schema declares survive; everything else the legacy
-    path scribbled on the dict is discarded rather than silently persisted.
-    """
-    update: dict[str, Any] = {}
-    for key in (
-        "context",
-        "todos",
-        "current_task_index",
-        "planning_call_count",
-        "planning_phase",
-        "plan_lifecycle",
-        "task_plan_id",
-        "current_task",
-        "all_tasks",
-        "custom_agents",
-    ):
-        if key in result and result[key] is not state.get(key):
-            update[key] = result[key]
-
-    appended = _appended_messages(state.get("messages") or [], result.get("messages") or [])
-    if appended:
-        update["messages"] = appended
-    return update
-
-
-def _appended_messages(before: list[Any], after: list[Any]) -> list[Any]:
-    if len(after) <= len(before):
-        return []
-    return list(after[len(before) :])
-
-
-def make_specialist_wrapper(
-    node_name: str,
-    specialist: SpecialistCallable,
-    *,
-    stage_router: StageRouter,
-    stage_targets: dict[str, str],
-) -> Callable[..., Awaitable[Command]]:
-    """Build the parent wrapper node for one specialist.
-
-    ``stage_router`` is the pre-v2 decision function ("tools", "approval",
-    "end", ...). ``stage_targets`` maps those decisions onto v2 node names;
-    ``"end"`` always maps to ``validate_output``, never to ``END``.
-    """
-
-    async def wrapper(state: dict[str, Any], runtime: Any = None) -> Command:
-        active_agent_id = state.get("active_agent_id")
-        expected_node = resolve_node_for_agent_id(active_agent_id)
-        if expected_node != node_name:
-            # Reaching a specialist that is not the active agent means the
-            # control plane and the topology disagree. Fail closed.
-            logger.error(
-                "Specialist node %s reached while active agent is %s",
-                node_name,
-                active_agent_id,
-            )
-            return Command(
-                update={
-                    "execution_phase": "failed",
-                    "workflow_error": WorkflowError(
-                        code="response_validation_failed",
-                        retriable=False,
-                        request_id=_request_id(state),
-                        details={"reason": "active_agent_node_mismatch", "node": node_name},
-                    ),
-                },
-                goto="finalize",
-            )
-
-        working = _with_finalizer_ownership(state)
-        result = await specialist(working)
-        result = result if isinstance(result, dict) else working
-
-        update = _carry_forward(state, result)
-        decision = stage_router(result)
-        if _is_awaitable(decision):
-            decision = await decision
-
-        target = stage_targets.get(str(decision), "validate_output")
-        if target == "validate_output":
-            response = result.get("response")
-            if not isinstance(response, AgentResponse):
-                return Command(
-                    update={
-                        **update,
-                        "execution_phase": "failed",
-                        "workflow_error": WorkflowError(
-                            code="response_validation_failed",
-                            retriable=False,
-                            request_id=_request_id(state),
-                            details={"reason": "specialist_produced_no_response"},
-                        ),
-                    },
-                    goto="finalize",
-                )
-            update["agent_outcome"] = _response_outcome(
-                active_agent_id or response.agent_id, response, result
-            )
-            update["execution_phase"] = "validating"
-
-        return Command(update=update, goto=target)
-
-    wrapper.__name__ = f"{node_name}_wrapper"
-    return wrapper
 
 
 def make_subgraph_specialist_wrapper(
@@ -377,68 +198,6 @@ def make_subgraph_specialist_wrapper(
 
     wrapper.__name__ = f"{node_name}_subgraph_wrapper"
     return wrapper
-
-
-def make_tool_stage_wrapper(
-    node_name: str,
-    stage: SpecialistCallable,
-    *,
-    stage_router: StageRouter,
-) -> Callable[..., Awaitable[Command]]:
-    """Wrap a pre-v2 tool/approval stage so it routes dynamically.
-
-    These stages hand control back to a specialist or, when the turn is done,
-    to ``validate_output``. They never reach ``END``.
-    """
-
-    async def wrapper(state: dict[str, Any], runtime: Any = None) -> Command:
-        result = await stage(dict(state))
-        result = result if isinstance(result, dict) else state
-        update = _carry_forward(state, result)
-
-        decision = stage_router(result)
-        if _is_awaitable(decision):
-            decision = await decision
-        decision = str(decision)
-
-        if decision == "end":
-            response = result.get("response")
-            if isinstance(response, AgentResponse):
-                update["agent_outcome"] = _response_outcome(
-                    str(result.get("active_agent_id") or response.agent_id), response, result
-                )
-                update["execution_phase"] = "validating"
-                return Command(update=update, goto="validate_output")
-            return Command(
-                update={
-                    **update,
-                    "execution_phase": "failed",
-                    "workflow_error": WorkflowError(
-                        code="tool_execution_failed",
-                        retriable=False,
-                        request_id=_request_id(state),
-                        details={"reason": "stage_ended_without_response", "stage": node_name},
-                    ),
-                },
-                goto="finalize",
-            )
-
-        if decision == "approval":
-            return Command(update=update, goto="approval")
-        if decision == "tools":
-            return Command(update=update, goto="tools")
-
-        target = resolve_node_for_agent_id(decision) or "validate_output"
-        if decision != (result.get("active_agent_id") or decision):
-            update["active_agent_id"] = decision
-        return Command(update=update, goto=target)
-
-    wrapper.__name__ = f"{node_name}_wrapper"
-    return wrapper
-
-
-def _is_awaitable(value: Any) -> bool:
-    return hasattr(value, "__await__")
 
 
 def _request_id(state: dict[str, Any]) -> str:
@@ -549,12 +308,20 @@ def _hitl_policy(context: Any) -> dict[str, Any]:
     """The request's approval policy. A worker inherits it, never a default.
 
     Falling back to a permissive default would make a delegated mutation
-    unapproved on exactly the path the user cannot see.
+    unapproved on exactly the path the user cannot see. A turn without a
+    per-user policy gets the process-wide one, as every other gate does.
     """
-    if not isinstance(context, dict):
-        return {}
-    policy = context.get("hitl_policy")
-    return dict(policy) if isinstance(policy, dict) else {}
+    return dict(policy_from_context(context if isinstance(context, dict) else None))
+
+
+def _effective_hitl_policy(policy: dict[str, Any] | None) -> dict[str, Any]:
+    """The policy a specialist's approval gate enforces.
+
+    ``None`` means "no per-user policy", not "approval off": leaving the gate
+    out would skip the global tool list and the mutation floor. Only an
+    explicit ``master_enabled: False`` turns approval off.
+    """
+    return _hitl_policy({"hitl_policy": policy})
 
 
 @dataclass(frozen=True)
@@ -932,6 +699,7 @@ class SpecialistFactory:
             return live_tools
 
         tool_execution = ToolExecutionMiddleware(scope=scope, tool_factory=_live_tools)
+        hitl_policy = _effective_hitl_policy(request.hitl_policy)
 
         middleware = build_specialist_middleware(
             runtime_model_resolver=self._runtime_model_resolver,
@@ -941,7 +709,7 @@ class SpecialistFactory:
             user_id=request.user_id,
             model_request=request.model_request,
             usage_recorder=self._usage_recorder,
-            hitl_policy=request.hitl_policy,
+            hitl_policy=hitl_policy,
             # The framework ceilings are the hard rungs of one ladder with the
             # soft budget. Reading them from anywhere else is how the framework
             # comes to raise on the very call the budget reserved.
@@ -949,7 +717,7 @@ class SpecialistFactory:
             max_tool_calls=accountant.limits.hard_tool_calls,
             tool_execution=tool_execution,
             budget=SoftExecutionBudgetMiddleware(accountant=accountant),
-            approval=ToolApprovalMiddleware(scope=scope, hitl_policy=request.hitl_policy or {}),
+            approval=ToolApprovalMiddleware(scope=scope, hitl_policy=hitl_policy),
             worker_tool_scope=worker_scope,
             preflight=_preflight_for(definition, request),
             web_research_session=web_research_session,
@@ -970,9 +738,6 @@ class SpecialistFactory:
             accountant=accountant,
             web_research_session=web_research_session,
         )
-
-    def _limit(self, name: str, default: int) -> int:
-        return int(getattr(self._settings, name, default) or default)
 
     def _runtime_context(self, request: SpecialistRequest) -> SpecialistRuntimeContext:
         return SpecialistRuntimeContext(

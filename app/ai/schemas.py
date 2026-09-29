@@ -92,14 +92,6 @@ class AgentMessage(BaseModel):
     )
 
 
-class AgentConfig(BaseModel):
-    model: str
-    temperature: float
-    max_tokens: int | None = None
-    top_p: float = 1.0
-    frequency_penalty: float = 0.0
-
-
 class AgentResponse(BaseModel):
     agent_type: AgentType
     agent_id: str
@@ -293,10 +285,6 @@ class GraphStateView:
         value = self._state.get("custom_agents")
         return value if isinstance(value, dict) else {}
 
-    def iteration_count(self, default: int = 0) -> int:
-        value = self._state.get("iteration_count")
-        return int(value) if isinstance(value, int) else default
-
     def planning_call_count(self, default: int = 0) -> int:
         value = self._state.get("planning_call_count")
         return int(value) if isinstance(value, int) else default
@@ -317,26 +305,6 @@ class GraphStateView:
         context_attachments = self.context().get("attachments")
         return context_attachments if isinstance(context_attachments, list) else []
 
-    def planning_flags(self) -> tuple[bool, bool]:
-        planning_mode_enabled = self._state.get("planning_mode_enabled")
-        has_existing_plan = self._state.get("has_existing_plan")
-        if isinstance(planning_mode_enabled, bool) and isinstance(has_existing_plan, bool):
-            return planning_mode_enabled, has_existing_plan
-
-        context = self.context()
-        return (
-            bool(
-                planning_mode_enabled
-                if isinstance(planning_mode_enabled, bool)
-                else context.get("planning_mode_enabled", False)
-            ),
-            bool(
-                has_existing_plan
-                if isinstance(has_existing_plan, bool)
-                else context.get("has_existing_plan", False)
-            ),
-        )
-
     def tool_artifacts(self) -> list[dict[str, Any]]:
         value = self.context().get("tool_artifacts")
         return value if isinstance(value, list) else []
@@ -344,14 +312,6 @@ class GraphStateView:
     def tool_images(self) -> list[dict[str, Any]]:
         value = self.context().get("tool_images")
         return value if isinstance(value, list) else []
-
-    def pending_action_requests(self) -> list[dict[str, Any]]:
-        value = self.context().get("pending_action_requests")
-        return value if isinstance(value, list) else []
-
-    def interrupt_metadata(self) -> dict[str, Any]:
-        value = self.context().get("interrupt_metadata")
-        return value if isinstance(value, dict) else {}
 
     def continuation_signal(self) -> ContinuationSignal:
         value = self.context().get("continuation_signal")

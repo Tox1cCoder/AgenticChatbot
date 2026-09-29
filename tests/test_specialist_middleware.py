@@ -641,6 +641,25 @@ def test_a_disabled_policy_installs_no_approval_gate():
     assert "ToolApprovalMiddleware" not in [type(item).__name__ for item in stack]
 
 
+def test_a_turn_without_a_per_user_policy_is_still_gated(monkeypatch):
+    """``None`` means "no per-user rules", not "approval off".
+
+    The factory passed ``request.hitl_policy`` straight through, and a ``None``
+    left the gate out entirely: no global tool list, no mutation floor.
+    """
+    from app.ai import hitl_config
+    from app.ai.workflow import specialists
+
+    monkeypatch.setattr(hitl_config.settings, "enable_human_in_the_loop", True)
+    policy = specialists._effective_hitl_policy(None)
+
+    assert policy.get("master_enabled") is True
+    assert "global_tools" in policy
+    names = [type(item).__name__ for item in _stack(hitl_policy=policy)]
+    assert "ToolApprovalMiddleware" in names
+    assert specialists._hitl_policy({})["master_enabled"] is True
+
+
 def test_specialist_stack_enforces_framework_call_limits_with_error_exit():
     names = [type(item).__name__ for item in _stack(hitl_policy=None)]
     assert "ModelCallLimitMiddleware" in names

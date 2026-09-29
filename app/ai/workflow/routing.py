@@ -498,15 +498,13 @@ class RoutingContextBuilder:
         if self._skill_summary_provider is None:
             return ()
         limit = int(getattr(self.settings, "router_context_max_skills", 20))
+        # No retry without ``allowed_skill_refs``: that would widen a custom
+        # agent's skill scope, and a second failure escaped the handler below.
         try:
             rows = self._skill_summary_provider(
                 user_id=request.user_id,
                 device_id=request.device_id,
                 allowed_skill_refs=request.allowed_skill_refs,
-            )
-        except TypeError:
-            rows = self._skill_summary_provider(
-                user_id=request.user_id, device_id=request.device_id
             )
         except Exception as exc:
             logger.warning("Routing context could not load skill summaries: %s", exc)

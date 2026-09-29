@@ -27,14 +27,12 @@ from app.ai.tool_execution import (
     execute_tool_calls,
 )
 from app.ai.utils import (
-    apply_hitl_decisions,
     make_json_safe,
     normalize_tool_call,
 )
 from app.core.config import settings
 
 logger = logging.getLogger("app.ai.graph")
-_apply_decisions = apply_hitl_decisions
 
 
 class ToolLoopMixin:

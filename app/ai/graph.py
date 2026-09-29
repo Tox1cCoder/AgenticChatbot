@@ -48,6 +48,7 @@ from .history import ConversationHistoryProvider
 from .hitl_config import (
     build_interrupt_response,
     pending_interrupt_payload,
+    policy_from_context,
 )
 from .image_context import (
     build_multimodal_content,
@@ -79,17 +80,21 @@ from .skills_tool import get_available_skill_summaries
 from .time_context import build_runtime_time_context_block
 from .utils import (
     address_decisions_to_interrupts,
-    apply_hitl_decisions,
     build_interrupt_resume_payload,
     coerce_response_text,
     make_json_safe,
-    normalize_tool_call,
 )
 from .workflow.continuation import ContinuationResume, pending_continuation_payload
-from .workflow.contracts import OutcomeProvenance, ResponseOutcome, TurnIdentity
+from .workflow.contracts import (
+    OutcomeProvenance,
+    ResponseOutcome,
+    TurnIdentity,
+    WorkflowRoutingException,
+)
 from .workflow.custom_agents import CustomAgentsMixin
 from .workflow.graph_builder import build_workflow_graph
 from .workflow.inventory import CUSTOM_AGENT_NODE
+from .workflow.middleware import _stream_writer as _graph_stream_writer
 from .workflow.planning_execution import (
     PLANNING_AGENT_ID,
     PlanningLimits,
@@ -116,22 +121,26 @@ if TYPE_CHECKING:
     from ..repositories.document import DocumentRepository
     from ..usage.recorder import ModelUsageRecorder
 
-_apply_decisions = apply_hitl_decisions
-
 # A pause is whatever the checkpoint says is pending. There is deliberately no
 # node-name allowlist here any more: it never listed ``planning_worker``, so a
 # Planning worker waiting on a human read as a crashed turn, and every node
 # added later would have had to remember to join the set.
 
 
-def _graph_stream_writer() -> Any:
-    """The live custom-event writer, when there is a run to write into."""
-    try:
-        from langgraph.config import get_stream_writer
+def _stream_failure_event(exc: BaseException, *, operation: str):
+    """The client-facing error event for a streamed turn that raised.
 
-        return get_stream_writer()
-    except (RuntimeError, ImportError):  # pragma: no cover - outside a run
-        return None
+    The exception text can carry provider URLs, request ids or credential
+    fragments, and the message service persists this text as the assistant
+    message. Only a typed workflow error (whose text is its code) or the
+    exception type leaves the process; the detail is logged.
+    """
+    logger.error("Workflow stream failed during %s", operation, exc_info=exc)
+    if isinstance(exc, WorkflowRoutingException):
+        client_text = str(exc)
+    else:
+        client_text = f"Response generation failed ({type(exc).__name__})."
+    return make_event("error", sequence=0, data={"error": client_text})
 
 
 def _last_human_text(messages: list[Any]) -> str:
@@ -139,9 +148,9 @@ def _last_human_text(messages: list[Any]) -> str:
     for message in reversed(messages or ()):
         if getattr(message, "type", None) != "human":
             continue
-        content = getattr(message, "content", "")
-        if isinstance(content, str) and content.strip():
-            return content
+        text = coerce_response_text(getattr(message, "content", ""))
+        if text.strip():
+            return text
     return ""
 
 
@@ -364,18 +373,9 @@ class MultiAgentWorkflow(
     def _get_current_turn_messages(self, messages: list) -> list:
         if not messages:
             return messages
-
-        # Find the last HumanMessage index
-        last_human_idx = None
-        for idx in range(len(messages) - 1, -1, -1):
-            if isinstance(messages[idx], HumanMessage):
-                last_human_idx = idx
-                break
-
+        last_human_idx = self._find_last_human_message_index(messages)
         if last_human_idx is None:
             return messages
-
-        # Return only messages from the current turn
         return messages[last_human_idx:]
 
     # ============================================================
@@ -744,10 +744,6 @@ class MultiAgentWorkflow(
             return current_turn_messages, False
         return self._build_turn_messages_with_attachments(current_turn_messages, attachments)
 
-    @staticmethod
-    def _get_planning_flags(state: GraphState) -> tuple[bool, bool]:
-        return GraphStateView(state).planning_flags()
-
     def _find_first_pending_task(self, tasks: list[dict[str, Any]]) -> int | None:
         """Find the first pending or in-progress task index in the task list."""
         for i, task in enumerate(tasks):
@@ -781,9 +777,6 @@ class MultiAgentWorkflow(
             context_schema=WorkflowRuntimeContext,
         )
 
-    # ------------------------------------------------------------------
-    # hand_off delegation helper
-    # ------------------------------------------------------------------
     # ------------------------------------------------------------------
     # Delegated-agent message scoping
     # ------------------------------------------------------------------
@@ -833,25 +826,6 @@ class MultiAgentWorkflow(
                     continue
             filtered.append(message)
         return filtered
-
-    @staticmethod
-    def _get_interrupt_payload_from_state(
-        state_values: dict[str, Any],
-        fallback_tool_calls: list[Any],
-    ) -> dict[str, Any]:
-        """Recover the pending interrupt payload from checkpoint state."""
-        state_view = GraphStateView(state_values)
-        action_requests = state_view.pending_action_requests()
-        if not action_requests:
-            action_requests = [normalize_tool_call(tool_call) for tool_call in fallback_tool_calls]
-
-        payload: dict[str, Any] = {"action_requests": action_requests}
-
-        interrupt_metadata = state_view.interrupt_metadata()
-        if interrupt_metadata:
-            payload["metadata"] = interrupt_metadata
-
-        return payload
 
     @staticmethod
     def _interrupt_payload_from_pending_interrupts(snapshot: Any) -> dict[str, Any] | None:
@@ -1134,54 +1108,6 @@ class MultiAgentWorkflow(
         )
 
     @staticmethod
-    def _set_continuation_signal(
-        state: GraphState,
-        *,
-        reason: str,
-        scope: str,
-        count: int,
-        limit: int,
-    ) -> None:
-        """Record why a loop stopped short of a final answer.
-
-        Read back by ``_get_planning_pause_details`` to report the pause to the
-        caller. It does not resume anything: a turn that runs out of budget
-        ends, and a task that needs more work is decomposed by Planning.
-        """
-        context = GraphStateView(state).context_copy()
-        context["continuation_signal"] = {
-            "reason": reason,
-            "scope": scope,
-            "count": count,
-            "limit": limit,
-        }
-        state["context"] = context
-
-    @staticmethod
-    def _last_message_is_tool_output(state: GraphState | dict[str, Any]) -> bool:
-        messages = GraphStateView(state).messages()
-        return bool(messages and isinstance(messages[-1], ToolMessage))
-
-    @staticmethod
-    def _mark_force_final_response(
-        state: GraphState,
-        *,
-        reason: str,
-        scope: str,
-        count: int,
-        limit: int,
-    ) -> None:
-        context = GraphStateView(state).context_copy()
-        context["force_final_response"] = True
-        context["tool_budget"] = {
-            "reason": reason,
-            "scope": scope,
-            "count": count,
-            "limit": limit,
-        }
-        state["context"] = context
-
-    @staticmethod
     def _final_response_kwargs(state: GraphState) -> dict[str, Any]:
         context = GraphStateView(state).context()
         kwargs: dict[str, Any] = {}
@@ -1437,10 +1363,6 @@ class MultiAgentWorkflow(
         render = render_results.get(str(tool_call_id))
         return render if isinstance(render, dict) else None
 
-    # ------------------------------------------------------------------
-    # Routing-v2 specialist subgraphs
-    # ------------------------------------------------------------------
-
     # ============================================================
     # Planning node collaborators
     # ============================================================
@@ -1555,6 +1477,7 @@ class MultiAgentWorkflow(
 
         for call in calls:
             tool_args = call.get("args") or {}
+            call_failed = False
             try:
                 todos, current_task_index, result, action = apply_write_todos_action(
                     todos=todos,
@@ -1573,14 +1496,17 @@ class MultiAgentWorkflow(
                 raw_action = tool_args.get("action")
                 action = getattr(raw_action, "value", raw_action)
                 result = f"Error executing {action}: {exc}"
+                call_failed = True
                 had_error = True
 
+            # Per call, not the running flag: one failed call must not mark the
+            # successful calls after it as errors too.
             messages.append(
                 ToolMessage(
                     content=result,
                     tool_call_id=str(call.get("id") or ""),
                     name=str(call.get("name") or "write_todos"),
-                    status="error" if had_error else "success",
+                    status="error" if call_failed else "success",
                 )
             )
 
@@ -1774,7 +1700,9 @@ class MultiAgentWorkflow(
             history=self._convert_history_for_specialist(conversation_history),
             carried_messages=carried_messages,
             state=dict(state) if isinstance(state, dict) else {},
-            hitl_policy=state_view.context().get("hitl_policy"),
+            # Resolved here, once: an absent per-user policy means the global
+            # one, never "no approval".
+            hitl_policy=policy_from_context(state_view.context()),
             attachments=state_view.attachments(),
             extras=extras,
         )
@@ -1945,12 +1873,6 @@ class MultiAgentWorkflow(
         state["context"] = context
         self._update_tool_error_streak(state, artifacts)
 
-    # ------------------------------------------------------------------
-    # Custom-agent multiplexing
-    # ------------------------------------------------------------------
-    # ------------------------------------------------------------------
-    # Multi-agent awareness (roster + per-turn invocation trail)
-    # ------------------------------------------------------------------
     def _build_chat_image_loader(self, user_id):
         """Build a per-run resolver that maps a stored ``image_id`` to a base64
         data URL, so historical image references are re-sent to the model. The
@@ -2052,7 +1974,7 @@ class MultiAgentWorkflow(
     def _latest_user_text(state: GraphState) -> str:
         for message in reversed(state.get("messages", []) or []):
             if isinstance(message, HumanMessage):
-                return str(message.content or "")
+                return coerce_response_text(message.content)
         return ""
 
     def _get_agent_type(self, active_agent_id: str | None) -> AgentType:
@@ -2134,10 +2056,6 @@ class MultiAgentWorkflow(
 
         return self._attach_context_outputs(state, response)
 
-    # ------------------------------------------------------------------
-    # Continuation helpers
-    # ------------------------------------------------------------------
-
     async def execute_request(self, request: WorkflowExecutionRequest) -> AgentResponse | None:
         initial_state = self._build_initial_state_from_request(request)
         conversation_id = request.conversation_id
@@ -2193,27 +2111,18 @@ class MultiAgentWorkflow(
             raise ValueError("Checkpointing is not enabled, cannot resume.")
 
         config = self._build_graph_config(thread_id)
-
-        # Get current state to extract tool calls for auto-approval
         state_snapshot = await self.graph.aget_state(config)
-        messages = state_snapshot.values.get("messages", [])
 
-        if messages and isinstance(messages[-1], AIMessage) and messages[-1].tool_calls:
-            # Auto-approve all tool calls
-            resume_data = [
-                {
-                    "task_id": tc.get("id"),
-                    "tool_call_id": tc.get("id"),
-                    "type": "approve",
-                    "args": None,
-                }
-                for tc in messages[-1].tool_calls
-            ]
-        else:
-            resume_data = user_input
+        # This path once answered a pending approval by approving every tool
+        # call in the last AIMessage. Only a human decision may release a
+        # gated tool, so an approval wait is refused here, never answered.
+        if pending_interrupt_payload(state_snapshot) is not None:
+            raise ValueError(
+                "Workflow is waiting on a tool approval; resume it with explicit decisions"
+            )
 
         result = await self.graph.ainvoke(
-            Command(resume=resume_data),
+            Command(resume=user_input),
             config=config,
             context=self._resume_runtime_context(state_snapshot.values),
         )
@@ -2303,7 +2212,7 @@ class MultiAgentWorkflow(
                     for public_event in projector.map_event(event, ctx):
                         yield public_event
         except Exception as exc:
-            yield make_event("error", sequence=0, data={"error": str(exc)})
+            yield _stream_failure_event(exc, operation="decision resume")
             return
 
         async for public_event in self._finish_stream(
@@ -2378,7 +2287,7 @@ class MultiAgentWorkflow(
                     for public_event in projector.map_event(event, ctx):
                         yield public_event
         except Exception as exc:
-            yield make_event("error", sequence=0, data={"error": str(exc)})
+            yield _stream_failure_event(exc, operation="continuation resume")
             return
 
         async for public_event in self._finish_stream(
@@ -2411,7 +2320,7 @@ class MultiAgentWorkflow(
         except Exception as exc:
             if history_prefetch and not history_prefetch.done():
                 history_prefetch.cancel()
-            yield make_event("error", sequence=0, data={"error": str(exc)})
+            yield _stream_failure_event(exc, operation="turn preparation")
             return
 
         # Per-stream accumulator state for the canonical event mapper. Token
@@ -2437,7 +2346,9 @@ class MultiAgentWorkflow(
                     for public_event in projector.map_event(event, ctx):
                         yield public_event
         except Exception as exc:
-            yield make_event("error", sequence=0, data={"error": str(exc)})
+            if history_prefetch and not history_prefetch.done():
+                history_prefetch.cancel()
+            yield _stream_failure_event(exc, operation="turn execution")
             return
 
         async for public_event in self._finish_stream(
@@ -2464,7 +2375,7 @@ class MultiAgentWorkflow(
             try:
                 snapshot = await self.graph.aget_state(config)
             except Exception as exc:  # noqa: BLE001 - reported, never published
-                yield make_event("error", sequence=0, data={"error": str(exc)})
+                yield _stream_failure_event(exc, operation="final checkpoint read")
                 return
 
         if snapshot is not None and snapshot.next:

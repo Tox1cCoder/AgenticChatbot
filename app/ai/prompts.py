@@ -642,40 +642,6 @@ def build_search_prompt(
     return "\n".join(parts)
 
 
-def build_image_generator_prompt(
-    user_message: str, conversation_history: list, persona: str | None = None
-) -> str:
-    """Create an enriched prompt for the image generator agent."""
-    parts = [IMAGE_GENERATOR_SYSTEM_PROMPT]
-
-    if persona is not None and persona.strip():
-        parts.insert(0, _build_persona_block(persona))
-
-    if conversation_history:
-        max_tokens = (
-            settings.chat_history_max_tokens if settings.chat_history_max_tokens > 0 else None
-        )
-        selected_history = _select_history_for_prompt(conversation_history, None, max_tokens)
-
-        if selected_history:
-            parts.append("\n\nRelevant prior context:")
-            for msg in selected_history:
-                role_value = getattr(getattr(msg, "role", None), "value", None)
-                role = "User" if role_value == "user" else "Assistant"
-                parts.append(f"{role}: {msg.content}")
-            parts.append(
-                "\nUse the conversation context above to understand pronouns or references to earlier images."
-            )
-
-    parts.append("\n\nCreate a detailed image based on this request:")
-    parts.append(user_message)
-    parts.append(
-        "\nEnsure the description includes setting, subject appearance, lighting, camera angle, artistic style, and mood."
-    )
-
-    return "\n".join(parts)
-
-
 TITLE_GENERATION_PROMPT = """You are a conversation title generator.
 Task: Generate a short, descriptive title (maximum 6 words) for a conversation beginning with the following message.
 

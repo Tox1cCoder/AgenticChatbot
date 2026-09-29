@@ -230,7 +230,10 @@ def make_continuation_pause_node(
             mutation_outcome_unknown=_mutation_outcome_unknown(outcome),
         )
 
-        if _rolls_its_own_epoch():
+        # An undecidable side effect is never rolled over automatically: the next
+        # epoch mints new tool-call ids, so its receipts cannot dedupe a replay.
+        # It takes the asking path, where the offer is blocked until reconciled.
+        if _rolls_its_own_epoch() and not payload.mutation_outcome_unknown:
             # No interrupt at all. Emitting one would advertise a Continue that
             # nothing is waiting to redeem, and the turn would still have to
             # answer it itself.
