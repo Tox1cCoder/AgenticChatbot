@@ -531,7 +531,12 @@ def process_document_task(self, document_id: str, temp_file_path: str, filename:
 # ---------------------------------------------------------------------------
 
 
-@celery_app.task(name="app.workers.document_processor.cleanup_failed_documents")
+@celery_app.task(
+    name="app.workers.document_processor.cleanup_failed_documents",
+    # Routed to the summary worker; see celery_app.task_routes.
+    time_limit=_settings.celery_worker_time_limit,
+    soft_time_limit=_settings.celery_worker_soft_time_limit,
+)
 def cleanup_failed_documents() -> dict[str, Any]:
     db = SessionLocal()
     document_repo = DocumentRepository(SessionLocal)
@@ -562,7 +567,7 @@ def cleanup_failed_documents() -> dict[str, Any]:
         }
 
     except Exception as exc:
-        logger.error(f"Error in cleanup task: {exc}")
+        logger.exception("Error in cleanup task: %s", exc)
         return {"success": False, "error": str(exc), "message": "Cleanup task failed"}
 
     finally:

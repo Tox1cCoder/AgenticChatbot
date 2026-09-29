@@ -30,8 +30,15 @@ CLEANUP_BEAT_SCHEDULE = {
 }
 celery_app.conf.beat_schedule.update(CLEANUP_BEAT_SCHEDULE)
 
+# These run on the summary worker, whose own limits are sized for one
+# compaction call; the general task limits are what maintenance was tuned for.
+_MAINTENANCE_LIMITS = {
+    "time_limit": settings.celery_worker_time_limit,
+    "soft_time_limit": settings.celery_worker_soft_time_limit,
+}
 
-@celery_app.task(name="app.workers.cleanup_tasks.cleanup_temp_files_task")
+
+@celery_app.task(name="app.workers.cleanup_tasks.cleanup_temp_files_task", **_MAINTENANCE_LIMITS)
 def cleanup_temp_files_task(older_than_hours: int = 24):
     try:
         from app.core.container import get_container
@@ -52,7 +59,7 @@ def cleanup_temp_files_task(older_than_hours: int = 24):
             loop.close()
 
     except Exception as e:
-        logger.error(f"Temp file cleanup task failed: {str(e)}")
+        logger.exception("Temp file cleanup task failed: %s", e)
         return {
             "files_removed": 0,
             "error": str(e),
@@ -60,14 +67,13 @@ def cleanup_temp_files_task(older_than_hours: int = 24):
         }
 
 
-@celery_app.task(name="app.workers.cleanup_tasks.health_check_task")
+@celery_app.task(name="app.workers.cleanup_tasks.health_check_task", **_MAINTENANCE_LIMITS)
 def health_check_task():
     try:
         from app.ai.agents.rag_agent import RAGAgent
         from app.core.container import get_container
 
         container = get_container()
-        settings = container.config()
         qdrant_client = container.qdrant_client()
         embedding_service = container.rag_embedding_service()
 
@@ -95,11 +101,13 @@ def health_check_task():
             loop.close()
 
     except Exception as e:
-        logger.error(f"Health check failed: {str(e)}")
+        logger.exception("Health check failed: %s", e)
         return {"success": False, "error": str(e), "message": "Health check failed"}
 
 
-@celery_app.task(name="app.workers.cleanup_tasks.cleanup_abandoned_interrupts")
+@celery_app.task(
+    name="app.workers.cleanup_tasks.cleanup_abandoned_interrupts", **_MAINTENANCE_LIMITS
+)
 def cleanup_abandoned_interrupts():
     """
     Background task to clean up abandoned HITL interrupts.
@@ -202,7 +210,7 @@ def cleanup_abandoned_interrupts():
         }
 
     except Exception as e:
-        logger.error("Cleanup abandoned interrupts task failed: %s", str(e))
+        logger.exception("Cleanup abandoned interrupts task failed: %s", e)
         return {
             "success": False,
             "error": str(e),
@@ -229,6 +237,7 @@ def _scan_and_expire_redis_interrupts(now: datetime) -> tuple[list[str], int, in
     expired_count = 0
     active_count = 0
 
+    redis_client = None
     try:
         redis_client = redis.from_url(redis_url)
         interrupt_pattern = "interrupt:*"
@@ -261,10 +270,15 @@ def _scan_and_expire_redis_interrupts(now: datetime) -> tuple[list[str], int, in
                     active_count += 1
 
             except Exception:
+                logger.debug("Skipping unreadable interrupt key %r", key, exc_info=True)
                 continue
     except Exception as redis_exc:
         logger.warning("Redis interrupt expiry scan failed: %s", redis_exc, exc_info=True)
         return [], 0, 0
+    finally:
+        # The task runs every ten minutes; an unclosed client leaks its pool.
+        if redis_client is not None:
+            redis_client.close()
 
     return expired_thread_ids, expired_count, active_count
 

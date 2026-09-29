@@ -216,6 +216,29 @@ def test_the_recorder_renders_a_scrapeable_payload(recorder):
     assert "finalization_failed" in rendered
 
 
+def test_process_wide_recorder_keeps_bounded_samples_and_exact_totals(recorder):
+    """The recorder lives as long as the process and records every turn, so an
+    unbounded sample list is a slow memory leak; the exposition must stay exact."""
+    turns = 5_000
+    for _ in range(turns):
+        recorder.routing_completed(
+            agent_id="chat_agent",
+            provider="gemini",
+            model="m",
+            inventory_version="v1",
+            attempts=1,
+            latency_ms=2.0,
+            schema_ok=True,
+        )
+        recorder.transition_accepted(from_agent_id="chat_agent", to_agent_id="rag_agent", depth=1)
+
+    assert len(recorder.latencies_ms) < turns
+    assert len(recorder.transition_depths) < turns
+    rendered = recorder.render()
+    assert f"workflow_routing_latency_ms_count {turns}" in rendered
+    assert f"workflow_routing_latency_ms_sum {2.0 * turns:.3f}" in rendered
+
+
 def test_routing_metrics_are_reachable_over_http(recorder):
     """The other four observability surfaces have an endpoint; routing had none.
 

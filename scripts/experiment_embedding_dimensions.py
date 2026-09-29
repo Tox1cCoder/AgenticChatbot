@@ -96,7 +96,6 @@ _REQUIRED_TOP_LEVEL = {
     "provenance",
 }
 _CELL_ALWAYS_ALLOWED_NON_NULL = {"measured", "reason"}
-_DIMENSION_ALWAYS_ALLOWED_NON_NULL = {"measured", "reason", "indexing"}
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

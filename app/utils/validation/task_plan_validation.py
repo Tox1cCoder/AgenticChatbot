@@ -18,30 +18,10 @@ class TaskPlanValidationUtils:
         self.task_plan_repository = TaskPlanRepository(session_factory)
         self.conversation_repository = ConversationRepository(session_factory)
 
-    def validate_task_exists(self, task_id: UUID) -> None:
-        """Validate that a task plan exists.
-
-        Args:
-            task_id: The task ID to check
-
-        Raises:
-            ResourceNotFoundException: If task doesn't exist
-        """
-        if not self.task_plan_repository.exists(task_id):
-            raise ResourceNotFoundException(
-                detail="Task plan not found",
-                error_code="TASK_PLAN_NOT_FOUND",
-            )
-
     def validate_task_access(self, user_id: UUID, task_id: UUID) -> None:
-        """Verify user owns the conversation containing the task.
+        """Raise not-found unless ``user_id`` owns the task's conversation.
 
-        Args:
-            user_id: The user ID to check ownership
-            task_id: The task ID to check access for
-
-        Raises:
-            ResourceNotFoundException: If task not found or access denied
+        A foreign task reads as missing, not forbidden, so ids cannot be probed.
         """
         task = self.task_plan_repository.get_by_id(task_id)
         if not task:
@@ -62,15 +42,3 @@ class TaskPlanValidationUtils:
                 detail="Task plan not found",
                 error_code="TASK_PLAN_NOT_FOUND",
             )
-
-    @staticmethod
-    def _coerce_uuid(value: UUID | str | None) -> UUID | None:
-        """Convert stored dependency identifiers into UUID objects."""
-        if value is None:
-            return None
-        if isinstance(value, UUID):
-            return value
-        try:
-            return UUID(str(value))
-        except (ValueError, TypeError):
-            return None

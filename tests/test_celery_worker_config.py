@@ -172,6 +172,55 @@ def test_celery_redis_broker_resilience_is_explicit():
     assert result_options["visibility_timeout"] == 3600
 
 
+def test_mineru_probe_only_opens_http_urls(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.workers import start_worker
+
+    opened: list[str] = []
+
+    def fake_urlopen(url, timeout):
+        opened.append(url)
+        raise OSError("unreachable")
+
+    monkeypatch.setattr(start_worker.urllib.request, "urlopen", fake_urlopen)
+
+    start_worker._check_mineru_service(SimpleNamespace(mineru_api_url="file:///etc/passwd"))
+    start_worker._check_mineru_service(SimpleNamespace(mineru_api_url="http://127.0.0.1:8765/"))
+
+    assert opened == ["http://127.0.0.1:8765/docs"]
+
+
+def test_every_beat_task_lands_on_a_queue_start_worker_consumes(monkeypatch):
+    """An unrouted task goes to Celery's default "celery" queue, which none of
+    the three spawned workers consume: its beat entry fires and it never runs."""
+    import app.workers.cleanup_tasks  # noqa: F401 - registers its beat entries
+    import app.workers.document_processor  # noqa: F401
+    from app.workers.celery_app import celery_app
+
+    consumed = {
+        arg.removeprefix("--queues=")
+        for cmd in _captured_cmds(monkeypatch, system="Linux")
+        for arg in cmd
+        if arg.startswith("--queues=")
+    }
+    routes = dict(celery_app.conf.task_routes)
+
+    stranded = {}
+    for entry_name, entry in celery_app.conf.beat_schedule.items():
+        task_name = entry["task"]
+        queue = (
+            entry.get("options", {}).get("queue")
+            or routes.get(task_name, {}).get("queue")
+            or getattr(celery_app.tasks[task_name], "queue", None)
+            or celery_app.conf.task_default_queue
+        )
+        if queue not in consumed:
+            stranded[entry_name] = queue
+
+    assert not stranded, f"beat entries routed to unconsumed queues: {stranded}"
+
+
 def test_summary_tasks_have_dedicated_routes_and_beat_schedules():
     from app.workers.celery_app import celery_app
 

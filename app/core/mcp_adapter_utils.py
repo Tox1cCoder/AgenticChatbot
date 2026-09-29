@@ -194,13 +194,9 @@ def sanitize_mcp_schema(schema: Any) -> dict[str, Any]:
     exported_schema: Any = None
 
     if (
-        PydanticBaseModel is not None
-        and (
-            isinstance(schema, type)
-            and issubclass(schema, PydanticBaseModel)
-            or isinstance(schema, PydanticBaseModel)
-        )
-        and hasattr(schema, "model_json_schema")
+        isinstance(schema, type)
+        and issubclass(schema, PydanticBaseModel)
+        or isinstance(schema, PydanticBaseModel)
     ):
         exported_schema = schema.model_json_schema()
 

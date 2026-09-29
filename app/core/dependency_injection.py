@@ -6,7 +6,6 @@ import functools
 import inspect
 from typing import Any
 
-from dependency_injector import providers
 from fastapi import Depends
 
 from app.interfaces import (
@@ -47,80 +46,18 @@ from app.utils.validation.user_validation import UserValidationUtils
 
 
 class AutoInjector:
-    """Base class for auto-injection with wiring_map configuration."""
-
     wiring_map: dict[type, Any] = {}
-
-    @classmethod
-    def auto_inject(cls):
-        """Decorator factory to auto-wire FastAPI route parameters from wiring_map."""
-
-        def decorator(func):
-            sig = inspect.signature(func)
-            new_params = []
-
-            for _name, param in sig.parameters.items():
-                ann = param.annotation
-                if ann in cls.wiring_map and (
-                    param.default == inspect.Parameter.empty or param.default is None
-                ):
-                    provider = cls.wiring_map[ann]
-
-                    def create_dependency(provider=provider):
-                        return lambda: provider()
-
-                    param = param.replace(default=Depends(create_dependency()))
-                new_params.append(param)
-
-            def wrapper_factory():
-                if inspect.iscoroutinefunction(func):
-
-                    @functools.wraps(func)
-                    async def wrapper(*args, **kwargs):
-                        return await func(*args, **kwargs)
-
-                else:
-
-                    @functools.wraps(func)
-                    def wrapper(*args, **kwargs):
-                        return func(*args, **kwargs)
-
-                wrapper.__signature__ = sig.replace(parameters=new_params)
-                return wrapper
-
-            return wrapper_factory()
-
-        return decorator
 
 
 class ContainerInjector:
-    """Helper for automatic container provider creation."""
-
     wiring_map: dict[type, Any] = {}
-
-    @classmethod
-    def inject_container(cls, target_cls):
-        """Automatically build a providers.Factory from __init__ annotations."""
-        sig = inspect.signature(target_cls.__init__)
-        kwargs = {}
-
-        # skip 'self'
-        for name, param in list(sig.parameters.items())[1:]:
-            ann = param.annotation
-            if ann in cls.wiring_map:
-                kwargs[name] = cls.wiring_map[ann]
-            else:
-                raise ValueError(f"No provider registered for type {ann}")
-
-        return providers.Factory(target_cls, **kwargs)
 
 
 class AppAutoInjector(AutoInjector):
-    """Application-specific auto-injector with service mappings."""
+    """Resolves annotated FastAPI route parameters from the container."""
 
     @classmethod
     def setup_wiring_map(cls, container):
-        """Setup the wiring map with container providers."""
         container_ref = container
 
         cls.wiring_map = {
@@ -223,11 +160,13 @@ class AppAutoInjector(AutoInjector):
 
 
 class AppContainerInjector(ContainerInjector):
-    """Application-specific container injector with repository and service mappings."""
+    """Type -> provider map for repositories, services and validation utils.
+
+    Nothing in the application reads this map; only tests assert on it.
+    """
 
     @classmethod
     def setup_wiring_map(cls, container):
-        """Setup the wiring map with container providers for automatic injection."""
         container_ref = container
 
         cls.wiring_map = {

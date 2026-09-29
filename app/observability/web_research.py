@@ -4,15 +4,12 @@ from __future__ import annotations
 
 from prometheus_client import CollectorRegistry, Counter, generate_latest
 
+from app.observability.labels import bounded_label as _bounded
+
 _OPERATIONS = {"search", "open", "image_search", "image_fetch", "finish"}
 _MODES = {"quick", "agentic"}
 _OUTCOMES = {"success", "partial", "error", "reused", "selected", "released"}
 _VISUAL_INTENTS = {"none", "figure", "comparison", "gallery"}
-
-
-def _bounded(value: object, allowed: set[str]) -> str:
-    normalized = str(value or "").strip().lower()
-    return normalized if normalized in allowed else "other"
 
 
 class WebResearchMetrics:

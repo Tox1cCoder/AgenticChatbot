@@ -7,6 +7,8 @@ from typing import Any
 
 from prometheus_client import CollectorRegistry, Counter, Histogram, generate_latest
 
+from app.observability.labels import bounded_label as _bounded
+
 _COMPONENTS = {"reranker"}
 # Task 12: stage/cache instrumentation. Every label below is a small closed
 # enum; ``_bounded`` coerces anything else (including a caller's mistake, such
@@ -188,11 +190,6 @@ class RAGMetrics:
 
     def render(self) -> bytes:
         return generate_latest(self.registry)
-
-
-def _bounded(value: Any, allowed: set[str]) -> str:
-    normalized = str(value or "").strip().lower()
-    return normalized if normalized in allowed else "other"
 
 
 rag_metrics = RAGMetrics()

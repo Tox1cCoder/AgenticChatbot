@@ -24,20 +24,3 @@ class FeedbackFactory:
             "comment": feedback_data.comment,
             **timestamps,
         }
-
-    @staticmethod
-    def create_from_dict(feedback_data: dict[str, Any]) -> dict[str, Any]:
-        """Create Feedback data dictionary from dictionary"""
-        timestamps = TimestampUtils.get_timestamp_dict(
-            created_at=feedback_data.get("created_at"),
-            updated_at=feedback_data.get("updated_at"),
-        )
-
-        return {
-            "id": feedback_data.get("id", uuid4()),
-            "message_id": feedback_data["message_id"],
-            "user_id": feedback_data["user_id"],
-            "rating": feedback_data["rating"],
-            "comment": feedback_data.get("comment"),
-            **timestamps,
-        }

@@ -416,12 +416,6 @@ def validate_public_rich_item(
 # ---------------------------------------------------------------------------
 
 
-# Match a standalone HTML-comment marker line with up to three leading spaces
-# and optional trailing whitespace. Kept for callers that still need to
-# distinguish canonical block placement from the tolerant inline parser below.
-_MARKER_LINE_RE = re.compile(
-    r"^[ ]{0,3}<!--rich:([A-Za-z0-9_\-.:]+)-->[ \t]*$",
-)
 _MARKER_RE = re.compile(r"<!--rich:([A-Za-z0-9_\-.:]+)-->")
 #: Deliberately tolerant: it matches a marker the strict grammar rejects, which
 #: is the only way such a marker can be found and deleted. Never use it to

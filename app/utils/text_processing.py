@@ -1,40 +1,10 @@
-"""
-Text processing utilities for RAG pipeline.
+"""Prompt-text normalization: persona/instruction sanitizing and markdown fixes."""
 
-Provides functions for token counting, sentence splitting, smart chunking,
-text truncation, and page range extraction.
-"""
-
-import logging
 import re
-
-logger = logging.getLogger(__name__)
-
-from nltk.tokenize import sent_tokenize  # noqa: E402
-
-
-def split_into_sentences(text: str) -> list[str]:
-    """
-    Split text into sentences.
-    """
-    if not text:
-        return []
-
-    return sent_tokenize(text)
 
 
 def truncate_text(text: str, max_chars: int, add_ellipsis: bool = True) -> str:
-    """
-    Truncate text to a maximum number of characters, preserving word boundaries.
-
-    Args:
-        text: The text to truncate
-        max_chars: Maximum number of characters
-        add_ellipsis: Whether to add "..." when truncated
-
-    Returns:
-        Truncated text
-    """
+    """Truncate to ``max_chars``, backing off to the last word boundary."""
     if not text or len(text) <= max_chars:
         return text
 
@@ -51,73 +21,17 @@ def truncate_text(text: str, max_chars: int, add_ellipsis: bool = True) -> str:
     return truncated
 
 
-def extract_page_range(text: str) -> tuple[int | None, int | None]:
-    """
-    Extract page range from text containing [PAGE X] markers.
-
-    Args:
-        text: The text containing page markers
-
-    Returns:
-        Tuple of (first_page, last_page). Returns (None, None) if no markers found.
-    """
-    # Find all page markers in format [PAGE X]
-    page_pattern = r"\[PAGE\s+(\d+)\]"
-    matches = re.findall(page_pattern, text)
-
-    if not matches:
-        return (None, None)
-
-    page_numbers = [int(m) for m in matches]
-    return (min(page_numbers), max(page_numbers))
-
-
-def calculate_text_overlap(text1: str, text2: str) -> int:
-    """
-    Calculate the character overlap between two text chunks.
-    """
-    if not text1 or not text2:
-        return 0
-
-    # Find the longest suffix of text1 that is a prefix of text2
-    max_overlap = min(len(text1), len(text2))
-
-    for i in range(max_overlap, 0, -1):
-        if text1[-i:] == text2[:i]:
-            return i
-
-    return 0
-
-
 def clean_text(text: str) -> str:
-    """
-    Clean text by removing extra whitespace and normalizing line breaks.
-    """
+    """Collapse runs of spaces and of 3+ newlines, then strip."""
     if not text:
         return ""
-
-    # Replace multiple spaces with single space
     text = re.sub(r" +", " ", text)
-
-    # Replace multiple newlines with double newline
     text = re.sub(r"\n{3,}", "\n\n", text)
-
-    # Remove leading/trailing whitespace
-    text = text.strip()
-
-    return text
+    return text.strip()
 
 
 def sanitize_persona(persona: str | None) -> str | None:
-    """
-    Sanitize and truncate persona text.
-
-    Args:
-        persona: The persona text to sanitize
-
-    Returns:
-        Cleaned and truncated persona or None if empty
-    """
+    """Clean authored prompt text and cap it at 8000 characters; blank -> None."""
     if persona is None or not persona.strip():
         return None
 
@@ -179,13 +93,7 @@ def compose_system_instruction(
 
 
 def fix_markdown_code_blocks(text: str) -> str:
-    """
-    Fix markdown code blocks that are missing newlines before opening fences.
-
-    """
+    """Insert the newline a model often omits before a ``` fence."""
     if not text:
         return text
-
-    fixed = re.sub(r"([^\n\s])(```)", r"\1\n\2", text)
-
-    return fixed
+    return re.sub(r"([^\n\s])(```)", r"\1\n\2", text)

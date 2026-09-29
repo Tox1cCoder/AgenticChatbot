@@ -17,10 +17,9 @@ _STREAM_MARKDOWN_ENTITY_MAP = {
     "&#x27;": "'",
 }
 
-# Standalone inline rich-response marker line. Matches the contract defined in
-# ``app.core.rich_response`` (block-level HTML comment, optional leading up to
-# three spaces, optional trailing whitespace) but is duplicated here to keep
-# this helper free of any heavy imports.
+# Standalone inline rich-response marker line: the ``app.core.rich_response``
+# marker grammar as a whole line (up to three leading spaces, optional trailing
+# whitespace). Duplicated here to keep this helper free of heavy imports.
 _RICH_MARKER_LINE_RE = re.compile(
     r"^[ ]{0,3}<!--rich:[A-Za-z0-9_\-.:]+-->[ \t]*$",
     re.MULTILINE,

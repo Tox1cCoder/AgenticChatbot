@@ -4,14 +4,7 @@ from app.core.exceptions.mcp import ServerConfigurationError
 
 
 def generate_server_name_from_url(url: str) -> str:
-    """Generate a unique server name from a URL.
-
-    Args:
-        url: The MCP server URL (npx command or HTTP URL)
-
-    Returns:
-        A generated server name
-    """
+    """Derive a server name from an ``npx ... run <pkg>`` command or an HTTP URL."""
     url = url.strip()
 
     # Handle npx URLs
@@ -55,16 +48,9 @@ def generate_server_name_from_url(url: str) -> str:
 
 
 def parse_mcp_url(url: str) -> dict[str, Any]:
-    """Parse an MCP server URL and generate appropriate configuration.
+    """Turn an npx command into a stdio config, or an HTTP URL into a streamable one.
 
-    Args:
-        url: The MCP server URL (npx command or HTTP URL)
-
-    Returns:
-        A dictionary containing the server configuration
-
-    Raises:
-        ServerConfigurationError: If the URL format is invalid
+    Raises ServerConfigurationError for an empty or unsupported value.
     """
     url = url.strip()
 

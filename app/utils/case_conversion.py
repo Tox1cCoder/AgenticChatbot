@@ -35,16 +35,4 @@ def convert_dict_keys_to_snake_case(data: dict[str, Any]) -> dict[str, Any]:
         return data
 
 
-def convert_dict_keys_to_camel_case(data: dict[str, Any]) -> dict[str, Any]:
-    if isinstance(data, dict):
-        return {
-            to_camel_case(key): convert_dict_keys_to_camel_case(value)
-            for key, value in data.items()
-        }
-    elif isinstance(data, list):
-        return [convert_dict_keys_to_camel_case(item) for item in data]
-    else:
-        return data
-
-
 to_camel = to_camel_case

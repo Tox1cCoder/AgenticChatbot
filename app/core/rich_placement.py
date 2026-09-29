@@ -263,7 +263,9 @@ def finalize_article_content(response: Any, content: str) -> str:
     try:
         return _finalize_article_content(response, content)
     except Exception:
-        logger.warning("Inline rich placement skipped code=rich_placement_failed")
+        logger.warning(
+            "Inline rich placement skipped code=rich_placement_failed", exc_info=True
+        )
         return content
 
 

@@ -10,7 +10,7 @@ access-controlled sampled logs and traces.
 from __future__ import annotations
 
 import logging
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -40,6 +40,9 @@ BASE_AGENT_KIND_LABELS = frozenset(
 )
 
 
+_MAX_SAMPLES = 1000
+
+
 def _escape_label(value: str) -> str:
     """Escape a counter key for use as a Prometheus label value."""
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
@@ -63,8 +66,13 @@ class RoutingMetricsRecorder:
     """
 
     counters: Counter = field(default_factory=Counter)
-    latencies_ms: list[float] = field(default_factory=list)
-    transition_depths: list[int] = field(default_factory=list)
+    # The recorder lives for the whole process and records every turn, so raw
+    # samples are a bounded recent window; the exposition reads the running
+    # count and sum, which stay exact.
+    latencies_ms: deque[float] = field(default_factory=lambda: deque(maxlen=_MAX_SAMPLES))
+    transition_depths: deque[int] = field(default_factory=lambda: deque(maxlen=_MAX_SAMPLES))
+    latency_count: int = 0
+    latency_sum_ms: float = 0.0
 
     # -- routing ---------------------------------------------------------
 
@@ -86,6 +94,8 @@ class RoutingMetricsRecorder:
         self.counters[f"routing.attempts.{min(int(attempts), 2)}"] += 1
         self.counters[f"routing.schema.{'ok' if schema_ok else 'invalid'}"] += 1
         self.latencies_ms.append(float(latency_ms))
+        self.latency_count += 1
+        self.latency_sum_ms += float(latency_ms)
 
     def routing_failed(self, *, code: str, provider: str, model: str, attempts: int) -> None:
         self.counters[f"routing.failed.{code}"] += 1
@@ -152,10 +162,9 @@ class RoutingMetricsRecorder:
             label = _escape_label(key)
             lines.append(f'workflow_routing_counter{{name="{label}"}} {self.counters[key]}')
 
-        latencies = list(self.latencies_ms)
         lines.append("# TYPE workflow_routing_latency_ms summary")
-        lines.append(f"workflow_routing_latency_ms_count {len(latencies)}")
-        lines.append(f"workflow_routing_latency_ms_sum {sum(latencies):.3f}")
+        lines.append(f"workflow_routing_latency_ms_count {self.latency_count}")
+        lines.append(f"workflow_routing_latency_ms_sum {self.latency_sum_ms:.3f}")
         return "\n".join(lines) + "\n"
 
     def export(self) -> dict[str, Any]:
@@ -169,6 +178,8 @@ class RoutingMetricsRecorder:
         self.counters.clear()
         self.latencies_ms.clear()
         self.transition_depths.clear()
+        self.latency_count = 0
+        self.latency_sum_ms = 0.0
 
 
 _recorder = RoutingMetricsRecorder()

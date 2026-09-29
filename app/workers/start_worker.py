@@ -3,7 +3,7 @@ import os
 import platform
 import subprocess
 import sys
-import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -16,15 +16,19 @@ def _check_mineru_service(settings) -> None:
     if not url:
         return  # Not configured — cold-start mode, no check needed
 
-    # Probe a health/docs endpoint
+    # urlopen also follows file:// and ftp://; only an HTTP service is probed.
+    if urllib.parse.urlsplit(url).scheme.lower() not in {"http", "https"}:
+        logger.warning("MINERU_API_URL must be an http(s) URL; not probing %r", url)
+        return
+
     probe_url = url.rstrip("/") + "/docs"  # mineru-api serves FastAPI /docs
     try:
-        with urllib.request.urlopen(probe_url, timeout=5) as resp:
+        with urllib.request.urlopen(probe_url, timeout=5) as resp:  # noqa: S310 - scheme checked
             if resp.status < 400:
                 logger.info("MinerU service at %s is reachable.", url)
                 return
     except Exception:
-        pass
+        logger.debug("MinerU probe of %s failed", probe_url, exc_info=True)
 
     logger.warning(
         "\n"

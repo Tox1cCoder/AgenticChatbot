@@ -6,6 +6,8 @@ from typing import Any
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 
+from app.observability.labels import bounded_label as _bounded
+
 _JOB_STATUSES = ("idle", "pending", "processing", "retry", "dead")
 _CONTENT_CLASSES = {"text", "tools", "multimodal", "mixed"}
 _PROVIDERS = {"openai", "gemini", "anthropic"}
@@ -223,11 +225,6 @@ class ConversationCompactionHealthService:
             "max_sequence_lag": max_lag,
             "total_sequence_lag": total_lag,
         }
-
-
-def _bounded(value: Any, allowed: set[str]) -> str:
-    normalized = str(value or "").strip().lower()
-    return normalized if normalized in allowed else "other"
 
 
 def _provider(value: Any) -> str:

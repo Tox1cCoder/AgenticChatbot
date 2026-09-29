@@ -25,20 +25,3 @@ class UserFactory:
             "avatar_url": user_data.avatar_url,
             **timestamps,
         }
-
-    @staticmethod
-    def create_from_dict(user_data: dict[str, Any]) -> dict[str, Any]:
-        """Create User data dictionary from dictionary"""
-        timestamps = TimestampUtils.get_timestamp_dict(
-            created_at=user_data.get("created_at"),
-            updated_at=user_data.get("updated_at"),
-        )
-
-        return {
-            "id": user_data.get("id", uuid4()),
-            "username": user_data["username"],
-            "email": user_data["email"],
-            "password_hash": user_data["password_hash"],
-            "avatar_url": user_data.get("avatar_url"),
-            **timestamps,
-        }

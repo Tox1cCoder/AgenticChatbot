@@ -724,7 +724,9 @@ def _build_ingest_fn(args: argparse.Namespace) -> Callable[..., list[dict[str, A
     if not auth_token and args.email and args.password:
         try:
             auth_token = _login(requests, args.base_url.rstrip("/"), args.email, args.password)
-        except Exception:
+        except Exception as exc:
+            # Without this the report only says "unexecuted", never why.
+            print(f"benchmark_rag: login failed: {type(exc).__name__}: {exc}", file=sys.stderr)
             return None
     if not auth_token:
         return None
@@ -763,7 +765,11 @@ def _build_query_target(
     if args.target:
         try:
             return load_local_target(args.target)
-        except Exception:
+        except Exception as exc:
+            print(
+                f"benchmark_rag: cannot load target {args.target!r}: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
             return None
     try:
         return build_http_target()

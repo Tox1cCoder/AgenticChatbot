@@ -28,6 +28,7 @@ from typing import Any
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, generate_latest
 
+from app.observability.labels import bounded_label as _bounded
 from app.observability.model_usage_failure_store import (
     FailureStoreSnapshot,
     ModelUsageFailureStore,
@@ -325,11 +326,6 @@ class ModelUsageHealthService:
         }
         self.metrics.update_health(result)
         return result
-
-
-def _bounded(value: Any, allowed: set[str]) -> str:
-    normalized = str(value or "").strip().lower()
-    return normalized if normalized in allowed else "other"
 
 
 def _provider_family(value: Any) -> str:

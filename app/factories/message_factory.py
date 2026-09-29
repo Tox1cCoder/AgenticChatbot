@@ -17,17 +17,6 @@ class MessageFactory:
     """Factory for creating Message entities"""
 
     @staticmethod
-    def create_from_schema(message_data: MessageCreate) -> dict[str, Any]:
-        """Create Message data dictionary from MessageCreate schema"""
-        return {
-            "id": uuid4(),
-            "conversation_id": message_data.conversation_id,
-            "sender": MessageRole.user.value,  # Default role assignment
-            "content": message_data.content,
-            "created_at": TimestampUtils.now(),
-        }
-
-    @staticmethod
     def create_from_schema_with_role(
         message_data: MessageCreate,
         role: MessageRole,
@@ -52,25 +41,6 @@ class MessageFactory:
         }
 
     @staticmethod
-    def create_from_dict(message_data: dict[str, Any]) -> dict[str, Any]:
-        """Create Message data dictionary from dictionary"""
-        return {
-            "id": message_data.get("id", uuid4()),
-            "conversation_id": message_data["conversation_id"],
-            "sender": message_data["sender"],
-            "content": message_data["content"],
-            "created_at": message_data.get("created_at", TimestampUtils.now()),
-        }
-
-    @staticmethod
-    def _normalize_content(
-        content: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> str:
-        """Wrapper for backward compatibility."""
-        return normalize_message_content(content, metadata)
-
-    @staticmethod
     def create_bot_response(
         conversation_id: UUID,
         content: str,
@@ -83,7 +53,7 @@ class MessageFactory:
             "id": id or uuid4(),
             "conversation_id": conversation_id,
             "sender": MessageRole.assistant.value,
-            "content": MessageFactory._normalize_content(content, metadata),
+            "content": normalize_message_content(content, metadata),
             "message_metadata": metadata,
             "created_at": TimestampUtils.now(),
         }

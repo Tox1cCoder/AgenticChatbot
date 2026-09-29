@@ -20,14 +20,12 @@ security = HTTPBearer()
 
 
 def get_jwt_service() -> JwtService:
-    """Dependency to get JwtService from container"""
     from app.core.container import container
 
     return container.jwt_service()
 
 
 def get_user_service():
-    """Dependency to get UserService from container"""
     from app.core.container import container
 
     return container.user_service()
@@ -93,19 +91,15 @@ def require_user_ownership(resource_user_id: UUID, authenticated_user_id: UUID) 
         )
 
 
-async def get_current_user(
+def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),  # noqa: B008
     jwt_service: JwtService = Depends(get_jwt_service),  # noqa: B008
 ) -> User:
-    """
-    Dependency to get current authenticated User object from JWT token.
+    """Resolve the bearer token to a (password-less) User.
 
-    Returns:
-        User: The authenticated user object
-
-    Raises:
-        TokenExpiredException: If the token has expired
-        AuthenticationException: If the token is invalid or user not found
+    Deliberately sync: the user lookup is a blocking database read, and FastAPI
+    runs a sync dependency in its threadpool. As ``async def`` it ran on the
+    event loop and stalled every in-flight stream for each authenticated request.
     """
     user_service = get_user_service()
     token = credentials.credentials

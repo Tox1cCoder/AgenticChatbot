@@ -64,6 +64,13 @@ celery_app.conf.task_routes = {
     "app.workers.model_usage.retry_model_usage_write_task": {"queue": "summary"},
     "app.workers.model_usage.reconcile_model_usage_task": {"queue": "summary"},
     "app.workers.model_usage.cleanup_model_usage_task": {"queue": "summary"},
+    # Maintenance tasks share the summary queue. Left unrouted they land on
+    # Celery's default "celery" queue, which no worker started by
+    # start_worker consumes, so the beat entries fired and never ran.
+    "app.workers.cleanup_tasks.cleanup_temp_files_task": {"queue": "summary"},
+    "app.workers.cleanup_tasks.cleanup_abandoned_interrupts": {"queue": "summary"},
+    "app.workers.cleanup_tasks.health_check_task": {"queue": "summary"},
+    "app.workers.document_processor.cleanup_failed_documents": {"queue": "summary"},
 }
 
 CELERY_BEAT_SCHEDULE = {

@@ -1460,10 +1460,6 @@ class Settings(BaseSettings):
             "research query reuses the existing result."
         ),
     )
-    research_budget_enabled: bool = Field(
-        default=True,
-        description="Kill switch for turn-local research dedup and call caps.",
-    )
     # The soft rungs reserve one tool-free model call so an exhausted turn
     # still produces a validated answer. The hard rungs are the framework's own
     # limits and must stay above them, or the framework raises on exactly the
@@ -1788,8 +1784,6 @@ class Settings(BaseSettings):
             "budgeting heuristic, not an exact provider accounting."
         ),
     )
-
-    # Auto-Continue Configuration
 
     # Planning Agent Explicit Settings (promoted from getattr defaults)
     planning_max_iterations: int = Field(
@@ -2463,12 +2457,6 @@ def _log_startup_warnings(s: "Settings") -> None:
 
 @lru_cache
 def get_settings() -> Settings:
-    """
-    Get application settings with caching.
-
-    Returns:
-        Settings: Application settings instance
-    """
     return Settings()
 
 

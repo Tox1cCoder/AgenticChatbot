@@ -173,9 +173,6 @@ class Container(containers.DeclarativeContainer):
         ]
     )
 
-    # Configuration
-    config = providers.Configuration()
-
     # Database
     db = providers.Singleton(
         Database,
@@ -636,7 +633,6 @@ class Container(containers.DeclarativeContainer):
 
     # AI service with conditional checkpoint injection
     def _create_ai_service():
-        """Factory function to create AIService with conditional checkpointer."""
         checkpointer = Container._get_checkpointer()
         workflow_runtime = create_workflow(
             qdrant_client=container.qdrant_client(),
@@ -818,8 +814,6 @@ class Container(containers.DeclarativeContainer):
 
 # Initialize auto-injection wiring map before container instantiation
 def setup_auto_injection(container_ref: Container | type[Container] | None = None):
-    """Setup auto-injection wiring maps."""
-
     target = container_ref or Container
     AppAutoInjector.setup_wiring_map(target)
     AppContainerInjector.setup_wiring_map(target)
@@ -833,5 +827,4 @@ container = Container()
 
 
 def get_container() -> Container:
-    """Get the global container instance."""
     return container

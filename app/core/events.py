@@ -38,11 +38,6 @@ class EventBus:
         if listener not in self._listeners[event_type]:
             self._listeners[event_type].append(listener)
 
-    def unregister_listener(self, event_type: DocumentEvent, listener: EventListener) -> None:
-        listeners = self._listeners.get(event_type, [])
-        if listener in listeners:
-            listeners.remove(listener)
-
     async def emit(self, event_type: DocumentEvent, data: DocumentEventData) -> None:
         listeners = list(self._listeners.get(event_type, []))
         for listener in listeners:

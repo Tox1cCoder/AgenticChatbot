@@ -9,9 +9,7 @@ from typing import Any
 
 import httpx
 
-from .contracts import RAGEvaluationInput, RAGEvaluationOutput
 from .corpus import EvaluationScope
-from .metrics import output_from_mapping
 
 
 def build_http_target(
@@ -65,18 +63,3 @@ def scoped_target(
         return dict(target(payload))
 
     return invoke
-
-
-def evaluate_target_call(
-    target: Callable[[Mapping[str, Any]], Mapping[str, Any]], evaluation_input: RAGEvaluationInput
-) -> RAGEvaluationOutput:
-    """Invoke a target and normalize its observable response to the typed contract."""
-    return output_from_mapping(
-        target(
-            {
-                "question": evaluation_input.question,
-                "user_id": evaluation_input.user_id,
-                "conversation_id": evaluation_input.conversation_id,
-            }
-        )
-    )
