@@ -71,6 +71,40 @@ def _build_owned_conversation_queries(
     return count_statement, page_statement
 
 
+def _live_message_previews(
+    db: Session, conversation_ids: list[UUID], latest_messages: int
+) -> tuple[dict[UUID, int], dict[UUID, list[Message]]]:
+    """Live message count and newest ``latest_messages`` rows (oldest first) per id."""
+    live = (Message.conversation_id.in_(conversation_ids), Message.deleted_at.is_(None))
+    counts = dict(
+        db.execute(
+            select(Message.conversation_id, func.count(Message.id))
+            .where(*live)
+            .group_by(Message.conversation_id)
+        ).all()
+    )
+
+    recent_rank = (
+        func.row_number()
+        .over(
+            partition_by=Message.conversation_id,
+            order_by=(Message.created_at.desc(), Message.sequence.desc()),
+        )
+        .label("recent_rank")
+    )
+    ranked = select(Message.id.label("id"), recent_rank).where(*live).subquery()
+    statement = (
+        select(Message)
+        .join(ranked, ranked.c.id == Message.id)
+        .where(ranked.c.recent_rank <= latest_messages)
+        .order_by(Message.conversation_id, Message.created_at.asc(), Message.sequence.asc())
+    )
+    recent: dict[UUID, list[Message]] = {}
+    for message in db.execute(statement).scalars().all():
+        recent.setdefault(message.conversation_id, []).append(message)
+    return counts, recent
+
+
 class ConversationCRUDStrategy(
     DefaultCommandStrategy[Conversation, ConversationCreate, ConversationUpdate],
     DefaultQueryStrategy[Conversation],
@@ -149,7 +183,12 @@ class ConversationCRUDStrategy(
         search: str | None = None,
         project_id: UUID | None = None,
     ) -> list[Conversation]:
-        """Get conversations with limited recent messages and total message count"""
+        """Get a page of conversations with their newest live messages and live count.
+
+        The preview and the count both exclude soft-deleted messages, and both
+        are loaded for the whole page in two queries rather than two per
+        conversation.
+        """
         _, page_statement = _build_owned_conversation_queries(
             owner_id=owner_id,
             page=page,
@@ -160,37 +199,16 @@ class ConversationCRUDStrategy(
             project_id=project_id,
         )
         conversations = list(db.execute(page_statement).scalars().all())
+        if not conversations:
+            return conversations
 
-        # Load recent messages and count total messages for each conversation
+        counts, recent = _live_message_previews(
+            db, [conversation.id for conversation in conversations], latest_messages
+        )
         for conversation in conversations:
-            # Get total message count
-            count_statement = select(func.count(Message.id)).where(
-                Message.conversation_id == conversation.id
-            )
-            total_message_count = db.execute(count_statement).scalar() or 0
-
-            # Get recent messages
-            message_statement = (
-                select(Message)
-                .where(Message.conversation_id == conversation.id)
-                .order_by(desc(Message.created_at))
-                .limit(latest_messages)
-            )
-            recent_messages = list(db.execute(message_statement).scalars().all())
-            # Reverse to get oldest first
-            recent_messages_reversed = recent_messages[::-1]
-
-            # Create detached copies of messages for the conversation
-            messages_for_attribute = []
-            for msg in recent_messages_reversed:
-                messages_for_attribute.append(msg)
-
-            # Expunge conversation from session first
             db.expunge(conversation)
-
-            # Set messages and message count directly in __dict__
-            conversation.__dict__["messages"] = messages_for_attribute
-            conversation.__dict__["message_count"] = total_message_count
+            conversation.__dict__["messages"] = recent.get(conversation.id, [])
+            conversation.__dict__["message_count"] = counts.get(conversation.id, 0)
 
         return conversations
 
@@ -311,11 +329,6 @@ class ConversationRepository(RepositorySessionMixin):
     async def aget_by_id(self, id: UUID) -> Conversation | None:
         """Async twin of :meth:`get_by_id`."""
         return await self._arun(lambda session: self._crud_strategy.get_by_id(session, id))
-
-    def get_all(self, page: int = 1, limit: int = 10) -> list[Conversation]:
-        """Get all conversations with page-based pagination"""
-        with self.session_factory() as session:
-            return self._crud_strategy.get_all(session, page, limit)
 
     def _update_in_session(
         self, session: Session, id: UUID, input_schema: ConversationUpdate

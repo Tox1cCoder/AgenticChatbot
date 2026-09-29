@@ -21,6 +21,21 @@ from app.models.message import Message
 from app.repositories.session_transport import RepositorySessionMixin
 
 
+def is_hidden_transcript_artifact(message: Message) -> bool:
+    """Empty paused/interrupt assistant placeholders are not real transcript turns.
+
+    Shared by prompt history and compaction input on purpose: if the two
+    disagreed, memory would summarize turns the prompt never shows, or skip
+    turns it does.
+    """
+    if message.sender != MessageRole.assistant.value:
+        return False
+    if (message.content or "").strip():
+        return False
+    metadata = message.message_metadata or {}
+    return metadata.get("paused") is True or bool(metadata.get("interrupt"))
+
+
 class SummaryJobClaim(NamedTuple):
     """A committed worker lease and its immutable captured target."""
 
@@ -791,14 +806,7 @@ class ConversationCompactionRepository(RepositorySessionMixin):
             session.commit()
             return True
 
-    @staticmethod
-    def _is_hidden_artifact(message: Message) -> bool:
-        if message.sender != MessageRole.assistant.value:
-            return False
-        if (message.content or "").strip():
-            return False
-        metadata = message.message_metadata or {}
-        return metadata.get("paused") is True or bool(metadata.get("interrupt"))
+    _is_hidden_artifact = staticmethod(is_hidden_transcript_artifact)
 
     @staticmethod
     def _sanitize_error_code(error_code: str) -> str:

@@ -21,6 +21,7 @@ from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from app.models.base import Base
+from app.models.enums import enum_values
 
 __all__ = ["ReceiptStatus", "ToolExecutionReceipt"]
 
@@ -32,11 +33,6 @@ class ReceiptStatus(str, enum.Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     OUTCOME_UNKNOWN = "outcome_unknown"
-
-
-def _enum_member_values(enum_class: type[enum.Enum]) -> list[str]:
-    """Persist stable enum values instead of Python member names."""
-    return [str(member.value) for member in enum_class]
 
 
 class ToolExecutionReceipt(Base):
@@ -68,7 +64,7 @@ class ToolExecutionReceipt(Base):
             ReceiptStatus,
             name="tool_execution_receipt_status",
             create_type=True,
-            values_callable=_enum_member_values,
+            values_callable=enum_values,
         ),
         nullable=False,
     )

@@ -74,16 +74,6 @@ class DocumentChunkRepository:
             db.commit()
             return deleted
 
-    def get_by_generation_ordered(self, index_generation_id: UUID) -> list[DocumentChunk]:
-        with self.session_factory() as db:
-            return (
-                db.query(DocumentChunk)
-                .options(joinedload(DocumentChunk.document))
-                .filter(DocumentChunk.index_generation_id == index_generation_id)
-                .order_by(DocumentChunk.chunk_index.asc())
-                .all()
-            )
-
     def delete_by_document(self, document_id: UUID) -> int:
         with self.session_factory() as db:
             deleted = (

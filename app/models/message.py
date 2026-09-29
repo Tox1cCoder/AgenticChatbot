@@ -55,6 +55,14 @@ class Message(Base):
             "sequence",
             postgresql_where=text("deleted_at IS NULL"),
         ),
+        # Created by migration de19068933b7 for conversation search. Declared
+        # so autogenerate stops proposing to drop it; ``ddl_if`` keeps
+        # ``to_tsvector`` out of the SQLite ``create_all`` used by tests.
+        Index(
+            "idx_messages_content_simple_fts",
+            text("to_tsvector('simple', content)"),
+            postgresql_using="gin",
+        ).ddl_if(dialect="postgresql"),
     )
 
     def __repr__(self) -> str:

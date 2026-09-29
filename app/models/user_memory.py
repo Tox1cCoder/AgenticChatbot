@@ -2,7 +2,7 @@
 
 import uuid
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Column, DateTime, ForeignKey, Index, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -13,6 +13,11 @@ class UserMemory(Base):
     """Persistent user memory entry written by an agent on behalf of a user."""
 
     __tablename__ = "user_memories"
+    # The recall index from migration 9778bb07ea35 (user + project scope, live
+    # rows). Declared here so autogenerate no longer proposes dropping it.
+    __table_args__ = (
+        Index("ix_user_memories_user_project", "user_id", "project_id", "deleted_at"),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)

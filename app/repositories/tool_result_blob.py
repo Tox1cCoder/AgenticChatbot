@@ -15,7 +15,7 @@ class ToolResultBlobRepository:
         self.session_factory = session_factory
 
     def create(self, data: dict[str, Any]) -> ToolResultBlob:
-        with self.session_factory() as db:  # type: Session
+        with self.session_factory() as db:
             record = ToolResultBlob(**data)
             db.add(record)
             db.commit()
@@ -23,7 +23,7 @@ class ToolResultBlobRepository:
             return record
 
     def get_for_user(self, blob_id: UUID, user_id: UUID) -> ToolResultBlob | None:
-        with self.session_factory() as db:  # type: Session
+        with self.session_factory() as db:
             statement = select(ToolResultBlob).where(
                 ToolResultBlob.id == blob_id,
                 ToolResultBlob.user_id == user_id,
@@ -37,7 +37,7 @@ class ToolResultBlobRepository:
         user_id: UUID,
         conversation_id: UUID,
     ) -> ToolResultBlob | None:
-        with self.session_factory() as db:  # type: Session
+        with self.session_factory() as db:
             statement = select(ToolResultBlob).where(
                 ToolResultBlob.id == blob_id,
                 ToolResultBlob.user_id == user_id,

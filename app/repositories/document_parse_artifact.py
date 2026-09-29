@@ -116,18 +116,3 @@ class DocumentParseArtifactRepository:
             if artifact_type is not None:
                 query = query.filter(DocumentParseArtifact.artifact_type == artifact_type)
             return query.all()
-
-    def get_by_document_and_type(
-        self,
-        document_id: UUID,
-        artifact_type: str,
-    ) -> DocumentParseArtifact | None:
-        with self.session_factory() as session:
-            return (
-                session.query(DocumentParseArtifact)
-                .filter(
-                    DocumentParseArtifact.document_id == document_id,
-                    DocumentParseArtifact.artifact_type == artifact_type,
-                )
-                .first()
-            )

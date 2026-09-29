@@ -148,27 +148,6 @@ class DocumentRepository(RepositorySessionMixin):
             db.commit()
             return True
 
-    def get_by_status(
-        self, status: int, page: int = 1, page_size: int = 20
-    ) -> tuple[list[Document], int]:
-        """Get paginated documents by status with total count"""
-        with self.session_factory() as db:
-            skip = (page - 1) * page_size
-
-            query = db.query(Document).filter(Document.status == status)
-
-            total = query.count()
-            documents = (
-                query.order_by(desc(Document.upload_time)).offset(skip).limit(page_size).all()
-            )
-
-            return documents, total
-
-    def count_all(self) -> int:
-        """Count total documents"""
-        with self.session_factory() as db:
-            return db.query(Document).count()
-
     @staticmethod
     def _count_by_conversation_in_session(db, conversation_id: UUID) -> int:
         """Counting body shared by both transports.

@@ -21,6 +21,11 @@ class TaskStatus(str, enum.Enum):
     skipped = "skipped"
 
 
+def enum_values(enum_class: type[enum.Enum]) -> list[str]:
+    """Persist stable enum values instead of Python member names."""
+    return [str(member.value) for member in enum_class]
+
+
 class PlanLifecycle(str, enum.Enum):
     """Explicit lifecycle state for a conversation's task plan."""
 

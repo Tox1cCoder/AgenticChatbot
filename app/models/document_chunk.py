@@ -95,9 +95,16 @@ class DocumentChunk(Base):
     embedding_dimension = Column(Integer, nullable=True)
     qdrant_collection_name = Column(String, nullable=True)
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    # ``default`` as well as ``server_default``: a database built by the
+    # migration chain has no column default here (1d24e8e1ec28 created the
+    # table without one and o6p7q8r9s0t1 altered it in place), so an INSERT
+    # that relied on the server default hit NOT NULL on every chunk.
+    created_at = Column(
+        DateTime(timezone=True), default=func.now(), server_default=func.now(), nullable=False
+    )
     updated_at = Column(
         DateTime(timezone=True),
+        default=func.now(),
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,

@@ -10,7 +10,10 @@ from app.factories.message_factory import MessageFactory
 from app.models.enums import MessageRole
 from app.models.message import Message
 from app.repositories.command_strategy import DefaultCommandStrategy
-from app.repositories.conversation_compaction import ConversationCompactionRepository
+from app.repositories.conversation_compaction import (
+    ConversationCompactionRepository,
+    is_hidden_transcript_artifact,
+)
 from app.repositories.query_strategy import DefaultQueryStrategy
 from app.repositories.session_transport import RepositorySessionMixin
 from app.repositories.utils.pagination import Paginator
@@ -218,59 +221,13 @@ class MessageCRUDStrategy(
 
         rows = list(db.execute(statement).scalars().all())
         rows.reverse()
-        return [row for row in rows if not self._is_hidden_artifact(row)]
+        return [row for row in rows if not is_hidden_transcript_artifact(row)]
 
     @staticmethod
     def _lookup_sequence(db: Session, message_id: UUID) -> int | None:
         statement = select(Message).where(Message.id == message_id)
         anchor = db.execute(statement).scalar_one_or_none()
         return int(anchor.sequence) if anchor is not None else None
-
-    @staticmethod
-    def _is_hidden_artifact(message: Message) -> bool:
-        """Empty paused/interrupt assistant placeholders are not real transcript turns."""
-        if message.sender != MessageRole.assistant.value:
-            return False
-        if (message.content or "").strip():
-            return False
-        metadata = message.message_metadata or {}
-        if metadata.get("paused") is True:
-            return True
-        return bool(metadata.get("interrupt"))
-
-    def search_by_content(
-        self,
-        db: Session,
-        conversation_id: UUID,
-        query: str,
-        limit: int = 10,
-    ) -> list[Message]:
-        """
-        Search messages by content in a specific conversation.
-
-        Args:
-            db: Database session
-            conversation_id: ID of the conversation to search in
-            query: Search query string
-            limit: Maximum number of results to return
-
-        Returns:
-            List of matching messages ordered by relevance (most recent first)
-        """
-        # Use case-insensitive pattern matching
-        search_pattern = f"%{query}%"
-
-        statement = (
-            select(Message)
-            .where(
-                Message.conversation_id == conversation_id,
-                Message.content.ilike(search_pattern),
-            )
-            .order_by(Message.created_at.desc())
-            .limit(limit)
-        )
-
-        return list(db.execute(statement).scalars().all())
 
     def get_canvas_artifact_candidates(
         self,
@@ -465,11 +422,6 @@ class MessageRepository(RepositorySessionMixin):
     async def aget_by_id(self, id: UUID) -> Message | None:
         """Async twin of :meth:`get_by_id`."""
         return await self._arun(lambda session: self._crud_strategy.get_by_id(session, id))
-
-    def get_all(self, page: int = 1, limit: int = 10) -> list[Message]:
-        """Get all messages with page-based pagination"""
-        with self.session_factory() as session:
-            return self._crud_strategy.get_all(session, page, limit)
 
     def update(self, id: UUID, input_schema: MessageUpdate) -> Message | None:
         """Update a message and invalidate covered memory in one transaction."""

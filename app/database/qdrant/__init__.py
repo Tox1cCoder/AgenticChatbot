@@ -1,3 +1,5 @@
-"""Qdrant database utilities and initialization."""
+"""Home of the optional native Qdrant runtime (``qdrant.exe`` plus ``config/``).
 
-__all__ = ["ensure_collection"]
+Holds no code. Collection bootstrap lives in
+``DocumentIndexService.ensure_collection``; see README "Qdrant".
+"""

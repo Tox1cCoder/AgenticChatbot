@@ -40,6 +40,7 @@ from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from app.models.base import Base
+from app.models.enums import enum_values
 
 __all__ = [
     "ACTIVE_STATUSES",
@@ -112,11 +113,6 @@ _ACTIVE_STATUS_SQL = ", ".join(
 )
 
 
-def _enum_member_values(enum_class: type[enum.Enum]) -> list[str]:
-    """Persist stable enum values instead of Python member names."""
-    return [str(member.value) for member in enum_class]
-
-
 class Generation(Base):
     """One assistant generation, across however many epochs it takes."""
 
@@ -164,7 +160,7 @@ class Generation(Base):
             GenerationStatus,
             name="generation_status",
             create_type=True,
-            values_callable=_enum_member_values,
+            values_callable=enum_values,
         ),
         nullable=False,
     )
@@ -256,7 +252,7 @@ class GenerationCommand(Base):
             GenerationCommandAction,
             name="generation_command_action",
             create_type=True,
-            values_callable=_enum_member_values,
+            values_callable=enum_values,
         ),
         nullable=False,
     )

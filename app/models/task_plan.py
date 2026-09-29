@@ -10,6 +10,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
@@ -48,7 +49,10 @@ class TaskPlan(Base):
     description = Column(Text, nullable=False)
     status = Column(TaskStatusType, nullable=False, default=TaskStatus.pending)
 
-    task_metadata = Column(JSONB, nullable=True, default=None, server_default="'{}'::jsonb")
+    # ``text()``, not a plain string: SQLAlchemy quotes a str server_default,
+    # which rendered DEFAULT '''{}''::jsonb' — invalid JSON that made
+    # ``create_all`` fail on PostgreSQL. This matches what the migration built.
+    task_metadata = Column(JSONB, nullable=True, default=None, server_default=text("'{}'::jsonb"))
     created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
     updated_at = Column(
         DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False

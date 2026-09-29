@@ -753,6 +753,122 @@ def test_tool_approval_orm_round_trips_migrated_lowercase_enum() -> None:
             engine.dispose()
 
 
+def test_document_chunk_orm_insert_succeeds_on_the_migrated_head_schema() -> None:
+    """The chain leaves ``document_chunks`` timestamps without a column default.
+
+    ``1d24e8e1ec28`` created the table with none and ``o6p7q8r9s0t1`` altered it
+    in place, so an INSERT that left the timestamps to the server failed NOT
+    NULL on every chunk. ``create_all`` builds the default from the model,
+    which is why no SQLite repository test could see it.
+    """
+    from sqlalchemy.orm import Session
+
+    from app.models import Conversation, Document, DocumentChunk, DocumentIndexGeneration, User
+
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", "head")
+        engine = create_engine(scratch_url)
+        try:
+            with Session(engine) as session:
+                user = User(
+                    username="orm-chunk-user",
+                    email="orm-chunk@example.invalid",
+                    password_hash="not-a-real-password",
+                )
+                session.add(user)
+                session.flush()
+                conversation = Conversation(owner_id=user.id, title="ORM chunk insert")
+                session.add(conversation)
+                session.flush()
+                document = Document(
+                    conversation_id=conversation.id,
+                    filename="notes.txt",
+                    filename_key="notes.txt",
+                    file_type="text/plain",
+                    status=1,
+                )
+                session.add(document)
+                session.flush()
+                generation = DocumentIndexGeneration(
+                    document_id=document.id,
+                    embedding_provider="test",
+                    embedding_model="test-model",
+                    embedding_dimension=3,
+                    chunking_version="v1",
+                )
+                session.add(generation)
+                session.flush()
+                chunk = DocumentChunk(
+                    document_id=document.id,
+                    index_generation_id=generation.id,
+                    chunk_index=0,
+                    content="hello",
+                    content_sha256="0" * 64,
+                    char_count=5,
+                    token_count=1,
+                )
+                session.add(chunk)
+                session.commit()
+
+                assert chunk.created_at is not None
+                assert chunk.updated_at is not None
+        finally:
+            engine.dispose()
+
+
+#: Model/migration drift that only a new migration can remove. Anything else
+#: autogenerate reports is new drift and fails the test below.
+_KNOWN_MODEL_DRIFT = {
+    # Legacy columns from 1d24e8e1ec28 that o6p7q8r9s0t1 never dropped.
+    ("remove_column", "document_chunks", "page_number"),
+    ("remove_column", "document_chunks", "content_preview"),
+}
+
+
+def _describe_drift(diff) -> tuple[str, ...]:
+    operation = diff[0]
+    if operation in {"add_column", "remove_column"}:
+        return (operation, diff[2], diff[3].name)
+    if operation in {"add_index", "remove_index", "add_constraint", "remove_constraint"}:
+        return (operation, diff[1].table.name, diff[1].name)
+    if operation in {"add_fk", "remove_fk"}:
+        return (operation, diff[1].parent.name, diff[1].name)
+    if operation in {"add_table", "remove_table"}:
+        return (operation, diff[1].name)
+    if operation.startswith("modify_"):
+        return (operation, diff[2], diff[3])
+    return (operation, repr(diff[1:]))
+
+
+def test_models_match_the_migrated_head_schema() -> None:
+    """``alembic check`` in test form: the models must describe what the chain builds.
+
+    Server defaults are not compared (Alembic's default); many migration-side
+    defaults are intentionally absent from the models.
+    """
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
+
+    from app.alembic.autogenerate_filters import include_name
+    from app.database.base import Base
+
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", "head")
+        engine = create_engine(scratch_url)
+        try:
+            with engine.connect() as connection:
+                context = MigrationContext.configure(
+                    connection,
+                    opts={"include_name": include_name, "compare_type": True},
+                )
+                diffs = compare_metadata(context, Base.metadata)
+        finally:
+            engine.dispose()
+
+    flattened = [item for diff in diffs for item in (diff if isinstance(diff, list) else [diff])]
+    assert {_describe_drift(diff) for diff in flattened} == _KNOWN_MODEL_DRIFT
+
+
 def test_head_round_trips_below_reconciliation_with_schema_and_data_intact() -> None:
     with _scratch_database(_postgres_test_url()) as scratch_url:
         _run_alembic(scratch_url, "upgrade", "head")

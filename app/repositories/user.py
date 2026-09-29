@@ -82,9 +82,21 @@ class UserRepository:
             return self._crud_strategy.get_by_id(session, id)
 
     def get_all(self, skip: int = 0, limit: int = 100) -> list[User]:
-        """Get all users with pagination"""
+        """Live users in creation order, ``skip`` rows in, at most ``limit``.
+
+        ``skip`` is a row offset. It used to be passed straight through as a
+        page number, so ``skip=0`` produced a negative OFFSET (a PostgreSQL
+        error) and ``skip=n`` skipped ``(n - 1) * limit`` rows.
+        """
+        statement = (
+            select(User)
+            .where(User.deleted_at.is_(None))
+            .order_by(User.created_at.asc(), User.id.asc())
+            .offset(max(0, skip))
+            .limit(limit)
+        )
         with self.session_factory() as session:
-            return self._crud_strategy.get_all(session, skip, limit)
+            return list(session.execute(statement).scalars().all())
 
     def update(self, id: UUID, input_schema: UserUpdate) -> User | None:
         """Update user by ID"""

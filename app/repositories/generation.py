@@ -196,7 +196,7 @@ class GenerationRepository(RepositorySessionMixin):
                 .where(
                     Generation.conversation_id == conversation_id,
                     Generation.user_id == user_id,
-                    Generation.status.in_(tuple(_active_statuses())),
+                    Generation.status.in_(tuple(ACTIVE_STATUSES)),
                 )
                 .order_by(Generation.created_at.desc())
                 .limit(1)
@@ -408,9 +408,3 @@ class GenerationRepository(RepositorySessionMixin):
                 )
 
         await self._arun(work)
-
-
-def _active_statuses() -> tuple[GenerationStatus, ...]:
-    from app.models.generation import ACTIVE_STATUSES
-
-    return tuple(sorted(ACTIVE_STATUSES, key=lambda status: status.value))

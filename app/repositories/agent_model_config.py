@@ -99,21 +99,6 @@ class AgentModelConfigRepository:
             session.commit()
             return int(deleted or 0)
 
-    def delete_by_user_and_agent_key(self, user_id: UUID, agent_key: str) -> bool:
-        with self.session_factory() as session:
-            deleted = (
-                session.query(AgentModelConfig)
-                .filter(
-                    and_(
-                        AgentModelConfig.user_id == user_id,
-                        AgentModelConfig.agent_key == agent_key,
-                    )
-                )
-                .delete(synchronize_session=False)
-            )
-            session.commit()
-            return bool(deleted)
-
     def delete_by_user_and_provider_type(self, user_id: UUID, provider_type: str) -> list[str]:
         with self.session_factory() as session:
             rows = (

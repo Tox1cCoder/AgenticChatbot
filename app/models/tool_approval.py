@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
 from app.models.base import Base
+from app.models.enums import enum_values
 
 
 class DecisionType(str, enum.Enum):
@@ -18,11 +19,6 @@ class DecisionType(str, enum.Enum):
     EDIT = "edit"
     REJECT = "reject"
     RESPOND = "respond"
-
-
-def _enum_member_values(enum_class: type[enum.Enum]) -> list[str]:
-    """Persist stable enum values instead of Python member names."""
-    return [str(member.value) for member in enum_class]
 
 
 class ToolApproval(Base):
@@ -63,7 +59,7 @@ class ToolApproval(Base):
             DecisionType,
             name="decision_type",
             create_type=True,
-            values_callable=_enum_member_values,
+            values_callable=enum_values,
         ),
         nullable=False,
     )

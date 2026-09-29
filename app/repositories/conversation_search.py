@@ -186,12 +186,16 @@ class ConversationSearchRepository(RepositorySessionMixin):
         def work(session: Session) -> tuple[str | None, list[TranscriptLine], int] | None:
             reachable = cls._scoped_conversations(user_id, project_id)
             # A prefix is what the model is shown, so a prefix is what it can
-            # pass back. Ownership still comes from ``reachable``.
+            # pass back. Ownership still comes from ``reachable``. Escaped so
+            # a ``%`` or ``_`` from the model is a literal, not a wildcard that
+            # resolves to whichever conversation happens to be the only match.
             conversation = session.execute(
                 select(Conversation.id, Conversation.title)
                 .where(
                     Conversation.id.in_(reachable),
-                    Conversation.id.cast(String).like(f"{conversation_id}%"),
+                    Conversation.id.cast(String).startswith(
+                        str(conversation_id), autoescape=True
+                    ),
                 )
                 .limit(2)
             ).all()

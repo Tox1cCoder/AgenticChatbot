@@ -26,8 +26,11 @@ class Document(Base):
     filename_key = Column(String(255), nullable=False)
     file_type = Column(String(100), nullable=False)
     status = Column(Integer, nullable=False, default=1)  # 1=processing, 2=ready, 3=failed
+    # Callable, not ``datetime.now(timezone.utc)``: an evaluated default is
+    # computed once at import, stamping every document a process uploads with
+    # that process's start time and making upload_time ordering arbitrary.
     upload_time = Column(
-        DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc)
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )
     # Celery task ID persisted at enqueue time for ownership-safe status polling.
     processing_task_id = Column(String(255), nullable=True)

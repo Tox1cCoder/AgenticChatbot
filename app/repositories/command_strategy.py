@@ -68,10 +68,6 @@ class DefaultCommandStrategy(CommandStrategy[ModelType, CreateSchemaType, Update
             if field in ["id", "created_at"]:
                 continue
             if hasattr(db_obj, field):
-                current_value = getattr(db_obj, field)
-                if isinstance(current_value, UUID) and field == "id":
-                    continue
-
                 setattr(db_obj, field, value)
         db.commit()
         db.refresh(db_obj)

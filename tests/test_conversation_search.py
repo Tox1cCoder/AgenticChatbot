@@ -258,6 +258,14 @@ class TestRead:
         repo, _sf, ids = env
         assert repo.read(ids.owner, "ffffffff", project_id=ids.project_a) is None
 
+    def test_like_wildcards_in_the_prefix_are_literals(self, env):
+        """Project B holds exactly one conversation, so an unescaped ``%`` or
+        ``_`` would resolve to it without the caller knowing any of its id."""
+        repo, _sf, ids = env
+        assert repo.read(ids.owner, "%", project_id=ids.project_b) is None
+        assert repo.read(ids.owner, "_" * 8, project_id=ids.project_b) is None
+        assert repo.read(ids.owner, ids.b[:8], project_id=ids.project_b) is not None
+
 
 class TestProjectResolution:
     def test_resolves_the_conversations_project(self, env):

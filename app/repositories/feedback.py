@@ -71,12 +71,6 @@ class FeedbackRepository:
         with self.session_factory() as session:
             return self._crud_strategy.get_by_id(session, id)
 
-    def get_all(self) -> list[Feedback]:
-        """Get all feedback (removed pagination as not needed for admin operations)"""
-        with self.session_factory() as session:
-            statement = select(Feedback).order_by(Feedback.created_at.desc())
-            return list(session.execute(statement).scalars().all())
-
     def update(self, id: UUID, input_schema: FeedbackUpdate) -> Feedback | None:
         """Update feedback by ID"""
         with self.session_factory() as session:

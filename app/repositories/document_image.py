@@ -144,10 +144,6 @@ class DocumentImageRepository:
                 .all()
             )
 
-    def get_by_chunk_id(self, chunk_id: UUID) -> list[DocumentImage]:
-        with self.session_factory() as db:
-            return db.query(DocumentImage).filter(DocumentImage.chunk_id == chunk_id).all()
-
     def update(self, image_id: UUID, update_data: DocumentImageUpdate) -> DocumentImage | None:
         with self.session_factory() as db:
             db_image = db.query(DocumentImage).filter(DocumentImage.id == image_id).first()

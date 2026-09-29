@@ -222,19 +222,6 @@ class HITLInterruptRepository:
                 )
             return expired_count
 
-    def update_assistant_message_id(self, interrupt_id: str, assistant_message_id: UUID) -> None:
-        """Attach the persisted assistant message ID to the interrupt record."""
-        with self.session_factory() as db:
-            db.execute(
-                update(HITLInterrupt)
-                .where(HITLInterrupt.id == interrupt_id)
-                .values(
-                    assistant_message_id=assistant_message_id,
-                    updated_at=datetime.now(timezone.utc),
-                )
-            )
-            db.commit()
-
     # ------------------------------------------------------------------
     # Read operations
     # ------------------------------------------------------------------
@@ -252,15 +239,6 @@ class HITLInterruptRepository:
                 HITLInterrupt.user_id == user_id,
             )
             return db.execute(stmt).scalar_one_or_none()
-
-    def get_pending_by_conversation(self, conversation_id: UUID) -> list[HITLInterrupt]:
-        """Return all PENDING interrupt records for a conversation."""
-        with self.session_factory() as db:
-            stmt = select(HITLInterrupt).where(
-                HITLInterrupt.conversation_id == conversation_id,
-                HITLInterrupt.status == HITLInterruptStatus.PENDING,
-            )
-            return list(db.execute(stmt).scalars().all())
 
     def get_expired_pending(self, now: datetime) -> list[HITLInterrupt]:
         """Return PENDING records whose expiry time has passed."""
