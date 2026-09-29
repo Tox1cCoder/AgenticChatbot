@@ -24,11 +24,11 @@ from .client_runtime_tools import (
     TOOL_ORIGIN_CLIENT_MCP,
     TOOL_ORIGIN_CLIENT_SKILL,
 )
+from .mcp_tool_catalog import extract_arg_info
 from .text_normalization import sanitize_identifier, tokenize_text
 from .tool_search_scoring import (
     ToolSearchScore,
     build_query_tokens,
-    rank_and_filter,
     rank_tool_candidates,
     score_tool,
 )
@@ -105,10 +105,6 @@ class ClientToolDescriptor:
             "is_client_tool": True,
         }
 
-    def is_client_tool(self) -> bool:
-        """Always True for ClientToolDescriptor."""
-        return True
-
 
 @dataclass
 class ClientToolReference:
@@ -121,26 +117,6 @@ class ClientToolReference:
     catalog_version: int = 0
     tool_instance_id: str = ""
 
-    def is_client_tool(self) -> bool:
-        """Always True for ClientToolReference."""
-        return True
-
-
-def _extract_arg_info(args_schema: dict[str, Any]) -> tuple[list[str], list[str]]:
-    """Extract argument names and required argument names from a JSON schema."""
-    properties = args_schema.get("properties", {})
-    required = set(args_schema.get("required", []))
-
-    all_args = list(properties.keys())
-    required_args = [arg for arg in all_args if arg in required]
-
-    return all_args, required_args
-
-
-def _tokenize(text: str) -> list[str]:
-    """Tokenize text for search matching."""
-    return tokenize_text(text)
-
 
 class ClientToolCatalog:
     """
@@ -151,13 +127,6 @@ class ClientToolCatalog:
     """
 
     def __init__(self, device_id: str, user_id: str):
-        """
-        Initialize the catalog for a specific device.
-
-        Args:
-            device_id: The device UUID string
-            user_id: The user UUID string
-        """
         self._device_id = device_id
         self._user_id = user_id
         self._tools: list[ClientToolDescriptor] = []
@@ -165,22 +134,13 @@ class ClientToolCatalog:
         self._tools_by_server: dict[str, list[ClientToolDescriptor]] = {}
         # Case-insensitive server name lookup: {lower_name: canonical_name}
         self._server_name_lower_map: dict[str, str] = {}
-        self._token_index: dict[str, set[int]] = {}
-        self._doc_freq: Counter = Counter()
-        self._total_docs: int = 0
         self._session_id: str = ""
         self._catalog_version: int = -1
-        self._last_refresh: float = 0
 
     def refresh_from_session(self, session: DeviceSession | None = None) -> bool:
-        """
-        Refresh the catalog from the device session.
+        """Rebuild from the device session (looked up when not given).
 
-        Args:
-            session: Optional DeviceSession. If not provided, will look up from registry.
-
-        Returns:
-            True if the catalog was refreshed, False if no refresh needed
+        Returns True only when the catalog was rebuilt.
         """
         from uuid import UUID
 
@@ -229,25 +189,19 @@ class ClientToolCatalog:
         return True
 
     def _clear(self) -> None:
-        """Clear all catalog data."""
         self._tools.clear()
         self._tools_by_name.clear()
         self._tools_by_server.clear()
         self._server_name_lower_map.clear()
-        self._token_index.clear()
-        self._doc_freq.clear()
-        self._total_docs = 0
         self._session_id = ""
         self._catalog_version = -1
 
     def _rebuild_from_catalog(self, catalog: dict[str, Any], version: int, session_id: str) -> None:
-        """Rebuild the catalog from a device's tool catalog."""
         start_time = time.time()
 
         self._clear()
         self._session_id = session_id
         self._catalog_version = version
-        self._last_refresh = time.time()
 
         raw_tools = catalog.get("tools", []) if isinstance(catalog, dict) else []
         if not isinstance(raw_tools, list):
@@ -277,7 +231,7 @@ class ClientToolCatalog:
             # Sanitize exposed name
             exposed_name = sanitize_identifier(exposed_name)
 
-            arg_names, required_args = _extract_arg_info(input_schema)
+            arg_names, required_args = extract_arg_info(input_schema)
 
             descriptor = ClientToolDescriptor(
                 tool_name=exposed_name,
@@ -294,21 +248,9 @@ class ClientToolCatalog:
                 args_schema=input_schema,
             )
 
-            idx = len(self._tools)
             self._tools.append(descriptor)
-
-            # Index by exposed name
             self._tools_by_name[exposed_name] = descriptor
-
-            # Index by server
-            if server_name not in self._tools_by_server:
-                self._tools_by_server[server_name] = []
-            self._tools_by_server[server_name].append(descriptor)
-
-            # Build search index
-            self._index_tool(idx, descriptor)
-
-        self._total_docs = len(self._tools)
+            self._tools_by_server.setdefault(server_name, []).append(descriptor)
 
         # Build case-insensitive server name lookup
         for sname in self._tools_by_server:
@@ -321,26 +263,6 @@ class ClientToolCatalog:
             len(self._tools),
             elapsed * 1000,
         )
-
-    def _index_tool(self, idx: int, descriptor: ClientToolDescriptor) -> None:
-        """Add a tool to the search index."""
-        searchable = " ".join(
-            [
-                descriptor.tool_name,
-                descriptor.server_name,
-                descriptor.description,
-                " ".join(descriptor.arg_names),
-            ]
-        )
-
-        tokens = _tokenize(searchable)
-        unique_tokens = set(tokens)
-
-        for token in unique_tokens:
-            if token not in self._token_index:
-                self._token_index[token] = set()
-            self._token_index[token].add(idx)
-            self._doc_freq[token] += 1
 
     def resolve_server_name(self, server_name: str) -> str | None:
         """Resolve a server name case-insensitively to its canonical form."""
@@ -358,7 +280,7 @@ class ClientToolCatalog:
         doc_freq: Counter = Counter()
 
         for candidate_name, descriptors in self._tools_by_server.items():
-            candidate_tokens = set(_tokenize(candidate_name))
+            candidate_tokens = set(tokenize_text(candidate_name))
             has_name_signal = (
                 candidate_name.lower() == query_lower
                 or candidate_name.lower().startswith(query_lower)
@@ -373,7 +295,7 @@ class ClientToolCatalog:
             profiles.append((candidate_name, description, example_tools))
 
             searchable = " ".join([candidate_name, " ".join(example_tools)])
-            for token in set(_tokenize(searchable)):
+            for token in set(tokenize_text(searchable)):
                 doc_freq[token] += 1
 
         if not profiles:
@@ -414,18 +336,7 @@ class ClientToolCatalog:
         server_name: str | None = None,
         allowlist: list[str] | None = None,
     ) -> list[ClientToolDescriptor]:
-        """
-        Search for tools matching a query.
-
-        Args:
-            query: Natural language search query (None for "list all")
-            top_k: Maximum results to return
-            server_name: Optional server filter
-            allowlist: Optional allowlist filter
-
-        Returns:
-            List of ClientToolDescriptor objects, ranked by relevance
-        """
+        """Rank tools by relevance; an empty ``query`` lists in stable order."""
         # Canonicalize server_name case-insensitively
         canonical_server = None
         if server_name:
@@ -492,32 +403,6 @@ class ClientToolCatalog:
             return []
 
         return rank_tool_candidates(query=query, candidates=candidates)[:top_k]
-
-    def _rank_candidates(
-        self,
-        query: str,
-        candidates: list[ClientToolDescriptor],
-    ) -> list[tuple[ClientToolDescriptor, float]]:
-        """Rank candidates by relevance to query using shared scoring logic."""
-        from app.core.config import settings as _settings
-
-        query_lower, query_tokens = build_query_tokens(query)
-        min_score = _settings.mcp_tool_search_min_relevance_score
-
-        scored: list[tuple[ClientToolDescriptor, float]] = []
-        for tool in candidates:
-            s = score_tool(
-                tool_name=tool.tool_name,
-                description=tool.description,
-                arg_names=tool.arg_names,
-                query_lower=query_lower,
-                query_tokens=query_tokens,
-                doc_freq=self._doc_freq,
-                total_docs=self._total_docs,
-            )
-            scored.append((tool, s))
-
-        return rank_and_filter(scored, min_relevance_score=min_score)
 
     def get_tool(
         self,
@@ -591,21 +476,11 @@ class ClientToolCatalog:
         return self._session_id
 
 
-# Module-level cache for client catalogs
 _client_catalogs: dict[str, ClientToolCatalog] = {}
 
 
 def get_client_tool_catalog(device_id: str, user_id: str) -> ClientToolCatalog:
-    """
-    Get or create a client tool catalog for a device.
-
-    Args:
-        device_id: The device UUID string
-        user_id: The user UUID string
-
-    Returns:
-        ClientToolCatalog instance (may be empty if device not connected)
-    """
+    """The cached catalog for one user's device; empty if it is not connected."""
     cache_key = f"{user_id}:{device_id}"
 
     if cache_key not in _client_catalogs:
@@ -613,13 +488,11 @@ def get_client_tool_catalog(device_id: str, user_id: str) -> ClientToolCatalog:
 
     catalog = _client_catalogs[cache_key]
     catalog.refresh_from_session()
+    if not catalog.session_id:
+        # No live session: keep nothing cached, or every device that ever
+        # connected to this process would hold an entry until restart.
+        _client_catalogs.pop(cache_key, None)
     return catalog
-
-
-def clear_client_tool_catalog(device_id: str, user_id: str) -> None:
-    """Clear a cached client tool catalog."""
-    cache_key = f"{user_id}:{device_id}"
-    _client_catalogs.pop(cache_key, None)
 
 
 def reset_all_client_catalogs() -> None:

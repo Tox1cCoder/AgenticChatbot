@@ -117,6 +117,42 @@ async def test_checkpoint_setup_validates_serializer_before_opening_pool(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_failed_checkpoint_setup_closes_the_pool_it_opened(monkeypatch):
+    """A retry builds a fresh pool, so the failed one must not keep connections."""
+    pools: list[object] = []
+
+    class FakePool:
+        def __init__(self, *args, **kwargs):
+            self.closed = False
+            pools.append(self)
+
+        async def open(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            self.closed = True
+
+        def connection(self):
+            raise RuntimeError("schema setup failed")
+
+    monkeypatch.setattr(checkpoint_module, "_build_checkpoint_serializer", lambda: object())
+    monkeypatch.setattr(checkpoint_module, "AsyncConnectionPool", FakePool)
+    monkeypatch.setattr(checkpoint_module, "AsyncPostgresSaver", lambda *a, **k: object())
+    manager = checkpoint_module.CheckpointManager(
+        db_url="postgresql://user:pass@localhost/db",
+        settings=SimpleNamespace(checkpoint_schema="public"),
+    )
+
+    with pytest.raises(RuntimeError, match="schema setup failed"):
+        await manager.setup()
+
+    assert [pool.closed for pool in pools] == [True]
+    assert manager._pool is None
+    assert manager.checkpointer is None
+    assert manager.get_checkpointer() is None
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_manager_delete_thread_delegates_to_async_saver():
     manager = checkpoint_module.CheckpointManager(
         db_url="postgresql://user:pass@localhost/db",

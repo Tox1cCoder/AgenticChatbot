@@ -21,10 +21,8 @@ from .tool_execution_policy import get_current_tool_policy
 logger = logging.getLogger(__name__)
 
 # Tool origin constants for clean separation between server and client tools
-TOOL_ORIGIN_SERVER_MCP = "server_mcp"  # MCP tools running on the server
 TOOL_ORIGIN_CLIENT_MCP = "client_mcp"  # MCP tools running on a client device
 TOOL_ORIGIN_CLIENT_SKILL = "client_skill"  # Skill capability tools running on a client device
-TOOL_ORIGIN_INTERNAL = "internal"  # Built-in server tools (tool_search, write_todos, etc.)
 
 # Catalog entry "origin" values a client-synced tool entry may carry.
 _CATALOG_ORIGINS = frozenset({"mcp", "skill"})
@@ -76,12 +74,7 @@ class ClientRuntimeToolSpec:
 
     @property
     def tool_origin(self) -> str:
-        """Return the normalized tool origin constant."""
         return TOOL_ORIGIN_CLIENT_SKILL if self.origin == "skill" else TOOL_ORIGIN_CLIENT_MCP
-
-    def is_client_tool(self) -> bool:
-        """Check if this is a client-side tool (always True for ClientRuntimeToolSpec)."""
-        return True
 
 
 def _sanitize_name_token(value: str | None) -> str:
@@ -200,6 +193,22 @@ _ERR_CLIENT_RECONNECTED = (
 )
 
 
+def client_dispatch_timeouts() -> tuple[float, float]:
+    """``(execution, response)`` seconds for one client dispatch.
+
+    The current tool policy wins per field; the runtime bridge timeout fills
+    whichever the policy leaves unset.
+    """
+    policy = get_current_tool_policy()
+    fallback = float(settings.client_runtime_ws_timeout_seconds)
+    execution = getattr(policy, "client_execution_timeout_seconds", None)
+    response = getattr(policy, "client_response_timeout_seconds", None)
+    return (
+        execution if execution is not None else fallback,
+        response if response is not None else fallback,
+    )
+
+
 def _build_tool(
     *,
     spec: ClientRuntimeToolSpec,
@@ -247,17 +256,7 @@ def _build_tool(
             return _ERR_CLIENT_RECONNECTED
 
         try:
-            policy = get_current_tool_policy()
-            execution_timeout_seconds = (
-                policy.client_execution_timeout_seconds
-                if policy is not None and policy.client_execution_timeout_seconds is not None
-                else float(settings.client_runtime_ws_timeout_seconds)
-            )
-            response_timeout_seconds = (
-                policy.client_response_timeout_seconds
-                if policy is not None and policy.client_response_timeout_seconds is not None
-                else float(settings.client_runtime_ws_timeout_seconds)
-            )
+            execution_timeout_seconds, response_timeout_seconds = client_dispatch_timeouts()
             response = await ClientDeviceService.dispatch_tool_call(
                 user_id=bound_user_id,
                 device_id=bound_device_id,
@@ -402,18 +401,7 @@ def get_client_runtime_tools(
 
 
 def is_client_tool(tool: BaseTool) -> bool:
-    """
-    Check if a tool is a client-side tool (runs on a connected device).
-
-    This is used to ensure clean separation between server MCP tools and
-    client device tools in tool search and execution paths.
-
-    Args:
-        tool: The tool to check
-
-    Returns:
-        True if the tool is a client-side tool
-    """
+    """Whether ``tool`` runs on a connected device rather than the server."""
     metadata = getattr(tool, "metadata", None) or {}
 
     # Check explicit flag first
@@ -430,15 +418,7 @@ def is_client_tool(tool: BaseTool) -> bool:
 
 
 def get_client_tool_device_id(tool: BaseTool) -> str | None:
-    """
-    Get the device_id that a client tool is bound to.
-
-    Args:
-        tool: The tool to check
-
-    Returns:
-        The device_id string if this is a client tool, None otherwise
-    """
+    """The device a client tool is bound to; None for any other tool."""
     if not is_client_tool(tool):
         return None
 

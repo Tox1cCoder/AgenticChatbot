@@ -184,6 +184,27 @@ async def test_invalid_or_empty_output_preserves_previous_memory(output: str, er
 
 
 @pytest.mark.asyncio
+async def test_a_reasoning_block_in_block_content_does_not_break_the_json() -> None:
+    """A reasoning summary under ``text`` used to be prefixed to the payload."""
+    generated = SimpleNamespace(
+        content=[
+            {"type": "reasoning", "text": "First I list the facts..."},
+            {"type": "text", "text": _valid_output()},
+        ]
+    )
+    compactor = _compactor(lambda **_: generated)
+
+    result = await compactor.compact(
+        [_message(1, "user"), _message(2, "assistant")],
+        previous_memory=None,
+    )
+
+    assert result.success is True
+    assert result.memory is not None
+    assert result.memory.facts == ["A stable fact."]
+
+
+@pytest.mark.asyncio
 async def test_over_budget_output_preserves_previous_memory() -> None:
     previous = ConversationMemory(facts=["previous"])
     compactor = _compactor(

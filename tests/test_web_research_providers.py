@@ -289,6 +289,42 @@ async def test_malformed_payload_has_a_bounded_failure() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "code", "retryable"),
+    [
+        # tavily_server._error: no error_type, an explicit retryable flag.
+        (
+            {"error": "Tavily search rate_limit.", "provider": "tavily", "retryable": True},
+            "provider_error",
+            True,
+        ),
+        # brave_image_search_server._error vocabulary.
+        ({"error": "HTTP 503", "error_type": "upstream", "retryable": True}, "upstream", True),
+        ({"error": "HTTP 429", "error_type": "rate_limit", "retryable": True}, "rate_limit", True),
+        (
+            {"error": "HTTP 401", "error_type": "authentication", "retryable": False},
+            "authentication",
+            False,
+        ),
+        # No declared flag: the code decides.
+        ({"error": "slow", "error_type": "timeout"}, "timeout", True),
+        # A code outside ResearchFailure's pattern must not crash the search.
+        ({"error": "x", "error_type": "Rate-Limit Hit"}, "rate_limit_hit", False),
+    ],
+)
+async def test_provider_error_payloads_keep_the_servers_retryable_signal(
+    payload: dict, code: str, retryable: bool
+) -> None:
+    """Both servers state ``retryable``; ignoring it disabled retry and the breaker."""
+
+    with pytest.raises(ProviderFailure) as raised:
+        await TavilyTextSearchProvider(_Tool(payload)).search(_normalized(), query_index=1)
+
+    assert raised.value.code == code
+    assert raised.value.retryable is retryable
+
+
+@pytest.mark.asyncio
 async def test_the_probe_uses_the_bare_host_not_the_www_form() -> None:
     """``site:www.t1.gg`` is narrower than the restriction the adapter enforces.
 

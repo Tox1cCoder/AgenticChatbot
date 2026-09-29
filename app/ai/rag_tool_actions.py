@@ -480,6 +480,8 @@ async def execute_search_documents_action(
                             max_agentic_images=max_agentic_images,
                         )
                     except Exception:
+                        # Images are supplementary; the chunks still answer.
+                        logger.debug("search_chunks image attachment failed", exc_info=True)
                         attached_count = 0
 
                     repository = getattr(
@@ -636,7 +638,14 @@ async def execute_search_documents_action(
             )
 
     except Exception as exc:
-        result = f"Error executing {action}: {str(exc)}"
+        # Logged, not forwarded: a raw driver or vector-store message can carry
+        # hosts, SQL, and internal ids the model has no use for.
+        logger.warning("search_documents action %r failed", action, exc_info=True)
+        result = compact_rag_tool_error(
+            error_type=ToolErrorKind.UNKNOWN.value,
+            message=f"search_documents {action or 'action'} failed ({type(exc).__name__}).",
+            hint="Try a different action, or answer from the evidence already gathered.",
+        )
 
     reason = tool_args.get("reason", "")
     if reason:

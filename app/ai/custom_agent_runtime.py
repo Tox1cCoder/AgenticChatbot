@@ -89,24 +89,6 @@ class AgentRuntimeSpec(BaseModel):
     def is_custom(self) -> bool:
         return self.custom_agent_id is not None
 
-    def allowed_qualified_tool_ids(self) -> set[str]:
-        """Qualified tool ids the model may discover via tool_search."""
-        ids: set[str] = set()
-        for ref in (*self.allowed_server_tool_refs, *self.allowed_client_tool_refs):
-            qid = ref.get("qualified_tool_id")
-            if qid:
-                ids.add(str(qid))
-        return ids
-
-    def tool_search_allowlist(self) -> list[str]:
-        """Allowlist (names + qualified ids) for the restricted tool_search."""
-        names: set[str] = set()
-        server_allowlist = self.server_tool_search_allowlist()
-        if server_allowlist:
-            names.update(server_allowlist)
-        names.update(self.client_tool_search_allowlist())
-        return sorted(names)
-
     def server_tool_search_allowlist(self) -> list[str] | None:
         """Server-side search allowlist; ``None`` means every backend MCP tool."""
         if self.allow_all_server_tools:

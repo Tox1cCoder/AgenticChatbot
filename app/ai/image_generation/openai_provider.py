@@ -42,7 +42,12 @@ _PARTIAL_PREVIEW_COUNT = 2
 
 
 class OpenAIImageProvider:
+    """One provider per generation: ``resolve_image_provider`` builds a fresh one
+    per call, so a client this provider created is closed when its stream ends.
+    An injected client belongs to the caller and is never closed here."""
+
     def __init__(self, api_key: str | None = None, client: Any | None = None) -> None:
+        self._owns_client = client is None
         if client is not None:
             self._client = client
         else:
@@ -84,21 +89,29 @@ class OpenAIImageProvider:
     async def stream_generate(
         self, request: ImageGenerationRequest
     ) -> AsyncIterator[ImageStreamEvent]:
-        stream = await self._open_stream(request)
-        seq = 0
-        async for event in stream:
-            event_type = getattr(event, "type", None)
-            data_b64 = getattr(event, "b64_json", None)
-            mime = f"image/{getattr(event, 'output_format', None) or 'png'}"
-            if event_type in ("image_generation.partial_image", "image_edit.partial_image"):
-                # Partial previews never carry usage accounting.
-                if data_b64:
-                    seq += 1
-                    yield ImagePartial(index=0, data_b64=data_b64, mime=mime, seq=seq)
-            elif event_type in ("image_generation.completed", "image_edit.completed"):
-                if data_b64:
-                    yield ImageFinal(index=0, data_b64=data_b64, mime=mime)
-                # The completed event carries the whole request's token usage;
-                # emit it as the terminal accounting event (unavailable when the
-                # provider omitted it).
-                yield ImageUsage(usage=normalize_provider_usage(provider="openai", payload=event))
+        try:
+            stream = await self._open_stream(request)
+            seq = 0
+            async for event in stream:
+                event_type = getattr(event, "type", None)
+                data_b64 = getattr(event, "b64_json", None)
+                mime = f"image/{getattr(event, 'output_format', None) or 'png'}"
+                if event_type in ("image_generation.partial_image", "image_edit.partial_image"):
+                    # Partial previews never carry usage accounting.
+                    if data_b64:
+                        seq += 1
+                        yield ImagePartial(index=0, data_b64=data_b64, mime=mime, seq=seq)
+                elif event_type in ("image_generation.completed", "image_edit.completed"):
+                    if data_b64:
+                        yield ImageFinal(index=0, data_b64=data_b64, mime=mime)
+                    # The completed event carries the whole request's token usage;
+                    # emit it as the terminal accounting event (unavailable when the
+                    # provider omitted it).
+                    yield ImageUsage(
+                        usage=normalize_provider_usage(provider="openai", payload=event)
+                    )
+        finally:
+            if self._owns_client:
+                # Each AsyncOpenAI holds its own httpx pool; one per request
+                # left open leaked sockets until garbage collection.
+                await self._client.close()

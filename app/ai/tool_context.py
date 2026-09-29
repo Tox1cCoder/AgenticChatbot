@@ -97,18 +97,6 @@ def get_tool_context() -> ToolContext:
     return ctx
 
 
-def set_tool_context(ctx: ToolContext) -> None:
-    """
-    Set the tool execution context.
-
-    This is primarily for testing. In production, use tool_execution_context().
-
-    Args:
-        ctx: The ToolContext to set
-    """
-    _tool_context.set(ctx)
-
-
 def clear_tool_context() -> None:
     """
     Clear the tool execution context.

@@ -27,16 +27,11 @@ def get_current_time(
                 '%A, %B %d, %Y' for 'Monday, January 15, 2024'
                 '%Y-%m-%d %I:%M %p %Z' for '2024-01-15 02:30 PM EST'
     """
-    tzinfo = None
     resolved_timezone = timezone
-
-    if ZoneInfo is not None:
-        try:
-            tzinfo = ZoneInfo(timezone)
-        except Exception:
-            tzinfo = None
-
-    if tzinfo is None:
+    try:
+        tzinfo = ZoneInfo(timezone)
+    except Exception:
+        # ZoneInfoNotFoundError, or ValueError/TypeError for a malformed key.
         tzinfo = dt_timezone.utc
         resolved_timezone = "UTC"
 

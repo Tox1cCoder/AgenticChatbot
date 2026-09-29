@@ -452,36 +452,6 @@ class TokenCounter:
             source="provider",
         )
 
-    @classmethod
-    def canonical_request_text(
-        cls,
-        *,
-        messages: Sequence[Any],
-        tools: Sequence[Any],
-        attachments: Sequence[Any],
-    ) -> str:
-        """Stable full protocol payload used by provider-native tokenizers."""
-        message_payloads = []
-        for message in messages:
-            payload = {
-                "role": cls._message_role(message),
-                "content": cls._message_value(message, "content"),
-            }
-            tool_calls = cls._message_value(message, "tool_calls")
-            if tool_calls:
-                payload["tool_calls"] = tool_calls
-            if cls._message_role(message) == "tool" or isinstance(message, ToolMessage):
-                payload["name"] = cls._message_value(message, "name") or ""
-                payload["tool_call_id"] = cls._message_value(message, "tool_call_id") or ""
-            message_payloads.append(payload)
-        return cls.canonical_json(
-            {
-                "attachments": [cls._attachment_payload(item) for item in attachments],
-                "messages": message_payloads,
-                "tools": [cls._tool_payload(tool) for tool in tools],
-            }
-        )
-
     def extract_reported_usage(
         self,
         *,

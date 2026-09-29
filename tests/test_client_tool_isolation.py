@@ -116,6 +116,46 @@ async def test_client_runtime_tools_are_scoped_per_user_and_device():
         reset_client_runtime_store()
 
 
+def test_a_disconnected_device_leaves_no_cached_catalog(monkeypatch):
+    """One entry per device that ever connected used to live until restart."""
+    import app.ai.client_tool_catalog as catalog_module
+
+    reset_all_client_catalogs()
+    user_id, device_id = str(uuid4()), str(uuid4())
+    session = SimpleNamespace(
+        user_id=user_id,
+        session_id="session-a",
+        tool_catalog_version=1,
+        tool_catalog={
+            "tools": [
+                {
+                    "name": "start_process",
+                    "origin": "mcp",
+                    "server_name": "desktop_commander",
+                    "qualified_id": "desktop_commander::start_process",
+                    "input_schema": {"type": "object", "properties": {}},
+                }
+            ]
+        },
+    )
+    live = {"session": session}
+    monkeypatch.setattr(
+        ClientDeviceService, "lookup_active_session", lambda _device: live["session"]
+    )
+    try:
+        connected = get_client_tool_catalog(device_id, user_id)
+        assert connected.tool_count == 1
+        assert len(catalog_module._client_catalogs) == 1
+
+        live["session"] = None
+        disconnected = get_client_tool_catalog(device_id, user_id)
+
+        assert disconnected.tool_count == 0
+        assert catalog_module._client_catalogs == {}
+    finally:
+        reset_all_client_catalogs()
+
+
 @pytest.mark.asyncio
 async def test_client_runtime_tools_ignore_non_mcp_catalog_entries():
     reset_client_runtime_store()

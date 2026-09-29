@@ -43,7 +43,7 @@ from .contracts import (
 )
 from .policy import ResearchLimits
 from .providers import ProviderFailure, ProviderResolver
-from .source_registry import SourceRegistry
+from .source_registry import SourceRegistry, canonicalize_public_url
 
 logger = logging.getLogger(__name__)
 
@@ -133,8 +133,10 @@ class ProviderHealthRegistry:
         if opened is None:
             return False
         if self.now() - opened >= self.cooldown:
+            # Pop rather than zero: keys are per user and device, so a zeroed
+            # entry for every partition that ever failed would never be freed.
             self._opened_at.pop(health_key, None)
-            self._failures[health_key] = 0
+            self._failures.pop(health_key, None)
             return False
         return True
 
@@ -149,25 +151,6 @@ class ProviderHealthRegistry:
         self._opened_at.pop(health_key, None)
 
 
-class ResearchResultCache:
-    def __init__(self, *, now: Callable[[], datetime] | None = None) -> None:
-        self.now = now or (lambda: datetime.now(timezone.utc))
-        self._values: dict[str, tuple[datetime, Any]] = {}
-
-    def get(self, key: str) -> Any | None:
-        value = self._values.get(key)
-        if value is None:
-            return None
-        expires_at, result = value
-        if expires_at <= self.now():
-            self._values.pop(key, None)
-            return None
-        return result
-
-    def put(self, key: str, value: Any, *, ttl: timedelta) -> None:
-        self._values[key] = (self.now() + ttl, value)
-
-
 class WebResearchService:
     def __init__(
         self,
@@ -175,7 +158,6 @@ class WebResearchService:
         resolver: ProviderResolver | None = None,
         now: Callable[[], datetime] | None = None,
         health: ProviderHealthRegistry | None = None,
-        cache: ResearchResultCache | None = None,
         retry_backoff: Callable[[int], Awaitable[None] | None] | None = None,
         image_service: Any | None = None,
         max_candidate_pool: int = 8,
@@ -189,7 +171,6 @@ class WebResearchService:
         self.resolver = resolver or ProviderResolver()
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.health = health or ProviderHealthRegistry(now=self.now)
-        self.cache = cache or ResearchResultCache(now=self.now)
         self.retry_backoff = retry_backoff or (lambda _attempt: None)
         self.image_service = image_service
         self.max_candidate_pool = max(1, int(max_candidate_pool))
@@ -477,8 +458,6 @@ class WebResearchSession:
             if record is not None:
                 url = str(record.url)
             else:
-                from .source_registry import canonicalize_public_url
-
                 url = canonicalize_public_url(str(value or "").strip()) or ""
                 invalid_source = invalid_source or not url
             if url and url not in self._opened_urls and url not in requested:
@@ -1067,7 +1046,6 @@ class WebResearchSession:
 
 __all__ = [
     "ProviderHealthRegistry",
-    "ResearchResultCache",
     "PreparedImage",
     "ResearchCloseout",
     "WebResearchService",

@@ -489,6 +489,35 @@ async def test_execute_tool_accepts_server_qualification_for_duplicate_names():
     assert result["server_name"] == "beta"
 
 
+@pytest.mark.asyncio
+async def test_a_failed_execution_logs_argument_names_not_values(caplog):
+    """The failure log carries a traceback; argument values may be secrets."""
+    manager = MCPManager.__new__(MCPManager)
+
+    class _Failing(SimpleNamespace):
+        async def ainvoke(self, arguments):
+            raise ValueError("upstream rejected the request")
+
+    tool = _Failing(name="inspect", description="", args_schema=None, metadata={})
+    manager._server_tools = {"alpha": [tool]}
+    manager._tool_index = {"inspect": [tool]}
+
+    async def _noop_get_tools():
+        return []
+
+    manager.get_tools = _noop_get_tools  # type: ignore[method-assign]
+
+    with caplog.at_level("ERROR", logger="app.ai.mcp_integration"):
+        result = await manager.execute_tool("inspect", {"api_token": "sk-live-SECRET"})
+
+    assert result["success"] is False
+    assert result["error"] == "ValueError: upstream rejected the request"
+    assert result["error_category"] == "value_error"
+    assert result["server_name"] == "alpha"
+    assert "api_token" in caplog.text
+    assert "sk-live-SECRET" not in caplog.text
+
+
 def test_get_server_for_tool_ignores_device_local_tool_provenance():
     """A device-local (client) MCP tool must NEVER be attributed to the backend
     MCP catalog.

@@ -8,7 +8,7 @@ import sys
 import time
 from collections.abc import Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from anyio import BrokenResourceError, ClosedResourceError
 from langchain_core.tools import BaseTool
@@ -52,9 +52,6 @@ def compute_catalog_version(descriptors: list[dict[str, Any]]) -> str:
     digest = hashlib.sha256(json.dumps(canonical, sort_keys=True).encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
 
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -386,6 +383,24 @@ class MCPManager:
             if not any(existing is tool for existing in indexed_tools):
                 indexed_tools.append(tool)
 
+    def _drop_server_tools(self, server_name: str) -> None:
+        """Forget a server's tools in every cache, by identity, not by name."""
+        removed_tools = self._server_tools.pop(server_name, [])
+        for tool in removed_tools:
+            indexed = self._tool_index.get(tool.name)
+            if indexed:
+                self._tool_index[tool.name] = [
+                    existing for existing in indexed if existing is not tool
+                ]
+                if not self._tool_index[tool.name]:
+                    del self._tool_index[tool.name]
+        if removed_tools:
+            self._tools = [
+                tool
+                for tool in self._tools
+                if not any(tool is removed for removed in removed_tools)
+            ]
+
     def get_tool_args_schema(self, tool: BaseTool) -> dict[str, Any]:
         """Public helper to expose argument schema for a tool."""
         return sanitize_mcp_schema(getattr(tool, "args_schema", None))
@@ -472,23 +487,10 @@ class MCPManager:
         if server_name in self.DEFAULT_SERVERS:
             raise ServerConfigurationError(f"Cannot remove core server '{server_name}'")
 
-        # Properly close session context if it exists
         if server_name in self._session_contexts:
             await self._close_session_context(server_name, self._session_contexts[server_name])
             del self._session_contexts[server_name]
-
-        # Remove cached tools
-        removed_tools = self._server_tools.pop(server_name, [])
-        for tool in removed_tools:
-            indexed = self._tool_index.get(tool.name)
-            if indexed:
-                self._tool_index[tool.name] = [
-                    existing for existing in indexed if existing is not tool
-                ]
-                if not self._tool_index[tool.name]:
-                    del self._tool_index[tool.name]
-        if removed_tools:
-            self._tools = [tool for tool in self._tools if tool not in removed_tools]
+        self._drop_server_tools(server_name)
 
         del self.config["servers"][server_name]
         self.save_config()
@@ -512,23 +514,10 @@ class MCPManager:
         if server_name not in self.config.get("servers", {}):
             raise ServerNotFoundError(server_name)
 
-        # Properly close session context if it exists
         if server_name in self._session_contexts:
             await self._close_session_context(server_name, self._session_contexts[server_name])
             del self._session_contexts[server_name]
-
-        # Remove tools from caches
-        removed_tools = self._server_tools.pop(server_name, [])
-        for tool in removed_tools:
-            indexed = self._tool_index.get(tool.name)
-            if indexed:
-                self._tool_index[tool.name] = [
-                    existing for existing in indexed if existing is not tool
-                ]
-                if not self._tool_index[tool.name]:
-                    del self._tool_index[tool.name]
-        if removed_tools:
-            self._tools = [tool for tool in self._tools if tool not in removed_tools]
+        self._drop_server_tools(server_name)
 
         self.config["servers"][server_name]["enabledByDefault"] = False
         self.save_config()
@@ -601,11 +590,6 @@ class MCPManager:
         """
         return await self.list_tool_descriptors(None)
 
-    @staticmethod
-    def _is_session_error(error: Exception) -> bool:
-        """Check if an error indicates a dead/closed MCP session."""
-        return isinstance(error, (ClosedResourceError, BrokenResourceError))
-
     async def reconnect_server(self, server_name: str) -> list[BaseTool]:
         """
         Close and re-establish the session for *server_name*, returning fresh tools.
@@ -622,14 +606,7 @@ class MCPManager:
             await self._close_session_context(server_name, old)
 
         # 2. Drop cached tools so get_server_tools re-creates everything
-        removed_tools = self._server_tools.pop(server_name, [])
-        for tool in removed_tools:
-            indexed = self._tool_index.get(tool.name)
-            if indexed:
-                self._tool_index[tool.name] = [t for t in indexed if t is not tool]
-                if not self._tool_index[tool.name]:
-                    del self._tool_index[tool.name]
-        self._tools = [t for t in self._tools if t not in removed_tools]
+        self._drop_server_tools(server_name)
 
         # 3. Re-create client entry if needed (config unchanged)
         if not self.client:
@@ -733,43 +710,28 @@ class MCPManager:
         arguments: dict[str, Any],
         server_name: str | None = None,
     ) -> dict[str, Any]:
-        """
-        Execute a tool for testing purposes
+        """Execute a tool for testing purposes.
 
-        Args:
-            tool_name: Name of the tool to execute
-            arguments: Arguments to pass to the tool
-            server_name: Owning server, required when the bare name is exposed
-                by more than one server
-
-        Returns:
-            Dict with execution result and metadata
-
-        Raises:
-            ToolNotFoundError: If tool doesn't exist
-            AmbiguousToolNameError: If the unqualified name maps to several servers
-            ToolExecutionError: If execution fails
+        ``server_name`` is required when the bare name is exposed by more than
+        one server. Raises ToolNotFoundError or AmbiguousToolNameError; an
+        execution failure is returned as ``success=False``, not raised.
         """
         tool = await self.get_tool_by_name(tool_name, server_name=server_name)
         if not tool:
             raise ToolNotFoundError(tool_name)
 
-        # Determine server name
         server_name = server_name or self.get_server_for_tool(tool) or "unknown"
+        base = {"tool_name": tool_name, "server_name": server_name}
 
         start_time = time.time()
         try:
-            # Execute tool using ainvoke for async support
             result = await tool.ainvoke(arguments)
-            execution_time = time.time() - start_time
-
             return {
                 "success": True,
                 "result": result,
                 "error": None,
-                "execution_time": execution_time,
-                "tool_name": tool_name,
-                "server_name": server_name,
+                "execution_time": time.time() - start_time,
+                **base,
             }
         except (ClosedResourceError, BrokenResourceError) as session_err:
             # MCP session died – try to reconnect once and retry
@@ -779,6 +741,7 @@ class MCPManager:
                 server_name,
                 session_err,
             )
+            failure: Exception = session_err
             try:
                 fresh_tool = await self.reconnect_and_get_tool(
                     tool_name,
@@ -786,14 +749,12 @@ class MCPManager:
                 )
                 if fresh_tool:
                     result = await fresh_tool.ainvoke(arguments)
-                    execution_time = time.time() - start_time
                     return {
                         "success": True,
                         "result": result,
                         "error": None,
-                        "execution_time": execution_time,
-                        "tool_name": tool_name,
-                        "server_name": server_name,
+                        "execution_time": time.time() - start_time,
+                        **base,
                     }
             except Exception as retry_err:
                 logger.error(
@@ -801,55 +762,36 @@ class MCPManager:
                     tool_name,
                     retry_err,
                 )
-                # Fall through to the normal error handling below
-                session_err = retry_err  # use retry error for reporting
-
-            execution_time = time.time() - start_time
-            e = session_err  # noqa: F841 – reuse variable for shared path
-
-            recovery_hint = get_error_recovery_hint(e, tool_name, arguments)
-            error_category = self._categorize_error(e)
-
-            logger.error(
-                f"Tool execution failed for {tool_name} with args {arguments}: {e}",
-                exc_info=True,
-            )
-
-            return {
-                "success": False,
-                "result": None,
-                "error": f"{type(e).__name__}: {str(e)}",
-                "error_category": error_category,
-                "error_hint": recovery_hint,
-                "execution_time": execution_time,
-                "tool_name": tool_name,
-                "server_name": server_name,
-            }
+                failure = retry_err
+            return self._execution_failure(failure, arguments, start_time, base)
         except Exception as e:
-            execution_time = time.time() - start_time
+            return self._execution_failure(e, arguments, start_time, base)
 
-            # Get error recovery hint
-            recovery_hint = get_error_recovery_hint(e, tool_name, arguments)
-
-            # Categorize error type
-            error_category = self._categorize_error(e)
-
-            # Log detailed error with full traceback
-            logger.error(
-                f"Tool execution failed for {tool_name} with args {arguments}: {e}",
-                exc_info=True,
-            )
-
-            return {
-                "success": False,
-                "result": None,
-                "error": f"{type(e).__name__}: {str(e)}",
-                "error_category": error_category,
-                "error_hint": recovery_hint,
-                "execution_time": execution_time,
-                "tool_name": tool_name,
-                "server_name": server_name,
-            }
+    def _execution_failure(
+        self,
+        error: Exception,
+        arguments: dict[str, Any],
+        start_time: float,
+        base: dict[str, Any],
+    ) -> dict[str, Any]:
+        # Argument names only: values are model- or user-supplied and may be
+        # sensitive, and this log line carries a full traceback.
+        logger.error(
+            "Tool execution failed for %s with arg keys %s: %s",
+            base["tool_name"],
+            sorted(arguments),
+            error,
+            exc_info=error,
+        )
+        return {
+            "success": False,
+            "result": None,
+            "error": f"{type(error).__name__}: {error}",
+            "error_category": self._categorize_error(error),
+            "error_hint": get_error_recovery_hint(error, base["tool_name"], arguments),
+            "execution_time": time.time() - start_time,
+            **base,
+        }
 
     def _categorize_error(self, error: Exception) -> str:
         """Categorize error for structured error handling."""

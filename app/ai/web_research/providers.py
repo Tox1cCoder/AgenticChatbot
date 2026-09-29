@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, Protocol
@@ -21,6 +22,19 @@ from .contracts import ProviderImageCandidate, ProviderSource, ResearchRequest
 from .source_registry import canonicalize_public_url
 
 logger = logging.getLogger(__name__)
+
+_UNSAFE_CODE_CHARS = re.compile(r"[^a-z0-9_]+")
+_RETRYABLE_CODES = frozenset(
+    {
+        "rate_limit",
+        "rate_limited",
+        "server_error",
+        "timeout",
+        "transport",
+        "transport_error",
+        "upstream",
+    }
+)
 
 
 class ProviderFailure(RuntimeError):
@@ -94,9 +108,16 @@ async def _payload(tool: Any, args: dict[str, Any], *, provider: str) -> dict[st
         raise ProviderFailure("invalid_response", provider=provider, retryable=False)
     error = payload.get("error")
     if error:
-        code = str(payload.get("error_type") or "provider_error").strip().lower()
-        retryable = code in {"rate_limited", "timeout", "transport_error", "server_error"}
-        raise ProviderFailure(code[:64], provider=provider, retryable=retryable)
+        raw_code = str(payload.get("error_type") or "provider_error").strip().lower()
+        # ResearchFailure.code is ``^[a-z0-9_]+$``; an unfiltered code would
+        # raise a ValidationError out of the chain instead of a bounded failure.
+        code = _UNSAFE_CODE_CHARS.sub("_", raw_code).strip("_")[:64] or "provider_error"
+        # Both bundled servers state ``retryable`` explicitly, in a vocabulary
+        # (``rate_limit``, ``upstream``, ``transport``) that differs from any
+        # fixed code list; the declared flag is the authoritative signal.
+        declared = payload.get("retryable")
+        retryable = declared if isinstance(declared, bool) else code in _RETRYABLE_CODES
+        raise ProviderFailure(code, provider=provider, retryable=retryable)
     return payload
 
 

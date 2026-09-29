@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from app.ai.conversation_memory import MEMORY_KEYS, ConversationMemory
 from app.ai.request_budget import _atomic_history_groups
 from app.ai.token_counter import TokenCounter
+from app.ai.utils import coerce_response_text
 from app.models.enums import MessageRole
 from app.usage import begin_usage_operation, bind_usage_context
 from app.usage.types import UsageContext, UsageOperation
@@ -400,10 +401,9 @@ class ConversationCompactor:
     def _generated_text(generated: Any) -> Any:
         content = getattr(generated, "content", generated)
         if isinstance(content, list):
-            return "".join(
-                str(item.get("text", "")) if isinstance(item, Mapping) else str(item)
-                for item in content
-            )
+            # Not a hand-rolled join: a reasoning block can carry its summary
+            # under ``text``, and prefixing it to the JSON failed the parse.
+            return coerce_response_text(content)
         return content
 
     def _bound_selection(

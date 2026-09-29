@@ -49,15 +49,9 @@ class MCPRegistry:
 
     @classmethod
     def get_config_path(cls) -> str:
-        """Get the default config path."""
         if cls._config_path:
             return cls._config_path
         return str(Path(__file__).parent / "mcp_config.json")
-
-    @classmethod
-    def set_config_path(cls, path: str) -> None:
-        """Override the config path."""
-        cls._config_path = path
 
     @classmethod
     def get_tools_generation(cls) -> int:
@@ -107,7 +101,6 @@ class MCPRegistry:
 
     @classmethod
     def _update_config_mtime(cls) -> None:
-        """Update the tracked config mtime to current."""
         config_path = cls.get_config_path()
         try:
             cls._config_mtime = os.path.getmtime(config_path)
@@ -126,58 +119,44 @@ class MCPRegistry:
 
     @classmethod
     async def get_manager_async(cls, auto_reload: bool = True) -> "MCPManager":
+        """Get or create the shared, initialized MCPManager.
+
+        With ``auto_reload`` a changed config file mtime triggers a reload.
         """
-        Get or create the shared MCPManager instance.
+        if cls._instance is None or not cls._initialized:
+            async with cls._init_lock:
+                if cls._instance is None or not cls._initialized:
+                    from .mcp_integration import MCPManager
 
-        Args:
-            auto_reload: If True, check config mtime and reload if changed.
+                    cls._instance = MCPManager(config_path=cls.get_config_path())
+                    await cls._instance.initialize()
+                    await cls._instance.get_tools()
 
-        Returns:
-            The shared MCPManager instance, fully initialized.
-        """
-        # Fast path: already initialized
-        if cls._instance is not None and cls._initialized:
-            # Check for config changes if auto_reload enabled
-            if auto_reload and cls._check_config_changed():
-                await cls.reload_config()
-            return cls._instance
+                    cls._initialized = True
+                    cls._update_config_mtime()
+                    cls.increment_tools_generation()
 
-        async with cls._init_lock:
-            # Double-check after acquiring lock
-            if cls._instance is not None and cls._initialized:
-                if auto_reload and cls._check_config_changed():
-                    await cls.reload_config()
-                return cls._instance
+                    logger.info("MCP Registry initialized with shared MCPManager instance")
+                    return cls._instance
 
-            # Create new instance
-            from .mcp_integration import MCPManager
-
-            cls._instance = MCPManager(config_path=cls.get_config_path())
-            await cls._instance.initialize()
-
-            # Pre-load tools
-            await cls._instance.get_tools()
-
-            cls._initialized = True
-            cls._update_config_mtime()
-            cls.increment_tools_generation()
-
-            logger.info("MCP Registry initialized with shared MCPManager instance")
-
+        # Outside the lock on purpose: asyncio.Lock is not reentrant, and
+        # reload_config takes it. Checking here while holding it deadlocked a
+        # caller that lost the initialization race to a config change.
+        if auto_reload and cls._check_config_changed():
+            await cls.reload_config(only_if_changed=True)
         return cls._instance
 
     @classmethod
-    async def reload_config(cls) -> None:
-        """
-        Reload MCP configuration from file.
-
-        This refreshes tools from all enabled servers and increments
-        the tools generation.
-        """
+    async def reload_config(cls, *, only_if_changed: bool = False) -> None:
+        """Refresh tools from all enabled servers and bump the tools generation."""
         if cls._instance is None:
             return
 
         async with cls._init_lock:
+            # Concurrent callers all observe the same new mtime; only the first
+            # to get the lock should tear the sessions down and rebuild them.
+            if only_if_changed and not cls._check_config_changed():
+                return
             logger.info("Reloading MCP configuration...")
 
             # Reload configuration and tools
@@ -192,58 +171,14 @@ class MCPRegistry:
             )
 
     @classmethod
-    async def reset(cls) -> None:
-        """
-        Reset the registry, cleaning up the current manager.
-
-        Used for testing or full application restart.
-        """
-        async with cls._init_lock:
-            if cls._instance is not None:
-                await cls._instance.cleanup()
-
-            cls._instance = None
-            cls._initialized = False
-            cls._config_mtime = 0.0
-            cls._tools_generation = 0
-
-            logger.debug("MCP Registry reset")
-
-    @classmethod
     def notify_server_change(cls) -> None:
-        """
-        Notify the registry that a server config has changed.
-
-        Called by MCPManager when servers are enabled/disabled/added/removed.
-        """
+        """Called by MCPManager when servers are enabled/disabled/added/removed."""
         cls.increment_tools_generation()
 
 
-# =============================================================================
-# Backward-compatible module-level functions
-# =============================================================================
-
-
 async def get_global_mcp_manager() -> "MCPManager":
-    """
-    Get or create a singleton MCPManager instance.
-
-    This function is the primary entry point for agents to get MCP tools.
-    It delegates to MCPRegistry for unified instance management.
-
-    Returns:
-        MCPManager: The global MCP manager instance with tools pre-loaded.
-    """
+    """The primary entry point for agents to get the shared MCPManager."""
     return await MCPRegistry.get_manager_async()
-
-
-async def reset_global_mcp_manager() -> None:
-    """
-    Reset the global MCP manager.
-
-    Used for testing or when a full refresh is needed.
-    """
-    await MCPRegistry.reset()
 
 
 def get_mcp_tools_generation() -> int:

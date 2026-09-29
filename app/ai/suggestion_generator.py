@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 from typing import TYPE_CHECKING
 
 from google import genai
@@ -12,6 +13,8 @@ from .agent_config import AGENT_CONFIG, create_gemini_client
 
 if TYPE_CHECKING:
     from ..usage.recorder import ModelUsageRecorder
+
+logger = logging.getLogger(__name__)
 
 SUGGESTION_PROMPT = """Generate useful follow-up questions for this conversation exchange.
 
@@ -46,21 +49,19 @@ class SuggestionGenerator:
         self._init_client()
 
     def _init_client(self) -> None:
-        """Initialize Gemini client."""
         try:
             self.client = create_gemini_client()
         except Exception:
+            logger.debug("suggestion client unavailable", exc_info=True)
             self.client = None
 
     def _create_cache_key(self, user_query: str, response_content: str) -> str:
-        """Create a hash-based cache key for query and response."""
         # Truncate as done in generate_suggestions for consistency
         truncated_query = user_query[:200]
         truncated_response = response_content[:500]
 
-        # Create deterministic hash
         content = f"{truncated_query}||{truncated_response}"
-        return hashlib.md5(content.encode()).hexdigest()
+        return hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()
 
     def _get_cached_suggestions(
         self,
@@ -130,7 +131,9 @@ class SuggestionGenerator:
             self._suggestion_cache[_key] = suggestions
             return suggestions
 
-        except (json.JSONDecodeError, Exception):
+        except Exception:
+            # Suggestions are best-effort; a failure costs the chips, not the turn.
+            logger.debug("follow-up suggestion generation failed", exc_info=True)
             return None
 
     async def generate_suggestions(
@@ -142,19 +145,6 @@ class SuggestionGenerator:
         usage_context: UsageContext | None = None,
         recorder: "ModelUsageRecorder | None" = None,
     ) -> list[str]:
-        """
-        Generate follow-up question suggestions.
-
-        Args:
-            user_query: The user's original question
-            response_content: The assistant's response
-            max_suggestions: Maximum number of suggestions (default 3)
-            usage_context: Attribution for the provider call, if tracking is on
-            recorder: Recorder used to attribute the provider call
-
-        Returns:
-            List of 0-3 suggestion strings
-        """
         if not self.client:
             return []
 
@@ -205,15 +195,14 @@ class SuggestionGenerator:
             return valid_suggestions
 
         except Exception:
+            logger.debug("follow-up suggestion post-processing failed", exc_info=True)
             return []
 
 
-# Global singleton instance
 _suggestion_generator: SuggestionGenerator | None = None
 
 
 def get_suggestion_generator() -> SuggestionGenerator:
-    """Get or create the global suggestion generator instance."""
     global _suggestion_generator
     if _suggestion_generator is None:
         _suggestion_generator = SuggestionGenerator()
@@ -227,18 +216,6 @@ async def generate_follow_up_suggestions(
     usage_context: UsageContext | None = None,
     recorder: "ModelUsageRecorder | None" = None,
 ) -> list[str]:
-    """
-    Convenience function to generate follow-up suggestions.
-
-    Args:
-        user_query: The user's original question
-        response_content: The assistant's response
-        usage_context: Attribution for the provider call, if tracking is on
-        recorder: Recorder used to attribute the provider call
-
-    Returns:
-        List of 0-3 suggestion strings
-    """
     generator = get_suggestion_generator()
     return await generator.generate_suggestions(
         user_query,

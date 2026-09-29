@@ -287,6 +287,44 @@ def test_openai_size_mapping():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+async def test_openai_provider_closes_the_client_it_created(monkeypatch):
+    """One AsyncOpenAI (and httpx pool) per generation used to stay open."""
+    import openai
+
+    calls: dict = {}
+    closed: list[bool] = []
+    fake = _openai_client([_openai_event("image_generation.completed", "UUFD")], calls)
+
+    async def _close() -> None:
+        closed.append(True)
+
+    fake.close = _close
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **_kwargs: fake)
+
+    provider = OpenAIImageProvider(api_key="k")
+    events = [event async for event in provider.stream_generate(_request(model="gpt-image-1"))]
+
+    assert any(isinstance(event, ImageFinal) for event in events)
+    assert closed == [True]
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_leaves_an_injected_client_open():
+    calls: dict = {}
+    closed: list[bool] = []
+    client = _openai_client([_openai_event("image_generation.completed", "UUFD")], calls)
+
+    async def _close() -> None:
+        closed.append(True)
+
+    client.close = _close
+    provider = OpenAIImageProvider(client=client)
+    _ = [event async for event in provider.stream_generate(_request(model="gpt-image-1"))]
+
+    assert closed == []
+
+
 def test_registry_routes_openai_models_to_openai_provider():
     provider = resolve_image_provider("gpt-image-1", openai_api_key="test-key")
     assert isinstance(provider, OpenAIImageProvider)

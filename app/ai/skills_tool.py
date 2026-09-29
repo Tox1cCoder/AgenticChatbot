@@ -19,11 +19,10 @@ from typing import Any
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from app.core.config import settings
 from app.services.client_device_service import ClientDeviceService
 
 from .client_runtime_errors import client_runtime_error_from_response
-from .client_runtime_tools import get_exposed_client_tool_name
+from .client_runtime_tools import client_dispatch_timeouts, get_exposed_client_tool_name
 from .skill_resolver import (
     get_available_skill_summaries as get_resolved_skill_summaries,
 )
@@ -34,7 +33,6 @@ from .skill_resolver import (
     resolve_skill_reference as resolve_runtime_skill_reference,
 )
 from .tool_context import get_tool_context
-from .tool_execution_policy import get_current_tool_policy
 
 logger = logging.getLogger(__name__)
 
@@ -118,68 +116,29 @@ def create_activate_skill_tool(
         to the current user request.  The returned text contains the
         complete instructions you should follow for that skill.
         """
-        resolved_skill, resolution_error = resolve_runtime_skill_reference(
+        binding = _bind_skill_call(
             skill_name=skill_name,
-            user_id=bound_user_id,
-            device_id=bound_device_id,
+            bound_user_id=bound_user_id,
+            bound_device_id=bound_device_id,
+            bound_session_id=bound_session_id,
             allowed_skill_refs=allowed_skill_refs,
+            wrong_device_error=(
+                "Error: client-side skill activation was requested for a different device "
+                "session than the active run."
+            ),
         )
-        if resolution_error:
-            return resolution_error
-        if resolved_skill is None:
-            return "Error: skill resolution failed."
+        if isinstance(binding, str):
+            return binding
+        resolved_skill, session, expected_session_id = binding
 
-        ctx = get_tool_context()
-        context_device_id = str(ctx.device_id or bound_device_id or "")
-        if bound_device_id and context_device_id and context_device_id != bound_device_id:
-            return (
-                "Error: client-side skill activation was requested for a different device session "
-                "than the active run."
-            )
-
-        session = get_bound_device_session(user_id=bound_user_id, device_id=bound_device_id)
-        if session is None:
-            return "Error: client-side skills are not available because the device is disconnected."
-
-        expected_session_id = resolved_skill.bound_session_id or bound_session_id
-        if expected_session_id and session.session_id != expected_session_id:
-            return (
-                "Error: the client device session changed after skills were bound. "
-                "Retry from the active device session."
-            )
-
-        policy = get_current_tool_policy()
-        execution_timeout_seconds = (
-            policy.client_execution_timeout_seconds
-            if policy is not None and policy.client_execution_timeout_seconds is not None
-            else float(settings.client_runtime_ws_timeout_seconds)
-        )
-        response_timeout_seconds = (
-            policy.client_response_timeout_seconds
-            if policy is not None and policy.client_response_timeout_seconds is not None
-            else float(settings.client_runtime_ws_timeout_seconds)
-        )
-        response = await ClientDeviceService.dispatch_tool_call(
+        content = await _dispatch_skill_call(
             user_id=bound_user_id,
             device_id=bound_device_id,
             tool_name="activate_skill",
             qualified_tool_id="client_skill::activate",
             arguments={"skill_name": resolved_skill.name},
-            execution_timeout_seconds=execution_timeout_seconds,
-            response_timeout_seconds=response_timeout_seconds,
             bound_session_id=expected_session_id,
         )
-
-        if not response.get("success", False):
-            raise client_runtime_error_from_response(response)
-
-        result = response.get("result")
-        if isinstance(result, str):
-            content = result
-        elif isinstance(result, dict) and isinstance(result.get("content"), str):
-            content = str(result["content"])
-        else:
-            content = json.dumps(result, indent=2, ensure_ascii=False, default=str)
 
         qualified_id = f"skill::{resolved_skill.name}::run_skill_command"
         exposed_name = get_exposed_client_tool_name(
@@ -235,51 +194,22 @@ def create_read_skill_resource_tool(
         own files. Only paths listed in that skill's activation output are
         readable, and only from that skill's folder.
         """
-        resolved_skill, resolution_error = resolve_runtime_skill_reference(
+        binding = _bind_skill_call(
             skill_name=skill_name,
-            user_id=bound_user_id,
-            device_id=bound_device_id,
+            bound_user_id=bound_user_id,
+            bound_device_id=bound_device_id,
+            bound_session_id=bound_session_id,
             allowed_skill_refs=allowed_skill_refs,
-        )
-        if resolution_error:
-            return resolution_error
-        if resolved_skill is None:
-            return "Error: skill resolution failed."
-
-        ctx = get_tool_context()
-        context_device_id = str(ctx.device_id or bound_device_id or "")
-        if bound_device_id and context_device_id and context_device_id != bound_device_id:
-            return (
+            wrong_device_error=(
                 "Error: a skill file was requested for a different device session "
                 "than the active run."
-            )
-
-        active_session = get_bound_device_session(
-            user_id=bound_user_id,
-            device_id=bound_device_id,
+            ),
         )
-        if active_session is None:
-            return "Error: client-side skills are not available because the device is disconnected."
+        if isinstance(binding, str):
+            return binding
+        resolved_skill, _session, expected_session_id = binding
 
-        expected_session_id = resolved_skill.bound_session_id or bound_session_id
-        if expected_session_id and active_session.session_id != expected_session_id:
-            return (
-                "Error: the client device session changed after skills were bound. "
-                "Retry from the active device session."
-            )
-
-        policy = get_current_tool_policy()
-        execution_timeout_seconds = (
-            policy.client_execution_timeout_seconds
-            if policy is not None and policy.client_execution_timeout_seconds is not None
-            else float(settings.client_runtime_ws_timeout_seconds)
-        )
-        response_timeout_seconds = (
-            policy.client_response_timeout_seconds
-            if policy is not None and policy.client_response_timeout_seconds is not None
-            else float(settings.client_runtime_ws_timeout_seconds)
-        )
-        response = await ClientDeviceService.dispatch_tool_call(
+        return await _dispatch_skill_call(
             user_id=bound_user_id,
             device_id=bound_device_id,
             tool_name="read_skill_resource",
@@ -288,20 +218,8 @@ def create_read_skill_resource_tool(
                 "skill_name": resolved_skill.name,
                 "resource_path": resource_path,
             },
-            execution_timeout_seconds=execution_timeout_seconds,
-            response_timeout_seconds=response_timeout_seconds,
             bound_session_id=expected_session_id,
         )
-
-        if not response.get("success", False):
-            raise client_runtime_error_from_response(response)
-
-        result = response.get("result")
-        if isinstance(result, str):
-            return result
-        if isinstance(result, dict) and isinstance(result.get("content"), str):
-            return str(result["content"])
-        return json.dumps(result, indent=2, ensure_ascii=False, default=str)
 
     read_skill_resource.metadata = {
         "tool_origin": "client_skill",
@@ -309,3 +227,79 @@ def create_read_skill_resource_tool(
         "source_tool_name": "read_skill_resource",
     }
     return read_skill_resource
+
+
+def _bind_skill_call(
+    *,
+    skill_name: str,
+    bound_user_id: str,
+    bound_device_id: str,
+    bound_session_id: str | None,
+    allowed_skill_refs: list[dict[str, Any]] | None,
+    wrong_device_error: str,
+) -> tuple[Any, Any, str | None] | str:
+    """Resolve a skill and re-check its device binding at call time.
+
+    Returns ``(skill, session, expected_session_id)`` or the model-facing error.
+    Shared by activation and resource reads so a file read can never skip a
+    check that loading the same skill would apply.
+    """
+    resolved_skill, resolution_error = resolve_runtime_skill_reference(
+        skill_name=skill_name,
+        user_id=bound_user_id,
+        device_id=bound_device_id,
+        allowed_skill_refs=allowed_skill_refs,
+    )
+    if resolution_error:
+        return resolution_error
+    if resolved_skill is None:
+        return "Error: skill resolution failed."
+
+    ctx = get_tool_context()
+    context_device_id = str(ctx.device_id or bound_device_id or "")
+    if bound_device_id and context_device_id and context_device_id != bound_device_id:
+        return wrong_device_error
+
+    session = get_bound_device_session(user_id=bound_user_id, device_id=bound_device_id)
+    if session is None:
+        return "Error: client-side skills are not available because the device is disconnected."
+
+    expected_session_id = resolved_skill.bound_session_id or bound_session_id
+    if expected_session_id and session.session_id != expected_session_id:
+        return (
+            "Error: the client device session changed after skills were bound. "
+            "Retry from the active device session."
+        )
+    return resolved_skill, session, expected_session_id
+
+
+async def _dispatch_skill_call(
+    *,
+    user_id: str,
+    device_id: str,
+    tool_name: str,
+    qualified_tool_id: str,
+    arguments: dict[str, Any],
+    bound_session_id: str | None,
+) -> str:
+    execution_timeout_seconds, response_timeout_seconds = client_dispatch_timeouts()
+    response = await ClientDeviceService.dispatch_tool_call(
+        user_id=user_id,
+        device_id=device_id,
+        tool_name=tool_name,
+        qualified_tool_id=qualified_tool_id,
+        arguments=arguments,
+        execution_timeout_seconds=execution_timeout_seconds,
+        response_timeout_seconds=response_timeout_seconds,
+        bound_session_id=bound_session_id,
+    )
+
+    if not response.get("success", False):
+        raise client_runtime_error_from_response(response)
+
+    result = response.get("result")
+    if isinstance(result, str):
+        return result
+    if isinstance(result, dict) and isinstance(result.get("content"), str):
+        return str(result["content"])
+    return json.dumps(result, indent=2, ensure_ascii=False, default=str)

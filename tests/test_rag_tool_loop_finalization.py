@@ -172,6 +172,48 @@ async def test_rag_agent_preserves_current_assistant_tool_group_without_syntheti
 
 
 @pytest.mark.asyncio
+async def test_a_failed_rag_model_call_does_not_publish_the_exception_text():
+    """The error content becomes the RAG answer, which is streamed and persisted."""
+    from app.core.runtime_modeling import ResolvedRuntimeModelConfig
+
+    agent = object.__new__(RAGAgent)
+    agent.settings = type("S", (), {"agentic_preview_chars": 500})()
+    agent.agentic_max_iterations = 5
+    agent.tools = [SimpleNamespace(name="search_documents")]
+    agent.mcp_manager = None
+    agent._tools_generation_seen = -1
+
+    async def failing_invoke(**_kwargs):
+        raise RuntimeError("401 https://api.example.test/v1?key=sk-live-SECRET123")
+
+    agent._invoke_agentic_rag_model = failing_invoke
+    agent._resolve_runtime_model_config = lambda *a, **kw: ResolvedRuntimeModelConfig(
+        agent_key="rag",
+        provider="gemini",
+        model="gemini-2.5-flash",
+        temperature=0.7,
+        api_key=None,
+        key_source="settings",
+        source="agent_default",
+        capabilities={"supports_vision": False},
+    )
+    agent._create_fallback_runtime_config = lambda *a, **kw: None
+    agent._build_skills_suffix = lambda **kw: ""
+    agent._get_tools_for_binding = lambda **kw: []
+
+    msg = AgentMessage(
+        role=MessageRole.USER,
+        content="What is revenue?",
+        metadata={"original_query": "What is revenue?"},
+    )
+
+    response = await agent._process_message_agentic(msg, "conv-1")
+
+    assert "SECRET123" not in response.message.content
+    assert "RuntimeError" in response.message.content
+
+
+@pytest.mark.asyncio
 async def test_execute_search_documents_action_returns_compact_error_for_unknown_action():
     import json
     from types import SimpleNamespace
@@ -197,6 +239,37 @@ async def test_execute_search_documents_action_returns_compact_error_for_unknown
         "message": "search_documents rejected the requested action.",
         "hint": "Use one of the supported document exploration actions from the tool schema.",
     }
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_action_failure_is_compact_and_hides_the_raw_message():
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.ai.rag_tool_actions import execute_search_documents_action
+
+    rag_agent = SimpleNamespace(
+        scan_all_documents=AsyncMock(
+            side_effect=RuntimeError("connection to postgresql://svc:hunter2@10.0.0.5 failed")
+        )
+    )
+
+    result, action, _ = await execute_search_documents_action(
+        rag_agent=rag_agent,
+        conversation_id="conv-1",
+        user_id="user-1",
+        tool_args={"action": "scan_all"},
+        context={},
+        max_agentic_images=3,
+    )
+
+    payload = json.loads(result)
+    assert action == "scan_all"
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "unknown"
+    assert "RuntimeError" in payload["message"]
+    assert "hunter2" not in result and "10.0.0.5" not in result
 
 
 @pytest.mark.asyncio

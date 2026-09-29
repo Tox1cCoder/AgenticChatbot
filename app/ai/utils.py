@@ -7,21 +7,11 @@ import json
 from collections.abc import Sequence
 from typing import Any
 
-from langchain_core.messages import AIMessage
-
 
 def coerce_response_text(content: Any) -> str:
-    """
-    Convert various content types to plain text string.
+    """Flatten message content (str, block list, or block dict) to visible text.
 
-    Handles strings, lists, dictionaries, and other types to ensure
-    consistent text output from agent responses.
-
-    Args:
-        content: The content to convert (str, list, dict, or other)
-
-    Returns:
-        Plain text string representation of the content
+    Thinking/reasoning and tool blocks are dropped, never stringified.
     """
     if isinstance(content, str):
         return content
@@ -241,41 +231,9 @@ def extract_openai_reasoning_tokens(message: Any) -> int | None:
     return None
 
 
-def format_tool_result(value: Any) -> str:
-    """
-    Format tool execution results as JSON or string.
-
-    Args:
-        value: The tool result to format
-
-    Returns:
-        Formatted string representation of the tool result
-    """
-    if value is None:
-        return ""
-
-    if isinstance(value, (str, int, float, bool)):
-        return str(value)
-
-    try:
-        return json.dumps(value, indent=2, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return str(value)
-
-
 def make_json_safe(value: Any) -> Any:
-    """
-    Recursively convert objects to JSON-serializable format.
-
-    Handles Pydantic models, objects with dict() methods, nested structures,
-    and other non-serializable types.
-
-    Args:
-        value: The value to make JSON-safe
-
-    Returns:
-        JSON-serializable version of the value
-    """
+    """Recursively convert Pydantic models, ``dict()`` objects and nested
+    containers to JSON-serializable values; anything else becomes ``str``."""
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
 
@@ -428,27 +386,6 @@ def normalize_tool_call(tool_call: Any) -> dict[str, Any]:
         "id": tool_id,
         "tool_call_id": tool_id,
     }
-
-
-def find_pending_tool_call_message(
-    messages: Sequence[Any],
-) -> tuple[int, AIMessage] | None:
-    """
-    Find the most recent AIMessage that still has pending tool calls.
-
-    The approval node may append rejection ToolMessages after the rewritten
-    AIMessage. In that case the pending tool-call message is no longer the last
-    entry, so consumers must scan backward until they reach the most recent
-    AIMessage boundary.
-    """
-    for idx in range(len(messages) - 1, -1, -1):
-        message = messages[idx]
-        if isinstance(message, AIMessage):
-            if getattr(message, "tool_calls", None):
-                return idx, message
-            return None
-
-    return None
 
 
 def extract_rejection_reason(decision: Any) -> str | None:
@@ -636,95 +573,8 @@ def build_rejection_tool_message(
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
-def extract_agent_execution_info(agent_response: dict[str, Any]) -> dict[str, Any]:
-    """
-    Extract execution information from agent executor response.
-
-    Parses the response from create_agent invocation and extracts:
-    - Final response text
-    - List of tools used
-    - Tool artifacts (calls with arguments and outputs)
-
-    Args:
-        agent_response: The response dictionary from agent.invoke()
-
-    Returns:
-        Dictionary with keys: response_text, tools_used, tool_artifacts
-    """
-    result = {
-        "response_text": "",
-        "tools_used": [],
-        "tool_artifacts": [],
-    }
-
-    # Extract messages from response
-    messages = agent_response.get("messages", [])
-    if not messages:
-        return result
-
-    # Find the final AI message
-    final_message = None
-    for msg in reversed(messages):
-        if hasattr(msg, "type") and msg.type == "ai":
-            final_message = msg
-            break
-
-    if not final_message:
-        return result
-
-    # Extract response text
-    result["response_text"] = coerce_response_text(final_message.content)
-
-    # Extract tools used and artifacts from all messages
-    tools_used_set = set()
-    for msg in messages:
-        # Check for tool calls in AI messages
-        if hasattr(msg, "type") and msg.type == "ai" and hasattr(msg, "tool_calls"):
-            for tool_call in msg.tool_calls:
-                tool_name = tool_call.get("name", "")
-                if tool_name:
-                    tools_used_set.add(tool_name)
-
-                    # Find corresponding tool result
-                    tool_id = tool_call.get("id", "")
-                    tool_result = None
-                    for result_msg in messages:
-                        if (
-                            hasattr(result_msg, "type")
-                            and result_msg.type == "tool"
-                            and hasattr(result_msg, "tool_call_id")
-                            and result_msg.tool_call_id == tool_id
-                        ):
-                            tool_result = result_msg.content
-                            break
-
-                    result["tool_artifacts"].append(
-                        {
-                            "tool": tool_name,
-                            "args": make_json_safe(tool_call.get("args", {})),
-                            "output": (format_tool_result(tool_result) if tool_result else None),
-                            "error": None,
-                            "status": "success",
-                        }
-                    )
-
-    result["tools_used"] = list(tools_used_set)
-
-    return result
-
-
 def get_error_recovery_hint(error: Exception, tool_name: str, tool_args: dict[str, Any]) -> str:
-    """
-    Analyze an exception and provide a recovery hint for the LLM.
-
-    Args:
-        error: The exception that occurred
-        tool_name: Name of the tool that failed
-        tool_args: Arguments passed to the tool
-
-    Returns:
-        A helpful hint string for the LLM on how to recover
-    """
+    """Map an exception to a recovery hint for the model."""
     error_type = type(error).__name__
     error_msg = str(error).lower()
 
@@ -774,46 +624,6 @@ def get_error_recovery_hint(error: Exception, tool_name: str, tool_args: dict[st
         f"Unexpected {error_type}: review the error message and adjust arguments or "
         "try a different approach"
     )
-
-
-def extract_content_from_result(result: Any) -> Any:
-    """
-    Extract actual content from LangChain Content objects.
-
-    MCP tools often return results wrapped in Content format:
-    [{'type': 'text', 'text': '...', 'id': '...'}]
-
-    This function unwraps such content to extract the actual text values.
-
-    Args:
-        result: The tool result which may be wrapped in Content format
-
-    Returns:
-        Unwrapped content - either pure text or cleaned structure
-    """
-    if isinstance(result, list):
-        cleaned = []
-        for item in result:
-            if isinstance(item, dict):
-                if "type" in item and item.get("type") == "text" and "text" in item:
-                    cleaned.append(item["text"])
-                else:
-                    cleaned.append(item)
-            else:
-                cleaned.append(item)
-        if len(cleaned) == 1:
-            return cleaned[0]
-        return cleaned
-
-    if (
-        isinstance(result, dict)
-        and "type" in result
-        and result.get("type") == "text"
-        and "text" in result
-    ):
-        return result["text"]
-
-    return result
 
 
 def apply_hitl_decisions(

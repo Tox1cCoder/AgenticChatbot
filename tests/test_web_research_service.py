@@ -103,6 +103,27 @@ def test_health_is_partitioned_by_provider_configuration() -> None:
     assert not health.is_open("tavily:key-b")
 
 
+def test_an_expired_breaker_leaves_no_per_partition_state_behind() -> None:
+    """Health keys are per user and device; the singleton must not accumulate them."""
+
+    clock = [datetime(2026, 9, 15, tzinfo=timezone.utc)]
+    health = ProviderHealthRegistry(
+        failure_threshold=1,
+        cooldown=timedelta(minutes=1),
+        now=lambda: clock[0],
+    )
+    health.record_failure("tavily:user-a")
+    assert health.is_open("tavily:user-a")
+
+    clock[0] += timedelta(minutes=2)
+
+    assert not health.is_open("tavily:user-a")
+    assert health._failures == {}
+    assert health._opened_at == {}
+    health.record_failure("tavily:user-a")
+    assert health.is_open("tavily:user-a")
+
+
 @pytest.mark.asyncio
 async def test_valid_image_sources_are_admitted_before_text_sources() -> None:
     class ImageProvider:

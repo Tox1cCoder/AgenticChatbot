@@ -467,14 +467,19 @@ def get_research_budget(
             )
             _budgets[key] = budget
         _budgets.move_to_end(key)
-        while len(_budgets) > _MAX_TRACKED_CONVERSATIONS:
-            evicted_key, _ = _budgets.popitem(last=False)
-            logger.debug(
-                "Evicted research budget for %r; a turn still in progress for "
-                "it would silently lose its dedup memory and call count.",
-                evicted_key,
-            )
+        _evict_overflow()
         return budget
+
+
+def _evict_overflow() -> None:
+    """Keep the store at its bound, oldest first. Caller holds ``_lock``."""
+    while len(_budgets) > _MAX_TRACKED_CONVERSATIONS:
+        evicted_key, _ = _budgets.popitem(last=False)
+        logger.debug(
+            "Evicted research budget for %r; a turn still in progress for "
+            "it would silently lose its dedup memory and call count.",
+            evicted_key,
+        )
 
 
 def install_research_budget(
@@ -499,6 +504,8 @@ def install_research_budget(
     with _lock:
         _budgets[key] = budget
         _budgets.move_to_end(key)
+        # Installs are a second way in; without this they grew past the bound.
+        _evict_overflow()
     return budget
 
 

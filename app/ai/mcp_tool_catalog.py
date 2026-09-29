@@ -27,7 +27,6 @@ from .text_normalization import sanitize_identifier, tokenize_text
 from .tool_search_scoring import (
     ToolSearchScore,
     build_query_tokens,
-    rank_and_filter,
     rank_tool_candidates,
     score_tool,
 )
@@ -125,9 +124,6 @@ class ToolDescriptor:
             "is_client_tool": False,
         }
 
-    def is_server_tool(self) -> bool:
-        """Check if this is a server-side tool (always True for ToolDescriptor)."""
-        return True
 
 
 @dataclass
@@ -175,15 +171,6 @@ def extract_arg_info(args_schema: dict[str, Any]) -> tuple[list[str], list[str]]
     return all_args, required_args
 
 
-def tokenize(text: str) -> list[str]:
-    """
-    Tokenize text for search matching.
-
-    Splits on non-alphanumeric characters and lowercases.
-    """
-    return tokenize_text(text)
-
-
 class McpToolCatalog:
     """
     Searchable catalog of MCP tools with generation-based caching.
@@ -193,12 +180,6 @@ class McpToolCatalog:
     """
 
     def __init__(self, mcp_manager: Any):
-        """
-        Initialize the catalog.
-
-        Args:
-            mcp_manager: The MCPManager instance to pull tools from
-        """
         self._mcp_manager = mcp_manager
         self._cached_generation: int = -1
         self._tools: list[ToolDescriptor] = []
@@ -209,20 +190,8 @@ class McpToolCatalog:
         self._server_name_lower_map: dict[str, str] = {}
         self._server_descriptions: dict[str, str] = {}
 
-        # Inverted index for search: token -> set of tool indices
-        self._token_index: dict[str, set[int]] = {}
-
-        # Document frequency for BM25-style scoring
-        self._doc_freq: Counter = Counter()
-        self._total_docs: int = 0
-
     async def refresh_if_needed(self) -> bool:
-        """
-        Refresh the catalog if the MCP tools generation has changed.
-
-        Returns:
-            True if the catalog was refreshed, False if cache was valid
-        """
+        """Rebuild when the MCP tools generation changed; True if it rebuilt."""
         current_gen = get_mcp_tools_generation()
         if current_gen == self._cached_generation:
             return False
@@ -241,22 +210,22 @@ class McpToolCatalog:
         """
         start_time = time.time()
 
-        # Clear existing data
+        # Fetch BEFORE clearing, and never await between clear and fill: the
+        # catalog is a shared singleton, so a search issued during the fetch
+        # used to see an empty catalog, and two overlapping rebuilds both
+        # appended into the same lists and duplicated every descriptor.
+        try:
+            tools_info = await self._mcp_manager.get_all_tools_info()
+        except Exception as e:
+            logger.error("Failed to fetch tools from MCP manager: %s", e)
+            tools_info = []
+
         self._tools.clear()
         self._tools_by_name.clear()
         self._tools_by_server.clear()
         self._colliding_names.clear()
         self._server_name_lower_map.clear()
         self._server_descriptions.clear()
-        self._token_index.clear()
-        self._doc_freq.clear()
-
-        # Fetch all tools from MCP manager
-        try:
-            tools_info = await self._mcp_manager.get_all_tools_info()
-        except Exception as e:
-            logger.error("Failed to fetch tools from MCP manager: %s", e)
-            tools_info = []
 
         # Track filtered tools for logging
         filtered_count = 0
@@ -293,21 +262,9 @@ class McpToolCatalog:
                 origin=TOOL_ORIGIN_SERVER_MCP,
             )
 
-            idx = len(self._tools)
             self._tools.append(descriptor)
-
-            # Index by name
-            if tool_name not in self._tools_by_name:
-                self._tools_by_name[tool_name] = []
-            self._tools_by_name[tool_name].append(descriptor)
-
-            # Index by server
-            if server_name not in self._tools_by_server:
-                self._tools_by_server[server_name] = []
-            self._tools_by_server[server_name].append(descriptor)
-
-            # Build search index
-            self._index_tool(idx, descriptor)
+            self._tools_by_name.setdefault(tool_name, []).append(descriptor)
+            self._tools_by_server.setdefault(server_name, []).append(descriptor)
 
         # Build case-insensitive server name lookup
         for sname in self._tools_by_server:
@@ -338,8 +295,6 @@ class McpToolCatalog:
                             descriptor.call_name,
                         )
 
-        self._total_docs = len(self._tools)
-
         elapsed = time.time() - start_time
         log_msg = (
             "Rebuilt MCP tool catalog: %d server tools from %d servers in %.2fms (collisions: %d)"
@@ -360,39 +315,9 @@ class McpToolCatalog:
                 sorted(self._colliding_names),
             )
 
-    def _index_tool(self, idx: int, descriptor: ToolDescriptor) -> None:
-        """Add a tool to the search index."""
-        # Combine searchable text
-        searchable = " ".join(
-            [
-                descriptor.tool_name,
-                descriptor.server_name,
-                descriptor.description,
-                " ".join(descriptor.arg_names),
-            ]
-        )
-
-        tokens = tokenize(searchable)
-        unique_tokens = set(tokens)
-
-        for token in unique_tokens:
-            if token not in self._token_index:
-                self._token_index[token] = set()
-            self._token_index[token].add(idx)
-            self._doc_freq[token] += 1
-
-    def get_colliding_names(self) -> set[str]:
-        """Return tool names that are exposed by multiple servers."""
-        return self._colliding_names.copy()
-
     def is_ambiguous(self, tool_name: str) -> bool:
         """Check if a tool name is ambiguous (exposed by multiple servers)."""
         return tool_name in self._colliding_names
-
-    def get_servers_for_tool(self, tool_name: str) -> list[str]:
-        """Return all server names that expose a given tool name."""
-        descriptors = self._tools_by_name.get(tool_name, [])
-        return list({d.server_name for d in descriptors})
 
     def resolve_server_name(self, server_name: str) -> str | None:
         """Resolve a server name case-insensitively to its canonical form.
@@ -414,7 +339,7 @@ class McpToolCatalog:
         doc_freq: Counter = Counter()
 
         for candidate_name, descriptors in self._tools_by_server.items():
-            candidate_tokens = set(tokenize(candidate_name))
+            candidate_tokens = set(tokenize_text(candidate_name))
             has_name_signal = (
                 candidate_name.lower() == query_lower
                 or candidate_name.lower().startswith(query_lower)
@@ -429,7 +354,7 @@ class McpToolCatalog:
             profiles.append((candidate_name, description, example_tools))
 
             searchable = " ".join([candidate_name, description, " ".join(example_tools)])
-            for token in set(tokenize(searchable)):
+            for token in set(tokenize_text(searchable)):
                 doc_freq[token] += 1
 
         if not profiles:
@@ -522,17 +447,10 @@ class McpToolCatalog:
         server_name: str | None = None,
         allowlist: list[str] | None = None,
     ) -> list[ToolDescriptor]:
-        """
-        Search for tools matching a query.
+        """Rank tools by relevance; an empty ``query`` lists in stable order.
 
-        Args:
-            query: Natural language search query (None or empty for "list all")
-            top_k: Maximum number of results to return
-            server_name: Optional server filter
-            allowlist: Optional list of allowed tool names or server names
-
-        Returns:
-            List of ToolDescriptor objects, ranked by relevance
+        ``allowlist`` entries may be tool names, server names, qualified ids,
+        or call names.
         """
         # Canonicalize server_name case-insensitively
         canonical_server = None
@@ -610,37 +528,6 @@ class McpToolCatalog:
 
         return rank_tool_candidates(query=query, candidates=candidates)[:top_k]
 
-    def _rank_candidates(
-        self,
-        query: str,
-        candidates: list[ToolDescriptor],
-    ) -> list[tuple[ToolDescriptor, float]]:
-        """
-        Rank candidates by relevance to query using shared scoring logic.
-
-        Uses tool_search_scoring.score_tool for consistent behavior across
-        server and client catalogs. Filters out below-threshold results.
-        """
-        from ..core.config import settings as _settings
-
-        query_lower, query_tokens = build_query_tokens(query)
-        min_score = _settings.mcp_tool_search_min_relevance_score
-
-        scored: list[tuple[ToolDescriptor, float]] = []
-        for tool in candidates:
-            s = score_tool(
-                tool_name=tool.tool_name,
-                description=tool.description,
-                arg_names=tool.arg_names,
-                query_lower=query_lower,
-                query_tokens=query_tokens,
-                doc_freq=self._doc_freq,
-                total_docs=self._total_docs,
-            )
-            scored.append((tool, s))
-
-        return rank_and_filter(scored, min_relevance_score=min_score)
-
     def filter_by_allowlist(
         self,
         tools: list[ToolDescriptor],
@@ -660,74 +547,21 @@ class McpToolCatalog:
 
         return [t for t in tools if self._descriptor_matches_allowlist(t, allowlist_set)]
 
-    def get_tool(
-        self,
-        tool_name: str,
-        server_name: str | None = None,
-    ) -> ToolDescriptor | None:
-        """
-        Get a specific tool by name, optionally scoped to a server.
-
-        Args:
-            tool_name: The tool name to look up
-            server_name: Optional server to scope the lookup
-
-        Returns:
-            ToolDescriptor or None if not found
-        """
-        descriptors = self._tools_by_name.get(tool_name, [])
-
-        if not descriptors:
-            return None
-
-        if server_name:
-            for d in descriptors:
-                if d.server_name == server_name:
-                    return d
-            return None
-
-        # Return first match (may be ambiguous)
-        return descriptors[0]
-
     def list_all(self, allowlist: list[str] | None = None) -> list[ToolDescriptor]:
-        """
-        List all tools in the catalog.
-
-        Args:
-            allowlist: Optional filter by tool names or server names
-
-        Returns:
-            List of all ToolDescriptor objects (filtered if allowlist provided)
-        """
         if allowlist:
             return self.filter_by_allowlist(self._tools, allowlist)
         return list(self._tools)
 
     @property
     def tool_count(self) -> int:
-        """Return the total number of tools in the catalog."""
         return len(self._tools)
 
-    @property
-    def server_count(self) -> int:
-        """Return the number of servers with tools."""
-        return len(self._tools_by_server)
 
-
-# Module-level singleton for the catalog
 _catalog_instance: McpToolCatalog | None = None
 
 
 async def get_tool_catalog(mcp_manager: Any) -> McpToolCatalog:
-    """
-    Get or create the global tool catalog instance.
-
-    Args:
-        mcp_manager: The MCPManager to use for tool loading
-
-    Returns:
-        The McpToolCatalog singleton
-    """
+    """The process-wide catalog. ``mcp_manager`` is only used on first creation."""
     global _catalog_instance
 
     if _catalog_instance is None:
@@ -735,9 +569,3 @@ async def get_tool_catalog(mcp_manager: Any) -> McpToolCatalog:
 
     await _catalog_instance.refresh_if_needed()
     return _catalog_instance
-
-
-def reset_tool_catalog() -> None:
-    """Reset the global catalog instance (for testing)."""
-    global _catalog_instance
-    _catalog_instance = None

@@ -416,3 +416,22 @@ def test_installing_an_accounting_replaces_the_live_budget():
     # The dedup memory came across; a fresh subject is still free.
     assert installed.reserve_search("alpha") == "duplicate_query"
     assert installed.reserve_search("gamma") is None
+
+
+def test_installs_respect_the_store_bound(monkeypatch):
+    """Continue paths insert directly; they must not grow the store without limit."""
+    import app.ai.research_budget as research_budget_module
+    from app.ai.research_budget import install_research_budget
+
+    state = get_research_budget(logical_turn_id="turn-bound-seed").to_state()
+    monkeypatch.setattr(research_budget_module, "_budgets", research_budget_module.OrderedDict())
+    monkeypatch.setattr(research_budget_module, "_MAX_TRACKED_CONVERSATIONS", 3)
+
+    for index in range(10):
+        install_research_budget(state, logical_turn_id=f"turn-bound-{index}")
+
+    assert list(research_budget_module._budgets) == [
+        "turn:turn-bound-7",
+        "turn:turn-bound-8",
+        "turn:turn-bound-9",
+    ]
