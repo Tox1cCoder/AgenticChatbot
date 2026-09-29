@@ -4,7 +4,7 @@ Generic API response wrapper
 
 from __future__ import annotations
 
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
@@ -30,3 +30,12 @@ class ApiResponse(BaseModel, Generic[T]):
         if self.code is None:
             data.pop("code", None)
         return data
+
+
+class ApiErrorResponse(BaseModel):
+    """Document the error envelope emitted by the canonical API handlers."""
+
+    success: Literal[False]
+    code: str
+    message: str
+    error: dict[str, list[str]] | None = None

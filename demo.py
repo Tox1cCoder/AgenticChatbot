@@ -1270,10 +1270,17 @@ def set_conversation_custom_agents(
 
 def list_projects() -> list[dict[str, Any]]:
     """The signed-in user's projects, newest first."""
-    response = make_api_request("GET", "/projects")
-    if not response or not response.get("success"):
-        return []
-    return response.get("data") or []
+    projects: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        response = make_api_request("GET", f"/projects?page={page}&limit=100")
+        if not response or not response.get("success"):
+            return projects
+        data = response.get("data") or {}
+        projects.extend(data.get("items") or [])
+        if page >= data.get("meta", {}).get("lastPage", 1):
+            return projects
+        page += 1
 
 
 def get_project(project_id: str) -> dict[str, Any] | None:
@@ -2392,6 +2399,7 @@ SESSION_STATE_DEFAULTS: dict[str, Callable[[], Any] | Any] = {
     "projects_list": list,
     "projects_loaded": lambda: False,
     "current_project_id": lambda: None,
+    "project_delete_pending_id": lambda: None,
     CONVERSATION_MANAGER_DIALOG_KEY: lambda: False,
     "show_instructions": lambda: False,
     "auth_token": lambda: None,
@@ -5707,6 +5715,7 @@ def render_sidebar():
         if st.button("New Chat", width="stretch", type="primary"):
             st.session_state.current_conversation_id = "pending_new"
             st.session_state.current_project_id = None
+            st.session_state.project_delete_pending_id = None
             st.session_state.active_view = "chat"
             close_conversation_manager()
             reset_conversation_state()
@@ -5723,10 +5732,28 @@ def render_sidebar():
         st.markdown("### :material/folder: Projects")
         if st.button("New Project", width="stretch"):
             st.session_state.current_project_id = None
+            st.session_state.project_delete_pending_id = None
             st.session_state.active_view = "project"
             st.rerun()
 
-        for project in st.session_state.projects_list:
+        project_search = (
+            st.text_input(
+                "Search projects",
+                placeholder="Search names or descriptions...",
+                key="project_sidebar_search",
+            )
+            or ""
+        ).strip().casefold()
+        visible_projects = [
+            project
+            for project in st.session_state.projects_list
+            if not project_search
+            or project_search in (project.get("name") or "").casefold()
+            or project_search in (project.get("description") or "").casefold()
+        ]
+        if project_search and not visible_projects:
+            st.caption("No matching projects.")
+        for project in visible_projects:
             project_id = project.get("id")
             is_active_project = (
                 st.session_state.active_view == "project"
@@ -5739,6 +5766,7 @@ def render_sidebar():
                 type="primary" if is_active_project else "secondary",
             ):
                 st.session_state.current_project_id = project_id
+                st.session_state.project_delete_pending_id = None
                 st.session_state.active_view = "project"
                 st.rerun()
 
@@ -5806,6 +5834,7 @@ def render_sidebar():
                     st.session_state.projects_list = []
                     st.session_state.projects_loaded = False
                     st.session_state.current_project_id = None
+                    st.session_state.project_delete_pending_id = None
                     st.session_state._ls_op = "clear"
                     if "__restore" in st.query_params:
                         del st.query_params["__restore"]
@@ -5834,6 +5863,7 @@ def render_project_view() -> None:
     if st.button(":material/arrow_back: Back to chat"):
         st.session_state.active_view = "chat"
         st.session_state.current_project_id = None
+        st.session_state.project_delete_pending_id = None
         st.rerun()
 
     project_id = st.session_state.get("current_project_id")
@@ -5931,28 +5961,68 @@ def render_project_view() -> None:
         return
 
     if st.button("Delete project", key=f"project_delete_{widget_scope}"):
-        if delete_project(project_id):
-            st.session_state.current_project_id = None
-            st.session_state.projects_loaded = False
-            st.session_state.active_view = "chat"
-            st.toast("Project deleted.", icon=":material/check_circle:")
-            st.rerun()
-        else:
-            st.error("Could not delete the project.")
+        st.session_state.project_delete_pending_id = project_id
+        st.rerun()
+    if st.session_state.get("project_delete_pending_id") == project_id:
+        st.warning(
+            "Deleting this project detaches its conversations. "
+            "Project-specific memories will no longer be available."
+        )
+        cancel_col, confirm_col = st.columns(2)
+        with cancel_col:
+            if st.button("Cancel", key=f"project_delete_cancel_{widget_scope}"):
+                st.session_state.project_delete_pending_id = None
+                st.rerun()
+        with confirm_col:
+            if st.button(
+                "Confirm delete", type="primary", key=f"project_delete_confirm_{widget_scope}"
+            ):
+                if delete_project(project_id):
+                    st.session_state.project_delete_pending_id = None
+                    st.session_state.current_project_id = None
+                    st.session_state.projects_loaded = False
+                    st.session_state.conversations_loaded = False
+                    st.session_state.active_view = "chat"
+                    st.toast("Project deleted.", icon=":material/check_circle:")
+                    st.rerun()
+                else:
+                    st.error("Could not delete the project.")
 
     st.divider()
     st.markdown("### Conversations in this project")
 
     if st.button("New chat in this project", key=f"project_new_chat_{widget_scope}"):
         st.session_state.current_conversation_id = "pending_new"
+        st.session_state.project_delete_pending_id = None
         st.session_state.active_view = "chat"
         reset_conversation_state()
         st.rerun()
 
-    conversations_response = get_conversations(project_id=project_id, fetch_all_pages=True)
+    conversation_search = (
+        st.text_input(
+            "Search conversations",
+            placeholder="Search titles or messages...",
+            key=f"project_conversation_search_{widget_scope}",
+        )
+        or ""
+    ).strip()
+    page_key = f"project_conversation_page_{widget_scope}"
+    last_search_key = f"project_conversation_last_search_{widget_scope}"
+    if st.session_state.get(last_search_key) != conversation_search:
+        st.session_state[page_key] = 1
+        st.session_state[last_search_key] = conversation_search
+    page = st.session_state.get(page_key, 1)
+    conversations_response = get_conversations(
+        project_id=project_id, search=conversation_search, page=page, limit=20
+    )
+    if not conversations_response or not conversations_response.get("success"):
+        st.error("Could not load this project's conversations.")
+        return
     conversations = (conversations_response or {}).get("data", {}).get("items") or []
     if not conversations:
-        st.caption("No conversations in this project yet.")
+        st.caption(
+            "No matching conversations." if conversation_search else "No conversations in this project yet."
+        )
     for conv in conversations:
         if st.button(
             format_conversation_title(conv.get("title", "New Conversation")),
@@ -5960,10 +6030,25 @@ def render_project_view() -> None:
             width="stretch",
         ):
             st.session_state.current_conversation_id = conv.get("id")
+            st.session_state.project_delete_pending_id = None
             st.session_state.active_view = "chat"
             close_conversation_manager()
             reset_conversation_state()
             st.rerun()
+
+    meta = conversations_response.get("data", {}).get("meta") or {}
+    last_page = max(1, meta.get("lastPage", 1))
+    if last_page > 1:
+        st.caption(f"Page {page} of {last_page} · {meta.get('total', 0)} conversations")
+        previous_col, next_col = st.columns(2)
+        with previous_col:
+            if st.button("Previous", disabled=page <= 1, key=f"project_conv_prev_{widget_scope}"):
+                st.session_state[page_key] = page - 1
+                st.rerun()
+        with next_col:
+            if st.button("Next", disabled=page >= last_page, key=f"project_conv_next_{widget_scope}"):
+                st.session_state[page_key] = page + 1
+                st.rerun()
 
 
 @st.cache_data(show_spinner=False)

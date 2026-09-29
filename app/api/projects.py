@@ -3,7 +3,7 @@
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Query, status
 
 from app.core.dependency_injection import AppAutoInjector
 from app.schemas.custom_agent import CustomAgentRead
@@ -14,20 +14,46 @@ from app.schemas.project import (
     ProjectUpdate,
 )
 from app.schemas.responses import ApiResponse
+from app.schemas.responses.api_response import ApiErrorResponse
+from app.schemas.responses.paginated_response import PaginatedApiResponse
 from app.services.project_service import ProjectService
 
-router = APIRouter(prefix="/projects", tags=["projects"])
+router = APIRouter(
+    prefix="/projects",
+    tags=["projects"],
+    responses={
+        401: {"model": ApiErrorResponse, "description": "Authentication required"},
+        422: {"model": ApiErrorResponse, "description": "Invalid path, query, or body input"},
+    },
+)
+
+PROJECT_ACCESS_RESPONSES = {
+    403: {"model": ApiErrorResponse, "description": "Project access denied, or agent unavailable"},
+    404: {"model": ApiErrorResponse, "description": "Project missing or deleted"},
+}
+MEMBERSHIP_RESPONSES = {
+    403: {"model": ApiErrorResponse, "description": "Project or conversation access denied"},
+    404: {
+        "model": ApiErrorResponse,
+        "description": "Project or conversation missing; detach also reports wrong membership",
+    },
+}
 
 
-@router.get("", response_model=ApiResponse[list[ProjectRead]])
+@router.get("", response_model=PaginatedApiResponse[ProjectRead])
 @AppAutoInjector.auto_inject()
 async def list_projects(
     project_service: ProjectService,
     user_id: UUID,
-) -> ApiResponse[list[ProjectRead]]:
-    """List the authenticated user's projects."""
-    result = project_service.list_projects(user_id)
-    return ApiResponse(success=True, message="Projects retrieved", data=result)
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    limit: int = Query(10, ge=1, le=100, description="Projects per page"),
+    search: str | None = Query(
+        None, max_length=200, description="Case-insensitive project name or description search"
+    ),
+) -> PaginatedApiResponse[ProjectRead]:
+    """List the authenticated user's live projects, newest first."""
+    result = project_service.list_projects(user_id, page=page, limit=limit, search=search)
+    return PaginatedApiResponse.from_paginator(result, "Projects retrieved")
 
 
 @router.post("", response_model=ApiResponse[ProjectRead], status_code=status.HTTP_201_CREATED)
@@ -42,7 +68,9 @@ async def create_project(
     return ApiResponse(success=True, message="Project created", data=result)
 
 
-@router.get("/{project_id}", response_model=ApiResponse[ProjectRead])
+@router.get(
+    "/{project_id}", response_model=ApiResponse[ProjectRead], responses=PROJECT_ACCESS_RESPONSES
+)
 @AppAutoInjector.auto_inject()
 async def get_project(
     project_id: UUID,
@@ -54,7 +82,9 @@ async def get_project(
     return ApiResponse(success=True, message="Project retrieved", data=result)
 
 
-@router.patch("/{project_id}", response_model=ApiResponse[ProjectRead])
+@router.patch(
+    "/{project_id}", response_model=ApiResponse[ProjectRead], responses=PROJECT_ACCESS_RESPONSES
+)
 @AppAutoInjector.auto_inject()
 async def update_project(
     project_id: UUID,
@@ -67,7 +97,7 @@ async def update_project(
     return ApiResponse(success=True, message="Project updated", data=result)
 
 
-@router.delete("/{project_id}", response_model=ApiResponse[Any])
+@router.delete("/{project_id}", response_model=ApiResponse[Any], responses=PROJECT_ACCESS_RESPONSES)
 @AppAutoInjector.auto_inject()
 async def delete_project(
     project_id: UUID,
@@ -79,7 +109,11 @@ async def delete_project(
     return ApiResponse(success=True, message="Project deleted", data=None)
 
 
-@router.get("/{project_id}/custom-agents", response_model=ApiResponse[list[CustomAgentRead]])
+@router.get(
+    "/{project_id}/custom-agents",
+    response_model=ApiResponse[list[CustomAgentRead]],
+    responses=PROJECT_ACCESS_RESPONSES,
+)
 @AppAutoInjector.auto_inject()
 async def list_project_custom_agents(
     project_id: UUID,
@@ -91,7 +125,11 @@ async def list_project_custom_agents(
     return ApiResponse(success=True, message="Project agents retrieved", data=result)
 
 
-@router.put("/{project_id}/custom-agents", response_model=ApiResponse[list[CustomAgentRead]])
+@router.put(
+    "/{project_id}/custom-agents",
+    response_model=ApiResponse[list[CustomAgentRead]],
+    responses=PROJECT_ACCESS_RESPONSES,
+)
 @AppAutoInjector.auto_inject()
 async def set_project_custom_agents(
     project_id: UUID,
@@ -104,7 +142,11 @@ async def set_project_custom_agents(
     return ApiResponse(success=True, message="Project agents updated", data=result)
 
 
-@router.put("/{project_id}/conversations/{conversation_id}", response_model=ApiResponse[Any])
+@router.put(
+    "/{project_id}/conversations/{conversation_id}",
+    response_model=ApiResponse[Any],
+    responses=MEMBERSHIP_RESPONSES,
+)
 @AppAutoInjector.auto_inject()
 async def attach_conversation(
     project_id: UUID,
@@ -117,7 +159,11 @@ async def attach_conversation(
     return ApiResponse(success=True, message="Conversation attached", data=None)
 
 
-@router.delete("/{project_id}/conversations/{conversation_id}", response_model=ApiResponse[Any])
+@router.delete(
+    "/{project_id}/conversations/{conversation_id}",
+    response_model=ApiResponse[Any],
+    responses=MEMBERSHIP_RESPONSES,
+)
 @AppAutoInjector.auto_inject()
 async def detach_conversation(
     project_id: UUID,

@@ -13,6 +13,7 @@ from app.core.exceptions.project import (
 from app.models.project import Project
 from app.repositories.custom_agent import CustomAgentRepository
 from app.repositories.project import ProjectRepository
+from app.repositories.utils.pagination import Paginator
 from app.schemas.custom_agent import CustomAgentRead
 from app.schemas.project import ProjectCreate, ProjectRead, ProjectUpdate
 from app.utils.validation.conversation_validation import ConversationValidationUtils
@@ -49,12 +50,13 @@ class ProjectService:
 
     # ----------------------------------------------------------------- CRUD
 
-    def list_projects(self, owner_id: UUID) -> list[ProjectRead]:
+    def list_projects(
+        self, owner_id: UUID, *, page: int = 1, limit: int = 10, search: str | None = None
+    ) -> Paginator[ProjectRead]:
+        projects = self.repository.list_by_owner(owner_id, page=page, limit=limit, search=search)
         counts = self.repository.conversation_counts(owner_id)
-        return [
-            self._to_read(project, counts.get(project.id, 0))
-            for project in self.repository.list_by_owner(owner_id)
-        ]
+        items = [self._to_read(project, counts.get(project.id, 0)) for project in projects.items]
+        return Paginator.create(items, projects.meta.total, page, limit)
 
     def create_project(self, owner_id: UUID, payload: ProjectCreate) -> ProjectRead:
         project = self.repository.create(

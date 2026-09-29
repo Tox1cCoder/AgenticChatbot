@@ -85,8 +85,8 @@ def test_create_and_list_by_owner(repo_env):
     created = repository.create(owner_id, {"name": "Roadmap", "instructions": "Be brief."})
 
     assert created.name == "Roadmap"
-    assert [p.id for p in repository.list_by_owner(owner_id)] == [created.id]
-    assert repository.list_by_owner(other_id) == []
+    assert [p.id for p in repository.list_by_owner(owner_id).items] == [created.id]
+    assert repository.list_by_owner(other_id).items == []
 
 
 def test_get_owned_returns_none_for_another_owner(repo_env):
@@ -113,11 +113,7 @@ def test_soft_delete_detaches_conversations_without_deleting_them(repo_env):
     project = repository.create(owner_id, {"name": "Roadmap"})
     conversation_id = uuid4()
     with sf() as s:
-        s.add(
-            Conversation(
-                id=conversation_id, owner_id=owner_id, title="t", project_id=project.id
-            )
-        )
+        s.add(Conversation(id=conversation_id, owner_id=owner_id, title="t", project_id=project.id))
         s.commit()
 
     assert repository.soft_delete_and_detach(owner_id, project.id) is True

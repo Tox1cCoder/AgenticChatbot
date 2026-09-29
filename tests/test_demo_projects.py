@@ -6,6 +6,7 @@ import importlib
 import inspect
 import sys
 import types
+from contextlib import nullcontext
 from typing import Any
 from uuid import uuid4
 
@@ -102,14 +103,32 @@ def test_list_projects_calls_the_endpoint(monkeypatch):
 
     def _fake_request(method, path, **kwargs):
         calls.append((method, path))
-        return {"success": True, "data": [{"id": str(uuid4()), "name": "Roadmap"}]}
+        if "page=1" in path:
+            return {
+                "success": True,
+                "data": {
+                    "items": [{"id": str(uuid4()), "name": "Roadmap"}],
+                    "meta": {"currentPage": 1, "lastPage": 2},
+                },
+            }
+        return {
+            "success": True,
+            "data": {
+                "items": [{"id": str(uuid4()), "name": "Notes"}],
+                "meta": {"currentPage": 2, "lastPage": 2},
+            },
+        }
 
     monkeypatch.setattr(demo, "make_api_request", _fake_request)
 
     result = demo.list_projects()
 
-    assert calls == [("GET", "/projects")]
+    assert calls == [
+        ("GET", "/projects?page=1&limit=100"),
+        ("GET", "/projects?page=2&limit=100"),
+    ]
     assert result[0]["name"] == "Roadmap"
+    assert result[1]["name"] == "Notes"
 
 
 def test_attach_calls_put_on_the_membership_route(monkeypatch):
@@ -217,6 +236,148 @@ def test_sidebar_renders_a_projects_section(monkeypatch):
     assert "render_project_view" in inspect.getsource(demo.main)
 
 
+def test_sidebar_search_filters_project_names_and_descriptions(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    streamlit_stub = sys.modules["streamlit"]
+    state = streamlit_stub.session_state
+    state.projects_list = [
+        {"id": "roadmap", "name": "Roadmap", "description": "Planning"},
+        {"id": "research", "name": "Notes", "description": "Research backlog"},
+        {"id": "misc", "name": "Misc", "description": "Other"},
+    ]
+    state.conversations_list = []
+    state.current_user_id = None
+    state.active_view = "chat"
+    state.current_project_id = None
+    streamlit_stub.sidebar = nullcontext()
+    streamlit_stub.text_input = lambda label, **_kwargs: (
+        "RESEARCH" if label == "Search projects" else ""
+    )
+    shown_buttons = []
+    streamlit_stub.button = lambda label, **_kwargs: shown_buttons.append(label) or False
+
+    demo.render_sidebar()
+
+    assert "Notes" in shown_buttons
+    assert "Roadmap" not in shown_buttons
+    assert "Misc" not in shown_buttons
+
+
+def _stub_existing_project_view(monkeypatch, *, search: str = "", clicked: str | None = None):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    streamlit_stub = sys.modules["streamlit"]
+    state = streamlit_stub.session_state
+    state.current_user_id = "user-1"
+    state.auth_token = "token"
+    state.current_project_id = "project-1"
+    state.active_view = "project"
+    monkeypatch.setattr(
+        demo, "get_project", lambda _id: {"id": "project-1", "name": "Roadmap", "customAgents": []}
+    )
+    monkeypatch.setattr(demo, "list_custom_agents", lambda: [])
+    streamlit_stub.text_input = lambda label, **kwargs: (
+        search if label == "Search conversations" else kwargs.get("value", "")
+    )
+    streamlit_stub.text_area = lambda _label, **kwargs: kwargs.get("value", "")
+    streamlit_stub.multiselect = lambda _label, _options, **kwargs: kwargs.get("default", [])
+    streamlit_stub.button = lambda label, **_kwargs: label == clicked
+    streamlit_stub.columns = lambda _spec: (nullcontext(), nullcontext())
+    return demo, streamlit_stub
+
+
+def test_project_conversation_search_resets_page_and_uses_server_filter(monkeypatch):
+    demo, streamlit_stub = _stub_existing_project_view(monkeypatch, search=" budget ")
+    state = streamlit_stub.session_state
+    state["project_conversation_page_project-1"] = 3
+    state["project_conversation_last_search_project-1"] = "old"
+    calls = []
+
+    def _get_conversations(**kwargs):
+        calls.append(kwargs)
+        return {
+            "success": True,
+            "data": {"items": [], "meta": {"total": 0, "currentPage": 1, "lastPage": 1}},
+        }
+
+    monkeypatch.setattr(demo, "get_conversations", _get_conversations)
+
+    demo.render_project_view()
+
+    assert calls == [{"project_id": "project-1", "search": "budget", "page": 1, "limit": 20}]
+    assert state["project_conversation_page_project-1"] == 1
+
+
+def test_project_conversation_next_page_uses_next_server_page(monkeypatch):
+    demo, streamlit_stub = _stub_existing_project_view(monkeypatch, clicked="Next")
+    calls = []
+
+    def _get_conversations(**kwargs):
+        calls.append(kwargs)
+        return {
+            "success": True,
+            "data": {
+                "items": [],
+                "meta": {"total": 25, "currentPage": kwargs["page"], "lastPage": 2},
+            },
+        }
+
+    monkeypatch.setattr(demo, "get_conversations", _get_conversations)
+
+    demo.render_project_view()
+    streamlit_stub.button = lambda _label, **_kwargs: False
+    demo.render_project_view()
+
+    assert [call["page"] for call in calls] == [1, 2]
+
+
+def test_project_delete_requires_confirmation(monkeypatch):
+    demo, streamlit_stub = _stub_existing_project_view(monkeypatch, clicked="Delete project")
+    monkeypatch.setattr(
+        demo,
+        "get_conversations",
+        lambda **_kwargs: {
+            "success": True,
+            "data": {"items": [], "meta": {"total": 0, "currentPage": 1, "lastPage": 1}},
+        },
+    )
+    deleted = []
+    monkeypatch.setattr(
+        demo, "delete_project", lambda project_id: deleted.append(project_id) or True
+    )
+
+    demo.render_project_view()
+
+    assert deleted == []
+    assert streamlit_stub.session_state["project_delete_pending_id"] == "project-1"
+
+    streamlit_stub.button = lambda label, **_kwargs: label == "Confirm delete"
+    monkeypatch.setattr(streamlit_stub, "rerun", lambda: None)
+    demo.render_project_view()
+
+    assert deleted == ["project-1"]
+    assert streamlit_stub.session_state["project_delete_pending_id"] is None
+
+
+def test_project_delete_confirmation_can_be_cancelled(monkeypatch):
+    demo, streamlit_stub = _stub_existing_project_view(monkeypatch, clicked="Cancel")
+    streamlit_stub.session_state.project_delete_pending_id = "project-1"
+    monkeypatch.setattr(
+        demo,
+        "get_conversations",
+        lambda **_kwargs: {
+            "success": True,
+            "data": {"items": [], "meta": {"total": 0, "currentPage": 1, "lastPage": 1}},
+        },
+    )
+    deleted = []
+    monkeypatch.setattr(demo, "delete_project", lambda project_id: deleted.append(project_id))
+
+    demo.render_project_view()
+
+    assert deleted == []
+    assert streamlit_stub.session_state.project_delete_pending_id is None
+
+
 def test_back_to_chat_clears_current_project_id(monkeypatch):
     """A browsed project must not silently capture the next new conversation.
 
@@ -229,8 +390,9 @@ def test_back_to_chat_clears_current_project_id(monkeypatch):
     streamlit_stub.session_state.current_user_id = "user-1"
     streamlit_stub.session_state.auth_token = "token"
     streamlit_stub.session_state.current_project_id = "project-1"
-    streamlit_stub.button = lambda label, *args, **kwargs: label == (
-        ":material/arrow_back: Back to chat"
+    streamlit_stub.session_state.project_delete_pending_id = "project-1"
+    streamlit_stub.button = lambda label, *args, **kwargs: (
+        label == (":material/arrow_back: Back to chat")
     )
 
     def _raise_rerun():
@@ -243,6 +405,7 @@ def test_back_to_chat_clears_current_project_id(monkeypatch):
 
     assert streamlit_stub.session_state.current_project_id is None
     assert streamlit_stub.session_state.active_view == "chat"
+    assert streamlit_stub.session_state.project_delete_pending_id is None
 
 
 def test_new_chat_in_project_button_keeps_current_project_id(monkeypatch):

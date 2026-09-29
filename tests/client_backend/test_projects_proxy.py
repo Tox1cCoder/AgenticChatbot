@@ -100,6 +100,27 @@ def test_list_projects_forwards(monkeypatch):
     assert ("GET", "/projects") in methods
 
 
+def test_project_search_and_page_parameters_reach_server(monkeypatch):
+    server = _fake_server(
+        {
+            "success": True,
+            "message": "Projects retrieved",
+            "data": {
+                "items": [],
+                "meta": {"total": 0, "perPage": 2, "currentPage": 2, "lastPage": 1},
+            },
+        }
+    )
+    client, _ = _projects_router_client(monkeypatch, server)
+
+    with client:
+        response = client.get("/projects?search=roadmap&page=2&limit=2")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["meta"]["currentPage"] == 2
+    assert dict(server.calls[0][2]["params"]) == {"search": "roadmap", "page": "2", "limit": "2"}
+
+
 def test_get_update_delete_project_forward(monkeypatch):
     server = _fake_server({"id": "p1"})
     client, _ = _projects_router_client(monkeypatch, server)
@@ -122,9 +143,7 @@ def test_project_custom_agents_forward(monkeypatch):
     with client:
         assert client.get("/projects/p1/custom-agents").status_code == 200
         assert (
-            client.put(
-                "/projects/p1/custom-agents", json={"customAgentIds": ["a1"]}
-            ).status_code
+            client.put("/projects/p1/custom-agents", json={"customAgentIds": ["a1"]}).status_code
             == 200
         )
 

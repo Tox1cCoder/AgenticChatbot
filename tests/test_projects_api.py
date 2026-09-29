@@ -83,7 +83,13 @@ def test_crud_flow(api):
 
     listed = owner.get("/projects")
     assert listed.status_code == 200
-    assert len(listed.json()["data"]) == 1
+    assert [item["id"] for item in listed.json()["data"]["items"]] == [project["id"]]
+    assert listed.json()["data"]["meta"] == {
+        "total": 1,
+        "perPage": 10,
+        "currentPage": 1,
+        "lastPage": 1,
+    }
 
     patched = owner.patch(f"/projects/{project['id']}", json={"name": "Renamed"})
     assert patched.status_code == 200
@@ -91,7 +97,31 @@ def test_crud_flow(api):
 
     deleted = owner.delete(f"/projects/{project['id']}")
     assert deleted.status_code == 200
-    assert owner.get("/projects").json()["data"] == []
+    assert owner.get("/projects").json()["data"]["items"] == []
+
+
+def test_project_list_search_and_pagination(api):
+    owner, other, *_ = api
+    owner.post("/projects", json={"name": "Roadmap", "description": "Planning"})
+    second = owner.post("/projects", json={"name": "Launch", "description": "ROADMAP work"})
+    owner.post("/projects", json={"name": "Notes"})
+    other.post("/projects", json={"name": "Roadmap from another user"})
+
+    response = owner.get("/projects?search=%20roadmap%20&page=1&limit=1")
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert [item["id"] for item in data["items"]] == [second.json()["data"]["id"]]
+    assert data["meta"] == {"total": 2, "perPage": 1, "currentPage": 1, "lastPage": 2}
+
+    page_two = owner.get("/projects?search=roadmap&page=2&limit=1")
+    assert [item["name"] for item in page_two.json()["data"]["items"]] == ["Roadmap"]
+
+
+def test_project_list_rejects_invalid_pagination(api):
+    owner, *_ = api
+    response = owner.get("/projects?page=0&limit=101")
+    assert response.status_code == 422
+    assert response.json()["code"] == "invalid_input"
 
 
 def test_instructions_over_the_cap_are_rejected(api):

@@ -6,12 +6,13 @@ from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 
 from app.models.conversation import Conversation
 from app.models.custom_agent import ConversationCustomAgent, CustomAgent
 from app.models.project import Project, ProjectCustomAgent
 from app.repositories.session_transport import RepositorySessionMixin
+from app.repositories.utils.pagination import Paginator
 
 
 class ProjectRepository(RepositorySessionMixin):
@@ -29,18 +30,34 @@ class ProjectRepository(RepositorySessionMixin):
 
     # ----------------------------------------------------------------- reads
 
-    def list_by_owner(self, owner_id: UUID) -> list[Project]:
-        """All live projects for an owner, newest first."""
+    def list_by_owner(
+        self, owner_id: UUID, *, page: int = 1, limit: int = 10, search: str | None = None
+    ) -> Paginator[Project]:
+        """A bounded, newest-first page of the owner's live projects."""
         with self.session_factory() as session:
+            conditions = [Project.owner_id == owner_id, Project.deleted_at.is_(None)]
+            normalized_search = search.strip().lower() if search else ""
+            if normalized_search:
+                conditions.append(
+                    or_(
+                        func.lower(Project.name).contains(normalized_search, autoescape=True),
+                        func.lower(Project.description).contains(
+                            normalized_search, autoescape=True
+                        ),
+                    )
+                )
+            total = session.execute(select(func.count(Project.id)).where(*conditions)).scalar_one()
             stmt = (
                 select(Project)
-                .where(Project.owner_id == owner_id, Project.deleted_at.is_(None))
-                .order_by(Project.created_at.desc())
+                .where(*conditions)
+                .order_by(Project.created_at.desc(), Project.id.desc())
+                .offset((page - 1) * limit)
+                .limit(limit)
             )
             projects = list(session.execute(stmt).scalars().all())
             for project in projects:
                 session.expunge(project)
-            return projects
+            return Paginator.create(projects, total, page, limit)
 
     @staticmethod
     def _get_owned_work(owner_id: UUID, project_id: UUID):
@@ -245,9 +262,9 @@ class ProjectRepository(RepositorySessionMixin):
             )
             next_order = (
                 session.execute(
-                    select(
-                        func.coalesce(func.max(ConversationCustomAgent.agent_order), -1)
-                    ).where(ConversationCustomAgent.conversation_id == conversation_id)
+                    select(func.coalesce(func.max(ConversationCustomAgent.agent_order), -1)).where(
+                        ConversationCustomAgent.conversation_id == conversation_id
+                    )
                 ).scalar_one()
                 + 1
             )
