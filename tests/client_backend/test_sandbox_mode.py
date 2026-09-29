@@ -57,3 +57,16 @@ def test_an_unknown_or_corrupt_override_falls_back_to_the_default(profile, monke
 def test_writing_an_unknown_mode_is_refused(profile):
     with pytest.raises(ValueError, match="sandbox mode"):
         mode.write_sandbox_mode("banana")
+
+
+def test_two_device_profiles_keep_independent_modes(tmp_path, monkeypatch):
+    from client_backend.core.config import client_settings
+
+    monkeypatch.setattr(client_settings, "sandbox_mode", "off")
+    monkeypatch.setattr(client_settings, "profile_root", str(tmp_path / "device-a"))
+    mode.write_sandbox_mode("workspace")
+    monkeypatch.setattr(client_settings, "profile_root", str(tmp_path / "device-b"))
+    assert mode.read_sandbox_mode() == "off"
+    mode.write_sandbox_mode("off")
+    monkeypatch.setattr(client_settings, "profile_root", str(tmp_path / "device-a"))
+    assert mode.read_sandbox_mode() == "workspace"

@@ -31,6 +31,7 @@ from client_backend.services.mcp_config_store import (
 from client_backend.services.runtime_bridge import get_runtime_bridge
 from client_backend.services.sandbox import launch as sandbox_launch
 from client_backend.services.sandbox.mode import read_sandbox_mode, write_sandbox_mode
+from client_backend.services.server_api import AuthenticationError
 
 
 def _catalog_version(tools: list[dict[str, Any]]) -> str:
@@ -85,7 +86,20 @@ async def _refresh_runtime_bridge_catalogs_if_connected(
     bridge_scope = getattr(bridge, "_mcp_scope", None)
     if bridge_scope is not None and bridge_scope != scope:
         return
-    await bridge.refresh_catalogs()
+    try:
+        await bridge.refresh_catalogs()
+    except AuthenticationError as exc:
+        if exc.status_code != status.HTTP_403_FORBIDDEN:
+            raise
+        # The server can forget an idle runtime session while its WebSocket is
+        # still open (for example after a runtime-store restart). A fresh
+        # registration and handshake rebind both catalogs to a live session.
+        await bridge.stop()
+        if not await bridge.start(wait_for_connection=True):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Device runtime did not reconnect after its session expired",
+            ) from exc
 
 
 def _require_known_server(manager: LocalMCPManager, server_name: str) -> None:

@@ -240,7 +240,10 @@ async def test_get_sandbox_reports_mode_and_account_readiness(monkeypatch, sandb
 
 
 @pytest.mark.asyncio
-async def test_put_sandbox_persists_the_mode_and_restarts(monkeypatch, sandbox_profile):
+@pytest.mark.parametrize("selected_mode", ["workspace", "off"])
+async def test_put_sandbox_persists_the_mode_and_restarts(
+    monkeypatch, sandbox_profile, selected_mode
+):
     from client_backend.services.sandbox.mode import read_sandbox_mode
 
     reloaded = []
@@ -252,11 +255,11 @@ async def test_put_sandbox_persists_the_mode_and_restarts(monkeypatch, sandbox_p
     )
     monkeypatch.setattr(mcp_api.sandbox_launch, "sandbox_is_set_up", lambda: True)
 
-    response = await mcp_api.set_sandbox_mode_endpoint({"mode": "workspace"}, _session())
+    response = await mcp_api.set_sandbox_mode_endpoint({"mode": selected_mode}, _session())
     body = json.loads(response.body)
 
-    assert read_sandbox_mode() == "workspace"
-    assert body["data"]["mode"] == "workspace"
+    assert read_sandbox_mode() == selected_mode
+    assert body["data"]["mode"] == selected_mode
     assert reloaded, "Desktop Commander must be restarted so the new mode takes effect"
 
 
@@ -266,3 +269,44 @@ async def test_put_sandbox_rejects_an_unknown_mode(monkeypatch, sandbox_profile)
         await mcp_api.set_sandbox_mode_endpoint({"mode": "banana"}, _session())
 
     assert excinfo.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_put_sandbox_reconnects_when_server_forgot_runtime_session(
+    monkeypatch, sandbox_profile
+):
+    from client_backend.services.server_api import AuthenticationError
+
+    events = []
+
+    class Bridge:
+        def is_connected(self):
+            return True
+
+        def get_registered_device_id(self):
+            return "device-a-id"
+
+        def get_device_identifier(self):
+            return "device-a"
+
+        _mcp_scope = mcp_api._scope(_session())
+
+        async def refresh_catalogs(self):
+            events.append("refresh")
+            raise AuthenticationError("Access forbidden", status_code=403)
+
+        async def stop(self):
+            events.append("stop")
+
+        async def start(self, *, wait_for_connection, timeout_seconds=None):
+            events.append("start")
+            return True
+
+    monkeypatch.setattr(mcp_api, "get_runtime_bridge", lambda: Bridge())
+    monkeypatch.setattr(mcp_api, "_reload_manager", lambda scope: _noop_async(events, scope))
+    monkeypatch.setattr(mcp_api.sandbox_launch, "sandbox_is_set_up", lambda: False)
+
+    response = await mcp_api.set_sandbox_mode_endpoint({"mode": "workspace"}, _session())
+
+    assert json.loads(response.body)["data"]["mode"] == "workspace"
+    assert events[1:] == ["refresh", "stop", "start"]

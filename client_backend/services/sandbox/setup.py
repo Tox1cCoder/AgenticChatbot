@@ -16,10 +16,11 @@ import base64
 import subprocess
 
 from client_backend.services.sandbox.account import (
-    SANDBOX_USERNAME,
     SandboxCredentials,
+    active_sandbox_username,
     forget_credentials,
     generate_password,
+    sandbox_username,
     save_credentials,
 )
 from client_backend.services.sandbox.path_resolution import revoke_path_resolution
@@ -31,7 +32,7 @@ _DESCRIPTION = "Runs commands for the Kani assistant"
 # The password is read from stdin: a command line is visible to every process.
 _PROVISION_SCRIPT = rf"""
 $ErrorActionPreference = 'Stop'
-$name = '{SANDBOX_USERNAME}'
+$name = '{{name}}'
 $password = ConvertTo-SecureString ([Console]::In.ReadLine()) -AsPlainText -Force
 if (Get-LocalUser -Name $name -ErrorAction SilentlyContinue) {{
     Set-LocalUser -Name $name -Password $password -PasswordNeverExpires $true `
@@ -47,15 +48,15 @@ try {{
 }} catch [Microsoft.PowerShell.Commands.MemberExistsException] {{ }}
 """
 
-_REMOVE_SCRIPT = rf"""
+_REMOVE_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
-$name = '{SANDBOX_USERNAME}'
+$name = '{name}'
 $user = Get-LocalUser -Name $name -ErrorAction SilentlyContinue
-if ($user) {{
+if ($user) {
     $sid = $user.SID.Value
     Remove-LocalUser -Name $name
-    Get-CimInstance Win32_UserProfile | Where-Object {{ $_.SID -eq $sid }} | Remove-CimInstance
-}}
+    Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $sid } | Remove-CimInstance
+}
 """
 
 
@@ -64,12 +65,13 @@ class SandboxSetupError(RuntimeError):
 
 
 def provision_account() -> SandboxCredentials:
-    """Create the account, or give an existing one a new password."""
+    """Create or update the account owned by this sidecar profile."""
 
+    name = sandbox_username()
     password = generate_password()
-    _run_powershell(_PROVISION_SCRIPT, stdin=password + "\n")
-    save_credentials(SANDBOX_USERNAME, password)
-    return SandboxCredentials(SANDBOX_USERNAME, password)
+    _run_powershell(_PROVISION_SCRIPT.replace("{name}", name), stdin=password + "\n")
+    save_credentials(name, password)
+    return SandboxCredentials(name, password)
 
 
 def remove_account() -> None:
@@ -79,8 +81,9 @@ def remove_account() -> None:
     they name still belongs to an account.
     """
 
+    name = active_sandbox_username()
     revoke_path_resolution()
-    _run_powershell(_REMOVE_SCRIPT, stdin="")
+    _run_powershell(_REMOVE_SCRIPT.replace("{name}", name), stdin="")
     forget_credentials()
 
 

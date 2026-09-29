@@ -172,7 +172,7 @@ an **enabled** server actually started:
 - `running: false` with a non-null `error` — enabled but not started, and
   `error` says why; render the reason rather than treating it as a crash. The
   common case is Desktop Commander under the sandbox: with
-  `CLIENT_SANDBOX_MODE=workspace`, if the `KaniSandbox` account is not set up or
+  `CLIENT_SANDBOX_MODE=workspace`, if this profile's sandbox account is not set up or
   the runtime cannot be prepared, Desktop Commander stays **off** — it never
   falls back to the user's full rights — and `error` explains what to do (for
   example, run `sandbox setup`). Show it as "off — <reason>".
@@ -181,8 +181,10 @@ an **enabled** server actually started:
 
 ### Sandbox mode (device-local switch)
 
+The complete route, state, error, and cross-device behavior is in [Sandbox Frontend Contract](SANDBOX_FE_CONTRACT.md).
+
 Desktop Commander can run either as the signed-in user or as an isolated
-Windows account (`KaniSandbox`) confined to a managed workspace. Two routes on
+Windows account with write access granted to a managed workspace. Two routes on
 the sidecar read and set this per device:
 
 - `GET /mcp/sandbox` → `data`: `{ "mode": "off" | "workspace", "accountReady": bool }`
@@ -192,7 +194,7 @@ the sidecar read and set this per device:
   next read; refetch the server list after a successful `PUT`.
 
 `mode` is `workspace` when the sandbox is on. `accountReady` is `false` when the
-`KaniSandbox` account has not been set up (`python -m client_backend sandbox
+profile's sandbox account has not been set up (`python -m client_backend sandbox
 setup`); surface that as "sandbox on, but not set up" — with `workspace` and
 `accountReady:false`, Desktop Commander stays **off** and its server row carries
 the reason in `error`. The switch is per device and is not synced to the user's

@@ -7,6 +7,7 @@ under the signed-in user, which the sandbox account itself cannot decrypt.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -17,9 +18,24 @@ from pathlib import Path
 from client_backend.core.config import client_settings
 from client_backend.core.security import decrypt_local_secret, encrypt_local_secret
 
-SANDBOX_USERNAME = "KaniSandbox"
+SANDBOX_USERNAME = "KaniSandbox"  # Legacy account name kept for existing profiles.
 PASSWORD_SYMBOLS = "!#%*+-=?@^_"
 _PASSWORD_LENGTH = 32
+
+
+def sandbox_username() -> str:
+    """A distinct local account for each sidecar profile on this Windows PC."""
+
+    profile = str(Path(client_settings.profile_root).resolve()).casefold()
+    suffix = hashlib.sha256(profile.encode("utf-8")).hexdigest()[:12]
+    return f"KaniSb{suffix}"
+
+
+def active_sandbox_username() -> str:
+    """Keep a previously configured legacy account usable until setup runs again."""
+
+    credentials = load_credentials()
+    return credentials.username if credentials is not None else sandbox_username()
 
 
 @dataclass(frozen=True)
@@ -45,7 +61,7 @@ def generate_password() -> str:
 
 
 def credentials_path() -> Path:
-    # Machine-level, not per chat user: there is one sandbox account per PC.
+    # Credentials belong to this Windows profile; another profile uses its own account.
     return Path(client_settings.profile_root) / "sandbox" / "account.json"
 
 

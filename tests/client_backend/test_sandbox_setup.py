@@ -8,6 +8,7 @@ administrator rights and is verified on a real machine.
 
 from __future__ import annotations
 
+import base64
 import subprocess
 
 import pytest
@@ -48,6 +49,26 @@ def test_provisioned_password_is_the_one_stored(profile, powershell):
     credentials = setup.provision_account()
 
     assert account.load_credentials() == credentials
+
+
+def test_setup_from_two_windows_profiles_uses_separate_accounts(tmp_path, monkeypatch, powershell):
+    from client_backend.core.config import client_settings
+
+    monkeypatch.setattr(client_settings, "profile_root", str(tmp_path / "alice"))
+    alice = setup.provision_account()
+    monkeypatch.setattr(client_settings, "profile_root", str(tmp_path / "bob"))
+    bob = setup.provision_account()
+
+    assert alice.username != bob.username
+    assert len(alice.username) <= 20
+    assert len(bob.username) <= 20
+    first_script = base64.b64decode(powershell[0]["argv"][-1]).decode("utf-16-le")
+    second_script = base64.b64decode(powershell[1]["argv"][-1]).decode("utf-16-le")
+    assert alice.username in first_script
+    assert bob.username in second_script
+    assert "{{" not in first_script + second_script
+    monkeypatch.setattr(client_settings, "profile_root", str(tmp_path / "alice"))
+    assert account.load_credentials() == alice
 
 
 def test_failed_provisioning_stores_no_credentials(profile, monkeypatch):

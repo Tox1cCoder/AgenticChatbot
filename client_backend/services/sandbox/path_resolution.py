@@ -24,7 +24,7 @@ from ctypes import wintypes
 from pathlib import Path
 
 from client_backend.core.config import client_settings
-from client_backend.services.sandbox.account import SANDBOX_USERNAME
+from client_backend.services.sandbox.account import active_sandbox_username
 
 _DACL_SECURITY_INFORMATION = 0x00000004
 _SDDL_REVISION_1 = 1
@@ -43,7 +43,7 @@ def grant_path_resolution(folder: Path, *, principal_sid: str | None = None) -> 
     between = _folders_between_profile_and(folder)
     if not between:
         return
-    sid = principal_sid or account_sid(SANDBOX_USERNAME)
+    sid = principal_sid or account_sid(active_sandbox_username())
     _, granted = _recorded()
     for ancestor in between:
         _add_entry(ancestor, sid)

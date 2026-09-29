@@ -180,14 +180,14 @@ needs_account = pytest.mark.skipif(
 
 @needs_account
 def test_missing_workspace_grant_is_applied(tmp_path):
-    runtime.ensure_workspace_access(tmp_path)
+    runtime.ensure_workspace_access(tmp_path, principal="KaniSandbox")
 
     assert any("kanisandbox:(oi)(ci)(m)" in line.lower() for line in _acl(tmp_path))
 
 
 @needs_account
 def test_existing_workspace_grant_is_not_applied_again(tmp_path, monkeypatch):
-    runtime.grant_workspace_access(tmp_path)
+    runtime.grant_workspace_access(tmp_path, principal="KaniSandbox")
     commands = []
     real_run = subprocess.run
 
@@ -197,9 +197,22 @@ def test_existing_workspace_grant_is_not_applied_again(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runtime.subprocess, "run", spy)
 
-    runtime.ensure_workspace_access(tmp_path)
+    runtime.ensure_workspace_access(tmp_path, principal="KaniSandbox")
 
     assert not [argv for argv in commands if "/grant" in argv]
+
+
+def test_existing_runtime_root_is_granted_to_replacement_profile_account(profile, monkeypatch):
+    root = profile / "runtime"
+    root.mkdir()
+    record = profile / "KaniDesktop" / "sandbox" / "runtime.json"
+    record.parent.mkdir(parents=True)
+    record.write_text('{"path": "' + str(root).replace("\\", "\\\\") + '"}', encoding="utf-8")
+    grants = []
+    monkeypatch.setattr(runtime, "_icacls", lambda path, *args: grants.append((path, args)))
+
+    assert runtime.ensure_runtime_root(principal="KaniSbNewProfile") == root
+    assert grants == [(root, ("/grant", "KaniSbNewProfile:(OI)(CI)RX"))]
 
 
 def test_node_the_account_can_already_run_is_used_in_place(profile, monkeypatch):

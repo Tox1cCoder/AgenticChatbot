@@ -23,7 +23,7 @@ from pathlib import Path
 
 from client_backend.core.config import client_settings
 from client_backend.services.desktop_commander_policy import PACKAGE, PINNED_VERSION
-from client_backend.services.sandbox.account import SANDBOX_USERNAME
+from client_backend.services.sandbox.account import active_sandbox_username
 
 __all__ = [
     "PINNED_VERSION",
@@ -45,13 +45,13 @@ class SandboxRuntimeError(RuntimeError):
     """Preparing a folder or program for the sandbox account failed."""
 
 
-def grant_workspace_access(folder: Path, principal: str = SANDBOX_USERNAME) -> None:
+def grant_workspace_access(folder: Path, principal: str | None = None) -> None:
     """Let the account create and change anything under ``folder``."""
 
-    _icacls(folder, "/grant", f"{principal}:(OI)(CI)M")
+    _icacls(folder, "/grant", f"{principal or active_sandbox_username()}:(OI)(CI)M")
 
 
-def ensure_workspace_access(folder: Path, principal: str = SANDBOX_USERNAME) -> None:
+def ensure_workspace_access(folder: Path, principal: str | None = None) -> None:
     """Grant the account write access to ``folder``, or refuse if that is unsafe.
 
     A grant is inherited by everything below, so it would also hand the account
@@ -67,6 +67,7 @@ def ensure_workspace_access(folder: Path, principal: str = SANDBOX_USERNAME) -> 
     in place.
     """
 
+    principal = principal or active_sandbox_username()
     protected = protected_paths(folder)
     if protected:
         names = ", ".join(sorted(str(path.relative_to(folder)) for path in protected))
@@ -123,13 +124,21 @@ def _has_write_grant(folder: Path, principal: str) -> bool:
     )
 
 
-def ensure_runtime_root(principal: str = SANDBOX_USERNAME) -> Path:
+def ensure_runtime_root(principal: str | None = None) -> Path:
     """The runtime folder, created and locked down on first use."""
 
+    principal = principal or active_sandbox_username()
     record = _runtime_record_path()
     if record.is_file():
-        recorded = Path(json.loads(record.read_text(encoding="utf-8"))["path"])
+        metadata = json.loads(record.read_text(encoding="utf-8"))
+        recorded = Path(metadata["path"])
         if recorded.is_dir():
+            if metadata.get("principal") != principal:
+                _icacls(recorded, "/grant", f"{principal}:(OI)(CI)RX")
+                record.write_text(
+                    json.dumps({"path": str(recorded), "principal": principal}),
+                    encoding="utf-8",
+                )
             return recorded
 
     folder = Path(os.environ["PROGRAMDATA"]) / f"KaniDesktop-runtime-{secrets.token_hex(8)}"
@@ -145,7 +154,9 @@ def ensure_runtime_root(principal: str = SANDBOX_USERNAME) -> Path:
         f"{principal}:(OI)(CI)RX",
     )
     record.parent.mkdir(parents=True, exist_ok=True)
-    record.write_text(json.dumps({"path": str(folder)}), encoding="utf-8")
+    record.write_text(
+        json.dumps({"path": str(folder), "principal": principal}), encoding="utf-8"
+    )
     return folder
 
 

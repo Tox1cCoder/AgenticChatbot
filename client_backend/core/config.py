@@ -139,7 +139,7 @@ class ClientSettings(BaseSettings):
     sandbox_mode: Literal["off", "workspace"] = Field(
         default="off",
         description=(
-            "'workspace' runs Desktop Commander as the KaniSandbox account (see "
+            "'workspace' runs Desktop Commander as this profile's sandbox account (see "
             "'python -m client_backend sandbox setup'), confined to workspace_roots. When "
             "workspace_roots is empty it works in a managed workspace under the profile "
             "('<profile_root>/workspace'), a clean folder holding no .git or environment. "
