@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
@@ -36,6 +37,8 @@ from .events import (
     resolve_image_preview_delivery,
 )
 
+logger = logging.getLogger(__name__)
+
 _AI_SDK_HEARTBEAT_INTERVAL_SECONDS = 15.0
 
 #: Canonical lifecycle event -> the ``phase`` on the shared ``data-generation``
@@ -61,14 +64,23 @@ def _sse(data: dict[str, Any]) -> str:
 
 
 def _ai_sdk_error_from_exception(exc: Exception) -> dict[str, Any]:
-    """Project a known server exception to the AI SDK error event shape."""
-    event: dict[str, Any] = {"type": "error", "errorText": str(exc)}
+    """Project a server exception to the AI SDK error event shape.
+
+    Only a ``CustomHTTPException`` detail is written for the client; any other
+    exception's text (provider URLs, SQL, paths) is logged and replaced by its
+    type name.
+    """
     if isinstance(exc, CustomHTTPException):
-        event["errorText"] = str(exc.detail)
-        event["statusCode"] = exc.status_code
+        event: dict[str, Any] = {
+            "type": "error",
+            "errorText": str(exc.detail),
+            "statusCode": exc.status_code,
+        }
         if exc.error_code is not None:
             event["errorCode"] = exc.error_code
-    return event
+        return event
+    logger.error("AI SDK stream failed", exc_info=exc)
+    return {"type": "error", "errorText": f"Response generation failed ({type(exc).__name__})."}
 
 
 def _ai_sdk_error_from_data(data: dict[str, Any]) -> dict[str, Any]:

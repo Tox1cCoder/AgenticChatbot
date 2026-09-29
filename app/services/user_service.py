@@ -5,13 +5,11 @@ from uuid import UUID
 from app.factories.user_factory import UserFactory
 from app.interfaces.user_service_interface import IUserService
 from app.repositories.user import UserRepository
-from app.schemas.user import UserCreate, UserInDB, UserRead, UserUpdate
+from app.schemas.user import UserCreate, UserInDB, UserRead
 from app.utils.validation.user_validation import UserValidationUtils
 
 
 class UserService(IUserService):
-    """Service layer for User operations"""
-
     def __init__(
         self,
         user_repository: UserRepository,
@@ -33,33 +31,6 @@ class UserService(IUserService):
         user_entity = self.repository.get_by_id(user_id)
         return UserRead.model_validate(user_entity)
 
-    def get_by_email(self, email: str) -> UserRead | None:
-        user_entity = self.repository.get_by_email(email)
-        return UserRead.model_validate(user_entity) if user_entity else None
-
     def get_by_email_with_password(self, email: str) -> UserInDB | None:
         user_entity = self.repository.get_by_email(email)
         return UserInDB.model_validate(user_entity) if user_entity else None
-
-    def get_by_username(self, username: str) -> UserRead | None:
-        user_entity = self.repository.get_by_username(username)
-        return UserRead.model_validate(user_entity) if user_entity else None
-
-    def get_all(self, skip: int = 0, limit: int = 100) -> list[UserRead]:
-        user_entities = self.repository.get_all(skip=skip, limit=limit)
-        return [UserRead.model_validate(user_entity) for user_entity in user_entities]
-
-    def update_user(self, user_id: UUID, user_update_data: UserUpdate) -> UserRead:
-        self.validation_utils.validate_user_exists(user_id)
-        user_entity = self.repository.get_by_id(user_id)
-
-        if user_update_data.email or user_update_data.username:
-            email_to_check = user_update_data.email or user_entity.email
-            username_to_check = user_update_data.username or user_entity.username
-
-            self.validation_utils.validate_email_and_username_availability(
-                email_to_check, username_to_check, exclude_user_id=user_id
-            )
-
-        updated_user = self.repository.update(user_entity.id, user_update_data)
-        return UserRead.model_validate(updated_user)

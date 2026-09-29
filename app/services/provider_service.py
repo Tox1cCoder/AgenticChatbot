@@ -297,17 +297,6 @@ class ProviderService:
 
         return config
 
-    def get_decrypted_api_key(self, user_id: UUID, provider_type: str) -> str | None:
-        provider_type = self._normalize_provider_type(provider_type)
-        provider = self.repository.get_by_user_and_type(user_id, provider_type)
-        if not provider:
-            return None
-
-        try:
-            return self._decrypt_key(provider.api_key_encrypted)
-        except ValueError:
-            return None
-
     def get_all_providers(
         self, user_id: UUID, include_encrypted: bool = False
     ) -> list[dict[str, Any]]:
@@ -770,7 +759,14 @@ class ProviderService:
             async_client_cls = getattr(openai, "AsyncOpenAI", None)
             if async_client_cls is not None:
                 client = async_client_cls(api_key=api_key, max_retries=0)
-                models_response = await client.models.list()
+                try:
+                    models_response = await client.models.list()
+                finally:
+                    # Each sync builds a client; unclosed, its httpx pool
+                    # outlives the call.
+                    close = getattr(client, "close", None)
+                    if close is not None:
+                        await close()
             else:
                 client = openai.OpenAI(api_key=api_key, max_retries=0)
                 models_response = await asyncio.to_thread(client.models.list)

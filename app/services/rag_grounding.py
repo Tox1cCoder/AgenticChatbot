@@ -486,15 +486,6 @@ def _hold_trailing_spaces(text: str) -> tuple[str, str]:
     return stripped, text[len(stripped) :]
 
 
-def neutralize_unknown_markers(text: str, known_evidence_ids: Iterable[str]) -> str:
-    """Drop citation markers that name evidence this turn never retrieved.
-
-    Shared with the stream projector so a citation is judged by one rule in
-    both places. A marker naming several ids keeps the resolvable ones.
-    """
-    return _neutralize_unknown_markers(str(text or ""), frozenset(known_evidence_ids))
-
-
 def _neutralize_unknown_markers(text: str, known: Any) -> str:
     return _rewrite_markers(text, known).strip()
 

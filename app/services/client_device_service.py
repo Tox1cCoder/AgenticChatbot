@@ -275,30 +275,6 @@ class ClientDeviceService:
         """Get all active sessions for a user."""
         return get_client_runtime_store().list_sessions_for_user(user_id)
 
-    def get_device_tool_catalog(
-        self,
-        *,
-        user_id: UUID,
-        device_id: UUID,
-    ) -> dict[str, Any] | None:
-        """Get the current tool catalog for an active device owned by the user."""
-        session = self.get_active_session(device_id)
-        if not session or session.user_id != user_id:
-            return None
-        return session.tool_catalog
-
-    def get_device_skill_catalog(
-        self,
-        *,
-        user_id: UUID,
-        device_id: UUID,
-    ) -> dict[str, Any] | None:
-        """Get the current skill catalog for an active device owned by the user."""
-        session = self.get_active_session(device_id)
-        if not session or session.user_id != user_id:
-            return None
-        return session.skill_catalog
-
     async def update_tool_catalog(
         self,
         device_id: UUID,

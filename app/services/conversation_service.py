@@ -21,6 +21,8 @@ from app.utils.validation.user_validation import UserValidationUtils
 
 logger = logging.getLogger(__name__)
 
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
 
 class ConversationService(IConversationService):
     """Service layer for Conversation operations"""
@@ -169,13 +171,6 @@ class ConversationService(IConversationService):
         # Return new Paginator with converted items
         return Paginator.create(conversation_reads, paginated_conversations.meta.total, page, limit)
 
-    def get_conversation_with_messages(
-        self, conversation_id: UUID, owner_id: UUID
-    ) -> ConversationRead:
-        self.conversation_validation_utils.validate_conversation_access(owner_id, conversation_id)
-        conversation_entity = self.repository.get_with_messages(conversation_id)
-        return self._convert_to_read_schema(conversation_entity, include=["messages"])
-
     def update_conversation(
         self,
         conversation_id: UUID,
@@ -207,9 +202,25 @@ class ConversationService(IConversationService):
             # Best-effort checkpoint thread cleanup. Errors are non-fatal —
             # the conversation row is already soft-deleted.
             if self.checkpoint_manager is not None:
-                with contextlib.suppress(Exception):
-                    asyncio.create_task(self._delete_checkpoint_thread_async(str(conversation_id)))
+                self._schedule_checkpoint_cleanup(str(conversation_id))
         return deleted
+
+    def _schedule_checkpoint_cleanup(self, thread_id: str) -> None:
+        """Delete the thread's checkpoints in the background.
+
+        The task is held in ``_BACKGROUND_TASKS`` until it finishes: the loop
+        keeps only a weak reference, so an unreferenced task can be collected
+        mid-delete. Without a running loop nothing is scheduled; the checkpoint
+        retention sweep deletes the threads of soft-deleted conversations.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.info("No event loop; checkpoint thread %s is left to the sweep", thread_id)
+            return
+        task = loop.create_task(self._delete_checkpoint_thread_async(thread_id))
+        _BACKGROUND_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_TASKS.discard)
 
     async def _delete_checkpoint_thread_async(self, thread_id: str) -> None:
         try:

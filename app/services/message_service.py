@@ -128,6 +128,92 @@ def _service_event_from_ai_event(
     return event.model_copy(update={"sequence": sequence})
 
 
+def _client_error_text(exc: Exception) -> str:
+    """The text a failed turn shows the client, in its error event and message.
+
+    A ``CustomHTTPException`` detail is written for the client (the API
+    returns it verbatim). Any other exception's text can carry a provider
+    error with a key in its URL, a SQL statement, or a filesystem path, so it
+    is logged and only the exception type leaves the process, matching the
+    graph's ``_stream_failure_event``.
+    """
+    if isinstance(exc, CustomHTTPException) and isinstance(exc.detail, str):
+        return exc.detail
+    logging.error("Message generation failed", exc_info=exc)
+    return f"Response generation failed ({type(exc).__name__})."
+
+
+def _is_blank(value: Any) -> bool:
+    return value in (None, "")
+
+
+def _pending_action_counts(pending_requests: list[Any]) -> dict[str, int]:
+    """How many pending requests share each action name.
+
+    An action name addresses a request only when it is unique; two calls of
+    the same tool must be told apart by id.
+    """
+    counts: dict[str, int] = {}
+    for request in pending_requests:
+        if isinstance(request, dict) and not _is_blank(request.get("action")):
+            key = str(request["action"])
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _pending_request_indexes(
+    pending_requests: list[Any], action_counts: dict[str, int]
+) -> dict[str, int]:
+    indexes: dict[str, int] = {}
+    for index, request in enumerate(pending_requests):
+        if not isinstance(request, dict):
+            continue
+        for id_key in ("tool_call_id", "task_id"):
+            value = request.get(id_key)
+            if not _is_blank(value):
+                indexes[str(value)] = index
+        action = request.get("action")
+        if not _is_blank(action) and action_counts.get(str(action)) == 1:
+            indexes[str(action)] = index
+    return indexes
+
+
+def _pending_request_key(request: dict[str, Any], action_counts: dict[str, int]) -> str | None:
+    """The one key a complete decision set must cover for this request."""
+    for id_key in ("tool_call_id", "task_id"):
+        value = request.get(id_key)
+        if not _is_blank(value):
+            return str(value)
+    action = request.get("action")
+    if not _is_blank(action) and action_counts.get(str(action)) == 1:
+        return str(action)
+    return None
+
+
+def _require_allowed_decision(request: dict[str, Any], decision: Any) -> None:
+    allowed_raw = request.get("allowed_decisions") or request.get("allowedDecisions")
+    if isinstance(allowed_raw, str):
+        allowed = {allowed_raw.strip().lower()}
+    elif isinstance(allowed_raw, list):
+        allowed = {
+            str(value).strip().lower()
+            for value in allowed_raw
+            if isinstance(value, str) and value.strip()
+        }
+    else:
+        allowed = {"approve", "edit", "reject"}
+
+    decision_type = getattr(decision, "type", None)
+    decision_type = getattr(decision_type, "value", decision_type)
+    normalized_type = str(decision_type or "").strip().lower()
+    if normalized_type not in allowed:
+        raise CustomHTTPException(
+            status_code=422,
+            detail=f"Decision '{normalized_type}' is not allowed for this pending tool call.",
+            error_code="INTERRUPT_DECISION_NOT_ALLOWED",
+        )
+
+
 #: Stream events at which a durable stop check is worth a database read. Tool
 #: and model boundaries, and the route landing -- the points where the turn is
 #: about to spend something. Token deltas are excluded on purpose: a read per
@@ -929,41 +1015,17 @@ class MessageService(IMessageService):
         record: Any,
         decisions: list[InterruptDecision] | None,
     ) -> None:
+        """Every pending tool call gets exactly one allowed decision, or 422."""
         pending_requests = getattr(record, "action_requests_json", None)
         if not isinstance(pending_requests, list) or not pending_requests:
             return
 
-        action_counts: dict[str, int] = {}
-        for request in pending_requests:
-            if not isinstance(request, dict):
-                continue
-            action = request.get("action")
-            if action not in (None, ""):
-                action_key = str(action)
-                action_counts[action_key] = action_counts.get(action_key, 0) + 1
-
-        request_indexes_by_key: dict[str, int] = {}
-        for index, request in enumerate(pending_requests):
-            if not isinstance(request, dict):
-                continue
-            for id_key in ("tool_call_id", "task_id"):
-                value = request.get(id_key)
-                if value not in (None, ""):
-                    request_indexes_by_key[str(value)] = index
-            action = request.get("action")
-            if action not in (None, "") and action_counts.get(str(action)) == 1:
-                request_indexes_by_key[str(action)] = index
+        action_counts = _pending_action_counts(pending_requests)
+        request_indexes_by_key = _pending_request_indexes(pending_requests, action_counts)
 
         seen_request_indexes: set[int] = set()
         for decision in decisions or []:
-            candidate_keys: list[str] = []
-            decision_id = resolve_interrupt_decision_id(decision)
-            if decision_id:
-                candidate_keys.append(str(decision_id))
-            action = cls._decision_action(decision)
-            if action:
-                candidate_keys.append(action)
-
+            candidate_keys = cls._decision_keys(decision)
             matched_index = next(
                 (
                     request_indexes_by_key[key]
@@ -985,61 +1047,18 @@ class MessageService(IMessageService):
                     error_code="INTERRUPT_DUPLICATE_DECISION",
                 )
             seen_request_indexes.add(matched_index)
+            _require_allowed_decision(pending_requests[matched_index], decision)
 
-            request = pending_requests[matched_index]
-            allowed_raw = request.get("allowed_decisions") or request.get("allowedDecisions")
-            if isinstance(allowed_raw, str):
-                allowed = {allowed_raw.strip().lower()}
-            elif isinstance(allowed_raw, list):
-                allowed = {
-                    str(value).strip().lower()
-                    for value in allowed_raw
-                    if isinstance(value, str) and value.strip()
-                }
-            else:
-                allowed = {"approve", "edit", "reject"}
-
-            decision_type = getattr(decision, "type", None)
-            decision_type = getattr(decision_type, "value", decision_type)
-            normalized_type = str(decision_type or "").strip().lower()
-            if normalized_type not in allowed:
-                raise CustomHTTPException(
-                    status_code=422,
-                    detail=(
-                        f"Decision '{normalized_type}' is not allowed for this pending tool call."
-                    ),
-                    error_code="INTERRUPT_DECISION_NOT_ALLOWED",
-                )
-
-        decision_keys: set[str] = set()
-        for decision in decisions or []:
-            decision_id = resolve_interrupt_decision_id(decision)
-            if decision_id:
-                decision_keys.add(str(decision_id))
-            action = cls._decision_action(decision)
-            if action:
-                decision_keys.add(action)
-
-        missing: list[str] = []
-        for request in pending_requests:
-            if not isinstance(request, dict):
-                continue
-
-            request_keys: list[str] = []
-            tool_call_id = request.get("tool_call_id")
-            task_id = request.get("task_id")
-            if tool_call_id not in (None, ""):
-                request_keys.append(str(tool_call_id))
-            elif task_id not in (None, ""):
-                request_keys.append(str(task_id))
-            else:
-                action = request.get("action")
-                if action not in (None, "") and action_counts.get(str(action)) == 1:
-                    request_keys.append(str(action))
-
-            if request_keys and not any(key in decision_keys for key in request_keys):
-                missing.append(request_keys[0])
-
+        decision_keys = {
+            key for decision in decisions or [] for key in cls._decision_keys(decision)
+        }
+        missing = [
+            request_key
+            for request in pending_requests
+            if isinstance(request, dict)
+            and (request_key := _pending_request_key(request, action_counts)) is not None
+            and request_key not in decision_keys
+        ]
         if missing:
             display_missing = ", ".join(missing[:5])
             extra = "" if len(missing) <= 5 else f", +{len(missing) - 5} more"
@@ -1051,6 +1070,18 @@ class MessageService(IMessageService):
                 ),
                 error_code="INTERRUPT_INCOMPLETE_DECISIONS",
             )
+
+    @classmethod
+    def _decision_keys(cls, decision: Any) -> list[str]:
+        """The ids a decision can address a pending request by, in match order."""
+        keys: list[str] = []
+        decision_id = resolve_interrupt_decision_id(decision)
+        if decision_id:
+            keys.append(str(decision_id))
+        action = cls._decision_action(decision)
+        if action:
+            keys.append(action)
+        return keys
 
     def _get_conversation_context(
         self, conversation_id: UUID, user_id: UUID | None = None
@@ -1310,22 +1341,8 @@ class MessageService(IMessageService):
             if suggestions:
                 metadata["suggested_questions"] = suggestions
         except Exception:
-            pass
-
-    def _is_first_user_message(self, conversation_id: UUID) -> bool:
-        """Check if this is the first user message in the conversation."""
-        try:
-            # Check if conversation has a default title (needs generation)
-            conversation = self.conversation_validation_utils.conversation_repository.get_by_id(
-                conversation_id
-            )
-            if not conversation:
-                return False
-            # Check for default/placeholder titles that need generation
-            default_titles = {"New Conversation", "Untitled", ""}
-            return conversation.title in default_titles or conversation.title is None
-        except Exception:
-            return False
+            # Suggestions are optional; the answer is persisted without them.
+            logging.warning("Follow-up suggestions failed", exc_info=True)
 
     async def _generate_title_async(
         self,
@@ -1354,7 +1371,7 @@ class MessageService(IMessageService):
                 )
                 return title
         except Exception:
-            pass
+            logging.warning("Conversation title update failed", exc_info=True)
         return None
 
     def _handle_redis_interrupt_storage(
@@ -1378,7 +1395,7 @@ class MessageService(IMessageService):
                 interrupt_response["metadata"] = {}
             interrupt_response["metadata"]["timeout_deadline"] = deadline.isoformat()
         except Exception:
-            pass
+            logging.warning("Could not record the interrupt timeout in Redis", exc_info=True)
 
     def _clear_redis_interrupt(self, conversation_id: UUID, interrupt_id: str | None) -> None:
         """Clear interrupt information from Redis."""
@@ -2102,13 +2119,11 @@ class MessageService(IMessageService):
                 _cancel_title_task()
                 if bot_message_persisted:
                     return
-                error_content = f"Error generating response: {str(exc)}"
-                error_metadata = {"error": str(exc)}
-
+                error_text = _client_error_text(exc)
                 error_message = self._create_bot_response_message(
                     conversation_id=message_create_data.conversation_id,
-                    content=error_content,
-                    metadata=error_metadata,
+                    content=f"Error generating response: {error_text}",
+                    metadata={"error": error_text},
                     message_id=bot_message_id,
                 )
 
@@ -2121,7 +2136,7 @@ class MessageService(IMessageService):
                     conversation_id=str(message_create_data.conversation_id),
                     message_id=str(bot_message_id),
                     data={
-                        "error": str(exc),
+                        "error": error_text,
                         "message": error_message.model_dump(mode="json"),
                     },
                 )
@@ -2388,7 +2403,7 @@ class MessageService(IMessageService):
             except CustomHTTPException:
                 raise
             except Exception:
-                pass
+                logging.warning("Interrupt expiry check failed; resuming", exc_info=True)
 
         return fetched_interrupt_record
 
@@ -2421,7 +2436,7 @@ class MessageService(IMessageService):
                     getattr(fetched_interrupt_record, "interrupt_metadata_json", None)
                 )
             except Exception:
-                pass
+                logging.warning("Could not read the stored interrupt arguments", exc_info=True)
 
         decision_type_map = {
             InterruptDecisionType.APPROVE: DecisionType.ACCEPT,
@@ -2629,10 +2644,11 @@ class MessageService(IMessageService):
                             user_id, conversation_id
                         )
                         self._mark_claimed_interrupt_failed(interrupt_id, "stream_exception")
+                        error_text = _client_error_text(exc)
                         error_message = self._create_bot_response_message(
                             conversation_id=conversation_id,
-                            content=f"Error generating response: {str(exc)}",
-                            metadata={"error": str(exc)},
+                            content=f"Error generating response: {error_text}",
+                            metadata={"error": error_text},
                             message_id=None,
                         )
                         bot_message_persisted = True
@@ -2642,7 +2658,7 @@ class MessageService(IMessageService):
                             conversation_id=str(conversation_id),
                             message_id=str(error_message.id),
                             data={
-                                "error": str(exc),
+                                "error": error_text,
                                 "message": error_message.model_dump(mode="json"),
                                 "error_code": "INTERRUPT_FAILED",
                                 "status_code": 500,
@@ -2811,10 +2827,11 @@ class MessageService(IMessageService):
             if bot_message_persisted:
                 return
 
+            error_text = _client_error_text(exc)
             error_message = self._create_bot_response_message(
                 conversation_id=conversation_id,
-                content=f"Error generating response: {str(exc)}",
-                metadata={"error": str(exc)},
+                content=f"Error generating response: {error_text}",
+                metadata={"error": error_text},
                 message_id=bot_message_id,
             )
 
@@ -2824,7 +2841,7 @@ class MessageService(IMessageService):
                 conversation_id=str(conversation_id),
                 message_id=str(bot_message_id) if bot_message_id else None,
                 data={
-                    "error": str(exc),
+                    "error": error_text,
                     "message": error_message.model_dump(mode="json"),
                     "error_code": "INTERRUPT_FAILED",
                     "status_code": 500,
@@ -3209,28 +3226,6 @@ class MessageService(IMessageService):
         self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
         return await control.aget_snapshot(
             generation_id=generation_id,
-            user_id=user_id,
-            conversation_id=conversation_id,
-        )
-
-    async def aresolve_generation_for_turn(
-        self,
-        *,
-        user_message_id: UUID,
-        conversation_id: UUID,
-        user_id: UUID,
-    ):
-        """The generation for one logical turn, for a client that has only that.
-
-        Fenced through the logical turn rather than "whatever is active in this
-        conversation": that shortcut would resolve a stale turn id to the turn
-        running now.
-        """
-        control = self._generation_control()
-        if control is None:
-            return None
-        return await control.find_by_logical_turn(
-            logical_turn_id=str(user_message_id),
             user_id=user_id,
             conversation_id=conversation_id,
         )
@@ -4219,7 +4214,7 @@ class MessageService(IMessageService):
                         "order": next_task.task_order,
                     }
             except Exception:
-                pass
+                logging.warning("Could not attach the next planned task", exc_info=True)
 
         if suggestion_source_message:
             await self._generate_and_add_suggestions(

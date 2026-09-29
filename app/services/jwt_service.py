@@ -9,8 +9,6 @@ from app.core.exceptions import AuthenticationException, TokenExpiredException
 
 
 class JwtService:
-    """JWT token service for authentication operations"""
-
     def __init__(self):
         self.secret_key = settings.secret_key
         self.algorithm = settings.jwt_algorithm
@@ -20,7 +18,6 @@ class JwtService:
     def _calculate_expiration_time(
         self, delta: timedelta | None = None, now: datetime | None = None
     ) -> datetime:
-        """Calculate token expiration time"""
         if now is None:
             now = datetime.now(timezone.utc)
         if delta:
@@ -28,7 +25,6 @@ class JwtService:
         return now + timedelta(minutes=self.access_token_expire_minutes)
 
     def create_access_token(self, data: dict, expires_delta: timedelta | None = None) -> str:
-        """Create JWT access token"""
         to_encode = data.copy()
         now = datetime.now(timezone.utc)
         expire = self._calculate_expiration_time(expires_delta, now)
@@ -36,7 +32,6 @@ class JwtService:
         return jwt.encode(to_encode, self.secret_key, algorithm=self.algorithm)
 
     def create_refresh_token(self, data: dict) -> str:
-        """Create refresh token with longer expiration"""
         to_encode = data.copy()
         now = datetime.now(timezone.utc)
         expire = now + timedelta(days=self.refresh_token_expire_days)
@@ -50,7 +45,6 @@ class JwtService:
         return jwt.encode(to_encode, self.secret_key, algorithm=self.algorithm)
 
     def decode_token(self, token: str) -> dict:
-        """Decode and verify JWT token"""
         try:
             payload = jwt.decode(token, self.secret_key, algorithms=[self.algorithm])
             return payload
@@ -63,21 +57,9 @@ class JwtService:
             ) from e
 
     def verify_refresh_token(self, token: str) -> dict:
-        """Verify refresh token and ensure correct type"""
         payload = self.decode_token(token)
         if payload.get("type") != "refresh":
             raise AuthenticationException(
                 detail="Invalid token type", error_code="INVALID_TOKEN_TYPE"
             )
         return payload
-
-    def get_user_id_from_token(self, token: str) -> str:
-        """Extract user ID from JWT token"""
-        payload = self.decode_token(token)
-        user_id: str = payload.get("sub")
-        if user_id is None:
-            raise AuthenticationException(
-                detail="Invalid authentication credentials",
-                error_code="INVALID_CREDENTIALS",
-            )
-        return user_id

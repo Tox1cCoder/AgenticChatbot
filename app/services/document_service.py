@@ -152,9 +152,11 @@ class DocumentService(IDocumentService):
         )
         if existing is not None:
             if existing.status == DocumentStatus.FAILED.value:
-                # Auto-replace: silently delete the failed document so the new
-                # upload can proceed with the same filename.
-                self.repository.delete(existing.id)
+                # Auto-replace: delete the failed document so the new upload
+                # can proceed with the same filename. Through delete_document,
+                # because a failure can come after some chunks were indexed and
+                # a bare row delete left those vectors behind.
+                await self.delete_document(existing.id)
             else:
                 raise DuplicateDocumentFilenameError(
                     detail=(f"A document named '{filename}' already exists in this conversation.")

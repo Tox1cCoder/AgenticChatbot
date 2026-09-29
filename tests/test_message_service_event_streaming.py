@@ -122,6 +122,72 @@ async def test_message_service_accumulates_v3_text_and_persists_once():
 
 
 @pytest.mark.asyncio
+async def test_a_failed_turn_does_not_send_the_exception_text_to_the_client():
+    conversation_id = uuid4()
+    user_id = uuid4()
+    secret = "https://provider.example/v1?key=sk-live-secret"
+    created: list[dict] = []
+
+    service = MessageService.__new__(MessageService)
+
+    def _create(entity):
+        return _message_row(
+            conversation_id=conversation_id,
+            sender=MessageRole.user.value,
+            content=entity["content"],
+        )
+
+    def _get_by_id(_conversation_id):
+        return SimpleNamespace(title="Existing chat")
+
+    def _bot_message(**kwargs):
+        created.append(kwargs)
+        return SimpleNamespace(model_dump=lambda **_kwargs: dict(kwargs))
+
+    service.repository = SimpleNamespace(create=_create, acreate=async_double(_create))
+    service.conversation_validation_utils = SimpleNamespace(
+        validate_conversation_access=lambda *_args: None,
+        avalidate_conversation_access=async_double(lambda *_args: None),
+        conversation_repository=SimpleNamespace(
+            get_by_id=_get_by_id, aget_by_id=async_double(_get_by_id)
+        ),
+    )
+    workflow_request = WorkflowExecutionRequest(
+        message="hello",
+        conversation_id=str(conversation_id),
+        user_id=str(user_id),
+        planning=WorkflowPlanningContext(),
+    )
+    service._build_user_message_workflow_request = AsyncMock(
+        return_value=(user_id, None, workflow_request)
+    )
+
+    async def source(_request):
+        raise RuntimeError(secret)
+        yield  # pragma: no cover
+
+    service.ai_service = SimpleNamespace(
+        invalidate_history_cache=lambda *_args: None,
+        execute_request_stream=source,
+    )
+    service._create_bot_response_message = _bot_message
+    service._acreate_bot_response_message = async_double(_bot_message)
+
+    events = [
+        event
+        async for event in service.create_message_stream(
+            MessageCreate(conversation_id=conversation_id, content="hello"),
+            user_id,
+        )
+    ]
+
+    assert events[-1].type == "error"
+    assert events[-1].data["error"] == "Response generation failed (RuntimeError)."
+    assert secret not in str(events[-1].data)
+    assert all(secret not in str(kwargs) for kwargs in created)
+
+
+@pytest.mark.asyncio
 async def test_resume_stream_accepts_v3_events_and_persists_once():
     conversation_id = uuid4()
     user_id = uuid4()
@@ -332,6 +398,7 @@ async def test_claimed_resume_setup_exception_marks_failed_and_yields_typed_erro
     assert events[-1].type == "error"
     assert events[-1].data["error_code"] == "INTERRUPT_FAILED"
     assert events[-1].data["status_code"] == 500
+    assert events[-1].data["error"] == "Response generation failed (RuntimeError)."
     assert registry.calls == [(user_id, conversation_id)]
 
 
@@ -534,7 +601,10 @@ async def test_claimed_nested_interrupt_durable_creation_failure_marks_failed_no
     assert events[-1].type == "error"
     assert [message_id for message_id, _metadata in created_messages] == [bot_message_id, None]
     assert created_messages[0][1]["paused"] is True
-    assert created_messages[1][1] == {"error": "follow-up interrupt persistence failed"}
+    # The repository's own error text stays in the log, never in the client's
+    # message or event.
+    assert created_messages[1][1] == {"error": "Response generation failed (RuntimeError)."}
+    assert "persistence failed" not in str(events[-1].data)
     assert events[-1].message_id == str(error_message_id)
     assert events[-1].data["message"]["id"] == str(error_message_id)
     assert deleted_message_ids == [paused_message_id]

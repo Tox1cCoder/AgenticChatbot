@@ -175,10 +175,6 @@ class ConversationTurnCoordinator:
         self._timeout_seconds = float(timeout_seconds)
         self._active: dict[str, int] = {}
 
-    def max_active_for(self, conversation_id: str) -> int:
-        """Peak concurrent holders observed for a conversation (diagnostics)."""
-        return self._active.get(str(conversation_id), 0)
-
     @contextlib.asynccontextmanager
     async def hold(self, conversation_id: str | None, *, request_id: str) -> AsyncIterator[None]:
         """Hold the conversation's turn lock for the body of the turn.

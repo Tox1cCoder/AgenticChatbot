@@ -410,6 +410,23 @@ async def test_ai_sdk_stream_exception_retains_custom_http_metadata():
 
 
 @pytest.mark.asyncio
+async def test_ai_sdk_stream_exception_text_is_not_sent_to_the_client():
+    secret = "postgresql://app:hunter2@db/chat"
+
+    async def source():
+        raise RuntimeError(secret)
+        yield  # pragma: no cover
+
+    payloads = await _collect_payloads(source)
+
+    assert next(
+        payload for payload in payloads if payload != "[DONE]" and payload["type"] == "error"
+    ) == {"type": "error", "errorText": "Response generation failed (RuntimeError)."}
+    assert secret not in str(payloads)
+    assert payloads[-1] == "[DONE]"
+
+
+@pytest.mark.asyncio
 async def test_interrupt_projects_paused_message_metadata_shape():
     async def source():
         yield make_event(

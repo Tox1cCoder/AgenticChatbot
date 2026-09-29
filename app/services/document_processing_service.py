@@ -299,7 +299,14 @@ class DocumentProcessingService:
             return response
 
         except Exception as e:
-            return {"task_id": task_id, "status": "UNKNOWN", "error": str(e)}
+            # The result-backend error names the backend host; the client only
+            # needs to know the status is unavailable.
+            logger.warning("Could not read processing status for task %s", task_id, exc_info=True)
+            return {
+                "task_id": task_id,
+                "status": "UNKNOWN",
+                "error": f"Status unavailable ({type(e).__name__})",
+            }
 
     async def process_document(
         self,
@@ -973,6 +980,21 @@ class DocumentProcessingService:
             rgb_img.save(buffer, format="JPEG")
             return buffer.getvalue()
 
+    def _is_orphaned_image_folder(self, doc_folder: Path) -> bool:
+        """True when no document image row still points into ``doc_folder``.
+
+        ``document_images/<document_id>`` is durable storage that retrieval
+        reads for as long as the document exists; it is not a temp directory.
+        The sweep used to delete every folder older than the cutoff, so a
+        document's images disappeared a day after upload. A folder not named
+        by a document id is left alone.
+        """
+        try:
+            document_id = uuid.UUID(doc_folder.name)
+        except ValueError:
+            return False
+        return not self.document_image_repository.get_image_paths_by_document_id(document_id)
+
     async def cleanup_temp_files(self, older_than_hours: int = 24) -> dict[str, Any]:
         try:
             temp_dir = os.path.join(os.getcwd(), self.settings.temp_storage_path)
@@ -1010,11 +1032,13 @@ class DocumentProcessingService:
             images_dir = Path(self.settings.document_images_storage_path)
             if images_dir.exists():
                 for doc_folder in images_dir.iterdir():
-                    if doc_folder.is_dir():
-                        folder_mtime = doc_folder.stat().st_mtime
-                        if folder_mtime < cutoff_time:
-                            shutil.rmtree(doc_folder)
-                            removed_folders += 1
+                    if (
+                        doc_folder.is_dir()
+                        and doc_folder.stat().st_mtime < cutoff_time
+                        and self._is_orphaned_image_folder(doc_folder)
+                    ):
+                        shutil.rmtree(doc_folder)
+                        removed_folders += 1
 
             return {
                 "files_removed": removed_count,

@@ -88,6 +88,49 @@ def test_service_rejects_duplicate_filename_before_create():
     document_repository.create.assert_not_called()
 
 
+def test_replacing_a_failed_upload_also_removes_its_index():
+    from types import SimpleNamespace
+
+    from app.schemas.document import DocumentStatus
+    from app.services.document_service import DocumentService
+
+    failed = SimpleNamespace(
+        id=uuid4(),
+        conversation_id=uuid4(),
+        filename="report.pdf",
+        status=DocumentStatus.FAILED.value,
+    )
+    service = object.__new__(DocumentService)
+
+    async def _validate_upload(filename, file_size):
+        return {"valid": True}
+
+    async def _emit(*_args):
+        return None
+
+    service.processing_service = MagicMock(validate_upload_file=_validate_upload)
+    service.repository = MagicMock()
+    service.repository.get_by_conversation_and_filename_key.return_value = failed
+    service.repository.get_by_id.return_value = failed
+    service.repository.delete.return_value = True
+    service.repository.create.side_effect = RuntimeError("stop after the replace")
+    service.index_service = MagicMock()
+    service._event_bus = SimpleNamespace(emit=_emit)
+
+    with pytest.raises(RuntimeError, match="stop after the replace"):
+        asyncio.run(
+            service.validate_and_create_document(
+                filename="report.pdf",
+                file_size=10,
+                content_type="application/pdf",
+                conversation_id=failed.conversation_id,
+            )
+        )
+
+    service.index_service.delete_document_index.assert_called_once_with(failed.id)
+    service.repository.delete.assert_called_once_with(failed.id)
+
+
 def test_repository_create_maps_integrity_error_to_domain_exception():
     from app.core.exceptions.validation import DuplicateDocumentFilenameError
     from app.repositories.document import DocumentRepository

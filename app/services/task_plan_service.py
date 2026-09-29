@@ -522,41 +522,6 @@ class TaskPlanService(ITaskPlanService):
         self._refresh_lifecycle_from_tasks(updated_task.conversation_id)
         return TaskPlanRead.model_validate(updated_task)
 
-    def mark_task_in_progress(self, task_id: UUID, user_id: UUID) -> TaskPlanRead:
-        self.task_plan_validation_utils.validate_task_access(user_id, task_id)
-
-        now = datetime.now(timezone.utc)
-        with self.task_plan_repository.session_factory() as session:
-            task = session.query(TaskPlan).filter(TaskPlan.id == task_id).first()
-            if not task:
-                raise ResourceNotFoundException(
-                    detail="Task plan not found",
-                    error_code="TASK_PLAN_NOT_FOUND",
-                )
-
-            (
-                session.query(TaskPlan)
-                .filter(
-                    TaskPlan.conversation_id == task.conversation_id,
-                    TaskPlan.id != task_id,
-                    TaskPlan.status == TaskStatus.in_progress,
-                )
-                .update(
-                    {
-                        TaskPlan.status: TaskStatus.pending,
-                        TaskPlan.completed_at: None,
-                        TaskPlan.updated_at: now,
-                    },
-                    synchronize_session=False,
-                )
-            )
-
-            self._set_task_status(task, TaskStatus.in_progress, now=now)
-            session.commit()
-            session.refresh(task)
-            self._refresh_lifecycle_from_tasks(task.conversation_id)
-            return TaskPlanRead.model_validate(task)
-
     def delete_task(self, task_id: UUID, user_id: UUID) -> bool:
         self.task_plan_validation_utils.validate_task_access(user_id, task_id)
         task = self.task_plan_repository.get_by_id(task_id)

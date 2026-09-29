@@ -185,19 +185,6 @@ class ITaskPlanService(ABC):
         pass
 
     @abstractmethod
-    def mark_task_in_progress(self, task_id: UUID, user_id: UUID) -> TaskPlanRead:
-        """Mark task as in progress.
-
-        Args:
-            task_id: The task ID to mark as in progress
-            user_id: The user making the request
-
-        Returns:
-            Updated TaskPlanRead schema
-        """
-        pass
-
-    @abstractmethod
     def delete_task(self, task_id: UUID, user_id: UUID) -> bool:
         """Delete task with ownership validation.
 

@@ -158,6 +158,30 @@ def test_provider_service_openai_async_client_disables_retries(monkeypatch):
     assert capture.kwargs["max_retries"] == 0
 
 
+def test_provider_service_closes_the_openai_client_it_built(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.services.provider_service import ProviderService
+
+    closed: list[bool] = []
+
+    class _AsyncClient:
+        def __init__(self, **_kwargs):
+            async def _list():
+                return SimpleNamespace(data=[])
+
+            self.models = SimpleNamespace(list=_list)
+
+        async def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", _AsyncClient)
+    service = ProviderService.__new__(ProviderService)
+    asyncio.run(service._fetch_openai_models("k"))
+    assert closed == [True]
+
+
 def test_provider_service_openai_sync_client_disables_retries(monkeypatch):
     import asyncio
     from types import SimpleNamespace

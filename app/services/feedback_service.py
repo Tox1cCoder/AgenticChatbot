@@ -80,14 +80,6 @@ class FeedbackService(IFeedbackService):
             return FeedbackRead.model_validate(feedback_entity)
         return None
 
-    def get_by_user(self, user_id: UUID) -> list[FeedbackRead]:
-        """Get all feedback by a user (no pagination needed for user's own feedback)"""
-        # Validate user exists
-        self.user_validation_utils.validate_user_exists(user_id)
-
-        feedback_entities = self.repository.get_by_user_id(user_id)
-        return [FeedbackRead.model_validate(feedback) for feedback in feedback_entities]
-
     def get_user_feedback_for_message(self, message_id: UUID, user_id: UUID) -> FeedbackRead | None:
         """Get specific user's feedback for a message"""
         # Validate message exists
@@ -131,18 +123,3 @@ class FeedbackService(IFeedbackService):
 
         updated_feedback = self.repository.update(feedback_id, feedback_update_data)
         return FeedbackRead.model_validate(updated_feedback)
-
-    def delete_feedback(self, feedback_id: UUID, user_id: UUID) -> bool:
-        """Delete feedback with ownership validation"""
-        if not self.feedback_validation_utils.validate_feedback_exists(feedback_id):
-            raise ResourceNotFoundException(
-                detail="Feedback not found", error_code="FEEDBACK_NOT_FOUND"
-            )
-
-        if not self.feedback_validation_utils.validate_user_owns_feedback(user_id, feedback_id):
-            raise AuthorizationException(
-                detail="Access denied to this feedback",
-                error_code="FEEDBACK_ACCESS_DENIED",
-            )
-
-        return self.repository.delete(feedback_id)

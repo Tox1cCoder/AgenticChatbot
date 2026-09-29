@@ -782,3 +782,38 @@ def test_persist_prepared_images_clears_orphans_from_failed_attempts(tmp_path):
     ]
     assert len(remaining) == 1, f"expected exactly one row set, got {len(remaining)}"
     assert final and final[0].id == remaining[0].id
+
+
+def test_temp_cleanup_keeps_the_images_of_a_live_document(tmp_path):
+    import os
+
+    service = _build_service(tmp_path)
+    images_root = tmp_path / "document_images"
+    live_id, orphan_id = uuid4(), uuid4()
+    for folder_id in (live_id, orphan_id):
+        folder = images_root / str(folder_id)
+        folder.mkdir(parents=True)
+        (folder / "chart.png").write_bytes(b"png")
+        old = (datetime.now(timezone.utc) - timedelta(days=3)).timestamp()
+        os.utime(folder, (old, old))
+    service.document_image_repository.get_image_paths_by_document_id.side_effect = (
+        lambda document_id: ["chart.png"] if document_id == live_id else []
+    )
+
+    result = asyncio.run(service.cleanup_temp_files(older_than_hours=24))
+
+    assert (images_root / str(live_id) / "chart.png").exists()
+    assert not (images_root / str(orphan_id)).exists()
+    assert result["folders_removed"] == 1
+
+
+def test_processing_status_error_does_not_echo_the_backend_error(tmp_path):
+    service = _build_service(tmp_path)
+    service.celery_app.AsyncResult.side_effect = ConnectionError(
+        "Error connecting to redis://:hunter2@cache:6379/0"
+    )
+
+    status = asyncio.run(service.get_processing_status("task-1"))
+
+    assert status["status"] == "UNKNOWN"
+    assert "hunter2" not in str(status)

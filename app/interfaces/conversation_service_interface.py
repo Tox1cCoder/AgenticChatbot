@@ -50,13 +50,6 @@ class IConversationService(ABC):
         pass
 
     @abstractmethod
-    def get_conversation_with_messages(
-        self, conversation_id: UUID, owner_id: UUID
-    ) -> ConversationRead:
-        """Get conversation with messages, ensuring user owns it"""
-        pass
-
-    @abstractmethod
     def update_conversation(
         self,
         conversation_id: UUID,

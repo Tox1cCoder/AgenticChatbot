@@ -12,25 +12,29 @@ from app.core.exceptions.mcp import (
 logger = logging.getLogger(__name__)
 
 
+_REDACTED = "***"
+
+
+def redact_server_config(config: dict[str, Any]) -> dict[str, Any]:
+    """A server config safe to return to a client.
+
+    ``env`` and ``headers`` hold API keys and bearer tokens. Every signed-in
+    user can list servers, so their values are masked; the keys stay, so a
+    client can still see which variables a server is configured with.
+    """
+    redacted = dict(config)
+    for field in ("env", "headers"):
+        values = redacted.get(field)
+        if isinstance(values, dict):
+            redacted[field] = dict.fromkeys(values, _REDACTED)
+    return redacted
+
+
 class MCPService:
-    """Business logic for MCP server and tool management"""
-
     def __init__(self, mcp_manager: MCPManager):
-        """
-        Initialize MCP Service
-
-        Args:
-            mcp_manager: MCPManager instance for MCP operations
-        """
         self.mcp_manager = mcp_manager
 
     async def list_servers(self) -> dict[str, Any]:
-        """
-        List all configured MCP servers with status
-
-        Returns:
-            Dict with servers list and summary statistics
-        """
         servers_status = self.mcp_manager.get_servers_status()
         configured_servers = self.mcp_manager.config.get("servers", {})
 
@@ -51,7 +55,7 @@ class MCPService:
                     "tool_count": status["tool_count"],
                     "transport": status["transport"],
                     "description": status.get("description", ""),
-                    "config": server_config,
+                    "config": redact_server_config(server_config),
                 }
             )
 
@@ -62,34 +66,11 @@ class MCPService:
         }
 
     async def get_server_details(self, server_name: str) -> dict[str, Any]:
-        """
-        Get detailed information about a specific server
-
-        Args:
-            server_name: Name of the server
-
-        Returns:
-            Dict with server details
-
-        Raises:
-            ServerNotFoundError: If server doesn't exist
-        """
-        return self.mcp_manager.get_server_info(server_name)
+        details = dict(self.mcp_manager.get_server_info(server_name))
+        details["config"] = redact_server_config(details["config"])
+        return details
 
     async def add_server(self, server_config: dict[str, Any]) -> dict[str, str]:
-        """
-        Add a new MCP server
-
-        Args:
-            server_config: Server configuration dict
-
-        Returns:
-            Dict with success message
-
-        Raises:
-            ServerConfigurationError: If validation fails or server already exists
-        """
-        # Validate required fields
         server_name = server_config.get("name")
         if not server_name:
             raise ServerConfigurationError("Server name is required")
@@ -117,22 +98,7 @@ class MCPService:
         return {"message": f"Server '{name}' added successfully"}
 
     async def add_server_from_url(self, url_config: dict[str, Any]) -> dict[str, str]:
-        """
-        Add a new MCP server from a URL
-
-        Args:
-            url_config: Dict containing:
-                - url: str - The URL string (npx command or HTTP URL)
-                - name: Optional[str] - Custom server name
-                - description: Optional[str] - Server description
-                - enabled: bool - Whether to enable the server
-
-        Returns:
-            Dict with success message including generated server name
-
-        Raises:
-            ServerConfigurationError: If URL parsing or validation fails
-        """
+        """Add a server from an npx command or an HTTP URL."""
         from app.utils.mcp_url_parser import (
             generate_server_name_from_url,
             parse_mcp_url,
@@ -165,7 +131,8 @@ class MCPService:
             # Use the existing add_server method
             await self.add_server(server_config)
 
-            logger.info("Added server from URL: %s -> %s", url, server_name)
+            # Not the URL: hosted MCP servers take their API key in the query.
+            logger.info("Added server from URL as %s", server_name)
             return {"message": f"Server '{server_name}' added successfully from URL"}
 
         except ServerConfigurationError:
@@ -173,24 +140,12 @@ class MCPService:
             raise
         except Exception as e:
             # Wrap other exceptions
-            logger.error("Failed to add server from URL: %s", str(e))
+            logger.error("Failed to add server from URL: %s", type(e).__name__)
             raise ServerConfigurationError(
                 detail=f"Failed to parse URL: {str(e)}", error_code="URL_PARSING_ERROR"
             ) from e
 
     async def remove_server(self, server_name: str) -> dict[str, str]:
-        """
-        Remove an MCP server
-
-        Args:
-            server_name: Name of the server to remove
-
-        Returns:
-            Dict with success message
-
-        Raises:
-            ServerNotFoundError: If server doesn't exist
-        """
         await self.mcp_manager.remove_server(server_name)
 
         # Reload tools to reflect removal
@@ -200,19 +155,6 @@ class MCPService:
         return {"message": f"Server '{server_name}' removed successfully"}
 
     async def toggle_server(self, server_name: str, enabled: bool) -> dict[str, str]:
-        """
-        Enable or disable an MCP server
-
-        Args:
-            server_name: Name of the server
-            enabled: True to enable, False to disable
-
-        Returns:
-            Dict with success message
-
-        Raises:
-            ServerNotFoundError: If server doesn't exist
-        """
         if enabled:
             await self.mcp_manager.enable_server(server_name)
         else:
@@ -328,7 +270,7 @@ class MCPService:
                 # Let Pydantic validate the arguments
                 args_schema_def(**arguments)
             except Exception as e:
-                logger.warning(f"Argument validation warning for {tool_name}: {e}")
+                logger.warning("Argument validation warning for %s: %s", tool_name, e)
                 # Continue anyway - let the tool handle invalid args
 
         # Execute tool

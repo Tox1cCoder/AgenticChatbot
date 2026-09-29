@@ -18,7 +18,7 @@ from ..ai.schemas import (
 from ..ai.schemas import (
     WorkflowExecutionRequest as AIWorkflowExecutionRequest,
 )
-from ..ai.utils import make_json_safe
+from ..ai.utils import coerce_response_text, make_json_safe
 from ..ai.workflow.contracts import WORKFLOW_ERROR_CODES, WorkflowError
 from ..ai.workflow.errors import workflow_error, workflow_error_payload
 from ..core.config import settings
@@ -586,17 +586,7 @@ class AIService:
         user_id: UUID | str | None = None,
         conversation_id: UUID | str | None = None,
     ) -> str:
-        """
-        Generate a concise, descriptive title for a conversation based on the first user message.
-
-        Args:
-            user_message: The first message from the user
-            user_id: Authenticated user the title call is attributed to
-            conversation_id: Conversation the title belongs to, if known
-
-        Returns:
-            A short, descriptive title (max 50 characters)
-        """
+        """A title of at most 50 characters; the truncated message when generation fails."""
         try:
             from ..ai.agent_config import AGENT_CONFIG, create_langchain_model
 
@@ -626,19 +616,7 @@ class AIService:
                     )
             else:
                 response = await llm.ainvoke(prompt)
-            raw_title = response.content
-
-            if isinstance(raw_title, list):
-                # Handle list content (e.g. from Gemini)
-                title_text = ""
-                for part in raw_title:
-                    if isinstance(part, dict) and part.get("type") == "text":
-                        title_text += part.get("text", "")
-                    elif isinstance(part, str):
-                        title_text += part
-                raw_title = title_text
-
-            title = str(raw_title).strip()
+            title = coerce_response_text(response.content).strip()
 
             # Clean up the title
             title = title.strip("\"'")  # Remove quotes
@@ -648,17 +626,15 @@ class AIService:
             if len(title) > 50:
                 title = title[:47] + "..."
 
-            # Fallback to truncated message if generation fails
             if not title or len(title) < 3:
-                title = user_message[:50]
-                if len(user_message) > 50:
-                    title = title[:47] + "..."
-
+                return _truncated_title(user_message)
             return title
 
         except Exception:
-            # Fallback: use truncated user message
-            title = user_message[:50]
-            if len(user_message) > 50:
-                title = title[:47] + "..."
-            return title
+            return _truncated_title(user_message)
+
+
+def _truncated_title(user_message: str) -> str:
+    if len(user_message) > 50:
+        return user_message[:47] + "..."
+    return user_message

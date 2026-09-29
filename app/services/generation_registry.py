@@ -163,13 +163,6 @@ class GenerationRegistry:
             logger.debug("Marked generation paused for generation_id=%s", generation_id)
         return entry
 
-    def set_active_agent_id(self, generation_id: UUID, agent_id: str | None) -> None:
-        """Record the currently selected runtime agent for an entry."""
-        entry = self.get(generation_id)
-        if entry is not None:
-            entry.active_agent_id = agent_id
-            entry.touch()
-
     # ------------------------------------------------------------------
     # Lock queries (custom-agent edit/delete/detach gating)
     # ------------------------------------------------------------------
