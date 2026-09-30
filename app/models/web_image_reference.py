@@ -2,11 +2,25 @@
 
 import uuid
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, LargeBinary, String, func
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    String,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
 from app.models.base import Base
+
+#: ``WebImageReferenceRepository`` moves a reference from ``pending`` to
+#: ``selected`` or ``released`` and nowhere else. Migration 371ffaf3a087
+#: enforces the same list.
+WEB_IMAGE_LIFECYCLE_STATES = ("pending", "selected", "released")
 
 
 class WebImageReference(Base):
@@ -19,6 +33,14 @@ class WebImageReference(Base):
     """
 
     __tablename__ = "web_image_references"
+    __table_args__ = (
+        CheckConstraint(
+            "lifecycle_state IN ({})".format(
+                ", ".join(f"'{state}'" for state in WEB_IMAGE_LIFECYCLE_STATES)
+            ),
+            name="ck_web_image_references_lifecycle_state",
+        ),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     conversation_id = Column(

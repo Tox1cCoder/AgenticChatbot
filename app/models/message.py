@@ -29,9 +29,8 @@ class Message(Base):
     )
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
-    conversation_id = Column(
-        UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False, index=True
-    )
+    # No single-column index: ``uq_messages_conversation_sequence`` leads with it.
+    conversation_id = Column(UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False)
     sender = Column(MessageRoleType, nullable=False)
     content = Column(Text, nullable=False)
     message_metadata = Column(JSONB, nullable=True, default=dict)
@@ -39,7 +38,14 @@ class Message(Base):
 
     # Relationships
     conversation = relationship("Conversation", back_populates="messages")
-    feedback = relationship("Feedback", back_populates="message", uselist=False, lazy="joined")
+    # Eager, because ``MessageRead`` reads it after the session has closed. Not
+    # ``joined``: that outer-joined feedbacks into every message read, and
+    # PostgreSQL refuses ``FOR UPDATE`` on the nullable side of an outer join.
+    # ``selectin`` loads it in one extra ``IN`` query per result, on query,
+    # ``get()`` and ``refresh()`` alike.
+    feedback = relationship(
+        "Feedback", back_populates="message", uselist=False, lazy="selectin"
+    )
 
     __table_args__ = (
         UniqueConstraint(

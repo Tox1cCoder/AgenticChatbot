@@ -167,7 +167,7 @@ class ToolExecutionReceiptService:
             if decided is not None:
                 return decided
             if record.status is ReceiptStatus.RESERVED and not scope.provider_idempotency:
-                await self.repository.amark_outcome_unknown(key=key)
+                await self.repository.amark_outcome_unknown(key=key, scope=scope)
                 logger.warning(
                     "Mutation %s on %s has an unknown outcome; provider offers no idempotency",
                     key[:12],
@@ -203,15 +203,18 @@ class ToolExecutionReceiptService:
             # Control flow, not an outcome. The receipt stays reserved so the
             # resumed turn recognizes the call it already started.
             raise
+        # Every transition names the caller's scope: the repository closes only
+        # a receipt this owner holds, never one that merely shares the key.
         except MutationOutcomeUnknown:
-            await self.repository.amark_outcome_unknown(key=key)
+            await self.repository.amark_outcome_unknown(key=key, scope=scope)
             raise
         except Exception:
-            await self.repository.afail(key=key, error_code="tool_execution_failed")
+            await self.repository.afail(key=key, scope=scope, error_code="tool_execution_failed")
             raise
 
         await self.repository.acomplete(
             key=key,
+            scope=scope,
             result=result.stored_payload(),
             provider_receipt_id=result.provider_receipt_id,
         )

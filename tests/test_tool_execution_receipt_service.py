@@ -62,13 +62,21 @@ class FakeReceiptRepository:
         self.failed: list[tuple[str, str]] = []
         self.unknown: list[str] = []
         self.owner_user_id: UUID = USER_ID
+        self.owner_conversation_id: UUID = CONVERSATION_ID
+        self.transition_scopes: list[MutationExecutionScope] = []
+
+    def _owns(self, scope: MutationExecutionScope) -> bool:
+        return (scope.user_id, scope.conversation_id) == (
+            self.owner_user_id,
+            self.owner_conversation_id,
+        )
 
     async def areserve(self, *, scope: MutationExecutionScope, key: str) -> ReceiptRecord:
         if self.status is None:
             self.reserved.append(key)
             self.status = ReceiptStatus.RESERVED
             return ReceiptRecord(execution_key=key, status=ReceiptStatus.RESERVED, fresh=True)
-        if self.owner_user_id != scope.user_id:
+        if not self._owns(scope):
             # Another user's receipt is not this caller's to observe or reuse.
             self.reserved.append(key)
             return ReceiptRecord(execution_key=key, status=ReceiptStatus.RESERVED, fresh=True)
@@ -80,17 +88,35 @@ class FakeReceiptRepository:
             provider_receipt_id=self.provider_receipt_id,
         )
 
-    async def acomplete(self, *, key: str, result: dict | None, provider_receipt_id: str | None):
+    def _may_transition(self, scope: MutationExecutionScope) -> bool:
+        # Mirrors the SQL: a transition matches only the owner's row.
+        self.transition_scopes.append(scope)
+        return self._owns(scope)
+
+    async def acomplete(
+        self,
+        *,
+        key: str,
+        scope: MutationExecutionScope,
+        result: dict | None,
+        provider_receipt_id: str | None,
+    ):
+        if not self._may_transition(scope):
+            return
         self.completed.append((key, result))
         self.status = ReceiptStatus.COMPLETED
         self.completed_result = result
         self.provider_receipt_id = provider_receipt_id
 
-    async def afail(self, *, key: str, error_code: str) -> None:
+    async def afail(self, *, key: str, scope: MutationExecutionScope, error_code: str) -> None:
+        if not self._may_transition(scope):
+            return
         self.failed.append((key, error_code))
         self.status = ReceiptStatus.FAILED
 
-    async def amark_outcome_unknown(self, *, key: str) -> None:
+    async def amark_outcome_unknown(self, *, key: str, scope: MutationExecutionScope) -> None:
+        if not self._may_transition(scope):
+            return
         self.unknown.append(key)
         self.status = ReceiptStatus.OUTCOME_UNKNOWN
 
@@ -262,6 +288,26 @@ async def test_another_users_receipt_is_not_reused():
 
     assert result.content == "mine"
     invoke.assert_awaited_once()
+
+
+async def test_a_caller_never_closes_a_receipt_it_does_not_own():
+    """Every transition carries the caller's scope, so the SQL can match the owner only.
+
+    The key embeds the checkpoint thread, so a collision is practically
+    unreachable; if one happens, keying the transition on ``execution_key``
+    alone would record this caller's outcome on the owner's receipt.
+    """
+    service = _service()
+    service.repository.status = ReceiptStatus.RESERVED
+    service.repository.owner_user_id = OTHER_USER_ID
+    invoke = AsyncMock(return_value=NormalizedToolResult(content="mine"))
+
+    result = await service.execute_mutation(_scope(), invoke)
+
+    assert result.content == "mine"
+    assert service.repository.transition_scopes == [_scope()]
+    assert service.repository.status is ReceiptStatus.RESERVED
+    assert service.repository.completed == []
 
 
 # ----------------------------------------------------------------------

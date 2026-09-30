@@ -10,6 +10,7 @@ from __future__ import annotations
 import uuid
 
 from sqlalchemy import (
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
@@ -26,17 +27,26 @@ from sqlalchemy.orm import relationship
 
 from app.models.base import Base
 
+#: Every value the code writes to ``index_status``; ``needs_reindex`` comes from
+#: migration o6p7q8r9s0t1 and scripts/reindex_embeddings.py. Migration
+#: 371ffaf3a087 enforces the same list.
+CHUNK_INDEX_STATUSES = ("pending", "indexed", "failed", "needs_reindex")
+
 
 class DocumentChunk(Base):
     __tablename__ = "document_chunks"
     __table_args__ = (
+        # Also serves document_id lookups, so that column has no index of its own.
         UniqueConstraint(
             "document_id",
             "index_generation_id",
             "chunk_index",
             name="uq_document_chunk_generation_index",
         ),
-        Index("idx_document_chunks_document_id", "document_id"),
+        CheckConstraint(
+            "index_status IN ({})".format(", ".join(f"'{s}'" for s in CHUNK_INDEX_STATUSES)),
+            name="ck_document_chunks_index_status",
+        ),
         Index("idx_document_chunks_index_generation_id", "index_generation_id"),
         Index("idx_document_chunks_parse_artifact_id", "parse_artifact_id"),
         Index("idx_document_chunks_content_sha256", "content_sha256"),
@@ -113,7 +123,9 @@ class DocumentChunk(Base):
     document = relationship("Document", back_populates="chunks")
     index_generation = relationship("DocumentIndexGeneration", back_populates="chunks")
     parse_artifact = relationship("DocumentParseArtifact", back_populates="chunks")
-    images = relationship("DocumentImage", back_populates="chunk")
+    # ``document_images.chunk_id`` is ON DELETE SET NULL in the database, so the
+    # ORM need not load a chunk's images to null them when the chunk goes.
+    images = relationship("DocumentImage", back_populates="chunk", passive_deletes=True)
 
     def __repr__(self) -> str:
         return (

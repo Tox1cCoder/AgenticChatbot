@@ -28,12 +28,12 @@ class SkillSetting(Base):
         DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False
     )
 
-    # Ownership
+    # Ownership. No single-column index: ``uq_skill_settings_user_skill`` leads
+    # with it.
     user_id = Column(
         UUID(as_uuid=True),
         ForeignKey("users.id"),
         nullable=False,
-        index=True,
     )
 
     # Skill reference

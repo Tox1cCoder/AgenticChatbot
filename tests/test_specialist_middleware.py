@@ -472,13 +472,13 @@ class _ReceiptLedger:
 
         return ReceiptRecord(execution_key=key, status=ReceiptStatus.RESERVED, fresh=True)
 
-    async def afail(self, *, key, error_code):
+    async def afail(self, *, key, scope, error_code):
         self.status = "failed"
 
-    async def amark_outcome_unknown(self, *, key):
+    async def amark_outcome_unknown(self, *, key, scope):
         self.status = "outcome_unknown"
 
-    async def acomplete(self, *, key, result, provider_receipt_id):
+    async def acomplete(self, *, key, scope, result, provider_receipt_id):
         self.status = "completed"
 
 

@@ -51,7 +51,8 @@ class CustomAgent(Base):
     )
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
-    owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    # No single-column index: ``ix_custom_agents_owner_deleted`` leads with it.
+    owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
 
     name = Column(String(255), nullable=False)
     slug = Column(String(255), nullable=False)

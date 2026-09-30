@@ -9,6 +9,7 @@ import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
+from datetime import datetime, timezone
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,7 +24,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _SCRATCH_DATABASE_PREFIX = "chatbot_migration_smoke_"
 _SCRATCH_DATABASE_RE = re.compile(r"chatbot_migration_smoke_[0-9a-f]{32}")
 _OLD_HEAD = "a4b5c6d7e8f9"
-_HEAD = "60adc43e534e"
+_HEAD = "371ffaf3a087"
+#: The revision just below the constraint revision, where its pre-checks are
+#: exercised against seeded violating rows.
+_PRE_CONSTRAINTS_HEAD = "c0033ee1e8cd"
 #: Not "head minus one". ``_assert_previous_head_schema`` describes the schema
 #: at *this* revision specifically — it asserts, among other things, that
 #: ``document_index_generations`` does not exist yet — so advancing it with each
@@ -754,7 +758,7 @@ def test_tool_approval_orm_round_trips_migrated_lowercase_enum() -> None:
 
 
 def test_document_chunk_orm_insert_succeeds_on_the_migrated_head_schema() -> None:
-    """The chain leaves ``document_chunks`` timestamps without a column default.
+    """Until c0033ee1e8cd the chain left ``document_chunks`` timestamps without a default.
 
     ``1d24e8e1ec28`` created the table with none and ``o6p7q8r9s0t1`` altered it
     in place, so an INSERT that left the timestamps to the server failed NOT
@@ -816,13 +820,322 @@ def test_document_chunk_orm_insert_succeeds_on_the_migrated_head_schema() -> Non
             engine.dispose()
 
 
-#: Model/migration drift that only a new migration can remove. Anything else
-#: autogenerate reports is new drift and fails the test below.
-_KNOWN_MODEL_DRIFT = {
-    # Legacy columns from 1d24e8e1ec28 that o6p7q8r9s0t1 never dropped.
-    ("remove_column", "document_chunks", "page_number"),
-    ("remove_column", "document_chunks", "content_preview"),
+def _seed_owner(connection, user_id, conversation_id=None, *, name: str) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO users (id, username, email, password_hash, created_at, updated_at) "
+            "VALUES (:id, :name, :email, 'not-a-real-password', now(), now())"
+        ),
+        {"id": user_id, "name": name, "email": f"{name}@example.invalid"},
+    )
+    if conversation_id is not None:
+        connection.execute(
+            text(
+                "INSERT INTO conversations (id, owner_id, title, created_at, updated_at, "
+                "planning_mode_enabled, next_message_sequence) "
+                "VALUES (:id, :owner_id, 'seeded', now(), now(), false, 1)"
+            ),
+            {"id": conversation_id, "owner_id": user_id},
+        )
+
+
+def _seed_generation(connection, conversation_id, document_id, generation_id) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO documents (id, conversation_id, filename, filename_key, file_type, "
+            "status, upload_time) VALUES (:id, :conversation_id, 'a.txt', 'a.txt', "
+            "'text/plain', 2, now())"
+        ),
+        {"id": document_id, "conversation_id": conversation_id},
+    )
+    connection.execute(
+        text(
+            "INSERT INTO document_index_generations (id, document_id, status, "
+            "embedding_provider, embedding_model, embedding_dimension, chunking_version) "
+            "VALUES (:id, :document_id, 'active', 'test', 'test-model', 3, 'v1')"
+        ),
+        {"id": generation_id, "document_id": document_id},
+    )
+
+
+_CHUNK_INSERT = (
+    "INSERT INTO document_chunks (id, document_id, index_generation_id, chunk_index, "
+    "content, content_sha256, char_count, token_count, section_path, block_provenance, "
+    "chunk_metadata, index_status) VALUES (:id, :document_id, :generation_id, :chunk_index, "
+    "'hello', repeat('0', 64), 5, 1, '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, :status)"
+)
+
+_DELETED_AT = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+_RESOLVER_OF = "SELECT resolved_by_user_id FROM hitl_interrupts WHERE id = :id"
+
+_CHAT_IMAGE_INSERT = (
+    "INSERT INTO chat_images (id, conversation_id, user_id, sha256, size_bytes, "
+    "storage_path, deleted_at) VALUES (:id, :conversation_id, :user_id, repeat('a', 64), 3, "
+    "'aa/a.png', :deleted_at)"
+)
+
+
+def test_document_chunk_raw_insert_gets_its_timestamps_from_the_server() -> None:
+    """c0033ee1e8cd: raw SQL naming no timestamps inserts, and the legacy columns are gone."""
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", "head")
+        engine = create_engine(scratch_url)
+        user_id, conversation_id, document_id, generation_id = uuid4(), uuid4(), uuid4(), uuid4()
+        chunk_id = uuid4()
+        try:
+            with engine.begin() as connection:
+                _seed_owner(connection, user_id, conversation_id, name="raw-chunk")
+                _seed_generation(connection, conversation_id, document_id, generation_id)
+                connection.execute(
+                    text(_CHUNK_INSERT),
+                    {
+                        "id": chunk_id,
+                        "document_id": document_id,
+                        "generation_id": generation_id,
+                        "chunk_index": 0,
+                        "status": "pending",
+                    },
+                )
+                stamps = connection.execute(
+                    text("SELECT created_at, updated_at FROM document_chunks WHERE id = :id"),
+                    {"id": chunk_id},
+                ).one()
+            assert None not in stamps
+            columns = {column["name"] for column in inspect(engine).get_columns("document_chunks")}
+            assert not {"page_number", "content_preview"} & columns
+        finally:
+            engine.dispose()
+
+
+#: 371ffaf3a087's index changes, as (table, index).
+_ADDED_INDEXES = {
+    ("model_usage_events", "ix_model_usage_events_request_message_id"),
+    ("model_usage_events", "ix_model_usage_events_document_id"),
+    ("generations", "ix_generations_assistant_message_id"),
+    ("project_custom_agents", "ix_project_custom_agents_custom_agent_id"),
+    ("user_memories", "ix_user_memories_project_id"),
+    ("hitl_interrupts", "ix_hitl_interrupts_resolved_by_user_id"),
+    ("chat_images", "uq_chat_images_user_sha256_live"),
 }
+_DROPPED_INDEXES = {
+    ("messages", "ix_messages_conversation_id"),
+    ("task_plans", "ix_task_plans_conversation_id"),
+    ("generations", "ix_generations_user_id"),
+    ("tool_execution_receipts", "ix_tool_execution_receipts_user_id"),
+    ("tool_execution_receipts", "ix_tool_execution_receipts_conversation_id"),
+    ("agent_model_configs", "idx_agent_model_configs_user_id"),
+    ("client_devices", "ix_client_devices_user_id"),
+    ("skill_settings", "ix_skill_settings_user_id"),
+    ("tool_approval_settings", "ix_tool_approval_settings_user_id"),
+    ("document_parse_artifacts", "ix_document_parse_artifacts_document_id"),
+    ("document_chunks", "idx_document_chunks_document_id"),
+    ("model_usage_events", "ix_model_usage_events_operation_id"),
+    ("custom_agents", "ix_custom_agents_owner_id"),
+    ("projects", "ix_projects_owner_id"),
+    ("feedbacks", "idx_feedbacks_message_user"),
+}
+
+
+def _index_names(engine) -> set[tuple[str, str]]:
+    schema = inspect(engine)
+    return {
+        (table, index["name"])
+        for table in {table for table, _ in _ADDED_INDEXES | _DROPPED_INDEXES}
+        for index in schema.get_indexes(table)
+    }
+
+
+def _assert_rejected(engine, statement: str, params: dict) -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(text(statement), params)
+
+
+def test_head_enforces_the_integrity_constraints() -> None:
+    """371ffaf3a087: the indexes changed, and each new rule refuses a bad row."""
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", "head")
+        engine = create_engine(scratch_url)
+        owner_id, resolver_id, conversation_id = uuid4(), uuid4(), uuid4()
+        document_id, generation_id, message_id = uuid4(), uuid4(), uuid4()
+        try:
+            names = _index_names(engine)
+            assert names >= _ADDED_INDEXES
+            assert not _DROPPED_INDEXES & names
+            with engine.connect() as connection:
+                validity = {
+                    name: connection.scalar(
+                        text(
+                            "SELECT i.indisvalid FROM pg_index i "
+                            "WHERE i.indexrelid = to_regclass(:name)"
+                        ),
+                        {"name": f"public.{name}"},
+                    )
+                    for _, name in _ADDED_INDEXES
+                }
+            # CREATE INDEX CONCURRENTLY can leave an INVALID index behind.
+            assert validity == {name: True for _, name in _ADDED_INDEXES}
+
+            with engine.begin() as connection:
+                _seed_owner(connection, owner_id, conversation_id, name="rules-owner")
+                _seed_owner(connection, resolver_id, name="rules-resolver")
+                _seed_generation(connection, conversation_id, document_id, generation_id)
+                connection.execute(
+                    text(
+                        "INSERT INTO messages (id, conversation_id, sender, content, sequence, "
+                        "created_at, updated_at) VALUES (:id, :conversation_id, 1, 'hi', 1, "
+                        "now(), now())"
+                    ),
+                    {"id": message_id, "conversation_id": conversation_id},
+                )
+
+            for rating in (0, 6):
+                _assert_rejected(
+                    engine,
+                    "INSERT INTO feedbacks (id, message_id, user_id, rating, created_at, "
+                    "updated_at) VALUES (:id, :message_id, :user_id, :rating, now(), now())",
+                    {
+                        "id": uuid4(),
+                        "message_id": message_id,
+                        "user_id": owner_id,
+                        "rating": rating,
+                    },
+                )
+            _assert_rejected(
+                engine,
+                "UPDATE document_index_generations SET status = 'bogus' WHERE id = :id",
+                {"id": generation_id},
+            )
+            _assert_rejected(
+                engine,
+                _CHUNK_INSERT,
+                {
+                    "id": uuid4(),
+                    "document_id": document_id,
+                    "generation_id": generation_id,
+                    "chunk_index": 0,
+                    "status": "bogus",
+                },
+            )
+            _assert_rejected(
+                engine,
+                "INSERT INTO web_image_references (conversation_id, user_id, upstream_url, "
+                "provider, lifecycle_state) VALUES (:conversation_id, :user_id, "
+                "'https://example.invalid/a.png', 'brave', 'bogus')",
+                {"conversation_id": conversation_id, "user_id": owner_id},
+            )
+
+            image = {"conversation_id": conversation_id, "user_id": owner_id}
+            with engine.begin() as connection:
+                connection.execute(
+                    text(_CHAT_IMAGE_INSERT), {**image, "id": uuid4(), "deleted_at": None}
+                )
+                # A soft-deleted copy of the same content is not a live duplicate.
+                connection.execute(
+                    text(_CHAT_IMAGE_INSERT), {**image, "id": uuid4(), "deleted_at": _DELETED_AT}
+                )
+            _assert_rejected(
+                engine, _CHAT_IMAGE_INSERT, {**image, "id": uuid4(), "deleted_at": None}
+            )
+
+            hitl = (
+                "INSERT INTO hitl_interrupts (id, conversation_id, user_id, thread_id, "
+                "expires_at, resolved_by_user_id) VALUES (:id, :conversation_id, :user_id, "
+                "'thread', now(), :resolver)"
+            )
+            base = {"conversation_id": conversation_id, "user_id": owner_id}
+            _assert_rejected(engine, hitl, {**base, "id": "orphan", "resolver": uuid4()})
+            with engine.begin() as connection:
+                connection.execute(text(hitl), {**base, "id": "resolved", "resolver": resolver_id})
+                connection.execute(text("DELETE FROM users WHERE id = :id"), {"id": resolver_id})
+                assert connection.scalar(text(_RESOLVER_OF), {"id": "resolved"}) is None
+        finally:
+            engine.dispose()
+
+
+def test_constraint_revision_refuses_violating_rows_and_changes_nothing() -> None:
+    """A bare ADD CONSTRAINT failure would block API startup with no explanation.
+
+    The revision counts violations first and names each one; nothing it would
+    add exists afterwards. Once the rows are fixed it applies, and it repairs
+    orphaned resolver ids itself rather than refusing.
+    """
+    with _scratch_database(_postgres_test_url()) as scratch_url:
+        _run_alembic(scratch_url, "upgrade", _PRE_CONSTRAINTS_HEAD)
+        engine = create_engine(scratch_url)
+        owner_id, conversation_id, message_id = uuid4(), uuid4(), uuid4()
+        duplicate_id, feedback_id = uuid4(), uuid4()
+        try:
+            with engine.begin() as connection:
+                _seed_owner(connection, owner_id, conversation_id, name="violations")
+                image = {"conversation_id": conversation_id, "user_id": owner_id}
+                connection.execute(
+                    text(_CHAT_IMAGE_INSERT), {**image, "id": uuid4(), "deleted_at": None}
+                )
+                connection.execute(
+                    text(_CHAT_IMAGE_INSERT), {**image, "id": duplicate_id, "deleted_at": None}
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO messages (id, conversation_id, sender, content, sequence, "
+                        "created_at, updated_at) VALUES (:id, :conversation_id, 1, 'hi', 1, "
+                        "now(), now())"
+                    ),
+                    {"id": message_id, "conversation_id": conversation_id},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO feedbacks (id, message_id, user_id, rating, created_at, "
+                        "updated_at) VALUES (:id, :message_id, :user_id, 9, now(), now())"
+                    ),
+                    {"id": feedback_id, "message_id": message_id, "user_id": owner_id},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO hitl_interrupts (id, conversation_id, user_id, thread_id, "
+                        "expires_at, resolved_by_user_id) VALUES ('orphaned', :conversation_id, "
+                        ":user_id, 'thread', now(), :resolver)"
+                    ),
+                    {"conversation_id": conversation_id, "user_id": owner_id, "resolver": uuid4()},
+                )
+
+            # Counts are matched loosely: _run_alembic redacts the database
+            # credentials wherever they appear, digits included.
+            with pytest.raises(
+                pytest.fail.Exception,
+                match=r"changed nothing.*chat_images: \S+ \(user_id, sha256\) groups.*"
+                r"feedbacks: \S+ rows violate ck_feedbacks_rating_range",
+            ):
+                _run_alembic(scratch_url, "upgrade", "head")
+            with engine.connect() as connection:
+                assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+                    _PRE_CONSTRAINTS_HEAD
+                )
+            names = _index_names(engine)
+            assert not _ADDED_INDEXES & names, "a refused upgrade must not leave indexes behind"
+            assert names >= _DROPPED_INDEXES
+
+            with engine.begin() as connection:
+                connection.execute(
+                    text("DELETE FROM chat_images WHERE id = :id"), {"id": duplicate_id}
+                )
+                connection.execute(
+                    text("UPDATE feedbacks SET rating = 5 WHERE id = :id"), {"id": feedback_id}
+                )
+            _run_alembic(scratch_url, "upgrade", "head")
+            with engine.connect() as connection:
+                assert connection.scalar(text("SELECT version_num FROM alembic_version")) == _HEAD
+                assert connection.scalar(text(_RESOLVER_OF), {"id": "orphaned"}) is None
+        finally:
+            engine.dispose()
+
+
+#: Model/migration drift that only a new migration can remove. Anything else
+#: autogenerate reports is new drift and fails the test below. Empty since
+#: c0033ee1e8cd dropped the legacy ``document_chunks`` columns.
+_KNOWN_MODEL_DRIFT: set[tuple[str, ...]] = set()
 
 
 def _describe_drift(diff) -> tuple[str, ...]:

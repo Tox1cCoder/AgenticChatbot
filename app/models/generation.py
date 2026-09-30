@@ -149,7 +149,8 @@ class Generation(Base):
     # --- owners ----------------------------------------------------------
     # Every read is filtered by both. A generation is not addressable by id
     # alone; that would let one user probe another's conversations.
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    # No single-column index: ``ix_generations_owner_status`` leads with it.
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     conversation_id = Column(
         UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False, index=True
     )
@@ -214,6 +215,8 @@ class Generation(Base):
         Index("ix_generations_owner_status", "user_id", "status"),
         Index("ix_generations_checkpoint_thread", "checkpoint_thread_id"),
         Index("ix_generations_continuation_id", "continuation_id"),
+        # Serves the ``SET NULL`` when an assistant message is deleted.
+        Index("ix_generations_assistant_message_id", "assistant_message_id"),
     )
 
     def __repr__(self) -> str:

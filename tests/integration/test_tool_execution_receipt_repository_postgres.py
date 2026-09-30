@@ -212,6 +212,7 @@ async def test_a_completed_receipt_returns_its_recorded_result(seeded: Seeded) -
     await repository.areserve(scope=scope, key=key)
     await repository.acomplete(
         key=key,
+        scope=scope,
         result={"content": "created", "artifact_ref": "blob:1"},
         provider_receipt_id="prov-1",
     )
@@ -229,13 +230,52 @@ async def test_a_terminal_receipt_is_never_overwritten(seeded: Seeded) -> None:
     key = execution_key(scope)
 
     await repository.areserve(scope=scope, key=key)
-    await repository.acomplete(key=key, result={"content": "created"}, provider_receipt_id=None)
-    await repository.afail(key=key, error_code="tool_execution_failed")
-    await repository.amark_outcome_unknown(key=key)
+    await repository.acomplete(
+        key=key, scope=scope, result={"content": "created"}, provider_receipt_id=None
+    )
+    await repository.afail(key=key, scope=scope, error_code="tool_execution_failed")
+    await repository.amark_outcome_unknown(key=key, scope=scope)
 
     row = _row(session_factory, key)
     assert row.status is ReceiptStatus.COMPLETED
     assert row.error_code is None
+
+
+async def test_a_foreign_owner_cannot_close_the_owners_receipt(seeded: Seeded) -> None:
+    """Fails if a transition matches on ``execution_key`` alone.
+
+    A foreign row reads back as fresh, so the intruder runs its own call; its
+    outcome must land nowhere, least of all on the owner's reserved row.
+    """
+    repository, owner_id, conversation_id, other_user_id, other_conversation_id, factory = (
+        seeded
+    )
+    owner_scope = _scope(owner_id, conversation_id)
+    key = execution_key(owner_scope)
+    await repository.areserve(scope=owner_scope, key=key)
+    intruder_scope = owner_scope.model_copy(
+        update={"user_id": other_user_id, "conversation_id": other_conversation_id}
+    )
+
+    async def _invoke() -> NormalizedToolResult:
+        return NormalizedToolResult(content="intruder effect")
+
+    def _assert_owner_row_untouched() -> None:
+        row = _row(factory, key)
+        assert row.user_id == owner_id
+        assert row.status is ReceiptStatus.RESERVED
+        assert row.result_json is None
+        assert row.error_code is None
+
+    service = ToolExecutionReceiptService(repository=repository)
+    result = await service.execute_mutation(intruder_scope, _invoke)
+
+    assert result.content == "intruder effect"
+    _assert_owner_row_untouched()
+
+    await repository.afail(key=key, scope=intruder_scope, error_code="tool_execution_failed")
+    await repository.amark_outcome_unknown(key=key, scope=intruder_scope)
+    _assert_owner_row_untouched()
 
 
 async def test_a_receipt_owned_by_another_user_is_not_readable(seeded: Seeded) -> None:
@@ -246,7 +286,10 @@ async def test_a_receipt_owned_by_another_user_is_not_readable(seeded: Seeded) -
 
     await repository.areserve(scope=owner_scope, key=key)
     await repository.acomplete(
-        key=key, result={"content": "someone elses effect"}, provider_receipt_id=None
+        key=key,
+        scope=owner_scope,
+        result={"content": "someone elses effect"},
+        provider_receipt_id=None,
     )
 
     intruder_scope = owner_scope.model_copy(
@@ -264,7 +307,7 @@ async def test_outcome_unknown_is_listed_for_reconciliation(seeded: Seeded) -> N
     key = execution_key(scope)
 
     await repository.areserve(scope=scope, key=key)
-    await repository.amark_outcome_unknown(key=key)
+    await repository.amark_outcome_unknown(key=key, scope=scope)
 
     unresolved = await repository.alist_unresolved(user_id=owner_id)
     assert [row.execution_key for row in unresolved] == [key]
@@ -276,7 +319,9 @@ async def test_a_bounded_result_is_stored_and_read_back(seeded: Seeded) -> None:
     key = execution_key(scope)
 
     await repository.areserve(scope=scope, key=key)
-    await repository.acomplete(key=key, result={"content": "x" * 4000}, provider_receipt_id=None)
+    await repository.acomplete(
+        key=key, scope=scope, result={"content": "x" * 4000}, provider_receipt_id=None
+    )
     record = await repository.areserve(scope=scope, key=key)
 
     assert len(record.result["content"]) == 4000
@@ -333,7 +378,7 @@ async def test_an_adjudicated_unknown_outcome_is_never_retried_later(seeded: See
     key = execution_key(scope)
 
     await repository.areserve(scope=scope, key=key)
-    await repository.amark_outcome_unknown(key=key)
+    await repository.amark_outcome_unknown(key=key, scope=scope)
 
     invocations: list[str] = []
 

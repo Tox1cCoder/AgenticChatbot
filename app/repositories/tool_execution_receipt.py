@@ -121,11 +121,17 @@ class ToolExecutionReceiptRepository(RepositorySessionMixin):
     # ------------------------------------------------------------------
 
     async def acomplete(
-        self, *, key: str, result: dict[str, Any] | None, provider_receipt_id: str | None
+        self,
+        *,
+        key: str,
+        scope: Any,
+        result: dict[str, Any] | None,
+        provider_receipt_id: str | None,
     ) -> None:
-        """Record the effect. Only a reserved row may complete."""
+        """Record the effect. Only the owner's reserved row may complete."""
         await self._atransition(
             key=key,
+            scope=scope,
             expected=(ReceiptStatus.RESERVED,),
             values={
                 "status": ReceiptStatus.COMPLETED,
@@ -136,41 +142,59 @@ class ToolExecutionReceiptRepository(RepositorySessionMixin):
             },
         )
 
-    async def afail(self, *, key: str, error_code: str) -> None:
+    async def afail(self, *, key: str, scope: Any, error_code: str) -> None:
         """Record that the provider never accepted the call."""
         await self._atransition(
             key=key,
+            scope=scope,
             expected=(ReceiptStatus.RESERVED,),
             values={"status": ReceiptStatus.FAILED, "error_code": str(error_code)[:128]},
         )
 
-    async def amark_outcome_unknown(self, *, key: str) -> None:
+    async def amark_outcome_unknown(self, *, key: str, scope: Any) -> None:
         """Record that nobody can say whether the effect happened."""
         await self._atransition(
             key=key,
+            scope=scope,
             expected=(ReceiptStatus.RESERVED,),
             values={"status": ReceiptStatus.OUTCOME_UNKNOWN},
         )
 
     async def _atransition(
-        self, *, key: str, expected: tuple[ReceiptStatus, ...], values: dict[str, Any]
+        self,
+        *,
+        key: str,
+        scope: Any,
+        expected: tuple[ReceiptStatus, ...],
+        values: dict[str, Any],
     ) -> None:
+        """Compare-and-set on the caller's own row.
+
+        Owner-scoped like every read here. A caller whose key is held by
+        another owner is told its reservation is fresh (see
+        :meth:`_existing_record`), runs its own call, and then closes "its"
+        receipt; matching on the key alone would write that outcome onto the
+        other owner's row.
+        """
+
         def work(session: Session) -> None:
             outcome = session.execute(
                 update(ToolExecutionReceipt)
                 .where(
                     ToolExecutionReceipt.execution_key == key,
+                    ToolExecutionReceipt.user_id == scope.user_id,
+                    ToolExecutionReceipt.conversation_id == scope.conversation_id,
                     ToolExecutionReceipt.status.in_(expected),
                 )
                 .values(**values)
             )
             session.commit()
             if outcome.rowcount == 0:
-                # Someone else already closed it. Not an error: the receipt is
-                # terminal either way, and overwriting a recorded outcome is
+                # Already closed, or not this owner's row. Not an error either
+                # way: overwriting a recorded outcome, or someone else's, is
                 # exactly what must not happen.
                 logger.info(
-                    "Receipt %s... was already terminal; %s not applied",
+                    "Receipt %s... was already terminal or not owned; %s not applied",
                     key[:12],
                     values.get("status"),
                 )

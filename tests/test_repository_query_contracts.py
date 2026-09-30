@@ -20,6 +20,7 @@ from app.models.message import Message
 from app.models.project import Project
 from app.models.user import User
 from app.repositories.conversation import ConversationRepository
+from app.repositories.message import MessageRepository
 from app.repositories.user import UserRepository
 
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -127,6 +128,98 @@ def test_conversation_list_preview_and_count_skip_deleted_messages(session_facto
     assert by_id[empty].messages == []
     assert by_id[empty].message_count == 0
     assert page.meta.total == 3
+
+
+def _conversation(owner_id: UUID, *, deleted_at: datetime | None = None) -> Conversation:
+    return Conversation(id=uuid4(), owner_id=owner_id, title="c", deleted_at=deleted_at)
+
+
+def test_user_messages_skip_soft_deleted_conversations(session_factory):
+    """A deleted conversation's messages stayed listed and counted under its owner."""
+    owner = _user("lister", T0)
+    live = _conversation(owner.id)
+    gone = _conversation(owner.id, deleted_at=T0)
+    with session_factory() as session:
+        session.add(owner)
+        session.flush()
+        session.add_all([live, gone])
+        session.flush()
+        session.add_all([_message(live.id, 1), _message(live.id, 2), _message(gone.id, 1)])
+        session.commit()
+
+    repository = MessageRepository(session_factory)
+    page = repository.get_by_user_id(owner.id, limit=10, order_direction="asc")
+
+    assert [message.conversation_id for message in page.items] == [live.id, live.id]
+    assert page.meta.total == 2
+    assert repository.count_by_user_id(owner.id) == 2
+
+
+def test_prompt_history_ignores_an_anchor_from_another_conversation(session_factory):
+    """The cursor's sequence was looked up in any conversation and bounded this one."""
+    owner = _user("history", T0)
+    mine, other = _conversation(owner.id), _conversation(owner.id)
+    foreign_anchor = _message(other.id, 2)
+    with session_factory() as session:
+        session.add(owner)
+        session.flush()
+        session.add_all([mine, other])
+        session.flush()
+        session.add_all([_message(mine.id, 1), _message(mine.id, 2), _message(mine.id, 3)])
+        session.add_all([_message(other.id, 1), foreign_anchor])
+        session.commit()
+
+    history = MessageRepository(session_factory).get_prompt_history(
+        mine.id, before_message_id=foreign_anchor.id
+    )
+
+    assert [message.content for message in history] == ["m1", "m2", "m3"]
+
+
+def test_feedback_is_loaded_before_the_session_closes(session_factory):
+    """``MessageRead`` reads ``feedback`` from a detached message."""
+    owner = _user("rater", T0)
+    conversation = _conversation(owner.id)
+    rated, unrated = _message(conversation.id, 1), _message(conversation.id, 2)
+    with session_factory() as session:
+        session.add(owner)
+        session.flush()
+        session.add(conversation)
+        session.flush()
+        session.add_all([rated, unrated])
+        session.flush()
+        session.add(Feedback(message_id=rated.id, user_id=owner.id, rating=5))
+        session.commit()
+
+    repository = MessageRepository(session_factory)
+    page = repository.get_by_conversation_id(conversation.id, order_by="sequence")
+
+    assert [message.feedback.rating if message.feedback else None for message in page.items] == [
+        5,
+        None,
+    ]
+    assert repository.get_by_id(rated.id).feedback.rating == 5
+
+
+def test_soft_deleted_conversations_are_bounded_newest_first(session_factory):
+    """Checkpoint retention re-read every soft-deleted conversation on every run."""
+    owner = _user("deleter", T0)
+    deleted = [
+        _conversation(owner.id, deleted_at=T0 + timedelta(minutes=offset)) for offset in range(3)
+    ]
+    with session_factory() as session:
+        session.add(owner)
+        session.flush()
+        session.add_all([*deleted, _conversation(owner.id)])
+        session.commit()
+
+    repository = ConversationRepository(session_factory=session_factory)
+
+    assert [row.id for row in repository.get_soft_deleted(limit=2)] == [
+        deleted[2].id,
+        deleted[1].id,
+    ]
+    assert len(repository.get_soft_deleted()) == 3
 
 
 def test_document_upload_time_is_stamped_at_insert(session_factory):

@@ -126,9 +126,27 @@ def test_model_usage_events_foreign_key_delete_behavior():
     assert next(iter(table.c.document_id.foreign_keys)).ondelete == "SET NULL"
 
 
-def test_model_usage_events_operation_id_is_indexed():
+def test_model_usage_events_operation_id_lookups_are_indexed():
+    """The (operation_id, attempt) unique constraint leads with it.
+
+    Migration 371ffaf3a087 dropped the single-column index as redundant, so the
+    constraint is what these lookups rely on.
+    """
     table = ModelUsageEvent.__table__
-    assert any(index.name == "ix_model_usage_events_operation_id" for index in table.indexes)
+    unique = next(
+        constraint
+        for constraint in table.constraints
+        if constraint.name == "uq_model_usage_events_operation_attempt"
+    )
+    assert [column.name for column in unique.columns] == ["operation_id", "attempt"]
+    assert not any(index.name == "ix_model_usage_events_operation_id" for index in table.indexes)
+
+
+def test_model_usage_events_set_null_foreign_keys_are_indexed():
+    """Deleting a message or document nulls these; without an index that scans the ledger."""
+    table = ModelUsageEvent.__table__
+    leading_columns = {list(index.columns)[0].name for index in table.indexes if index.columns}
+    assert {"request_message_id", "document_id"} <= leading_columns
 
 
 def test_model_usage_events_nonnegative_checks_are_database_enforced():

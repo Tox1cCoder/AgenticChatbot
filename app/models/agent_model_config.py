@@ -41,8 +41,8 @@ class AgentModelConfig(Base):
 
     user = relationship("User", back_populates="agent_model_configs")
 
+    # The unique index leads with user_id, so it also serves per-user lookups.
     __table_args__ = (
-        Index("idx_agent_model_configs_user_id", "user_id"),
         Index("idx_agent_model_configs_user_agent", "user_id", "agent_key", unique=True),
     )
 

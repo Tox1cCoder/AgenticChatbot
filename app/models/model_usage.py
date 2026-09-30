@@ -111,6 +111,9 @@ class ModelUsageEvent(Base):
         ),
         Index("ix_model_usage_events_operation_started", "operation", "started_at"),
         Index("ix_model_usage_events_started_at", "started_at"),
+        # Serve the ``SET NULL`` when a message or document is deleted.
+        Index("ix_model_usage_events_request_message_id", "request_message_id"),
+        Index("ix_model_usage_events_document_id", "document_id"),
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -118,7 +121,8 @@ class ModelUsageEvent(Base):
     # Idempotency: same normalized command replayed after a ledger-write
     # failure resolves to the same event_key ("<operation_id>:<attempt>").
     event_key = Column(String(160), nullable=False)
-    operation_id = Column(UUID(as_uuid=True), nullable=False, index=True)
+    # No single-column index: ``uq_model_usage_events_operation_attempt`` leads with it.
+    operation_id = Column(UUID(as_uuid=True), nullable=False)
     attempt = Column(Integer, nullable=False)
 
     user_id = Column(

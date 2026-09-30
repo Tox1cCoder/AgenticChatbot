@@ -17,6 +17,9 @@ class UserMemory(Base):
     # rows). Declared here so autogenerate no longer proposes dropping it.
     __table_args__ = (
         Index("ix_user_memories_user_project", "user_id", "project_id", "deleted_at"),
+        # Serves the ``SET NULL`` from projects, which the recall index cannot:
+        # it leads with user_id.
+        Index("ix_user_memories_project_id", "project_id"),
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

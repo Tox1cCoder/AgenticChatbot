@@ -37,7 +37,8 @@ class Project(Base):
     )
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
-    owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    # No single-column index: ``ix_projects_owner_deleted`` leads with it.
+    owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     instructions = Column(Text, nullable=True)
@@ -61,6 +62,9 @@ class ProjectCustomAgent(Base):
             name="uq_project_custom_agents_project_agent",
         ),
         Index("ix_project_custom_agents_owner_project", "owner_id", "project_id"),
+        # The unique constraint leads with project_id, so it cannot serve lookups
+        # (or FK checks) that start from the agent.
+        Index("ix_project_custom_agents_custom_agent_id", "custom_agent_id"),
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

@@ -52,12 +52,12 @@ class ClientDevice(Base):
         DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False
     )
 
-    # Ownership
+    # Ownership. No single-column index: ``uq_client_devices_user_device_id``
+    # leads with it.
     user_id = Column(
         UUID(as_uuid=True),
         ForeignKey("users.id"),
         nullable=False,
-        index=True,
     )
 
     # Device identity

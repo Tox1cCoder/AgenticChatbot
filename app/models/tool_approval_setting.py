@@ -54,7 +54,8 @@ class ToolApprovalSetting(Base):
         DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False
     )
 
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    # No single-column index: the scope unique constraint above leads with it.
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     device_id = Column(
         UUID(as_uuid=True),
         ForeignKey("client_devices.id", ondelete="CASCADE"),

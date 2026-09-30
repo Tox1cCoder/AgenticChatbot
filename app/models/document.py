@@ -35,18 +35,23 @@ class Document(Base):
     # Celery task ID persisted at enqueue time for ownership-safe status polling.
     processing_task_id = Column(String(255), nullable=True)
 
-    # Relationships
+    # Relationships. ``chunks`` and ``index_generations`` cascade in the
+    # database (ON DELETE CASCADE), so they are passive: deleting a document
+    # must not load every chunk first. ``images`` and ``parse_artifacts`` have
+    # plain foreign keys, so the ORM cascade is the only thing deleting them.
     conversation = relationship("Conversation", back_populates="documents")
     images = relationship("DocumentImage", back_populates="document", cascade="all, delete-orphan")
     chunks = relationship(
         "DocumentChunk",
         back_populates="document",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     index_generations = relationship(
         "DocumentIndexGeneration",
         back_populates="document",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     parse_artifacts = relationship(
         "DocumentParseArtifact",

@@ -54,12 +54,10 @@ class ChatImageStorageService:
         # with the deduplicated files. Scoped to the owner so the per-user read
         # endpoint's ownership guarantees are preserved.
         #
-        # NOTE: query-then-insert with a TOCTOU window and NO backing DB unique
-        # constraint/index on (user_id, sha256). Correct for the sequential
-        # resume/retry scenario; two concurrent identical persists (multi-worker)
-        # could still double-insert. A partial unique index
-        # `(user_id, sha256) WHERE deleted_at IS NULL` + conflict handling would
-        # close that window if it ever matters.
+        # This read is the fast path, not the guarantee: two concurrent persists
+        # can both miss it. The partial unique index
+        # ``uq_chat_images_user_sha256_live`` backs it, and the repository's
+        # insert returns the winning row instead of raising on it.
         existing = self._existing_reference_for(user_id=user_id, sha=sha, name=name)
         if existing is not None:
             return existing
@@ -77,7 +75,15 @@ class ChatImageStorageService:
                 "storage_path": rel_path,
             }
         )
+        # ``record`` may be a concurrent winner's row, so describe that row.
+        return self._reference(record, name=name, sha=sha)
+
+    @staticmethod
+    def _reference(record, *, name: str, sha: str) -> dict[str, str]:
         image_id = record["id"] if isinstance(record, dict) else record.id
+        content_type = (
+            record["content_type"] if isinstance(record, dict) else record.content_type
+        )
         return {
             "name": name or "image",
             "mime": content_type,
@@ -92,17 +98,7 @@ class ChatImageStorageService:
         existing = self.repository.get_by_user_and_sha(user_id, sha)
         if existing is None:
             return None
-        image_id = existing["id"] if isinstance(existing, dict) else existing.id
-        content_type = (
-            existing["content_type"] if isinstance(existing, dict) else existing.content_type
-        )
-        return {
-            "name": name or "image",
-            "mime": content_type,
-            "image_id": str(image_id),
-            "url": f"{CHAT_IMAGE_URL_PREFIX}{image_id}",
-            "content_hash": sha,
-        }
+        return self._reference(existing, name=name, sha=sha)
 
     def load_data_url(self, image_id: UUID, user_id: UUID) -> str | None:
         record = self.repository.get_for_user(image_id, user_id)

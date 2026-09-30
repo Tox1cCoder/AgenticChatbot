@@ -37,12 +37,12 @@ class DocumentParseArtifact(Base):
         DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False
     )
 
-    # Parent document
+    # Parent document. No single-column index: ``uq_document_parse_artifact_path``
+    # leads with it.
     document_id = Column(
         UUID(as_uuid=True),
         ForeignKey("documents.id"),
         nullable=False,
-        index=True,
     )
 
     # Artifact metadata
@@ -57,7 +57,10 @@ class DocumentParseArtifact(Base):
 
     # Relationships
     document = relationship("Document", back_populates="parse_artifacts")
-    chunks = relationship("DocumentChunk", back_populates="parse_artifact")
+    # The database sets ``document_chunks.parse_artifact_id`` to NULL itself
+    # (ON DELETE SET NULL); without passive_deletes the ORM would first load
+    # every chunk just to null the column row by row.
+    chunks = relationship("DocumentChunk", back_populates="parse_artifact", passive_deletes=True)
 
     def __repr__(self) -> str:
         return (

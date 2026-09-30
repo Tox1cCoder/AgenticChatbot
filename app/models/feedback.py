@@ -1,10 +1,10 @@
 import uuid
 
 from sqlalchemy import (
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
-    Index,
     SmallInteger,
     Text,
     func,
@@ -25,6 +25,8 @@ class Feedback(Base):
     )
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
+    # UNIQUE on its own, which is also why there is no (message_id, user_id)
+    # index: any lookup by message finds at most one row already.
     message_id = Column(
         UUID(as_uuid=True),
         ForeignKey("messages.id"),
@@ -40,8 +42,10 @@ class Feedback(Base):
     message = relationship("Message", back_populates="feedback")
     user = relationship("User", back_populates="feedback")
 
-    # Index for efficient querying
-    __table_args__ = (Index("idx_feedbacks_message_user", "message_id", "user_id"),)
+    # The API schemas already bound it to 1..5; this holds for raw SQL too.
+    __table_args__ = (
+        CheckConstraint("rating BETWEEN 1 AND 5", name="ck_feedbacks_rating_range"),
+    )
 
     def __repr__(self) -> str:
         return (

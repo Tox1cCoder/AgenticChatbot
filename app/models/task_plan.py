@@ -42,9 +42,8 @@ class TaskPlan(Base):
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    conversation_id = Column(
-        UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False, index=True
-    )
+    # No single-column index: ``uq_task_plan_conversation_order`` leads with it.
+    conversation_id = Column(UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False)
     task_order = Column(Integer, nullable=False)
     description = Column(Text, nullable=False)
     status = Column(TaskStatusType, nullable=False, default=TaskStatus.pending)

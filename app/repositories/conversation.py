@@ -221,9 +221,14 @@ class ConversationCRUDStrategy(
         )
         return db.execute(statement).scalar() is not None
 
-    def get_soft_deleted(self, db: Session) -> list[Conversation]:
-        """Return conversations that have been soft-deleted (deleted_at is set)."""
-        statement = select(Conversation).where(Conversation.deleted_at.is_not(None))
+    def get_soft_deleted(self, db: Session, limit: int) -> list[Conversation]:
+        """The most recently soft-deleted conversations, at most ``limit`` of them."""
+        statement = (
+            select(Conversation)
+            .where(Conversation.deleted_at.is_not(None))
+            .order_by(Conversation.deleted_at.desc(), Conversation.id)
+            .limit(max(1, int(limit)))
+        )
         return list(db.execute(statement).scalars().all())
 
 
@@ -377,7 +382,14 @@ class ConversationRepository(RepositorySessionMixin):
         """Async twin of :meth:`exists`."""
         return await self._arun(lambda session: self._crud_strategy.exists(session, id))
 
-    def get_soft_deleted(self) -> list[Conversation]:
-        """Get all soft-deleted conversations (used by checkpoint retention cleanup)."""
+    #: Checkpoint retention's safety net re-reads this list on every run and
+    #: nothing marks a conversation as already reaped, so an unbounded read
+    #: grew with every deletion ever made (985 on the application database on
+    #: 2026-09-30). Newest first: a conversation whose delete-time cleanup
+    #: failed is retried on the runs that follow its deletion.
+    SOFT_DELETED_BATCH = 500
+
+    def get_soft_deleted(self, limit: int = SOFT_DELETED_BATCH) -> list[Conversation]:
+        """The most recently soft-deleted conversations (checkpoint retention cleanup)."""
         with self.session_factory() as session:
-            return self._crud_strategy.get_soft_deleted(session)
+            return self._crud_strategy.get_soft_deleted(session, limit)

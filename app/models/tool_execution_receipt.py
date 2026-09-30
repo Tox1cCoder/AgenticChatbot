@@ -71,11 +71,11 @@ class ToolExecutionReceipt(Base):
 
     # --- owners ----------------------------------------------------------
     # Every read is filtered by owner. A receipt is not a global cache: one
-    # user's completed effect must never answer another user's call.
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
-    conversation_id = Column(
-        UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False, index=True
-    )
+    # user's completed effect must never answer another user's call. Neither
+    # column has its own index: the owner/status and conversation/turn
+    # composites below lead with them.
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    conversation_id = Column(UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False)
     turn_id = Column(String(160), nullable=False)
     thread_id = Column(String(320), nullable=False, index=True)
 

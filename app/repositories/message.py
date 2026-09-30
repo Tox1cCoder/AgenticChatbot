@@ -7,6 +7,7 @@ from sqlalchemy import asc, desc, func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.factories.message_factory import MessageFactory
+from app.models.conversation import Conversation
 from app.models.enums import MessageRole
 from app.models.message import Message
 from app.repositories.command_strategy import DefaultCommandStrategy
@@ -110,15 +111,8 @@ class MessageCRUDStrategy(
 
         # Get paginated items
         offset = (page - 1) * limit
-        # Join with conversations to get messages from user's conversations
-        statement = (
-            select(Message)
-            .join(Message.conversation)
-            .where(
-                Message.conversation.has(owner_id=user_id),
-                Message.deleted_at.is_(None),
-            )
-        )
+        statement = select(Message).join(Conversation, Message.conversation_id == Conversation.id)
+        statement = statement.where(*self._owned_live_message_clauses(user_id))
 
         # Apply eager loading if requested
         if include_feedback:
@@ -150,13 +144,24 @@ class MessageCRUDStrategy(
         """Count an owner's non-deleted messages using SQL ``COUNT``."""
         statement = (
             select(func.count(Message.id))
-            .join(Message.conversation)
-            .where(
-                Message.conversation.has(owner_id=user_id),
-                Message.deleted_at.is_(None),
-            )
+            .join(Conversation, Message.conversation_id == Conversation.id)
+            .where(*self._owned_live_message_clauses(user_id))
         )
         return int(db.execute(statement).scalar() or 0)
+
+    @staticmethod
+    def _owned_live_message_clauses(user_id: UUID) -> tuple:
+        """Live messages in the owner's live conversations.
+
+        One join is enough: it used to be a join *and* an EXISTS on the same
+        relationship, and neither excluded soft-deleted conversations, so a
+        deleted conversation's messages stayed listed and counted.
+        """
+        return (
+            Conversation.owner_id == user_id,
+            Conversation.deleted_at.is_(None),
+            Message.deleted_at.is_(None),
+        )
 
     def get_user_message_ids(self, db: Session, conversation_id: UUID) -> list[UUID]:
         """Every user-message ID in a conversation, oldest first.
@@ -198,8 +203,16 @@ class MessageCRUDStrategy(
         predicates differ across dialects and the candidate set is small.
         """
 
-        before_anchor = self._lookup_sequence(db, before_message_id) if before_message_id else None
-        after_anchor = self._lookup_sequence(db, after_message_id) if after_message_id else None
+        before_anchor = (
+            self._lookup_sequence(db, conversation_id, before_message_id)
+            if before_message_id
+            else None
+        )
+        after_anchor = (
+            self._lookup_sequence(db, conversation_id, after_message_id)
+            if after_message_id
+            else None
+        )
 
         clauses = [
             Message.conversation_id == conversation_id,
@@ -224,10 +237,19 @@ class MessageCRUDStrategy(
         return [row for row in rows if not is_hidden_transcript_artifact(row)]
 
     @staticmethod
-    def _lookup_sequence(db: Session, message_id: UUID) -> int | None:
-        statement = select(Message).where(Message.id == message_id)
-        anchor = db.execute(statement).scalar_one_or_none()
-        return int(anchor.sequence) if anchor is not None else None
+    def _lookup_sequence(db: Session, conversation_id: UUID, message_id: UUID) -> int | None:
+        """The anchor's sequence, only if the anchor belongs to this conversation.
+
+        Sequences are per conversation, so another conversation's anchor would
+        bound this history at an unrelated position. A foreign anchor is
+        treated like a missing one: no bound.
+        """
+        statement = select(Message.sequence).where(
+            Message.id == message_id,
+            Message.conversation_id == conversation_id,
+        )
+        sequence = db.execute(statement).scalar_one_or_none()
+        return int(sequence) if sequence is not None else None
 
     def get_canvas_artifact_candidates(
         self,

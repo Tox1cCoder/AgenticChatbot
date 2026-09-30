@@ -75,7 +75,17 @@ class HITLInterrupt(Base):
     )
     expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
     resolved_at = Column(DateTime(timezone=True), nullable=True)
-    resolved_by_user_id = Column(UUID(as_uuid=True), nullable=True)
+    # SET NULL: a resolution record must not block deleting the user who made it.
+    resolved_by_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "users.id",
+            name="fk_hitl_interrupts_resolved_by_user_id_users",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
     resolution_source = Column(String(50), nullable=True)  # "user", "timeout", "cancel"
 
     # Stored pending actions (serialized ToolInterruptRequest list)
@@ -99,7 +109,8 @@ class HITLInterrupt(Base):
 
     # Relationships
     conversation = relationship("Conversation", backref="hitl_interrupts")
-    user = relationship("User", backref="hitl_interrupts")
+    # Two foreign keys now point at users; this relationship is the owner's.
+    user = relationship("User", backref="hitl_interrupts", foreign_keys=[user_id])
     device = relationship("ClientDevice", backref="hitl_interrupts")
 
     def __repr__(self) -> str:

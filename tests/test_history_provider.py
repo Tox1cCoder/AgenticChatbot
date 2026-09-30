@@ -142,7 +142,7 @@ def test_get_prompt_history_excludes_current_deleted_and_empty_paused():
     )
 
     # Programmed sessions:
-    # 1) lookup of the cursor message (returns current_message)
+    # 1) lookup of the cursor message's sequence (scoped to this conversation)
     # 2) main query: SQL now orders DESC + LIMIT to grab the most recent rows
     #    in the window, then the strategy reverses to ASC. The fake session
     #    ignores ``.order_by``, so we hand back rows in the DESC order the
@@ -151,7 +151,7 @@ def test_get_prompt_history_excludes_current_deleted_and_empty_paused():
     #    empties in Python.
     session = _CaptureSession(
         [
-            [current_message],
+            [current_message.sequence],
             [interrupt_empty, paused_empty, old_assistant, old_user],
         ]
     )
@@ -221,9 +221,9 @@ def test_get_prompt_history_uses_after_cursor_when_provided():
         created_at=base + timedelta(seconds=5),
     )
 
-    # First lookup returns cursor; main query (with cursor applied) returns the
-    # one post-cursor row.
-    session = _CaptureSession([[cursor_msg], [after]])
+    # First lookup returns the cursor's sequence; main query (with cursor
+    # applied) returns the one post-cursor row.
+    session = _CaptureSession([[cursor_msg.sequence], [after]])
     repo = MessageRepository(session_factory=_factory_for(session))
 
     rows = repo.get_prompt_history(
